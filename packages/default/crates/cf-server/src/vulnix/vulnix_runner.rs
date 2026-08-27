@@ -82,6 +82,10 @@ impl VulnixRunner {
 
         // Build vulnix command
         let mut cmd = AsyncCommand::new("vulnix");
+        // Ownership heartbeats may cancel a scan if its lease is lost. Ensure
+        // dropping the command future terminates the child instead of leaving
+        // an unowned vulnix process running in the background.
+        cmd.kill_on_drop(true);
         cmd.arg("--json").arg(&store_path);
 
         if self.config.enable_whitelist {

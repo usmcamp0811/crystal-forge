@@ -130,6 +130,17 @@ async fn create_cve_scan_reuses_existing_active_scan() {
     .expect("should count active scans");
 
     assert_eq!(active_count, 1, "only one active scan row should exist");
+
+    sqlx::query("DELETE FROM cve_scans WHERE derivation_id = $1")
+        .bind(target.id)
+        .execute(&pool)
+        .await
+        .expect("active-scan fixture should be deleted");
+    sqlx::query("DELETE FROM derivations WHERE id = $1")
+        .bind(target.id)
+        .execute(&pool)
+        .await
+        .expect("active-scan derivation should be deleted");
 }
 
 #[tokio::test]

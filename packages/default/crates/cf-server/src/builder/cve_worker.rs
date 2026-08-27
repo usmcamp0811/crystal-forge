@@ -28,9 +28,11 @@ use crate::log::{WorkerState, WorkerStatus, get_cve_status};
 use crate::models::cache_destination::CacheDestination;
 use crate::queries::cache_destinations::get_cache_destination;
 use crate::queries::cve_scans::{
-    claim_queued_cve_scans, create_cve_scan, get_targets_needing_cve_rescan,
-    get_targets_needing_cve_scan, mark_cve_scan_failed, mark_cve_scan_failed_by_id,
-    recover_stale_scans, save_scan_results,
+    CveScanExecutionClaim, claim_queued_cve_scans, create_cve_scan, get_targets_needing_cve_rescan,
+    get_targets_needing_cve_scan, heartbeat_cve_scan_execution, mark_cve_scan_failed,
+    mark_cve_scan_failed_by_id_for_execution, mark_cve_scan_failed_for_execution,
+    recover_stale_scans, requeue_cve_scan_execution, save_scan_results,
+    save_scan_results_for_execution,
 };
 use crate::queries::derivations::get_derivation_by_id;
 use crate::queries::scanning::get_scan_schedule_policy;
@@ -365,31 +367,62 @@ async fn scan_cycle_with_runner<R: CveScanRunner + Sync>(
                 queued.len(),
                 MAX_SCANS_PER_CYCLE
             );
-            for (scan_id, derivation_id) in queued {
-                if !*enabled_rx.read().await {
+            for claim in queued {
+                if requeue_claim_if_disabled(pool, claim, enabled_rx).await? {
                     info!("🛑 CVE scan loop disabled — stopping queued phase");
                     return Ok(());
                 }
 
-                let derivation = match get_derivation_by_id(pool, derivation_id).await {
+                let derivation = match get_derivation_by_id(pool, claim.derivation_id).await {
                     Ok(derivation) => derivation,
                     Err(e) => {
-                        error!("❌ [queued] Could not load derivation {derivation_id}: {e}");
-                        if let Err(mark_err) = mark_cve_scan_failed_by_id(
+                        error!(
+                            "❌ [queued] Could not load derivation {}: {e}",
+                            claim.derivation_id
+                        );
+                        if let Err(mark_err) = mark_cve_scan_failed_by_id_for_execution(
                             pool,
-                            scan_id,
-                            derivation_id,
+                            claim.scan_id,
+                            claim.derivation_id,
                             &format!("Could not load derivation: {e}"),
+                            claim.execution_id,
                         )
                         .await
                         {
-                            error!("❌ [queued] Failed to mark scan {scan_id} failed: {mark_err}");
+                            error!(
+                                "❌ [queued] Failed to mark scan {} failed: {mark_err}",
+                                claim.scan_id
+                            );
                         }
                         continue;
                     }
                 };
 
                 set_cve_status_working(&format!("scanning {}", derivation.derivation_name)).await;
+                // This final read is the execution handoff: there is no await
+                // between observing enabled and starting `execute_scan`. Drop
+                // the guard immediately so disabling does not block for the
+                // full materialization/vulnix/persistence window.
+                let enabled_guard = enabled_rx.read().await;
+                if !*enabled_guard {
+                    drop(enabled_guard);
+                    let requeued = requeue_cve_scan_execution(
+                        pool,
+                        claim.scan_id,
+                        claim.execution_id,
+                        "worker-disabled-before-execution",
+                    )
+                    .await?;
+                    if !requeued {
+                        warn!(
+                            "Queued CVE scan {} lost ownership before it could be requeued",
+                            claim.scan_id
+                        );
+                    }
+                    info!("🛑 CVE scan loop disabled — stopping queued phase");
+                    return Ok(());
+                }
+                drop(enabled_guard);
                 info!(
                     "📥 [queued] Scanning operator-requested derivation: {}",
                     derivation.derivation_name
@@ -399,7 +432,8 @@ async fn scan_cycle_with_runner<R: CveScanRunner + Sync>(
                     vulnix_runner,
                     vulnix_version.clone(),
                     &derivation,
-                    scan_id,
+                    claim.scan_id,
+                    Some(claim.execution_id),
                 )
                 .await
                 {
@@ -539,6 +573,31 @@ async fn scan_cycle_with_runner<R: CveScanRunner + Sync>(
     Ok(())
 }
 
+async fn requeue_claim_if_disabled(
+    pool: &PgPool,
+    claim: CveScanExecutionClaim,
+    enabled_rx: &tokio::sync::RwLock<bool>,
+) -> Result<bool> {
+    if *enabled_rx.read().await {
+        return Ok(false);
+    }
+
+    let requeued = requeue_cve_scan_execution(
+        pool,
+        claim.scan_id,
+        claim.execution_id,
+        "worker-disabled-before-execution",
+    )
+    .await?;
+    if !requeued {
+        warn!(
+            "Queued CVE scan {} lost ownership before it could be requeued",
+            claim.scan_id
+        );
+    }
+    Ok(true)
+}
+
 /// Scan a single derivation: create a scan record, run vulnix, save results.
 ///
 /// If the store path is not present in the local Nix store, the function
@@ -591,7 +650,15 @@ async fn scan_one<R: CveScanRunner + Sync>(
         scan_id
     };
 
-    execute_scan(pool, vulnix_runner, vulnix_version, derivation, scan_id).await
+    execute_scan(
+        pool,
+        vulnix_runner,
+        vulnix_version,
+        derivation,
+        scan_id,
+        None,
+    )
+    .await
 }
 
 /// Execute a CVE scan for an already-claimed `cve_scans` row.
@@ -612,17 +679,66 @@ async fn execute_scan<R: CveScanRunner + Sync>(
     vulnix_version: Option<String>,
     derivation: &crate::derivations::Derivation,
     scan_id: uuid::Uuid,
+    execution_id: Option<uuid::Uuid>,
+) -> Result<()> {
+    let execution = execute_scan_inner(
+        pool,
+        vulnix_runner,
+        vulnix_version,
+        derivation,
+        scan_id,
+        execution_id,
+    );
+    let Some(execution_id) = execution_id else {
+        return execution.await;
+    };
+
+    // Heartbeat the entire materialization/vulnix/persistence window. Terminal
+    // writes still verify the token, so heartbeat is liveness rather than the
+    // final authorization boundary.
+    const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+    let heartbeat = async {
+        let start = tokio::time::Instant::now() + HEARTBEAT_INTERVAL;
+        let mut interval = tokio::time::interval_at(start, HEARTBEAT_INTERVAL);
+        loop {
+            interval.tick().await;
+            let still_owned = heartbeat_cve_scan_execution(pool, scan_id, execution_id)
+                .await
+                .context("Failed to refresh CVE scan execution heartbeat")?;
+            if !still_owned {
+                anyhow::bail!("CVE scan {scan_id} lost execution ownership");
+            }
+        }
+    };
+
+    tokio::pin!(execution);
+    tokio::pin!(heartbeat);
+    tokio::select! {
+        biased;
+        result = &mut execution => result,
+        ownership = &mut heartbeat => ownership,
+    }
+}
+
+async fn execute_scan_inner<R: CveScanRunner + Sync>(
+    pool: &PgPool,
+    vulnix_runner: &R,
+    vulnix_version: Option<String>,
+    derivation: &crate::derivations::Derivation,
+    scan_id: uuid::Uuid,
+    execution_id: Option<uuid::Uuid>,
 ) -> Result<()> {
     let Some(ref path) = derivation.store_path else {
         warn!(
             "❌ No store_path set for derivation {}",
             derivation.derivation_name
         );
-        mark_cve_scan_failed(
+        mark_scan_failed_for_owner(
             pool,
             scan_id,
             derivation,
             "No store_path set for derivation",
+            execution_id,
         )
         .await?;
         return Ok(());
@@ -653,7 +769,7 @@ async fn execute_scan<R: CveScanRunner + Sync>(
                     "❌ Could not materialize {} from any cache — marking scan as failed",
                     path
                 );
-                mark_cve_scan_failed(
+                mark_scan_failed_for_owner(
                     pool,
                     scan_id,
                     derivation,
@@ -661,17 +777,19 @@ async fn execute_scan<R: CveScanRunner + Sync>(
                         "Store path {} not present locally and no cache could provide it",
                         path
                     ),
+                    execution_id,
                 )
                 .await?;
                 return Ok(());
             }
             Err(e) => {
                 error!("❌ Error materializing {} from cache: {}", path, e);
-                mark_cve_scan_failed(
+                mark_scan_failed_for_owner(
                     pool,
                     scan_id,
                     derivation,
                     &format!("Cache materialization error: {}", e),
+                    execution_id,
                 )
                 .await?;
                 return Ok(());
@@ -687,8 +805,17 @@ async fn execute_scan<R: CveScanRunner + Sync>(
         Ok(entries) => {
             let elapsed_ms = Some(start.elapsed().as_millis() as i32);
             let stats = crate::vulnix::vulnix_parser::VulnixParser::calculate_stats(&entries);
-            if let Err(err) = save_scan_results(pool, scan_id, &entries, elapsed_ms).await {
-                mark_cve_scan_failed(pool, scan_id, derivation, &err.to_string()).await?;
+            if let Err(err) =
+                save_results_for_owner(pool, scan_id, &entries, elapsed_ms, execution_id).await
+            {
+                mark_scan_failed_for_owner(
+                    pool,
+                    scan_id,
+                    derivation,
+                    &err.to_string(),
+                    execution_id,
+                )
+                .await?;
                 return Err(err);
             }
             info!(
@@ -702,7 +829,8 @@ async fn execute_scan<R: CveScanRunner + Sync>(
                 derivation.derivation_name, e
             );
             if let Err(save_err) =
-                mark_cve_scan_failed(pool, scan_id, derivation, &e.to_string()).await
+                mark_scan_failed_for_owner(pool, scan_id, derivation, &e.to_string(), execution_id)
+                    .await
             {
                 error!("❌ Failed to mark CVE scan as failed: {save_err}");
             }
@@ -710,6 +838,43 @@ async fn execute_scan<R: CveScanRunner + Sync>(
     }
 
     Ok(())
+}
+
+async fn save_results_for_owner(
+    pool: &PgPool,
+    scan_id: uuid::Uuid,
+    entries: &crate::vulnix::vulnix_parser::VulnixScanOutput,
+    elapsed_ms: Option<i32>,
+    execution_id: Option<uuid::Uuid>,
+) -> Result<()> {
+    match execution_id {
+        Some(execution_id) => {
+            save_scan_results_for_execution(pool, scan_id, entries, elapsed_ms, execution_id).await
+        }
+        None => save_scan_results(pool, scan_id, entries, elapsed_ms).await,
+    }
+}
+
+async fn mark_scan_failed_for_owner(
+    pool: &PgPool,
+    scan_id: uuid::Uuid,
+    derivation: &crate::derivations::Derivation,
+    error_message: &str,
+    execution_id: Option<uuid::Uuid>,
+) -> Result<()> {
+    match execution_id {
+        Some(execution_id) => {
+            mark_cve_scan_failed_for_execution(
+                pool,
+                scan_id,
+                derivation,
+                error_message,
+                execution_id,
+            )
+            .await
+        }
+        None => mark_cve_scan_failed(pool, scan_id, derivation, error_message).await,
+    }
 }
 
 /// Try to copy a store path from a configured cache destination.
@@ -1290,10 +1455,171 @@ mod tests {
             .execute(&pool)
             .await
             .expect("scan-cycle derivations should be deleted");
-        sqlx::query("UPDATE scan_schedule_policy SET on_build = TRUE WHERE id = 1")
+        sqlx::query(
+            r#"
+            UPDATE scan_schedule_policy
+            SET on_build = TRUE,
+                deployed_interval = '24h',
+                recent_interval = '24h',
+                archived_interval = '168h',
+                archived_enabled = TRUE
+            WHERE id = 1
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("scan policy should be restored");
+    }
+
+    /// Disabling the worker after Phase 0 claims a queued row must return that
+    /// row to `pending`. Re-enabling on the next cycle then executes it once
+    /// under a newly issued ownership token.
+    #[tokio::test]
+    async fn disabled_queued_claim_is_requeued_then_executed_once() {
+        let Some(pool) = db_test_pool().await else {
+            return;
+        };
+        let tempdir = tempdir().expect("tempdir should be created");
+        let store_path = tempdir.path().join("task-325-requeued-scan-store-path");
+        std::fs::create_dir_all(&store_path).expect("store path dir should be created");
+
+        sqlx::query(
+            r#"
+            INSERT INTO scan_schedule_policy (
+                id, on_build, deployed_interval, recent_interval,
+                archived_interval, archived_enabled
+            )
+            VALUES (1, false, '876000h', '876000h', '876000h', false)
+            ON CONFLICT (id) DO UPDATE
+            SET on_build = EXCLUDED.on_build,
+                deployed_interval = EXCLUDED.deployed_interval,
+                recent_interval = EXCLUDED.recent_interval,
+                archived_interval = EXCLUDED.archived_interval,
+                archived_enabled = EXCLUDED.archived_enabled,
+                updated_at = NOW()
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("scan policy should suppress non-queued phases");
+
+        let derivation = insert_derivation(
+            &pool,
+            None,
+            &format!("task-325-requeue-cycle-{}", Uuid::new_v4()),
+            "nixos",
+        )
+        .await
+        .expect("requeue-cycle derivation should be inserted");
+        sqlx::query(
+            r#"
+            UPDATE derivations
+            SET status_id = $2, completed_at = NOW(), store_path = $3
+            WHERE id = $1
+            "#,
+        )
+        .bind(derivation.id)
+        .bind(EvaluationStatus::BuildComplete.as_id())
+        .bind(store_path.to_string_lossy().to_string())
+        .execute(&pool)
+        .await
+        .expect("requeue-cycle derivation should be build-complete");
+        let scan_id = Uuid::new_v4();
+        sqlx::query(
+            r#"
+            INSERT INTO cve_scans (
+                id, derivation_id, scanner_name, status, attempts,
+                total_packages, total_vulnerabilities,
+                critical_count, high_count, medium_count, low_count
+            )
+            VALUES ($1, $2, 'vulnix', 'pending', 0, 0, 0, 0, 0, 0, 0)
+            "#,
+        )
+        .bind(scan_id)
+        .bind(derivation.id)
+        .execute(&pool)
+        .await
+        .expect("queued scan should be inserted");
+
+        let runner = FakeRunner {
+            calls: Arc::new(AtomicUsize::new(0)),
+        };
+        let vulnix_config = crate::config::VulnixConfig::default();
+        let enabled_rx = tokio::sync::RwLock::new(true);
+        let claim = claim_queued_cve_scans(&pool, 1)
+            .await
+            .expect("enabled worker should claim the queued scan")
+            .into_iter()
+            .find(|claim| claim.scan_id == scan_id)
+            .expect("the test scan should be claimed");
+        *enabled_rx.write().await = false;
+        assert!(
+            requeue_claim_if_disabled(&pool, claim, &enabled_rx)
+                .await
+                .expect("disable after claim should safely requeue it")
+        );
+
+        let (status, attempts, has_execution_id): (String, i32, bool) = sqlx::query_as(
+            "SELECT status, attempts, scan_metadata ? 'execution_id' FROM cve_scans WHERE id = $1",
+        )
+        .bind(scan_id)
+        .fetch_one(&pool)
+        .await
+        .expect("requeued scan should resolve");
+        assert_eq!(status, "pending");
+        assert_eq!(attempts, 1);
+        assert!(!has_execution_id);
+        assert_eq!(runner.calls.load(Ordering::SeqCst), 0);
+
+        *enabled_rx.write().await = true;
+        scan_cycle_with_runner(
+            &pool,
+            &vulnix_config,
+            &runner,
+            Some("test".to_string()),
+            &enabled_rx,
+        )
+        .await
+        .expect("re-enabled cycle should execute the queued scan");
+
+        let (status, attempts): (String, i32) =
+            sqlx::query_as("SELECT status, attempts FROM cve_scans WHERE id = $1")
+                .bind(scan_id)
+                .fetch_one(&pool)
+                .await
+                .expect("executed scan should resolve");
+        assert_eq!(status, "completed");
+        assert_eq!(attempts, 2, "each durable claim remains in audit history");
+        assert_eq!(
+            runner.calls.load(Ordering::SeqCst),
+            1,
+            "the re-enabled worker must execute the queued scan exactly once"
+        );
+
+        sqlx::query("DELETE FROM cve_scans WHERE id = $1")
+            .bind(scan_id)
             .execute(&pool)
             .await
-            .expect("scan policy should be restored");
+            .expect("requeue-cycle scan should be deleted");
+        sqlx::query("DELETE FROM derivations WHERE id = $1")
+            .bind(derivation.id)
+            .execute(&pool)
+            .await
+            .expect("requeue-cycle derivation should be deleted");
+        sqlx::query(
+            r#"
+            UPDATE scan_schedule_policy
+            SET on_build = TRUE,
+                deployed_interval = '24h',
+                recent_interval = '24h',
+                archived_interval = '168h',
+                archived_enabled = TRUE
+            WHERE id = 1
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("scan policy should be restored");
     }
 
     /// Confirms that [`BackgroundJobHandle`] state machine correctly reports

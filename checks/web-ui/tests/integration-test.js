@@ -6309,15 +6309,40 @@ const steps = [
       // "queued N" from "everything already had an active scan". Both are 202
       // successes, so the UI must render them differently from an error.
       const fleetRescanResponses = [
-        { enqueued_count: 3, message: "Queued 3 CVE scan(s)." },
         {
-          enqueued_count: 0,
-          message:
-            "All 4 eligible system configuration(s) already have a scan pending or in progress.",
+          status: 202,
+          payload: { enqueued_count: 3, message: "Queued 3 CVE scan(s)." },
+        },
+        {
+          status: 202,
+          payload: {
+            enqueued_count: 0,
+            message:
+              "All 4 eligible system configuration(s) already have a scan pending or in progress.",
+          },
+        },
+        {
+          status: 202,
+          payload: {
+            enqueued_count: 2,
+            message:
+              "Queued 2 CVE scan(s); 1 eligible system configuration already has a scan pending or in progress.",
+          },
+        },
+        {
+          status: 202,
+          payload: {
+            enqueued_count: 0,
+            message: "No eligible active system configurations were found.",
+          },
+        },
+        {
+          status: 503,
+          payload: { error: "CVE scan queue is unavailable" },
         },
       ];
       await page.route("**/api/v1/cves/rescan-fleet", async (route) => {
-        const payload =
+        const response =
           fleetRescanResponses[
             Math.min(fleetRescanRequests, fleetRescanResponses.length - 1)
           ];
@@ -6328,9 +6353,9 @@ const steps = [
           await fleetRescanRelease;
         }
         await route.fulfill({
-          status: 202,
+          status: response.status,
           contentType: "application/json",
-          body: JSON.stringify(payload),
+          body: JSON.stringify(response.payload),
         });
       });
 
@@ -6381,6 +6406,57 @@ const steps = [
         throw new Error(
           `Expected exactly two fleet rescan requests, got ${fleetRescanRequests}`,
         );
+      }
+
+      // A partial result must preserve both the newly queued count and the
+      // already-active count rather than presenting the request as all-new.
+      await fleetRescanButton.click();
+      await assertVisible(
+        page.getByText("Queued 2 CVE scan(s); 1 eligible system configuration already has"),
+        "Expected partial fleet enqueue/reuse feedback",
+      );
+
+      // An empty active fleet is a successful no-op with a different reason
+      // from the all-already-active result above.
+      await fleetRescanButton.click();
+      await assertVisible(
+        page.getByText("No eligible active system configurations were found."),
+        "Expected zero-eligible fleet feedback",
+      );
+
+      await fleetRescanButton.click();
+      await assertVisible(
+        page.getByText("Fleet rescan failed:"),
+        "Expected fleet rescan API failure feedback",
+      );
+      if (fleetRescanRequests !== 5) {
+        throw new Error(
+          `Expected five fleet rescan response scenarios, got ${fleetRescanRequests}`,
+        );
+      }
+
+      // Exercise authorization presentation in an isolated browser context so
+      // the admin page and its screenshot remain unchanged.
+      const browser = page.context().browser();
+      if (!browser) {
+        throw new Error("Expected browser instance for isolated Viewer CVE check");
+      }
+      const viewerContext = await browser.newContext({ viewport: VIEWPORTS.desktop });
+      const viewerPage = await viewerContext.newPage();
+      try {
+        await viewerPage.goto(`${baseUrl}/cves?ui_check_auth=1&ui_check_role=viewer`, {
+          timeout: LOAD_TIMEOUT,
+        });
+        await assertVisible(
+          viewerPage.locator("main h1:has-text('CVEs')"),
+          "Expected Viewer CVE page to finish rendering",
+        );
+        await assertHidden(
+          viewerPage.getByRole("button", { name: "Rescan fleet" }),
+          "Expected Viewer role to hide the fleet rescan action",
+        );
+      } finally {
+        await viewerContext.close();
       }
 
       // Assert summary stat cards are rendered.
