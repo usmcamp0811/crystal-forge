@@ -28,11 +28,11 @@ use crate::log::{WorkerState, WorkerStatus, get_cve_status};
 use crate::models::cache_destination::CacheDestination;
 use crate::queries::cache_destinations::get_cache_destination;
 use crate::queries::cve_scans::{
-    CveScanExecutionClaim, claim_queued_cve_scans, create_cve_scan, get_targets_needing_cve_rescan,
-    get_targets_needing_cve_scan, heartbeat_cve_scan_execution, mark_cve_scan_failed,
+    CreateCveScanOutcome, CveScanExecutionClaim, acknowledge_revoked_cve_scan_execution,
+    claim_queued_cve_scans, create_cve_scan, get_targets_needing_cve_rescan,
+    get_targets_needing_cve_scan, heartbeat_cve_scan_execution,
     mark_cve_scan_failed_by_id_for_execution, mark_cve_scan_failed_for_execution,
-    recover_stale_scans, requeue_cve_scan_execution, save_scan_results,
-    save_scan_results_for_execution,
+    recover_stale_scans, requeue_cve_scan_execution, save_scan_results_for_execution,
 };
 use crate::queries::derivations::get_derivation_by_id;
 use crate::queries::scanning::get_scan_schedule_policy;
@@ -433,7 +433,7 @@ async fn scan_cycle_with_runner<R: CveScanRunner + Sync>(
                     vulnix_version.clone(),
                     &derivation,
                     claim.scan_id,
-                    Some(claim.execution_id),
+                    claim.execution_id,
                 )
                 .await
                 {
@@ -623,7 +623,7 @@ async fn scan_one<R: CveScanRunner + Sync>(
     // waiting for the write lock, no new read guard can be acquired.  This
     // ensures that any scan_one() call begun after set_enabled(false) returns
     // will see enabled=false and exit without creating a claim.
-    let scan_id = {
+    let claim = {
         let enabled_guard = enabled_rx.read().await;
         if !*enabled_guard {
             debug!(
@@ -635,19 +635,20 @@ async fn scan_one<R: CveScanRunner + Sync>(
 
         let scan_claim =
             create_cve_scan(pool, derivation.id, "vulnix", vulnix_version.clone()).await?;
-        let scan_id = scan_claim.id();
         // Release the guard as soon as the claim is committed.  From here the
         // scan is authorized and runs to completion even if disable fires later.
         drop(enabled_guard);
 
-        if !scan_claim.was_created() {
-            info!(
-                "⏭️ Skipping duplicate CVE scan for {} — active scan {scan_id} already exists",
-                derivation.derivation_name
-            );
-            return Ok(());
+        match scan_claim {
+            CreateCveScanOutcome::Created(claim) => claim,
+            CreateCveScanOutcome::Existing(scan_id) => {
+                info!(
+                    "⏭️ Skipping duplicate CVE scan for {} — active scan {scan_id} already exists",
+                    derivation.derivation_name
+                );
+                return Ok(());
+            }
         }
-        scan_id
     };
 
     execute_scan(
@@ -655,8 +656,8 @@ async fn scan_one<R: CveScanRunner + Sync>(
         vulnix_runner,
         vulnix_version,
         derivation,
-        scan_id,
-        None,
+        claim.scan_id,
+        claim.execution_id,
     )
     .await
 }
@@ -679,44 +680,84 @@ async fn execute_scan<R: CveScanRunner + Sync>(
     vulnix_version: Option<String>,
     derivation: &crate::derivations::Derivation,
     scan_id: uuid::Uuid,
-    execution_id: Option<uuid::Uuid>,
+    execution_id: uuid::Uuid,
 ) -> Result<()> {
-    let execution = execute_scan_inner(
+    let mut execution = Box::pin(execute_scan_inner(
         pool,
         vulnix_runner,
         vulnix_version,
         derivation,
         scan_id,
         execution_id,
-    );
-    let Some(execution_id) = execution_id else {
-        return execution.await;
-    };
-
+    ));
     // Heartbeat the entire materialization/vulnix/persistence window. Terminal
     // writes still verify the token, so heartbeat is liveness rather than the
     // final authorization boundary.
+    #[cfg(not(test))]
     const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
-    let heartbeat = async {
-        let start = tokio::time::Instant::now() + HEARTBEAT_INTERVAL;
-        let mut interval = tokio::time::interval_at(start, HEARTBEAT_INTERVAL);
-        loop {
-            interval.tick().await;
-            let still_owned = heartbeat_cve_scan_execution(pool, scan_id, execution_id)
+    #[cfg(test)]
+    const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+    const HEARTBEAT_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+    let start = tokio::time::Instant::now() + HEARTBEAT_INTERVAL;
+    let mut heartbeat = tokio::time::interval_at(start, HEARTBEAT_INTERVAL);
+    loop {
+        tokio::select! {
+            biased;
+            result = &mut execution => return result,
+            _ = heartbeat.tick() => {
+                match tokio::time::timeout(
+                    HEARTBEAT_QUERY_TIMEOUT,
+                    heartbeat_cve_scan_execution(pool, scan_id, execution_id),
+                )
                 .await
-                .context("Failed to refresh CVE scan execution heartbeat")?;
-            if !still_owned {
-                anyhow::bail!("CVE scan {scan_id} lost execution ownership");
+                {
+                    Ok(Ok(true)) => {}
+                    Ok(Ok(false)) => {
+                        // Cancel the scanner before acknowledging revocation.
+                        // Until this future is dropped the row remains
+                        // in_progress, preserving active-scan uniqueness.
+                        drop(execution);
+                        let _ = acknowledge_revoked_cve_scan_execution(
+                            pool,
+                            scan_id,
+                            execution_id,
+                        )
+                        .await;
+                        anyhow::bail!("CVE scan {scan_id} lost execution ownership");
+                    }
+                    Ok(Err(err)) => {
+                        drop(execution);
+                        let heartbeat_error = err.context(
+                            "Failed to refresh CVE scan execution heartbeat",
+                        );
+                        let _ = mark_cve_scan_failed_by_id_for_execution(
+                            pool,
+                            scan_id,
+                            derivation.id,
+                            &heartbeat_error.to_string(),
+                            execution_id,
+                        )
+                        .await;
+                        return Err(heartbeat_error);
+                    }
+                    Err(_) => {
+                        drop(execution);
+                        let heartbeat_error = anyhow::anyhow!(
+                            "Timed out refreshing CVE scan {scan_id} execution heartbeat"
+                        );
+                        let _ = mark_cve_scan_failed_by_id_for_execution(
+                            pool,
+                            scan_id,
+                            derivation.id,
+                            &heartbeat_error.to_string(),
+                            execution_id,
+                        )
+                        .await;
+                        return Err(heartbeat_error);
+                    }
+                }
             }
         }
-    };
-
-    tokio::pin!(execution);
-    tokio::pin!(heartbeat);
-    tokio::select! {
-        biased;
-        result = &mut execution => result,
-        ownership = &mut heartbeat => ownership,
     }
 }
 
@@ -726,7 +767,7 @@ async fn execute_scan_inner<R: CveScanRunner + Sync>(
     vulnix_version: Option<String>,
     derivation: &crate::derivations::Derivation,
     scan_id: uuid::Uuid,
-    execution_id: Option<uuid::Uuid>,
+    execution_id: uuid::Uuid,
 ) -> Result<()> {
     let Some(ref path) = derivation.store_path else {
         warn!(
@@ -806,7 +847,8 @@ async fn execute_scan_inner<R: CveScanRunner + Sync>(
             let elapsed_ms = Some(start.elapsed().as_millis() as i32);
             let stats = crate::vulnix::vulnix_parser::VulnixParser::calculate_stats(&entries);
             if let Err(err) =
-                save_results_for_owner(pool, scan_id, &entries, elapsed_ms, execution_id).await
+                save_scan_results_for_execution(pool, scan_id, &entries, elapsed_ms, execution_id)
+                    .await
             {
                 mark_scan_failed_for_owner(
                     pool,
@@ -828,31 +870,19 @@ async fn execute_scan_inner<R: CveScanRunner + Sync>(
                 "❌ CVE scan failed for {}: {}",
                 derivation.derivation_name, e
             );
-            if let Err(save_err) =
-                mark_scan_failed_for_owner(pool, scan_id, derivation, &e.to_string(), execution_id)
-                    .await
-            {
-                error!("❌ Failed to mark CVE scan as failed: {save_err}");
-            }
+            mark_cve_scan_failed_for_execution(
+                pool,
+                scan_id,
+                derivation,
+                &e.to_string(),
+                execution_id,
+            )
+            .await
+            .context("Failed to persist CVE scanner failure")?;
         }
     }
 
     Ok(())
-}
-
-async fn save_results_for_owner(
-    pool: &PgPool,
-    scan_id: uuid::Uuid,
-    entries: &crate::vulnix::vulnix_parser::VulnixScanOutput,
-    elapsed_ms: Option<i32>,
-    execution_id: Option<uuid::Uuid>,
-) -> Result<()> {
-    match execution_id {
-        Some(execution_id) => {
-            save_scan_results_for_execution(pool, scan_id, entries, elapsed_ms, execution_id).await
-        }
-        None => save_scan_results(pool, scan_id, entries, elapsed_ms).await,
-    }
 }
 
 async fn mark_scan_failed_for_owner(
@@ -860,21 +890,9 @@ async fn mark_scan_failed_for_owner(
     scan_id: uuid::Uuid,
     derivation: &crate::derivations::Derivation,
     error_message: &str,
-    execution_id: Option<uuid::Uuid>,
+    execution_id: uuid::Uuid,
 ) -> Result<()> {
-    match execution_id {
-        Some(execution_id) => {
-            mark_cve_scan_failed_for_execution(
-                pool,
-                scan_id,
-                derivation,
-                error_message,
-                execution_id,
-            )
-            .await
-        }
-        None => mark_cve_scan_failed(pool, scan_id, derivation, error_message).await,
-    }
+    mark_cve_scan_failed_for_execution(pool, scan_id, derivation, error_message, execution_id).await
 }
 
 /// Try to copy a store path from a configured cache destination.
@@ -1102,6 +1120,7 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
     use tempfile::tempdir;
+    use tokio::sync::Semaphore;
     use uuid::Uuid;
 
     #[derive(Clone)]
@@ -1120,6 +1139,68 @@ mod tests {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(vec![])
         }
+    }
+
+    #[derive(Clone)]
+    struct BlockingRunner {
+        calls: Arc<AtomicUsize>,
+        active: Arc<AtomicUsize>,
+        max_active: Arc<AtomicUsize>,
+        cancelled: Arc<AtomicUsize>,
+        release: Arc<Semaphore>,
+    }
+
+    struct ActiveCallGuard {
+        active: Arc<AtomicUsize>,
+        cancelled: Arc<AtomicUsize>,
+        completed: bool,
+    }
+
+    impl Drop for ActiveCallGuard {
+        fn drop(&mut self) {
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            if !self.completed {
+                self.cancelled.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    #[async_trait]
+    impl CveScanRunner for BlockingRunner {
+        async fn scan_derivation(
+            &self,
+            _pool: &PgPool,
+            _derivation_id: i32,
+            _vulnix_version: Option<String>,
+        ) -> Result<crate::vulnix::vulnix_parser::VulnixScanOutput> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_active.fetch_max(active, Ordering::SeqCst);
+            let mut guard = ActiveCallGuard {
+                active: self.active.clone(),
+                cancelled: self.cancelled.clone(),
+                completed: false,
+            };
+
+            let permit = self
+                .release
+                .acquire()
+                .await
+                .context("blocking test runner semaphore closed")?;
+            permit.forget();
+            guard.completed = true;
+            Ok(vec![])
+        }
+    }
+
+    async fn wait_for_counter(counter: &AtomicUsize, expected: usize, description: &str) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while counter.load(Ordering::SeqCst) < expected {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {description}"));
     }
 
     async fn db_test_pool() -> Option<PgPool> {
@@ -1469,6 +1550,217 @@ mod tests {
         .execute(&pool)
         .await
         .expect("scan policy should be restored");
+    }
+
+    /// A policy-created execution uses the same renewable ownership lease as a
+    /// queued execution. Healthy heartbeats prevent stale recovery; losing the
+    /// token cancels the running scanner before a replacement starts.
+    #[tokio::test]
+    async fn policy_scan_heartbeat_prevents_recovery_and_ownership_loss_cancels_execution() {
+        let Some(pool) = db_test_pool().await else {
+            return;
+        };
+        let recovery_pool = PgPool::connect(
+            &std::env::var("CRYSTAL_FORGE_TEST_DATABASE_URL")
+                .expect("dedicated CVE database URL should remain available"),
+        )
+        .await
+        .expect("independent stale-recovery pool should connect");
+        let tempdir = tempdir().expect("tempdir should be created");
+        let store_path = tempdir.path().join("task-325-policy-lease-store-path");
+        std::fs::create_dir_all(&store_path).expect("store path dir should be created");
+
+        let mut derivation = insert_derivation(
+            &pool,
+            None,
+            &format!("task-325-policy-lease-{}", Uuid::new_v4()),
+            "nixos",
+        )
+        .await
+        .expect("policy lease derivation should be inserted");
+        derivation.store_path = Some(store_path.to_string_lossy().to_string());
+        let derivation = Arc::new(derivation);
+
+        let runner = BlockingRunner {
+            calls: Arc::new(AtomicUsize::new(0)),
+            active: Arc::new(AtomicUsize::new(0)),
+            max_active: Arc::new(AtomicUsize::new(0)),
+            cancelled: Arc::new(AtomicUsize::new(0)),
+            release: Arc::new(Semaphore::new(0)),
+        };
+        let enabled = Arc::new(tokio::sync::RwLock::new(true));
+
+        let first_pool = pool.clone();
+        let first_runner = runner.clone();
+        let first_derivation = derivation.clone();
+        let first_enabled = enabled.clone();
+        let first = tokio::spawn(async move {
+            scan_one(
+                &first_pool,
+                &first_runner,
+                Some("test".to_string()),
+                &first_derivation,
+                &first_enabled,
+            )
+            .await
+        });
+        wait_for_counter(&runner.calls, 1, "first policy scanner invocation").await;
+
+        let (scan_id, execution_id, initial_heartbeat): (
+            Uuid,
+            Uuid,
+            chrono::DateTime<chrono::Utc>,
+        ) = sqlx::query_as(
+            r#"
+            SELECT
+                id,
+                (scan_metadata ->> 'execution_id')::uuid,
+                (scan_metadata ->> 'execution_heartbeat_at')::timestamptz
+            FROM cve_scans
+            WHERE derivation_id = $1 AND status = 'in_progress'
+            "#,
+        )
+        .bind(derivation.id)
+        .fetch_one(&pool)
+        .await
+        .expect("policy-created execution should have lease metadata");
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let heartbeat: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+                    "SELECT (scan_metadata ->> 'execution_heartbeat_at')::timestamptz FROM cve_scans WHERE id = $1",
+                )
+                .bind(scan_id)
+                .fetch_one(&pool)
+                .await
+                .expect("policy heartbeat should resolve");
+                if heartbeat > initial_heartbeat {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("policy execution should refresh its heartbeat");
+
+        sqlx::query(
+            r#"
+            UPDATE cve_scans
+            SET scan_metadata = scan_metadata || jsonb_build_object(
+                'execution_started_at', NOW() - INTERVAL '2 hours',
+                'execution_heartbeat_at', NOW() - INTERVAL '2 hours'
+            )
+            WHERE id = $1 AND scan_metadata ->> 'execution_id' = $2::uuid::text
+            "#,
+        )
+        .bind(scan_id)
+        .bind(execution_id)
+        .execute(&pool)
+        .await
+        .expect("policy execution should be artificially aged");
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let heartbeat: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+                    "SELECT (scan_metadata ->> 'execution_heartbeat_at')::timestamptz FROM cve_scans WHERE id = $1",
+                )
+                .bind(scan_id)
+                .fetch_one(&pool)
+                .await
+                .expect("refreshed policy heartbeat should resolve");
+                if heartbeat > Utc::now() - chrono::Duration::minutes(1) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("policy execution should renew its artificially aged lease");
+
+        assert_eq!(
+            recover_stale_scans(&recovery_pool, std::time::Duration::from_secs(1800))
+                .await
+                .expect("concurrent stale recovery should succeed"),
+            0,
+            "a healthy policy heartbeat must prevent stale recovery"
+        );
+
+        sqlx::query(
+            r#"
+            UPDATE cve_scans
+            SET scan_metadata = scan_metadata || jsonb_build_object(
+                'execution_revoked_at', NOW(),
+                'stale_recovery_reason', 'test-intentional-revocation'
+            )
+            WHERE id = $1
+              AND status = 'in_progress'
+              AND scan_metadata ->> 'execution_id' = $2::uuid::text
+            "#,
+        )
+        .bind(scan_id)
+        .bind(execution_id)
+        .execute(&recovery_pool)
+        .await
+        .expect("test should intentionally revoke the first policy execution");
+
+        let first_result = tokio::time::timeout(std::time::Duration::from_secs(5), first)
+            .await
+            .expect("revoked policy execution should stop promptly")
+            .expect("first policy task should not panic");
+        assert!(
+            first_result
+                .expect_err("revoked policy execution should report ownership loss")
+                .to_string()
+                .contains("lost execution ownership")
+        );
+        assert_eq!(runner.cancelled.load(Ordering::SeqCst), 1);
+        assert_eq!(runner.active.load(Ordering::SeqCst), 0);
+
+        let second_pool = pool.clone();
+        let second_runner = runner.clone();
+        let second_derivation = derivation.clone();
+        let second_enabled = enabled.clone();
+        let second = tokio::spawn(async move {
+            scan_one(
+                &second_pool,
+                &second_runner,
+                Some("test".to_string()),
+                &second_derivation,
+                &second_enabled,
+            )
+            .await
+        });
+        wait_for_counter(&runner.calls, 2, "replacement policy scanner invocation").await;
+        assert_eq!(
+            runner.max_active.load(Ordering::SeqCst),
+            1,
+            "replacement must not overlap the revoked execution"
+        );
+        runner.release.add_permits(1);
+        second
+            .await
+            .expect("replacement policy task should not panic")
+            .expect("replacement policy execution should complete");
+
+        let statuses: Vec<String> = sqlx::query_scalar(
+            "SELECT status FROM cve_scans WHERE derivation_id = $1 ORDER BY created_at, id",
+        )
+        .bind(derivation.id)
+        .fetch_all(&pool)
+        .await
+        .expect("policy scan statuses should resolve");
+        assert_eq!(statuses, vec!["failed", "completed"]);
+
+        sqlx::query("DELETE FROM cve_scans WHERE derivation_id = $1")
+            .bind(derivation.id)
+            .execute(&pool)
+            .await
+            .expect("policy lease scans should be deleted");
+        sqlx::query("DELETE FROM derivations WHERE id = $1")
+            .bind(derivation.id)
+            .execute(&pool)
+            .await
+            .expect("policy lease derivation should be deleted");
     }
 
     /// Disabling the worker after Phase 0 claims a queued row must return that

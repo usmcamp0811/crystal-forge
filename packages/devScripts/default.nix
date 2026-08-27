@@ -658,6 +658,9 @@ let
           --lib builder::cve_worker::tests::scan_cycle_processes_target_with_fake_runner
         CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
           cargo test --manifest-path Cargo.toml \
+          --lib builder::cve_worker::tests::policy_scan_heartbeat_prevents_recovery_and_ownership_loss_cancels_execution
+        CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
+          cargo test --manifest-path Cargo.toml \
           --lib queries::cve_scans::tests::get_targets_needing_cve_rescan_selects_stale_scan
         CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
           cargo test --manifest-path Cargo.toml \

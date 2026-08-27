@@ -58,10 +58,12 @@ async fn save_scan_results_truncates_overlong_package_version() {
         .await
         .expect("should insert target derivation");
 
-    let scan_id = create_cve_scan(&pool, target.id, "vulnix", Some("test".to_string()))
+    let claim = create_cve_scan(&pool, target.id, "vulnix", Some("test".to_string()))
         .await
-        .expect("should create cve scan")
-        .id();
+        .expect("should create cve scan");
+    let CreateCveScanOutcome::Created(claim) = claim else {
+        panic!("test derivation should receive a new execution claim");
+    };
 
     let long_version = "a".repeat(140);
     let expected_version: String = long_version.chars().take(100).collect();
@@ -79,10 +81,11 @@ async fn save_scan_results_truncates_overlong_package_version() {
 
     save_scan_results_with_store_path_override(
         &pool,
-        scan_id,
+        claim.scan_id,
         &vulnix_results,
         Some(123),
         Some("/nix/store/fakehash-task-261-overlong-version-package"),
+        claim.execution_id,
     )
     .await
     .expect("save_scan_results should succeed for overlong version");
@@ -120,6 +123,28 @@ async fn create_cve_scan_reuses_existing_active_scan() {
     assert!(matches!(first, CreateCveScanOutcome::Created(_)));
     assert!(matches!(second, CreateCveScanOutcome::Existing(_)));
     assert_eq!(first.id(), second.id());
+
+    let CreateCveScanOutcome::Created(first_claim) = first else {
+        unreachable!("the first atomic claim was asserted to be newly created");
+    };
+    let (stored_execution_id, has_started_at, has_heartbeat_at): (Uuid, bool, bool) =
+        sqlx::query_as(
+            r#"
+            SELECT
+                (scan_metadata ->> 'execution_id')::uuid,
+                scan_metadata ? 'execution_started_at',
+                scan_metadata ? 'execution_heartbeat_at'
+            FROM cve_scans
+            WHERE id = $1
+            "#,
+        )
+        .bind(first_claim.scan_id)
+        .fetch_one(&pool)
+        .await
+        .expect("created scan lease metadata should resolve");
+    assert_eq!(stored_execution_id, first_claim.execution_id);
+    assert!(has_started_at);
+    assert!(has_heartbeat_at);
 
     let active_count = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM cve_scans WHERE derivation_id = $1 AND status IN ('pending', 'in_progress')",
@@ -166,15 +191,17 @@ async fn save_scan_results_sets_fleet_relevant_since_atomically_with_cve_attenti
     .await
     .expect("insert nixos derivation");
 
-    let scan_id = create_cve_scan(
+    let claim = create_cve_scan(
         &pool,
         nixos_derivation_id,
         "vulnix",
         Some("test".to_string()),
     )
     .await
-    .expect("create scan")
-    .id();
+    .expect("create scan");
+    let CreateCveScanOutcome::Created(claim) = claim else {
+        panic!("test derivation should receive a new execution claim");
+    };
 
     // Package derivation, build-complete.
     let pkg_name = format!(
@@ -207,10 +234,11 @@ async fn save_scan_results_sets_fleet_relevant_since_atomically_with_cve_attenti
 
     save_scan_results_with_store_path_override(
         &pool,
-        scan_id,
+        claim.scan_id,
         &vulnix_results,
         Some(123),
         Some("/nix/store/fake-atomic-path"),
+        claim.execution_id,
     )
     .await
     .expect("save_scan_results should succeed");
@@ -255,11 +283,11 @@ async fn save_scan_results_sets_fleet_relevant_since_atomically_with_cve_attenti
         .execute(&pool)
         .await;
     let _ = sqlx::query("DELETE FROM scan_packages WHERE scan_id = $1")
-        .bind(scan_id)
+        .bind(claim.scan_id)
         .execute(&pool)
         .await;
     let _ = sqlx::query("DELETE FROM cve_scans WHERE id = $1")
-        .bind(scan_id)
+        .bind(claim.scan_id)
         .execute(&pool)
         .await;
     let _ = sqlx::query("DELETE FROM derivations WHERE id = ANY($1)")

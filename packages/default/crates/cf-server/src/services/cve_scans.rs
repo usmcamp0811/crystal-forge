@@ -1,7 +1,9 @@
 use crate::config::CrystalForgeConfig;
 use crate::queries::cve_scans::{
-    create_cve_scan, get_active_scan_for_derivation, mark_cve_scan_failed,
-    mark_cve_scan_failed_by_id, save_scan_results,
+    CreateCveScanOutcome, acknowledge_revoked_cve_scan_execution, create_cve_scan,
+    get_active_scan_for_derivation, heartbeat_cve_scan_execution,
+    mark_cve_scan_failed_by_id_for_execution, mark_cve_scan_failed_for_execution,
+    save_scan_results_for_execution,
 };
 use crate::queries::derivations::get_derivation_by_id;
 use crate::vulnix::vulnix_runner::VulnixRunner;
@@ -60,14 +62,15 @@ pub async fn trigger_immediate_cve_scan(
     let scan_claim = create_cve_scan(&pool, derivation_id, "vulnix", vulnix_version.clone())
         .await
         .map_err(CveScanError::Internal)?;
-    let scan_id = scan_claim.id();
-    if !scan_claim.was_created() {
-        return Ok(scan_id);
-    }
+    let claim = match scan_claim {
+        CreateCveScanOutcome::Created(claim) => claim,
+        CreateCveScanOutcome::Existing(scan_id) => return Ok(scan_id),
+    };
+    let scan_id = claim.scan_id;
 
     let spawn_pool = pool.clone();
     tokio::spawn(async move {
-        let result: anyhow::Result<()> = async {
+        let execution = async {
             let derivation = get_derivation_by_id(&spawn_pool, derivation_id).await?;
             let cfg = CrystalForgeConfig::load().unwrap_or_else(|_| CrystalForgeConfig::default());
             let vulnix_config = cfg.get_vulnix_config();
@@ -81,29 +84,95 @@ pub async fn trigger_immediate_cve_scan(
             {
                 Ok(vulnix_entries) => {
                     let scan_duration_ms = Some(started.elapsed().as_millis() as i32);
-                    if let Err(err) =
-                        save_scan_results(&spawn_pool, scan_id, &vulnix_entries, scan_duration_ms)
-                            .await
+                    if let Err(err) = save_scan_results_for_execution(
+                        &spawn_pool,
+                        scan_id,
+                        &vulnix_entries,
+                        scan_duration_ms,
+                        claim.execution_id,
+                    )
+                    .await
                     {
-                        mark_cve_scan_failed(&spawn_pool, scan_id, &derivation, &err.to_string())
-                            .await?;
                         return Err(err);
                     }
                 }
                 Err(err) => {
-                    mark_cve_scan_failed(&spawn_pool, scan_id, &derivation, &err.to_string())
-                        .await?;
+                    mark_cve_scan_failed_for_execution(
+                        &spawn_pool,
+                        scan_id,
+                        &derivation,
+                        &err.to_string(),
+                        claim.execution_id,
+                    )
+                    .await?;
                 }
             }
 
             Ok(())
-        }
-        .await;
+        };
+
+        let mut execution = Box::pin(execution);
+        let start = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        let mut heartbeat = tokio::time::interval_at(start, std::time::Duration::from_secs(30));
+        const HEARTBEAT_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+        let result = loop {
+            tokio::select! {
+                biased;
+                result = &mut execution => break result,
+                _ = heartbeat.tick() => {
+                    match tokio::time::timeout(
+                        HEARTBEAT_QUERY_TIMEOUT,
+                        heartbeat_cve_scan_execution(
+                            &spawn_pool,
+                            scan_id,
+                            claim.execution_id,
+                        ),
+                    )
+                    .await
+                    {
+                        Ok(Ok(true)) => {}
+                        Ok(Ok(false)) => {
+                            drop(execution);
+                            if acknowledge_revoked_cve_scan_execution(
+                                &spawn_pool,
+                                scan_id,
+                                claim.execution_id,
+                            )
+                            .await
+                            .unwrap_or(false)
+                            {
+                                return;
+                            }
+                            break Err(anyhow::anyhow!(
+                                "CVE scan {scan_id} lost execution ownership"
+                            ));
+                        }
+                        Ok(Err(err)) => {
+                            drop(execution);
+                            break Err(err.context(
+                                "Failed to refresh immediate CVE scan execution heartbeat",
+                            ));
+                        }
+                        Err(_) => {
+                            drop(execution);
+                            break Err(anyhow::anyhow!(
+                                "Timed out refreshing immediate CVE scan {scan_id} execution heartbeat"
+                            ));
+                        }
+                    }
+                }
+            }
+        };
 
         if let Err(err) = result {
-            if let Err(mark_err) =
-                mark_cve_scan_failed_by_id(&spawn_pool, scan_id, derivation_id, &err.to_string())
-                    .await
+            if let Err(mark_err) = mark_cve_scan_failed_by_id_for_execution(
+                &spawn_pool,
+                scan_id,
+                derivation_id,
+                &err.to_string(),
+                claim.execution_id,
+            )
+            .await
             {
                 error!(
                     "Failed to mark immediate CVE scan {scan_id} as failed after setup error: {mark_err:#}"

@@ -20,16 +20,25 @@ pub struct CveScanEligibleTarget {
     pub blocked_reason: Option<String>,
 }
 
+/// Durable ownership for an active CVE scan execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CveScanExecutionClaim {
+    pub scan_id: Uuid,
+    pub derivation_id: i32,
+    pub execution_id: Uuid,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CreateCveScanOutcome {
-    Created(Uuid),
+    Created(CveScanExecutionClaim),
     Existing(Uuid),
 }
 
 impl CreateCveScanOutcome {
     pub fn id(self) -> Uuid {
         match self {
-            Self::Created(id) | Self::Existing(id) => id,
+            Self::Created(claim) => claim.scan_id,
+            Self::Existing(id) => id,
         }
     }
 
@@ -141,34 +150,40 @@ pub async fn create_cve_scan(
 ) -> Result<CreateCveScanOutcome> {
     let scan_id = Uuid::new_v4();
 
-    let result = sqlx::query!(
+    let inserted = sqlx::query(
         r#"
         INSERT INTO cve_scans (
             id, derivation_id, scanner_name, scanner_version,
             status, total_packages, total_vulnerabilities,
             critical_count, high_count, medium_count, low_count,
-            attempts
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            attempts, scan_metadata
+        ) VALUES (
+            $1, $2, $3, $4,
+            'in_progress', 0, 0,
+            0, 0, 0, 0,
+            1,
+            jsonb_build_object(
+                'execution_id', gen_random_uuid(),
+                'execution_started_at', NOW(),
+                'execution_heartbeat_at', NOW()
+            )
+        )
         ON CONFLICT (derivation_id) WHERE status IN ('pending', 'in_progress')
         DO NOTHING
+        RETURNING
+            id AS scan_id,
+            derivation_id,
+            (scan_metadata ->> 'execution_id')::uuid AS execution_id
         "#,
-        scan_id,
-        derivation_id,
-        scanner_name,
-        scanner_version,
-        "in_progress" as &str,
-        0i32,
-        0i32,
-        0i32,
-        0i32,
-        0i32,
-        0i32,
-        1i32
     )
-    .execute(pool)
+    .bind(scan_id)
+    .bind(derivation_id)
+    .bind(scanner_name)
+    .bind(scanner_version)
+    .fetch_optional(pool)
     .await?;
 
-    if result.rows_affected() == 0 {
+    let Some(inserted) = inserted else {
         // Another caller already claimed this derivation. Prefer an active scan
         // if it still exists; if the winner completed between the conflicting
         // INSERT and this follow-up read, fall back to the newest scan row for
@@ -195,9 +210,13 @@ pub async fn create_cve_scan(
             )
         })?;
         return Ok(CreateCveScanOutcome::Existing(existing));
-    }
+    };
 
-    Ok(CreateCveScanOutcome::Created(scan_id))
+    Ok(CreateCveScanOutcome::Created(CveScanExecutionClaim {
+        scan_id: inserted.get("scan_id"),
+        derivation_id: inserted.get("derivation_id"),
+        execution_id: inserted.get("execution_id"),
+    }))
 }
 
 /// Complete a CVE scan with results
@@ -225,6 +244,38 @@ pub async fn complete_cve_scan(
         scan_duration_ms,
         scan_metadata,
         None,
+    )
+    .await
+}
+
+/// Complete a token-owned CVE scan. The transition is rejected after the
+/// execution lease is revoked or replaced.
+#[allow(clippy::too_many_arguments)]
+pub async fn complete_cve_scan_for_execution(
+    pool: &PgPool,
+    scan_id: Uuid,
+    total_packages: i32,
+    total_vulnerabilities: i32,
+    critical_count: i32,
+    high_count: i32,
+    medium_count: i32,
+    low_count: i32,
+    scan_duration_ms: Option<i32>,
+    scan_metadata: Option<serde_json::Value>,
+    execution_id: Uuid,
+) -> Result<()> {
+    complete_cve_scan_for_owner(
+        pool,
+        scan_id,
+        total_packages,
+        total_vulnerabilities,
+        critical_count,
+        high_count,
+        medium_count,
+        low_count,
+        scan_duration_ms,
+        scan_metadata,
+        Some(execution_id),
     )
     .await
 }
@@ -259,6 +310,7 @@ async fn complete_cve_scan_for_owner(
             scan_metadata = $9
         WHERE id = $1
           AND status = 'in_progress'
+          AND NOT (COALESCE(scan_metadata, '{}'::jsonb) ? 'execution_revoked_at')
           AND (
               ($10::uuid IS NULL AND NOT (COALESCE(scan_metadata, '{}'::jsonb) ? 'execution_id'))
               OR scan_metadata ->> 'execution_id' = $10::uuid::text
@@ -291,7 +343,7 @@ pub async fn mark_cve_scan_failed(
     mark_cve_scan_failed_for_owner(pool, scan_id, target, error_message, None).await
 }
 
-pub(crate) async fn mark_cve_scan_failed_for_execution(
+pub async fn mark_cve_scan_failed_for_execution(
     pool: &PgPool,
     scan_id: Uuid,
     target: &Derivation,
@@ -322,9 +374,10 @@ async fn mark_cve_scan_failed_for_owner(
             status = 'failed',
             completed_at = NOW(),
             attempts = attempts + 1,
-            scan_metadata = $2
+            scan_metadata = COALESCE(scan_metadata, '{}'::jsonb) || $2
         WHERE id = $1
           AND status = 'in_progress'
+          AND NOT (COALESCE(scan_metadata, '{}'::jsonb) ? 'execution_revoked_at')
           AND (
               ($3::uuid IS NULL AND NOT (COALESCE(scan_metadata, '{}'::jsonb) ? 'execution_id'))
               OR scan_metadata ->> 'execution_id' = $3::uuid::text
@@ -351,7 +404,7 @@ pub async fn mark_cve_scan_failed_by_id(
     mark_cve_scan_failed_by_id_for_owner(pool, scan_id, derivation_id, error_message, None).await
 }
 
-pub(crate) async fn mark_cve_scan_failed_by_id_for_execution(
+pub async fn mark_cve_scan_failed_by_id_for_execution(
     pool: &PgPool,
     scan_id: Uuid,
     derivation_id: i32,
@@ -386,9 +439,10 @@ async fn mark_cve_scan_failed_by_id_for_owner(
         SET
             status = 'failed',
             completed_at = NOW(),
-            scan_metadata = $2
+            scan_metadata = COALESCE(scan_metadata, '{}'::jsonb) || $2
         WHERE id = $1
           AND status = 'in_progress'
+          AND NOT (COALESCE(scan_metadata, '{}'::jsonb) ? 'execution_revoked_at')
           AND (
               ($3::uuid IS NULL AND NOT (COALESCE(scan_metadata, '{}'::jsonb) ? 'execution_id'))
               OR scan_metadata ->> 'execution_id' = $3::uuid::text
@@ -422,7 +476,7 @@ pub async fn save_scan_results(
     save_scan_results_for_owner(pool, scan_id, vulnix_results, scan_duration_ms, None, None).await
 }
 
-pub(crate) async fn save_scan_results_for_execution(
+pub async fn save_scan_results_for_execution(
     pool: &PgPool,
     scan_id: Uuid,
     vulnix_results: &VulnixScanOutput,
@@ -446,6 +500,7 @@ pub(crate) async fn save_scan_results_with_store_path_override(
     vulnix_results: &VulnixScanOutput,
     scan_duration_ms: Option<i32>,
     store_path_override: Option<&str>,
+    execution_id: Uuid,
 ) -> Result<()> {
     save_scan_results_for_owner(
         pool,
@@ -453,7 +508,7 @@ pub(crate) async fn save_scan_results_with_store_path_override(
         vulnix_results,
         scan_duration_ms,
         store_path_override,
-        None,
+        Some(execution_id),
     )
     .await
 }
@@ -613,6 +668,7 @@ async fn save_scan_results_for_owner(
             scan_duration_ms = $8
         WHERE id = $1
           AND status = 'in_progress'
+          AND NOT (COALESCE(scan_metadata, '{}'::jsonb) ? 'execution_revoked_at')
           AND (
               ($9::uuid IS NULL AND NOT (COALESCE(scan_metadata, '{}'::jsonb) ? 'execution_id'))
               OR scan_metadata ->> 'execution_id' = $9::uuid::text
@@ -1132,14 +1188,6 @@ pub struct FleetEnqueueOutcome {
     pub created: i64,
 }
 
-/// Durable ownership granted by an atomic pending-to-in-progress transition.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CveScanExecutionClaim {
-    pub scan_id: Uuid,
-    pub derivation_id: i32,
-    pub execution_id: Uuid,
-}
-
 impl FleetEnqueueOutcome {
     /// Targets skipped because a pending or in-progress scan already existed.
     pub fn reused(self) -> i64 {
@@ -1299,7 +1347,41 @@ pub async fn heartbeat_cve_scan_execution(
             || jsonb_build_object('execution_heartbeat_at', NOW())
         WHERE id = $1
           AND status = 'in_progress'
+          AND NOT (COALESCE(scan_metadata, '{}'::jsonb) ? 'execution_revoked_at')
           AND scan_metadata ->> 'execution_id' = $2::uuid::text
+        "#,
+    )
+    .bind(scan_id)
+    .bind(execution_id)
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected() == 1)
+}
+
+/// Finalize a stale execution only after its scanner future has been dropped.
+/// Recovery first records `execution_revoked_at` while retaining active-scan
+/// uniqueness; the former owner calls this after cancelling its live process.
+pub async fn acknowledge_revoked_cve_scan_execution(
+    pool: &PgPool,
+    scan_id: Uuid,
+    execution_id: Uuid,
+) -> Result<bool> {
+    let result = sqlx::query(
+        r#"
+        UPDATE cve_scans
+        SET status = 'failed',
+            completed_at = NOW(),
+            attempts = attempts + 1,
+            scan_metadata = COALESCE(scan_metadata, '{}'::jsonb)
+                || jsonb_build_object(
+                    'stale_recovered_at', NOW(),
+                    'stale_recovery_reason', 'execution-revocation-acknowledged'
+                )
+        WHERE id = $1
+          AND status = 'in_progress'
+          AND scan_metadata ->> 'execution_id' = $2::uuid::text
+          AND scan_metadata ? 'execution_revoked_at'
         "#,
     )
     .bind(scan_id)
@@ -1335,6 +1417,7 @@ pub async fn requeue_cve_scan_execution(
             )
         WHERE id = $1
           AND status = 'in_progress'
+          AND NOT (COALESCE(scan_metadata, '{}'::jsonb) ? 'execution_revoked_at')
           AND scan_metadata ->> 'execution_id' = $2::uuid::text
         "#,
     )
@@ -1347,10 +1430,11 @@ pub async fn requeue_cve_scan_execution(
     Ok(result.rows_affected() == 1)
 }
 
-/// Mark scans that have been stuck `in_progress` for more than the given
-/// threshold as `failed` so the derivation becomes eligible for re-scanning.
-/// This prevents a server crash between claiming/creating an in-progress scan
-/// and `save_scan_results` from permanently poisoning a derivation.
+/// Revoke scans stuck `in_progress` beyond the threshold without immediately
+/// releasing active-scan uniqueness. A live owner observes the revocation on
+/// its next heartbeat, cancels its scanner, and acknowledges the revocation as
+/// failed. If the owner crashed, a later pass finalizes revocations older than
+/// the cancellation grace period.
 ///
 /// Returns the number of scans that were recovered so callers can log the event.
 pub async fn recover_stale_scans(
@@ -1362,30 +1446,61 @@ pub async fn recover_stale_scans(
     // before a worker claims them, so aging from `created_at` would let a
     // second process classify a scan that just began as already stale and fail
     // it out from under the worker running it. `execution_started_at` is written
-    // by `claim_queued_cve_scans`; rows created directly as `in_progress` have
-    // no claim marker and correctly fall back to `created_at`.
-    let result = sqlx::query(
+    // by every current execution claim path. The `created_at` fallback remains
+    // only for legacy in-progress rows created before execution leases existed.
+    const REVOCATION_GRACE_SECONDS: i64 = 60;
+    let row = sqlx::query(
         r#"
-        UPDATE cve_scans
-        SET status = 'failed',
-            completed_at = NOW(),
-            attempts = attempts + 1,
-            scan_metadata = COALESCE(scan_metadata, '{}'::jsonb) ||
-                           jsonb_build_object('stale_recovered_at', NOW()::text,
-                                              'stale_recovery_reason', 'server-crash-recovery')
-        WHERE status = 'in_progress'
-          AND COALESCE(
-                  (scan_metadata ->> 'execution_heartbeat_at')::timestamptz,
-                  (scan_metadata ->> 'execution_started_at')::timestamptz,
-                  created_at
-              ) < NOW() - ($1::bigint) * INTERVAL '1 second'
+        WITH revoked AS (
+            UPDATE cve_scans
+            SET scan_metadata = COALESCE(scan_metadata, '{}'::jsonb)
+                || jsonb_build_object(
+                    'execution_revoked_at', NOW(),
+                    'stale_recovery_reason', 'stale-execution-revoked'
+                )
+            WHERE status = 'in_progress'
+              AND scan_metadata ? 'execution_id'
+              AND NOT (scan_metadata ? 'execution_revoked_at')
+              AND COALESCE(
+                      (scan_metadata ->> 'execution_heartbeat_at')::timestamptz,
+                      (scan_metadata ->> 'execution_started_at')::timestamptz,
+                      created_at
+                  ) < NOW() - ($1::bigint) * INTERVAL '1 second'
+            RETURNING id
+        ),
+        failed AS (
+            UPDATE cve_scans
+            SET status = 'failed',
+                completed_at = NOW(),
+                attempts = attempts + 1,
+                scan_metadata = COALESCE(scan_metadata, '{}'::jsonb)
+                    || jsonb_build_object(
+                        'stale_recovered_at', NOW(),
+                        'stale_recovery_reason', 'server-crash-recovery'
+                    )
+            WHERE status = 'in_progress'
+              AND (
+                  (
+                      NOT (COALESCE(scan_metadata, '{}'::jsonb) ? 'execution_id')
+                      AND created_at < NOW() - ($1::bigint) * INTERVAL '1 second'
+                  )
+                  OR (scan_metadata ->> 'execution_revoked_at')::timestamptz
+                      < NOW() - ($2::bigint) * INTERVAL '1 second'
+              )
+            RETURNING id
+        )
+        SELECT (
+            (SELECT COUNT(*) FROM revoked)
+            + (SELECT COUNT(*) FROM failed)
+        )::bigint AS recovered
         "#,
     )
     .bind(stale_threshold.as_secs() as i64)
-    .execute(pool)
+    .bind(REVOCATION_GRACE_SECONDS)
+    .fetch_one(pool)
     .await?;
 
-    Ok(result.rows_affected() as i64)
+    Ok(row.get("recovered"))
 }
 
 /// Get derivations whose most recent completed CVE scan is stale according to
@@ -2199,7 +2314,42 @@ mod tests {
         let recovered = recover_stale_scans(&pool, std::time::Duration::from_secs(1800))
             .await
             .expect("genuinely stale scan recovery should succeed");
-        assert_eq!(recovered, 1, "a genuinely stale execution is recovered");
+        assert_eq!(recovered, 1, "a genuinely stale execution is revoked");
+        let (status, revoked): (String, bool) = sqlx::query_as(
+            "SELECT status, scan_metadata ? 'execution_revoked_at' FROM cve_scans WHERE id = $1",
+        )
+        .bind(scan_id)
+        .fetch_one(&pool)
+        .await
+        .expect("revoked stale execution should resolve");
+        assert_eq!(status, "in_progress");
+        assert!(revoked, "revocation must retain active-scan uniqueness");
+        assert!(matches!(
+            create_cve_scan(&pool, derivation.id, "vulnix", Some("test".to_string()))
+                .await
+                .expect("replacement claim should observe the active revocation"),
+            CreateCveScanOutcome::Existing(id) if id == scan_id
+        ));
+
+        sqlx::query(
+            "UPDATE cve_scans SET scan_metadata = scan_metadata || jsonb_build_object('execution_revoked_at', NOW() - INTERVAL '2 minutes') WHERE id = $1",
+        )
+        .bind(scan_id)
+        .execute(&pool)
+        .await
+        .expect("crashed-owner revocation should be aged beyond its grace period");
+        assert_eq!(
+            recover_stale_scans(&pool, std::time::Duration::from_secs(1800))
+                .await
+                .expect("expired revocation should be finalized"),
+            1
+        );
+        let status: String = sqlx::query_scalar("SELECT status FROM cve_scans WHERE id = $1")
+            .bind(scan_id)
+            .fetch_one(&pool)
+            .await
+            .expect("finalized stale execution should resolve");
+        assert_eq!(status, "failed");
 
         sqlx::query("DELETE FROM cve_scans WHERE id = $1")
             .bind(scan_id)
@@ -2330,13 +2480,15 @@ mod tests {
         );
         let heartbeat = heartbeat.expect("racing heartbeat should execute");
         let recovered = recovered.expect("racing recovery should execute");
-        let status: String = sqlx::query_scalar("SELECT status FROM cve_scans WHERE id = $1")
-            .bind(scan_id)
-            .fetch_one(&pool)
-            .await
-            .expect("raced scan status should resolve");
-        match status.as_str() {
-            "in_progress" => {
+        let (status, revoked): (String, bool) = sqlx::query_as(
+            "SELECT status, scan_metadata ? 'execution_revoked_at' FROM cve_scans WHERE id = $1",
+        )
+        .bind(scan_id)
+        .fetch_one(&pool)
+        .await
+        .expect("raced scan status should resolve");
+        match (status.as_str(), revoked) {
+            ("in_progress", false) => {
                 assert!(heartbeat, "heartbeat must own an in-progress race winner");
                 assert_eq!(recovered, 0);
                 sqlx::query(
@@ -2353,11 +2505,11 @@ mod tests {
                     1
                 );
             }
-            "failed" => {
-                assert!(!heartbeat, "heartbeat must lose after recovery commits");
+            ("in_progress", true) => {
+                assert!(!heartbeat, "heartbeat must lose after revocation commits");
                 assert_eq!(recovered, 1);
             }
-            other => panic!("unexpected heartbeat/recovery race status: {other}"),
+            other => panic!("unexpected heartbeat/recovery race state: {other:?}"),
         }
 
         let suffix = Uuid::new_v4().simple().to_string();
@@ -2533,7 +2685,8 @@ mod tests {
     async fn recover_stale_scans_unblocks_derivation(pool: PgPool) {
         let (derivation_id, _) = setup_test_derivation(&pool).await;
 
-        // Create a scan and mark it in_progress with an old timestamp.
+        // Create a scan, then strip its lease metadata to model a legacy row
+        // from before execution tokens existed.
         let scan_id = create_cve_scan(&pool, derivation_id, "vulnix", None)
             .await
             .expect("scan should be created")
@@ -2543,7 +2696,11 @@ mod tests {
         sqlx::query(
             r#"
             UPDATE cve_scans
-            SET created_at = NOW() - '2 hours'::INTERVAL
+            SET created_at = NOW() - '2 hours'::INTERVAL,
+                scan_metadata = COALESCE(scan_metadata, '{}'::jsonb)
+                    - 'execution_id'
+                    - 'execution_started_at'
+                    - 'execution_heartbeat_at'
             WHERE id = $1
             "#,
         )
