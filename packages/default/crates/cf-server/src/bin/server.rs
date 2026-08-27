@@ -233,6 +233,10 @@ async fn main() -> anyhow::Result<()> {
             get(dashboard::dashboard_summary),
         )
         .route(
+            "/api/v1/dashboard/activity",
+            get(dashboard::dashboard_activity),
+        )
+        .route(
             "/api/v1/cves/summary",
             get(dashboard::cve_dashboard_summary),
         )

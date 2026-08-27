@@ -522,6 +522,11 @@ pub fn build_queue_summary_fixture() -> BuildQueueSummary {
     BuildQueueSummary {
         building_count: 2,
         queued_count: 3,
+        failed_24h_count: 0,
+        active_workers: 0,
+        total_workers: 0,
+        used_slots: 0,
+        total_slots: 0,
         items: build_queue_item_fixtures(),
         timestamp: mock_datetime(),
     }
