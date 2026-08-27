@@ -1,11 +1,11 @@
 ---
 id: TASK-433.6
 title: 'TASK-433 Phase 5: POA&M database schema, API, auth/audit, and server tests'
-status: In Progress
+status: Review
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:43'
-updated_date: '2026-08-26 18:21'
+updated_date: '2026-08-27 01:48'
 labels:
   - design-parity
   - poam
@@ -61,12 +61,12 @@ nix build .#checks.x86_64-linux.integration --no-link
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Normalized POAM tables, links, milestones, activity/history and verification references exist through additive migrations with constraints/indexes.
-- [ ] #2 Authenticated APIs implement POAM creation, detail/list/filter/search, update, transitions, milestones, notes, links, verification, close, reopen, system/bundle rollups and dashboard sources.
-- [ ] #3 Server validates finding context, compatibility, active-link invariant if applicable, authorization/CSRF and stale/conflict conditions.
-- [ ] #4 POAM creation/linking never changes the underlying evaluation result; FAIL remains FAIL.
-- [ ] #5 Closure is authoritative and race-safe, requires current Pass or documented accepted waiver for all linked findings, stores verification and rejects failing/error/unknown/not-checked/stale findings.
-- [ ] #6 POAM server tests cover real finding creation, multi-finding links, invalid links, active invariant, milestones, activity, transitions, overdue, closure rejection/acceptance, verification storage, reopen, filters, auth and concurrency.
+- [x] #1 Normalized POAM tables, links, milestones, activity/history and verification references exist through additive migrations with constraints/indexes.
+- [x] #2 Authenticated APIs implement POAM creation, detail/list/filter/search, update, transitions, milestones, notes, links, verification, close, reopen, system/bundle rollups and dashboard sources.
+- [x] #3 Server validates finding context, compatibility, active-link invariant if applicable, authorization/CSRF and stale/conflict conditions.
+- [x] #4 POAM creation/linking never changes the underlying evaluation result; FAIL remains FAIL.
+- [x] #5 Closure is authoritative and race-safe, requires current Pass or documented accepted waiver for all linked findings, stores verification and rejects failing/error/unknown/not-checked/stale findings.
+- [x] #6 POAM server tests cover real finding creation, multi-finding links, invalid links, active invariant, milestones, activity, transitions, overdue, closure rejection/acceptance, verification storage, reopen, filters, auth and concurrency.
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -96,4 +96,30 @@ Make activity/audit history truthful and reconstructable, enforce completed/acti
 
 <!-- SECTION:NOTES:BEGIN -->
 Phase-5 lock/preflight: implementation is active in dedicated worktree `/home/mcamp/code/crystal-forge/TASK-433-policy-poam-workflows` on branch `TASK-433-policy-poam-workflows`, based on successful Phase-4 exact head `b238ff9e969b525aa44d46ef27beb4faefc30e12`. Pipeline 2791067463 is green and MR !318 is conflict-free. Scope is server/database POA&M foundation only; Phase 6 UI and Phase 7 consumers are not started. Acceptance criteria remain unchecked until full implementation, verification, and independent review pass.
+
+Implemented Phase 5 in dedicated worktree and pushed commit `68904343` to MR !318. Final closure/verification transactions acquire deterministic finding advisory locks before authoritative reads and intentionally use READ COMMITTED so statements after lock waits observe the committing writer; forced races cover superseding assessments, direct applicability, aggregate rule results, and waiver revocation. Added database-enforced immutable finding/link/evidence identity, sealed verification attempts, exact Pass/accepted-waiver closure constraints, all-history environment visibility, non-oracular authorization, bounded batch expansion, and keyset pagination for mutable history feeds.
+
+Verification completed against repository-isolated PostgreSQL on port 3042: fresh migration chain through 0234 and `cargo sqlx prepare --workspace` passed with no metadata delta; focused POA&M suite passed 13/13; full workspace Rust tests passed 1221 with 0 failures and 386 ignored; server package, server-regressions, and integration Nix builds passed; formatting and `git diff --check` passed. Final independent integrity, authorization, and correctness reviews found no remaining P0/P1/P2 issues.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+## Summary
+- Added the normalized POA&M persistence model, stable finding lineage, immutable historical links/activity/verification evidence, milestones, assignment-version references, exact finding waivers, and database-enforced closure invariants.
+- Added authenticated and CSRF-protected server APIs for creation, detail/list/search/filter, updates/transitions, milestones/notes, finding and assignment relationships, verification, close/reopen, compatible findings, dashboard/watchlist, and system/bundle rollups.
+- Integrated canonical effective-policy resolution and deterministic finding locks with assessment/CVE/applicability writers so closure rechecks exact current Pass or accepted unexpired waiver evidence without changing compliance outcomes.
+- Added bounded keyset history pagination, hidden-context authorization protections, typed errors, resource limits, and migrated database/API/concurrency regressions.
+
+## Verification
+- `cargo fmt --all --check`
+- fresh isolated migration chain and `cargo sqlx prepare --workspace` (no metadata delta)
+- full Rust workspace: 1221 passed, 0 failed, 386 ignored
+- focused POA&M workflows: 13 passed, 0 failed
+- server package Nix build
+- server-regressions Nix check
+- integration Nix check
+- final independent integrity, authorization, and correctness reviews: no remaining P0/P1/P2 findings
+
+Pushed as `68904343` to MR !318. Phase 6 UI work remains out of scope.
+<!-- SECTION:FINAL_SUMMARY:END -->
