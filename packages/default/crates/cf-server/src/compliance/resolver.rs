@@ -1084,6 +1084,25 @@ pub async fn resolve_system_effective_policies_in_tx(
     resolve_system_effective_policies_with_options_in_tx(tx, system_id, false).await
 }
 
+/// Resolve complete policy semantics for a deterministic system batch through
+/// the caller's transaction. This is the authoritative API for decisions that
+/// must remain in the same serializable closure as their locks and writes.
+pub async fn resolve_systems_effective_policies_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    system_ids: &[Uuid],
+) -> Result<std::collections::HashMap<Uuid, ResolutionOutcome>> {
+    let mut ids = system_ids.to_vec();
+    ids.sort_unstable();
+    ids.dedup();
+    let keyed = resolve_systems_effective_policies_batch_in_tx(tx, &ids, None, false).await?;
+    Ok(keyed
+        .into_iter()
+        .filter_map(|((bundle_version_id, system_id), outcome)| {
+            bundle_version_id.is_none().then_some((system_id, outcome))
+        })
+        .collect())
+}
+
 /// Resolve only the policy semantics relevant to Nix evaluation while still
 /// retaining the complete resolver for compliance and deployment consumers.
 /// Conflicts between two non-Nix policy versions at the same specificity are
@@ -1229,8 +1248,6 @@ async fn resolve_systems_effective_policies_batch(
     if system_ids.is_empty() {
         return Ok(std::collections::HashMap::new());
     }
-
-    // ── Open a single REPEATABLE READ snapshot for all reads ──────────────────
     let mut tx = pool
         .begin()
         .await
@@ -1239,12 +1256,34 @@ async fn resolve_systems_effective_policies_batch(
         .execute(&mut *tx)
         .await
         .context("set repeatable read (batch)")?;
+    let result = resolve_systems_effective_policies_batch_in_tx(
+        &mut tx,
+        system_ids,
+        bundle_version_requests,
+        ignore_non_evaluation_conflicts,
+    )
+    .await?;
+    tx.commit()
+        .await
+        .context("commit batch resolution snapshot")?;
+    Ok(result)
+}
+
+async fn resolve_systems_effective_policies_batch_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    system_ids: &[Uuid],
+    bundle_version_requests: Option<&std::collections::HashMap<Uuid, Vec<Uuid>>>,
+    ignore_non_evaluation_conflicts: bool,
+) -> Result<std::collections::HashMap<(Option<Uuid>, Uuid), ResolutionOutcome>> {
+    if system_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
 
     // ── Q1: Load system → environment_id for all systems ─────────────────────
     let system_envs: Vec<(Uuid, Option<Uuid>)> =
         sqlx::query_as("SELECT id, environment_id FROM systems WHERE id = ANY($1)")
             .bind(system_ids)
-            .fetch_all(&mut *tx)
+            .fetch_all(&mut **tx)
             .await
             .context("batch load system environments")?;
 
@@ -1273,7 +1312,7 @@ async fn resolve_systems_effective_policies_batch(
             "SELECT current_published_version_id FROM compliance_bundles WHERE current_published_version_id = ANY($1)",
         )
         .bind(version_ids)
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut **tx)
         .await
         .context("load current published bundle versions for virtual baseline resolution")?
     } else {
@@ -1312,7 +1351,7 @@ async fn resolve_systems_effective_policies_batch(
     .bind(&all_env_ids)
     .bind(system_ids)
     .bind(bundle_version_filter_ids.as_deref())
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut **tx)
     .await
     .context("batch load bundle assignments")?;
 
@@ -1340,7 +1379,7 @@ async fn resolve_systems_effective_policies_batch(
          WHERE assignment_version_id = ANY($1)",
     )
     .bind(&all_assignment_version_ids)
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut **tx)
     .await
     .context("batch load exclusions")?;
 
@@ -1358,7 +1397,7 @@ async fn resolve_systems_effective_policies_batch(
          ORDER BY assignment_version_id, addition_order",
     )
     .bind(&all_assignment_version_ids)
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut **tx)
     .await
     .context("batch load additions")?;
 
@@ -1375,7 +1414,7 @@ async fn resolve_systems_effective_policies_batch(
          WHERE assignment_version_id = ANY($1)",
     )
     .bind(&all_assignment_version_ids)
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut **tx)
     .await
     .context("batch load overrides")?;
 
@@ -1405,7 +1444,7 @@ async fn resolve_systems_effective_policies_batch(
          WHERE id = ANY($1)",
     )
     .bind(&all_bundle_version_ids)
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut **tx)
     .await
     .context("batch load bundle versions")?;
 
@@ -1437,7 +1476,7 @@ async fn resolve_systems_effective_policies_batch(
                ORDER BY cbvp.bundle_version_id, cbvp.policy_order"#,
     )
     .bind(&all_bundle_version_ids)
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut **tx)
     .await
     .context("batch load bundle baselines")?;
 
@@ -1491,7 +1530,7 @@ async fn resolve_systems_effective_policies_batch(
                  WHERE id = ANY($1)",
             )
             .bind(&all_addition_pv_ids)
-            .fetch_all(&mut *tx)
+            .fetch_all(&mut **tx)
             .await
             .context("batch load addition policy versions")?;
 
@@ -1523,7 +1562,7 @@ async fn resolve_systems_effective_policies_batch(
                  )"#,
         )
         .bind(&all_env_ids)
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut **tx)
         .await
         .context("batch load environment direct policies")?;
 
@@ -1558,7 +1597,7 @@ async fn resolve_systems_effective_policies_batch(
                  )"#,
         )
         .bind(system_ids)
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut **tx)
         .await
         .context("batch load system direct policies")?;
 
@@ -1569,11 +1608,6 @@ async fn resolve_systems_effective_policies_batch(
                 .push((pv_id, lin_id, ptype, config));
         }
     }
-
-    // Close the transaction — all reads are done.
-    tx.commit()
-        .await
-        .context("commit batch resolution snapshot")?;
 
     // ── Per-system merge phase (pure Rust, no DB access) ──────────────────────
     //

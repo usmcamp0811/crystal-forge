@@ -1,0 +1,955 @@
+use axum::{
+    Json,
+    extract::{
+        Path, Query, State,
+        rejection::{JsonRejection, PathRejection, QueryRejection},
+    },
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
+};
+use serde::Deserialize;
+use serde_json::json;
+use sqlx::PgPool;
+use uuid::Uuid;
+
+use crate::auth::extractors::RequireAuth;
+use crate::handlers::api::{auth_session::validate_csrf, rbac::extract_request_origin};
+use crate::models::poam::*;
+use crate::queries::poam::user_environment_ids;
+use crate::services::poam::{self, PoamActor, PoamError, SystemClock};
+
+fn error_response(error: PoamError) -> Response {
+    let (status, code, message, details) = match error {
+        PoamError::NotFound => (
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "POA&M resource was not found".into(),
+            None,
+        ),
+        PoamError::Forbidden => (
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "Insufficient permissions".into(),
+            None,
+        ),
+        PoamError::Validation(code, message) => (StatusCode::BAD_REQUEST, code, message, None),
+        PoamError::Conflict(code, message) => (StatusCode::CONFLICT, code, message, None),
+        PoamError::Precondition(code, message, details) => {
+            (StatusCode::PRECONDITION_FAILED, code, message, details)
+        }
+        PoamError::Database(error) => {
+            tracing::error!(error=%error,"POA&M request failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "POA&M request failed".into(),
+                None,
+            )
+        }
+    };
+    (
+        status,
+        Json(json!({"error":code,"message":message,"details":details})),
+    )
+        .into_response()
+}
+
+async fn actor(
+    pool: &PgPool,
+    user: crate::auth::extractors::AuthenticatedUser,
+    headers: &HeaderMap,
+) -> Result<PoamActor, Response> {
+    let identifier = sqlx::query_scalar::<_, String>("SELECT email FROM users WHERE id=$1")
+        .bind(user.user_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| error_response(PoamError::Database(anyhow::anyhow!("actor lookup failed"))))?
+        .unwrap_or_else(|| user.user_id.to_string());
+    let environment_ids = user_environment_ids(pool, user.user_id)
+        .await
+        .map_err(|e| error_response(PoamError::Database(e)))?;
+    Ok(PoamActor {
+        user_id: user.user_id,
+        identifier,
+        is_admin: user.is_admin(),
+        can_mutate: user.is_operator_or_higher(),
+        environment_ids,
+        request_origin: extract_request_origin(headers),
+    })
+}
+
+fn csrf(headers: &HeaderMap) -> Result<(), Response> {
+    validate_csrf(headers).map_err(|_| {
+        (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "error":"csrf_validation_failed",
+                "message":"CSRF validation failed",
+                "details":null
+            })),
+        )
+            .into_response()
+    })
+}
+
+fn json_body<T>(
+    body: Result<Json<T>, JsonRejection>,
+    message: &'static str,
+) -> Result<T, Response> {
+    body.map(|Json(value)| value).map_err(|rejection| {
+        if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
+            (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                Json(json!({
+                    "error":"payload_too_large",
+                    "message":"Request body exceeds the configured limit",
+                    "details":null
+                })),
+            )
+                .into_response()
+        } else {
+            error_response(PoamError::Validation("invalid_body", message.into()))
+        }
+    })
+}
+
+fn query_body<T>(
+    query: Result<Query<T>, QueryRejection>,
+    code: &'static str,
+    message: &'static str,
+) -> Result<T, Response> {
+    query
+        .map(|Query(value)| value)
+        .map_err(|_| error_response(PoamError::Validation(code, message.into())))
+}
+
+fn path_body<T>(path: Result<Path<T>, PathRejection>) -> Result<T, Response> {
+    path.map(|Path(value)| value).map_err(|_| {
+        error_response(PoamError::Validation(
+            "invalid_path",
+            "Malformed POA&M path parameter".into(),
+        ))
+    })
+}
+
+pub async fn list(
+    State(pool): State<PgPool>,
+    RequireAuth(user): RequireAuth,
+    headers: HeaderMap,
+    query: Result<Query<PoamListQuery>, QueryRejection>,
+) -> Response {
+    let Query(query) = match query {
+        Ok(query) => query,
+        Err(_) => {
+            return error_response(PoamError::Validation(
+                "invalid_query",
+                "Malformed POA&M list query".into(),
+            ));
+        }
+    };
+    let actor = match actor(&pool, user, &headers).await {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    match poam::list(&pool, &actor, &query, &SystemClock).await {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => error_response(e),
+    }
+}
+pub async fn get(
+    State(pool): State<PgPool>,
+    RequireAuth(user): RequireAuth,
+    headers: HeaderMap,
+    path: Result<Path<Uuid>, PathRejection>,
+    query: Result<Query<PoamDetailQuery>, QueryRejection>,
+) -> Response {
+    let id = match path_body(path) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let Query(query) = match query {
+        Ok(query) => query,
+        Err(_) => {
+            return error_response(PoamError::Validation(
+                "invalid_query",
+                "Malformed POA&M detail query".into(),
+            ));
+        }
+    };
+    let actor = match actor(&pool, user, &headers).await {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    match poam::detail_with_history(&pool, &actor, id, &query, &SystemClock).await {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => error_response(e),
+    }
+}
+pub async fn create(
+    State(pool): State<PgPool>,
+    RequireAuth(user): RequireAuth,
+    headers: HeaderMap,
+    body: Result<Json<CreatePoamRequest>, JsonRejection>,
+) -> Response {
+    if let Err(e) = csrf(&headers) {
+        return e;
+    }
+    let Json(body) = match body {
+        Ok(body) => body,
+        Err(_) => {
+            return error_response(PoamError::Validation(
+                "invalid_body",
+                "Malformed POA&M request".into(),
+            ));
+        }
+    };
+    let actor = match actor(&pool, user, &headers).await {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    match poam::create(&pool, &actor, body, &SystemClock).await {
+        Ok(v) => (StatusCode::CREATED, Json(v)).into_response(),
+        Err(e) => error_response(e),
+    }
+}
+pub async fn update(
+    State(pool): State<PgPool>,
+    RequireAuth(user): RequireAuth,
+    headers: HeaderMap,
+    path: Result<Path<Uuid>, PathRejection>,
+    body: Result<Json<UpdatePoamRequest>, JsonRejection>,
+) -> Response {
+    let id = match path_body(path) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    if let Err(e) = csrf(&headers) {
+        return e;
+    }
+    let Json(body) = match body {
+        Ok(body) => body,
+        Err(_) => {
+            return error_response(PoamError::Validation(
+                "invalid_body",
+                "Malformed POA&M request".into(),
+            ));
+        }
+    };
+    let actor = match actor(&pool, user, &headers).await {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    match poam::update(&pool, &actor, id, body, &SystemClock).await {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => error_response(e),
+    }
+}
+pub async fn transition(
+    State(pool): State<PgPool>,
+    RequireAuth(user): RequireAuth,
+    headers: HeaderMap,
+    path: Result<Path<Uuid>, PathRejection>,
+    body: Result<Json<TransitionPoamRequest>, JsonRejection>,
+) -> Response {
+    let id = match path_body(path) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    if let Err(e) = csrf(&headers) {
+        return e;
+    }
+    let Json(body) = match body {
+        Ok(body) => body,
+        Err(_) => {
+            return error_response(PoamError::Validation(
+                "invalid_body",
+                "Malformed POA&M status".into(),
+            ));
+        }
+    };
+    let actor = match actor(&pool, user, &headers).await {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    match poam::transition(&pool, &actor, id, body, &SystemClock).await {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => error_response(e),
+    }
+}
+pub async fn note(
+    State(pool): State<PgPool>,
+    RequireAuth(user): RequireAuth,
+    headers: HeaderMap,
+    path: Result<Path<Uuid>, PathRejection>,
+    body: Result<Json<AddNoteRequest>, JsonRejection>,
+) -> Response {
+    let id = match path_body(path) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    if let Err(e) = csrf(&headers) {
+        return e;
+    }
+    let body = match json_body(body, "Malformed POA&M note") {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    let actor = match actor(&pool, user, &headers).await {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    match poam::add_note(&pool, &actor, id, body, &SystemClock).await {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => error_response(e),
+    }
+}
+pub async fn add_milestone(
+    State(pool): State<PgPool>,
+    RequireAuth(user): RequireAuth,
+    headers: HeaderMap,
+    path: Result<Path<Uuid>, PathRejection>,
+    body: Result<Json<AddMilestoneRequest>, JsonRejection>,
+) -> Response {
+    let id = match path_body(path) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    if let Err(e) = csrf(&headers) {
+        return e;
+    }
+    let body = match json_body(body, "Malformed POA&M milestone") {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    let actor = match actor(&pool, user, &headers).await {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    match poam::add_milestone(&pool, &actor, id, body, &SystemClock).await {
+        Ok(v) => (StatusCode::CREATED, Json(v)).into_response(),
+        Err(e) => error_response(e),
+    }
+}
+pub async fn update_milestone(
+    State(pool): State<PgPool>,
+    RequireAuth(user): RequireAuth,
+    headers: HeaderMap,
+    path: Result<Path<(Uuid, Uuid)>, PathRejection>,
+    body: Result<Json<UpdateMilestoneRequest>, JsonRejection>,
+) -> Response {
+    let (id, mid) = match path_body(path) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    if let Err(e) = csrf(&headers) {
+        return e;
+    }
+    let body = match json_body(body, "Malformed POA&M milestone") {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    let actor = match actor(&pool, user, &headers).await {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    match poam::update_milestone(&pool, &actor, id, mid, body, &SystemClock).await {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => error_response(e),
+    }
+}
+pub async fn remove_milestone(
+    State(pool): State<PgPool>,
+    RequireAuth(user): RequireAuth,
+    headers: HeaderMap,
+    path: Result<Path<(Uuid, Uuid)>, PathRejection>,
+    query: Result<Query<RevisionRequest>, QueryRejection>,
+) -> Response {
+    let (id, mid) = match path_body(path) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    if let Err(e) = csrf(&headers) {
+        return e;
+    }
+    let body = match query_body(query, "invalid_revision", "Malformed POA&M revision") {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    let actor = match actor(&pool, user, &headers).await {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    match poam::remove_milestone(&pool, &actor, id, mid, body.revision, &SystemClock).await {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => error_response(e),
+    }
+}
+pub async fn link_finding(
+    State(pool): State<PgPool>,
+    RequireAuth(user): RequireAuth,
+    headers: HeaderMap,
+    path: Result<Path<Uuid>, PathRejection>,
+    body: Result<Json<AddFindingRequest>, JsonRejection>,
+) -> Response {
+    let id = match path_body(path) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    if let Err(e) = csrf(&headers) {
+        return e;
+    }
+    let body = match json_body(body, "Malformed finding link request") {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    let actor = match actor(&pool, user, &headers).await {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    match poam::link_finding(&pool, &actor, id, body, &SystemClock).await {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => error_response(e),
+    }
+}
+pub async fn unlink_finding(
+    State(pool): State<PgPool>,
+    RequireAuth(user): RequireAuth,
+    headers: HeaderMap,
+    path: Result<Path<(Uuid, Uuid)>, PathRejection>,
+    query: Result<Query<RevisionRequest>, QueryRejection>,
+) -> Response {
+    let (id, fid) = match path_body(path) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    if let Err(e) = csrf(&headers) {
+        return e;
+    }
+    let body = match query_body(query, "invalid_revision", "Malformed POA&M revision") {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    let actor = match actor(&pool, user, &headers).await {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    match poam::unlink_finding(&pool, &actor, id, fid, body.revision, &SystemClock).await {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => error_response(e),
+    }
+}
+pub async fn link_assignment(
+    State(pool): State<PgPool>,
+    RequireAuth(user): RequireAuth,
+    headers: HeaderMap,
+    path: Result<Path<Uuid>, PathRejection>,
+    body: Result<Json<AssignmentReferenceRequest>, JsonRejection>,
+) -> Response {
+    let id = match path_body(path) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    if let Err(e) = csrf(&headers) {
+        return e;
+    }
+    let body = match json_body(body, "Malformed assignment link request") {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    let actor = match actor(&pool, user, &headers).await {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    match poam::link_assignment(&pool, &actor, id, body, &SystemClock).await {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => error_response(e),
+    }
+}
+pub async fn unlink_assignment(
+    State(pool): State<PgPool>,
+    RequireAuth(user): RequireAuth,
+    headers: HeaderMap,
+    path: Result<Path<(Uuid, Uuid)>, PathRejection>,
+    query: Result<Query<RevisionRequest>, QueryRejection>,
+) -> Response {
+    let (id, aid) = match path_body(path) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    if let Err(e) = csrf(&headers) {
+        return e;
+    }
+    let body = match query_body(query, "invalid_revision", "Malformed POA&M revision") {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    let actor = match actor(&pool, user, &headers).await {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    match poam::unlink_assignment(&pool, &actor, id, aid, body.revision, &SystemClock).await {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => error_response(e),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct SearchQuery {
+    pub q: Option<String>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+pub async fn compatible(
+    State(pool): State<PgPool>,
+    RequireAuth(user): RequireAuth,
+    headers: HeaderMap,
+    path: Result<Path<Uuid>, PathRejection>,
+    query: Result<Query<SearchQuery>, QueryRejection>,
+) -> Response {
+    let id = match path_body(path) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let q = match query_body(query, "invalid_query", "Malformed compatible-finding query") {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    let actor = match actor(&pool, user, &headers).await {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    match poam::compatible(
+        &pool,
+        &actor,
+        id,
+        q.q.as_deref(),
+        q.limit.unwrap_or(25),
+        q.offset.unwrap_or(0),
+    )
+    .await
+    {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => error_response(e),
+    }
+}
+pub async fn close(
+    State(pool): State<PgPool>,
+    RequireAuth(user): RequireAuth,
+    headers: HeaderMap,
+    path: Result<Path<Uuid>, PathRejection>,
+    body: Result<Json<RevisionRequest>, JsonRejection>,
+) -> Response {
+    let id = match path_body(path) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    if let Err(e) = csrf(&headers) {
+        return e;
+    }
+    let body = match json_body(body, "Malformed POA&M close request") {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    let actor = match actor(&pool, user, &headers).await {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    match poam::close(&pool, &actor, id, body.revision, &SystemClock).await {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => error_response(e),
+    }
+}
+pub async fn verify(
+    State(pool): State<PgPool>,
+    RequireAuth(user): RequireAuth,
+    headers: HeaderMap,
+    path: Result<Path<Uuid>, PathRejection>,
+    body: Result<Json<RevisionRequest>, JsonRejection>,
+) -> Response {
+    let id = match path_body(path) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    if let Err(e) = csrf(&headers) {
+        return e;
+    }
+    let body = match json_body(body, "Malformed POA&M verification request") {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    let actor = match actor(&pool, user, &headers).await {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    match poam::verify(&pool, &actor, id, body.revision, &SystemClock).await {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => error_response(e),
+    }
+}
+pub async fn reopen(
+    State(pool): State<PgPool>,
+    RequireAuth(user): RequireAuth,
+    headers: HeaderMap,
+    path: Result<Path<Uuid>, PathRejection>,
+    body: Result<Json<RevisionRequest>, JsonRejection>,
+) -> Response {
+    let id = match path_body(path) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    if let Err(e) = csrf(&headers) {
+        return e;
+    }
+    let body = match json_body(body, "Malformed POA&M reopen request") {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    let actor = match actor(&pool, user, &headers).await {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    match poam::reopen(&pool, &actor, id, body.revision, &SystemClock).await {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => error_response(e),
+    }
+}
+pub async fn create_waiver(
+    State(pool): State<PgPool>,
+    RequireAuth(user): RequireAuth,
+    headers: HeaderMap,
+    body: Result<Json<CreateWaiverRequest>, JsonRejection>,
+) -> Response {
+    if let Err(e) = csrf(&headers) {
+        return e;
+    }
+    let body = match json_body(body, "Malformed finding waiver request") {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    let actor = match actor(&pool, user, &headers).await {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    match poam::create_waiver(&pool, &actor, body).await {
+        Ok(v) => (StatusCode::CREATED, Json(v)).into_response(),
+        Err(e) => error_response(e),
+    }
+}
+pub async fn list_waivers(
+    State(pool): State<PgPool>,
+    RequireAuth(user): RequireAuth,
+    headers: HeaderMap,
+    query: Result<Query<WaiverListQuery>, QueryRejection>,
+) -> Response {
+    let query = match query_body(query, "invalid_query", "Malformed waiver list query") {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    let actor = match actor(&pool, user, &headers).await {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    match poam::list_waivers(&pool, &actor, &query).await {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => error_response(error),
+    }
+}
+pub async fn get_waiver(
+    State(pool): State<PgPool>,
+    RequireAuth(user): RequireAuth,
+    headers: HeaderMap,
+    path: Result<Path<Uuid>, PathRejection>,
+) -> Response {
+    let id = match path_body(path) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let actor = match actor(&pool, user, &headers).await {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    match poam::waiver(&pool, &actor, id).await {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => error_response(error),
+    }
+}
+pub async fn decide_waiver(
+    State(pool): State<PgPool>,
+    RequireAuth(user): RequireAuth,
+    headers: HeaderMap,
+    path: Result<Path<Uuid>, PathRejection>,
+    body: Result<Json<WaiverDecisionRequest>, JsonRejection>,
+) -> Response {
+    let id = match path_body(path) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    if let Err(e) = csrf(&headers) {
+        return e;
+    }
+    let Json(body) = match body {
+        Ok(body) => body,
+        Err(_) => {
+            return error_response(PoamError::Validation(
+                "invalid_body",
+                "Malformed waiver decision".into(),
+            ));
+        }
+    };
+    let actor = match actor(&pool, user, &headers).await {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    if !actor.is_admin {
+        return error_response(PoamError::Forbidden);
+    }
+    match poam::decide_waiver(&pool, &actor, id, body, &SystemClock).await {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => error_response(e),
+    }
+}
+pub async fn dashboard(
+    State(pool): State<PgPool>,
+    RequireAuth(user): RequireAuth,
+    headers: HeaderMap,
+) -> Response {
+    let actor = match actor(&pool, user, &headers).await {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    match poam::dashboard(&pool, &actor, &SystemClock).await {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => error_response(e),
+    }
+}
+pub async fn watchlist(
+    State(pool): State<PgPool>,
+    RequireAuth(user): RequireAuth,
+    headers: HeaderMap,
+    query: Result<Query<SearchQuery>, QueryRejection>,
+) -> Response {
+    let q = match query_body(query, "invalid_query", "Malformed watchlist query") {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    let actor = match actor(&pool, user, &headers).await {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    match poam::watchlist(
+        &pool,
+        &actor,
+        q.limit.unwrap_or(25),
+        q.offset.unwrap_or(0),
+        &SystemClock,
+    )
+    .await
+    {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => error_response(e),
+    }
+}
+#[derive(Deserialize)]
+pub struct BatchQuery {
+    pub ids: String,
+}
+
+fn batch_ids(value: &str) -> Result<Vec<Uuid>, Response> {
+    let raw = value.split(',').collect::<Vec<_>>();
+    if raw.is_empty() || raw.iter().any(|id| id.trim().is_empty()) {
+        return Err(error_response(PoamError::Validation(
+            "invalid_ids",
+            "ids must contain at least one UUID and no empty values".into(),
+        )));
+    }
+    if raw.len() > 100 {
+        return Err(error_response(PoamError::Validation(
+            "too_many_ids",
+            "At most 100 ids are allowed".into(),
+        )));
+    }
+    let mut ids = raw
+        .into_iter()
+        .map(|id| {
+            Uuid::parse_str(id.trim()).map_err(|_| {
+                error_response(PoamError::Validation(
+                    "invalid_ids",
+                    "ids must be a comma-separated list of UUIDs".into(),
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    ids.sort_unstable();
+    ids.dedup();
+    Ok(ids)
+}
+pub async fn system_rollups(
+    State(pool): State<PgPool>,
+    RequireAuth(user): RequireAuth,
+    headers: HeaderMap,
+    query: Result<Query<BatchQuery>, QueryRejection>,
+) -> Response {
+    let Query(q) = match query {
+        Ok(query) => query,
+        Err(_) => {
+            return error_response(PoamError::Validation(
+                "invalid_ids",
+                "Malformed batch query".into(),
+            ));
+        }
+    };
+    let ids = match batch_ids(&q.ids) {
+        Ok(ids) => ids,
+        Err(response) => return response,
+    };
+    let actor = match actor(&pool, user, &headers).await {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    match poam::system_rollups(&pool, &actor, &ids, &SystemClock).await {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => error_response(e),
+    }
+}
+pub async fn bundle_rollups(
+    State(pool): State<PgPool>,
+    RequireAuth(user): RequireAuth,
+    headers: HeaderMap,
+    query: Result<Query<BatchQuery>, QueryRejection>,
+) -> Response {
+    let Query(q) = match query {
+        Ok(query) => query,
+        Err(_) => {
+            return error_response(PoamError::Validation(
+                "invalid_ids",
+                "Malformed batch query".into(),
+            ));
+        }
+    };
+    let ids = match batch_ids(&q.ids) {
+        Ok(ids) => ids,
+        Err(response) => return response,
+    };
+    let actor = match actor(&pool, user, &headers).await {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    match poam::bundle_rollups(&pool, &actor, &ids, &SystemClock).await {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => error_response(e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::session::{
+        CSRF_COOKIE_NAME, CSRF_HEADER_NAME, SESSION_COOKIE_NAME, hash_token,
+    };
+    use crate::handlers::agent_request::CFState;
+    use crate::models::auth_identity::AuthRole;
+    use crate::queries::auth_identity::{create_user_session, sync_user_role};
+    use crate::queries::users::insert_user;
+    use crate::queue::QueueNotifier;
+    use crate::server::jobs::BackgroundJobRegistry;
+    use axum::{Router, routing::get};
+    use chrono::Utc;
+    use std::sync::Arc;
+
+    async fn session(pool: &PgPool, role: AuthRole) -> String {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let user = insert_user(
+            pool,
+            &format!("poam-http-{suffix}@example.invalid"),
+            Some("POAM HTTP Test"),
+        )
+        .await
+        .unwrap();
+        sync_user_role(pool, user.id, role).await.unwrap();
+        let token = format!("session-{suffix}");
+        create_user_session(
+            pool,
+            user.id,
+            hash_token(&token),
+            Utc::now() + chrono::Duration::hours(1),
+            Some("poam-test".into()),
+            Some("127.0.0.1".into()),
+            "local".into(),
+        )
+        .await
+        .unwrap();
+        token
+    }
+
+    async fn server(pool: PgPool) -> String {
+        let state = CFState::new(
+            pool,
+            crate::config::ServerConfig::default(),
+            Arc::new(QueueNotifier::new()),
+            BackgroundJobRegistry::new(),
+        );
+        let app = Router::new()
+            .route("/api/v1/poams", get(list).post(create))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{address}")
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires test database creation privileges"]
+    async fn http_requires_session_csrf_and_mutator_role(pool: PgPool) {
+        let base = server(pool.clone()).await;
+        let client = reqwest::Client::new();
+        let unauthenticated = client
+            .get(format!("{base}/api/v1/poams"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(unauthenticated.status().as_u16(), 401);
+
+        let viewer = session(&pool, AuthRole::Viewer).await;
+        let body = json!({
+            "assessment_id": Uuid::new_v4(),
+            "title": "HTTP authorization",
+            "risk": "high"
+        });
+        let no_csrf = client
+            .post(format!("{base}/api/v1/poams"))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={viewer}"))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(no_csrf.status().as_u16(), 403);
+
+        let csrf = "poam-http-csrf";
+        let viewer_forbidden = client
+            .post(format!("{base}/api/v1/poams"))
+            .header(
+                "cookie",
+                format!("{SESSION_COOKIE_NAME}={viewer}; {CSRF_COOKIE_NAME}={csrf}"),
+            )
+            .header(CSRF_HEADER_NAME.as_str(), csrf)
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(viewer_forbidden.status().as_u16(), 403);
+
+        let admin = session(&pool, AuthRole::Admin).await;
+        let authenticated = client
+            .post(format!("{base}/api/v1/poams"))
+            .header(
+                "cookie",
+                format!("{SESSION_COOKIE_NAME}={admin}; {CSRF_COOKIE_NAME}={csrf}"),
+            )
+            .header(CSRF_HEADER_NAME.as_str(), csrf)
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(authenticated.status().as_u16(), 404);
+    }
+}

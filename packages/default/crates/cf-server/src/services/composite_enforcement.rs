@@ -625,6 +625,23 @@ async fn bulk_merge_outcomes(
     if rows.is_empty() {
         return Ok(());
     }
+    let mut locked_assessment_ids = rows.iter().map(|row| row.0).collect::<Vec<_>>();
+    locked_assessment_ids.sort_unstable();
+    locked_assessment_ids.dedup();
+    // Rule rows do not carry the stable finding key. Lock every affected key
+    // before the first mutation so closure cannot observe a rule/aggregate gap.
+    sqlx::query(
+        r#"SELECT lock_poam_finding_key(key.system_id,key.policy_lineage_id)
+           FROM (
+             SELECT DISTINCT assessment.system_id,assessment.policy_lineage_id
+             FROM composite_policy_assessments assessment
+             WHERE assessment.id=ANY($1)
+             ORDER BY assessment.system_id,assessment.policy_lineage_id
+           ) key"#,
+    )
+    .bind(&locked_assessment_ids)
+    .execute(&mut **tx)
+    .await?;
     let assessment_ids = rows.iter().map(|row| row.0).collect::<Vec<_>>();
     let ordinals = rows.iter().map(|row| row.1).collect::<Vec<_>>();
     let rule_ids = rows.iter().map(|row| row.2.rule_id).collect::<Vec<_>>();
@@ -839,6 +856,25 @@ pub async fn persist_scan_phase(pool: &PgPool, scan_id: Uuid) -> Result<()> {
     Ok(())
 }
 
+pub(crate) async fn lock_poam_findings_for_derivation_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    derivation_id: i32,
+) -> Result<()> {
+    sqlx::query(
+        r#"SELECT lock_poam_finding_key(key.system_id,key.policy_lineage_id)
+           FROM (
+             SELECT DISTINCT assessment.system_id,assessment.policy_lineage_id
+             FROM composite_policy_assessments assessment
+             WHERE assessment.derivation_id=$1
+             ORDER BY assessment.system_id,assessment.policy_lineage_id
+           ) key"#,
+    )
+    .bind(derivation_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 pub(crate) async fn persist_scan_phase_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     scan_id: Uuid,
@@ -863,6 +899,19 @@ pub(crate) async fn persist_scan_phase_in_tx(
     if newest_id != Some(scan.id) {
         return Ok(());
     }
+    sqlx::query(
+        r#"SELECT lock_poam_finding_key(key.system_id,key.policy_lineage_id)
+           FROM (
+             SELECT DISTINCT assessment.system_id,assessment.policy_lineage_id
+             FROM composite_policy_assessments assessment
+             JOIN cve_scans scan ON scan.derivation_id=assessment.derivation_id
+             WHERE scan.id=$1
+             ORDER BY assessment.system_id,assessment.policy_lineage_id
+           ) key"#,
+    )
+    .bind(scan_id)
+    .execute(&mut **tx)
+    .await?;
     let assessments = sqlx::query_as::<_, (Uuid, serde_json::Value)>(
         r#"
         SELECT assessment.id, assessment.effective_config
@@ -908,6 +957,16 @@ async fn authorize_target_at(
     sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
         .execute(&mut *tx)
         .await?;
+    // Closure uses this same deterministic key order. Acquire it before the
+    // system, assessment, or rule rows so neither path can invert lock order.
+    sqlx::query(
+        r#"SELECT lock_poam_finding_key(system_id,policy_lineage_id)
+           FROM poam_findings WHERE system_id=$1
+           ORDER BY system_id,policy_lineage_id"#,
+    )
+    .bind(system_id)
+    .execute(&mut *tx)
+    .await?;
     let current_desired = sqlx::query_scalar::<_, Option<String>>(
         "SELECT desired_target FROM systems WHERE id = $1 FOR UPDATE",
     )

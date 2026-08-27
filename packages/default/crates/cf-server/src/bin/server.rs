@@ -24,7 +24,7 @@ use crystal_forge::{
             admin, auth_dev, auth_local, auth_oidc, auth_session, auth_status, auth_whoami,
             builders, caches, commits, compliance, config_health, cves, dashboard,
             deployment_policies, deployments, environments, flakes, framework_requirements,
-            hardening, navigation, nixos_options, scanning, setup_wizard, systems,
+            hardening, navigation, nixos_options, poam, scanning, setup_wizard, systems,
             user_notifications, user_preferences, user_sessions,
         },
         status,
@@ -235,6 +235,42 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/v1/dashboard/summary",
             get(dashboard::dashboard_summary),
+        )
+        .route("/api/v1/poams", get(poam::list).post(poam::create))
+        .route("/api/v1/poams/dashboard", get(poam::dashboard))
+        .route("/api/v1/poams/dashboard/watchlist", get(poam::watchlist))
+        .route("/api/v1/poams/rollups/systems", get(poam::system_rollups))
+        .route("/api/v1/poams/rollups/bundles", get(poam::bundle_rollups))
+        .route("/api/v1/poams/:id", get(poam::get).patch(poam::update))
+        .route("/api/v1/poams/:id/transition", post(poam::transition))
+        .route("/api/v1/poams/:id/notes", post(poam::note))
+        .route("/api/v1/poams/:id/milestones", post(poam::add_milestone))
+        .route(
+            "/api/v1/poams/:id/milestones/:milestone_id",
+            patch(poam::update_milestone).delete(poam::remove_milestone),
+        )
+        .route("/api/v1/poams/:id/findings", post(poam::link_finding))
+        .route(
+            "/api/v1/poams/:id/findings/:finding_id",
+            delete(poam::unlink_finding),
+        )
+        .route("/api/v1/poams/:id/assignments", post(poam::link_assignment))
+        .route(
+            "/api/v1/poams/:id/assignments/:assignment_version_id",
+            delete(poam::unlink_assignment),
+        )
+        .route("/api/v1/poams/:id/compatible", get(poam::compatible))
+        .route("/api/v1/poams/:id/verify", post(poam::verify))
+        .route("/api/v1/poams/:id/close", post(poam::close))
+        .route("/api/v1/poams/:id/reopen", post(poam::reopen))
+        .route(
+            "/api/v1/finding-waivers",
+            get(poam::list_waivers).post(poam::create_waiver),
+        )
+        .route("/api/v1/finding-waivers/:id", get(poam::get_waiver))
+        .route(
+            "/api/v1/finding-waivers/:id/status",
+            post(poam::decide_waiver),
         )
         .route(
             "/api/v1/dashboard/activity",

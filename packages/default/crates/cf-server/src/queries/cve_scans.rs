@@ -141,6 +141,11 @@ pub async fn create_cve_scan(
 ) -> Result<CreateCveScanOutcome> {
     let scan_id = Uuid::new_v4();
     let mut tx = pool.begin().await?;
+    crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx(
+        &mut tx,
+        derivation_id,
+    )
+    .await?;
 
     let result = sqlx::query!(
         r#"
@@ -207,6 +212,15 @@ pub async fn create_cve_scan(
 /// Update CVE scan to in-progress status
 pub async fn mark_scan_in_progress(pool: &PgPool, scan_id: Uuid) -> Result<()> {
     let mut tx = pool.begin().await?;
+    let derivation_id: i32 = sqlx::query_scalar("SELECT derivation_id FROM cve_scans WHERE id=$1")
+        .bind(scan_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx(
+        &mut tx,
+        derivation_id,
+    )
+    .await?;
     sqlx::query(
         r#"
         UPDATE cve_scans 
@@ -239,6 +253,15 @@ pub async fn complete_cve_scan(
     scan_metadata: Option<serde_json::Value>,
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
+    let derivation_id: i32 = sqlx::query_scalar("SELECT derivation_id FROM cve_scans WHERE id=$1")
+        .bind(scan_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx(
+        &mut tx,
+        derivation_id,
+    )
+    .await?;
     sqlx::query(
         r#"
         UPDATE cve_scans 
@@ -290,6 +313,10 @@ pub async fn mark_cve_scan_failed(
     });
 
     let mut tx = pool.begin().await?;
+    crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx(
+        &mut tx, target.id,
+    )
+    .await?;
     sqlx::query(
         r#"
         UPDATE cve_scans 
@@ -329,6 +356,11 @@ pub async fn mark_cve_scan_failed_by_id(
     });
 
     let mut tx = pool.begin().await?;
+    crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx(
+        &mut tx,
+        derivation_id,
+    )
+    .await?;
     sqlx::query(
         r#"
         UPDATE cve_scans

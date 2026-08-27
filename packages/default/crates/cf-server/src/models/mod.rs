@@ -13,6 +13,7 @@ pub mod flakes;
 pub mod hardening_scans;
 pub mod network_interfaces;
 pub mod package_vulnerabilities;
+pub mod poam;
 pub mod public_key;
 pub mod retry_policy;
 pub mod scan_packages;
