@@ -641,6 +641,30 @@ let
     '';
   };
 
+  runDashboardVisibilityTests = pkgs.writeShellApplication {
+    name = "run-dashboard-visibility-tests";
+    runtimeInputs = with pkgs; [ nix coreutils ];
+    text = ''
+      set -euo pipefail
+
+      REPO_ROOT="''${PROJECT_ROOT:-$PWD}"
+      DB_URL="postgresql://crystal_forge:${db_password}@127.0.0.1:${toString db_port}/crystal_forge"
+
+      nix develop "$REPO_ROOT#sqlx" -c bash -euo pipefail -c "
+        cd \"$REPO_ROOT/packages/default\"
+        DATABASE_URL=\"$DB_URL\" cargo sqlx migrate run --source crates/cf-server/migrations
+        CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
+          cargo test --manifest-path Cargo.toml \
+          -p cf-server --lib queries::dashboard::tests::visibility_ \
+          -- --ignored --test-threads=1
+        CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
+          cargo test --manifest-path Cargo.toml \
+          -p cf-server --lib handlers::api::dashboard::tests::visibility_ \
+          -- --ignored --test-threads=1
+      "
+    '';
+  };
+
   runCveProcessingTest = pkgs.writeShellApplication {
     name = "run-cve-processing-test";
     runtimeInputs = with pkgs; [ nix coreutils ];
@@ -1209,6 +1233,15 @@ let
     };
   };
 
+  dashboard-visibility-test-module = {
+    settings.processes.dashboard-visibility-tests = {
+      inherit namespace;
+      command = runDashboardVisibilityTests;
+      availability.exit_on_end = true;
+      depends_on."db".condition = "process_healthy";
+    };
+  };
+
   full-stack = pkgs.process-compose-flake.evalModules {
     modules = [
       inputs.services-flake.processComposeModules.default
@@ -1257,6 +1290,14 @@ let
     ];
   };
 
+  dashboardVisibilityTest = pkgs.process-compose-flake.evalModules {
+    modules = [
+      inputs.services-flake.processComposeModules.default
+      db-core-module
+      dashboard-visibility-test-module
+    ];
+  };
+
   oidc-stack = pkgs.process-compose-flake.evalModules {
     modules = [
       inputs.services-flake.processComposeModules.default
@@ -1271,6 +1312,7 @@ in full-stack.config.outputs.package // {
     runUiDev runUiFrontend bootstrapDevBuilder envExports;
   cve-test = cveTest.config.outputs.package;
   state-machine-test = stateMachineTest.config.outputs.package;
+  dashboard-visibility-test = dashboardVisibilityTest.config.outputs.package;
   db-only = dbOnly.config.outputs.package;
   server-only = server-only.config.outputs.package;
   server-stack-mock = server-stack-mock.config.outputs.package;

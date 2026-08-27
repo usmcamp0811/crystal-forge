@@ -279,6 +279,8 @@ pub struct DashboardSummary {
     pub total_systems: i64,
     pub active_builds: i64,
     pub build_queue: Option<BuildQueueSummary>,
+    #[serde(default)]
+    pub cache_health: Option<CacheHealthSummary>,
     pub recent_deployments: Vec<RecentDeployment>,
     pub timestamp: DateTime<Utc>,
 }
@@ -625,6 +627,73 @@ pub struct RecentDeployment {
     pub commit_message: Option<String>,
     pub deployed_at: DateTime<Utc>,
     pub status: DeploymentStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CacheHealthSummary {
+    pub status: CacheHealthStatus,
+    pub destination_count: i64,
+    pub enabled_destination_count: i64,
+    pub successful_pushes_24h: i64,
+    pub failed_pushes_24h: i64,
+    pub last_activity_at: Option<DateTime<Utc>>,
+    pub used_bytes: Option<i64>,
+    pub capacity_bytes: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheHealthStatus {
+    Healthy,
+    Degraded,
+    Unknown,
+    Disabled,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DashboardActivity {
+    #[serde(default)]
+    pub id: String,
+    pub kind: DashboardActivityKind,
+    pub status: DashboardActivityStatus,
+    pub occurred_at: DateTime<Utc>,
+    pub title: String,
+    pub system_id: Option<Uuid>,
+    pub flake_id: Option<i32>,
+    pub commit_id: Option<i32>,
+    pub commit_hash: Option<String>,
+    pub build_job_id: Option<Uuid>,
+    pub deployment_id: Option<Uuid>,
+    #[serde(default)]
+    pub evaluation_attempt_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DashboardActivityKind {
+    Deployment,
+    Build,
+    Evaluation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DashboardActivityStatus {
+    DeploymentStarted,
+    DeploymentSucceeded,
+    DeploymentFailed,
+    BuildQueued,
+    BuildBuilding,
+    BuildCancelling,
+    BuildSucceeded,
+    BuildFailed,
+    BuildCancelled,
+    EvaluationPending,
+    EvaluationInProgress,
+    EvaluationCancelling,
+    EvaluationSucceeded,
+    EvaluationFailed,
+    EvaluationCancelled,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2446,6 +2515,16 @@ pub struct BuildQueueSummary {
     pub building_count: i64,
     /// Number of builds waiting in the queue.
     pub queued_count: i64,
+    #[serde(default)]
+    pub failed_24h_count: i64,
+    #[serde(default)]
+    pub active_workers: i64,
+    #[serde(default)]
+    pub total_workers: i64,
+    #[serde(default)]
+    pub used_slots: i64,
+    #[serde(default)]
+    pub total_slots: i64,
     /// List of active build items (building + queued, limited).
     pub items: Vec<BuildQueueItem>,
     /// Server timestamp for freshness.
@@ -2511,6 +2590,8 @@ fn default_attempt_number() -> i32 {
 pub struct EvalQueueSummary {
     pub active_count: i64,
     pub completed_count: i64,
+    #[serde(default)]
+    pub successful_count: i64,
     pub failed_count: i64,
     #[serde(default)]
     pub domain_total: i64,
