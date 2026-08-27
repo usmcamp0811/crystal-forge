@@ -661,6 +661,9 @@ let
           --lib builder::cve_worker::tests::policy_scan_heartbeat_prevents_recovery_and_ownership_loss_cancels_execution
         CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
           cargo test --manifest-path Cargo.toml \
+          --lib services::cve_scans::tests::immediate_scan_renews_ownership_reuses_active_and_cancels_on_revocation
+        CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
+          cargo test --manifest-path Cargo.toml \
           --lib queries::cve_scans::tests::get_targets_needing_cve_rescan_selects_stale_scan
         CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
           cargo test --manifest-path Cargo.toml \
