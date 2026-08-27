@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:43'
-updated_date: '2026-08-27 03:26'
+updated_date: '2026-08-27 17:45'
 labels:
   - design-parity
   - poam
@@ -75,6 +75,8 @@ nix build .#checks.x86_64-linux.web-ui --no-link
 8. Add pure DTO/presentation/navigation/error tests plus real server-backed browser workflows for finding create/link, detail edits/milestones/activity, closure rejection while FAIL, system integration, bundle rollups/no-N+1, and assignment link/unlink immutability. Extend the coverage manifest and critical Web UI checks; capture supported screenshots.
 9. Run exact TASK-433.7 verification, focused Phase-5 contract tests, syntax/diff checks, then perform independent requirements/API-authority/UI-state/E2E/performance/regression/design-comparison reviews. Resolve all P0/P1/P2.
 10. Only after AC1-AC4 are objectively proven: check exactly four ACs, move TASK-433.7 to Review, update TASK-433.6 correction evidence and MR !318, commit/push the rebased branch, confirm clean local/remote SHA and CI, then stop before Phase 7.
+
+Interrupted-agent recovery: inspect the full worktree diff, move assignment relationship/link UI into `AssignmentListPanel` with its existing local signals and generation guards, normalize new Dioxus data attributes, fix only compile-required `EvidenceDrawer` call interfaces, then run fmt/check/tests and focused prohibited-global scans before reporting without committing.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
