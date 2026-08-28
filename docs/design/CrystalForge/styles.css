@@ -1730,6 +1730,84 @@ html[data-theme="light"] .sd-log-stream {
 }
 
 /* Config */
+/* Revision selector — options belong to a revision, so an older generation is a
+   different cached blob rather than a re-evaluation. */
+.cfg-revbar{display:flex;align-items:center;gap:8px;padding:0 0 10px;min-width:0;flex-wrap:wrap}
+.cfg-revseg{flex-shrink:0}
+.cfg-revbar-label{font-size:10.5px;letter-spacing:.05em;text-transform:uppercase;color:var(--cf-text-muted);font-weight:600;flex-shrink:0}
+.cfg-revselect{background:var(--cf-input-bg);color:var(--cf-text-primary);border:1px solid var(--cf-input-border);border-radius:6px;padding:3px 7px;font-size:11.5px;font-family:var(--font-mono);max-width:280px;flex-shrink:0}
+.cfg-revbar-msg{font-size:11.5px;color:var(--cf-text-muted);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cfg-revback{flex-shrink:0;margin-left:auto}
+.cfg-hist-note{margin:0 0 10px}
+.cfg-side{display:flex;flex-direction:column;gap:14px;min-width:0}
+/* No inner scroller — the page scrolls, matching every other table view. */
+.cfg-card{padding-bottom:0}
+/* One control row: filter, search, range, pager. */
+.cfg-toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding-bottom:10px}
+.cfg-q{flex:1 1 200px;min-width:170px}
+.seg-n{opacity:.55;font-variant-numeric:tabular-nums;margin-left:3px}
+.cfg-count{font-size:11px;color:var(--cf-text-muted);font-variant-numeric:tabular-nums;white-space:nowrap}
+.cfg-pager{display:flex;align-items:center;gap:3px}
+.cfg-table-wrap{margin:0 -18px;transition:opacity .12s ease}
+.cfg-table-wrap.loading{opacity:.5}
+.cfg-table{table-layout:fixed}
+.cfg-table th:first-child,.cfg-table td:first-child{padding-left:18px}
+.cfg-table th:last-child,.cfg-table td:last-child{padding-right:18px}
+.cfg-table tbody td{padding-top:6px;padding-bottom:6px;font-size:12px;vertical-align:middle}
+.cfg-row{cursor:pointer}
+.cfg-opt{display:flex;align-items:center;gap:6px;min-width:0}
+.cfg-caret{flex-shrink:0;color:var(--cf-text-muted);transition:transform .12s ease}
+.cfg-caret.open{transform:rotate(90deg)}
+/* Single-line rows keep the list scannable at hundreds of options; full value in title. */
+.cfg-path{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cfg-val{display:block;color:var(--cf-text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cfg-tag{flex-shrink:0;font-size:9px;letter-spacing:.05em;text-transform:uppercase;padding:1px 4px;border-radius:3px;font-weight:600}
+.cfg-tag-changed{background:color-mix(in oklab,#fbbf24 18%,transparent);color:#fbbf24}
+.cfg-tag-added{background:color-mix(in oklab,#34d399 18%,transparent);color:#34d399}
+.cfg-src{display:flex;align-items:center;gap:6px;min-width:0;width:100%;background:none;border:0;padding:0;cursor:pointer;color:var(--cf-text-muted);font-size:11.5px;text-align:left;border-radius:4px}
+.cfg-src>.mono{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cfg-src:hover{color:var(--cf-brand-purple)}
+.cfg-src:hover>.mono{text-decoration:underline}
+/* Chip that navigates — keeps chip geometry, adds affordance. */
+.chip-link{cursor:pointer;border:1px solid transparent}
+.chip-link:hover{border-color:color-mix(in oklab,var(--cf-brand-purple) 55%,transparent);color:var(--cf-brand-purple)}
+.cfg-input-link{border:0;cursor:pointer;font-family:inherit}
+.cfg-input-link:hover{background:color-mix(in oklab,var(--cf-brand-purple) 20%,transparent);color:var(--cf-brand-purple)}
+.cfg-input{flex-shrink:0;font-size:9.5px;font-weight:600;padding:1px 5px;border-radius:3px;background:var(--cf-subtle-bg);color:var(--cf-text-secondary);white-space:nowrap;max-width:110px;overflow:hidden;text-overflow:ellipsis}
+.cfg-defcount{flex-shrink:0;background:color-mix(in oklab,#fbbf24 16%,transparent);color:#fbbf24;border-radius:3px;padding:1px 4px;font-size:9px;font-weight:600;white-space:nowrap}
+/* Expanded row: label/value pairs, aligned to the option column. */
+.cfg-detail-row td{background:var(--cf-subtle-bg);padding:0}
+.cfg-detail{padding:10px 18px 12px 36px;display:flex;flex-direction:column;gap:8px}
+.cfg-detail .cfg-detail-row{display:grid;grid-template-columns:96px minmax(0,1fr);gap:10px;align-items:start}
+.cfg-detail-label{font-size:10.5px;letter-spacing:.05em;text-transform:uppercase;color:var(--cf-text-muted);font-weight:600;padding-top:3px}
+.cfg-detail-v{font-size:11.5px;color:var(--cf-text-secondary);padding-top:2px}
+.cfg-defs{display:flex;flex-direction:column;gap:3px;min-width:0}
+.cfg-def{display:flex;align-items:center;gap:7px;min-width:0;background:var(--cf-card-bg);border:1px solid var(--cf-card-border);border-radius:5px;padding:4px 8px;cursor:pointer;font-size:11.5px;color:var(--cf-text-muted);text-align:left}
+.cfg-def.win{border-color:color-mix(in oklab,#34d399 40%,var(--cf-card-border));color:var(--cf-text-primary)}
+.cfg-def:hover{background:var(--cf-hover-bg)}
+.cfg-def-file{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cfg-def-note{margin-left:auto;flex-shrink:0;font-size:10.5px;opacity:.7;white-space:nowrap}
+.cfg-diff{display:flex;flex-direction:column;gap:3px;min-width:0}
+.cfg-diff-line{font-size:11.5px;padding:2px 7px;border-radius:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cfg-diff-opaque{background:var(--cf-subtle-bg);color:var(--cf-text-muted);font-size:11px}
+.cfg-diff-err{background:color-mix(in oklab,#f87171 10%,transparent);color:#f87171;font-size:11px;white-space:normal}
+.cfg-diff-note{font-size:10.5px;color:var(--cf-text-muted);padding:1px 7px}
+.cfg-val-err{color:#f87171;font-size:11.5px}
+.cfg-diff-from{background:color-mix(in oklab,#f87171 12%,transparent);color:#f87171}
+.cfg-diff-to{background:color-mix(in oklab,#34d399 12%,transparent);color:#34d399}
+.cfg-empty{padding:26px 18px;text-align:center;color:var(--cf-text-muted);font-size:12.5px}
+.cfg-modules{display:flex;flex-direction:column;gap:2px;max-height:300px;overflow:auto}
+.cfg-module{display:flex;align-items:center;gap:8px;background:none;border:1px solid transparent;border-radius:5px;padding:4px 7px;cursor:pointer;text-align:left;color:var(--cf-text-primary);font-size:11.5px;min-width:0}
+.cfg-module:hover{background:var(--cf-hover-bg);border-color:var(--cf-card-border)}
+.cfg-module-kind{flex-shrink:0;font-size:9px;letter-spacing:.03em;font-weight:600;padding:1px 5px;border-radius:3px;max-width:96px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cfg-module-self{background:color-mix(in oklab,var(--cf-brand-purple) 18%,transparent);color:var(--cf-brand-purple)}
+.cfg-module-input{background:color-mix(in oklab,#38bdf8 16%,transparent);color:#38bdf8}
+.cfg-module-nixpkgs{background:color-mix(in oklab,#94a3b8 18%,transparent);color:var(--cf-text-muted)}
+.cfg-module-path{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cfg-module-count{flex-shrink:0;color:var(--cf-text-muted);font-size:10.5px;font-variant-numeric:tabular-nums}
+.cfg-drv{max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cfg-tray-title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:520px;line-height:1.35}
+.cfg-tray-col{display:flex;flex-direction:column;gap:12px;width:100%;min-width:0;grid-column:1/-1}
 .sd-nix {
   background: #0b1120;
   color: #cbd5e1;
@@ -1841,6 +1919,72 @@ html[data-theme="light"] .sd-nix {
   border-top: 1px solid color-mix(in oklab, var(--cf-red) 18%, transparent);
 }
 
+/* Revision bar — every output pane states which commit it describes. */
+.fx-revbar{display:flex;flex-direction:column;gap:7px;padding:9px 12px;border:1px solid var(--cf-card-border);border-radius:7px;background:var(--cf-subtle-bg)}
+.fx-revbar-main{display:flex;align-items:center;gap:8px;min-width:0}
+.fx-revbar-label{font-size:10.5px;letter-spacing:.05em;text-transform:uppercase;color:var(--cf-text-muted);font-weight:600;flex-shrink:0}
+.fx-revbar-sha{display:flex;align-items:center;gap:4px;background:var(--cf-card-bg);border:1px solid var(--cf-card-border);border-radius:5px;padding:2px 6px;font-size:11.5px;color:var(--cf-text-primary);cursor:pointer;flex-shrink:0}
+.fx-revbar-sha:hover{background:var(--cf-hover-bg);color:var(--cf-brand-purple)}
+.fx-revbar-msg{font-size:11.5px;color:var(--cf-text-secondary);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fx-delta{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.fx-delta-label{font-size:10.5px;color:var(--cf-text-muted)}
+.fx-delta-chip{font-size:10px;font-weight:600;padding:1px 6px;border-radius:4px;white-space:nowrap;cursor:default}
+.fx-delta-chip.add{background:color-mix(in oklab,#34d399 16%,transparent);color:#34d399}
+.fx-delta-chip.del{background:color-mix(in oklab,#f87171 16%,transparent);color:#f87171}
+.fx-delta-chip.bump{background:color-mix(in oklab,#fbbf24 16%,transparent);color:#fbbf24}
+/* Module detail: declared options at this revision */
+.fx-row{cursor:pointer}
+.fx-mod-cell{display:flex;align-items:center;gap:6px;min-width:0}
+.fx-detail-row td{background:var(--cf-subtle-bg);padding:0}
+.fx-detail{padding:10px 18px 14px 36px;display:flex;flex-direction:column;gap:8px}
+.fx-detail-head{display:flex;align-items:baseline;gap:10px;min-width:0}
+.fx-detail-label{font-size:10.5px;letter-spacing:.05em;text-transform:uppercase;color:var(--cf-text-muted);font-weight:600;flex-shrink:0}
+.fx-detail-file{font-size:11px;color:var(--cf-text-muted);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fx-opts{width:100%;border-collapse:collapse;table-layout:fixed}
+.fx-opts th{text-align:left;font-size:9.5px;letter-spacing:.05em;text-transform:uppercase;color:var(--cf-text-muted);font-weight:600;padding:4px 8px;border-bottom:1px solid var(--cf-card-border)}
+.fx-opts th:nth-child(1){width:52%}.fx-opts th:nth-child(2){width:22%}.fx-opts th:nth-child(3){width:26%}
+.fx-opts td{padding:4px 8px;font-size:11.5px;border-bottom:1px solid var(--cf-divider);overflow:hidden}
+.fx-opt-path{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--cf-text-primary)}
+.fx-detail-note{font-size:10.5px;color:var(--cf-text-muted)}
+/* Flake explorer — output tabs inside the flake tray */
+.fx-tabs{display:flex;gap:2px;padding:0 18px;border-bottom:1px solid var(--cf-divider);background:color-mix(in oklab,var(--cf-page-bg) 30%,var(--cf-card-bg));flex-shrink:0}
+.fx-tab{position:relative;display:flex;align-items:center;gap:6px;background:none;border:0;border-bottom:2px solid transparent;padding:9px 12px;font-size:12.5px;font-weight:500;color:var(--cf-text-muted);cursor:pointer}
+.fx-tab:hover{color:var(--cf-text-primary)}
+.fx-tab.active{color:var(--cf-text-primary);border-bottom-color:var(--cf-brand-purple)}
+.fx-tab-n{font-size:10.5px;font-variant-numeric:tabular-nums;opacity:.6}
+.fx-tab-dot{width:5px;height:5px;border-radius:50%;background:#fbbf24}
+.fx-body{flex:1;min-height:0;overflow-y:auto}
+.fx-pane{padding:16px 18px 24px;display:flex;flex-direction:column;gap:12px}
+.fx-pane-note{font-size:12px;color:var(--cf-text-muted);line-height:1.5;max-width:70ch}
+.fx-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px}
+.fx-stat{display:flex;flex-direction:column;gap:2px;padding:9px 12px;border:1px solid var(--cf-card-border);border-radius:7px;background:var(--cf-subtle-bg)}
+.fx-stat.warn{border-color:color-mix(in oklab,#fbbf24 45%,var(--cf-card-border))}
+.fx-stat.crit{border-color:color-mix(in oklab,#f87171 45%,var(--cf-card-border))}
+.fx-stat-n{font-size:19px;font-weight:600;font-variant-numeric:tabular-nums;color:var(--cf-text-primary)}
+.fx-stat-l{font-size:10.5px;letter-spacing:.03em;text-transform:uppercase;color:var(--cf-text-muted);font-weight:600}
+.fx-callout{margin:0}
+.fx-toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.fx-table{margin:0 -18px;width:calc(100% + 36px);table-layout:fixed}
+.fx-table th:first-child,.fx-table td:first-child{padding-left:18px}
+.fx-table th:last-child,.fx-table td:last-child{padding-right:18px}
+.fx-table tbody td{padding-top:7px;padding-bottom:7px;font-size:12px;vertical-align:middle;overflow:hidden}
+.fx-host{font-size:12px;color:var(--cf-text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block}
+.fx-url{font-size:11px;color:var(--cf-text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block}
+.fx-desc{font-size:11.5px;color:var(--cf-text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block}
+.fx-dim{color:var(--cf-text-muted);font-size:11.5px}
+.fx-stale{color:#fbbf24;font-size:11.5px}
+.fx-chip{font-size:10px}
+.fx-note{display:block;font-size:10.5px;color:var(--cf-text-muted);margin-top:2px}
+.fx-right{text-align:right}
+.fx-input-cell{display:flex;align-items:center;gap:6px;min-width:0}
+/* Name is the row identifier: it keeps its space and the badge yields. */
+.fx-input-cell .fx-host{flex:0 1 auto;min-width:0}
+.fx-chip-shrink{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fx-bar-row{display:flex;align-items:center;gap:8px}
+.fx-bar{flex:1;min-width:0;height:5px;border-radius:3px;background:var(--cf-subtle-bg);overflow:hidden}
+.fx-bar-fill{height:100%;border-radius:3px;background:var(--cf-brand-purple)}
+.fx-bar-n{font-size:11px;color:var(--cf-text-secondary);font-variant-numeric:tabular-nums;min-width:22px;text-align:right}
+.fx-empty{padding:24px 18px;text-align:center;color:var(--cf-text-muted);font-size:12.5px}
 /* Flakes view */
 .fl-tray-head {
   padding: 14px 18px;

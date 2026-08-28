@@ -66,16 +66,15 @@ function useDeployStages(pendingDeploy, onClear) {
   return stage;
 }
 
-function SystemDetail({ sys, onBack, onDeploy, onEdit, onNavigate, onTagFilter, onOpenCommit, pendingDeploy, onStartPending, onClearPending, initialTab }) {
+function SystemDetail({ sys, onBack, onDeploy, onEdit, onNavigate, onTagFilter, onOpenCommit, pendingDeploy, onStartPending, onClearPending, initialTab, initialRev }) {
   const [tab, setTab] = React.useState(initialTab || "overview");
   const [editSystem, setEditSystem] = React.useState(false);
   const deployStage = useDeployStages(pendingDeploy, onClearPending);
   React.useEffect(() => { setTab(initialTab || "overview"); }, [sys.id, initialTab]);
   const [logsJump, setLogsJump] = React.useState(null);
-  const [rollbackTarget, setRollbackTarget] = React.useState(null);
-  const [rollbackConfirm, setRollbackConfirm] = React.useState(false);
+  const [deployPreselect, setDeployPreselect] = React.useState(null);
+  React.useEffect(() => { setDeployPreselect(null); }, [sys.id]);
   const [sshOpen, setSshOpen] = React.useState(false);
-  const [rollbackOpen, setRollbackOpen] = React.useState(false);
   const [commitPeek, setCommitPeek] = React.useState(null); // {sha, msg, flake, author, at} | {capture,...}
   const openCommitPeek = (c) => {
     const f = FLAKE_REGISTRY.find(x => x.name === c.flake)
@@ -111,12 +110,8 @@ function SystemDetail({ sys, onBack, onDeploy, onEdit, onNavigate, onTagFilter, 
             <DeploymentChip state={sys.deploymentState} />
           </div>
           <div className="sd-head-actions">
-            <button className="btn btn-ghost focus-ring" onClick={() => setRollbackOpen(true)}><Icon name="rollback" size={14} /> Rollback</button>
             <button className="btn btn-ghost focus-ring" onClick={() => setSshOpen(true)}><Icon name="terminal" size={14} /> SSH</button>
             <button className="btn btn-ghost focus-ring" onClick={() => onEdit?.(sys)}><Icon name="gear" size={14} /> Edit</button>
-            <button className="btn btn-primary focus-ring" onClick={() => setTab("deploy")}>
-              <Icon name="deploy" size={14} /> Deploy
-            </button>
           </div>
         </div>
 
@@ -193,17 +188,16 @@ function SystemDetail({ sys, onBack, onDeploy, onEdit, onNavigate, onTagFilter, 
 
       {/* Tab panels */}
       <div className="sd-body">
-        {tab === "overview"   && <OverviewTab sys={sys} onViewCves={() => setTab("cves")} onTagFilter={onTagFilter} deployStage={deployStage} pendingCommit={pendingDeploy?.commit} pendingKind={pendingDeploy?.kind} pendingGen={pendingDeploy?.gen} onViewHistory={() => setTab("history")} onOpenCommit={openCommitPeek} onOpenBuild={() => onNavigate?.("builds")} />}
-        {tab === "deploy"     && <DeployTab sys={sys} onDeploy={onDeploy} onOpenCommit={openCommitPeek} />}
-        {tab === "history"    && <HistoryTab sys={sys} onRollback={(sha,gen)=>{ setRollbackTarget({sha,gen}); setRollbackConfirm(true); }} onLogsJump={(id)=>{ setTab("logs"); setLogsJump({ id, nonce: Date.now() }); }} onOpenCommit={openCommitPeek} />}
+        {tab === "overview"   && <OverviewTab sys={sys} onNavigate={onNavigate} onViewCves={() => setTab("cves")} onTagFilter={onTagFilter} deployStage={deployStage} pendingCommit={pendingDeploy?.commit} pendingKind={pendingDeploy?.kind} pendingGen={pendingDeploy?.gen} onViewHistory={() => setTab("history")} onOpenCommit={openCommitPeek} onOpenBuild={() => onNavigate?.("builds")} />}
+        {tab === "deploy"     && <DeployTab key={sys.id} sys={sys} onDeploy={onDeploy} onOpenCommit={openCommitPeek} preselect={deployPreselect} />}
+        {tab === "history"    && <HistoryTab sys={sys} onRollback={(sha,gen)=>{ setDeployPreselect({ sha, gen, nonce: Date.now() }); setTab("deploy"); }} onLogsJump={(id)=>{ setTab("logs"); setLogsJump({ id, nonce: Date.now() }); }} onOpenCommit={openCommitPeek} />}
         {tab === "logs"       && <LogsTab sys={sys} jump={logsJump} />}
-        {tab === "config"     && <ConfigTab sys={sys} />}
+        {tab === "config"     && <ConfigTab sys={sys} initialRev={initialRev} onOpenFlake={openCommitPeek} />}
         {tab === "cves"       && <CvesTab sys={sys} />}
         {tab === "compliance" && <ComplianceTab sys={sys} onNavigate={onNavigate} />}
         {tab === "hardening"  && <HardeningTab sys={sys} />}
       </div>
       {sshOpen && <SshConnectModal sys={sys} onClose={() => setSshOpen(false)} />}
-      {(rollbackConfirm || rollbackOpen) && <RollbackModal sys={sys} targetGen={rollbackTarget?.gen} targetSha={rollbackTarget?.sha} onClose={() => { setRollbackConfirm(false); setRollbackOpen(false); setRollbackTarget(null); }} onConfirm={(g) => { setRollbackConfirm(false); setRollbackOpen(false); setRollbackTarget(null); setTab("overview"); onStartPending?.({ commit: g.sha.substring(0,7), kind: "rollback", gen: g.id }); }} />}
       {commitPeek && <FlakeTray flake={commitPeek.flake} focusSha={commitPeek.sha} focusMeta={commitPeek.meta} onClose={() => setCommitPeek(null)} onEdit={() => {}} onOpenEval={(c) => onNavigate?.("evals", c)} onOpenBuild={(c) => onNavigate?.("builds", c)} onOpenSystems={(flakeName) => onNavigate?.("systems", null, flakeName)} />}
     </div>
   );
@@ -389,7 +383,7 @@ function buildActivityFeed(sys, deployStage, pendingCommit, pendingKind, pending
   return feed.slice(0, 9);
 }
 
-function OverviewTab({ sys, onViewCves, onTagFilter, deployStage, pendingCommit, pendingKind, pendingGen, onViewHistory, onOpenCommit, onOpenBuild }) {
+function OverviewTab({ sys, onViewCves, onTagFilter, deployStage, pendingCommit, pendingKind, pendingGen, onViewHistory, onOpenCommit, onOpenBuild, onNavigate }) {
   const [tags, setTags] = React.useState(sys.tags || []);
   const [adding, setAdding] = React.useState(false);
   const [draft, setDraft] = React.useState("");
@@ -429,6 +423,11 @@ function OverviewTab({ sys, onViewCves, onTagFilter, deployStage, pendingCommit,
           <dt>Store path</dt>
           <dd className="mono" style={{ fontSize:11, whiteSpace:"normal", wordBreak:"break-all", lineHeight:1.4 }} title={sys.storePath}>
             {sys.storePath}
+            {" "}
+            <button className="tl-commit-link mono focus-ring" style={{ fontSize:11 }} title={`Open the evaluation for ${sys.commit}`}
+              onClick={() => onNavigate?.("evals", { sha: sys.commit })}>
+              <Icon name="build" size={11} /> eval <Icon name="arrow-right" size={10} />
+            </button>
           </dd>
           {sys.targetStorePath && sys.targetStorePath !== sys.storePath && (
             <>
@@ -548,7 +547,67 @@ function OverviewTab({ sys, onViewCves, onTagFilter, deployStage, pendingCommit,
 }
 
 /* ---------- Deploy ---------- */
-function DeployTab({ sys, onDeploy, onOpenCommit }) {
+/* Generation history for a system — every locally activated nixos generation.
+   origin: 'cf' (deployed via Crystal Forge) | 'local' (manual nixos-rebuild on
+   host) | 'unknown' (closure not in cache). Only 'cf' generations carry a
+   commit, so only those have an evaluable configuration. */
+/* Flake commit history relevant to this system. Any commit can be evaluated for
+   this host, whether or not it was ever deployed here — that is the difference
+   between browsing commits and browsing generations. */
+/* An input maps to a TRACKED flake only when Crystal Forge actually tracks it:
+   "self" is the deployed flake, and a named input matches if a registry entry
+   shares its name. Third-party inputs (nixpkgs, home-manager…) are not tracked
+   here, so they get no link rather than a dead one. */
+function resolveInputFlake(input, sys) {
+  const reg = typeof FLAKE_REGISTRY !== "undefined" ? FLAKE_REGISTRY : [];
+  if (input === "self") return reg.some(f => f.name === sys.flake) ? sys.flake : null;
+  const hit = reg.find(f => f.name === input);
+  return hit ? hit.name : null;
+}
+
+function buildSystemCommits(sys) {
+    const msgs = [
+      "chore: bump nixpkgs to 24.11 snapshot",
+      "fix: restart nginx on cert renewal",
+      "stig: enforce audit rules for sudo",
+      "feat: enable prometheus node exporter",
+      "cve: patch openssl to 3.3.2",
+      "refactor: extract firewall module",
+      "fix: postgres role permissions migration",
+      "chore: update kernel to 6.6.72",
+      "feat: prometheus alertmanager rules",
+      "fix: rotate sops keys",
+    ];
+    // The deployed revision and the host's previously deployed generations must
+    // appear in this list — a commit history that omits what is running makes
+    // "deployed" unrepresentable. Index 2 IS the live commit; later entries
+    // reuse the generation shas so earlier deployments are selectable too.
+    const pool = ["a3f8c12","f1d9022",sys.commit,"77aef00","a1f2c31","ffa2b88","bc10201","9b3a201","44102fa","e7a1233"];
+    return msgs.map((m, i) => ({
+      sha: pool[i],
+      message: i === 2 ? (sys.commitMessage || m) : m,
+      author: ["mreyes","jpark","dchen","ops-bot"][i % 4],
+      when: i === 0 ? "2m ago" : i === 1 ? "18m ago" : i === 2 ? "1h ago" : `${i}h ago`,
+      current: i === 2,
+      deployed: i === 2,
+      buildStatus: i === 0 ? "building" : i === 1 ? "cached" : "cached",
+    }));
+  }
+
+function buildGenerations(sys) {
+  const gen = sys.generation;
+  return [
+      { id: gen,     origin: "cf",      sha: sys.commit, flake: sys.flake, msg: sys.commitMessage,            at: "2h ago",     kernel: "6.6.72", by: "mreyes",       current: true,  state: "active" },
+      { id: gen - 1, origin: "local",   sha: null,       flake: null,      msg: "Manual rebuild — uncommitted change", at: "8h ago",     kernel: "6.6.72", by: "root@host",   current: false, state: "drift",  driftHint: "modules/services/nginx.nix differs from sys.commit" },
+      { id: gen - 2, origin: "cf",      sha: "a1f2c31",  flake: sys.flake, msg: "chore: bump nixpkgs",        at: "yesterday",  kernel: "6.6.72", by: "ops-bot",     current: false, state: "ok" },
+      { id: gen - 3, origin: "cf",      sha: "ffa2b88",  flake: sys.flake, msg: "cve: patch openssl",         at: "3d ago",     kernel: "6.6.71", by: "ops-bot",     current: false, state: "ok" },
+      { id: gen - 4, origin: "unknown", sha: null,       flake: null,      msg: "Closure not in cache",       at: "5d ago",     kernel: "6.6.71", by: "—",           current: false, state: "unknown" },
+      { id: gen - 5, origin: "cf",      sha: "9b3a201",  flake: sys.flake, msg: "feat: prometheus exporter",  at: "1w ago",     kernel: "6.6.70", by: "dchen",       current: false, state: "ok" },
+      { id: gen - 6, origin: "cf",      sha: "44102fa",  flake: sys.flake, msg: "stig: harden sshd defaults", at: "2w ago",     kernel: "6.6.68", by: "mreyes",      current: false, state: "ok" },
+    ];
+}
+
+function DeployTab({ sys, onDeploy, onOpenCommit, preselect }) {
   const [mode, setMode] = React.useState("commit"); // 'commit' | 'generation'
   const [target, setTarget] = React.useState(null); // {kind, id, label, sub, sha?}
   const [showDiff, setShowDiff] = React.useState(false);
@@ -556,6 +615,8 @@ function DeployTab({ sys, onDeploy, onOpenCommit }) {
   const [attestations, setAttestations] = React.useState(() => (typeof ATTESTATION_RECORDS !== "undefined" ? ATTESTATION_RECORDS : []));
   const [reviewApproval, setReviewApproval] = React.useState(null);
   const [reviewAttestation, setReviewAttestation] = React.useState(null);
+  const [autoLatestPrompt, setAutoLatestPrompt] = React.useState(null);
+  const [policyOverride, setPolicyOverride] = React.useState(null);
 
   const pendingApproval = approvalQueue.find(a => a.system_id === sys.id && a.status === "pending");
   const attestationRecord = attestations.find(r => r.system_id === sys.id);
@@ -578,43 +639,16 @@ function DeployTab({ sys, onDeploy, onOpenCommit }) {
     setReviewAttestation(null);
   };
 
-  const commits = React.useMemo(() => {
-    const msgs = [
-      "chore: bump nixpkgs to 24.11 snapshot",
-      "fix: restart nginx on cert renewal",
-      "stig: enforce audit rules for sudo",
-      "feat: enable prometheus node exporter",
-      "cve: patch openssl to 3.3.2",
-      "refactor: extract firewall module",
-      "fix: postgres role permissions migration",
-      "chore: update kernel to 6.6.72",
-      "feat: prometheus alertmanager rules",
-      "fix: rotate sops keys",
-    ];
-    return msgs.map((m, i) => ({
-      sha: ["a3f8c12","f1d9022","8c4b311","77aef00","3c12889","a22fc08","bc10201","0e9f177","dd55410","e7a1233"][i],
-      message: m,
-      author: ["mreyes","jpark","dchen","ops-bot"][i % 4],
-      when: i === 0 ? "2m ago" : i === 1 ? "18m ago" : i === 2 ? "1h ago" : `${i}h ago`,
-      current: i === 2,
-      buildStatus: i === 0 ? "building" : i === 1 ? "cached" : "cached",
-    }));
-  }, [sys.id]);
+  const commits = React.useMemo(() => buildSystemCommits(sys), [sys.id]);
 
-  // Generation history (all locally activated nixos generations on this system)
-  const generations = React.useMemo(() => {
-    const gen = sys.generation;
-    // origin: 'cf' (deployed via Crystal Forge) | 'local' (manual nixos-rebuild on host) | 'unknown' (closure not in cache, no metadata)
-    return [
-      { id: gen,     origin: "cf",      sha: sys.commit, flake: sys.flake, msg: sys.commitMessage,            at: "2h ago",     kernel: "6.6.72", by: "mreyes",       current: true,  state: "active" },
-      { id: gen - 1, origin: "local",   sha: null,       flake: null,      msg: "Manual rebuild — uncommitted change", at: "8h ago",     kernel: "6.6.72", by: "root@host",   current: false, state: "drift",  driftHint: "modules/services/nginx.nix differs from sys.commit" },
-      { id: gen - 2, origin: "cf",      sha: "a1f2c31",  flake: sys.flake, msg: "chore: bump nixpkgs",        at: "yesterday",  kernel: "6.6.72", by: "ops-bot",     current: false, state: "ok" },
-      { id: gen - 3, origin: "cf",      sha: "ffa2b88",  flake: sys.flake, msg: "cve: patch openssl",         at: "3d ago",     kernel: "6.6.71", by: "ops-bot",     current: false, state: "ok" },
-      { id: gen - 4, origin: "unknown", sha: null,       flake: null,      msg: "Closure not in cache",       at: "5d ago",     kernel: "6.6.71", by: "—",           current: false, state: "unknown" },
-      { id: gen - 5, origin: "cf",      sha: "9b3a201",  flake: sys.flake, msg: "feat: prometheus exporter",  at: "1w ago",     kernel: "6.6.70", by: "dchen",       current: false, state: "ok" },
-      { id: gen - 6, origin: "cf",      sha: "44102fa",  flake: sys.flake, msg: "stig: harden sshd defaults", at: "2w ago",     kernel: "6.6.68", by: "mreyes",      current: false, state: "ok" },
-    ];
-  }, [sys.id]);
+  const generations = React.useMemo(() => buildGenerations(sys), [sys.id]);
+
+  React.useEffect(() => {
+    if (!preselect) return;
+    const g = generations.find(x => x.id === preselect.gen);
+    setMode("generation");
+    setTarget({ kind:"generation", id: preselect.gen, label:`gen #${preselect.gen}`, sub: g?.msg || "", sha: preselect.sha, origin: g?.origin });
+  }, [preselect?.nonce]);
 
   const selected = target || (mode === "commit"
     ? { kind: "commit", id: commits[0].sha, label: commits[0].sha, sub: commits[0].message, sha: commits[0].sha }
@@ -674,10 +708,10 @@ function DeployTab({ sys, onDeploy, onOpenCommit }) {
           </div>
           <div className="seg" style={{ alignSelf: "flex-start" }}>
             <button className={mode === "commit" ? "active" : ""} onClick={() => switchMode("commit")}>
-              <Icon name="git" size={12} /> Commit
+              <Icon name="git" size={12} /> New commit
             </button>
             <button className={mode === "generation" ? "active" : ""} onClick={() => switchMode("generation")}>
-              <Icon name="rollback" size={12} /> Generation
+              <Icon name="rollback" size={12} /> Previous generation
             </button>
           </div>
         </div>
@@ -826,7 +860,14 @@ nix-env --switch-generation ${selected.id} --profile /nix/var/nix/profiles/syste
 
         <div className="sd-deploy-actions">
           <button className="btn btn-ghost focus-ring">{selected.kind === "generation" ? "Verify closure" : "Dry-run build"}</button>
-          <button className="btn btn-primary focus-ring" onClick={() => onDeploy({ ...sys, pendingCommit: selected.sha })}>
+          <button className="btn btn-primary focus-ring" onClick={() => {
+            const effectivePolicy = policyOverride || sys.deploymentPolicy;
+            if (selected.kind !== "generation" && effectivePolicy === "auto_latest") {
+              setAutoLatestPrompt({ sha: selected.sha });
+              return;
+            }
+            onDeploy({ ...sys, pendingCommit: selected.sha });
+          }}>
             <Icon name={selected.kind === "generation" ? "rollback" : "deploy"} size={13} />
             {selected.kind === "generation" ? ` Switch to gen #${selected.id}` : ` Deploy ${selected.sha}`}
           </button>
@@ -835,6 +876,27 @@ nix-env --switch-generation ${selected.id} --profile /nix/var/nix/profiles/syste
     </div>
     {reviewApproval && <ApprovalReviewModal request={reviewApproval} onClose={()=>setReviewApproval(null)} onDecide={decideApproval}/>}
     {reviewAttestation && <ResolveAttestationModal record={reviewAttestation} onClose={()=>setReviewAttestation(null)} onResolve={resolveAttestation}/>}
+    {autoLatestPrompt && (
+      <div className="modal-backdrop" onClick={()=>setAutoLatestPrompt(null)}>
+        <div className="modal" onClick={e=>e.stopPropagation()} style={{ width:"min(460px,94vw)" }}>
+          <div className="modal-head" style={{ display:"flex", gap:12, alignItems:"flex-start" }}>
+            <Icon name="warn" size={18} style={{ color:"#fbbf24", flexShrink:0, marginTop:2 }}/>
+            <div>
+              <h2>This system is on auto_latest</h2>
+              <p><span className="mono">{sys.hostname}</span> tracks the newest passing commit automatically and may override a manual deploy on its next sync.</p>
+            </div>
+          </div>
+          <div className="modal-body">
+            <div style={{ fontSize:12.5, color:"var(--cf-text-muted)" }}>Convert to manual to keep this deploy pinned, or continue without changing the policy.</div>
+          </div>
+          <div className="modal-foot">
+            <button className="btn btn-ghost focus-ring" onClick={()=>setAutoLatestPrompt(null)}>Cancel</button>
+            <button className="btn btn-ghost focus-ring" onClick={()=>{ onDeploy({ ...sys, pendingCommit: autoLatestPrompt.sha }); setAutoLatestPrompt(null); }}>Continue on auto_latest</button>
+            <button className="btn btn-primary focus-ring" onClick={()=>{ setPolicyOverride("manual"); onDeploy({ ...sys, pendingCommit: autoLatestPrompt.sha, deploymentPolicy: "manual" }); setAutoLatestPrompt(null); }}>Convert &amp; deploy</button>
+          </div>
+        </div>
+      </div>
+    )}
     </div>
   );
 }
@@ -1338,37 +1400,290 @@ function LogsTab({ sys, jump }) {
 }
 
 /* ---------- Config ---------- */
-function ConfigTab({ sys }) {
+function ConfigTab({ sys, initialRev, onOpenFlake }) {
+  /* Server-shaped consumer: the browser never holds the full option set.
+     A debounced query fetches ONE page (PAGE rows) with the search term and
+     filter resolved server-side, so load time is flat whether the host has
+     300 options or 15,000. */
+  const [summary, setSummary] = React.useState(null);
+  const [q, setQ] = React.useState("");
+  const [debouncedQ, setDebouncedQ] = React.useState("");
+  const [filter, setFilter] = React.useState("all"); // all | overridden | changed
+  const [page, setPage] = React.useState(0);
+  const [result, setResult] = React.useState(null);
+  const [loading, setLoading] = React.useState(true);
+  const [expanded, setExpanded] = React.useState(null);
+  const [module, setModule] = React.useState(null);
+  const reqId = React.useRef(0);
+
+  /* Page size is measured so the table ends level with the side column. Measure
+     the side column's CONTENT (children + gaps) rather than the window: this card
+     lives inside an internally-scrolling container, so viewport math is
+     meaningless here. Re-measured once `summary` arrives — measuring against
+     empty side cards gives a uselessly small first answer. */
+  const cardRef = React.useRef(null);
+  const wrapRef = React.useRef(null);
+  const sideRef = React.useRef(null);
+  const [PAGE, setPAGE] = React.useState(24);
+  React.useLayoutEffect(() => {
+    const measure = () => {
+      const card = cardRef.current, wrap = wrapRef.current, side = sideRef.current;
+      if (!card || !wrap || !side || !side.children.length) return;
+      const kids = Array.from(side.children);
+      const gap = parseFloat(getComputedStyle(side).rowGap) || 14;
+      const target = kids.reduce((a, k) => a + k.getBoundingClientRect().height, 0) + gap * (kids.length - 1);
+      const chrome = wrap.getBoundingClientRect().top - card.getBoundingClientRect().top;
+      const head = wrap.querySelector("thead");
+      const row = wrap.querySelector("tbody tr:not(.cfg-detail-row)");
+      const rowH = row ? row.getBoundingClientRect().height : 34;
+      const headH = head ? head.getBoundingClientRect().height : 32;
+      const n = Math.floor((target - chrome - headH) / Math.max(rowH, 18));
+      setPAGE(prev => {
+        const next = Math.max(10, Math.min(80, n));
+        return Math.abs(next - prev) <= 1 ? prev : next;
+      });
+    };
+    measure();
+    const t = setTimeout(measure, 220);
+    window.addEventListener("resize", measure);
+    return () => { clearTimeout(t); window.removeEventListener("resize", measure); };
+  }, [sys.id, !!summary]);
+
+  /* Which revision's options we're looking at. Options belong to a revision, so
+     an older generation is a different cached blob — not a re-evaluation.
+     Two ways in: GENERATIONS (what this host actually ran; only Crystal Forge
+     deployments carry a commit) and COMMITS (any revision of the flake, whether
+     or not it was ever deployed here). */
+  const gens = React.useMemo(() => buildGenerations(sys), [sys.id]);
+  const commits = React.useMemo(() => {
+    const list = buildSystemCommits(sys);
+    // A revision arrived by navigation (e.g. from the flake explorer) may not be
+     // in this host's tracked list — it is still evaluable, so surface it.
+    if (initialRev && !list.some(c => c.sha === initialRev)) {
+      return [{ sha: initialRev, message: "(from flake explorer)", author: "—", when: "referenced", current: false, deployed: false, synthetic: true }, ...list];
+    }
+    return list;
+  }, [sys.id, initialRev]);
+  const [revMode, setRevMode] = React.useState(initialRev ? "commit" : "generation"); // generation | commit
+  const [genId, setGenId] = React.useState(null);
+  const [commitSha, setCommitSha] = React.useState(initialRev || null);
+  React.useEffect(() => {
+    setRevMode(initialRev ? "commit" : "generation");
+    setGenId(null);
+    setCommitSha(initialRev || null);
+    setPage(0);
+  }, [sys.id, initialRev]);
+
+  const activeGen = (genId !== null && gens.find(g => g.id === genId)) || gens[0];
+  const activeCommit = (commitSha && commits.find(c => c.sha === commitSha)) || commits.find(c => c.sha === sys.commit) || commits[0];
+  const onCommits = revMode === "commit";
+  const rev = onCommits ? activeCommit.sha : (activeGen && activeGen.sha ? activeGen.sha : sys.commit);
+  const isHistorical = onCommits
+    ? activeCommit.sha !== sys.commit
+    : !!activeGen && !activeGen.current;
+  const deployedHere = gens.some(g => g.sha === rev);
+
+  React.useEffect(() => { window.ConfigAPI.summary(sys, rev).then(setSummary); }, [sys.id, rev]);
+  // Debounce keystrokes so typing issues one query, not one per character.
+  React.useEffect(() => { const t = setTimeout(() => { setDebouncedQ(q); setPage(0); }, 220); return () => clearTimeout(t); }, [q]);
+  React.useEffect(() => { setPage(0); }, [filter, sys.id, PAGE]);
+
+  React.useEffect(() => {
+    // Guard against out-of-order responses: only the newest request may write.
+    const id = ++reqId.current;
+    setLoading(true);
+    window.ConfigAPI.query(sys, { q: debouncedQ, filter, offset: page * PAGE, limit: PAGE, rev })
+      .then(res => { if (id === reqId.current) { setResult(res); setLoading(false); } });
+  }, [sys.id, rev, debouncedQ, filter, page, PAGE]);
+
+  const rows = result ? result.rows : [];
+  const total = result ? result.total : 0;
+  const counts = (result && result.counts) || (summary && summary.counts) || { all: 0, overridden: 0, changed: 0 };
+  const prevGen = summary ? summary.prevGen : "–";
+  const pageCount = Math.max(1, Math.ceil(total / PAGE));
+  const shortFile = (f) => f.replace(/\/default\.nix$/, "").replace(/\.nix$/, "");
+
   return (
     <div className="sd-grid sd-grid-config">
-      <section className="card sd-card">
+      <section className="card sd-card cfg-card" ref={cardRef}>
         <div className="sd-card-head">
-          <h2>Rendered module</h2>
+          <h2>Evaluated options</h2>
           <span className="sd-card-meta mono">{sys.flake}#nixosConfigurations.{sys.hostname}</span>
         </div>
-        <pre className="sd-nix">{`{ config, pkgs, lib, ... }: {
-  networking.hostName = "${sys.hostname}";
-  networking.domain = "${sys.environment}.cf.internal";
+        <div className="cfg-revbar">
+          <div className="seg cfg-revseg">
+            <button className={!onCommits?"active":""} onClick={()=>{ setRevMode("generation"); setPage(0); setExpanded(null); }}>Generations</button>
+            <button className={onCommits?"active":""} onClick={()=>{ setRevMode("commit"); setPage(0); setExpanded(null); }}>Commits</button>
+          </div>
+          {onCommits ? (
+            <select className="cfg-revselect focus-ring" value={activeCommit.sha} onChange={e=>{ setCommitSha(e.target.value); setPage(0); setExpanded(null); }}>
+                {commits.map(c => (
+                  <option key={c.sha} value={c.sha}>{c.sha}{c.sha === sys.commit ? " (deployed)" : ""} · {c.when}</option>
+                ))}
+            </select>
+          ) : (
+            <select className="cfg-revselect focus-ring" value={activeGen ? activeGen.id : ""} onChange={e=>{ setGenId(Number(e.target.value)); setPage(0); setExpanded(null); }}>
+              {gens.map(g => (
+                <option key={g.id} value={g.id} disabled={!g.sha}>
+                  gen #{g.id}{g.current ? " (current)" : ""}{g.sha ? ` · ${g.sha}` : " · no commit"}
+                </option>
+              ))}
+            </select>
+          )}
+          <span className="cfg-revbar-msg" title={onCommits ? activeCommit.message : (activeGen ? activeGen.msg : "")}>{onCommits ? activeCommit.message : (activeGen ? activeGen.msg : "")}</span>
+          {isHistorical && (
+            <button className="btn btn-ghost focus-ring xs cfg-revback" onClick={()=>{ setRevMode("generation"); setGenId(null); setCommitSha(null); setPage(0); setExpanded(null); }}>
+              Back to current
+            </button>
+          )}
+        </div>
+        {isHistorical && (
+          <div className="sd-callout sd-callout-warn cfg-hist-note">
+            <Icon name="info" size={13}/>
+            <div>
+              {onCommits
+                ? <>Showing the configuration this host <em>would</em> evaluate to at <span className="mono">{rev}</span>{deployedHere ? "" : " — a revision never deployed here"}, not what is running now.</>
+                : <>Showing the configuration as evaluated for generation #{activeGen.id} (<span className="mono">{rev}</span>), not what is running now.</>}
+            </div>
+          </div>
+        )}
+        <div className="cfg-toolbar">
+          <div className="seg">
+            <button className={filter==="all"?"active":""} onClick={()=>setFilter("all")}>All <span className="seg-n">{counts.all.toLocaleString()}</span></button>
+            <button className={filter==="overridden"?"active":""} onClick={()=>setFilter("overridden")}>Overridden <span className="seg-n">{counts.overridden}</span></button>
+            <button className={filter==="changed"?"active":""} onClick={()=>setFilter("changed")} title={`Changed vs generation #${prevGen}`}>Changed <span className="seg-n">{counts.changed}</span></button>
+          </div>
+          <div className="q-search cfg-q">
+            <Icon name="search" size={13}/>
+            <input className="q-search-input" value={q} onChange={e=>setQ(e.target.value)} placeholder="Filter options, values, modules…"/>
+            {q && <button className="btn-icon xs focus-ring" title="Clear" onClick={()=>setQ("")}><Icon name="x" size={13}/></button>}
+          </div>
+          <div className="cfg-count">{loading ? "Querying…" : `${(page*PAGE+1).toLocaleString()}–${Math.min(total,(page+1)*PAGE).toLocaleString()} of ${total.toLocaleString()}`}</div>
+          {pageCount > 1 && (
+            <div className="cfg-pager">
+              <button className="btn-icon xs focus-ring" title="Previous page" disabled={page===0} onClick={()=>{setPage(p=>Math.max(0,p-1));setExpanded(null);}}><Icon name="chevron-left" size={13}/></button>
+              <button className="btn-icon xs focus-ring" title="Next page" disabled={page>=pageCount-1} onClick={()=>{setPage(p=>Math.min(pageCount-1,p+1));setExpanded(null);}}><Icon name="chevron-right" size={13}/></button>
+            </div>
+          )}
+        </div>
+        <div className={`cfg-table-wrap${loading?" loading":""}`} ref={wrapRef}>
+          <table className="sys-table compact cfg-table">
+            <colgroup><col style={{ width:"46%" }}/><col style={{ width:"26%" }}/><col style={{ width:"28%" }}/></colgroup>
+            <thead><tr><th>Option</th><th>Value</th><th>Set by</th></tr></thead>
+            <tbody>
+              {rows.map(o => {
+                const ch = o.change;
+                const open = expanded === o.path;
+                return (
+                  <React.Fragment key={o.path}>
+                    <tr className={`cfg-row${open?" open":""}`} onClick={()=>setExpanded(open?null:o.path)}>
+                      <td>
+                        <div className="cfg-opt">
+                          <Icon name="chevron-right" size={11} className={`cfg-caret${open?" open":""}`}/>
+                          <span className="mono cfg-path" title={o.path}>{o.path}</span>
+                          {ch && <span className={`cfg-tag cfg-tag-${ch.kind}`}>{ch.kind}</span>}
+                        </div>
+                      </td>
+                      <td>
+                        {o.evalError
+                          ? <span className="cfg-val cfg-val-err" title={o.evalError}>not evaluated</span>
+                          : <span className="mono cfg-val" title={o.value || o.type}>{o.value}</span>}
+                      </td>
+                      <td>
+                        <button className="cfg-src focus-ring" onClick={(e)=>{ e.stopPropagation(); setModule({ file:o.source, input:o.sourceInput }); }}>
+                          <CfgInputBadge input={o.sourceInput} sys={sys} onOpenFlake={onOpenFlake}/>
+                          <span className="mono">{shortFile(o.source)}</span>
+                          {o.overridden && <span className="cfg-defcount" title={`${o.defs.length} modules define this option; this one won the priority merge`}>{o.defs.length} defs</span>}
+                        </button>
+                      </td>
+                    </tr>
+                    {open && (
+                      <tr className="cfg-detail-row"><td colSpan={3}>
+                        <div className="cfg-detail">
+                          <div className="cfg-detail-row">
+                            <span className="cfg-detail-label">Type</span>
+                            <span className="mono cfg-detail-v">{o.type}</span>
+                          </div>
+                          {ch && (
+                            <div className="cfg-detail-row">
+                              <span className="cfg-detail-label">vs gen #{prevGen}</span>
+                              <div className="cfg-diff">
+                                {/* Diff rendering follows the option's declared TYPE.
+                                    Non-comparable values state that plainly rather
+                                    than inventing a before/after. */}
+                                {ch.comparable === false && (
+                                  <div className="cfg-diff-line cfg-diff-opaque">
+                                    <span>changed — {ch.reason}</span>
+                                  </div>
+                                )}
+                                {ch.evalError && <div className="cfg-diff-line cfg-diff-err"><span className="mono">{ch.evalError}</span></div>}
+                                {ch.valueKind === "package" && ch.comparable && <React.Fragment>
+                                  {ch.pkgRemoved.map(p => <div key={"r"+p.name} className="cfg-diff-line cfg-diff-from"><span className="mono">− {p.name}-{p.version}</span></div>)}
+                                  {ch.pkgAdded.map(p => <div key={"a"+p.name} className="cfg-diff-line cfg-diff-to"><span className="mono">+ {p.name}-{p.version}</span></div>)}
+                                  {ch.pkgUnchanged > 0 && <div className="cfg-diff-note">{ch.pkgUnchanged} package{ch.pkgUnchanged===1?"":"s"} unchanged</div>}
+                                </React.Fragment>}
+                                {ch.valueKind === "scalar" && <React.Fragment>
+                                  {ch.from !== null && ch.from !== undefined && <div className="cfg-diff-line cfg-diff-from"><span className="mono">− {ch.from}</span></div>}
+                                  {ch.to !== null && ch.to !== undefined && <div className="cfg-diff-line cfg-diff-to"><span className="mono">+ {ch.to}</span></div>}
+                                </React.Fragment>}
+                              </div>
+                            </div>
+                          )}
+                          <div className="cfg-detail-row">
+                            <span className="cfg-detail-label">Definitions</span>
+                            <div className="cfg-defs">
+                              {o.defs.map(d => (
+                                <button key={d.file} className={`cfg-def focus-ring${d.winning?" win":""}`} onClick={()=>setModule(d)}>
+                                  <Icon name={d.winning?"check":"minus"} size={11}/>
+                                  <CfgInputBadge input={d.input} rev={d.rev} sys={sys} onOpenFlake={onOpenFlake}/>
+                                  <span className="mono cfg-def-file">{d.file}</span>
+                                  <span className="cfg-def-note">{d.note}</span>
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                      </td></tr>
+                    )}
+                  </React.Fragment>
+                );
+              })}
+              {rows.length === 0 && <tr><td colSpan={3}><div className="cfg-empty">{loading ? "Loading options…" : "No options match this filter."}</div></td></tr>}
+            </tbody>
+          </table>
+        </div>
+      </section>
 
-  crystal-forge.client = {
-    enable = true;
-    server_host = "crystal-forge.internal";
-    environment = "${sys.environment}";
-  };
+      <div className="cfg-side" ref={sideRef}>
+      <section className="card sd-card">
+        <div className="sd-card-head">
+          <h2>Modules</h2>
+          <span className="sd-card-meta">{summary ? `${summary.modules.length} modules · won / defined` : "…"}</span>
+        </div>
+        <div className="cfg-modules">
+          {(summary ? summary.modules : []).map(m => (
+            <button key={m.path} className="cfg-module focus-ring" onClick={()=>setModule(m)}>
+              <span className={`cfg-module-kind cfg-module-${m.kind}`} title={m.rev ? `${m.input} @ ${m.rev}` : m.input}>{m.input}</span>
+              <span className="mono cfg-module-path">{shortFile(m.path)}</span>
+              <span className="cfg-module-count" title={`Sets ${m.sets} option${m.sets===1?"":"s"} on this host; ${m.wins} of those definitions win the priority merge`}>{m.wins}/{m.sets}</span>
+            </button>
+          ))}
+        </div>
+      </section>
 
-  crystal-forge.stig = {
-    banner.enable = true;
-    sshd_hardening.enable = true;
-    audit_rules.enable = true;
-    # ${sys.environment === "production" ? "28" : "22"} STIG controls active
-  };
-
-  services.openssh.enable = true;
-  services.prometheus.exporters.node.enable = true;
-
-  deploymentPolicy = "${sys.deploymentPolicy}";
-  system.stateVersion = "${sys.nixosVersion.slice(0, 5)}";
-}`}</pre>
+      <section className="card sd-card">
+        <div className="sd-card-head">
+          <h2>Evaluation</h2>
+          <span className={`chip ${summary && summary.facts.cached ? "chip-healthy" : "chip-unknown"}`}>{summary ? (summary.facts.cached ? "cached" : "re-evaluated") : "…"}</span>
+        </div>
+        {summary && <React.Fragment>
+        <div className="sd-drift-row"><span className="sd-drift-label">Toplevel</span><span className="mono sd-drift-val cfg-drv" title={summary.facts.drv}>{summary.facts.drv.replace("/nix/store/","").split("-")[0]}…</span></div>
+        <div className="sd-drift-row"><span className="sd-drift-label">Evaluated options</span><span className="mono sd-drift-val">{summary.facts.optionCount.toLocaleString()}</span></div>
+        <div className="sd-drift-row"><span className="sd-drift-label">Host delta</span><span className="mono sd-drift-val" title="Rows stored for this host; the rest are shared with every host on this flake revision">{summary.facts.deltaRows} rows</span></div>
+        <div className="sd-drift-row"><span className="sd-drift-label">Packages</span><span className="mono sd-drift-val">{summary.facts.packages}</span></div>
+        <div className="sd-drift-row"><span className="sd-drift-label">Closure size</span><span className="mono sd-drift-val">{summary.facts.closure}</span></div>
+        <div className="sd-drift-row"><span className="sd-drift-label">Eval time</span><span className="mono sd-drift-val">{summary.facts.evalSeconds}s · {summary.facts.evaluatedAt}</span></div>
+        </React.Fragment>}
       </section>
 
       <section className="card sd-card">
@@ -1393,6 +1708,65 @@ function ConfigTab({ sys }) {
           <div>No configuration drift detected in the last 7 days.</div>
         </div>
       </section>
+      </div>
+      {module && <ModuleSourceTray sys={sys} mod={module} onOpenFlake={onOpenFlake} onClose={()=>setModule(null)}/>}
+    </div>
+  );
+}
+
+/* Input badge — a link into the Flakes drawer when the input is a tracked
+   flake, plain text otherwise. */
+function CfgInputBadge({ input, rev, sys, onOpenFlake }) {
+  const flakeName = resolveInputFlake(input, sys);
+  const label = input + (rev ? ` @ ${rev}` : "");
+  if (!flakeName) return <span className="cfg-input" title={`${input} — not tracked by Crystal Forge`}>{label}</span>;
+  return (
+    <button className="cfg-input cfg-input-link focus-ring" title={`Open ${flakeName} in Flakes`}
+      onClick={(e)=>{ e.stopPropagation(); onOpenFlake?.({ flake: flakeName, sha: input === "self" ? sys.commit : undefined }); }}>
+      {label}
+    </button>
+  );
+}
+
+function ModuleSourceTray({ sys, mod, onOpenFlake, onClose }) {
+  const file = mod.file || mod.path;
+  const input = mod.input || "self";
+  const rev = mod.rev || null;
+  const isSelf = input === "self";
+  // Origin is (input, rev, path) — the flake being deployed is just one input
+  // among many, so the tray states which tree the source is read from.
+  const origin = isSelf ? `${sys.flake} @ ${sys.commit}` : `input "${input}"${rev ? ` @ ${rev}` : ""}`;
+  return (
+    <div className="fl-tray-backdrop" onClick={onClose}>
+      <div className="fl-tray" style={{ width:"min(720px,96vw)" }} onClick={e=>e.stopPropagation()}>
+        <div className="fl-tray-head">
+          <div style={{ minWidth:0 }}>
+            <div className="fl-tray-title mono cfg-tray-title" title={file}>{file}</div>
+            <div className="fl-tray-sub">{origin}{isSelf ? "" : " · read-only"}</div>
+          </div>
+          <div style={{ display:"flex", gap:6 }}>
+            {resolveInputFlake(input, sys)
+              ? <button className="btn btn-ghost focus-ring xs" onClick={()=>onOpenFlake?.({ flake: resolveInputFlake(input, sys), sha: isSelf ? sys.commit : undefined })}><Icon name="git" size={12}/> Open in Flakes</button>
+              : <button className="btn btn-ghost focus-ring xs" disabled title="This input is not tracked by Crystal Forge"><Icon name="git" size={12}/> Not tracked</button>}
+            <button className="btn-icon focus-ring" onClick={onClose}><Icon name="x" size={16}/></button>
+          </div>
+        </div>
+        <div className="fl-tray-body">
+          <div className="cfg-tray-col">
+          <div className="sd-callout sd-callout-info">
+            <Icon name="info" size={13}/>
+            <div>Source is read from {isSelf ? "the deployed flake" : `flake input "${input}"`} at the locked revision, not reconstructed per host.</div>
+          </div>
+          <pre className="sd-nix">{`{ config, lib, pkgs, ... }:
+with lib;
+let cfg = config.${isSelf ? "crystal-forge" : "services"};
+in {
+  # ${file}
+  # ${origin}
+}`}</pre>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1607,4 +1981,4 @@ function ComplianceTab({ sys, onNavigate }) {
   );
 }
 
-Object.assign(window, { SystemDetail });
+Object.assign(window, { SystemDetail, buildGenerations, buildSystemCommits });

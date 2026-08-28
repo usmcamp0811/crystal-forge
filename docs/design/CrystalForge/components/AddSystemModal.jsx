@@ -1,7 +1,7 @@
 // Register System modal — opens from the "Add system" button on the Systems view.
 // Step 5 of onboarding; on success shows the Step 6 "deploy the agent" next-steps panel.
 
-function AddSystemModal({ onClose, coach }) {
+function AddSystemModal({ onClose, coach, prefill }) {
   const envList = (typeof ENVIRONMENTS !== "undefined" && ENVIRONMENTS.length)
     ? ENVIRONMENTS.map(e => e.name) : ["production", "staging", "dev", "edge", "lab"];
   const flakeList = (typeof FLAKES !== "undefined" && FLAKES.length) ? FLAKES : ["infrastructure"];
@@ -17,6 +17,9 @@ function AddSystemModal({ onClose, coach }) {
     serverAddress: "",
     publicKey: "",
     tags: "",
+    // Prefill when the host is already declared in a flake and only needs
+    // registering (e.g. opened from the flake explorer's Systems tab).
+    ...(prefill || {}),
   });
   const [phase, setPhase] = React.useState("form"); // form | registered
   const set = (k, v) => setForm(p => ({ ...p, [k]: v }));

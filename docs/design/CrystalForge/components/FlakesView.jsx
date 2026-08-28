@@ -1,6 +1,6 @@
 // Flakes view — registry table/cards + side-tray commit explorer
 
-function FlakesView({ defaultView, focus, onClearFocus, onOpenEval, onOpenBuild, onOpenSystems }) {
+function FlakesView({ defaultView, focus, onClearFocus, onTrayClose, onOpenEval, onOpenBuild, onOpenSystems, onOpenSystem }) {
   const [viewMode, setViewMode] = React.useState(defaultView || "table");
   React.useEffect(() => { if (defaultView) setViewMode(defaultView); }, [defaultView]);
   const [query, setQuery]       = React.useState("");
@@ -42,7 +42,7 @@ function FlakesView({ defaultView, focus, onClearFocus, onOpenEval, onOpenBuild,
         <div>
           <h1 className="page-title">Flakes</h1>
           <p className="page-subtitle">
-            {FLAKE_REGISTRY.length} tracked · {FLAKE_REGISTRY.reduce((a,f)=>a+f.systemCount,0)} systems ·{" "}
+            {FLAKE_REGISTRY.length} tracked · {FLAKE_REGISTRY.reduce((a,f)=>a+flakeManagedCount(f),0)} systems ·{" "}
             {FLAKE_REGISTRY.filter(f=>f.status==="synced").length} synced
           </p>
         </div>
@@ -73,7 +73,7 @@ function FlakesView({ defaultView, focus, onClearFocus, onOpenEval, onOpenBuild,
       }
 
       {/* Side tray */}
-      {trayFlake && <FlakeTray flake={trayFlake} focusSha={focusSha} onClose={() => { setTrayFlake(null); setFocusSha(null); }} onEdit={() => { setEditFlake(trayFlake); }} onOpenEval={onOpenEval} onOpenBuild={onOpenBuild} onOpenSystems={onOpenSystems} />}
+      {trayFlake && <FlakeTray flake={trayFlake} focusSha={focusSha} onClose={() => { setTrayFlake(null); setFocusSha(null); onTrayClose?.(); }} onEdit={() => { setEditFlake(trayFlake); }} onOpenEval={onOpenEval} onOpenBuild={onOpenBuild} onOpenSystems={onOpenSystems} onOpenSystem={onOpenSystem} />}
 
       {addOpen && <FlakeFormModal mode="add" onClose={()=>setAddOpen(false)}/>}
       {editFlake && <FlakeFormModal mode="edit" flake={editFlake} onClose={()=>setEditFlake(null)}/>}
@@ -82,7 +82,7 @@ function FlakesView({ defaultView, focus, onClearFocus, onOpenEval, onOpenBuild,
 }
 
 /* ── Side tray: history + diff ─────────────────────────────────────── */
-function FlakeTray({ flake, focusSha, focusMeta, onClose, onEdit, onOpenEval, onOpenBuild, onOpenSystems }) {
+function FlakeTray({ flake, focusSha, focusMeta, onClose, onEdit, onOpenEval, onOpenBuild, onOpenSystems, onOpenSystem }) {
   const commits = FLAKE_COMMITS[flake.id] || [];
   // If the deep-linked commit isn't in the tracked list, synthesize a stub so the
   // tray can still focus it (e.g. a short sha referenced from a deployment) — using
@@ -138,8 +138,21 @@ function FlakeTray({ flake, focusSha, focusMeta, onClose, onEdit, onOpenEval, on
   const idx = allCommits.findIndex(c => c.sha === selCommit?.sha);
   const pipe = COMMIT_PIPELINE_STATUS[idx >= 0 ? idx % COMMIT_PIPELINE_STATUS.length : 0];
 
+  // Outputs are a property of the SELECTED COMMIT, not of the flake: nothing
+  // guarantees two commits declare the same hosts, modules, or lock. One cached
+  // read per revision (`nix flake show` + flake.lock + cached option
+  // declarations) — no per-host eval, so cost is flat as the fleet grows.
+  const [pane, setPane] = React.useState("commits");
+  React.useEffect(() => { setPane("commits"); }, [flake.id]);
+  React.useEffect(() => { if (focusSha) setPane("commits"); }, [focusSha]);
+  const prevSha = idx >= 0 && allCommits[idx + 1] ? allCommits[idx + 1].sha : null;
+  const outputs = React.useMemo(
+    () => window.getFlakeOutputs(flake, selCommit ? selCommit.sha : flake.latestCommit, prevSha),
+    [flake.id, selCommit?.sha, prevSha]
+  );
+
   // Rollout fraction: pretend system count tied to flake's systemCount, vary by index
-  const rolloutTotal = flake.systemCount;
+  const rolloutTotal = flakeManagedCount(flake);
   const rolloutOn = idx === 0 ? rolloutTotal : Math.max(0, rolloutTotal - (idx * 2));
 
   return (
@@ -184,7 +197,29 @@ function FlakeTray({ flake, focusSha, focusMeta, onClose, onEdit, onOpenEval, on
           </div>
         )}
 
-        {/* Body: 2-pane — commit list (left) / detail (right) */}
+        {/* Output tabs: git history is one facet of a flake, not the whole thing. */}
+        <nav className="fx-tabs">
+          {[
+            { k:"commits", l:"Commits", n:allCommits.length },
+            { k:"systems", l:"Systems", n:outputs.counts.declared, alert:outputs.counts.orphaned || outputs.counts.declaredOnly },
+            { k:"modules", l:"Modules", n:outputs.counts.modules },
+            { k:"inputs",  l:"Inputs",  n:outputs.counts.inputs, alert:outputs.counts.staleInputs },
+          ].map(t => (
+            <button key={t.k} className={`fx-tab focus-ring${pane===t.k?" active":""}`} onClick={()=>setPane(t.k)}>
+              {t.l}<span className="fx-tab-n">{t.n}</span>
+              {t.alert > 0 && <span className="fx-tab-dot"/>}
+            </button>
+          ))}
+        </nav>
+
+        {pane !== "commits" ? (
+          <div className="fx-body">
+            {pane === "systems" && <FlakeSystemsPane flake={flake} out={outputs} commit={selCommit} onPickCommit={()=>setPane("commits")} onOpenSystem={onOpenSystem}/>}
+            {pane === "modules" && <FlakeModulesPane flake={flake} out={outputs} commit={selCommit} onPickCommit={()=>setPane("commits")}/>}
+            {pane === "inputs"  && <FlakeInputsPane flake={flake} out={outputs} commit={selCommit} onPickCommit={()=>setPane("commits")}/>}
+          </div>
+        ) : (
+        /* Body: 2-pane — commit list (left) / detail (right) */
         <div className="fl-tray-body">
           {/* Commit list */}
           <nav className="fl-tray-commits">
@@ -209,7 +244,7 @@ function FlakeTray({ flake, focusSha, focusMeta, onClose, onEdit, onOpenEval, on
                   const isLastInBucket = i === list.length - 1;
                   const isLastBucket = gi === Object.keys(commitGroups).length - 1;
                   return (
-                    <div key={c.sha}
+                    <div key={`${c.sha}-${gi}-${i}`}
                       className={`fl-commit-item${isSel?" active":""}`}
                       onClick={()=>setSelCommit(c)}
                     >
@@ -310,6 +345,7 @@ function FlakeTray({ flake, focusSha, focusMeta, onClose, onEdit, onOpenEval, on
             )}
           </section>
         </div>
+        )}
       </aside>
       {selFile && selCommit && (
         <DiffModal file={selFile} commit={selCommit} flake={flake} onClose={()=>setSelFile(null)} />
@@ -379,7 +415,9 @@ function DiffModal({ file, commit, flake, onClose }) {
   }, []);
 
   return (
-    <div className="modal-backdrop" onClick={onClose} style={{ zIndex: 90 }}>
+    // The diff modal is a sibling of the flake tray (z-index 181), so it needs a
+    // higher layer than the tray — not the default modal layer.
+    <div className="modal-backdrop" onClick={onClose} style={{ zIndex: 200 }}>
       <div className="diff-modal" onClick={e=>e.stopPropagation()}>
         <header className="diff-modal-head">
           <div style={{ minWidth:0, flex:1 }}>
@@ -525,7 +563,7 @@ function FlakeTable({ flakes, selected, onSelect, onEdit, flashError }) {
               </td>
               <td><FlakeSyncChip f={f}/></td>
               <td><span className="chip chip-unknown">{f.branch}</span></td>
-              <td style={{ fontSize:13 }}>{f.systemCount}</td>
+              <td style={{ fontSize:13 }}>{flakeManagedCount(f)}</td>
               <td><FlakeEnvBadges flake={f} align="flex-start" max={3}/></td>
               <td>
                 <span className="mono" style={{ fontSize:12, fontWeight:600 }}>{f.latestCommit}</span>
@@ -585,7 +623,7 @@ function FlakeCards({ flakes, selected, onSelect, onEdit, flashError }) {
             </div>
             <div className="sys-card-body">
               <div><div className="sys-kv-key">Branch</div><div className="sys-kv-val">{f.branch}</div></div>
-              <div><div className="sys-kv-key">Systems</div><div className="sys-kv-val" style={{fontFamily:"inherit"}}>{f.systemCount}</div></div>
+              <div><div className="sys-kv-key">Systems</div><div className="sys-kv-val" style={{fontFamily:"inherit"}}>{flakeManagedCount(f)}</div></div>
               <div><div className="sys-kv-key">Commit</div><div className="sys-kv-val">{f.latestCommit}</div></div>
               <div><div className="sys-kv-key">Synced</div><div className="sys-kv-val" style={{fontFamily:"inherit"}}>{f.lastSyncAt}</div></div>
             </div>
@@ -778,7 +816,7 @@ function DeleteFlakeConfirm({ flake, onCancel, onConfirm }) {
               <div style={{ fontWeight:600, color:"#fecaca", marginBottom:4 }}>What happens</div>
               <ul style={{ margin:0, paddingLeft:18, color:"var(--cf-text-secondary)", lineHeight:1.6 }}>
                 <li>Auto-sync polling stops immediately</li>
-                <li>{flake.systemCount} system{flake.systemCount === 1 ? "" : "s"} on this flake will need to be retargeted</li>
+                <li>{flakeManagedCount(flake)} system{flakeManagedCount(flake) === 1 ? "" : "s"} on this flake will need to be retargeted</li>
                 <li>Tracked commits are retained for audit; build/eval history stays</li>
                 <li>Repository credentials are <em>not</em> deleted</li>
               </ul>

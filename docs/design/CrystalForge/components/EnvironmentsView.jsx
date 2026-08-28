@@ -81,12 +81,22 @@ function isProductionEnv(envName) {
 }
 window.isProductionEnv = isProductionEnv;
 
-function EnvironmentsView({ defaultView, onOpenCache, onOpenSystem, onOpenBundle }) {
+function EnvironmentsView({ defaultView, onOpenCache, onOpenSystem, onOpenBundle, onOpenFlake, focusEnv, onClearFocusEnv }) {
   const [query, setQuery] = React.useState("");
   const [viewMode, setViewMode] = React.useState(defaultView || "cards");
   React.useEffect(() => { if (defaultView) setViewMode(defaultView); }, [defaultView]);
   const [editEnv, setEditEnv] = React.useState(null);
   const [viewEnv, setViewEnv] = React.useState(null);
+  // Returning from a drawer opened out of this panel (e.g. a flake) reopens it,
+  // so navigation is reversible rather than dumping the user on the list.
+  React.useEffect(() => {
+    if (!focusEnv) return;
+    // Resolve through the same decoration the cards use — raw ENVIRONMENTS
+    // entries carry no `stats`, which EnvPanel requires.
+    const raw = ENVIRONMENTS.find(x => x.name === focusEnv);
+    if (raw) setViewEnv({ ...raw, ...(ENV_META[raw.name] || {}), stats: envStats(raw.name) });
+    onClearFocusEnv?.();
+  }, [focusEnv]);
   const [addOpen, setAddOpen] = React.useState(false);
   const envNeedsAttention = (name) => SYSTEMS.some(s => s.environment === name && (s.health === "critical" || s.health === "offline"));
   const flashAttention = useAttentionFlash("environments", ENVIRONMENTS.some(e => envNeedsAttention(e.name)));
@@ -179,7 +189,7 @@ function EnvironmentsView({ defaultView, onOpenCache, onOpenSystem, onOpenBundle
       )}
 
       {viewEnv && (
-        <EnvPanel env={viewEnv} onClose={() => setViewEnv(null)} onEdit={() => { setEditEnv(viewEnv); }} onOpenCache={onOpenCache} onOpenSystem={onOpenSystem} onOpenBundle={onOpenBundle} />
+        <EnvPanel env={viewEnv} onClose={() => setViewEnv(null)} onEdit={() => { setEditEnv(viewEnv); }} onOpenCache={onOpenCache} onOpenSystem={onOpenSystem} onOpenBundle={onOpenBundle} onOpenFlake={onOpenFlake} />
       )}
       {(editEnv || addOpen) && (
         <EnvFormModal
@@ -349,7 +359,7 @@ function EnvCard({ env, onEdit, flash }) {
 }
 
 // Side panel — environment reference peek, with Edit handing off to the form modal
-function EnvPanel({ env, onClose, onEdit, onOpenCache, onOpenSystem, onOpenBundle }) {
+function EnvPanel({ env, onClose, onEdit, onOpenCache, onOpenSystem, onOpenBundle, onOpenFlake }) {
   const total = env.stats.total || 1;
   const sys = SYSTEMS.filter(s => s.environment === env.name);
   return (
@@ -440,7 +450,8 @@ function EnvPanel({ env, onClose, onEdit, onOpenCache, onOpenSystem, onOpenBundl
             <h3>Flakes in use</h3>
             <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
               {env.stats.flakes.length ? env.stats.flakes.map(f => (
-                <span key={f} className="chip chip-unknown mono" style={{ fontSize:11 }}>{f}</span>
+                <span key={f} className="chip chip-unknown mono chip-link" style={{ fontSize:11 }}
+                  title={`Open ${f} in Flakes`} onClick={() => onOpenFlake?.(f, env.name)}>{f}</span>
               )) : <span style={{ fontSize:12, color:"var(--cf-text-muted)" }}>none deployed</span>}
             </div>
           </section>

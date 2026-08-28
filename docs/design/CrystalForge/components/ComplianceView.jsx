@@ -551,7 +551,6 @@ function BundleHeader({ bundle, stats, onEdit }) {
           <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
             {bundle.requiredEnvs.map(env => <EnvBadge key={env} env={env}/>)}
           </div>
-          <button className="btn btn-ghost focus-ring" onClick={onEdit}><Icon name="edit" size={13}/> Edit bundle</button>
         </div>
       </div>
       <p style={{ margin:0, fontSize:13, color:"var(--cf-text-secondary)", lineHeight:1.5 }}>{bundle.description}</p>

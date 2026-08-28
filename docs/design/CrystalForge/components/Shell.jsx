@@ -540,7 +540,7 @@ function Topbar({ theme, onTheme, onTweaks, crumb, onNavigate, onSearchResult })
       APPROVAL_QUEUE.filter(a => a.status === "pending").forEach(a => {
         items.push({ id:`apr-${a.id}`, icon:"deploy", color:"#fbbf24",
           title:`${a.hostname} awaiting deploy approval`, sub:`${a.environment} · ${a.policyId} policy · ${a.approvals.length}/${a.neededApprovals} approved`,
-          at: timeAgoShort(a.requestedAt), route:"systems", unread:true });
+          at: timeAgoShort(a.requestedAt), route:"systems", sysId: a.systemId ?? a.system_id, hostname: a.hostname, sysTab:"deploy", unread:true });
       });
     }
     if (typeof ATTESTATION_RECORDS !== "undefined") {
@@ -608,7 +608,7 @@ function Topbar({ theme, onTheme, onTweaks, crumb, onNavigate, onSearchResult })
               )}
               {visibleNotifs.map(n => (
                 <button key={n.id} className={`notif-item focus-ring${n.unread ? " unread" : ""}`}
-                  onClick={() => { setNotifOpen(false); onNavigate?.(n.route); if (n.poamId && typeof openPoamDetail === "function") setTimeout(() => openPoamDetail(n.poamId), 60); }}>
+                  onClick={() => { setNotifOpen(false); if (n.sysId || n.hostname) { window.dispatchEvent(new CustomEvent("cf-open-system", { detail:{ id:n.sysId, hostname:n.hostname, tab:n.sysTab } })); return; } onNavigate?.(n.route); if (n.poamId && typeof openPoamDetail === "function") setTimeout(() => openPoamDetail(n.poamId), 60); }}>
                   <span className="notif-icon" style={{ color:n.color, background:`color-mix(in oklab, ${n.color} 16%, transparent)` }}>
                     <Icon name={n.icon} size={13}/>
                   </span>
