@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-08-28 16:52'
+updated_date: '2026-08-28 16:58'
 labels:
   - design-parity
   - web-ui
@@ -191,6 +191,12 @@ The `modifiedFiles` metadata is anticipated and non-exhaustive. The implementati
 Preflight 2026-08-28: dedicated worktree `/home/mcamp/code/crystal-forge/TASK-440-system-config-flake-parity`, branch `TASK-440-system-config-flake-parity`, based exactly on `origin/dev` at `a9747294b153eddcb17906336fe3ec31a474c217`. User explicitly directed that the unrelated dirty local `main` worktree be ignored and that this task branch from `origin/dev`; local `dev` was not used as the base. Lock created at `backlog/.locks/TASK-440.lock`.
 
 Parallel TASK-433 coordination baseline: open MR !318 at https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/318, current fetched head `fd7548ad0b983e2412a5d1fa2b84ac397280daaa`. Its current additive migrations are `0233_composite_policy_assessments.sql` and `0234_poam_workflows.sql`. TASK-440 must re-inspect the remote branch before allocating migrations and rebase/update onto TASK-433 after merge before TASK-440 merges.
+
+Research inventory completed for backend evaluation/snapshot ownership, frontend navigation/surfaces, design delta, and authoritative browser coverage. Key findings: current Config is static; flake output panes/snapshots do not exist; normal timeline reads are DB-only but commit diff GET has side effects; first-parent identity and generation snapshot retention are absent; current redaction is too narrow; ordinary flake counts mix declared/managed/deployed relationships; `/api/v1/commits/:commit_id/re-evaluate` needs authorization review; TASK-433 overlaps shared DTOs/routes/System Detail/Compliance/notifications/CSS/tests.
+
+Initial Phase 1 slice implemented in the TASK-440 worktree: flake focus/selection and row keys now use exact full SHA rather than displayed prefixes; added a regression with two distinct full SHAs sharing the same seven-character display prefix; diff modal now uses an explicit above-drawer overlay class instead of an inline z-index below the tray.
+
+Verification: `nix develop -c cargo test --manifest-path packages/web-ui/Cargo.toml displayed_sha_prefix_never_aliases_full_commit_identity` passed (1 passed, 192 filtered out). `git diff --check` passed. Full web-ui `cargo fmt --check` is currently blocked by pre-existing formatting drift in TASK-433-origin files on `origin/dev` (including policy editor, compliance, policies, and adapter files); no unrelated formatting was applied.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
