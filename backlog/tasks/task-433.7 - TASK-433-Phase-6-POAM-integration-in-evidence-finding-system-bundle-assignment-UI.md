@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:43'
-updated_date: '2026-08-27 17:45'
+updated_date: '2026-08-28 03:10'
 labels:
   - design-parity
   - poam
@@ -77,6 +77,8 @@ nix build .#checks.x86_64-linux.web-ui --no-link
 10. Only after AC1-AC4 are objectively proven: check exactly four ACs, move TASK-433.7 to Review, update TASK-433.6 correction evidence and MR !318, commit/push the rebased branch, confirm clean local/remote SHA and CI, then stop before Phase 7.
 
 Interrupted-agent recovery: inspect the full worktree diff, move assignment relationship/link UI into `AssignmentListPanel` with its existing local signals and generation guards, normalize new Dioxus data attributes, fix only compile-required `EvidenceDrawer` call interfaces, then run fmt/check/tests and focused prohibited-global scans before reporting without committing.
+
+Focused browser-failure adjustment: identify the added milestone by the authoritative POST response ID instead of unsupported display-value locator composition; explicitly open the evidence policy target before asserting remediation navigation; initialize the assignment-reference scope from the exact compliance route system ID and render the relationship panel independently of the Systems Matrix fetch, while only auto-opening evidence for `view=evidence`. Verify these fixes with formatting, compilation, and focused workflows before rerunning all Phase-6 workflows.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
