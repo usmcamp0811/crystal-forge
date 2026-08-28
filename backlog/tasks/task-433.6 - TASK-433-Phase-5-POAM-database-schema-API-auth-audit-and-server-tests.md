@@ -5,7 +5,7 @@ status: Review
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:43'
-updated_date: '2026-08-27 02:16'
+updated_date: '2026-08-28 05:20'
 labels:
   - design-parity
   - poam
@@ -102,6 +102,8 @@ Implemented Phase 5 in dedicated worktree and pushed commit `68904343` to MR !31
 Verification completed against repository-isolated PostgreSQL on port 3042: fresh migration chain through 0234 and `cargo sqlx prepare --workspace` passed with no metadata delta; focused POA&M suite passed 13/13; full workspace Rust tests passed 1221 with 0 failures and 386 ignored; server package, server-regressions, and integration Nix builds passed; formatting and `git diff --check` passed. Final independent integrity, authorization, and correctness reviews found no remaining P0/P1/P2 issues.
 
 Exact-head GitLab pipeline 2794857147 passed for commit `68904343a488e6a5c909fa80c4bac16052814ff1`: https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2794857147. MR !318 is conflict-free and remains open for review. Per repository lifecycle, the task remains Review until the MR is merged.
+
+Phase-6 authorized contract correction completed on 2026-08-28: added bounded authenticated finding-remediation relationships by authoritative assessment IDs, server-filtered compatible POA&M search from a current Fail assessment, and immutable assignment-version relationship lookup. Assignment compatibility now pairs each scope with the same finding's policy lineage rather than independently matching scope and lineage across findings. PostgreSQL-backed `poam_workflows` verification passed 16/16, including the new cross-finding scope/lineage regression; Phase-6 browser workflows 29g–29m and the full Web UI Nix check also passed. These are minimal Phase-5 API corrections required by TASK-433.7 and remain part of MR !318.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
