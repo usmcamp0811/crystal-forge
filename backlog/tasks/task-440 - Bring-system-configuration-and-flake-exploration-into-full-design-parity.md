@@ -4,7 +4,7 @@ title: Bring system configuration and flake exploration into full design parity
 status: To Do
 assignee: []
 created_date: '2026-08-28 03:43'
-updated_date: '2026-08-28 03:56'
+updated_date: '2026-08-28 16:42'
 labels:
   - design-parity
   - web-ui
@@ -132,3 +132,13 @@ The `modifiedFiles` metadata is anticipated and non-exhaustive. The implementati
 - [ ] #26 New evaluation and flake-output APIs provide bounded server-side query/diff results, preserve supported agent/builder compatibility and environment authorization, avoid evaluation side effects on read paths and per-host evaluation during flake browsing, and return explicit unavailable/error states.
 - [ ] #27 Targeted frontend and server tests, security/redaction tests, snapshot lifecycle and deduplication tests, auto_latest failure/idempotency tests, SQLx metadata/schema checks when applicable, the web-ui package build, the authoritative web-ui check, and broader Nix flake checks required by protocol, migration, packaging, or cross-package changes pass in the repository Nix development environment.
 <!-- AC:END -->
+
+## Comments
+
+<!-- COMMENTS:BEGIN -->
+author: openai-agent
+created: 2026-08-28 16:42
+---
+Parallel-work coordination (2026-08-28): TASK-440 may be implemented in parallel with TASK-433, but TASK-440 must not merge until TASK-433 is merged. Before TASK-440 adds any database migration or refreshes SQLx metadata, inspect TASK-433's latest branch state and migration numbers, then rebase/update from post-TASK-433 `dev` and allocate new additive migration numbers. Known overlap includes System Detail/Compliance UI, server models/queries/handlers, migrations, SQLx metadata, and browser checks. Preserve TASK-433's POA&M behavior when resolving overlap.
+---
+<!-- COMMENTS:END -->
