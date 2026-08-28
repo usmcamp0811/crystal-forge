@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-08-28 17:20'
+updated_date: '2026-08-28 17:43'
 labels:
   - design-parity
   - web-ui
@@ -183,6 +183,8 @@ The `modifiedFiles` metadata is anticipated and non-exhaustive. The implementati
 - Rebase/update onto merged TASK-433, resolve shared surfaces without regressing POA&M behavior, then rerun schema/SQLx preparation.
 - Add targeted Rust/server/security/lifecycle/API tests and authoritative browser workflows for every AC state, including delayed response races, unavailable/error/non-disclosure, typed diffs, cross-navigation, deployment outcomes, layering, and keyboard focus.
 - Exercise affected canonical states at 1920x1080 dark/light and 900x900 narrow, enroll TASK-440 workflows as critical, retain screenshots, and run the applicable package builds, web-ui check, integration/server-regression checks, and `nix flake check --keep-going`.
+
+Frontend-only Phase 1 execution slice (2026-08-28): keep Dioxus route variants unchanged to minimize conflict with TASK-433, and add typed query parsing/serialization in `state/navigation_focus.rs`. Bind System Detail tab, Config revision mode/full SHA or generation, Deploy generation, and flake drawer/pane/full revision/return-environment context to browser history with popstate synchronization and stale-context replacement. Preserve exact full SHA identity in state and tests. Add flake tray/diff modal Escape precedence, focus trapping, initial focus, and focus restoration. Apply isolated AC #20/#22 fixes in System Detail, topbar notifications, selector text, and Compliance while preserving TASK-433 POA&M authorization semantics. Verify with focused web-ui Rust tests, package tests where feasible, formatting for touched files, and `git diff --check`.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
