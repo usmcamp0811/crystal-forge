@@ -14,9 +14,9 @@ use crystal_forge::models::deployment_policies::{
     EnforcementPhase, composite_config_digest,
 };
 use crystal_forge::models::poam::{
-    AddFindingRequest, CreatePoamRequest, CreateWaiverRequest, PoamDetailQuery, PoamListQuery,
-    PoamRisk, PoamStatus, TransitionPoamRequest, UpdatePoamRequest, WaiverDecision,
-    WaiverDecisionRequest,
+    AddFindingRequest, AssignmentReferenceRequest, CreatePoamRequest, CreateWaiverRequest,
+    PoamDetailQuery, PoamListQuery, PoamRisk, PoamStatus, TransitionPoamRequest, UpdatePoamRequest,
+    WaiverDecision, WaiverDecisionRequest,
 };
 use crystal_forge::models::system_states::SystemState;
 use crystal_forge::queries::poam;
@@ -584,6 +584,18 @@ async fn poam_http_server(pool: PgPool) -> String {
         .route(
             "/api/v1/poams/rollups/bundles",
             get(poam_handlers::bundle_rollups),
+        )
+        .route(
+            "/api/v1/poams/relationships/findings",
+            get(poam_handlers::finding_relationships),
+        )
+        .route(
+            "/api/v1/poams/relationships/assignments",
+            get(poam_handlers::assignment_relationships),
+        )
+        .route(
+            "/api/v1/poams/compatible",
+            get(poam_handlers::compatible_poams),
         )
         .route(
             "/api/v1/poams/:id",
@@ -3498,4 +3510,425 @@ async fn authenticated_http_routes_cover_authorization_and_lifecycle(pool: PgPoo
         .unwrap();
         assert_eq!(response.status(), reqwest::StatusCode::OK, "{path}");
     }
+}
+
+#[sqlx::test]
+async fn relationship_services_batch_active_history_and_immutable_assignments(pool: PgPool) {
+    let visible = assessment_fixture(&pool).await;
+    let hidden = assessment_fixture_for_policy(&pool, &visible).await;
+    for fixture in [&visible, &hidden] {
+        let mut tx = pool.begin().await.unwrap();
+        persist_assessment(&mut tx, fixture, EnforcementOutcome::Fail).await;
+        tx.commit().await.unwrap();
+    }
+    let hidden_assessment = current_assessment_id(&pool, &hidden).await;
+    let dev: Uuid = sqlx::query_scalar("SELECT id FROM environments WHERE name='dev'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let prod: Uuid = sqlx::query_scalar("SELECT id FROM environments WHERE name='prod'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    for (system_id, environment_id) in [(visible.system_id, dev), (hidden.system_id, prod)] {
+        sqlx::query("UPDATE systems SET environment_id=$2 WHERE id=$1")
+            .bind(system_id)
+            .bind(environment_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let actor = PoamActor {
+        user_id: visible.user_id,
+        identifier: "relationship-operator@example.invalid".into(),
+        is_admin: false,
+        can_mutate: true,
+        environment_ids: vec![dev],
+        request_origin: None,
+    };
+    let admin = admin_actor(visible.user_id);
+    let clock = FixedClock(Utc.with_ymd_and_hms(2026, 8, 26, 12, 0, 0).unwrap());
+
+    let historical = create_service_poam(&pool, &visible, &admin, &clock, "Historical POAM").await;
+    let awaiting = awaiting_verification(&pool, &admin, historical, &clock).await;
+    let mut passing = pool.begin().await.unwrap();
+    persist_assessment(&mut passing, &visible, EnforcementOutcome::Pass).await;
+    passing.commit().await.unwrap();
+    let historical = poam_service::close(
+        &pool,
+        &admin,
+        awaiting.poam.id,
+        awaiting.poam.revision,
+        &clock,
+    )
+    .await
+    .unwrap();
+    let mut failing = pool.begin().await.unwrap();
+    persist_assessment(&mut failing, &visible, EnforcementOutcome::Fail).await;
+    failing.commit().await.unwrap();
+    let current_assessment = current_assessment_id(&pool, &visible).await;
+    let active = create_service_poam(&pool, &visible, &admin, &clock, "Active POAM").await;
+
+    let relationships = poam_service::finding_relationships(
+        &pool,
+        &actor,
+        &[current_assessment, hidden_assessment, Uuid::new_v4()],
+        &clock,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        relationships.len(),
+        1,
+        "hidden and unknown assessments are omitted"
+    );
+    assert_eq!(relationships[0].assessment_id, current_assessment);
+    assert_eq!(
+        relationships[0].finding_id,
+        finding_id(&pool, &visible).await
+    );
+    assert_eq!(
+        relationships[0].active_poam.as_ref().unwrap().id,
+        active.poam.id
+    );
+    assert_eq!(relationships[0].historical_poams.len(), 1);
+    assert_eq!(relationships[0].historical_poams[0].id, historical.poam.id);
+    assert_eq!(relationships[0].historical_poams[0].status, "completed");
+
+    let (assignment_id, assignment_version_id, _) =
+        immutable_assignment_fixture(&pool, visible.system_id, visible.user_id).await;
+    let assignment_before = assignment_snapshot(&pool, assignment_version_id).await;
+    sqlx::query("INSERT INTO poam_assignment_references(poam_id,assignment_id,assignment_version_id,added_by) VALUES($1,$2,$3,$4)")
+        .bind(active.poam.id)
+        .bind(assignment_id)
+        .bind(assignment_version_id)
+        .bind(visible.user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let assignments = poam_service::assignment_relationships(
+        &pool,
+        &actor,
+        &[assignment_version_id, Uuid::new_v4()],
+        &clock,
+    )
+    .await
+    .unwrap();
+    assert_eq!(assignments.len(), 1);
+    assert_eq!(assignments[0].assignment_version_id, assignment_version_id);
+    assert_eq!(assignments[0].poams.len(), 1);
+    assert_eq!(assignments[0].poams[0].id, active.poam.id);
+    assert_eq!(
+        assignment_snapshot(&pool, assignment_version_id).await,
+        assignment_before
+    );
+}
+
+#[sqlx::test]
+async fn assignment_compatibility_keeps_scope_and_lineage_from_the_same_finding(pool: PgPool) {
+    let primary = assessment_fixture(&pool).await;
+    let secondary = assessment_fixture(&pool).await;
+    for fixture in [&primary, &secondary] {
+        let mut tx = pool.begin().await.unwrap();
+        persist_assessment(&mut tx, fixture, EnforcementOutcome::Fail).await;
+        tx.commit().await.unwrap();
+    }
+
+    let actor = admin_actor(primary.user_id);
+    let clock = FixedClock(Utc.with_ymd_and_hms(2026, 8, 26, 12, 0, 0).unwrap());
+    let poam = create_service_poam(&pool, &primary, &actor, &clock, "Paired context").await;
+    let secondary_finding = finding_id(&pool, &secondary).await;
+    sqlx::query("INSERT INTO poam_finding_links(poam_id,finding_id,linked_by) VALUES($1,$2,$3)")
+        .bind(poam.poam.id)
+        .bind(secondary_finding)
+        .bind(actor.user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let (assignment_id, assignment_version_id, _) =
+        immutable_assignment_fixture(&pool, secondary.system_id, actor.user_id).await;
+    sqlx::query("UPDATE compliance_bundle_assignments SET system_id=$2 WHERE id=$1")
+        .bind(assignment_id)
+        .bind(primary.system_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let result = poam_service::link_assignment(
+        &pool,
+        &actor,
+        poam.poam.id,
+        AssignmentReferenceRequest {
+            revision: poam.poam.revision,
+            assignment_version_id,
+        },
+        &clock,
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(PoamError::Validation(
+            "incompatible_assignment_reference",
+            _
+        ))
+    ));
+}
+
+#[sqlx::test]
+async fn authenticated_relationship_http_contracts_enforce_bounds_visibility_and_compatibility(
+    pool: PgPool,
+) {
+    let target = assessment_fixture(&pool).await;
+    let candidate = assessment_fixture_for_policy(&pool, &target).await;
+    let completed_candidate = assessment_fixture_for_policy(&pool, &target).await;
+    let hidden_candidate = assessment_fixture_for_policy(&pool, &target).await;
+    let incompatible = assessment_fixture(&pool).await;
+    for fixture in [
+        &target,
+        &candidate,
+        &completed_candidate,
+        &hidden_candidate,
+        &incompatible,
+    ] {
+        let mut tx = pool.begin().await.unwrap();
+        persist_assessment(&mut tx, fixture, EnforcementOutcome::Fail).await;
+        tx.commit().await.unwrap();
+    }
+    let dev: Uuid = sqlx::query_scalar("SELECT id FROM environments WHERE name='dev'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let prod: Uuid = sqlx::query_scalar("SELECT id FROM environments WHERE name='prod'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    for (system_id, environment_id) in [
+        (target.system_id, dev),
+        (candidate.system_id, dev),
+        (completed_candidate.system_id, dev),
+        (hidden_candidate.system_id, prod),
+        (incompatible.system_id, dev),
+    ] {
+        sqlx::query("UPDATE systems SET environment_id=$2 WHERE id=$1")
+            .bind(system_id)
+            .bind(environment_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    sqlx::query("INSERT INTO user_environment_memberships(user_id,environment_id) VALUES($1,$2)")
+        .bind(target.user_id)
+        .bind(dev)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let operator = session(&pool, target.user_id, AuthRole::Operator).await;
+    let admin = admin_actor(target.user_id);
+    let clock = FixedClock(Utc.with_ymd_and_hms(2026, 8, 26, 12, 0, 0).unwrap());
+    let candidate_poam =
+        create_service_poam(&pool, &candidate, &admin, &clock, "Needle compatible").await;
+    sqlx::query("UPDATE poams SET owner='Needle Owner' WHERE id=$1")
+        .bind(candidate_poam.poam.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let hidden_poam =
+        create_service_poam(&pool, &hidden_candidate, &admin, &clock, "Needle hidden").await;
+    let incompatible_poam =
+        create_service_poam(&pool, &incompatible, &admin, &clock, "Needle incompatible").await;
+    let completed = create_service_poam(
+        &pool,
+        &completed_candidate,
+        &admin,
+        &clock,
+        "Needle completed",
+    )
+    .await;
+    let awaiting = awaiting_verification(&pool, &admin, completed, &clock).await;
+    let mut pass = pool.begin().await.unwrap();
+    persist_assessment(&mut pass, &completed_candidate, EnforcementOutcome::Pass).await;
+    pass.commit().await.unwrap();
+    let completed = poam_service::close(
+        &pool,
+        &admin,
+        awaiting.poam.id,
+        awaiting.poam.revision,
+        &clock,
+    )
+    .await
+    .unwrap();
+    let target_assessment = current_assessment_id(&pool, &target).await;
+    let hidden_assessment = current_assessment_id(&pool, &hidden_candidate).await;
+    let (assignment_id, assignment_version_id, _) =
+        immutable_assignment_fixture(&pool, candidate.system_id, candidate.user_id).await;
+    let assignment_before = assignment_snapshot(&pool, assignment_version_id).await;
+    sqlx::query("INSERT INTO poam_assignment_references(poam_id,assignment_id,assignment_version_id,added_by) VALUES($1,$2,$3,$4)")
+        .bind(candidate_poam.poam.id)
+        .bind(assignment_id)
+        .bind(assignment_version_id)
+        .bind(target.user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let base = poam_http_server(pool.clone()).await;
+    let client = reqwest::Client::new();
+    assert_eq!(
+        client
+            .get(format!(
+                "{base}/api/v1/poams/compatible?assessment_id={target_assessment}"
+            ))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+    let compatible = http_request(
+        &client,
+        reqwest::Method::GET,
+        format!(
+            "{base}/api/v1/poams/compatible?assessment_id={target_assessment}&limit=10&offset=0"
+        ),
+        &operator,
+        None,
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(compatible.status(), reqwest::StatusCode::OK);
+    let compatible: serde_json::Value = compatible.json().await.unwrap();
+    assert_eq!(compatible["items"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        compatible["items"][0]["id"],
+        candidate_poam.poam.id.to_string()
+    );
+    let returned_ids = compatible["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["id"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(!returned_ids.contains(&hidden_poam.poam.id.to_string().as_str()));
+    assert!(!returned_ids.contains(&incompatible_poam.poam.id.to_string().as_str()));
+    assert!(!returned_ids.contains(&completed.poam.id.to_string().as_str()));
+    let searched = http_request(
+        &client,
+        reqwest::Method::GET,
+        format!(
+            "{base}/api/v1/poams/compatible?assessment_id={target_assessment}&q=Needle%20Owner"
+        ),
+        &operator,
+        None,
+    )
+    .send()
+    .await
+    .unwrap()
+    .json::<serde_json::Value>()
+    .await
+    .unwrap();
+    assert_eq!(searched["items"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        searched["items"][0]["id"],
+        candidate_poam.poam.id.to_string()
+    );
+
+    let invalid_limit = http_request(
+        &client,
+        reqwest::Method::GET,
+        format!("{base}/api/v1/poams/compatible?assessment_id={target_assessment}&limit=101"),
+        &operator,
+        None,
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(invalid_limit.status(), reqwest::StatusCode::BAD_REQUEST);
+    let too_many = (0..101)
+        .map(|_| Uuid::new_v4().to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let bounded = http_request(
+        &client,
+        reqwest::Method::GET,
+        format!("{base}/api/v1/poams/relationships/findings?assessment_ids={too_many}"),
+        &operator,
+        None,
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(bounded.status(), reqwest::StatusCode::BAD_REQUEST);
+    let assignments_bounded = http_request(
+        &client,
+        reqwest::Method::GET,
+        format!("{base}/api/v1/poams/relationships/assignments?ids={too_many}"),
+        &operator,
+        None,
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(
+        assignments_bounded.status(),
+        reqwest::StatusCode::BAD_REQUEST
+    );
+    let findings = http_request(
+        &client,
+        reqwest::Method::GET,
+        format!("{base}/api/v1/poams/relationships/findings?assessment_ids={target_assessment},{hidden_assessment}"),
+        &operator,
+        None,
+    )
+    .send()
+    .await
+    .unwrap()
+    .json::<serde_json::Value>()
+    .await
+    .unwrap();
+    assert_eq!(findings.as_array().unwrap().len(), 1);
+    assert_eq!(findings[0]["assessment_id"], target_assessment.to_string());
+    assert!(findings[0]["active_poam"].is_null());
+
+    let assignments = http_request(
+        &client,
+        reqwest::Method::GET,
+        format!("{base}/api/v1/poams/relationships/assignments?ids={assignment_version_id}"),
+        &operator,
+        None,
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(assignments.status(), reqwest::StatusCode::OK);
+    let assignments: serde_json::Value = assignments.json().await.unwrap();
+    assert_eq!(
+        assignments[0]["assignment_version_id"],
+        assignment_version_id.to_string()
+    );
+    assert_eq!(
+        assignments[0]["poams"][0]["id"],
+        candidate_poam.poam.id.to_string()
+    );
+    assert_eq!(
+        assignment_snapshot(&pool, assignment_version_id).await,
+        assignment_before
+    );
+
+    create_service_poam(&pool, &target, &admin, &clock, "Target active remediation").await;
+    let conflicted = http_request(
+        &client,
+        reqwest::Method::GET,
+        format!("{base}/api/v1/poams/compatible?assessment_id={target_assessment}"),
+        &operator,
+        None,
+    )
+    .send()
+    .await
+    .unwrap()
+    .json::<serde_json::Value>()
+    .await
+    .unwrap();
+    assert!(conflicted["items"].as_array().unwrap().is_empty());
 }

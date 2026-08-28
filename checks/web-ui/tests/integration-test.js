@@ -21,6 +21,7 @@ const { chromium } = require("playwright");
 const fs = require("fs");
 const path = require("path");
 const { execSync } = require("child_process");
+const { createHash } = require("crypto");
 const { isDeepStrictEqual } = require("util");
 
 const baseUrl = process.argv[2] || "http://127.0.0.1:3000";
@@ -457,6 +458,20 @@ async function assertCardText(page, testId, patterns, message, { excluded = [], 
     const sample = (await card.innerText().catch(() => "(card not found)")) || "(empty card text)";
     throw new Error(`${message} (card text was: ${JSON.stringify(sample)})`);
   });
+}
+
+async function waitForPhase6Target(page, locator, description, timeout = 15000) {
+  try {
+    await locator.waitFor({ state: "visible", timeout });
+  } catch (error) {
+    const diagnostic = await page.evaluate(() => ({
+      url: window.location.href,
+      title: document.title,
+      body: (document.body?.innerText || "").slice(0, 4000),
+      testIds: Array.from(document.querySelectorAll("[data-testid]"), (element) => element.getAttribute("data-testid")).filter(Boolean).slice(0, 100),
+    })).catch((diagnosticError) => ({ diagnosticError: String(diagnosticError) }));
+    throw new Error(`${description} was not visible: ${error.message}\nDIAG=${JSON.stringify(diagnostic)}`);
+  }
 }
 
 async function ensureAuthenticated(page) {
@@ -2534,6 +2549,309 @@ async function routeFlakesStressData(page) {
 async function unrouteFlakesStressData(page) {
   await page.unroute("**/api/v1/flakes/timelines*");
   await page.unroute("**/api/v1/flakes");
+}
+
+async function phase6Api(page, requestPath, options = {}) {
+  const result = await page.evaluate(async ({ base, requestPath, options }) => {
+    const method = options.method || "GET";
+    const csrf = document.cookie
+      .split(";")
+      .map((cookie) => cookie.trim())
+      .find((cookie) => cookie.startsWith("__Host-cf-csrf="))
+      ?.slice("__Host-cf-csrf=".length);
+    const response = await fetch(`${base}${requestPath}`, {
+      ...options,
+      method,
+      credentials: "include",
+      headers: {
+        Accept: "application/json",
+        ...(options.body ? { "Content-Type": "application/json" } : {}),
+        ...(!["GET", "HEAD", "OPTIONS"].includes(method) && csrf ? { "X-CSRF-Token": csrf } : {}),
+        ...(options.headers || {}),
+      },
+    });
+    return { status: response.status, text: await response.text() };
+  }, { base: apiBaseUrl, requestPath, options });
+  let body = null;
+  if (result.text) {
+    try { body = JSON.parse(result.text); } catch { body = result.text; }
+  }
+  if (result.status < 200 || result.status >= 300) {
+    throw new Error(`${options.method || "GET"} ${requestPath} returned ${result.status}: ${result.text}`);
+  }
+  return { status: result.status, body };
+}
+
+function phase6SemanticDigest(value) {
+  const canonicalize = (item) => {
+    if (Array.isArray(item)) return item.map(canonicalize);
+    if (item && typeof item === "object") {
+      return Object.fromEntries(Object.keys(item).sort().map((key) => [key, canonicalize(item[key])]));
+    }
+    return item;
+  };
+  return createHash("sha256").update(JSON.stringify(canonicalize(value))).digest("hex");
+}
+
+async function createPhase6PoamFixture(page, label, systemCount = 1) {
+  await page.unrouteAll({ behavior: "wait" });
+  await ensureAuthenticated(page);
+  const suffix = crypto.randomUUID();
+  const name = `UI POAM ${label} ${suffix}`;
+  const ruleId = crypto.randomUUID();
+  const config = {
+    schema_version: 1,
+    mode: "all",
+    rules: [{
+      id: ruleId,
+      kind: "nixos_option",
+      config: { path: "services.openssh.settings.PermitRootLogin", operator: "==", value_type: "string", value: "no" },
+    }],
+  };
+  const policy = (await phase6Api(page, "/api/v1/deployment-policies", {
+    method: "POST",
+    body: JSON.stringify({
+      name,
+      description: `Real Phase-6 ${label} finding fixture`,
+      policy_type: "composite",
+      config,
+      enabled: true,
+      category: "security",
+      severity: "high",
+      srg_ids: ["SRG-OS-000480-GPOS-00227"],
+      cci_ids: ["CCI-000366"],
+      evidence_specs: [],
+      requirement_mappings: [],
+    }),
+  })).body;
+  const policyDetail = (await phase6Api(page, `/api/v1/deployment-policies/${policy.id}`)).body;
+  const policyVersionId = policyDetail.current_version_id;
+  await phase6Api(page, `/api/v1/policy-versions/${policyVersionId}/trust`, {
+    method: "POST",
+    body: JSON.stringify({ trusted: true, review_note: "TASK-433.7 browser fixture" }),
+  });
+  await phase6Api(page, `/api/v1/policy-versions/${policyVersionId}/publish`, {
+    method: "POST",
+    body: JSON.stringify({ expected_semantic_digest: null }),
+  });
+
+  const systems = [];
+  for (let index = 0; index < systemCount; index += 1) {
+    const systemId = crypto.randomUUID();
+    const assessmentId = crypto.randomUUID();
+    const hostname = `${name} host ${index + 1}`;
+    const storePath = `/nix/store/00000000000000000000000000000000-poam-${systemId}`;
+    const target = runFixtureSql(`
+      WITH selected_environment AS (
+        SELECT id FROM environments ORDER BY created_at NULLS LAST, id LIMIT 1
+      ), selected_commit AS (
+        SELECT id FROM commits ORDER BY id LIMIT 1
+      ), inserted_derivation AS (
+        INSERT INTO derivations (
+          commit_id, derivation_type, derivation_name, derivation_path, store_path,
+          expected_store_path, status_id, attempt_count, completed_at, policy_results
+        )
+        SELECT id, 'nixos', $name$${hostname}$name$, $path$${storePath}$path$,
+               $path$${storePath}$path$, $path$${storePath}$path$, 10, 0, now(), '{}'::jsonb
+        FROM selected_commit RETURNING id, store_path
+      ), inserted_system AS (
+        INSERT INTO systems (id, hostname, environment_id, is_active, public_key, derivation)
+        SELECT '${systemId}'::uuid, $name$${hostname}$name$, environment.id, true,
+               'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPhase6BrowserFixture', derivation.store_path
+        FROM selected_environment environment CROSS JOIN inserted_derivation derivation
+        RETURNING id, hostname
+      ), inserted_state AS (
+        INSERT INTO system_states (hostname, change_reason, store_path, generation, timestamp)
+        SELECT system.hostname, 'cf_deployment', derivation.store_path, 1, CURRENT_TIMESTAMP
+        FROM inserted_system system CROSS JOIN inserted_derivation derivation RETURNING store_path
+      )
+      SELECT system.id, derivation.id, state.store_path
+      FROM inserted_system system CROSS JOIN inserted_derivation derivation CROSS JOIN inserted_state state;
+    `).split("|");
+    if (target.length !== 3) throw new Error(`Could not create Phase-6 system fixture: ${JSON.stringify(target)}`);
+    systems.push({ id: systemId, assessmentId, hostname, derivationId: Number(target[1]), storePath: target[2] });
+  }
+
+  const bundle = (await phase6Api(page, "/api/v1/compliance/bundles", {
+    method: "POST",
+    body: JSON.stringify({
+      name,
+      framework: "TASK-433 browser authority",
+      version: "6",
+      description: `Real Phase-6 ${label} bundle`,
+      layer: "system",
+      required_envs: [],
+      policy_ids: [policy.id],
+      requirement_version_ids: [],
+    }),
+  })).body;
+  const bundleVersionId = bundle.current_draft_version_id;
+  await phase6Api(page, `/api/v1/compliance/bundle-versions/${bundleVersionId}/trust`, {
+    method: "POST",
+    body: JSON.stringify({ trusted: true, review_note: "TASK-433.7 browser fixture" }),
+  });
+  await phase6Api(page, `/api/v1/compliance/bundle-versions/${bundleVersionId}/publish`, {
+    method: "POST",
+    body: JSON.stringify({ auto_publish_draft_policies: false, expected_semantic_digest: null }),
+  });
+
+  for (const system of systems) {
+    system.assignment = (await phase6Api(page, "/api/v1/compliance/assignments", {
+      method: "POST",
+      body: JSON.stringify({
+        bundle_version_id: bundleVersionId,
+        scope_type: "system",
+        scope_id: system.id,
+        enforcement_mode: "enforce",
+        exclusions: [],
+        additions: [],
+        value_overrides: [],
+        reason: `TASK-433.7 ${label}`,
+      }),
+    })).body;
+    const effective = (await phase6Api(page, `/api/v1/systems/${system.id}/effective-policies`)).body;
+    const effectivePolicy = effective.policies.find((item) => item.policy_lineage_id === policy.id);
+    if (!effectivePolicy) throw new Error(`Effective set omitted fixture policy ${policy.id}`);
+    runFixtureSql(`
+      INSERT INTO composite_policy_derivation_targets (derivation_id, target_store_path)
+      VALUES (${system.derivationId}, $path$${system.storePath}$path$);
+      INSERT INTO composite_policy_assessments (
+        id, system_id, derivation_id, target_store_path, policy_lineage_id,
+        policy_version_id, effective_set_digest, effective_config_digest,
+        effective_config, overall_outcome
+      ) VALUES (
+        '${system.assessmentId}'::uuid, '${system.id}'::uuid, ${system.derivationId},
+        $path$${system.storePath}$path$, '${policy.id}'::uuid, '${policyVersionId}'::uuid,
+        '${effective.effective_set_digest}', '${phase6SemanticDigest(effectivePolicy.effective_config)}',
+        $fixture$${JSON.stringify(effectivePolicy.effective_config)}$fixture$::jsonb, 'fail'
+      );
+      INSERT INTO poam_findings (system_id, policy_lineage_id)
+      VALUES ('${system.id}'::uuid, '${policy.id}'::uuid)
+      ON CONFLICT (system_id, policy_lineage_id) DO NOTHING;
+      INSERT INTO composite_policy_rule_results
+        (assessment_id, rule_id, ordinal, kind, phase, outcome, blocking, detail, evidence)
+      VALUES (
+        '${system.assessmentId}'::uuid, '${ruleId}'::uuid, 0, 'nixos_option', 'evaluation',
+        'fail', true, 'PermitRootLogin was yes; expected no',
+        '{"path":"services.openssh.settings.PermitRootLogin","actual":"yes","expected":"no"}'::jsonb
+      );
+    `);
+  }
+  const findingRows = runFixtureSql(`
+    SELECT system_id, id FROM poam_findings
+    WHERE policy_lineage_id='${policy.id}'::uuid AND system_id=ANY(ARRAY[${systems.map((system) => `'${system.id}'::uuid`).join(",")}])
+    ORDER BY system_id;
+  `).split("\n").filter(Boolean).map((line) => line.split("|"));
+  for (const system of systems) {
+    const finding = findingRows.find(([systemId]) => systemId === system.id);
+    if (!finding) throw new Error(`No persisted finding was created for assessment ${system.assessmentId}`);
+    system.findingId = finding[1];
+  }
+  return { name, policy, policyVersionId, bundle, bundleVersionId, systems, ruleId };
+}
+
+async function createFixturePoam(page, assessmentId, values = {}) {
+  return (await phase6Api(page, "/api/v1/poams", {
+    method: "POST",
+    body: JSON.stringify({
+      assessment_id: assessmentId,
+      title: values.title || "TASK-433.7 remediation",
+      plan: values.plan || "Deploy the corrected policy and verify authoritative evidence.",
+      owner: values.owner || "Platform Security",
+      target_date: values.targetDate || "2026-09-30",
+      risk: values.risk || "high",
+      default_milestones: values.defaultMilestones ?? false,
+      assignment_version_ids: values.assignmentVersionIds || [],
+    }),
+  })).body;
+}
+
+async function openPhase6Evidence(page, fixture, system = fixture.systems[0]) {
+  await page.goto(
+    `${baseUrl}/compliance?bundle=${fixture.bundle.id}&version=${fixture.bundleVersionId}&system=${system.id}&policy=${fixture.policy.id}&view=evidence`,
+    { timeout: LOAD_TIMEOUT },
+  );
+  const control = page.locator(`[data-testid="evidence-policy-target"][data-policy-id="${fixture.policy.id}"]`);
+  await waitForPhase6Target(page, control, "Exact evidence policy target");
+  await control.click();
+  return page.locator(`[data-testid="finding-poam-remediation"][data-assessment-id="${system.assessmentId}"]`);
+}
+
+async function addPhase6Finding(page, fixture, label, system = fixture.systems[0]) {
+  const ruleId = crypto.randomUUID();
+  const policy = (await phase6Api(page, "/api/v1/deployment-policies", {
+    method: "POST",
+    body: JSON.stringify({
+      name: `${fixture.name} ${label}`,
+      description: `Auxiliary ${label} finding for TASK-433.7`,
+      policy_type: "composite",
+      config: {
+        schema_version: 1,
+        mode: "all",
+        rules: [{
+          id: ruleId,
+          kind: "nixos_option",
+          config: { path: "services.openssh.settings.PasswordAuthentication", operator: "==", value_type: "boolean", value: false },
+        }],
+      },
+      enabled: true,
+      category: "security",
+      severity: "high",
+      srg_ids: [],
+      cci_ids: [],
+      evidence_specs: [],
+      requirement_mappings: [],
+    }),
+  })).body;
+  const detail = (await phase6Api(page, `/api/v1/deployment-policies/${policy.id}`)).body;
+  await phase6Api(page, `/api/v1/policy-versions/${detail.current_version_id}/trust`, {
+    method: "POST",
+    body: JSON.stringify({ trusted: true, review_note: "TASK-433.7 auxiliary fixture" }),
+  });
+  await phase6Api(page, `/api/v1/policy-versions/${detail.current_version_id}/publish`, {
+    method: "POST",
+    body: JSON.stringify({ expected_semantic_digest: null }),
+  });
+  const additions = [...(system.assignment.additions || []), detail.current_version_id];
+  system.assignment = (await phase6Api(page, `/api/v1/compliance/assignments/${system.assignment.id}`, {
+    method: "PUT",
+    body: JSON.stringify({ expected_version_id: system.assignment.current_version_id, additions }),
+  })).body;
+  const effective = (await phase6Api(page, `/api/v1/systems/${system.id}/effective-policies`)).body;
+  const effectivePolicy = effective.policies.find((item) => item.policy_lineage_id === policy.id);
+  if (!effectivePolicy) throw new Error(`Effective set omitted auxiliary policy ${policy.id}`);
+  const assessmentId = crypto.randomUUID();
+  runFixtureSql(`
+    UPDATE composite_policy_assessments
+    SET effective_set_digest='${effective.effective_set_digest}', updated_at=now()
+    WHERE system_id='${system.id}'::uuid AND derivation_id=${system.derivationId};
+    INSERT INTO composite_policy_assessments (
+      id, system_id, derivation_id, target_store_path, policy_lineage_id,
+      policy_version_id, effective_set_digest, effective_config_digest,
+      effective_config, overall_outcome
+    ) VALUES (
+      '${assessmentId}'::uuid, '${system.id}'::uuid, ${system.derivationId},
+      $path$${system.storePath}$path$, '${policy.id}'::uuid, '${detail.current_version_id}'::uuid,
+      '${effective.effective_set_digest}', '${phase6SemanticDigest(effectivePolicy.effective_config)}',
+      $fixture$${JSON.stringify(effectivePolicy.effective_config)}$fixture$::jsonb, 'fail'
+    );
+    INSERT INTO poam_findings (system_id, policy_lineage_id)
+    VALUES ('${system.id}'::uuid, '${policy.id}'::uuid)
+    ON CONFLICT (system_id, policy_lineage_id) DO NOTHING;
+    INSERT INTO composite_policy_rule_results
+      (assessment_id, rule_id, ordinal, kind, phase, outcome, blocking, detail, evidence)
+    VALUES (
+      '${assessmentId}'::uuid, '${ruleId}'::uuid, 0, 'nixos_option', 'evaluation',
+      'fail', true, 'PasswordAuthentication was enabled; expected disabled',
+      '{"path":"services.openssh.settings.PasswordAuthentication","actual":true,"expected":false}'::jsonb
+    );
+  `);
+  const findingId = runFixtureSql(`
+    SELECT id FROM poam_findings
+    WHERE system_id='${system.id}'::uuid AND policy_lineage_id='${policy.id}'::uuid;
+  `);
+  if (!findingId) throw new Error(`No finding was created for auxiliary assessment ${assessmentId}`);
+  return { policy, policyVersionId: detail.current_version_id, assessmentId, findingId, ruleId };
 }
 
 // Screenshot steps - executed in order
@@ -10807,6 +11125,458 @@ security.audit.enable = true;</fixtext>
       await page.getByRole("button", { name: "Edit mode", exact: true }).click();
       await assertValue(page.getByPlaceholder("reason (leave empty to preserve)"), "", "Cleared assignment reason should be absent");
       if (reason !== null) throw new Error(`Expected explicit clear to send null/absent reason, got ${reason}`);
+    },
+  },
+  // ── TASK-433.7: real server-backed POA&M integration ───────────────────────
+  {
+    name: "29g-poam-failed-evidence-create",
+    description: "A persisted FAIL finding creates a POA&M with exact authoritative context and evidence navigation",
+    action: async (page) => {
+      const fixture = await createPhase6PoamFixture(page, "create");
+      const system = fixture.systems[0];
+      const waiverMutations = [];
+      const onWaiverRequest = (request) => {
+        const url = new URL(request.url());
+        if (!["GET", "HEAD", "OPTIONS"].includes(request.method()) && url.pathname.includes("/waivers")) {
+          waiverMutations.push(`${request.method()} ${url.pathname}`);
+        }
+      };
+      page.on("request", onWaiverRequest);
+      const bar = await openPhase6Evidence(page, fixture, system);
+      await assertVisible(bar, "Expected remediation controls for the persisted FAIL assessment");
+      await assertVisible(bar.getByText("FAIL", { exact: true }), "The finding must render FAIL before remediation");
+      await assertVisible(bar.getByText("No active remediation plan. The finding remains FAIL.", { exact: true }), "Expected no-remediation state");
+
+      await bar.getByRole("button", { name: "Create POA&M", exact: true }).click();
+      const modal = page.getByRole("dialog").filter({ has: page.getByRole("heading", { name: "Create POA&M", exact: true }) });
+      const context = modal.getByTestId("poam-finding-context");
+      await assertVisible(context.getByText(system.hostname, { exact: true }), "Create context must show the exact system");
+      await assertVisible(context.getByText(`${fixture.policy.name} · ${fixture.policyVersionId}`, { exact: true }), "Create context must show the exact policy and version");
+      const bundleContext = context.getByText("Bundle / version", { exact: true }).locator("..").locator("dd");
+      await assertVisible(bundleContext, "Create context must show bundle context");
+      const bundleContextText = (await bundleContext.textContent()) || "";
+      if (!bundleContextText.includes(fixture.bundle.name) || !bundleContextText.includes("6")) {
+        throw new Error(`Create context must show the exact bundle and version, got ${JSON.stringify(bundleContextText)}`);
+      }
+      await assertVisible(context.getByText(system.assessmentId, { exact: true }), "Create context must show the exact assessment ID");
+      await assertVisible(context.getByText("FAIL", { exact: true }), "Create context must preserve FAIL");
+      if (await context.locator("input, textarea, select").count() !== 0) throw new Error("Authoritative finding context must be read-only");
+      await assertVisible(
+        modal.getByText("A POA&M records work to fix a deficiency. Risk acceptance uses the separate waiver flow; neither action changes this finding's result.", { exact: true }),
+        "The create flow must keep remediation separate from waiver risk acceptance",
+      );
+
+      await modal.getByLabel("Title").fill("Disable direct root SSH login");
+      await modal.getByLabel("Owner").fill("Host Security");
+      await modal.getByLabel("Target completion").fill("2026-09-19");
+      await modal.getByLabel("Risk").selectOption("High");
+      await modal.getByLabel("Remediation plan").fill("Deploy PermitRootLogin=no and verify the exact assessment target.");
+      const createResponsePromise = page.waitForResponse(
+        (response) => response.url().endsWith("/api/v1/poams") && response.request().method() === "POST",
+      );
+      await modal.getByRole("button", { name: "Create POA&M", exact: true }).click();
+      const createResponse = await createResponsePromise;
+      if (createResponse.status() !== 201) throw new Error(`POA&M create returned ${createResponse.status()}: ${await createResponse.text()}`);
+      const posted = createResponse.request().postDataJSON();
+      if (posted.assessment_id !== system.assessmentId) throw new Error(`Create posted ${posted.assessment_id}, expected ${system.assessmentId}`);
+      const created = await createResponse.json();
+      const detail = page.getByTestId("poam-detail");
+      await assertVisible(detail.getByText(created.human_id, { exact: true }), "Expected returned human POA&M ID");
+      await assertVisible(detail.getByText("Open", { exact: true }).first(), "Expected returned Open status");
+      await assertVisible(detail.getByText("Host Security", { exact: true }), "Expected returned owner");
+      await assertVisible(detail.getByText("2026-09-19", { exact: true }), "Expected returned due date");
+      if (!page.url().includes(`poam=${created.id}`)) throw new Error(`POA&M detail route omitted exact ID: ${page.url()}`);
+
+      const exactEvidence = detail.getByTestId("poam-linked-finding").filter({ hasText: system.hostname });
+      await assertVisible(exactEvidence.getByText("Fail", { exact: true }), "Linked finding must remain FAIL in common detail");
+      await exactEvidence.getByRole("button", { name: "Evidence", exact: true }).click();
+      await page.locator(`[data-testid="finding-poam-remediation"][data-assessment-id="${system.assessmentId}"]`).waitFor({ state: "visible", timeout: 15000 });
+      const currentUrl = new URL(page.url());
+      for (const [key, value] of [["bundle", fixture.bundle.id], ["version", fixture.bundleVersionId], ["system", system.id], ["policy", fixture.policy.id], ["view", "evidence"]]) {
+        if (currentUrl.searchParams.get(key) !== value) throw new Error(`Evidence back navigation lost exact ${key}: ${page.url()}`);
+      }
+      const refreshedBar = page.locator(`[data-testid="finding-poam-remediation"][data-assessment-id="${system.assessmentId}"]`);
+      await assertVisible(refreshedBar.getByText("FAIL", { exact: true }), "Finding must remain FAIL after create");
+      await assertVisible(refreshedBar.getByText(created.human_id, { exact: true }), "Remediation must reference the created POA&M");
+      page.off("request", onWaiverRequest);
+      if (waiverMutations.length !== 0) throw new Error(`POA&M create used waiver mutations: ${waiverMutations.join(", ")}`);
+    },
+  },
+  {
+    name: "29h-poam-link-compatible-findings",
+    description: "Finding-origin compatibility search links only the same real lineage and keeps both findings FAIL",
+    action: async (page) => {
+      const fixture = await createPhase6PoamFixture(page, "compatible", 2);
+      const incompatible = await createPhase6PoamFixture(page, "incompatible");
+      const first = fixture.systems[0];
+      const second = fixture.systems[1];
+      const poam = await createFixturePoam(page, first.assessmentId, { title: "Shared lineage remediation", targetDate: "2026-10-04" });
+      const incompatiblePoam = await createFixturePoam(page, incompatible.systems[0].assessmentId, { title: `Excluded ${incompatible.name}` });
+      const bar = await openPhase6Evidence(page, fixture, second);
+      await bar.getByRole("button", { name: "Link existing", exact: true }).click();
+      const modal = page.getByRole("dialog").filter({ has: page.getByRole("heading", { name: "Link existing POA&M" }) });
+      const searchResponse = await page.waitForResponse(
+        (response) => response.url().includes(`/api/v1/poams/compatible?assessment_id=${second.assessmentId}`) && response.request().method() === "GET",
+      );
+      if (searchResponse.status() !== 200) throw new Error(`Compatible search returned ${searchResponse.status()}`);
+      const candidates = await searchResponse.json();
+      if (!candidates.items.some((item) => item.id === poam.id)) throw new Error("Compatible server search omitted same-lineage POA&M");
+      if (candidates.items.some((item) => item.id === incompatiblePoam.id)) throw new Error("Compatible server search leaked an incompatible lineage");
+      await assertVisible(modal.getByText(poam.human_id, { exact: true }), "Compatible POA&M must be visible from the finding");
+      await assertHidden(modal.getByText(incompatiblePoam.human_id, { exact: true }), "Incompatible lineage must not be offered");
+      const linkResponsePromise = page.waitForResponse(
+        (response) => response.url().endsWith(`/api/v1/poams/${poam.id}/findings`) && response.request().method() === "POST",
+      );
+      await modal.getByText(poam.human_id, { exact: true }).click();
+      const linkResponse = await linkResponsePromise;
+      if (linkResponse.status() !== 200 || linkResponse.request().postDataJSON().assessment_id !== second.assessmentId) {
+        throw new Error(`Finding link did not use exact assessment ${second.assessmentId}`);
+      }
+      const detail = page.getByTestId("poam-detail");
+      const rows = detail.getByTestId("poam-linked-finding");
+      await page.waitForFunction((count) => document.querySelectorAll('[data-testid="poam-linked-finding"]').length === count, 2);
+      if (await rows.count() !== 2) throw new Error(`Expected two linked findings, got ${await rows.count()}`);
+      for (const system of [first, second]) {
+        const row = detail.locator(`[data-testid="poam-linked-finding"][data-finding-id="${system.findingId}"]`);
+        await assertVisible(row.getByText("Fail", { exact: true }), `${system.hostname} must remain FAIL after link`);
+      }
+      const persisted = (await phase6Api(page, `/api/v1/poams/${poam.id}`)).body;
+      if (persisted.findings.length !== 2 || persisted.findings.some((finding) => finding.resolution_state !== "fail")) {
+        throw new Error(`Server detail did not preserve two FAIL findings: ${JSON.stringify(persisted.findings)}`);
+      }
+    },
+  },
+  {
+    name: "29i-poam-detail-edits-milestones-conflicts",
+    description: "Common POA&M detail persists metadata, lifecycle, notes, milestone operations, and stale-revision feedback",
+    action: async (page) => {
+      const fixture = await createPhase6PoamFixture(page, "detail");
+      const poam = await createFixturePoam(page, fixture.systems[0].assessmentId, { title: "Editable remediation" });
+      await page.goto(`${baseUrl}/compliance?bundle=${fixture.bundle.id}&version=${fixture.bundleVersionId}&view=poam&poam=${poam.id}`, { timeout: LOAD_TIMEOUT });
+      const detail = page.getByTestId("poam-detail");
+      await waitForPhase6Target(page, detail, "POA&M detail route");
+      await detail.getByLabel("Title").fill("Persisted remediation metadata");
+      await detail.getByLabel("Owner").fill("Security Engineering");
+      await detail.getByLabel("Target completion").fill("2026-11-12");
+      await detail.getByLabel("Risk").selectOption("Low");
+      await detail.getByPlaceholder("What will change, where, and how it will be verified").fill("Persist this exact remediation plan.");
+      await detail.getByRole("button", { name: "Save metadata", exact: true }).click();
+      await assertVisible(detail.getByText("Security Engineering", { exact: true }).first(), "Saved owner must reconcile from server response");
+      await detail.getByRole("button", { name: "In Progress", exact: true }).click();
+      await assertVisible(detail.getByText("In Progress", { exact: true }).first(), "Status transition must reconcile");
+      await detail.getByPlaceholder("Add a durable note").fill("Browser persisted durable note");
+      await detail.getByRole("button", { name: "Add note", exact: true }).click();
+      await assertVisible(detail.getByText(/Browser persisted durable note/), "Durable note must appear in activity");
+
+      await detail.getByPlaceholder("Add milestone").fill("Browser release gate");
+      await detail.locator('.poam-milestone-add input[type="date"]').fill("2026-10-31");
+      const addMilestoneResponsePromise = page.waitForResponse(
+        (response) => response.url().endsWith(`/api/v1/poams/${poam.id}/milestones`) && response.request().method() === "POST",
+      );
+      await detail.locator(".poam-milestone-add").getByRole("button", { name: "Add", exact: true }).click();
+      const addMilestoneResponse = await addMilestoneResponsePromise;
+      const addedDetail = await addMilestoneResponse.json();
+      const addedMilestone = addedDetail.milestones.find((item) => item.title === "Browser release gate");
+      if (!addedMilestone) throw new Error(`Milestone response omitted added row: ${JSON.stringify(addedDetail.milestones)}`);
+      const milestone = detail.locator(`[data-testid="poam-milestone"][data-milestone-id="${addedMilestone.id}"]`);
+      await assertVisible(milestone, "Added milestone must reconcile from server response");
+      await milestone.getByRole("button", { name: "Complete", exact: true }).click();
+      await assertVisible(milestone.getByRole("button", { name: "Reopen", exact: true }), "Completed milestone must expose reopen");
+      await milestone.getByRole("button", { name: "Reopen", exact: true }).click();
+      await assertVisible(milestone.getByRole("button", { name: "Complete", exact: true }), "Reopened milestone must persist");
+      await milestone.getByTitle("Remove milestone").click();
+      await assertHidden(detail.getByTestId("poam-milestone").filter({ hasText: "Browser release gate" }), "Removed milestone must disappear");
+
+      await page.reload({ timeout: LOAD_TIMEOUT });
+      const reloaded = page.getByTestId("poam-detail");
+      await reloaded.waitFor({ state: "visible", timeout: 15000 });
+      await assertValue(reloaded.getByLabel("Title"), "Persisted remediation metadata", "Title must survive reload");
+      await assertValue(reloaded.getByLabel("Owner"), "Security Engineering", "Owner must survive reload");
+      await assertValue(reloaded.getByLabel("Target completion"), "2026-11-12", "Target must survive reload");
+      await assertValue(reloaded.getByLabel("Risk"), "Low", "Risk must survive reload");
+      await assertValue(reloaded.getByPlaceholder("What will change, where, and how it will be verified"), "Persist this exact remediation plan.", "Plan must survive reload");
+      await assertVisible(reloaded.getByText(/Browser persisted durable note/), "Note activity must survive reload");
+      await assertHidden(reloaded.getByTestId("poam-milestone").filter({ hasText: "Browser release gate" }), "Removed milestone must remain removed after reload");
+
+      const current = (await phase6Api(page, `/api/v1/poams/${poam.id}`)).body;
+      await phase6Api(page, `/api/v1/poams/${poam.id}/notes`, {
+        method: "POST",
+        body: JSON.stringify({ revision: current.revision, text: "Concurrent revision" }),
+      });
+      await reloaded.getByLabel("Owner").fill("Preserved stale draft");
+      const staleResponsePromise = page.waitForResponse(
+        (response) => response.url().endsWith(`/api/v1/poams/${poam.id}`) && response.request().method() === "PATCH",
+      );
+      await reloaded.getByRole("button", { name: "Save metadata", exact: true }).click();
+      const staleResponse = await staleResponsePromise;
+      if (staleResponse.status() !== 409) throw new Error(`Expected real stale revision 409, got ${staleResponse.status()}`);
+      await assertVisible(reloaded.getByText(/changed before saving metadata/i), "Stale revision must have actionable presentation");
+      await assertValue(reloaded.getByLabel("Owner"), "Preserved stale draft", "Stale refresh must preserve entered values");
+    },
+  },
+  {
+    name: "29j-poam-awaiting-verification-closure-rejection",
+    description: "Awaiting verification cannot close while its authoritative linked finding remains FAIL",
+    action: async (page) => {
+      const fixture = await createPhase6PoamFixture(page, "closure");
+      const system = fixture.systems[0];
+      const poam = await createFixturePoam(page, system.assessmentId, { title: "Closure must remain authoritative" });
+      await page.goto(`${baseUrl}/compliance?bundle=${fixture.bundle.id}&version=${fixture.bundleVersionId}&view=poam&poam=${poam.id}`, { timeout: LOAD_TIMEOUT });
+      const detail = page.getByTestId("poam-detail");
+      await waitForPhase6Target(page, detail, "Awaiting-verification POA&M detail route");
+      await detail.getByRole("button", { name: "In Progress", exact: true }).click();
+      await detail.getByRole("button", { name: "Awaiting Verification", exact: true }).click();
+      await assertVisible(detail.getByText("Awaiting verification.", { exact: true }), "Awaiting state must explain finding independence");
+      const verifyResponsePromise = page.waitForResponse(
+        (response) => response.url().endsWith(`/api/v1/poams/${poam.id}/verify`) && response.request().method() === "POST",
+      );
+      await detail.getByRole("button", { name: "Verify now", exact: true }).click();
+      const verifyResponse = await verifyResponsePromise;
+      if (verifyResponse.status() !== 200) throw new Error(`Verification returned ${verifyResponse.status()}`);
+      await assertVisible(detail.getByTestId("poam-verification-result").getByText("Fail", { exact: true }), "Verification must expose authoritative FAIL");
+
+      const closeResponsePromise = page.waitForResponse(
+        (response) => response.url().endsWith(`/api/v1/poams/${poam.id}/close`) && response.request().method() === "POST",
+      );
+      await detail.getByRole("button", { name: "Authoritative close", exact: true }).click();
+      const closeResponse = await closeResponsePromise;
+      if (closeResponse.status() !== 412) throw new Error(`Expected authoritative close 412, got ${closeResponse.status()}`);
+      const rejection = detail.getByTestId("poam-close-rejection");
+      await assertVisible(rejection.getByText("Closure rejected for these findings", { exact: true }), "Structured closure reason must be visible");
+      await assertVisible(rejection.locator(`[data-finding-id="${system.findingId}"]`).getByText("Fail", { exact: true }), "Structured rejection must identify the failing finding");
+      const persisted = (await phase6Api(page, `/api/v1/poams/${poam.id}`)).body;
+      if (persisted.status === "completed" || persisted.findings[0].resolution_state !== "fail") {
+        throw new Error(`Rejected closure changed authoritative state: ${JSON.stringify(persisted)}`);
+      }
+    },
+  },
+  {
+    name: "29k-poam-system-rollups-navigation",
+    description: "System compliance uses real Open, Overdue, and Closed rollups with common detail and exact evidence navigation",
+    action: async (page) => {
+      const fixture = await createPhase6PoamFixture(page, "system-rollup");
+      const system = fixture.systems[0];
+      const overdue = await createFixturePoam(page, system.assessmentId, { title: "System overdue remediation", targetDate: "2020-01-01" });
+      const awaitingFinding = await addPhase6Finding(page, fixture, "awaiting", system);
+      let awaiting = await createFixturePoam(page, awaitingFinding.assessmentId, { title: "System awaiting remediation" });
+      awaiting = (await phase6Api(page, `/api/v1/poams/${awaiting.id}/transition`, { method: "POST", body: JSON.stringify({ revision: awaiting.revision, status: "in_progress", note: null }) })).body;
+      awaiting = (await phase6Api(page, `/api/v1/poams/${awaiting.id}/transition`, { method: "POST", body: JSON.stringify({ revision: awaiting.revision, status: "awaiting_verification", note: null }) })).body;
+      const closedFinding = await addPhase6Finding(page, fixture, "closed", system);
+      let closed = await createFixturePoam(page, closedFinding.assessmentId, { title: "System closed remediation" });
+      runFixtureSql(`UPDATE composite_policy_assessments SET overall_outcome='pass', updated_at=now() WHERE id='${closedFinding.assessmentId}'::uuid;`);
+      closed = (await phase6Api(page, `/api/v1/poams/${closed.id}/transition`, { method: "POST", body: JSON.stringify({ revision: closed.revision, status: "in_progress", note: null }) })).body;
+      closed = (await phase6Api(page, `/api/v1/poams/${closed.id}/transition`, { method: "POST", body: JSON.stringify({ revision: closed.revision, status: "awaiting_verification", note: null }) })).body;
+      closed = (await phase6Api(page, `/api/v1/poams/${closed.id}/close`, { method: "POST", body: JSON.stringify({ revision: closed.revision }) })).body;
+
+      const expected = (await phase6Api(page, `/api/v1/poams/rollups/systems?ids=${system.id}`)).body[0];
+      await page.goto(`${baseUrl}/systems/${system.id}?tab=compliance`, { timeout: LOAD_TIMEOUT });
+      const section = page.locator("section.poam-system-section");
+      await waitForPhase6Target(page, section, "System POA&M section");
+      for (const [label, value] of [["Open findings", expected.open_findings], ["On POA&M", expected.on_poam_findings], ["No POA&M", expected.no_poam_findings], ["Overdue", expected.overdue], ["Awaiting verification", expected.awaiting_verification], ["Closed", expected.completed]]) {
+        await assertVisible(section.getByText(label, { exact: true }).locator("..").getByText(String(value), { exact: true }), `System rollup must render exact ${label}`);
+      }
+      await section.getByRole("button", { name: new RegExp(`Overdue\\s*${expected.overdue}`) }).click();
+      await assertVisible(section.locator(`[data-testid="poam-row"][data-poam-id="${overdue.id}"]`), "Overdue filter must show the overdue server row");
+      await section.getByRole("button", { name: new RegExp(`Closed\\s*${expected.completed}`) }).click();
+      const closedRow = section.locator(`[data-testid="poam-row"][data-poam-id="${closed.id}"]`);
+      await assertVisible(closedRow, "Closed filter must show the completed server row");
+      await closedRow.click();
+      await assertVisible(page.getByTestId("poam-detail").getByText(closed.human_id, { exact: true }), "System row must open common POA&M detail");
+      await page.getByTestId("poam-detail").getByRole("button", { name: "Close", exact: true }).click();
+      await section.locator(".poam-filter button").filter({ hasText: "Awaiting verification" }).click();
+      await section.locator(`[data-testid="poam-row"][data-poam-id="${awaiting.id}"]`).click();
+      await page.getByTestId("poam-detail").getByTestId("poam-linked-finding").getByRole("button", { name: "Evidence", exact: true }).click();
+      const evidenceTarget = page.locator(`[data-testid="evidence-policy-target"][data-policy-id="${awaitingFinding.policy.id}"]`);
+      await evidenceTarget.waitFor({ state: "visible", timeout: 15000 });
+      await evidenceTarget.click();
+      await page.locator(`[data-testid="finding-poam-remediation"][data-assessment-id="${awaitingFinding.assessmentId}"]`).waitFor({ state: "visible", timeout: 15000 });
+      if (!page.url().includes(`tab=compliance`) || page.url().includes("poam=")) throw new Error(`System evidence navigation did not clear exact POA&M route: ${page.url()}`);
+    },
+  },
+  {
+    name: "29l-poam-bundle-rollups-batching",
+    description: "Bundle UI renders the authoritative POA&M mixture without N+1 rollup or eager detail requests",
+    action: async (page) => {
+      const fixture = await createPhase6PoamFixture(page, "bundle-rollup", 6);
+      const [openSystem, overdueSystem, awaitingSystem, completedSystem, noPoamSystem, progressSystem] = fixture.systems;
+      const open = await createFixturePoam(page, openSystem.assessmentId, { title: "Bundle open remediation" });
+      const overdue = await createFixturePoam(page, overdueSystem.assessmentId, { title: "Bundle overdue remediation", targetDate: "2020-01-01" });
+      let awaiting = await createFixturePoam(page, awaitingSystem.assessmentId, { title: "Bundle awaiting remediation" });
+      awaiting = (await phase6Api(page, `/api/v1/poams/${awaiting.id}/transition`, { method: "POST", body: JSON.stringify({ revision: awaiting.revision, status: "in_progress", note: null }) })).body;
+      awaiting = (await phase6Api(page, `/api/v1/poams/${awaiting.id}/transition`, { method: "POST", body: JSON.stringify({ revision: awaiting.revision, status: "awaiting_verification", note: null }) })).body;
+      let completed = await createFixturePoam(page, completedSystem.assessmentId, { title: "Bundle completed remediation" });
+      runFixtureSql(`UPDATE composite_policy_assessments SET overall_outcome='pass', updated_at=now() WHERE id='${completedSystem.assessmentId}'::uuid;`);
+      completed = (await phase6Api(page, `/api/v1/poams/${completed.id}/transition`, { method: "POST", body: JSON.stringify({ revision: completed.revision, status: "in_progress", note: null }) })).body;
+      completed = (await phase6Api(page, `/api/v1/poams/${completed.id}/transition`, { method: "POST", body: JSON.stringify({ revision: completed.revision, status: "awaiting_verification", note: null }) })).body;
+      completed = (await phase6Api(page, `/api/v1/poams/${completed.id}/close`, { method: "POST", body: JSON.stringify({ revision: completed.revision }) })).body;
+      let progress = await createFixturePoam(page, progressSystem.assessmentId, { title: "Bundle progress remediation" });
+      progress = (await phase6Api(page, `/api/v1/poams/${progress.id}/transition`, { method: "POST", body: JSON.stringify({ revision: progress.revision, status: "in_progress", note: null }) })).body;
+      const expected = (await phase6Api(page, `/api/v1/poams/rollups/bundles?ids=${fixture.bundle.id}`)).body[0];
+      const complianceBefore = Number(runFixtureSql(`
+        SELECT COUNT(*) FROM composite_policy_assessments
+        WHERE system_id=ANY(ARRAY[${fixture.systems.map((system) => `'${system.id}'::uuid`).join(",")}])
+          AND policy_lineage_id='${fixture.policy.id}'::uuid AND overall_outcome='fail';
+      `));
+
+      const rollupRequests = [];
+      const detailRequests = [];
+      const onRequest = (request) => {
+        const url = new URL(request.url());
+        if (request.method() === "GET" && url.pathname === "/api/v1/poams/rollups/bundles") rollupRequests.push(url);
+        if (request.method() === "GET" && /^\/api\/v1\/poams\/[0-9a-f-]+$/.test(url.pathname)) detailRequests.push(url);
+      };
+      page.on("request", onRequest);
+      await page.goto(`${baseUrl}/compliance`, { timeout: LOAD_TIMEOUT });
+      await page.locator(`[data-testid="compliance-bundle-row"][data-bundle-id="${fixture.bundle.id}"]`).waitFor({ state: "visible", timeout: 15000 });
+      await page.waitForFunction(() => {
+        const rows = [...document.querySelectorAll('[data-testid="compliance-bundle-row"]')];
+        return rows.length > 0 && rows.every((row) => row.querySelector('[data-testid="bundle-poam-summary"]'));
+      });
+      const visibleBundleIds = await page.getByTestId("compliance-bundle-row").evaluateAll((rows) => rows.map((row) => row.dataset.bundleId).filter(Boolean));
+      const expectedRollupRequests = Math.ceil(visibleBundleIds.length / 100);
+      if (rollupRequests.length !== expectedRollupRequests) throw new Error(`Bundle list made ${rollupRequests.length} rollup requests for ${visibleBundleIds.length} rows; expected ${expectedRollupRequests}`);
+      const requestedBundleIds = rollupRequests.flatMap((url) => (url.searchParams.get("ids") || "").split(",").filter(Boolean));
+      if (rollupRequests.some((url) => (url.searchParams.get("ids") || "").split(",").filter(Boolean).length > 100)) {
+        throw new Error(`Bundle rollup request exceeded the 100-ID server limit: ${rollupRequests.map((url) => url.toString()).join(", ")}`);
+      }
+      if (!isDeepStrictEqual([...new Set(requestedBundleIds)].sort(), [...new Set(visibleBundleIds)].sort())) {
+        throw new Error(`Bundle rollup IDs did not match visible rows: requested=${JSON.stringify(requestedBundleIds)} visible=${JSON.stringify(visibleBundleIds)}`);
+      }
+      if (detailRequests.length !== 0) throw new Error(`Bundle list eagerly loaded ${detailRequests.length} POA&M details`);
+      page.off("request", onRequest);
+
+      await page.locator(`[data-testid="compliance-bundle-row"][data-bundle-id="${fixture.bundle.id}"]`).click();
+      const rollup = page.locator(".poam-bundle-rollup");
+      await rollup.waitFor({ state: "visible", timeout: 15000 });
+      const exactCounts = {
+        "Open findings": expected.open_findings,
+        "On POA&M": expected.on_poam_findings,
+        "No POA&M": expected.no_poam_findings,
+        Overdue: expected.overdue,
+        Awaiting: expected.awaiting_verification,
+        Closed: expected.completed,
+      };
+      for (const [label, value] of Object.entries(exactCounts)) {
+        const cell = ["Open findings", "On POA&M", "No POA&M"].includes(label)
+          ? rollup.locator(".poam-rollup-counts > div").filter({ hasText: label })
+          : rollup.getByRole("button", { name: new RegExp(`${label}.*${value}|${value}.*${label}`) });
+        await assertVisible(cell.getByText(String(value), { exact: true }), `Bundle rollup must render exact ${label}=${value}`);
+      }
+      await rollup.getByRole("button", { name: new RegExp(`${expected.total} POA&M items`) }).click();
+      const poamView = page.getByTestId("bundle-poam-view");
+      await poamView.waitFor({ state: "visible", timeout: 15000 });
+      await page.waitForFunction(
+        (count) => document.querySelectorAll('[data-testid="bundle-poam-view"] [data-testid="poam-row"]').length === count,
+        expected.total,
+      );
+      const renderedRows = await poamView.getByTestId("poam-row").evaluateAll((rows) => rows.map((row) => ({ id: row.dataset.poamId, text: row.innerText })));
+      if (renderedRows.length !== expected.total) throw new Error(`All filter rendered ${renderedRows.length}, not ${expected.total}, authoritative rows: ${JSON.stringify(renderedRows)}`);
+      await poamView.getByRole("button", { name: new RegExp(`Overdue\\s*${expected.overdue}`) }).click();
+      await assertVisible(poamView.locator(`[data-testid="poam-row"][data-poam-id="${overdue.id}"]`), "Overdue filter must render exact item");
+      await poamView.getByTestId("bundle-poam-filters").getByRole("button").filter({ hasText: "Awaiting verification" }).click();
+      await assertVisible(poamView.locator(`[data-testid="poam-row"][data-poam-id="${awaiting.id}"]`), "Awaiting filter must render exact item");
+      await poamView.getByRole("button", { name: new RegExp(`Closed\\s*${expected.completed}`) }).click();
+      await poamView.locator(`[data-testid="poam-row"][data-poam-id="${completed.id}"]`).click();
+      await assertVisible(page.getByTestId("poam-detail").getByText(completed.human_id, { exact: true }), "Bundle row must open common detail only on demand");
+      const complianceAfter = Number(runFixtureSql(`
+        SELECT COUNT(*) FROM composite_policy_assessments
+        WHERE system_id=ANY(ARRAY[${fixture.systems.map((system) => `'${system.id}'::uuid`).join(",")}])
+          AND policy_lineage_id='${fixture.policy.id}'::uuid AND overall_outcome='fail';
+      `));
+      if (complianceAfter !== complianceBefore) throw new Error(`POA&M filtering changed compliance failures ${complianceBefore} -> ${complianceAfter}`);
+      if (noPoamSystem.findingId === undefined || progress.id === undefined) throw new Error("Fixture mixture omitted no-POA&M or in-progress state");
+    },
+  },
+  {
+    name: "29m-poam-assignment-relationship-immutability",
+    description: "Assignment POA&M link and unlink use relationship endpoints without mutating the immutable assignment version",
+    action: async (page) => {
+      const fixture = await createPhase6PoamFixture(page, "assignment");
+      const poam = await createFixturePoam(page, fixture.systems[0].assessmentId, { title: "Immutable assignment reference" });
+      const assignment = fixture.systems[0].assignment;
+      await page.goto(`${baseUrl}/compliance?bundle=${fixture.bundle.id}&version=${fixture.bundleVersionId}&system=${fixture.systems[0].id}&view=overview`, { timeout: LOAD_TIMEOUT });
+      const snapshotSql = `
+        SELECT jsonb_build_object(
+          'version', to_jsonb(av),
+          'exclusions', COALESCE((
+            SELECT jsonb_agg(to_jsonb(exclusion) ORDER BY exclusion.policy_version_id)
+            FROM compliance_assignment_exclusions exclusion
+            WHERE exclusion.assignment_version_id=av.id
+          ), '[]'::jsonb),
+          'additions', COALESCE((
+            SELECT jsonb_agg(to_jsonb(addition) ORDER BY addition.addition_order, addition.policy_version_id)
+            FROM compliance_assignment_additions addition
+            WHERE addition.assignment_version_id=av.id
+          ), '[]'::jsonb),
+          'overrides', COALESCE((
+            SELECT jsonb_agg(to_jsonb(override_value) ORDER BY override_value.policy_version_id, override_value.value_path)
+            FROM compliance_assignment_value_overrides override_value
+            WHERE override_value.assignment_version_id=av.id
+          ), '[]'::jsonb),
+          'current_pointer', assignment.current_version_id
+        )::text
+        FROM compliance_bundle_assignment_versions av
+        JOIN compliance_bundle_assignments assignment ON assignment.id=av.assignment_id
+        WHERE av.id='${assignment.current_version_id}'::uuid;
+      `;
+      const before = JSON.parse(runFixtureSql(snapshotSql));
+      const assignmentUpdates = [];
+      const onRequest = (request) => {
+        if (request.method() === "PUT" && /\/api\/v1\/compliance\/assignments\/[0-9a-f-]+$/.test(new URL(request.url()).pathname)) assignmentUpdates.push(request.url());
+      };
+      page.on("request", onRequest);
+      const relationship = page.locator(`[data-testid="assignment-poam-relationships"][data-assignment-version-id="${assignment.current_version_id}"]`);
+      await relationship.waitFor({ state: "visible", timeout: 15000 });
+      await relationship.getByTestId("assignment-link-poam").click();
+      const search = page.getByTestId("assignment-poam-search");
+      await search.fill(poam.human_id);
+      const linkButton = page.locator(`[data-testid="assignment-poam-link-submit"][data-assignment-version-id="${assignment.current_version_id}"]`).filter({ hasText: poam.human_id });
+      await linkButton.waitFor({ state: "visible", timeout: 15000 });
+      const linkResponsePromise = page.waitForResponse(
+        (response) => response.url().endsWith(`/api/v1/poams/${poam.id}/assignments`) && response.request().method() === "POST",
+      );
+      await linkButton.click();
+      const linkResponse = await linkResponsePromise;
+      if (linkResponse.status() !== 200 || linkResponse.request().postDataJSON().assignment_version_id !== assignment.current_version_id) {
+        throw new Error("Assignment relationship did not post the exact immutable version ID");
+      }
+      const detail = page.getByTestId("poam-detail");
+      await assertVisible(detail.getByText(`Assignment version ${assignment.current_version_id}`, { exact: true }), "Common detail must show exact assignment relation");
+      await detail.getByRole("button", { name: "Close", exact: true }).click();
+      await assertVisible(relationship.getByTestId("assignment-poam-reference").filter({ hasText: poam.human_id }), "Assignment surface must show linked relation");
+      const afterLink = JSON.parse(runFixtureSql(snapshotSql));
+      if (!isDeepStrictEqual(afterLink, before) || assignmentUpdates.length !== 0) throw new Error(`Link mutated assignment state: before=${JSON.stringify(before)} after=${JSON.stringify(afterLink)} updates=${assignmentUpdates.length}`);
+
+      await relationship.getByTestId("assignment-poam-reference").filter({ hasText: poam.human_id }).click();
+      const unlinkResponsePromise = page.waitForResponse(
+        (response) => new URL(response.url()).pathname === `/api/v1/poams/${poam.id}/assignments/${assignment.current_version_id}` && response.request().method() === "DELETE",
+      );
+      await page.getByTestId("poam-detail").getByRole("button", { name: "Unlink reference", exact: true }).click();
+      const unlinkResponse = await unlinkResponsePromise;
+      if (unlinkResponse.status() !== 200) throw new Error(`Assignment unlink returned ${unlinkResponse.status()}`);
+      await page.getByTestId("poam-detail").getByRole("button", { name: "Close", exact: true }).click();
+      await assertHidden(relationship.getByTestId("assignment-poam-reference").filter({ hasText: poam.human_id }), "Unlinked relation must disappear");
+      const afterUnlink = JSON.parse(runFixtureSql(snapshotSql));
+      if (!isDeepStrictEqual(afterUnlink, before) || assignmentUpdates.length !== 0) throw new Error(`Unlink mutated assignment state: before=${JSON.stringify(before)} after=${JSON.stringify(afterUnlink)} updates=${assignmentUpdates.length}`);
+
+      await page.route("**/api/auth/whoami", async (route) => route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          is_authenticated: true,
+          auth_mode: "local",
+          roles: ["Viewer"],
+          is_admin: false,
+          user: { id: "phase6-viewer", email: "viewer@example.invalid", display_name: "Phase 6 Viewer" },
+        }),
+      }));
+      await page.goto(`${baseUrl}/compliance?bundle=${fixture.bundle.id}&version=${fixture.bundleVersionId}&view=poam&poam=${poam.id}`, { timeout: LOAD_TIMEOUT });
+      const viewerDetail = page.getByTestId("poam-detail");
+      await viewerDetail.waitFor({ state: "visible", timeout: 15000 });
+      if (!(await viewerDetail.getByRole("button", { name: "Save metadata", exact: true }).isDisabled())) throw new Error("Viewer must not mutate POA&M metadata");
+      if (!(await viewerDetail.getByRole("button", { name: "Link finding", exact: true }).isDisabled())) throw new Error("Viewer must not mutate POA&M findings");
+      await page.unroute("**/api/auth/whoami");
+      page.off("request", onRequest);
     },
   },
   // ── End TASK-334 ─────────────────────────────────────────────────────────────

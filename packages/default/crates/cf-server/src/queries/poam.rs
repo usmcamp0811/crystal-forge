@@ -32,6 +32,207 @@ const SUMMARY_COLUMNS_AFTER_TODAY: &str = r#", FALSE) AS overdue,
     p.created_at, p.updated_at, p.closed_at, p.closure_attempt_id
 "#;
 
+#[derive(sqlx::FromRow)]
+struct RelatedPoamSummary {
+    relation_id: Uuid,
+    relation_active: bool,
+    id: Uuid,
+    human_id: String,
+    title: String,
+    plan: String,
+    owner: String,
+    target_date: Option<NaiveDate>,
+    risk: String,
+    status: String,
+    revision: i64,
+    overdue: bool,
+    finding_count: i64,
+    created_at: chrono::DateTime<chrono::Utc>,
+    updated_at: chrono::DateTime<chrono::Utc>,
+    closed_at: Option<chrono::DateTime<chrono::Utc>>,
+    closure_attempt_id: Option<Uuid>,
+}
+
+impl RelatedPoamSummary {
+    fn into_parts(self) -> (Uuid, bool, PoamSummary) {
+        (
+            self.relation_id,
+            self.relation_active,
+            PoamSummary {
+                id: self.id,
+                human_id: self.human_id,
+                title: self.title,
+                plan: self.plan,
+                owner: self.owner,
+                target_date: self.target_date,
+                risk: self.risk,
+                status: self.status,
+                revision: self.revision,
+                overdue: self.overdue,
+                finding_count: self.finding_count,
+                created_at: self.created_at,
+                updated_at: self.updated_at,
+                closed_at: self.closed_at,
+                closure_attempt_id: self.closure_attempt_id,
+            },
+        )
+    }
+}
+
+pub async fn visible_assessment_findings(
+    pool: &PgPool,
+    assessment_ids: &[Uuid],
+    is_admin: bool,
+    environment_ids: &[Uuid],
+) -> Result<Vec<(Uuid, Uuid, Uuid, Uuid)>> {
+    Ok(sqlx::query_as(
+        r#"SELECT assessment.id,finding.id,assessment.system_id,assessment.policy_lineage_id
+           FROM UNNEST($1::uuid[]) WITH ORDINALITY requested(id,ordinal)
+           JOIN composite_policy_assessments assessment ON assessment.id=requested.id
+           JOIN poam_findings finding ON finding.system_id=assessment.system_id
+             AND finding.policy_lineage_id=assessment.policy_lineage_id
+           JOIN systems system ON system.id=assessment.system_id
+           WHERE $2 OR system.environment_id=ANY($3)
+           ORDER BY requested.ordinal"#,
+    )
+    .bind(assessment_ids)
+    .bind(is_admin)
+    .bind(environment_ids)
+    .fetch_all(pool)
+    .await?)
+}
+
+pub async fn finding_poam_summaries(
+    pool: &PgPool,
+    finding_ids: &[Uuid],
+    today: NaiveDate,
+    is_admin: bool,
+    environment_ids: &[Uuid],
+) -> Result<Vec<(Uuid, bool, PoamSummary)>> {
+    let mut builder = QueryBuilder::<Postgres>::new(
+        "SELECT link.finding_id AS relation_id,(p.status<>'completed' AND link.retired_at IS NULL) AS relation_active,",
+    );
+    builder
+        .push(SUMMARY_COLUMNS_BEFORE_TODAY)
+        .push_bind(today)
+        .push(SUMMARY_COLUMNS_AFTER_TODAY)
+        .push(" FROM poam_finding_links link JOIN poams p ON p.id=link.poam_id WHERE link.finding_id=ANY(")
+        .push_bind(finding_ids)
+        .push(") AND (")
+        .push_bind(is_admin)
+        .push(" OR poam_visible_to_environments(p.id,")
+        .push_bind(environment_ids)
+        .push(")) ORDER BY link.finding_id,(p.status<>'completed' AND link.retired_at IS NULL) DESC,p.updated_at DESC,p.id");
+    Ok(builder
+        .build_query_as::<RelatedPoamSummary>()
+        .fetch_all(pool)
+        .await?
+        .into_iter()
+        .map(RelatedPoamSummary::into_parts)
+        .collect())
+}
+
+pub async fn compatible_poams(
+    pool: &PgPool,
+    finding_id: Uuid,
+    policy_lineage_id: Uuid,
+    q: Option<&str>,
+    today: NaiveDate,
+    limit: i64,
+    offset: i64,
+    is_admin: bool,
+    environment_ids: &[Uuid],
+) -> Result<Vec<PoamSummary>> {
+    let mut builder = QueryBuilder::<Postgres>::new("SELECT ");
+    builder
+        .push(SUMMARY_COLUMNS_BEFORE_TODAY)
+        .push_bind(today)
+        .push(SUMMARY_COLUMNS_AFTER_TODAY)
+        .push(" FROM poams p WHERE p.status<>'completed' AND (")
+        .push_bind(is_admin)
+        .push(" OR poam_visible_to_environments(p.id,")
+        .push_bind(environment_ids)
+        .push(")) AND EXISTS (SELECT 1 FROM poam_finding_links link JOIN poam_findings finding ON finding.id=link.finding_id WHERE link.poam_id=p.id AND link.retired_at IS NULL AND finding.policy_lineage_id=")
+        .push_bind(policy_lineage_id)
+        .push(") AND (SELECT COUNT(*) FROM poam_finding_links link WHERE link.poam_id=p.id AND link.retired_at IS NULL)<100")
+        .push(" AND NOT EXISTS (SELECT 1 FROM poam_finding_links link WHERE link.poam_id=p.id AND link.finding_id=")
+        .push_bind(finding_id)
+        .push(") AND NOT EXISTS (SELECT 1 FROM poam_finding_links link WHERE link.finding_id=")
+        .push_bind(finding_id)
+        .push(" AND link.retired_at IS NULL)");
+    if let Some(q) = q {
+        builder
+            .push(" AND (p.title ILIKE ")
+            .push_bind(format!("%{q}%"))
+            .push(" OR p.owner ILIKE ")
+            .push_bind(format!("%{q}%"))
+            .push(" OR ('POAM-'||lpad(p.human_number::text,4,'0')) ILIKE ")
+            .push_bind(format!("%{q}%"))
+            .push(")");
+    }
+    builder
+        .push(" ORDER BY p.updated_at DESC,p.id LIMIT ")
+        .push_bind(limit + 1)
+        .push(" OFFSET ")
+        .push_bind(offset);
+    Ok(builder.build_query_as().fetch_all(pool).await?)
+}
+
+pub async fn visible_assignment_versions(
+    pool: &PgPool,
+    assignment_version_ids: &[Uuid],
+    is_admin: bool,
+    environment_ids: &[Uuid],
+) -> Result<Vec<Uuid>> {
+    Ok(sqlx::query_scalar(
+        r#"SELECT version.id
+           FROM UNNEST($1::uuid[]) WITH ORDINALITY requested(id,ordinal)
+           JOIN compliance_bundle_assignment_versions version ON version.id=requested.id
+           JOIN compliance_bundle_assignments assignment ON assignment.id=version.assignment_id
+           LEFT JOIN systems system ON system.id=assignment.system_id
+           WHERE $2 OR COALESCE(assignment.environment_id,system.environment_id)=ANY($3)
+           ORDER BY requested.ordinal"#,
+    )
+    .bind(assignment_version_ids)
+    .bind(is_admin)
+    .bind(environment_ids)
+    .fetch_all(pool)
+    .await?)
+}
+
+pub async fn assignment_poam_summaries(
+    pool: &PgPool,
+    assignment_version_ids: &[Uuid],
+    today: NaiveDate,
+    is_admin: bool,
+    environment_ids: &[Uuid],
+) -> Result<Vec<(Uuid, PoamSummary)>> {
+    let mut builder = QueryBuilder::<Postgres>::new(
+        "SELECT reference.assignment_version_id AS relation_id,false AS relation_active,",
+    );
+    builder
+        .push(SUMMARY_COLUMNS_BEFORE_TODAY)
+        .push_bind(today)
+        .push(SUMMARY_COLUMNS_AFTER_TODAY)
+        .push(" FROM poam_assignment_references reference JOIN poams p ON p.id=reference.poam_id WHERE reference.assignment_version_id=ANY(")
+        .push_bind(assignment_version_ids)
+        .push(") AND (")
+        .push_bind(is_admin)
+        .push(" OR poam_visible_to_environments(p.id,")
+        .push_bind(environment_ids)
+        .push(")) ORDER BY reference.assignment_version_id,p.updated_at DESC,p.id");
+    Ok(builder
+        .build_query_as::<RelatedPoamSummary>()
+        .fetch_all(pool)
+        .await?
+        .into_iter()
+        .map(|row| {
+            let (id, _, summary) = row.into_parts();
+            (id, summary)
+        })
+        .collect())
+}
+
 pub async fn user_environment_ids(pool: &PgPool, user_id: Uuid) -> Result<Vec<Uuid>> {
     Ok(sqlx::query_scalar(
         "SELECT environment_id FROM user_environment_memberships WHERE user_id = $1",

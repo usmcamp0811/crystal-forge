@@ -973,7 +973,7 @@ pub fn SystemsListView() -> Element {
                             },
                             on_open_detail: move |_| {
                                 preview_system.set(None);
-                                nav.push(Route::SystemDetailView { id: detail_for_open_detail.id.to_string() });
+                                nav.push(Route::SystemDetailView { id: detail_for_open_detail.id.to_string(), tab: String::new(), poam: String::new() });
                             },
                             on_deploy: move |_| {
                                 #[cfg(target_arch = "wasm32")]

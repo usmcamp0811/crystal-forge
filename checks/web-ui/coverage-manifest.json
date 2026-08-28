@@ -1997,6 +1997,83 @@
       "baseline": "advisory"
     },
     {
+      "name": "29g-poam-failed-evidence-create",
+      "description": "Persisted FAIL evidence creates a POA&M from exact read-only finding context and returns through exact evidence navigation",
+      "route": "/compliance",
+      "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
+      "profiles": ["ci_fast", "full"],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "29h-poam-link-compatible-findings",
+      "description": "Server-compatible finding-origin search links same-lineage persisted FAIL findings and excludes incompatible lineage",
+      "route": "/compliance",
+      "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
+      "profiles": ["ci_fast", "full"],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "29i-poam-detail-edits-milestones-conflicts",
+      "description": "Common POA&M detail persists metadata, status, notes, milestone lifecycle, and presents real stale revisions",
+      "route": "/compliance",
+      "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
+      "profiles": ["ci_fast", "full"],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "29j-poam-awaiting-verification-closure-rejection",
+      "description": "Awaiting verification exposes real failed verification and structured authoritative closure rejection",
+      "route": "/compliance",
+      "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
+      "profiles": ["ci_fast", "full"],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "29k-poam-system-rollups-navigation",
+      "description": "System compliance renders exact server POA&M rollups, filters, common detail, and linked evidence navigation",
+      "route": "/systems/:id?tab=compliance",
+      "designRef": "docs/design/CrystalForge/components/SystemDetail.jsx",
+      "profiles": ["ci_fast", "full"],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "29l-poam-bundle-rollups-batching",
+      "description": "Bundle compliance renders the authoritative POA&M mixture with bounded batch rollups and no eager row details",
+      "route": "/compliance",
+      "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
+      "profiles": ["ci_fast", "full"],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "29m-poam-assignment-relationship-immutability",
+      "description": "Assignment POA&M relationship link and unlink preserve exact immutable assignment version content and pointer",
+      "route": "/compliance",
+      "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
+      "profiles": ["ci_fast", "full"],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
       "name": "13i-flakes-non-admin",
       "description": "Flakes view hides admin-only mutations for non-admin users",
       "route": "/flakes",

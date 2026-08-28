@@ -1664,7 +1664,7 @@ pub fn PolicyDrawer(
                                         for system in usage.systems.iter() {
                                             {
                                                 let environment = system.environment.as_deref().unwrap_or("No environment");
-                                                rsx! { Link { key: "{system.bundle_version_id}-{system.system_id}", class: "policy-revision-row focus-ring", to: Route::SystemDetailView { id: system.system_id.to_string() },
+                                                rsx! { Link { key: "{system.bundle_version_id}-{system.system_id}", class: "policy-revision-row focus-ring", to: Route::SystemDetailView { id: system.system_id.to_string(), tab: String::new(), poam: String::new() },
                                                     div {
                                                         div { class: "mono", style: "font-weight:700;", "{system.hostname}" }
                                                         div { style: "font-size:11px;color:var(--cf-text-muted);margin-top:3px;", "{environment} · {system.bundle_name} rev {system.bundle_version}" }

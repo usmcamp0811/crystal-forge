@@ -231,6 +231,20 @@ pub struct PoamSummary {
     pub closure_attempt_id: Option<Uuid>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct FindingPoamRelationship {
+    pub assessment_id: Uuid,
+    pub finding_id: Uuid,
+    pub active_poam: Option<PoamSummary>,
+    pub historical_poams: Vec<PoamSummary>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AssignmentPoamRelationship {
+    pub assignment_version_id: Uuid,
+    pub poams: Vec<PoamSummary>,
+}
+
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct FindingView {
     pub id: Uuid,

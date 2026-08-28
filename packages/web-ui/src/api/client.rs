@@ -2075,7 +2075,7 @@ async fn send_empty_with_csrf<B: serde::Serialize>(
     Ok(())
 }
 
-async fn send_request_with_csrf(
+pub(crate) async fn send_request_with_csrf(
     method: &str,
     url: &str,
     body: Option<&str>,

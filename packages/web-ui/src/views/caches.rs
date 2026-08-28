@@ -1995,7 +1995,7 @@ fn CacheDestinationPanel(props: CacheDestinationPanelProps) -> Element {
                                             let nav = nav.clone();
                                             let system_id = system.id.to_string();
                                             move |_| {
-                                                nav.push(Route::SystemDetailView { id: system_id.clone() });
+                                                nav.push(Route::SystemDetailView { id: system_id.clone(), tab: String::new(), poam: String::new() });
                                             }
                                         },
                                         Icon { name: IconName::Server, size: 10 }

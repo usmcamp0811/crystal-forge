@@ -412,32 +412,33 @@ async fn validate_assignment_compatibility_tx(
            FROM compliance_bundle_assignment_versions version
            JOIN compliance_bundle_assignments assignment ON assignment.id=version.assignment_id
            WHERE version.id=ANY($1)
-             AND EXISTS (
-               SELECT 1
-               FROM UNNEST($2::uuid[],$3::uuid[]) context(system_id,policy_lineage_id)
-               JOIN systems system ON system.id=context.system_id
-               WHERE assignment.system_id=context.system_id
-                  OR assignment.environment_id=system.environment_id
-             )
-             AND (
-               EXISTS (
-                 SELECT 1 FROM compliance_assignment_additions addition
-                 JOIN deployment_policy_versions policy_version ON policy_version.id=addition.policy_version_id
-                 WHERE addition.assignment_version_id=version.id
-                   AND policy_version.policy_id=ANY($3)
-               )
-               OR EXISTS (
-                 SELECT 1 FROM compliance_bundle_version_policies membership
-                 JOIN deployment_policy_versions policy_version ON policy_version.id=membership.policy_version_id
-                 WHERE membership.bundle_version_id=version.bundle_version_id
-                   AND membership.selected AND policy_version.policy_id=ANY($3)
-                   AND NOT EXISTS (
-                     SELECT 1 FROM compliance_assignment_exclusions exclusion
-                     WHERE exclusion.assignment_version_id=version.id
-                       AND exclusion.policy_version_id=membership.policy_version_id
-                   )
-               )
-             )"#,
+              AND EXISTS (
+                SELECT 1
+                FROM UNNEST($2::uuid[],$3::uuid[]) context(system_id,policy_lineage_id)
+                JOIN systems system ON system.id=context.system_id
+                WHERE (assignment.system_id=context.system_id
+                    OR assignment.environment_id=system.environment_id)
+                  AND (
+                    EXISTS (
+                      SELECT 1 FROM compliance_assignment_additions addition
+                      JOIN deployment_policy_versions policy_version ON policy_version.id=addition.policy_version_id
+                      WHERE addition.assignment_version_id=version.id
+                        AND policy_version.policy_id=context.policy_lineage_id
+                    )
+                    OR EXISTS (
+                      SELECT 1 FROM compliance_bundle_version_policies membership
+                      JOIN deployment_policy_versions policy_version ON policy_version.id=membership.policy_version_id
+                      WHERE membership.bundle_version_id=version.bundle_version_id
+                        AND membership.selected
+                        AND policy_version.policy_id=context.policy_lineage_id
+                        AND NOT EXISTS (
+                          SELECT 1 FROM compliance_assignment_exclusions exclusion
+                          WHERE exclusion.assignment_version_id=version.id
+                            AND exclusion.policy_version_id=membership.policy_version_id
+                        )
+                    )
+                  )
+                )"#,
     )
     .bind(assignment_version_ids)
     .bind(system_ids)
@@ -1516,6 +1517,181 @@ pub async fn compatible(
         has_more,
         next_offset: has_more.then_some(offset + limit),
     })
+}
+
+pub async fn finding_relationships(
+    pool: &PgPool,
+    actor: &PoamActor,
+    assessment_ids: &[Uuid],
+    clock: &dyn PoamClock,
+) -> Result<Vec<FindingPoamRelationship>, PoamError> {
+    if assessment_ids.is_empty() || assessment_ids.len() > MAX_POAM_RELATIONSHIPS as usize {
+        return Err(PoamError::Validation(
+            "invalid_assessment_ids",
+            "Between 1 and 100 assessment IDs are required".into(),
+        ));
+    }
+    let candidates = poam::visible_assessment_findings(
+        pool,
+        assessment_ids,
+        actor.is_admin,
+        &actor.environment_ids,
+    )
+    .await?;
+    let tuples = candidates
+        .iter()
+        .map(|row| (row.1, row.2, row.3))
+        .collect::<Vec<_>>();
+    let authoritative = if tuples.is_empty() {
+        Vec::new()
+    } else {
+        let mut tx = pool.begin().await?;
+        let items = current_verification_items_tx(&mut tx, &tuples, clock.now()).await?;
+        tx.commit().await?;
+        items
+    };
+    let visible = candidates
+        .into_iter()
+        .filter(|candidate| {
+            authoritative.iter().any(|item| {
+                item.finding_id == candidate.1
+                    && item.assessment_id == Some(candidate.0)
+                    && !matches!(item.result.as_str(), "stale" | "missing")
+            })
+        })
+        .collect::<Vec<_>>();
+    let finding_ids = visible.iter().map(|row| row.1).collect::<Vec<_>>();
+    let summaries = poam::finding_poam_summaries(
+        pool,
+        &finding_ids,
+        clock.today(),
+        actor.is_admin,
+        &actor.environment_ids,
+    )
+    .await?;
+    Ok(visible
+        .into_iter()
+        .map(|(assessment_id, finding_id, _, _)| {
+            let active_poam = summaries
+                .iter()
+                .find(|(related_finding, active, _)| *related_finding == finding_id && *active)
+                .map(|(_, _, summary)| summary.clone());
+            let active_id = active_poam.as_ref().map(|summary| summary.id);
+            let mut seen = BTreeSet::new();
+            FindingPoamRelationship {
+                assessment_id,
+                finding_id,
+                active_poam,
+                historical_poams: summaries
+                    .iter()
+                    .filter(|(related_finding, active, summary)| {
+                        *related_finding == finding_id
+                            && !*active
+                            && Some(summary.id) != active_id
+                            && seen.insert(summary.id)
+                    })
+                    .map(|(_, _, summary)| summary.clone())
+                    .collect(),
+            }
+        })
+        .collect())
+}
+
+pub async fn compatible_for_assessment(
+    pool: &PgPool,
+    actor: &PoamActor,
+    assessment_id: Uuid,
+    q: Option<&str>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+    clock: &dyn PoamClock,
+) -> Result<Page<PoamSummary>, PoamError> {
+    let (limit, offset) = page_bounds(limit, offset)?;
+    let q = q.map(str::trim).filter(|value| !value.is_empty());
+    if let Some(q) = q {
+        validate_text_length(q, MAX_SEARCH_BYTES, "search_too_long", "search")?;
+    }
+    let mut tx = pool.begin().await?;
+    let context = assessment_context_tx(&mut tx, assessment_id)
+        .await?
+        .ok_or(PoamError::NotFound)?;
+    if !actor_can_access_systems_tx(&mut tx, actor, &[context.system_id]).await? {
+        return Err(PoamError::NotFound);
+    }
+    validate_current_assessment_tx(&mut tx, &context).await?;
+    if context.overall_outcome != "fail" {
+        return Err(PoamError::Precondition(
+            "finding_not_failed",
+            "Only a current Fail finding can search compatible POA&Ms".into(),
+            None,
+        ));
+    }
+    tx.commit().await?;
+    let mut items = poam::compatible_poams(
+        pool,
+        context.finding_id,
+        context.policy_lineage_id,
+        q,
+        clock.today(),
+        limit,
+        offset,
+        actor.is_admin,
+        &actor.environment_ids,
+    )
+    .await?;
+    let has_more = items.len() as i64 > limit;
+    if has_more {
+        items.truncate(limit as usize);
+    }
+    Ok(Page {
+        items,
+        limit,
+        offset,
+        has_more,
+        next_offset: has_more.then_some(offset + limit),
+    })
+}
+
+pub async fn assignment_relationships(
+    pool: &PgPool,
+    actor: &PoamActor,
+    assignment_version_ids: &[Uuid],
+    clock: &dyn PoamClock,
+) -> Result<Vec<AssignmentPoamRelationship>, PoamError> {
+    if assignment_version_ids.is_empty()
+        || assignment_version_ids.len() > MAX_POAM_RELATIONSHIPS as usize
+    {
+        return Err(PoamError::Validation(
+            "invalid_assignment_version_ids",
+            "Between 1 and 100 assignment-version IDs are required".into(),
+        ));
+    }
+    let visible_ids = poam::visible_assignment_versions(
+        pool,
+        assignment_version_ids,
+        actor.is_admin,
+        &actor.environment_ids,
+    )
+    .await?;
+    let summaries = poam::assignment_poam_summaries(
+        pool,
+        &visible_ids,
+        clock.today(),
+        actor.is_admin,
+        &actor.environment_ids,
+    )
+    .await?;
+    Ok(visible_ids
+        .into_iter()
+        .map(|assignment_version_id| AssignmentPoamRelationship {
+            assignment_version_id,
+            poams: summaries
+                .iter()
+                .filter(|(related_id, _)| *related_id == assignment_version_id)
+                .map(|(_, summary)| summary.clone())
+                .collect(),
+        })
+        .collect())
 }
 
 pub async fn create_waiver(

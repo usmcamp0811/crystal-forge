@@ -9,6 +9,10 @@ use crate::api::models::{
     CompositeAssessmentResult,
 };
 use crate::components::icon::{Icon, IconName};
+use crate::components::poam::{
+    AssignmentVersionCandidate, FindingPoamBar, FindingPoamContext, FindingPoamEvent,
+};
+use crate::views::poam_api::{self, AssessmentOutcome, FindingRelationshipEntry};
 
 pub mod refine_policy;
 pub use refine_policy::{
@@ -28,6 +32,10 @@ pub struct BundleCatalogProps {
     pub selected_version_id: Option<uuid::Uuid>,
     #[props(default)]
     pub on_select_version: EventHandler<uuid::Uuid>,
+    #[props(default)]
+    pub poam_rollups: Vec<poam_api::Rollup>,
+    #[props(default)]
+    pub poam_rollups_loading: bool,
 }
 
 #[component]
@@ -117,6 +125,7 @@ pub fn BundleCatalog(props: BundleCatalogProps) -> Element {
                         let score_color = score.map_or("var(--cf-text-muted)", |score| if score >= 90 { "#34d399" } else if score >= 70 { "#fbbf24" } else { "#f87171" });
                         let score_label = score.map_or_else(|| "—".to_string(), |score| format!("{score}%"));
                         let system_count_label = format!("{} system{}", bundle.applicable_system_count, if bundle.applicable_system_count == 1 { "" } else { "s" });
+                        let poam_rollup = props.poam_rollups.iter().find(|rollup| rollup.scope_id == id);
                         rsx! {
                             tr {
                                 class: if selected { "selected" } else { "" },
@@ -131,6 +140,14 @@ pub fn BundleCatalog(props: BundleCatalogProps) -> Element {
                                     div { style: "font-size:11px;color:var(--cf-text-muted);margin-top:2px;",
                                         "{bundle.requirement_count} requirements · {bundle.policy_count} policies"
                                         if revisions.len() > 1 { " · {revisions.len()} revisions" }
+                                    }
+                                    if let Some(rollup) = poam_rollup {
+                                        div { "data-testid": "bundle-poam-summary", style: "font-size:10px;color:var(--cf-text-muted);margin-top:3px;",
+                                            span { style: "color:#f87171;font-weight:700;", "{rollup.open_findings} open" }
+                                            " · {rollup.on_poam_findings} on POA&M · {rollup.no_poam_findings} unassigned"
+                                        }
+                                    } else if props.poam_rollups_loading {
+                                        div { style: "font-size:10px;color:var(--cf-text-muted);margin-top:3px;", "Loading POA&M roll-up…" }
                                     }
                                 }
                                 td { span { class: "chip chip-info", "{framework}" } }
@@ -482,7 +499,28 @@ pub struct EvidenceDrawerProps {
     pub bundle_name: String,
     #[props(default)]
     pub system: Option<ComplianceSystemRollup>,
+    #[props(default)]
+    pub bundle_version: Option<String>,
+    #[props(default)]
+    pub assignment_versions: Vec<AssignmentVersionCandidate>,
+    #[props(default)]
+    pub assignment_context_error: Option<String>,
+    #[props(default)]
+    pub viewer: bool,
+    #[props(default)]
+    pub initial_policy_id: Option<uuid::Uuid>,
+    #[props(default)]
+    pub on_active_policy: EventHandler<uuid::Uuid>,
+    #[props(default)]
+    pub on_poam_event: EventHandler<FindingPoamEvent>,
     pub on_close: EventHandler<()>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum EvidencePoamState {
+    Loading,
+    Loaded(std::collections::HashMap<uuid::Uuid, FindingRelationshipEntry>),
+    Unavailable(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -625,13 +663,75 @@ fn reconciled_active(active: usize, visible: &[usize]) -> Option<usize> {
 
 #[component]
 pub fn EvidenceDrawer(props: EvidenceDrawerProps) -> Element {
-    let mut active_idx = use_signal(|| 0usize);
+    let initial_index = props
+        .initial_policy_id
+        .and_then(|policy_id| {
+            props
+                .evidence
+                .controls
+                .iter()
+                .position(|control| control.policy_id == policy_id)
+        })
+        .unwrap_or(0);
+    let mut active_idx = use_signal(|| initial_index);
     let mut filter = use_signal(String::new);
     let mut collapsed = use_signal(Vec::<String>::new);
     let total = props.evidence.controls.len();
     let hostname = props.evidence.hostname.clone();
     let bundle_name = props.bundle_name.clone();
     let system = props.system.clone();
+    let mut poam_state = use_signal(|| EvidencePoamState::Loading);
+    let mut poam_generation = use_signal(|| 0_u64);
+
+    let mut load_relationships = move |assessment_ids: Vec<uuid::Uuid>| {
+        poam_generation += 1;
+        let requested = poam_generation();
+        if assessment_ids.is_empty() {
+            poam_state.set(EvidencePoamState::Unavailable(
+                "No current persisted composite assessment is available for POA&M lookup."
+                    .to_string(),
+            ));
+            return;
+        }
+        poam_state.set(EvidencePoamState::Loading);
+        spawn(async move {
+            match poam_api::finding_relationships(&assessment_ids).await {
+                Ok(entries) if poam_generation() == requested => {
+                    poam_state.set(EvidencePoamState::Loaded(
+                        entries
+                            .into_iter()
+                            .map(|entry| (entry.assessment_id, entry))
+                            .collect(),
+                    ));
+                }
+                Err(error) if poam_generation() == requested => {
+                    let message = if error.is_not_visible() || error.is_unauthorized() {
+                        "POA&M relationships are not visible for this evidence scope.".to_string()
+                    } else {
+                        format!("Could not load POA&M relationships: {error}")
+                    };
+                    poam_state.set(EvidencePoamState::Unavailable(message));
+                }
+                _ => {}
+            }
+        });
+    };
+
+    let assessment_ids = props
+        .evidence
+        .controls
+        .iter()
+        .filter_map(|control| {
+            control
+                .composite_result
+                .as_ref()
+                .and_then(|result| result.assessment_id)
+        })
+        .collect::<Vec<_>>();
+    use_effect({
+        let assessment_ids = assessment_ids.clone();
+        move || load_relationships(assessment_ids.clone())
+    });
 
     let query = filter.read().trim().to_ascii_lowercase();
     let groups = navigator_groups(
@@ -722,7 +822,7 @@ pub fn EvidenceDrawer(props: EvidenceDrawerProps) -> Element {
                         }
                         Link {
                             class: "btn btn-ghost xs focus-ring",
-                            to: Route::SystemDetailView { id: system.system_id.to_string() },
+                            to: Route::SystemDetailView { id: system.system_id.to_string(), tab: String::new(), poam: String::new() },
                             "Open system"
                             Icon { name: IconName::ArrowRight, size: 12 }
                         }
@@ -794,7 +894,12 @@ pub fn EvidenceDrawer(props: EvidenceDrawerProps) -> Element {
                                                     button {
                                                         class: "focus-ring",
                                                         style: if is_sel { "all:unset;cursor:pointer;display:block;padding:10px 14px;width:100%;box-sizing:border-box;border-left:3px solid var(--cf-brand-purple);background:color-mix(in oklab,var(--cf-brand-purple) 8%,transparent);border-bottom:1px solid var(--cf-divider);" } else { "all:unset;cursor:pointer;display:block;padding:10px 14px;width:100%;box-sizing:border-box;border-left:3px solid transparent;background:transparent;border-bottom:1px solid var(--cf-divider);" },
-                                                        onclick: move |_| active_idx.set(index),
+                                                        "data-testid": "evidence-policy-target",
+                                                        "data-policy-id": "{control.policy_id}",
+                                                        onclick: move |_| {
+                                                            active_idx.set(index);
+                                                            props.on_active_policy.call(control.policy_id);
+                                                        },
                                                         div { style: "display:flex;justify-content:space-between;align-items:center;gap:8px;",
                                                             span { class: "mono", style: "font-size:11px;color:var(--cf-text-muted);", "{index+1:02}" }
                                                             span { style: "width:8px;height:8px;border-radius:50%;background:{dot_color};" }
@@ -846,11 +951,29 @@ pub fn EvidenceDrawer(props: EvidenceDrawerProps) -> Element {
                             }
                         }
                     }
+                    if let Some(error) = props.assignment_context_error.as_ref() {
+                        div { class: "sd-callout sd-callout-danger", "Could not load exact assignment references: {error}" }
+                    }
                     if let Some(ctrl) = active_control {
                         ControlEvidenceCard {
                             control: ctrl,
                             control_idx: reconciled_active(*active_idx.read(), &visible).unwrap_or(0),
                             total,
+                            system_id: props.evidence.system_id,
+                            hostname: props.evidence.hostname.clone(),
+                            bundle_id: props.evidence.bundle_id,
+                            bundle_name: props.bundle_name.clone(),
+                            bundle_version_id: props.evidence.bundle_version_id,
+                            bundle_version: props.bundle_version.clone(),
+                            assignment_versions: props.assignment_versions.clone(),
+                            viewer: props.viewer,
+                            poam_state: poam_state.read().clone(),
+                            on_poam_event: move |event: FindingPoamEvent| {
+                                if let FindingPoamEvent::InvalidateAssessment(_) = event {
+                                    load_relationships(assessment_ids.clone());
+                                }
+                                props.on_poam_event.call(event);
+                            },
                         }
                     }
                 }
@@ -928,6 +1051,16 @@ struct ControlEvidenceCardProps {
     control: ComplianceControlEvidence,
     control_idx: usize,
     total: usize,
+    system_id: uuid::Uuid,
+    hostname: String,
+    bundle_id: uuid::Uuid,
+    bundle_name: String,
+    bundle_version_id: Option<uuid::Uuid>,
+    bundle_version: Option<String>,
+    assignment_versions: Vec<AssignmentVersionCandidate>,
+    viewer: bool,
+    poam_state: EvidencePoamState,
+    on_poam_event: EventHandler<FindingPoamEvent>,
 }
 
 #[component]
@@ -1032,6 +1165,72 @@ fn ControlEvidenceCard(props: ControlEvidenceCardProps) -> Element {
                     }
                 }
             },
+        }
+
+        if let Some(result) = props.control.composite_result.as_ref() {
+            if let Some(assessment_id) = result.assessment_id {
+                {
+                    let assessment_outcome = match result.overall_status.as_str() {
+                        "pass" => AssessmentOutcome::Pass,
+                        "fail" => AssessmentOutcome::Fail,
+                        "error" => AssessmentOutcome::Error,
+                        _ => AssessmentOutcome::NotChecked,
+                    };
+                    let evidence_summary = if props.control.evidence_items.is_empty() {
+                        props.control.summary.clone()
+                    } else {
+                        props
+                            .control
+                            .evidence_items
+                            .iter()
+                            .map(|item| item.label.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    };
+                    let context = FindingPoamContext {
+                        assessment_id,
+                        system_id: props.system_id,
+                        hostname: props.hostname.clone(),
+                        policy_lineage_id: props.control.policy_id,
+                        policy_version_id: result.policy_version_id,
+                        policy_name: props.control.policy_name.clone(),
+                        policy_version: result.policy_version_id.to_string(),
+                        bundle_id: Some(props.bundle_id),
+                        bundle_name: Some(props.bundle_name.clone()),
+                        bundle_version_id: props.bundle_version_id,
+                        bundle_version: props.bundle_version.clone(),
+                        result: assessment_outcome,
+                        evidence_summary,
+                        assignment_versions: props.assignment_versions.clone(),
+                    };
+                    match &props.poam_state {
+                        EvidencePoamState::Loading => rsx! {
+                            div { class: "sd-callout sd-callout-info", "Loading POA&M relationships for this persisted assessment…" }
+                        },
+                        EvidencePoamState::Unavailable(message) => rsx! {
+                            div { class: "sd-callout sd-callout-warn", "{message}" }
+                        },
+                        EvidencePoamState::Loaded(relationships) => {
+                            if let Some(relationship) = relationships.get(&assessment_id) {
+                                rsx! {
+                                    FindingPoamBar {
+                                        context,
+                                        relationship: relationship.clone(),
+                                        viewer: props.viewer,
+                                        on_event: props.on_poam_event,
+                                    }
+                                }
+                            } else {
+                                rsx! {
+                                    div { class: "sd-callout sd-callout-warn",
+                                        "The authoritative POA&M relationship response did not include this assessment. Refresh evidence before acting."
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
 

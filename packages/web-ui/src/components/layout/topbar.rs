@@ -220,7 +220,7 @@ pub fn TopBar(title: String) -> Element {
             (Some(parent), current)
         } else {
             match &current_route {
-                Route::SystemDetailView { id } => (Some("Systems".to_string()), id.clone()),
+                Route::SystemDetailView { id, .. } => (Some("Systems".to_string()), id.clone()),
                 Route::EvaluationsCommitView { commit_id } => (
                     Some("Evaluations".to_string()),
                     format!("commit {commit_id}"),

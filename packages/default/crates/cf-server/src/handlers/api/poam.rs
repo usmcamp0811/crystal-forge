@@ -156,6 +156,140 @@ pub async fn list(
         Err(e) => error_response(e),
     }
 }
+
+#[derive(Deserialize)]
+pub struct FindingRelationshipsQuery {
+    pub assessment_ids: String,
+}
+
+#[derive(Deserialize)]
+pub struct AssignmentRelationshipsQuery {
+    pub ids: String,
+}
+
+#[derive(Deserialize)]
+pub struct CompatiblePoamsQuery {
+    pub assessment_id: Uuid,
+    pub q: Option<String>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+fn relationship_ids(value: &str, field: &str) -> Result<Vec<Uuid>, Response> {
+    let raw = value.split(',').collect::<Vec<_>>();
+    if raw.is_empty() || raw.iter().any(|id| id.trim().is_empty()) {
+        return Err(error_response(PoamError::Validation(
+            "invalid_ids",
+            format!("{field} must contain at least one UUID and no empty values"),
+        )));
+    }
+    if raw.len() > 100 {
+        return Err(error_response(PoamError::Validation(
+            "too_many_ids",
+            format!("At most 100 {field} are allowed"),
+        )));
+    }
+    let mut ids = Vec::with_capacity(raw.len());
+    for id in raw {
+        let id = Uuid::parse_str(id.trim()).map_err(|_| {
+            error_response(PoamError::Validation(
+                "invalid_ids",
+                format!("{field} must be a comma-separated list of UUIDs"),
+            ))
+        })?;
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    Ok(ids)
+}
+
+pub async fn finding_relationships(
+    State(pool): State<PgPool>,
+    RequireAuth(user): RequireAuth,
+    headers: HeaderMap,
+    query: Result<Query<FindingRelationshipsQuery>, QueryRejection>,
+) -> Response {
+    let query = match query_body(
+        query,
+        "invalid_ids",
+        "Malformed assessment relationship query",
+    ) {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    let ids = match relationship_ids(&query.assessment_ids, "assessment_ids") {
+        Ok(ids) => ids,
+        Err(response) => return response,
+    };
+    let actor = match actor(&pool, user, &headers).await {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    match poam::finding_relationships(&pool, &actor, &ids, &SystemClock).await {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => error_response(error),
+    }
+}
+
+pub async fn compatible_poams(
+    State(pool): State<PgPool>,
+    RequireAuth(user): RequireAuth,
+    headers: HeaderMap,
+    query: Result<Query<CompatiblePoamsQuery>, QueryRejection>,
+) -> Response {
+    let query = match query_body(query, "invalid_query", "Malformed compatible-POA&M query") {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    let actor = match actor(&pool, user, &headers).await {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    match poam::compatible_for_assessment(
+        &pool,
+        &actor,
+        query.assessment_id,
+        query.q.as_deref(),
+        query.limit,
+        query.offset,
+        &SystemClock,
+    )
+    .await
+    {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => error_response(error),
+    }
+}
+
+pub async fn assignment_relationships(
+    State(pool): State<PgPool>,
+    RequireAuth(user): RequireAuth,
+    headers: HeaderMap,
+    query: Result<Query<AssignmentRelationshipsQuery>, QueryRejection>,
+) -> Response {
+    let query = match query_body(
+        query,
+        "invalid_ids",
+        "Malformed assignment relationship query",
+    ) {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    let ids = match relationship_ids(&query.ids, "ids") {
+        Ok(ids) => ids,
+        Err(response) => return response,
+    };
+    let actor = match actor(&pool, user, &headers).await {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    match poam::assignment_relationships(&pool, &actor, &ids, &SystemClock).await {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => error_response(error),
+    }
+}
+
 pub async fn get(
     State(pool): State<PgPool>,
     RequireAuth(user): RequireAuth,

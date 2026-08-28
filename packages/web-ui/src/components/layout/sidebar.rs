@@ -456,7 +456,7 @@ pub fn SidebarNav() -> Element {
                 }
                 NavLink {
                     collapsed: is_collapsed,
-                    to: Route::ComplianceView {},
+                    to: Route::ComplianceView { bundle: String::new(), version: String::new(), system: String::new(), policy: String::new(), poam: String::new(), view: String::new() },
                     label: "Compliance",
                     icon: rsx!(
                         svg {
@@ -824,7 +824,7 @@ pub fn MobileDrawer() -> Element {
                 }
                 NavLink {
                     collapsed: false,
-                    to: Route::ComplianceView {},
+                    to: Route::ComplianceView { bundle: String::new(), version: String::new(), system: String::new(), policy: String::new(), poam: String::new(), view: String::new() },
                     label: "Compliance",
                     icon: rsx!(
                         svg {

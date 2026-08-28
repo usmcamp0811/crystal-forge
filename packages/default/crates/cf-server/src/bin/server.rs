@@ -241,6 +241,15 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/poams/dashboard/watchlist", get(poam::watchlist))
         .route("/api/v1/poams/rollups/systems", get(poam::system_rollups))
         .route("/api/v1/poams/rollups/bundles", get(poam::bundle_rollups))
+        .route(
+            "/api/v1/poams/relationships/findings",
+            get(poam::finding_relationships),
+        )
+        .route(
+            "/api/v1/poams/relationships/assignments",
+            get(poam::assignment_relationships),
+        )
+        .route("/api/v1/poams/compatible", get(poam::compatible_poams))
         .route("/api/v1/poams/:id", get(poam::get).patch(poam::update))
         .route("/api/v1/poams/:id/transition", post(poam::transition))
         .route("/api/v1/poams/:id/notes", post(poam::note))

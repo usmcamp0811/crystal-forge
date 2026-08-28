@@ -20,6 +20,7 @@
 //! - `flake` - Flake-specific components
 //! - `builds` - Build control center components
 //! - `policy` - Policy management components
+//! - `poam` - POA&M remediation workflow components
 
 // Domain-specific component modules
 pub mod builders;
@@ -38,6 +39,7 @@ pub mod heartbeat_spinner;
 pub mod modals;
 pub mod notifications;
 pub mod onboarding;
+pub mod poam;
 pub mod policy;
 pub mod system;
 pub mod tables;
