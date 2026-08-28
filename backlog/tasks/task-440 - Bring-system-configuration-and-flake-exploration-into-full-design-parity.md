@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-08-28 18:03'
+updated_date: '2026-08-28 18:06'
 labels:
   - design-parity
   - web-ui
@@ -187,6 +187,8 @@ The `modifiedFiles` metadata is anticipated and non-exhaustive. The implementati
 Frontend-only Phase 1 execution slice (2026-08-28): keep Dioxus route variants unchanged to minimize conflict with TASK-433, and add typed query parsing/serialization in `state/navigation_focus.rs`. Bind System Detail tab, Config revision mode/full SHA or generation, Deploy generation, and flake drawer/pane/full revision/return-environment context to browser history with popstate synchronization and stale-context replacement. Preserve exact full SHA identity in state and tests. Add flake tray/diff modal Escape precedence, focus trapping, initial focus, and focus restoration. Apply isolated AC #20/#22 fixes in System Detail, topbar notifications, selector text, and Compliance while preserving TASK-433 POA&M authorization semantics. Verify with focused web-ui Rust tests, package tests where feasible, formatting for touched files, and `git diff --check`.
 
 Backend implementation slice (2026-08-28): refreshed `origin/TASK-433-policy-poam-workflows` at `fd7548ad`; it still owns only migrations 0233/0234 while `origin/dev` ends at 0232, so allocate additive TASK-440 migration 0235. Add documented tagged snapshot domain types and pre-persistence redaction/canonical digests; extend the existing bulk evaluation expression/result path to collect options-tree and flake-output metadata; persist content-addressed option payloads and revision/configuration references atomically with successful evaluation finalization; add environment-scoped database-only lifecycle/options/flake snapshot reads with bounded search/filter/count/pagination/diff; add an authorized idempotent queue/reuse action; centralize managed-system reconciliation; verify focused domain/query/handler tests with SQLX_OFFLINE=true. Do not touch TASK-433 migrations, web-ui, or browser tests.
+
+Frontend contract-consumption slice (2026-08-28): own only `packages/web-ui`; preserve concurrent backend, migration, TASK-433 POA&M, and browser-test changes. Mirror `evaluation_snapshots.rs` DTOs and add bounded client methods. Replace static Config with URL-selected revision lifecycle, explicit queue action, debounced stale-safe server query, global counts/filter/pagination, typed values/diffs/provenance, source tray, and selected-revision summary/drift cards. Connect flake Commits/Systems/Modules/Inputs tabs to revision output snapshots with full-SHA identity, lifecycle/no-parent states, authoritative reconciliation/counts, exact Config and registration navigation, and truthful rendering of only fields supplied by the server payload. Add focused Rust tests and CSS for wide/narrow layouts; verify full web-ui tests and wasm check. Do not edit browser integration JavaScript.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
