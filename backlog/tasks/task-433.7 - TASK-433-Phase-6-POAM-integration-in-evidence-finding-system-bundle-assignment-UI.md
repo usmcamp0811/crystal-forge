@@ -3,11 +3,11 @@ id: TASK-433.7
 title: >-
   TASK-433 Phase 6: POA&M integration in evidence/finding, system, bundle,
   assignment UI
-status: In Progress
+status: Review
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:43'
-updated_date: '2026-08-28 03:10'
+updated_date: '2026-08-28 13:10'
 labels:
   - design-parity
   - poam
@@ -19,6 +19,7 @@ dependencies:
 references:
   - TASK-433
   - TASK-433.1
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/318'
 documentation:
   - docs/design/CrystalForge/components/ComplianceView.jsx
   - docs/design/CrystalForge/components/SystemDetail.jsx
@@ -54,10 +55,10 @@ nix build .#checks.x86_64-linux.web-ui --no-link
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Evidence supports Create POAM and Link existing with real prefilled context and exact navigation to/from finding/bundle/system/evidence.
-- [ ] #2 System compliance provides real committed POAM filters/counts and exact finding navigation.
-- [ ] #3 Bundle compliance provides real open/on-POAM/no-POAM/overdue/awaiting-verification/closed rollups and no N+1 visible-list queries.
-- [ ] #4 Assignment POAM references are first-class relationships and do not mutate immutable assignment versions.
+- [x] #1 Evidence supports Create POAM and Link existing with real prefilled context and exact navigation to/from finding/bundle/system/evidence.
+- [x] #2 System compliance provides real committed POAM filters/counts and exact finding navigation.
+- [x] #3 Bundle compliance provides real open/on-POAM/no-POAM/overdue/awaiting-verification/closed rollups and no N+1 visible-list queries.
+- [x] #4 Assignment POAM references are first-class relationships and do not mutate immutable assignment versions.
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -88,3 +89,26 @@ Preflight: rebased `TASK-433-policy-poam-workflows` onto current `origin/dev` (`
 
 Phase-6 contract audit found blocking Phase-5 API omissions before any implementation write. AC1 cannot be implemented without client-side approximation/N+1 because evidence DTOs expose only an assessment ID and no stable finding/remediation relationship, while Phase 5 has no batch active/historical remediation lookup for visible findings/assessment IDs. AC1 Link Existing is also directionally unsupported: `GET /poams/:poam_id/compatible` returns findings compatible with a known POA&M, but the required finding-origin flow needs server-filtered POA&Ms compatible with a supplied real finding/assessment; broad `/poams?policy_lineage_id=...` listing would shift compatibility/active-link decisions into the browser. AC4 cannot render first-class relationships from the assignment surface because there is no assignment-version filter or batch lookup; assignment references are discoverable only after fetching an already-known POA&M detail. These gaps belong to TASK-433.6 AC2 and its explicit Phase-5 scope for authenticated compatible search and batched active links/assignment relationships. Per the user's stop rule, no Phase-6 code or tests were written. Required Phase-5 correction would expose bounded authorization-scoped contracts for (1) active plus completed POA&M relationships by assessment/finding IDs, (2) compatible POA&M search by authoritative assessment/finding context, and (3) POA&M relationships by immutable assignment-version IDs. Awaiting explicit authorization to amend Phase 5 or another server-contract decision.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+## Summary
+- Integrated authoritative POA&M create/link/detail workflows into compliance evidence while preserving FAIL outcomes and exact finding/bundle/system/evidence navigation.
+- Added committed System Detail POA&M counts, filters, rows, and exact linked-finding navigation.
+- Added bundle POA&M rollups and bounded 100-ID batching with browser request-count coverage proving no visible-list N+1.
+- Added first-class immutable assignment-version POA&M relationships with link/unlink behavior that leaves assignment identity, digest, configuration, and current-version pointer unchanged.
+- Added the minimal authorized Phase-5 read contracts and corrected assignment compatibility to pair scope and policy lineage from the same finding.
+
+## Verification
+- Server workspace formatting passed.
+- PostgreSQL-backed `poam_workflows`: 16 passed, 0 failed.
+- Web UI formatting and syntax checks passed.
+- Web UI Rust tests: 233 passed, 0 failed, 1 ignored.
+- `nix build .#packages.x86_64-linux.web-ui --no-link -L` passed.
+- Focused browser workflows 29g–29m passed together.
+- `nix build .#checks.x86_64-linux.web-ui --no-link -L` passed and captured dark/light screenshots for workflows 29g–29m.
+- `git diff --check` passed.
+
+Committed and pushed as `fd7548ad` to MR !318.
+<!-- SECTION:FINAL_SUMMARY:END -->
