@@ -1,10 +1,11 @@
 ---
 id: TASK-440
 title: Bring system configuration and flake exploration into full design parity
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-08-28 16:42'
+updated_date: '2026-08-28 16:44'
 labels:
   - design-parity
   - web-ui
@@ -15,6 +16,8 @@ dependencies: []
 references:
   - git commit eb5a18513623890e9dac1e8a74565078243288a8
   - git parent cfae4f4a33815c72059d309a547672f8c9039747
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/318'
+  - origin/TASK-433-policy-poam-workflows
 documentation:
   - docs/design/CrystalForge/app.jsx
   - docs/design/CrystalForge/components/SystemDetail.jsx
@@ -132,6 +135,14 @@ The `modifiedFiles` metadata is anticipated and non-exhaustive. The implementati
 - [ ] #26 New evaluation and flake-output APIs provide bounded server-side query/diff results, preserve supported agent/builder compatibility and environment authorization, avoid evaluation side effects on read paths and per-host evaluation during flake browsing, and return explicit unavailable/error states.
 - [ ] #27 Targeted frontend and server tests, security/redaction tests, snapshot lifecycle and deduplication tests, auto_latest failure/idempotency tests, SQLx metadata/schema checks when applicable, the web-ui package build, the authoritative web-ui check, and broader Nix flake checks required by protocol, migration, packaging, or cross-package changes pass in the repository Nix development environment.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Preflight 2026-08-28: dedicated worktree `/home/mcamp/code/crystal-forge/TASK-440-system-config-flake-parity`, branch `TASK-440-system-config-flake-parity`, based exactly on `origin/dev` at `a9747294b153eddcb17906336fe3ec31a474c217`. User explicitly directed that the unrelated dirty local `main` worktree be ignored and that this task branch from `origin/dev`; local `dev` was not used as the base. Lock created at `backlog/.locks/TASK-440.lock`.
+
+Parallel TASK-433 coordination baseline: open MR !318 at https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/318, current fetched head `fd7548ad0b983e2412a5d1fa2b84ac397280daaa`. Its current additive migrations are `0233_composite_policy_assessments.sql` and `0234_poam_workflows.sql`. TASK-440 must re-inspect the remote branch before allocating migrations and rebase/update onto TASK-433 after merge before TASK-440 merges.
+<!-- SECTION:NOTES:END -->
 
 ## Comments
 
