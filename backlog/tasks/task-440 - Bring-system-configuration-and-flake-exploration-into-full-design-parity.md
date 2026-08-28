@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-08-28 16:44'
+updated_date: '2026-08-28 16:52'
 labels:
   - design-parity
   - web-ui
@@ -135,6 +135,55 @@ The `modifiedFiles` metadata is anticipated and non-exhaustive. The implementati
 - [ ] #26 New evaluation and flake-output APIs provide bounded server-side query/diff results, preserve supported agent/builder compatibility and environment authorization, avoid evaluation side effects on read paths and per-host evaluation during flake browsing, and return explicit unavailable/error states.
 - [ ] #27 Targeted frontend and server tests, security/redaction tests, snapshot lifecycle and deduplication tests, auto_latest failure/idempotency tests, SQLx metadata/schema checks when applicable, the web-ui package build, the authoritative web-ui check, and broader Nix flake checks required by protocol, migration, packaging, or cross-package changes pass in the repository Nix development environment.
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+## Implementation plan (recorded 2026-08-28)
+
+### Coordination and sequencing
+- Keep TASK-440 on its dedicated branch/worktree and track TASK-433 through MR !318 / `origin/TASK-433-policy-poam-workflows`.
+- Do not edit TASK-433 migrations. Re-fetch its branch before allocating any TASK-440 migration; TASK-433 currently owns 0233 and 0234 and may add more. Update TASK-440 onto the merged TASK-433 result before TASK-440 is eligible to merge.
+- Prefer additive files/helpers and isolated flakes/config work while TASK-433 is active. Defer conflict-prone final edits in System Detail, Compliance, notifications, shared DTOs/CSS, and browser manifests until the latest TASK-433 head is reconciled.
+
+### Phase 1 — Identity, navigation, and overlay foundations
+- Make full commit SHA the sole identity for flake rows, selection, keys, comparisons, and navigation; abbreviation remains presentation only. Add a collision regression for two SHAs sharing the displayed prefix.
+- Introduce typed URL-backed navigation state for System Detail tab/config revision and flake drawer pane/revision/return context, with round-trip/back-forward/stale-context tests.
+- Establish explicit overlay ordering and focus behavior (page < tray/drawer < modal < toast), then fix the file-diff modal stacking, Escape order, focus trap, and focus restoration.
+
+### Phase 2 — Secure snapshot domain and extraction
+- Add reusable pre-persistence redaction for nested option values, package/collection elements, defaults, evaluation errors, provenance/source metadata, and credential-bearing URLs. Build search text and content digests only from already-redacted representations.
+- Define tagged safe option values/errors/provenance and revision/snapshot lifecycle states without serializing `config` or fabricating failed/opaque values.
+- Extend the existing authorized bulk evaluation path to extract target `options` data, module/evaluation summaries, and one per-commit flake output/lock snapshot; Config and flake read paths remain database-only and never invoke Nix/Git/network work.
+- Preserve builder/agent protocol compatibility unless verification proves a protocol addition is unavoidable.
+
+### Phase 3 — Additive persistence and lifecycle
+- After refreshing TASK-433 migration allocation, add content-addressed snapshot/content tables and lightweight per-revision/configuration option references, explicit first-parent identity, flake output systems/modules/inputs, and durable retained-generation references.
+- Use full `(flake, SHA, configuration)` identities, canonical redacted digests, bounded indexes, and restrictive retention semantics so store GC/history rewrites do not silently remove snapshots needed by retained generations/timeline records.
+- Add isolated-PostgreSQL tests for deduplication, bounded amplification, retention, corruption/missing states, first-parent/generation baselines, and prefix collisions; refresh SQLx metadata only after schema/query stabilization.
+
+### Phase 4 — Authorized bounded APIs
+- Add non-disclosing environment-aware Config summary/options/detail and flake output APIs with explicit unavailable/queued/running/failed/available/error states.
+- Compute search/filter/count/pagination and generation/first-parent comparisons server-side. Clamp requests and keep filter counts revision-global while result totals reflect active query/filter.
+- Add an authorized idempotent explicit evaluation queue/reuse action; secure the existing re-evaluation path and prove all reads are side-effect free.
+- Centralize authoritative managed-system reconciliation/counts for all flake surfaces.
+
+### Phase 5 — Config and flake explorer UI
+- Replace static Config with URL-backed generation/commit controls, lifecycle and comparison states, debounced stale-safe server queries, filters/counts/pagination, typed expandable rows, provenance/source tray, and real Modules/Evaluation/Drift cards.
+- Add revision-scoped flake Commits/Systems/Modules/Inputs panes, first-parent/no-previous states, reconciliation/warnings, exact Config navigation, prefilled registration, modules/consumers, and resolved input details.
+- Port only the needed design layout behavior into Rust CSS, including 1920x1080 light/dark and 900x900 behavior with no unintended inner scrolling.
+
+### Phase 6 — Cross-surface parity
+- Restore environment panels after flake navigation; preserve Config↔flake exact revision context and clear stale context after unrelated navigation.
+- Route approval notifications to the exact system Deploy tab; remove duplicate System Detail header actions; route History rollback into Deploy with exact generation; rename selectors.
+- Implement truthful idempotent auto_latest Cancel/Continue/Convert-and-deploy outcomes against a server contract.
+- Remove only the duplicate inner Compliance Edit while preserving authorization and the outer action.
+
+### Phase 7 — Verification and TASK-433 reconciliation
+- Rebase/update onto merged TASK-433, resolve shared surfaces without regressing POA&M behavior, then rerun schema/SQLx preparation.
+- Add targeted Rust/server/security/lifecycle/API tests and authoritative browser workflows for every AC state, including delayed response races, unavailable/error/non-disclosure, typed diffs, cross-navigation, deployment outcomes, layering, and keyboard focus.
+- Exercise affected canonical states at 1920x1080 dark/light and 900x900 narrow, enroll TASK-440 workflows as critical, retain screenshots, and run the applicable package builds, web-ui check, integration/server-regression checks, and `nix flake check --keep-going`.
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
