@@ -7,7 +7,7 @@ status: Review
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:43'
-updated_date: '2026-08-29 02:31'
+updated_date: '2026-08-28 19:24'
 labels:
   - design-parity
   - poam
@@ -97,5 +97,7 @@ Phase-6 contract audit found blocking Phase-5 API omissions before any implement
 
 Review handoff: local and remote branch SHAs match at `fd7548ad0b983e2412a5d1fa2b84ac397280daaa`; worktree is clean. MR !318 has no conflicts and received Phase-6 summary plus dark/light browser screenshots. Exact-head pipeline 2799822073 started for `fd7548ad`: https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2799822073 (running when handed off).
 
-Final authoritative exact-head gate passed on 2026-08-28 at `ff183d032a8dcc4794acf7064eb7acd8e61cdcb6`: `nix build .#checks.x86_64-linux.web-ui --no-link` exited successfully. This proves AC1 on the final post-lock remediation head; AC1-AC4 remain checked. Phase 6 is ready for review. Phase 7 has not started.
+Phase-6 review remediation completed. Legacy custom-check FAIL evidence now creates POA&Ms through stable finding identity and an authoritative observation reference without creating composite assessments or changing the FAIL result. The shared detail tray adds independent cursor pagination for linked findings, activity, and verification history; activity renders actor, timestamp, meaningful descriptions, and collapsed diagnostics. Assignment finding actions use typed Dioxus routing or synchronize the existing ComplianceView state while preserving exact bundle/version/system/policy/evidence identity.
+
+Serial verification passed: default Rust formatting (`cargo fmt --all --check`), Web UI formatting, PostgreSQL-backed `poam_workflows` 17/17, Web UI unit tests 233 passed/1 ignored, Web UI package build, focused browser workflows 29g/29i/29m independently, and the full `checks.x86_64-linux.web-ui` harness. The full harness had no failures, so no baseline comparison at `42488e89` was required. JavaScript syntax and `git diff --check` also passed.
 <!-- SECTION:NOTES:END -->
