@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-08-28 17:43'
+updated_date: '2026-08-28 17:58'
 labels:
   - design-parity
   - web-ui
@@ -205,6 +205,8 @@ Verification: `nix develop -c cargo test --manifest-path packages/web-ui/Cargo.t
 Phase 2 security foundation started without allocating migrations: added documented `security::snapshot_redaction` boundary for recursive JSON redaction and diagnostic text sanitization before future snapshot persistence, indexing, digesting, logging, or API serialization. It redacts sensitive nested fields, authorization headers, common secret assignments, URL userinfo, query strings, and fragments while preserving non-sensitive diagnostic text.
 
 Verification: `nix develop -c env SQLX_OFFLINE=true cargo test --manifest-path packages/default/Cargo.toml -p cf-server snapshot_redaction` passed (3 passed, 1564 filtered out; remaining targets had zero matching tests). The same command without `SQLX_OFFLINE=true` failed at compile time because no PostgreSQL server was running; this was an environment/SQLx macro issue, not a test failure. The new redaction source file was formatted with repository rustfmt.
+
+Frontend Phase 1 and isolated cross-surface slice implemented in `packages/web-ui` without editing server, migrations, SQLx metadata, or browser `integration-test.js`. Added typed URL query contracts for System Detail tab/Config revision/Deploy generation and flake drawer pane/full revision/environment return context, including URL encoding, stale-context clearing, popstate synchronization, exact full-SHA retention, and focused round-trip tests. System Detail now removes duplicate header Deploy/Rollback actions, History rollback opens Deploy with the exact generation selected, selectors read `New commit` and `Previous generation`, and Config exposes URL-backed generation/commit revision controls with explicit unavailable linked-revision state. Environment flake chips open the exact flake context and restore the originating panel on tray close. Notification parsing now accepts only an exact UUID system path plus exact `tab=deploy` and rejects prefix aliases. The duplicate inner Compliance Edit was removed while the authorized `BundleHeader` edit remains. Flake tray/diff modal now use explicit tray < modal < toast ordering, initial focus, Tab/Shift+Tab trapping, modal-first Escape handling, and opener focus restoration for table/card/file controls. Verification passed: `nix develop -c cargo test --manifest-path packages/web-ui/Cargo.toml` (198 passed, 1 ignored); `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown`; `git diff --check`. Existing repository warnings remain. Remaining frontend gaps for later phases: real evaluation/flake-output snapshot APIs and pane content, full Config option explorer/search/diffs/lifecycle states, Flake Systems/Modules/Inputs data, Config-to-flake and Flake-to-Config domain rows, auto_latest conversion workflow, and authoritative browser coverage/screenshots. Concurrent server/migration changes visible in the worktree were preserved and not modified by this frontend slice.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
