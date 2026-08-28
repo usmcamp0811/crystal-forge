@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - claude-agent
 created_date: '2026-08-23 01:35'
-updated_date: '2026-08-23 02:07'
+updated_date: '2026-08-28 16:42'
 labels:
   - design-parity
   - policy
@@ -221,3 +221,13 @@ Per user instruction, this plan is presented for review after Phase 0 before any
 ## Worktree/MR decision (user, 2026-08-22)
 All phase subtasks (TASK-433.2 through TASK-433.9) share ONE dedicated worktree/branch/eventual MR under this parent task, rather than one worktree per subtask. Worktree: /home/mcamp/code/crystal-forge/TASK-433-policy-poam-workflows, branch: TASK-433-policy-poam-workflows, based on dev @ c60b5799. TASK-433 itself now carries the lock/In Progress status for the shared implementation effort; individual TASK-433.x subtasks are moved through In Progress/Review/Done to track granular AC completion, but all commits land on this one branch and are shipped via a single MR opened once phase work is ready for review. Composite rule-set decision (open question #1) resolved: build the composite/multi-rule-kind structure now in Phase 3/4 as originally scoped, not deferred.
 <!-- SECTION:PLAN:END -->
+
+## Comments
+
+<!-- COMMENTS:BEGIN -->
+author: openai-agent
+created: 2026-08-28 16:42
+---
+Parallel-work coordination (2026-08-28): TASK-440 is intended to proceed in parallel but merge only after TASK-433. TASK-440 overlaps System Detail/Compliance UI, server models/queries/handlers, migrations, SQLx metadata, and browser checks. Please record migration numbers as they are allocated so TASK-440 can rebase onto TASK-433's merged result and use subsequent additive migration numbers without editing TASK-433 migrations.
+---
+<!-- COMMENTS:END -->
