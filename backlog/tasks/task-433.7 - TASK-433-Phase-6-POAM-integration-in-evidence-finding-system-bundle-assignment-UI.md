@@ -3,11 +3,11 @@ id: TASK-433.7
 title: >-
   TASK-433 Phase 6: POA&M integration in evidence/finding, system, bundle,
   assignment UI
-status: Review
+status: In Progress
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:43'
-updated_date: '2026-08-28 13:14'
+updated_date: '2026-08-28 14:18'
 labels:
   - design-parity
   - poam
@@ -55,7 +55,7 @@ nix build .#checks.x86_64-linux.web-ui --no-link
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [x] #1 Evidence supports Create POAM and Link existing with real prefilled context and exact navigation to/from finding/bundle/system/evidence.
+- [ ] #1 Evidence supports Create POAM and Link existing with real prefilled context and exact navigation to/from finding/bundle/system/evidence.
 - [x] #2 System compliance provides real committed POAM filters/counts and exact finding navigation.
 - [x] #3 Bundle compliance provides real open/on-POAM/no-POAM/overdue/awaiting-verification/closed rollups and no N+1 visible-list queries.
 - [x] #4 Assignment POAM references are first-class relationships and do not mutate immutable assignment versions.
@@ -80,6 +80,8 @@ nix build .#checks.x86_64-linux.web-ui --no-link
 Interrupted-agent recovery: inspect the full worktree diff, move assignment relationship/link UI into `AssignmentListPanel` with its existing local signals and generation guards, normalize new Dioxus data attributes, fix only compile-required `EvidenceDrawer` call interfaces, then run fmt/check/tests and focused prohibited-global scans before reporting without committing.
 
 Focused browser-failure adjustment: identify the added milestone by the authoritative POST response ID instead of unsupported display-value locator composition; explicitly open the evidence policy target before asserting remediation navigation; initialize the assignment-reference scope from the exact compliance route system ID and render the relationship panel independently of the Systems Matrix fetch, while only auto-opening evidence for `view=evidence`. Verify these fixes with formatting, compilation, and focused workflows before rerunning all Phase-6 workflows.
+
+Phase-6 review remediation at exact head `fd7548ad`: (1) prove and close the production legacy failing-policy finding gap without fabricating composite assessments, using the smallest authoritative source-agnostic finding/observation contract and a real legacy FAIL → Create POA&M → still FAIL browser regression; (2) add cursor-aware incremental loading for findings, activity, and verification attempts in the shared detail tray; (3) map durable activity events to timestamp, actor, and meaningful user-facing descriptions, retaining raw payload only as optional diagnostics; (4) route assignment finding navigation through Dioxus while preserving exact bundle/version/system/policy/evidence query identity; (5) add discriminating unit/server/browser coverage; (6) rerun server POA&M, Web UI unit/package, workflows 29g–29m, and full Web UI checks; (7) run the same full harness at pre-Phase-6 baseline `42488e89` and record exact shared failure names/status; (8) synchronize TASK-433.6/.7 task files into the final remediation commit, update MR !318, and return TASK-433.7 to Review only after AC1 is re-proven. Phase 7 remains prohibited.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -91,26 +93,3 @@ Phase-6 contract audit found blocking Phase-5 API omissions before any implement
 
 Review handoff: local and remote branch SHAs match at `fd7548ad0b983e2412a5d1fa2b84ac397280daaa`; worktree is clean. MR !318 has no conflicts and received Phase-6 summary plus dark/light browser screenshots. Exact-head pipeline 2799822073 started for `fd7548ad`: https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2799822073 (running when handed off).
 <!-- SECTION:NOTES:END -->
-
-## Final Summary
-
-<!-- SECTION:FINAL_SUMMARY:BEGIN -->
-## Summary
-- Integrated authoritative POA&M create/link/detail workflows into compliance evidence while preserving FAIL outcomes and exact finding/bundle/system/evidence navigation.
-- Added committed System Detail POA&M counts, filters, rows, and exact linked-finding navigation.
-- Added bundle POA&M rollups and bounded 100-ID batching with browser request-count coverage proving no visible-list N+1.
-- Added first-class immutable assignment-version POA&M relationships with link/unlink behavior that leaves assignment identity, digest, configuration, and current-version pointer unchanged.
-- Added the minimal authorized Phase-5 read contracts and corrected assignment compatibility to pair scope and policy lineage from the same finding.
-
-## Verification
-- Server workspace formatting passed.
-- PostgreSQL-backed `poam_workflows`: 16 passed, 0 failed.
-- Web UI formatting and syntax checks passed.
-- Web UI Rust tests: 233 passed, 0 failed, 1 ignored.
-- `nix build .#packages.x86_64-linux.web-ui --no-link -L` passed.
-- Focused browser workflows 29g–29m passed together.
-- `nix build .#checks.x86_64-linux.web-ui --no-link -L` passed and captured dark/light screenshots for workflows 29g–29m.
-- `git diff --check` passed.
-
-Committed and pushed as `fd7548ad` to MR !318.
-<!-- SECTION:FINAL_SUMMARY:END -->
