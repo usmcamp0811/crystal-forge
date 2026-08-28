@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:43'
-updated_date: '2026-08-28 14:18'
+updated_date: '2026-08-28 14:28'
 labels:
   - design-parity
   - poam
@@ -82,6 +82,10 @@ Interrupted-agent recovery: inspect the full worktree diff, move assignment rela
 Focused browser-failure adjustment: identify the added milestone by the authoritative POST response ID instead of unsupported display-value locator composition; explicitly open the evidence policy target before asserting remediation navigation; initialize the assignment-reference scope from the exact compliance route system ID and render the relationship panel independently of the Systems Matrix fetch, while only auto-opening evidence for `view=evidence`. Verify these fixes with formatting, compilation, and focused workflows before rerunning all Phase-6 workflows.
 
 Phase-6 review remediation at exact head `fd7548ad`: (1) prove and close the production legacy failing-policy finding gap without fabricating composite assessments, using the smallest authoritative source-agnostic finding/observation contract and a real legacy FAIL → Create POA&M → still FAIL browser regression; (2) add cursor-aware incremental loading for findings, activity, and verification attempts in the shared detail tray; (3) map durable activity events to timestamp, actor, and meaningful user-facing descriptions, retaining raw payload only as optional diagnostics; (4) route assignment finding navigation through Dioxus while preserving exact bundle/version/system/policy/evidence query identity; (5) add discriminating unit/server/browser coverage; (6) rerun server POA&M, Web UI unit/package, workflows 29g–29m, and full Web UI checks; (7) run the same full harness at pre-Phase-6 baseline `42488e89` and record exact shared failure names/status; (8) synchronize TASK-433.6/.7 task files into the final remediation commit, update MR !318, and return TASK-433.7 to Review only after AC1 is re-proven. Phase 7 remains prohibited.
+
+Legacy observation design decision: preserve the deployed Phase-5 composite-assessment API for compatibility, and add a narrow source-neutral observation reference for evidence-origin actions. Each failed control exposes its stable finding identity plus an authoritative observation reference (`source_kind`, source identifier, and semantic observation token). The server resolves that reference against the latest deployed derivation/CVE scan or exact composite assessment, rechecks current effective policy/version and FAIL state, and never derives outcome from POA&M state. Stable `poam_findings` rows are idempotently materialized for resolved evidence controls; relationship and compatible-search APIs accept finding IDs so legacy and composite sources share the same remediation identity without fabricating composite assessments. Create/link mutations accept the observation reference while retaining `assessment_id` compatibility. Closure/waiver behavior remains unchanged unless discriminating tests show the review finding requires extending those Phase-5 workflows.
+
+Implement this as a focused additive contract: shared canonical legacy-observation snapshot/token helpers; evidence DTO fields; finding-ID batch relationship and compatible lookup; authoritative create/link validation; Web UI adapter and evidence-bar wiring; server/unit/browser regression proving a persisted legacy failure can create a POA&M and remains FAIL afterward. Then implement the independent pagination/activity/typed-routing findings and verify serially.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
