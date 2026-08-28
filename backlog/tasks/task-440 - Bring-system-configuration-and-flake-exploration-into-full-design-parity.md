@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-08-28 16:58'
+updated_date: '2026-08-28 17:20'
 labels:
   - design-parity
   - web-ui
@@ -197,6 +197,10 @@ Research inventory completed for backend evaluation/snapshot ownership, frontend
 Initial Phase 1 slice implemented in the TASK-440 worktree: flake focus/selection and row keys now use exact full SHA rather than displayed prefixes; added a regression with two distinct full SHAs sharing the same seven-character display prefix; diff modal now uses an explicit above-drawer overlay class instead of an inline z-index below the tray.
 
 Verification: `nix develop -c cargo test --manifest-path packages/web-ui/Cargo.toml displayed_sha_prefix_never_aliases_full_commit_identity` passed (1 passed, 192 filtered out). `git diff --check` passed. Full web-ui `cargo fmt --check` is currently blocked by pre-existing formatting drift in TASK-433-origin files on `origin/dev` (including policy editor, compliance, policies, and adapter files); no unrelated formatting was applied.
+
+Phase 2 security foundation started without allocating migrations: added documented `security::snapshot_redaction` boundary for recursive JSON redaction and diagnostic text sanitization before future snapshot persistence, indexing, digesting, logging, or API serialization. It redacts sensitive nested fields, authorization headers, common secret assignments, URL userinfo, query strings, and fragments while preserving non-sensitive diagnostic text.
+
+Verification: `nix develop -c env SQLX_OFFLINE=true cargo test --manifest-path packages/default/Cargo.toml -p cf-server snapshot_redaction` passed (3 passed, 1564 filtered out; remaining targets had zero matching tests). The same command without `SQLX_OFFLINE=true` failed at compile time because no PostgreSQL server was running; this was an environment/SQLx macro issue, not a test failure. The new redaction source file was formatted with repository rustfmt.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
