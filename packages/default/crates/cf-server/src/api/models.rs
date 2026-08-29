@@ -3037,22 +3037,46 @@ pub struct OidcGroupMapping {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Reports whether one server-derived setup coach step is complete.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SetupWizardStepStatus {
+    /// Indicates whether at least one qualifying entity exists.
     pub complete: bool,
+    /// Gives the number of qualifying persisted records or lineages for the step.
     pub count: i64,
 }
 
+/// Reports administrator setup coach progress derived from persisted state.
+///
+/// `all_required_complete` retains the original five infrastructure-step
+/// contract. `all_coach_steps_complete` covers all nine coach steps, including
+/// the per-user agent acknowledgment.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SetupWizardProgressResponse {
+    /// Indicates whether the current administrator dismissed the coach.
     pub dismissed: bool,
+    /// Indicates whether the current administrator acknowledged agent setup.
     pub agent_acknowledged: bool,
+    /// Reports environment setup progress.
     pub environment: SetupWizardStepStatus,
+    /// Reports flake setup progress.
     pub flake: SetupWizardStepStatus,
+    /// Reports builder setup progress.
     pub builder: SetupWizardStepStatus,
+    /// Reports cache destination setup progress.
     pub cache: SetupWizardStepStatus,
+    /// Reports progress for systems linked to an environment and flake.
     pub system: SetupWizardStepStatus,
+    /// Reports policy lineage progress from user-attributed policy versions.
+    pub policy: SetupWizardStepStatus,
+    /// Reports progress from persisted compliance bundles.
+    pub bundle: SetupWizardStepStatus,
+    /// Reports progress from persisted POA&Ms across all lifecycle states.
+    pub poam: SetupWizardStepStatus,
+    /// Indicates whether the original five infrastructure steps are complete.
     pub all_required_complete: bool,
+    /// Indicates whether all nine setup coach steps are complete.
+    pub all_coach_steps_complete: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -160,6 +160,21 @@ pub struct PoamSummary {
     pub closure_attempt_id: Option<Uuid>,
 }
 
+/// Contains authoritative fleet-visible POA&M dashboard counts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PoamDashboardSummary {
+    /// Contains all visible POA&Ms in every lifecycle state.
+    pub total: i64,
+    /// Contains visible POA&Ms that are not completed.
+    pub active: i64,
+    /// Contains active visible POA&Ms past their target date.
+    pub overdue: i64,
+    /// Contains visible POA&Ms waiting for verification.
+    pub awaiting_verification: i64,
+    /// Contains completed visible POA&Ms.
+    pub completed: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FindingView {
     pub id: Uuid,
@@ -503,8 +518,12 @@ pub enum PoamApiError {
 }
 
 impl PoamApiError {
+    pub fn is_unauthenticated(&self) -> bool {
+        matches!(self, Self::Server(error) if error.status == 401)
+    }
+
     pub fn is_unauthorized(&self) -> bool {
-        matches!(self, Self::Server(error) if matches!(error.status, 401 | 403))
+        matches!(self, Self::Server(error) if error.status == 403)
     }
 
     pub fn is_not_visible(&self) -> bool {
@@ -625,6 +644,58 @@ pub async fn list_poams(query: &PoamListQuery) -> Result<Page<PoamSummary>, Poam
         request("GET", &with_query("/poams", query)?, None::<&()>).await?;
     page.validate(requested_offset)?;
     Ok(page)
+}
+
+/// Fetches the server-computed POA&M dashboard summary.
+///
+/// # Errors
+///
+/// Returns [`PoamApiError`] when the request fails or the response does not
+/// match the dashboard summary contract.
+pub async fn dashboard_summary() -> Result<PoamDashboardSummary, PoamApiError> {
+    request(
+        "GET",
+        &format!("{}/poams/dashboard", base_url()),
+        None::<&()>,
+    )
+    .await
+}
+
+/// Fetches the first 13 server-ordered POA&M attention rows.
+///
+/// The fixed bound is the maximum row count supported by the dashboard
+/// widget. The response must echo the requested page and a coherent cursor.
+///
+/// # Errors
+///
+/// Returns [`PoamApiError`] when the request fails or pagination is
+/// incoherent.
+pub async fn dashboard_watchlist() -> Result<Page<PoamSummary>, PoamApiError> {
+    const LIMIT: i64 = 13;
+    const OFFSET: i64 = 0;
+    let page: Page<PoamSummary> = request(
+        "GET",
+        &format!(
+            "{}/poams/dashboard/watchlist?limit={LIMIT}&offset={OFFSET}",
+            base_url()
+        ),
+        None::<&()>,
+    )
+    .await?;
+    validate_dashboard_watchlist_page(&page)?;
+    Ok(page)
+}
+
+fn validate_dashboard_watchlist_page<T>(page: &Page<T>) -> Result<(), PoamApiError> {
+    page.validate(0)?;
+    let expected_next = page.has_more.then_some(13);
+    if page.limit == 13 && page.next_offset == expected_next {
+        Ok(())
+    } else {
+        Err(PoamApiError::Deserialize(
+            "incoherent POA&M watchlist page size".to_string(),
+        ))
+    }
 }
 
 pub async fn fetch_all_poams(query: &PoamListQuery) -> Result<Vec<PoamSummary>, PoamApiError> {
@@ -946,6 +1017,40 @@ mod tests {
         let mut incoherent = coherent;
         incoherent.next_offset = None;
         assert!(incoherent.validate(0).is_err());
+    }
+
+    #[test]
+    fn dashboard_summary_uses_authoritative_wire_fields() {
+        let summary = parse_response::<PoamDashboardSummary>(
+            200,
+            r#"{"total":9,"active":5,"overdue":2,"awaiting_verification":1,"completed":4}"#,
+        )
+        .unwrap();
+        assert_eq!(summary.active, 5);
+        assert_eq!(summary.overdue, 2);
+        assert_eq!(summary.awaiting_verification, 1);
+        assert_eq!(summary.completed, 4);
+    }
+
+    #[test]
+    fn dashboard_watchlist_pagination_requires_exact_bound() {
+        let mut page = Page::<()> {
+            items: vec![],
+            limit: 13,
+            offset: 0,
+            has_more: false,
+            next_offset: None,
+        };
+        assert!(validate_dashboard_watchlist_page(&page).is_ok());
+        page.limit = 12;
+        assert!(validate_dashboard_watchlist_page(&page).is_err());
+        page.limit = 13;
+        page.offset = 1;
+        assert!(validate_dashboard_watchlist_page(&page).is_err());
+        page.offset = 0;
+        page.has_more = true;
+        page.next_offset = Some(14);
+        assert!(validate_dashboard_watchlist_page(&page).is_err());
     }
 
     #[test]

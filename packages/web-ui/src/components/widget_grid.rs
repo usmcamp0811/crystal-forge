@@ -287,7 +287,8 @@ pub struct StoredLayout {
 }
 
 impl StoredLayout {
-    pub const VERSION: u32 = 2;
+    /// Identifies the current persisted dashboard layout schema.
+    pub const VERSION: u32 = 3;
     const KEY: &'static str = "cf-dashboard-layout";
 
     /// Load from localStorage.
@@ -402,7 +403,8 @@ impl<'de> serde::Deserialize<'de> for StoredLayout {
                 }
 
                 Ok(StoredLayout {
-                    version: version.unwrap_or(StoredLayout::VERSION),
+                    // A missing version predates versioned layout migrations.
+                    version: version.unwrap_or(0),
                     entries: entries.unwrap_or_default(),
                 })
             }

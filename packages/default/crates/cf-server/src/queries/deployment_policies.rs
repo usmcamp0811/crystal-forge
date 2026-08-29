@@ -779,6 +779,16 @@ fn duplicate_requirement_mapping_id(request: &CreateDeploymentPolicyRequest) -> 
         .find(|requirement_version_id| !requirement_ids.insert(*requirement_version_id))
 }
 
+/// Creates a deployment policy and its initial requirement mappings.
+///
+/// The operation attributes the trigger-created draft to `actor_id` in the
+/// same transaction. An absent actor leaves the draft unattributed for
+/// migration, seed, and internal callers.
+///
+/// # Errors
+///
+/// Returns an error when validation fails or any policy, attribution, digest,
+/// or requirement-mapping write fails. The transaction rolls back on error.
 pub async fn create_deployment_policy_with_mappings(
     pool: &PgPool,
     request: &CreateDeploymentPolicyRequest,
@@ -810,6 +820,22 @@ pub async fn create_deployment_policy_with_mappings(
     .fetch_one(&mut *tx)
     .await
     .context("Failed to create deployment policy")?;
+
+    if let Some(actor_id) = actor_id {
+        // SECURITY: Attribution must be written before commit so seeded,
+        // unattributed versions cannot satisfy user-created policy checks.
+        let result = sqlx::query(
+            "UPDATE deployment_policy_versions SET created_by = $2 WHERE id = (SELECT current_draft_version_id FROM deployment_policies WHERE id = $1)",
+        )
+        .bind(policy.id)
+        .bind(actor_id)
+        .execute(&mut *tx)
+        .await
+        .context("Failed to attribute created policy draft")?;
+        if result.rows_affected() != 1 {
+            anyhow::bail!("Created policy draft was not available for attribution");
+        }
+    }
 
     // Compute and persist the canonical digest before committing.
     // New policies created via the legacy API have no opaque XML.
@@ -1931,6 +1957,13 @@ mod tests {
         .await
         .expect("count mappings");
         assert_eq!(count, 2);
+        let created_by: Option<Uuid> =
+            sqlx::query_scalar("SELECT created_by FROM deployment_policy_versions WHERE id = $1")
+                .bind(draft_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read draft attribution");
+        assert_eq!(created_by, Some(user_id));
         sqlx::query("DELETE FROM policy_requirement_mappings WHERE policy_version_id = $1")
             .bind(draft_id)
             .execute(&pool)

@@ -3674,22 +3674,73 @@ pub struct AdminUpdateUserRequest {
     pub password: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Reports whether one server-derived setup coach step is complete.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SetupWizardStepStatus {
+    /// Indicates whether at least one qualifying entity exists.
     pub complete: bool,
+    /// Gives the number of qualifying persisted records or lineages for the step.
     pub count: i64,
 }
 
+/// Reports administrator setup coach progress derived from persisted state.
+///
+/// Optional coach fields preserve compatibility with the legacy six-step API.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SetupWizardProgressResponse {
+    /// Indicates whether the current administrator dismissed the coach.
     pub dismissed: bool,
+    /// Indicates whether the current administrator acknowledged agent setup.
     pub agent_acknowledged: bool,
+    /// Reports environment setup progress.
     pub environment: SetupWizardStepStatus,
+    /// Reports flake setup progress.
     pub flake: SetupWizardStepStatus,
+    /// Reports builder setup progress.
     pub builder: SetupWizardStepStatus,
+    /// Reports cache destination setup progress.
     pub cache: SetupWizardStepStatus,
+    /// Reports progress for systems linked to an environment and flake.
     pub system: SetupWizardStepStatus,
+    /// Reports policy lineage progress from user-attributed policy versions.
+    #[serde(default)]
+    pub policy: Option<SetupWizardStepStatus>,
+    /// Reports compliance bundle lineage progress.
+    #[serde(default)]
+    pub bundle: Option<SetupWizardStepStatus>,
+    /// Reports POA&M progress across all lifecycle states.
+    #[serde(default)]
+    pub poam: Option<SetupWizardStepStatus>,
+    /// Indicates whether the original five infrastructure steps are complete.
     pub all_required_complete: bool,
+    /// Indicates whether all nine setup coach steps are complete.
+    #[serde(default)]
+    pub all_coach_steps_complete: Option<bool>,
+}
+
+#[cfg(test)]
+mod setup_wizard_tests {
+    use super::*;
+
+    #[test]
+    fn older_setup_progress_preserves_absent_new_steps() {
+        let progress: SetupWizardProgressResponse = serde_json::from_value(serde_json::json!({
+            "dismissed": false,
+            "agent_acknowledged": true,
+            "environment": { "complete": true, "count": 1 },
+            "flake": { "complete": true, "count": 1 },
+            "builder": { "complete": true, "count": 1 },
+            "cache": { "complete": true, "count": 1 },
+            "system": { "complete": true, "count": 1 },
+            "all_required_complete": true
+        }))
+        .expect("older setup progress should deserialize");
+
+        assert_eq!(progress.policy, None);
+        assert_eq!(progress.bundle, None);
+        assert_eq!(progress.poam, None);
+        assert_eq!(progress.all_coach_steps_complete, None);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

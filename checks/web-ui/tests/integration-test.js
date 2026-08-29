@@ -132,30 +132,34 @@ async function getAccountPreferences(page) {
   }, { baseUrl });
 }
 
-async function mockAccountNotifications(page) {
+async function mockAccountNotifications(page, notification = null) {
   let unread = 1;
+  let dismissed = false;
+  const requests = { get: [], read: [], dismiss: [] };
+  const item = notification || {
+    id: "11111111-1111-4111-8111-111111111111",
+    category: "build_failures",
+    title: "Build failed",
+    summary: "A build entered a failed terminal state.",
+    route: "/builds",
+  };
   await page.route("**/api/v1/user/notifications**", async (route) => {
     if (route.request().method() !== "GET") {
       await route.fallback();
       return;
     }
+    requests.get.push(route.request().url());
     await route.fulfill({
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({
         unread_count: unread,
         next_cursor: null,
-        notifications: [
-          {
-            id: "11111111-1111-4111-8111-111111111111",
-            category: "build_failures",
-            title: "Build failed",
-            summary: "A build entered a failed terminal state.",
-            route: "/builds",
-            created_at: new Date(Date.now() - 60_000).toISOString(),
-            read_at: unread > 0 ? null : new Date().toISOString(),
-          },
-        ],
+        notifications: dismissed ? [] : [{
+          ...item,
+          created_at: new Date(Date.now() - 60_000).toISOString(),
+          read_at: unread > 0 ? null : new Date().toISOString(),
+        }],
       }),
     });
   });
@@ -164,17 +168,21 @@ async function mockAccountNotifications(page) {
     await route.fulfill({ status: 204 });
   });
   await page.route("**/api/v1/user/notifications/*/read", async (route) => {
+    requests.read.push(route.request().url());
     unread = 0;
     await route.fulfill({ status: 204 });
   });
   await page.route("**/api/v1/user/notifications/*", async (route) => {
     if (route.request().method() === "DELETE") {
+      requests.dismiss.push(route.request().url());
       unread = 0;
+      dismissed = true;
       await route.fulfill({ status: 204 });
       return;
     }
     await route.fallback();
   });
+  return requests;
 }
 
 async function mockProfileNotificationAndSessionApis(page) {
@@ -1746,7 +1754,11 @@ function mockSetupCoachProgress() {
     builder: { complete: false, count: 0 },
     cache: { complete: false, count: 0 },
     system: { complete: false, count: 0 },
+    policy: { complete: false, count: 0 },
+    bundle: { complete: false, count: 0 },
+    poam: { complete: false, count: 0 },
     all_required_complete: false,
+    all_coach_steps_complete: false,
   };
 }
 
@@ -3022,13 +3034,92 @@ const steps = [
     name: "06-dashboard",
     description: "Dashboard after login",
     action: async (page) => {
+      const fixture = await createPhase6PoamFixture(page, "phase-7-dashboard");
+      const poam = await createFixturePoam(page, fixture.systems[0].assessmentId, {
+        title: "Phase 7 dashboard watchlist remediation",
+        targetDate: "2000-01-01",
+      });
       await routeSetupCoachData(page);
+      const expectedLayout = {
+        version: 3,
+        entries: [
+          ["fleet-health", 2, 1],
+          ["poam-summary", 1, 1],
+          ["cve-summary", 1, 1],
+          ["poam-watchlist", 2, 1],
+        ],
+      };
+      await page.evaluate(() => {
+        localStorage.setItem("cf-dashboard-layout", JSON.stringify({
+          version: 2,
+          entries: [["fleet-health", 2, 1], ["cve-summary", 1, 1]],
+        }));
+      });
+      const summaryResponsePromise = page.waitForResponse((response) => {
+        return new URL(response.url()).pathname === "/api/v1/poams/dashboard";
+      });
+      const watchlistResponsePromise = page.waitForResponse((response) => {
+        return new URL(response.url()).pathname === "/api/v1/poams/dashboard/watchlist";
+      });
       await page.goto(`${baseUrl}/`, { timeout: LOAD_TIMEOUT });
-      await page.waitForTimeout(2000);
+      const [summaryResponse, watchlistResponse] = await Promise.all([
+        summaryResponsePromise,
+        watchlistResponsePromise,
+      ]);
+      if (summaryResponse.status() !== 200 || watchlistResponse.status() !== 200) {
+        throw new Error(`POA&M dashboard endpoints returned ${summaryResponse.status()} and ${watchlistResponse.status()}`);
+      }
+      const summary = await summaryResponse.json();
+      const watchlist = await watchlistResponse.json();
+      if (!watchlist.items.some((item) => item.id === poam.id)) {
+        throw new Error(`POA&M watchlist omitted exact fixture ${poam.id}`);
+      }
       await assertVisible(
         page.locator("[data-testid='onboarding-coach-panel']"),
         "Onboarding coach panel should be visible on dashboard",
       );
+      const summaryWidget = page.locator('[data-widget-id="poam-summary"]');
+      const watchlistWidget = page.locator('[data-widget-id="poam-watchlist"]');
+      await assertVisible(summaryWidget, "POA&M Summary widget should render migrated layout data");
+      await assertVisible(watchlistWidget, "POA&M Watchlist widget should render migrated layout data");
+      await assertVisible(
+        summaryWidget.getByText(String(summary.active), { exact: true }).first(),
+        "POA&M Summary widget should render the endpoint active count",
+      );
+      await assertVisible(
+        summaryWidget.getByText(`${summary.overdue} overdue`, { exact: true }),
+        "POA&M Summary widget should render the endpoint overdue count",
+      );
+      await assertVisible(
+        watchlistWidget.getByTitle(`Open ${poam.human_id}: ${poam.title}`),
+        "POA&M Watchlist should render the exact endpoint row",
+      );
+      await page.waitForFunction((expected) => {
+        const stored = JSON.parse(localStorage.getItem("cf-dashboard-layout") || "null");
+        return JSON.stringify(stored) === JSON.stringify(expected);
+      }, expectedLayout, { timeout: LOAD_TIMEOUT });
+      const migratedLayout = await page.evaluate(() => localStorage.getItem("cf-dashboard-layout"));
+
+      await page.reload({ timeout: LOAD_TIMEOUT });
+      await page.locator('[data-widget-id="poam-watchlist"]').waitFor({ state: "visible", timeout: LOAD_TIMEOUT });
+      const reloadedLayout = await page.evaluate(() => localStorage.getItem("cf-dashboard-layout"));
+      if (reloadedLayout !== migratedLayout) {
+        throw new Error(`Version-3 dashboard migration was not idempotent: ${migratedLayout} -> ${reloadedLayout}`);
+      }
+      if (await page.locator('[data-widget-id="poam-summary"]').count() !== 1 ||
+          await page.locator('[data-widget-id="poam-watchlist"]').count() !== 1) {
+        throw new Error("Reload duplicated or removed a migrated POA&M widget");
+      }
+
+      await page.locator('[data-widget-id="poam-watchlist"]').getByTitle(`Open ${poam.human_id}: ${poam.title}`).click();
+      await page.waitForURL((url) => url.pathname === "/compliance" && url.searchParams.get("poam") === poam.id, {
+        timeout: LOAD_TIMEOUT,
+      });
+      const detail = page.locator(`[data-testid="poam-detail"][data-poam-id="${poam.id}"]`);
+      await waitForPhase6Target(page, detail, "Dashboard watchlist exact POA&M detail");
+      await assertVisible(detail.getByText(poam.human_id, { exact: true }), "Dashboard route should open the exact POA&M");
+      await page.goto(`${baseUrl}/`, { timeout: LOAD_TIMEOUT });
+      await page.locator('[data-widget-id="poam-watchlist"]').waitFor({ state: "visible", timeout: LOAD_TIMEOUT });
     },
   },
   {
@@ -3869,7 +3960,7 @@ const steps = [
     name: "06h-onboarding-coach-all-configured",
     description: "Coach panel: expand from tab, all steps show Configured",
     action: async (page) => {
-      // Mock progress as fully complete for the all-configured screenshot
+      await page.evaluate(() => localStorage.setItem("cf.coach.force_show", "true"));
       await page.route("**/api/v1/admin/setup-progress*", async (route) => {
         await route.fulfill({
           status: 200,
@@ -3882,26 +3973,23 @@ const steps = [
             builder: { complete: true, count: 1 },
             cache: { complete: true, count: 1 },
             system: { complete: true, count: 1 },
-            all_required_complete: false, // Keep false so panel doesn't auto-dismiss
+            policy: { complete: true, count: 1 },
+            bundle: { complete: true, count: 1 },
+            poam: { complete: true, count: 1 },
+            all_required_complete: true,
+            all_coach_steps_complete: true,
           }),
         });
       });
 
-      // Click the minimized tab to expand
-      await page.locator("[data-testid='onboarding-coach-panel']").click();
-      await page.waitForTimeout(800);
-
-      // Force a refresh so the mocked progress is loaded
-      await page.locator("[data-testid='onboarding-coach-refresh']").click();
-      await page.waitForTimeout(1200);
+      await page.reload({ timeout: LOAD_TIMEOUT });
 
       await assertVisible(
         page.locator("[data-testid='onboarding-step-environment']"),
         "Panel should be expanded and show steps",
       );
 
-      // All five entity steps should be Configured
-      for (const stepId of ["environment", "flake", "builder", "cache", "system"]) {
+      for (const stepId of ["environment", "flake", "builder", "cache", "system", "policy", "bundle", "poam"]) {
         const step = page.locator(`[data-testid='onboarding-step-${stepId}']`);
         await assertVisible(step, `Step ${stepId} should be visible`);
         const text = await step.textContent();
@@ -3917,7 +4005,24 @@ const steps = [
         throw new Error(`Expected agent step to show Acknowledged, got: ${agentText}`);
       }
 
+      for (const [stepId, pathname] of [
+        ["policy", "/deployment-policies"],
+        ["bundle", "/compliance"],
+        ["poam", "/compliance"],
+      ]) {
+        await page.locator(`[data-testid='onboarding-step-${stepId}']`).click();
+        await page.waitForURL((url) => url.pathname === pathname, { timeout: LOAD_TIMEOUT });
+        await assertVisible(
+          page.locator(`[data-testid='onboarding-step-${stepId}']`),
+          `Setup Coach ${stepId} step should remain available at its typed destination`,
+        );
+      }
+
+      await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
+      await assertVisible(page.locator("[data-testid='onboarding-step-poam']"), "All nine Setup Coach steps should remain visible");
+
       await page.unroute("**/api/v1/admin/setup-progress*");
+      await page.evaluate(() => localStorage.setItem("cf.coach.force_show", "false"));
     },
   },
   {
@@ -4283,7 +4388,20 @@ const steps = [
     name: "09g-topbar-notifications-dark",
     description: "Dark theme notifications panel opens with server-backed unread badge and settings link",
     action: async (page) => {
-      await mockAccountNotifications(page);
+      const fixture = await createPhase6PoamFixture(page, "phase-7-notification");
+      const poam = await createFixturePoam(page, fixture.systems[0].assessmentId, {
+        title: "Phase 7 durable notification remediation",
+        targetDate: "2000-01-01",
+      });
+      const notificationId = "77777777-7777-4777-8777-777777777777";
+      const notificationTitle = `POA&M overdue: ${poam.human_id}`;
+      const notificationRequests = await mockAccountNotifications(page, {
+        id: notificationId,
+        category: "policy_violations",
+        title: notificationTitle,
+        summary: poam.title,
+        route: `/compliance?poam=${poam.id}`,
+      });
       await page.setViewportSize(VIEWPORTS.desktop);
       await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
       await setAccountPreferences(page, { theme: "dark" });
@@ -4301,7 +4419,51 @@ const steps = [
       );
       const settingsButton = page.locator("[data-testid='topbar-notifications-settings-button']");
       await assertVisible(settingsButton, "Expected functional notification settings button");
-      await assertVisible(panel.getByText("Build failed"), "Expected server-backed notification row");
+      const notificationRow = panel.getByText(notificationTitle, { exact: true }).locator("xpath=ancestor::*[@role='button'][1]");
+      await assertVisible(notificationRow, "Expected durable POA&M notification row");
+      const readResponsePromise = page.waitForResponse(
+        (response) => response.url().endsWith(`/api/v1/user/notifications/${notificationId}/read`),
+      );
+      await notificationRow.click();
+      if ((await readResponsePromise).status() !== 204) {
+        throw new Error("POA&M notification read request failed");
+      }
+      await page.waitForURL((url) => url.pathname === "/compliance" && url.searchParams.get("poam") === poam.id, {
+        timeout: LOAD_TIMEOUT,
+      });
+      const detail = page.locator(`[data-testid="poam-detail"][data-poam-id="${poam.id}"]`);
+      await waitForPhase6Target(page, detail, "Notification exact POA&M detail");
+      if (notificationRequests.read.length !== 1) {
+        throw new Error(`Expected one durable read mutation, got ${notificationRequests.read.length}`);
+      }
+
+      await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
+      await bell.waitFor({ state: "visible", timeout: LOAD_TIMEOUT });
+      await bell.click();
+      const reopenedPanel = page.locator("[data-testid='topbar-notifications-panel']");
+      const reopenedRow = reopenedPanel.getByText(notificationTitle, { exact: true }).locator("xpath=ancestor::*[@role='button'][1]");
+      await assertVisible(reopenedRow, "Read POA&M notification should remain durable until dismissed");
+      const dismissResponsePromise = page.waitForResponse(
+        (response) => response.url().endsWith(`/api/v1/user/notifications/${notificationId}`) && response.request().method() === "DELETE",
+      );
+      await reopenedRow.getByTitle("Dismiss notification").click();
+      if ((await dismissResponsePromise).status() !== 204) {
+        throw new Error("POA&M notification dismiss request failed");
+      }
+      await assertHidden(reopenedPanel.getByText(notificationTitle, { exact: true }), "Dismissed POA&M notification should leave the inbox");
+      if (notificationRequests.dismiss.length !== 1) {
+        throw new Error(`Expected one durable dismiss mutation, got ${notificationRequests.dismiss.length}`);
+      }
+
+      const pollBaseline = notificationRequests.get.length;
+      await page.waitForResponse((response) => {
+        const url = new URL(response.url());
+        return response.request().method() === "GET" &&
+          url.pathname === "/api/v1/user/notifications";
+      }, { timeout: 35_000 });
+      if (notificationRequests.get.length !== pollBaseline + 1) {
+        throw new Error(`Expected one AppShell poll without overlap, got ${notificationRequests.get.length - pollBaseline}`);
+      }
 
       const markRead = page.locator("[data-testid='topbar-notifications-mark-read']");
       await assertVisible(markRead, "Expected mark-all-read action");

@@ -11,8 +11,14 @@ pub async fn materialize_attention_notifications_for_user(
     let result = sqlx::query(
         r#"
         WITH prefs AS (
-            INSERT INTO user_notification_preferences (user_id)
-            VALUES ($1)
+            INSERT INTO user_notification_preferences (
+                user_id, deploy_failures_in_app_enabled_at,
+                build_failures_in_app_enabled_at,
+                critical_cves_in_app_enabled_at,
+                policy_violations_in_app_enabled_at, initialized_at
+            )
+            SELECT id, created_at, created_at, created_at, created_at, created_at
+            FROM users WHERE id = $1
             ON CONFLICT (user_id) DO UPDATE SET user_id = EXCLUDED.user_id
             RETURNING *
         ), attention_eligible AS (
@@ -23,8 +29,9 @@ pub async fn materialize_attention_notifications_for_user(
                     WHEN 'evals' THEN 'policy_violations'
                     WHEN 'cves' THEN 'critical_cves'
                     WHEN 'systems' THEN 'heartbeat_lost'
+                    WHEN 'poams' THEN 'policy_violations'
                 END AS category,
-                ao.category AS source_type,
+                CASE WHEN ao.category = 'poams' THEN 'poams' ELSE ao.category END AS source_type,
                 ao.subject_id,
                 'attention_occurrence' AS identity_type,
                 ao.id::text AS identity_id,
@@ -34,18 +41,21 @@ pub async fn materialize_attention_notifications_for_user(
                     WHEN 'evals' THEN p.policy_violations_in_app_enabled_at
                     WHEN 'cves' THEN p.critical_cves_in_app_enabled_at
                     WHEN 'systems' THEN p.heartbeat_lost_in_app_enabled_at
+                    WHEN 'poams' THEN p.policy_violations_in_app_enabled_at
                      END), FALSE) AS in_app_visible,
                  COALESCE(($2 AND p.delivery_channel IN ('email', 'both') AND ao.opened_at >= CASE ao.category
                      WHEN 'builds' THEN p.build_failures_email_enabled_at
                      WHEN 'evals' THEN p.policy_violations_email_enabled_at
                      WHEN 'cves' THEN p.critical_cves_email_enabled_at
                      WHEN 'systems' THEN p.heartbeat_lost_email_enabled_at
+                     WHEN 'poams' THEN p.policy_violations_email_enabled_at
                  END), FALSE) AS email_delivery_eligible,
                 CASE ao.category
                     WHEN 'builds' THEN 'Build failed'
                     WHEN 'evals' THEN 'Policy or evaluation failure'
                     WHEN 'cves' THEN 'New critical CVE'
                     WHEN 'systems' THEN 'Heartbeat lost'
+                    WHEN 'poams' THEN 'POAM-' || lpad(poam.human_number::text, 4, '0') || ' overdue'
                     ELSE 'Notification'
                 END AS title,
                 CASE ao.category
@@ -53,6 +63,7 @@ pub async fn materialize_attention_notifications_for_user(
                     WHEN 'evals' THEN 'An evaluation or policy check entered a failed state.'
                     WHEN 'cves' THEN 'A critical CVE attention episode opened.'
                     WHEN 'systems' THEN 'A system crossed an offline or lost-heartbeat threshold.'
+                    WHEN 'poams' THEN poam.title || ' passed its target date.'
                     ELSE 'A Crystal Forge event needs attention.'
                 END AS summary,
                 CASE ao.category
@@ -60,18 +71,21 @@ pub async fn materialize_attention_notifications_for_user(
                     WHEN 'evals' THEN '/evaluations'
                     WHEN 'cves' THEN '/cves'
                     WHEN 'systems' THEN '/systems'
+                    WHEN 'poams' THEN '/compliance?poam=' || poam.id::text
                     ELSE '/'
                 END AS route
             FROM attention_occurrences ao
+            LEFT JOIN poams poam ON ao.category = 'poams' AND poam.id::text = ao.subject_id
             CROSS JOIN prefs p
             WHERE ao.opened_at >= p.initialized_at
-              AND ao.category IN ('builds', 'evals', 'cves', 'systems')
+              AND ao.category IN ('builds', 'evals', 'cves', 'systems', 'poams')
                AND p.delivery_channel IN ('in_app', 'email', 'both')
                AND (
                     (ao.category = 'builds' AND p.build_failures)
                  OR (ao.category = 'evals' AND p.policy_violations)
                  OR (ao.category = 'cves' AND p.critical_cves)
-                 OR (ao.category = 'systems' AND p.heartbeat_lost)
+                  OR (ao.category = 'systems' AND p.heartbeat_lost)
+                  OR (ao.category = 'poams' AND p.policy_violations)
                )
               AND (
                     (
@@ -81,6 +95,7 @@ pub async fn materialize_attention_notifications_for_user(
                             WHEN 'evals' THEN p.policy_violations_in_app_enabled_at
                             WHEN 'cves' THEN p.critical_cves_in_app_enabled_at
                             WHEN 'systems' THEN p.heartbeat_lost_in_app_enabled_at
+                            WHEN 'poams' THEN p.policy_violations_in_app_enabled_at
                         END
                     )
                  OR (
@@ -90,10 +105,42 @@ pub async fn materialize_attention_notifications_for_user(
                             WHEN 'evals' THEN p.policy_violations_email_enabled_at
                             WHEN 'cves' THEN p.critical_cves_email_enabled_at
                             WHEN 'systems' THEN p.heartbeat_lost_email_enabled_at
+                            WHEN 'poams' THEN p.policy_violations_email_enabled_at
                         END
                     )
               )
-               AND notification_visible_to_user($1, ao.category, ao.subject_id)
+               AND notification_visible_to_user($1, CASE WHEN ao.category = 'poams' THEN 'poams' ELSE ao.category END, ao.subject_id)
+        ), poam_activity_eligible AS (
+            SELECT
+                activity.id AS source_occurrence_id,
+                'policy_violations' AS category,
+                'poams' AS source_type,
+                poam.id::text AS subject_id,
+                'poam_activity' AS identity_type,
+                activity.id::text AS identity_id,
+                activity.created_at AS opened_at,
+                COALESCE((p.delivery_channel IN ('in_app', 'both')
+                    AND activity.created_at >= p.policy_violations_in_app_enabled_at), FALSE) AS in_app_visible,
+                COALESCE(($2 AND p.delivery_channel IN ('email', 'both')
+                    AND activity.created_at >= p.policy_violations_email_enabled_at), FALSE) AS email_delivery_eligible,
+                'POAM-' || lpad(poam.human_number::text, 4, '0') || ' awaiting verification' AS title,
+                poam.title || ' is ready for verification.' AS summary,
+                '/compliance?poam=' || poam.id::text AS route
+            FROM poam_activity activity
+            JOIN poams poam ON poam.id = activity.poam_id
+            CROSS JOIN prefs p
+            WHERE activity.kind = 'status_changed'
+              AND activity.payload->>'to' = 'awaiting_verification'
+              AND activity.created_at >= p.initialized_at
+              AND p.policy_violations
+              AND p.delivery_channel IN ('in_app', 'email', 'both')
+              AND (
+                    (p.delivery_channel IN ('in_app', 'both')
+                     AND activity.created_at >= p.policy_violations_in_app_enabled_at)
+                 OR (p.delivery_channel IN ('email', 'both')
+                     AND activity.created_at >= p.policy_violations_email_enabled_at)
+              )
+              AND notification_visible_to_user($1, 'poams', poam.id::text)
         ), deployment_eligible AS (
             SELECT
                 NULL::uuid AS source_occurrence_id,
@@ -123,6 +170,8 @@ pub async fn materialize_attention_notifications_for_user(
         ), eligible AS (
             SELECT * FROM attention_eligible
             UNION ALL
+            SELECT * FROM poam_activity_eligible
+            UNION ALL
             SELECT * FROM deployment_eligible
         )
         INSERT INTO user_notifications (
@@ -148,8 +197,14 @@ pub async fn materialize_attention_notifications_for_user(
     sqlx::query(
         r#"
         WITH prefs AS (
-            INSERT INTO user_notification_preferences (user_id)
-            VALUES ($1)
+            INSERT INTO user_notification_preferences (
+                user_id, deploy_failures_in_app_enabled_at,
+                build_failures_in_app_enabled_at,
+                critical_cves_in_app_enabled_at,
+                policy_violations_in_app_enabled_at, initialized_at
+            )
+            SELECT id, created_at, created_at, created_at, created_at, created_at
+            FROM users WHERE id = $1
             ON CONFLICT (user_id) DO UPDATE SET user_id = EXCLUDED.user_id
             RETURNING *
         ), attention_eligible AS (
@@ -160,8 +215,9 @@ pub async fn materialize_attention_notifications_for_user(
                     WHEN 'evals' THEN 'policy_violations'
                     WHEN 'cves' THEN 'critical_cves'
                     WHEN 'systems' THEN 'heartbeat_lost'
+                    WHEN 'poams' THEN 'policy_violations'
                 END AS category,
-                ao.category AS source_type,
+                CASE WHEN ao.category = 'poams' THEN 'poams' ELSE ao.category END AS source_type,
                 ao.subject_id AS source_id,
                 'attention_occurrence' AS identity_type,
                 ao.id::text AS identity_id,
@@ -171,19 +227,40 @@ pub async fn materialize_attention_notifications_for_user(
                     WHEN 'evals' THEN p.policy_violations_email_enabled_at
                     WHEN 'cves' THEN p.critical_cves_email_enabled_at
                     WHEN 'systems' THEN p.heartbeat_lost_email_enabled_at
+                    WHEN 'poams' THEN p.policy_violations_email_enabled_at
                 END AS email_enabled_at
             FROM attention_occurrences ao
             CROSS JOIN prefs p
             WHERE ao.opened_at >= p.initialized_at
-              AND ao.category IN ('builds', 'evals', 'cves', 'systems')
+              AND ao.category IN ('builds', 'evals', 'cves', 'systems', 'poams')
               AND p.delivery_channel IN ('email', 'both')
               AND (
                     (ao.category = 'builds' AND p.build_failures)
                  OR (ao.category = 'evals' AND p.policy_violations)
                  OR (ao.category = 'cves' AND p.critical_cves)
-                 OR (ao.category = 'systems' AND p.heartbeat_lost)
-              )
-               AND notification_visible_to_user($1, ao.category, ao.subject_id)
+                  OR (ao.category = 'systems' AND p.heartbeat_lost)
+                  OR (ao.category = 'poams' AND p.policy_violations)
+               )
+               AND notification_visible_to_user($1, CASE WHEN ao.category = 'poams' THEN 'poams' ELSE ao.category END, ao.subject_id)
+        ), poam_activity_eligible AS (
+            SELECT
+                activity.id AS source_occurrence_id,
+                'policy_violations' AS category,
+                'poams' AS source_type,
+                poam.id::text AS source_id,
+                'poam_activity' AS identity_type,
+                activity.id::text AS identity_id,
+                activity.created_at AS opened_at,
+                p.policy_violations_email_enabled_at AS email_enabled_at
+            FROM poam_activity activity
+            JOIN poams poam ON poam.id = activity.poam_id
+            CROSS JOIN prefs p
+            WHERE activity.kind = 'status_changed'
+              AND activity.payload->>'to' = 'awaiting_verification'
+              AND activity.created_at >= p.initialized_at
+              AND p.delivery_channel IN ('email', 'both')
+              AND p.policy_violations
+              AND notification_visible_to_user($1, 'poams', poam.id::text)
         ), deployment_eligible AS (
             SELECT
                 NULL::uuid AS source_occurrence_id,
@@ -204,6 +281,8 @@ pub async fn materialize_attention_notifications_for_user(
                AND notification_visible_to_user($1, 'system_event', se.id::text)
         ), eligible AS (
             SELECT * FROM attention_eligible
+            UNION ALL
+            SELECT * FROM poam_activity_eligible
             UNION ALL
             SELECT * FROM deployment_eligible
         ), existing_notification AS (
@@ -246,10 +325,9 @@ pub async fn materialize_all_user_notifications(
     email_delivery_permitted: bool,
 ) -> Result<u64, sqlx::Error> {
     let users: Vec<(Uuid,)> = sqlx::query_as(
-        "SELECT DISTINCT p.user_id
-                        FROM user_notification_preferences p
-                        JOIN users u ON u.id = p.user_id
-                        WHERE u.is_active = TRUE",
+        "SELECT id
+         FROM users
+         WHERE is_active = TRUE",
     )
     .fetch_all(pool)
     .await?;
@@ -360,8 +438,14 @@ pub async fn get_or_create_notification_preferences(
     user_id: Uuid,
 ) -> Result<UserNotificationPreferences, sqlx::Error> {
     sqlx::query_as::<_, UserNotificationPreferences>(
-        "INSERT INTO user_notification_preferences (user_id)
-         VALUES ($1)
+        "INSERT INTO user_notification_preferences (
+             user_id, deploy_failures_in_app_enabled_at,
+             build_failures_in_app_enabled_at,
+             critical_cves_in_app_enabled_at,
+             policy_violations_in_app_enabled_at, initialized_at
+         )
+         SELECT id, created_at, created_at, created_at, created_at, created_at
+         FROM users WHERE id = $1
          ON CONFLICT (user_id) DO UPDATE SET user_id = EXCLUDED.user_id
          RETURNING user_id, deploy_failures, build_failures, critical_cves, policy_violations,
                    heartbeat_lost, weekly_digest, delivery_channel,
@@ -375,6 +459,32 @@ pub async fn get_or_create_notification_preferences(
     )
     .bind(user_id)
     .fetch_one(pool)
+    .await
+}
+
+/// Returns existing notification preferences without creating or updating rows.
+///
+/// # Errors
+///
+/// Returns a database error when the preference query fails.
+pub async fn get_notification_preferences(
+    pool: &PgPool,
+    user_id: Uuid,
+) -> Result<Option<UserNotificationPreferences>, sqlx::Error> {
+    sqlx::query_as::<_, UserNotificationPreferences>(
+        "SELECT user_id, deploy_failures, build_failures, critical_cves, policy_violations,
+                heartbeat_lost, weekly_digest, delivery_channel,
+                deploy_failures_email_enabled_at, build_failures_email_enabled_at,
+                critical_cves_email_enabled_at, policy_violations_email_enabled_at,
+                heartbeat_lost_email_enabled_at,
+                deploy_failures_in_app_enabled_at, build_failures_in_app_enabled_at,
+                critical_cves_in_app_enabled_at, policy_violations_in_app_enabled_at,
+                heartbeat_lost_in_app_enabled_at, weekly_digest_enabled_at,
+                initialized_at, updated_at
+         FROM user_notification_preferences WHERE user_id = $1",
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
     .await
 }
 
@@ -598,7 +708,7 @@ mod tests {
 
     async fn test_pool() -> PgPool {
         PgPoolOptions::new()
-            .max_connections(1)
+            .max_connections(5)
             .connect(&test_database_url())
             .await
             .expect("failed to connect to test database")
@@ -631,14 +741,88 @@ mod tests {
         user_id
     }
 
+    async fn create_poam_fixture(pool: &PgPool, user_id: Uuid) -> Uuid {
+        let token = Uuid::new_v4().simple().to_string();
+        let environment_id = Uuid::new_v4();
+        let system_id = Uuid::new_v4();
+        let policy_id = Uuid::new_v4();
+        let finding_id = Uuid::new_v4();
+        let poam_id = Uuid::new_v4();
+        let mut tx = pool.begin().await.expect("begin POA&M fixture transaction");
+
+        sqlx::query("UPDATE user_role_assignments SET role = 'admin' WHERE user_id = $1")
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await
+            .expect("grant fixture administrator role");
+        sqlx::query("INSERT INTO environments (id, name) VALUES ($1, $2)")
+            .bind(environment_id)
+            .bind(format!("notification-poam-{token}"))
+            .execute(&mut *tx)
+            .await
+            .expect("insert fixture environment");
+        sqlx::query(
+            "INSERT INTO systems (id, hostname, environment_id, public_key, derivation, is_active) \
+             VALUES ($1, $2, $3, $4, '', TRUE)",
+        )
+        .bind(system_id)
+        .bind(format!("notification-poam-{token}"))
+        .bind(environment_id)
+        .bind(format!("ssh-ed25519 AAAA-notification-poam-{token}"))
+        .execute(&mut *tx)
+        .await
+        .expect("insert fixture system");
+        sqlx::query(
+            "INSERT INTO deployment_policies (id, name, policy_type, config, enabled) \
+             VALUES ($1, $2, 'custom_check', '{\"expression\": \"true\"}', FALSE)",
+        )
+        .bind(policy_id)
+        .bind(format!("notification-poam-{token}"))
+        .execute(&mut *tx)
+        .await
+        .expect("insert fixture policy");
+        sqlx::query(
+            "INSERT INTO poam_findings (id, system_id, policy_lineage_id) VALUES ($1, $2, $3)",
+        )
+        .bind(finding_id)
+        .bind(system_id)
+        .bind(policy_id)
+        .execute(&mut *tx)
+        .await
+        .expect("insert fixture finding");
+        sqlx::query(
+            "INSERT INTO poams (id, title, target_date, risk, created_by) \
+             VALUES ($1, $2, CURRENT_DATE - 2, 'medium', $3)",
+        )
+        .bind(poam_id)
+        .bind(format!("Notification POA&M {token}"))
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .expect("insert fixture POA&M");
+        sqlx::query(
+            "INSERT INTO poam_finding_links (poam_id, finding_id, linked_by) VALUES ($1, $2, $3)",
+        )
+        .bind(poam_id)
+        .bind(finding_id)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .expect("link fixture finding");
+        tx.commit().await.expect("commit POA&M fixture");
+        poam_id
+    }
+
     #[tokio::test]
     #[ignore = "requires migrated CRYSTAL_FORGE_TEST_DATABASE_URL"]
     async fn user_notifications_materialize_event_after_user_creation_before_api_touch() {
         let pool = test_pool().await;
         let user_id = create_test_user(&pool, "preference-init").await;
-        get_or_create_notification_preferences(&pool, user_id)
+        sqlx::query("DELETE FROM user_notification_preferences WHERE user_id = $1")
+            .bind(user_id)
+            .execute(&pool)
             .await
-            .expect("initialize notification preferences");
+            .expect("remove initialized notification preferences");
         let occurrence_id = Uuid::new_v4();
         let subject_id = Uuid::new_v4().to_string();
 
@@ -654,16 +838,108 @@ mod tests {
         .await
         .expect("insert attention occurrence");
 
-        let materialized = materialize_attention_notifications_for_user(&pool, user_id, true)
+        materialize_all_user_notifications(&pool, true)
             .await
-            .expect("materialize notifications");
+            .expect("materialize all active-user notifications");
 
-        assert_eq!(materialized, 1);
         let rows = list_notifications(&pool, user_id, 20, None, false)
             .await
             .expect("list notifications");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].source_occurrence_id, Some(occurrence_id));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires migrated CRYSTAL_FORGE_TEST_DATABASE_URL"]
+    async fn poam_notifications_deduplicate_and_preserve_inbox_state() {
+        let pool = test_pool().await;
+        let user_id = create_test_user(&pool, "poam-events").await;
+        let poam_id = create_poam_fixture(&pool, user_id).await;
+        crate::tasks::attention_reconciliation::reconcile_poam_overdue_subject(&pool, poam_id)
+            .await
+            .expect("reconcile overdue POA&M");
+
+        for _ in 0..2 {
+            sqlx::query(
+                "INSERT INTO poam_activity (poam_id, actor_user_id, kind, payload) \
+                 VALUES ($1, $2, 'status_changed', \
+                    jsonb_build_object('from', 'in_progress', 'to', 'awaiting_verification'))",
+            )
+            .bind(poam_id)
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .expect("insert awaiting-verification activity");
+        }
+
+        let (first, second) = tokio::join!(
+            materialize_attention_notifications_for_user(&pool, user_id, false),
+            materialize_attention_notifications_for_user(&pool, user_id, false),
+        );
+        first.expect("first concurrent materialization");
+        second.expect("second concurrent materialization");
+
+        let notifications: Vec<(Uuid, String, Option<Uuid>)> = sqlx::query_as(
+            "SELECT id, route, source_occurrence_id FROM user_notifications \
+             WHERE user_id = $1 AND source_type = 'poams' ORDER BY created_at, id",
+        )
+        .bind(user_id)
+        .fetch_all(&pool)
+        .await
+        .expect("list POA&M notifications");
+        assert_eq!(notifications.len(), 3);
+        assert!(notifications.iter().all(|(_, route, source_id)| {
+            route == &format!("/compliance?poam={poam_id}") && source_id.is_some()
+        }));
+
+        assert!(
+            mark_notification_read(&pool, user_id, notifications[0].0)
+                .await
+                .expect("mark POA&M notification read")
+        );
+        assert!(
+            dismiss_notification(&pool, user_id, notifications[1].0)
+                .await
+                .expect("dismiss POA&M notification")
+        );
+        materialize_attention_notifications_for_user(&pool, user_id, false)
+            .await
+            .expect("repeat POA&M materialization");
+
+        let state: (i64, i64, i64) = sqlx::query_as(
+            "SELECT COUNT(*)::bigint, COUNT(read_at)::bigint, COUNT(dismissed_at)::bigint \
+             FROM user_notifications WHERE user_id = $1 AND source_type = 'poams'",
+        )
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read durable POA&M inbox state");
+        assert_eq!(state, (3, 1, 1));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires migrated CRYSTAL_FORGE_TEST_DATABASE_URL"]
+    async fn notification_preference_read_does_not_initialize_missing_row() {
+        let pool = test_pool().await;
+        let user_id = create_test_user(&pool, "read-only-preferences").await;
+        sqlx::query("DELETE FROM user_notification_preferences WHERE user_id = $1")
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .expect("remove initialized notification preferences");
+
+        let preferences = get_notification_preferences(&pool, user_id)
+            .await
+            .expect("read notification preferences");
+        assert!(preferences.is_none());
+        let row_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM user_notification_preferences WHERE user_id = $1",
+        )
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count notification preference rows");
+        assert_eq!(row_count, 0);
     }
 
     #[tokio::test]

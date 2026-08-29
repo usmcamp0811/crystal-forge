@@ -85,7 +85,19 @@ fn notification_color(category: NotificationCategory) -> &'static str {
 }
 
 fn notification_route(route: &str) -> Option<Route> {
-    if route.starts_with("/systems") {
+    if let Some(poam_id) = route.strip_prefix("/compliance?poam=") {
+        if uuid::Uuid::parse_str(poam_id).is_ok() {
+            return Some(Route::ComplianceView {
+                bundle: String::new(),
+                version: String::new(),
+                system: String::new(),
+                policy: String::new(),
+                poam: poam_id.to_string(),
+                view: String::new(),
+            });
+        }
+        None
+    } else if route.starts_with("/systems") {
         Some(Route::SystemsView {})
     } else if route.starts_with("/builds") {
         Some(Route::BuildsView {})
@@ -126,7 +138,11 @@ fn current_topbar_auth_generation(app_state: Signal<AppState>) -> u64 {
     app_state.read().auth_generation
 }
 
-fn load_account_notifications(
+/// Starts one notification load unless another notification request is in progress.
+///
+/// Responses update account-scoped signals only while the authenticated user and
+/// authentication generation still match the request owner.
+pub(crate) fn load_account_notifications(
     mut ctx: AccountNotificationsContext,
     app_state: Signal<AppState>,
     auth_user_id: Option<String>,
@@ -134,18 +150,26 @@ fn load_account_notifications(
     cursor: Option<String>,
     append: bool,
 ) {
+    if auth_user_id.is_none() {
+        ctx.items.set(Vec::new());
+        ctx.unread_count.set(0);
+        ctx.next_cursor.set(None);
+        ctx.loading.set(false);
+        ctx.loading_more.set(false);
+        return;
+    }
+    // CONCURRENCY: Polling replaces the first page while pagination appends an
+    // older page. They must not overlap because their responses can otherwise
+    // lose or duplicate notification history.
+    if *ctx.loading.peek() || *ctx.loading_more.peek() {
+        return;
+    }
+    if append {
+        ctx.loading_more.set(true);
+    } else {
+        ctx.loading.set(true);
+    }
     spawn(async move {
-        if auth_user_id.is_none() {
-            ctx.items.set(Vec::new());
-            ctx.unread_count.set(0);
-            ctx.next_cursor.set(None);
-            return;
-        }
-        if append {
-            ctx.loading_more.set(true);
-        } else {
-            ctx.loading.set(true);
-        }
         match fetch_user_notifications(Some(10), cursor, false).await {
             Ok(response) => {
                 if current_topbar_user_id(app_state) == auth_user_id
@@ -242,18 +266,6 @@ pub fn TopBar(title: String) -> Element {
                     if (b > 0) document.documentElement.style.setProperty('--coach-top', b + 'px'); \
                 } \
             })()",
-        );
-    });
-
-    let effect_auth_user_id = auth_user_id.clone();
-    use_effect(move || {
-        load_account_notifications(
-            notification_ctx,
-            app_state,
-            effect_auth_user_id.clone(),
-            auth_generation,
-            None,
-            false,
         );
     });
 
@@ -614,7 +626,7 @@ pub fn TopBar(title: String) -> Element {
                                     "data-testid": "topbar-notifications-load-more",
                                     class: "btn btn-ghost focus-ring xs",
                                     r#type: "button",
-                                    disabled: notifications_loading_more(),
+                                    disabled: notifications_loading() || notifications_loading_more(),
                                     onclick: move |_| {
                                         load_account_notifications(
                                             notification_ctx,
@@ -795,6 +807,48 @@ pub fn TopBar(title: String) -> Element {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::notification_route;
+    use crate::routes::Route;
+
+    #[test]
+    fn notification_route_accepts_only_exact_poam_query() {
+        let poam_id = "0198f3f0-e8cc-7e5d-b53d-0f31840c8712";
+        assert_eq!(
+            notification_route(&format!("/compliance?poam={poam_id}")),
+            Some(Route::ComplianceView {
+                bundle: String::new(),
+                version: String::new(),
+                system: String::new(),
+                policy: String::new(),
+                poam: poam_id.to_string(),
+                view: String::new(),
+            })
+        );
+        assert_eq!(
+            notification_route(&format!("/compliance?poam={poam_id}&view=summary")),
+            None
+        );
+        assert_eq!(notification_route("/compliance?poam=not-a-uuid"), None);
+    }
+
+    #[test]
+    fn notification_route_preserves_existing_destinations() {
+        assert_eq!(
+            notification_route("/systems?state=offline"),
+            Some(Route::SystemsView {})
+        );
+        assert_eq!(notification_route("/builds"), Some(Route::BuildsView {}));
+        assert_eq!(notification_route("/cves"), Some(Route::CvesView {}));
+        assert_eq!(
+            notification_route("/evaluations"),
+            Some(Route::EvaluationsView {})
+        );
+        assert_eq!(notification_route("/profile"), Some(Route::ProfileView {}));
     }
 }
 
