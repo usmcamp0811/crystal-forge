@@ -7,7 +7,7 @@ status: Review
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:43'
-updated_date: '2026-08-28 19:24'
+updated_date: '2026-08-29 01:49'
 labels:
   - design-parity
   - poam
@@ -100,4 +100,6 @@ Review handoff: local and remote branch SHAs match at `fd7548ad0b983e2412a5d1fa2
 Phase-6 review remediation completed. Legacy custom-check FAIL evidence now creates POA&Ms through stable finding identity and an authoritative observation reference without creating composite assessments or changing the FAIL result. The shared detail tray adds independent cursor pagination for linked findings, activity, and verification history; activity renders actor, timestamp, meaningful descriptions, and collapsed diagnostics. Assignment finding actions use typed Dioxus routing or synchronize the existing ComplianceView state while preserving exact bundle/version/system/policy/evidence identity.
 
 Serial verification passed: default Rust formatting (`cargo fmt --all --check`), Web UI formatting, PostgreSQL-backed `poam_workflows` 17/17, Web UI unit tests 233 passed/1 ignored, Web UI package build, focused browser workflows 29g/29i/29m independently, and the full `checks.x86_64-linux.web-ui` harness. The full harness had no failures, so no baseline comparison at `42488e89` was required. JavaScript syntax and `git diff --check` also passed.
+
+2026-08-29 final security review and push checkpoint: evidence reads now enforce system environment visibility before finding materialization. POA&M actions and evidence publishers use a deterministic advisory-lock protocol ordered by derivation publication key, system sentinel, finding key, then row locks; agent state publication, derivation/CVE writers, composite assessment writers, target authorization, and legacy finding materialization participate. Assignment relationship panels remount on system-scope changes. Serial verification passed: offline `cf-server` check; `poam_workflows` 20/20 against repository-isolated PostgreSQL; heartbeat 14/14; state 4/4; Web UI 233 passed/1 ignored; JavaScript syntax and `git diff --check`; and an authoritative Web UI check run passed before the final backend-only lock additions. The final post-lock authoritative rerun was interrupted at user request after a prior attempt failed because the onboarding coach overlay intercepted unrelated CVE test clicks; TASK-433 workflows 29g-29m passed in that failed attempt. Task remains In Progress pending a clean final authoritative check.
 <!-- SECTION:NOTES:END -->
