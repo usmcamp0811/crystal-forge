@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-gpt-5.6-sol
 created_date: '2026-08-29 16:26'
-updated_date: '2026-08-29 16:29'
+updated_date: '2026-08-29 16:35'
 labels:
   - backend
   - frontend
@@ -42,6 +42,18 @@ The evaluation dependency graph currently conflates closure paths, locally absen
 - [ ] #12 Frontend regression coverage verifies equal-count widths, proportional 10-to-100 widths, all-zero data, unavailable plan data, and failed-system presentation.
 - [ ] #13 Affected API and maintainer-facing documentation defines the build-count semantics, top-level exclusion rule, configuration dependency, and failure behavior.
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Add a forward-only migration that records dependency build-plan count and an explicit unavailable/calculating/complete/failed state on each NixOS derivation. Keep `closure_total` as the retained internal dependency-derivation total, but write only filtered `.drv` requisites and exclude the evaluated top-level derivation. Treat legacy rows as unavailable.
+2. Replace closure package/cache inference with a documented build-plan calculation. Query requisites for the derivation-only total, run `nix-store --realise --dry-run` with the same `BuildConfig` substitute/offline and build options used for realization, parse only the derivations Nix says it would build, exclude the top-level derivation, accept a no-op plan as zero, and persist explicit failure instead of fallback counts.
+3. Update every evaluation finalization path to pass `BuildConfig`, mark plan calculation state, and persist success or failure without blocking build queue activation.
+4. Replace package-oriented query/API DTO fields with system name, dependency derivation count, optional dependency build count, explicit plan status, and system failure state. Update all in-repository consumers and API rustdoc to define configuration dependence, top-level exclusion, valid zero, unavailable, and failure semantics.
+5. Extract frontend graph presentation calculations. Use one maximum valid dependency build count for all rows, render zero work without division, and render unavailable plan data, plan failure, and failed systems as distinct states. Update labels to systems/dependency derivations/build work.
+6. Add focused backend parser/state tests for mixed requisite paths, singular/plural build plans, substitutions, no-op output, top-level exclusion, command/configuration behavior, and failures. Add frontend unit tests for equal/proportional widths, all-zero values, unavailable plans, and failed systems.
+7. Extend the authoritative Web UI integration fixture/assertions and screenshot coverage for the dependency graph, then run targeted server/Web UI checks, package builds, migration/SQLx verification as required, and the authoritative Web UI check.
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
