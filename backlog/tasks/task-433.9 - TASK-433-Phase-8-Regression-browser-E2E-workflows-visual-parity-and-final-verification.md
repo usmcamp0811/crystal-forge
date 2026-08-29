@@ -3,9 +3,11 @@ id: TASK-433.9
 title: >-
   TASK-433 Phase 8: Regression, browser E2E workflows, visual parity, and final
   verification
-status: Backlog
-assignee: []
+status: In Progress
+assignee:
+  - '@opencode-agent'
 created_date: '2026-08-23 01:43'
+updated_date: '2026-08-29 15:32'
 labels:
   - design-parity
   - policy
@@ -84,3 +86,25 @@ nix flake check --keep-going
 - [ ] #10 POAM browser workflow starts at failed evidence, creates/links, retains FAIL, edits milestones/links, shows system/bundle rollups, reaches Awaiting Verification, blocks closure while failing, closes after passing evaluation, and retains history.
 - [ ] #11 Visual review records differences and artifacts for every affected production surface and the changed-design-file omission classification.
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+## Phase 8 final verification plan
+
+1. Reconfirm the Phase-7 dependency gate, current branch/worktree, MR conflict state, and exact-head pipeline. Keep AC1-AC11 unchecked until objective final-head evidence exists.
+2. Read TASK-433 and TASK-433.1 through TASK-433.9 completely, plus verification/database/workspace contracts. Rebuild the exact `c2f5db08..ae20da816edb1cb14275db9cd646010e69d88cd8` design inventory and inspect every changed product and demo/harness file.
+3. Build a phase-ownership map and parent AC1-AC40 evidence matrix. For each AC identify current production code, current discriminating unit/server/DB/browser proof, artifact, exact-head status, and remaining concern.
+4. Review the complete MR against current `origin/dev` for unrelated task drift, deleted/generated/debug files, design-file contamination, migration/SQLx hygiene, stale documentation, prohibited browser authority, and nonfunctional controls.
+5. Perform separate requirements, backend/data-integrity, performance/query, authorization/security, state/error, backward-compatibility, exact-identity, audit, notification-dedupe, dashboard-layout, and Setup Coach reviews. Inspect direct APIs and current tests, not task checkboxes.
+6. Enumerate every exposed enforcement kind and build the required create/validate/persist/reload/phase/outcome/edit/evidence/import-export matrix. Build the POA&M backend lifecycle/concurrency matrix and run all relevant ignored/live-DB tests against repository-isolated PostgreSQL.
+7. Review and strengthen the six canonical production-path browser workflows: large catalog; unmapped custom policy; imported STIG refinement; exact multiline DoD banner; mixed Nix+CVE enforcement; and complete POA&M lifecycle. Fixtures may arrange state, but accepted operations must use production HTTP, Dioxus routing/components, and persistence.
+8. If a product gap is found, return its owning TASK-433.2 through TASK-433.8 phase to In Progress before fixing it. Record ownership, add focused regression coverage, run focused verification, obtain independent re-review, return the owner to Review, then resume Phase 8. Do not add new product features.
+9. Capture deterministic screenshots for meaningful intermediate/final states of all six workflows. Compare all affected production surfaces to the authoritative design in desktop/narrow layouts and representative dark/light themes. Record behavior, hierarchy, metadata, interaction, accessibility, and true cosmetic differences.
+10. Produce the complete state matrix, backward-compatibility findings, changed-design-file classification, visual review, performance/security reports, artifact inventory, and parent/Phase-8 AC evidence in durable task notes or documentation without modifying authoritative design files.
+11. Freeze production/test/Nix/migration code. Record the candidate SHA and run every required exact-final-SHA command, SQLx preparation on an isolated database, clean migration path, JavaScript syntax, and diff checks. Inspect screenshot/reconciliation artifacts and underlying exit statuses.
+12. Re-open the complete MR diff after verification and perform final independent P0-P3 review. Any production/test/Nix/migration change restarts affected exact-SHA verification.
+13. Commit and push intended Phase-8 test/parity evidence, require an exact-final-branch-head green GitLab pipeline, and confirm clean synchronized local/remote state with no conflicts.
+14. Reconcile TASK-433.2 through TASK-433.8, parent TASK-433 AC1-AC40, and TASK-433.9 AC1-AC11 from current-head evidence only. Keep all tasks in Review until merge and do not mark Done.
+15. Rewrite MR !318 description to summarize the full eight-phase MR, invariants, migrations, compatibility, six workflows, visual review, exact verification, final pipeline, and accepted P3 differences. Stop without merging and issue the required maintainer report.
+<!-- SECTION:PLAN:END -->
