@@ -1,9 +1,11 @@
 ---
 id: TASK-441
 title: Correct dependency graph build counts and comparative scaling
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - openai-gpt-5.6-sol
 created_date: '2026-08-29 16:26'
+updated_date: '2026-08-29 16:29'
 labels:
   - backend
   - frontend
@@ -40,3 +42,9 @@ The evaluation dependency graph currently conflates closure paths, locally absen
 - [ ] #12 Frontend regression coverage verifies equal-count widths, proportional 10-to-100 widths, all-zero data, unavailable plan data, and failed-system presentation.
 - [ ] #13 Affected API and maintainer-facing documentation defines the build-count semantics, top-level exclusion rule, configuration dependency, and failure behavior.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: openai-gpt-5.6-sol on gray in /home/mcamp/code/crystal-forge/TASK-441-dependency-graph-counts
+<!-- SECTION:NOTES:END -->
