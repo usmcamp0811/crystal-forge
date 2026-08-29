@@ -1,11 +1,11 @@
 ---
 id: TASK-433.5
 title: 'TASK-433 Phase 4: Composite heterogeneous enforcement execution'
-status: Review
+status: In Progress
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:42'
-updated_date: '2026-08-26 04:09'
+updated_date: '2026-08-29 15:41'
 labels:
   - design-parity
   - policy
@@ -55,9 +55,9 @@ nix build .#checks.x86_64-linux.server-regressions --no-link
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [x] #1 Every visible enforcement control has a complete DTO, validation, storage, execution, result/evidence, read-back and import/export path or is hidden.
-- [x] #2 Mixed Nix/evaluation-phase plus non-Nix rule sets persist and evaluate with all semantics and visible constituent outcomes.
-- [x] #3 For every exposed enforcement kind tests cover create, validate, persist, reload, correct phase, pass, fail, error/not-checked, edit, evidence and import/export.
+- [ ] #1 Every visible enforcement control has a complete DTO, validation, storage, execution, result/evidence, read-back and import/export path or is hidden.
+- [ ] #2 Mixed Nix/evaluation-phase plus non-Nix rule sets persist and evaluate with all semantics and visible constituent outcomes.
+- [ ] #3 For every exposed enforcement kind tests cover create, validate, persist, reload, correct phase, pass, fail, error/not-checked, edit, evidence and import/export.
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -79,6 +79,8 @@ nix build .#checks.x86_64-linux.server-regressions --no-link
 Independent evaluator/security review remediation (2026-08-25): keep changes limited to evaluator/domain backend files. Replace invalid option lookup with strict quoted-path parsing plus fold-based target config traversal; make bulk/standalone policy expressions share canonical `config`; contain malformed composite custom_eval by authoritative Nix parse validation and a static Error result rather than embedding invalid syntax; compare exact requested and Nix-resolved immutable revisions and fix flake rev replacement; derive eval_passed outcomes from terminal evaluation/error helpers; add a dedicated Nix string encoder and direct environment.systemPackages pname contract/validation; classify malformed enforced policy data as deterministic while DB/infrastructure loader failures remain transient and restore legacy conflict behavior. Verify with cargo fmt, focused CARGO_BUILD_JOBS=1 Rust tests, and ignored authoritative Nix evaluation tests.
 
 Review synchronization: fetch current `origin/dev`, merge it into the dedicated TASK-433 branch, resolve every conflicting file manually while preserving `origin/dev` backlog/task state outside TASK-433, verify no TASK-422/TASK-432 branch contamination, review enforcement mutation/delivery semantics, run focused server regressions and only rerun composite browser workflows if relevant UI/test files conflict, then update TASK-433.5/MR !318, commit, push, and leave exact-head CI running. No Phase-4 feature changes and no Phase 5.
+
+Phase-8 owner remediation: remove the arbitrary unknown-store-path authorization fallback. No-policy historical compatibility may authorize only an exact store path with immutable evidence that the same system previously observed or was authorized for that target; known uncached/failed and completely unknown paths fail closed. Add direct generation-rollback and delivery regressions. Bound composite rule count and move potentially blocking custom Nix validation off async request workers according to existing server patterns. Require CSRF on TASK-433-touched manual deployment and rollback mutations. Correct stale public helper semantics for Composite policies. Reconcile the complete eight-kind validation/storage/phase/outcome/evidence/interchange matrix with discriminating current tests, and add missing coverage rather than weakening the criterion.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -118,4 +120,6 @@ Post-resolution semantic inspection confirmed `composite_enforcement.rs` is unch
 Conflict-resolution merge committed and pushed as `b238ff9e969b525aa44d46ef27beb4faefc30e12` (`Merge origin/dev into TASK-433 policy work`). Local HEAD and the remote branch match; `origin/dev` is an ancestor; MR !318 reports `has_conflicts: false`. Exact-head pipeline 2791067463 started for SHA `b238ff9e969b525aa44d46ef27beb4faefc30e12` and is running. CI is intentionally left to complete remotely; Phase 5 has not started.
 
 Exact-head Phase-4 dependency gate confirmed successful: GitLab pipeline 2791067463 completed successfully for `b238ff9e969b525aa44d46ef27beb4faefc30e12` at 2026-08-26 04:09 UTC. MR !318 is conflict-free and mergeable. TASK-433.5 remains in Review with AC1-AC3 checked; it is not moved to Done.
+
+Phase 8 returned Phase 4 to In Progress. A P1 security defect allows a generation rollback to an arbitrary unknown `/nix/store/...` string when no composite policies are effective; the existing compatibility test codifies this unsafe fallback. Additional gaps are unbounded per-rule custom Nix validation in async handlers, missing CSRF on TASK-433-touched deployment/rollback mutations, stale public Composite helper behavior, and incomplete consolidated proof for AC3's per-kind matrix. AC1-AC3 are temporarily unchecked until focused security, execution, and matrix regressions pass.
 <!-- SECTION:NOTES:END -->
