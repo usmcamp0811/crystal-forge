@@ -68,9 +68,13 @@ Crystal Forge binary, grouped by service. Calls listed in execution order.
 | 25 | Enumerate all drvs in closure (with cache status) | `nix path-info --derivation --recursive <drv>` | line 453 |
 | 26 | Resolve `.drv` → output path | `nix-store --query --outputs <drv>` | line 495 |
 | 27 | Check if output path is already built | `nix path-info <store-path>` (exit status) | line 507 |
-| 28 | Count closure packages (step 1: enumerate drvs) | `nix-store --query --requisites <drv>` | line 533 |
-| 29 | Count closure packages (step 2: drv → output) | `nix-store --query --outputs <paths...>` (batched) | line 575 |
-| 30 | Count closure packages (step 3: check cache) | `nix path-info --json <paths...>` (batched) | line 619 |
+| 28 | Count dependency derivations (filter `.drv` requisites and exclude the top-level system derivation) | `nix-store --query --requisites <drv>` | `calculate_dependency_build_plan` |
+| 29 | Calculate dependency build work with the effective substitute and offline configuration | `nix-store --realise --dry-run <drv> <build-options...>` | `calculate_dependency_build_plan` |
+
+The dependency build-plan command counts only derivations in Nix's build
+section. It does not count fetched paths. A successful plan with no build
+section is zero work. Command failure, timeout, malformed output, and unavailable
+legacy data remain distinct from a completed zero-build plan.
 
 ### `builder/worker.rs`
 

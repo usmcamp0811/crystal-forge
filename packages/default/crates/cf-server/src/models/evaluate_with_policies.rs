@@ -31,10 +31,10 @@ const MIN_MISSING_FOR_PERCENT_GUARD: usize = 2;
 const FALLBACK_CONCURRENCY: usize = 2;
 /// Overall deadline for the fallback phase.
 const FALLBACK_PHASE_TIMEOUT: Duration = Duration::from_secs(180);
-const CLOSURE_COUNT_MAX_CONCURRENT: usize = 2;
+const DEPENDENCY_BUILD_PLAN_MAX_CONCURRENT: usize = 2;
 const EVALUATOR_STDERR_DIAGNOSTIC_MAX_BYTES: usize = 256 * 1024;
 const STANDALONE_STDOUT_MAX_BYTES: usize = 8 * 1024 * 1024;
-static CLOSURE_COUNT_LIMITER: OnceLock<Arc<Semaphore>> = OnceLock::new();
+static DEPENDENCY_BUILD_PLAN_LIMITER: OnceLock<Arc<Semaphore>> = OnceLock::new();
 /// Process-wide in-process permit that limits concurrent heavy Nix evaluations
 /// within the same server process.  Currently set to 1 so that bulk evaluation
 /// and standalone/fallback evaluations are serialized inside a single process.
@@ -324,7 +324,7 @@ impl Drop for NixEvalProcessGuard {
 use tracing::{debug, error, info, warn};
 
 use crate::config::{BuildConfig, ServerConfig};
-use crate::derivations::utils::{build_flake_reference, count_closure_packages};
+use crate::derivations::utils::{build_flake_reference, calculate_dependency_build_plan};
 use crate::flake::credentials::FlakeCredentialEnv;
 use crate::models::commits::Commit;
 use crate::models::deployment_policies::{
@@ -338,7 +338,8 @@ use crate::queries::build_jobs::{
 };
 use crate::queries::commits_artifacts::CachedSystemsState;
 use crate::queries::derivations::{
-    insert_derivation_with_target, mark_derivation_dry_run_complete, set_closure_counts,
+    complete_dependency_build_plan, fail_dependency_build_plan, insert_derivation_with_target,
+    mark_dependency_build_plan_calculating, mark_derivation_dry_run_complete,
     set_expected_store_path,
 };
 use crate::queries::systems::list_configuration_names_for_flake;
@@ -517,55 +518,91 @@ async fn resolve_expected_store_path(
     }
 }
 
-fn closure_count_limiter() -> Arc<Semaphore> {
-    CLOSURE_COUNT_LIMITER
-        .get_or_init(|| Arc::new(Semaphore::new(CLOSURE_COUNT_MAX_CONCURRENT)))
+fn dependency_build_plan_limiter() -> Arc<Semaphore> {
+    DEPENDENCY_BUILD_PLAN_LIMITER
+        .get_or_init(|| Arc::new(Semaphore::new(DEPENDENCY_BUILD_PLAN_MAX_CONCURRENT)))
         .clone()
 }
 
-/// Spawn non-critical background work after a system has been queued for build.
+/// Spawns build-plan calculation after a successful derivation write.
 ///
-/// GC root creation is intentionally NOT included here: it is performed
-/// *before* the queue notification so that a builder cannot claim a job
-/// before the derivation is safely rooted against Nix GC collection.
-fn spawn_closure_counting(pool: PgPool, finalized: FinalizedDerivation) {
-    // Closure counting: bounded via semaphore.
+/// The calculation has no effect on GC-root creation or build queue activation.
+/// Calculation and persistence failures produce logs and a `failed` plan state
+/// when possible, but they do not fail system finalization.
+fn spawn_dependency_build_plan_calculation(
+    pool: PgPool,
+    finalized: FinalizedDerivation,
+    build_config: BuildConfig,
+) {
+    // Build-plan calculation is bounded and never delays build activation.
     let pool_cc = pool.clone();
     let drv_cc = finalized.drv_path.clone();
     let derivation_id_cc = finalized.derivation_id;
-    let limiter = closure_count_limiter();
+    let limiter = dependency_build_plan_limiter();
     tokio::spawn(async move {
+        if let Err(err) = mark_dependency_build_plan_calculating(&pool_cc, derivation_id_cc).await {
+            warn!(
+                "Failed to mark dependency build plan calculating for id={}: {}",
+                derivation_id_cc, err
+            );
+        }
         let permit = match limiter.acquire_owned().await {
             Ok(permit) => permit,
             Err(err) => {
                 warn!(
-                    "⚠️  Failed to acquire closure count permit for id={}: {}",
+                    "Failed to acquire dependency build-plan permit for id={}: {}",
                     derivation_id_cc, err
                 );
+                if let Err(persist_err) =
+                    fail_dependency_build_plan(&pool_cc, derivation_id_cc).await
+                {
+                    warn!(
+                        "Failed to mark dependency build plan failed for id={}: {}",
+                        derivation_id_cc, persist_err
+                    );
+                }
                 return;
             }
         };
 
-        match count_closure_packages(&drv_cc).await {
-            Ok((total, cached)) => {
-                if let Err(err) = crate::queries::derivations::set_closure_counts(
+        match calculate_dependency_build_plan(&drv_cc, &build_config).await {
+            Ok(plan) => {
+                if let Err(err) = complete_dependency_build_plan(
                     &pool_cc,
                     derivation_id_cc,
-                    total,
-                    cached,
+                    plan.dependency_derivation_count,
+                    plan.dependency_build_count,
                 )
                 .await
                 {
                     warn!(
-                        "⚠️  Failed to store closure counts for id={}: {}",
+                        "Failed to store dependency build plan for id={}: {}",
                         derivation_id_cc, err
+                    );
+                    if let Err(persist_err) =
+                        fail_dependency_build_plan(&pool_cc, derivation_id_cc).await
+                    {
+                        warn!(
+                            "Failed to mark dependency build plan failed for id={}: {}",
+                            derivation_id_cc, persist_err
+                        );
+                    }
+                }
+            }
+            Err(err) => {
+                warn!(
+                    "Failed to calculate dependency build plan for id={}: {}",
+                    derivation_id_cc, err
+                );
+                if let Err(persist_err) =
+                    fail_dependency_build_plan(&pool_cc, derivation_id_cc).await
+                {
+                    warn!(
+                        "Failed to mark dependency build plan failed for id={}: {}",
+                        derivation_id_cc, persist_err
                     );
                 }
             }
-            Err(err) => warn!(
-                "⚠️  Failed to count closure packages for id={}: {}",
-                derivation_id_cc, err
-            ),
         }
         drop(permit);
     });
@@ -2526,16 +2563,22 @@ async fn handle_system_finalize_outcome(
             })
         }
 
-        SystemFinalizeOutcome::RecordedWithoutBuild { ref reason, .. } => {
+        SystemFinalizeOutcome::RecordedWithoutBuild {
+            derivation_id,
+            ref reason,
+        } => {
             debug!("Recorded {} without build: {:?}", system_name, reason);
-            Ok(SystemFinalizeAction::Recorded)
+            Ok(SystemFinalizeAction::Recorded { derivation_id })
         }
 
-        SystemFinalizeOutcome::PreparationFailed { ref error, .. } => {
+        SystemFinalizeOutcome::PreparationFailed {
+            derivation_id,
+            ref error,
+        } => {
             warn!("{}: build queue preparation failed: {}", system_name, error);
             // The derivation was persisted and build-eligible; the recovery
             // reconciler will retry activation with backoff.
-            Ok(SystemFinalizeAction::Recorded)
+            Ok(SystemFinalizeAction::Recorded { derivation_id })
         }
 
         SystemFinalizeOutcome::Cancelled => {
@@ -2564,7 +2607,7 @@ enum SystemFinalizeAction {
         build_job_id: uuid::Uuid,
     },
     /// Derivation recorded but no build job created (policy/scope).
-    Recorded,
+    Recorded { derivation_id: i32 },
     /// Evaluation was cancelled; caller should stop.
     Cancelled,
     /// Evaluation was superseded; caller should bail.
@@ -3282,6 +3325,14 @@ async fn evaluate_with_nix_eval_jobs_inner(
                                                 let cf_state_owned = cf_state.cloned();
                                                 let queue_notifier_owned = queue_notifier.cloned();
 
+                                                // Build-plan calculation starts after persistence
+                                                // and does not depend on GC-root or queue activation.
+                                                spawn_dependency_build_plan_calculation(
+                                                    pool.clone(),
+                                                    finalized.clone(),
+                                                    build_config.clone(),
+                                                );
+
                                                 info!(
                                                     commit_id,
                                                     expected_attempt,
@@ -3403,7 +3454,6 @@ async fn evaluate_with_nix_eval_jobs_inner(
                                                             )
                                                             .await?;
 
-                                                            spawn_closure_counting(pool, finalized);
                                                         }
                                                         SystemBuildActivationOutcome::Cancelled => {
                                                             // Task completed after cancellation —
@@ -3505,11 +3555,32 @@ async fn evaluate_with_nix_eval_jobs_inner(
                                                 }
 
                                                 successful_results.push(successful.clone());
+                                                spawn_dependency_build_plan_calculation(
+                                                    pool.clone(),
+                                                    FinalizedDerivation {
+                                                        derivation_id,
+                                                        drv_path,
+                                                        system_name: system_name.clone(),
+                                                        cf_agent_enabled: successful.cf_agent_enabled,
+                                                    },
+                                                    build_config.clone(),
+                                                );
                                             }
 
                                             SystemPersistenceOutcome::RecordedWithoutBuild {
+                                                derivation_id,
                                                 ..
                                             } => {
+                                                spawn_dependency_build_plan_calculation(
+                                                    pool.clone(),
+                                                    FinalizedDerivation {
+                                                        derivation_id,
+                                                        drv_path: successful.drv_path.clone(),
+                                                        system_name: system_name.clone(),
+                                                        cf_agent_enabled: successful.cf_agent_enabled,
+                                                    },
+                                                    build_config.clone(),
+                                                );
                                                 successful_results.push(successful);
                                             }
 
@@ -4019,9 +4090,24 @@ async fn evaluate_with_nix_eval_jobs_inner(
                                         system_name: result.system_name.clone(),
                                         cf_agent_enabled: result.cf_agent_enabled,
                                     };
-                                    spawn_closure_counting(pool.clone(), finalized);
+                                    spawn_dependency_build_plan_calculation(
+                                        pool.clone(),
+                                        finalized,
+                                        build_config.clone(),
+                                    );
                                 }
-                                SystemFinalizeAction::Recorded => {}
+                                SystemFinalizeAction::Recorded { derivation_id } => {
+                                    spawn_dependency_build_plan_calculation(
+                                        pool.clone(),
+                                        FinalizedDerivation {
+                                            derivation_id,
+                                            drv_path: result.drv_path.clone(),
+                                            system_name: result.system_name.clone(),
+                                            cf_agent_enabled: result.cf_agent_enabled,
+                                        },
+                                        build_config.clone(),
+                                    );
+                                }
                                 SystemFinalizeAction::Cancelled => {
                                     return Err(EvaluationCancelled.into());
                                 }

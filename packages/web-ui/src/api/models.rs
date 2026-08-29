@@ -2940,24 +2940,54 @@ pub struct EvalPolicySystemRow {
     pub details: Vec<Option<String>>,
 }
 
+/// Dependency graph data for the NixOS systems in one evaluation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvalDependencyGraphResponse {
+    /// Commit whose evaluated systems produced this graph.
     pub commit_id: i32,
-    pub total_packages: i64,
-    pub packages: Vec<EvalDependencyPackageRow>,
+    /// Number of system rows in the response.
+    pub total_systems: i64,
+    /// Per-system dependency and build-plan results.
+    pub systems: Vec<EvalDependencySystemRow>,
 }
 
+/// Dependency and build-plan data for one evaluated NixOS system.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct EvalDependencyPackageRow {
-    pub package_name: String,
-    #[serde(default)]
-    pub closure_counted: bool,
-    /// Built (store_path present / BuildComplete).
-    pub ready_count: i64,
-    /// Evaluated but not yet built.
-    pub pending_count: i64,
-    /// Eval or build failed.
-    pub failed_count: i64,
+pub struct EvalDependencySystemRow {
+    /// Configuration name of the evaluated NixOS system.
+    pub system_name: String,
+    /// Number of dependency derivations, excluding the top-level system derivation.
+    pub dependency_derivation_count: Option<i64>,
+    /// Dependency derivations that Nix plans to build with the effective build configuration.
+    pub dependency_build_count: Option<i64>,
+    /// Availability and outcome of the dependency build-plan calculation.
+    pub build_plan_status: EvalBuildPlanStatus,
+    /// Evaluation or build failure state of the NixOS system.
+    pub system_status: EvalDependencySystemStatus,
+}
+
+/// Availability and outcome of a dependency build-plan calculation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvalBuildPlanStatus {
+    /// No build-plan result is available.
+    Unavailable,
+    /// Build-plan calculation is in progress.
+    Calculating,
+    /// Build-plan calculation completed, including a valid zero-build result.
+    Complete,
+    /// Build-plan calculation failed.
+    Failed,
+}
+
+/// Failure state for a dependency graph system row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvalDependencySystemStatus {
+    /// The NixOS system evaluated successfully.
+    Evaluated,
+    /// The NixOS system evaluation or build failed.
+    Failed,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

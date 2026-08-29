@@ -13,9 +13,10 @@ use serde::{Deserialize, Serialize};
 use tokio::time::{Duration, interval};
 
 use crate::api::models::{
-    ApiError, CancelEvalOutcome, EvalDependencyGraphResponse, EvalDependencyPackageRow,
-    EvalHistoryPage, EvalHistoryParams, EvalPolicyMatrixResponse, EvalPolicySystemRow,
-    EvalQueueItem, EvalQueueParams, EvalQueueSummary, ReorderEvalQueueRequest,
+    ApiError, CancelEvalOutcome, DependencyBuildPlanStatus, DependencyGraphSystemStatus,
+    EvalDependencyGraphResponse, EvalDependencySystemRow, EvalHistoryPage, EvalHistoryParams,
+    EvalPolicyMatrixResponse, EvalPolicySystemRow, EvalQueueItem, EvalQueueParams,
+    EvalQueueSummary, ReorderEvalQueueRequest,
 };
 use crate::handlers::agent_request::CFState;
 use crate::handlers::api::rbac::{require_operator_or_admin, require_viewer_or_above};
@@ -528,7 +529,12 @@ fn build_eval_policy_matrix_response(
     }
 }
 
-/// Fetch dependency/derivation package breakdown for a commit evaluation.
+/// Fetch dependency build-plan data for a commit evaluation.
+///
+/// Build counts include only dependency derivations that Nix reports it would
+/// build under the effective substitute and offline configuration. They exclude
+/// the exact top-level system derivation and fetched paths. A completed zero,
+/// unavailable data, calculation failure, and system failure remain distinct.
 /// GET /api/v1/commits/:commit_id/eval/dependency-graph
 pub async fn get_eval_dependency_graph(
     Path(commit_id): Path<i32>,
@@ -559,20 +565,48 @@ pub async fn get_eval_dependency_graph(
         }
     };
 
-    let total_packages = rows.len() as i64;
+    let total_systems = rows.len() as i64;
+    let systems = rows
+        .into_iter()
+        .map(|row| {
+            let build_plan_status = DependencyBuildPlanStatus::from_database(
+                &row.build_plan_status,
+            )
+            .ok_or_else(|| {
+                tracing::error!(
+                    commit_id,
+                    status = row.build_plan_status,
+                    "Invalid dependency build-plan status in database"
+                );
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+            let system_status = DependencyGraphSystemStatus::from_database(&row.system_status)
+                .ok_or_else(|| {
+                    tracing::error!(
+                        commit_id,
+                        status = row.system_status,
+                        "Invalid dependency graph system status from query"
+                    );
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?;
+
+            Ok(EvalDependencySystemRow {
+                system_name: row.system_name,
+                dependency_derivation_count: row.dependency_derivation_count,
+                dependency_build_count: row.dependency_build_count,
+                build_plan_status,
+                system_status,
+            })
+        })
+        .collect::<Result<Vec<_>, StatusCode>>();
+    let systems = match systems {
+        Ok(systems) => systems,
+        Err(status) => return status.into_response(),
+    };
     let body = EvalDependencyGraphResponse {
         commit_id,
-        total_packages,
-        packages: rows
-            .into_iter()
-            .map(|row| EvalDependencyPackageRow {
-                package_name: row.package_name,
-                closure_counted: row.closure_counted,
-                ready_count: row.ready_count,
-                pending_count: row.pending_count,
-                failed_count: row.failed_count,
-            })
-            .collect(),
+        total_systems,
+        systems,
     };
 
     Json(body).into_response()

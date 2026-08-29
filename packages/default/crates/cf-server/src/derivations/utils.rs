@@ -7,8 +7,7 @@ use tokio::process::Command;
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
-const CLOSURE_COUNT_COMMAND_TIMEOUT_SECS: u64 = 120;
-const CLOSURE_COUNT_ARG_CHUNK_SIZE: usize = 500;
+const DEPENDENCY_BUILD_PLAN_COMMAND_TIMEOUT_SECS: u64 = 120;
 
 /// Add/remove to taste; this set covers AWS + MinIO/common S3 endpoints.
 pub const CACHE_ENV_ALLOWLIST: &[&str] = &[
@@ -535,20 +534,25 @@ pub async fn get_store_path_and_build_status(drv_path: &str) -> Result<(String, 
     Ok((store_path, is_built))
 }
 
-/// Count the total packages in a system closure and how many are already cached.
+/// Counts dependency derivations and the subset that Nix would build.
 ///
-/// Uses two nix calls:
-///   1. `nix-store --query --requisites <drv>` — list all .drv files in the closure (fast)
-///   2. `nix-store --query --outputs <drv>...` — map each .drv to its output path
-///   3. `nix path-info <paths>...` — batch check which outputs exist in the store
+/// The dependency total contains only `.drv` requisites and excludes the exact
+/// top-level system derivation. The build count contains only derivations from
+/// the build section of `nix-store --realise --dry-run`; fetched paths do not
+/// contribute. The dry run uses the supplied [`BuildConfig`], so substitute and
+/// offline settings match the real build.
 ///
-/// Returns `(total, cached)` where:
-///   total  = number of packages in the closure (excluding the nixos-system drv itself)
-///   cached = number already present in the local/substituter-accessible store
-pub async fn count_closure_packages(drv_path: &str) -> Result<(i32, i32)> {
-    // Step 1: get all .drv requisites (the full closure as .drv paths)
-    info!("📦 Counting closure requisites for {}", drv_path);
-    let command_timeout = Duration::from_secs(CLOSURE_COUNT_COMMAND_TIMEOUT_SECS);
+/// # Errors
+///
+/// Returns an error when either Nix command fails, times out, emits non-UTF-8
+/// output, or reports a malformed or internally inconsistent build section.
+/// No fallback count is returned.
+pub async fn calculate_dependency_build_plan(
+    drv_path: &str,
+    build_config: &BuildConfig,
+) -> Result<DependencyBuildPlan> {
+    info!("📦 Calculating dependency build plan for {}", drv_path);
+    let command_timeout = Duration::from_secs(DEPENDENCY_BUILD_PLAN_COMMAND_TIMEOUT_SECS);
     let req_out = timeout(
         command_timeout,
         Command::new("nix-store")
@@ -559,7 +563,7 @@ pub async fn count_closure_packages(drv_path: &str) -> Result<(i32, i32)> {
     .map_err(|_| {
         anyhow!(
             "nix-store --query --requisites timed out after {}s for {}",
-            CLOSURE_COUNT_COMMAND_TIMEOUT_SECS,
+            DEPENDENCY_BUILD_PLAN_COMMAND_TIMEOUT_SECS,
             drv_path
         )
     })??;
@@ -571,104 +575,138 @@ pub async fn count_closure_packages(drv_path: &str) -> Result<(i32, i32)> {
         );
     }
 
-    let drv_paths: Vec<String> = String::from_utf8(req_out.stdout)?
+    let dependency_derivation_count = parse_dependency_requisites(&req_out.stdout, drv_path)?;
+
+    let mut command = dependency_build_plan_command(drv_path, build_config);
+    let plan_out = timeout(command_timeout, command.output())
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "nix-store --realise --dry-run timed out after {}s for {}",
+                DEPENDENCY_BUILD_PLAN_COMMAND_TIMEOUT_SECS,
+                drv_path
+            )
+        })??;
+
+    let dependency_build_count = interpret_dependency_build_plan_output(
+        plan_out.status.success(),
+        &plan_out.stderr,
+        drv_path,
+    )?;
+    Ok(DependencyBuildPlan {
+        dependency_derivation_count,
+        dependency_build_count,
+    })
+}
+
+/// Contains dependency counts calculated for one evaluated NixOS system.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DependencyBuildPlan {
+    /// Number of `.drv` requisites excluding the exact top-level system derivation.
+    pub dependency_derivation_count: i32,
+    /// Number of dependency derivations that Nix reports it would build.
+    pub dependency_build_count: i32,
+}
+
+fn dependency_build_plan_command(drv_path: &str, build_config: &BuildConfig) -> Command {
+    let mut command = Command::new("nix-store");
+    command.args(["--realise", "--dry-run", drv_path]);
+    // COMPATIBILITY: The legacy dry-run interface is human-readable. A fixed
+    // locale keeps the documented singular and plural section headers stable.
+    command.env("LC_ALL", "C");
+    build_config.apply_to_command(&mut command);
+    command
+}
+
+fn parse_dependency_requisites(output: &[u8], top_level_drv: &str) -> Result<i32> {
+    let requisites = String::from_utf8(output.to_vec())?;
+    let count = requisites
         .lines()
-        .filter(|l| !l.is_empty() && *l != drv_path)
-        .map(|s| s.to_string())
-        .collect();
+        .map(str::trim)
+        .filter(|path| path.ends_with(".drv") && *path != top_level_drv)
+        .collect::<HashSet<_>>()
+        .len();
+    i32::try_from(count).map_err(|_| anyhow!("dependency derivation count exceeds i32"))
+}
 
-    let total = drv_paths.len() as i32;
-    if total == 0 {
-        return Ok((0, 0));
-    }
+fn parse_dependency_build_plan(output: &[u8], top_level_drv: &str) -> Result<i32> {
+    let output = String::from_utf8(output.to_vec())?;
+    let mut expected = None;
+    let mut in_build_section = false;
+    let mut reported = Vec::new();
 
-    // Step 2: map .drv paths → output store paths. Large NixOS closures can
-    // contain tens of thousands of derivations, so chunk args to stay below
-    // Linux argv limits.
-    info!(
-        "📦 Resolving {} closure outputs for {} in chunks of {}",
-        drv_paths.len(),
-        drv_path,
-        CLOSURE_COUNT_ARG_CHUNK_SIZE
-    );
-    let mut store_paths = Vec::new();
-    for chunk in drv_paths.chunks(CLOSURE_COUNT_ARG_CHUNK_SIZE) {
-        let mut outputs_cmd = Command::new("nix-store");
-        outputs_cmd.arg("--query").arg("--outputs");
-        for p in chunk {
-            outputs_cmd.arg(p);
-        }
-
-        let outputs_out = timeout(command_timeout, outputs_cmd.output())
-            .await
-            .map_err(|_| {
-                anyhow!(
-                    "nix-store --query --outputs timed out after {}s for {}",
-                    CLOSURE_COUNT_COMMAND_TIMEOUT_SECS,
-                    drv_path
-                )
-            })??;
-
-        if outputs_out.status.success() {
-            store_paths.extend(
-                String::from_utf8(outputs_out.stdout)?
-                    .lines()
-                    .filter(|l| !l.is_empty())
-                    .map(|s| s.to_string()),
-            );
-        } else {
-            // Fall back to zero cached if we can't map outputs
-            warn!("nix-store --query --outputs failed; assuming 0 cached");
-            return Ok((total, 0));
-        }
-    }
-
-    if store_paths.is_empty() {
-        return Ok((total, 0));
-    }
-
-    // Step 3: batch check which outputs exist. Large closures are chunked for
-    // the same argv-limit reason as output resolution.
-    info!(
-        "📦 Checking {} closure outputs in local store for {} in chunks of {}",
-        store_paths.len(),
-        drv_path,
-        CLOSURE_COUNT_ARG_CHUNK_SIZE
-    );
-    let mut cached = 0i32;
-    for chunk in store_paths.chunks(CLOSURE_COUNT_ARG_CHUNK_SIZE) {
-        let mut pi_cmd = Command::new("nix");
-        pi_cmd.args(["path-info", "--json"]);
-        for p in chunk {
-            pi_cmd.arg(p);
-        }
-
-        let pi_out = timeout(command_timeout, pi_cmd.output())
-            .await
-            .map_err(|_| {
-                anyhow!(
-                    "nix path-info --json timed out after {}s for {}",
-                    CLOSURE_COUNT_COMMAND_TIMEOUT_SECS,
-                    drv_path
-                )
-            })??;
-
-        cached += if pi_out.status.success() {
-            // All chunk paths present — count equals chunk size.
-            chunk.len() as i32
-        } else {
-            // Some paths missing — parse JSON to count which are present.
-            // nix path-info --json returns an object keyed by store path.
-            // Paths that don't exist are omitted from the output.
-            match serde_json::from_slice::<serde_json::Value>(&pi_out.stdout) {
-                Ok(serde_json::Value::Object(map)) => map.len() as i32,
-                Ok(serde_json::Value::Array(arr)) => arr.len() as i32,
-                _ => 0,
+    for line in output.lines() {
+        let line = line.trim();
+        if line == "this derivation will be built:" {
+            if expected.replace(1).is_some() {
+                anyhow::bail!("dry-run output contains multiple build sections");
             }
-        };
+            in_build_section = true;
+            continue;
+        }
+        if let Some(value) = line
+            .strip_prefix("these ")
+            .and_then(|value| value.strip_suffix(" derivations will be built:"))
+        {
+            let count = value
+                .parse::<usize>()
+                .map_err(|_| anyhow!("malformed dry-run build count: {line}"))?;
+            if expected.replace(count).is_some() {
+                anyhow::bail!("dry-run output contains multiple build sections");
+            }
+            in_build_section = true;
+            continue;
+        }
+        if line.ends_with(':')
+            && (line.contains(" path will be fetched") || line.contains(" paths will be fetched"))
+        {
+            in_build_section = false;
+            continue;
+        }
+        if line.contains("will be built") {
+            anyhow::bail!("malformed dry-run build header: {line}");
+        }
+        if in_build_section && line.starts_with("/nix/store/") {
+            if !line.ends_with(".drv") {
+                anyhow::bail!("non-derivation path in dry-run build section: {line}");
+            }
+            reported.push(line);
+        }
     }
 
-    Ok((total, cached))
+    let Some(expected) = expected else {
+        // A successful dry run emits no build section when realization is a no-op.
+        return Ok(0);
+    };
+    if reported.len() != expected {
+        anyhow::bail!(
+            "dry-run build count mismatch: header reports {}, section contains {}",
+            expected,
+            reported.len()
+        );
+    }
+
+    let count = reported
+        .into_iter()
+        .filter(|path| *path != top_level_drv)
+        .collect::<HashSet<_>>()
+        .len();
+    i32::try_from(count).map_err(|_| anyhow!("dependency build count exceeds i32"))
+}
+
+fn interpret_dependency_build_plan_output(
+    succeeded: bool,
+    stderr: &[u8],
+    top_level_drv: &str,
+) -> Result<i32> {
+    if !succeeded {
+        anyhow::bail!(
+            "nix-store --realise --dry-run failed: {}",
+            String::from_utf8_lossy(stderr)
+        );
+    }
+
+    parse_dependency_build_plan(stderr, top_level_drv)
 }
 
 // ============================================================================
@@ -678,6 +716,100 @@ pub async fn count_closure_packages(drv_path: &str) -> Result<(i32, i32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TOP_LEVEL_DRV: &str = "/nix/store/aaaaaaaa-system.drv";
+
+    #[test]
+    fn dependency_requisites_count_only_unique_dependency_derivations() {
+        let output = format!(
+            "/nix/store/source.tar.gz\n/nix/store/bbbbbbbb-one.drv\n{TOP_LEVEL_DRV}\n/nix/store/config.json\n/nix/store/bbbbbbbb-one.drv\n/nix/store/cccccccc-two.drv\n"
+        );
+        assert_eq!(
+            parse_dependency_requisites(output.as_bytes(), TOP_LEVEL_DRV).unwrap(),
+            2
+        );
+    }
+
+    #[test]
+    fn dependency_build_plan_parses_plural_and_excludes_fetched_paths_and_top_level() {
+        let output = format!(
+            "these 3 derivations will be built:\n  /nix/store/bbbbbbbb-one.drv\n  {TOP_LEVEL_DRV}\n  /nix/store/cccccccc-two.drv\nthese 2 paths will be fetched (1.0 MiB download, 2.0 MiB unpacked):\n  /nix/store/dddddddd-fetched\n  /nix/store/eeeeeeee-fetched.drv\n"
+        );
+        assert_eq!(
+            parse_dependency_build_plan(output.as_bytes(), TOP_LEVEL_DRV).unwrap(),
+            2
+        );
+    }
+
+    #[test]
+    fn dependency_build_plan_parses_singular() {
+        let output = b"this derivation will be built:\n  /nix/store/bbbbbbbb-one.drv\n";
+        assert_eq!(
+            parse_dependency_build_plan(output, TOP_LEVEL_DRV).unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn dependency_build_plan_accepts_successful_no_op() {
+        assert_eq!(parse_dependency_build_plan(b"", TOP_LEVEL_DRV).unwrap(), 0);
+    }
+
+    #[test]
+    fn dependency_build_plan_rejects_mismatch_and_malformed_paths() {
+        let mismatch = b"these 2 derivations will be built:\n  /nix/store/bbbbbbbb-one.drv\n";
+        assert!(parse_dependency_build_plan(mismatch, TOP_LEVEL_DRV).is_err());
+
+        let malformed = b"this derivation will be built:\n  /nix/store/bbbbbbbb-output\n";
+        assert!(parse_dependency_build_plan(malformed, TOP_LEVEL_DRV).is_err());
+
+        let malformed_header = b"some derivations will be built:\n";
+        assert!(parse_dependency_build_plan(malformed_header, TOP_LEVEL_DRV).is_err());
+    }
+
+    #[test]
+    fn dependency_build_plan_rejects_failed_nix_command() {
+        let error = interpret_dependency_build_plan_output(
+            false,
+            b"error: cannot contact configured substituter",
+            TOP_LEVEL_DRV,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("nix-store --realise --dry-run failed"));
+    }
+
+    #[test]
+    fn dependency_build_plan_command_applies_build_configuration() {
+        let config = BuildConfig {
+            use_substitutes: false,
+            offline: true,
+            max_jobs: 7,
+            cores_per_job: 3,
+            ..BuildConfig::default()
+        };
+        let command = dependency_build_plan_command(TOP_LEVEL_DRV, &config);
+        let arguments = command
+            .as_std()
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert!(arguments.windows(2).any(|args| args == ["--max-jobs", "7"]));
+        assert!(arguments.windows(2).any(|args| args == ["--cores", "3"]));
+        assert!(arguments.iter().any(|arg| arg == "--no-substitute"));
+        assert!(arguments.iter().any(|arg| arg == "--offline"));
+        assert_eq!(
+            command
+                .as_std()
+                .get_envs()
+                .find(|(name, _)| *name == "LC_ALL")
+                .and_then(|(_, value)| value)
+                .map(|value| value.to_string_lossy().into_owned()),
+            Some("C".to_string())
+        );
+    }
 
     #[test]
     fn test_normalize_scp_ssh_url_no_dot_git() {
