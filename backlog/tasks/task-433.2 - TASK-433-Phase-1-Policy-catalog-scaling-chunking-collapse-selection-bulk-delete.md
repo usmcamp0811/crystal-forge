@@ -3,11 +3,11 @@ id: TASK-433.2
 title: >-
   TASK-433 Phase 1: Policy catalog scaling (chunking, collapse, selection, bulk
   delete)
-status: Review
+status: In Progress
 assignee:
-  - claude-agent
+  - '@opencode-agent'
 created_date: '2026-08-23 01:42'
-updated_date: '2026-08-23 14:05'
+updated_date: '2026-08-29 15:40'
 labels:
   - design-parity
   - policy
@@ -81,9 +81,15 @@ Add/extend a browser workflow proving deep search, collapse/expand, cards/table,
 - [x] #3 Search reveals matches in collapsed groups and clearing search restores prior explicit collapse state.
 - [x] #4 Cards and table views preserve equivalent policy semantics and logical selection.
 - [x] #5 Individual, Shift-range, group, cross-chunk, clear, selected export and selected delete work on filtered logical order.
-- [x] #6 Bulk delete uses server eligibility, reports deleted/skipped/reasons, handles partial/all-blocked/failure, and preserves immutable blockers.
+- [ ] #6 Bulk delete uses server eligibility, reports deleted/skipped/reasons, handles partial/all-blocked/failure, and preserves immutable blockers.
 - [x] #7 Existing catalog API pagination is preserved; chunking remains client rendering only.
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+Phase-8 owner remediation: require and directly test CSRF on the TASK-433 bulk-delete mutation while preserving admin authorization, atomic deleted/skipped reconciliation, and existing client behavior. Add production-API browser/server proof for partial, all-blocked, unexpected failure, and authorization states before returning AC6 and the task to Review.
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
@@ -122,6 +128,8 @@ The deferred-check note above is superseded. After the commit, all deferred chec
 
 ## Remediation correction
 The earlier implementation note describing per-policy transactions is superseded by commit e0d036db: bulk deletion now uses one transaction via `delete_deployment_policy_in_transaction`, commits expected blocked/not-found skips, and rolls back all eligible deletions on any unexpected error. The browser workflow is now extended in `checks/web-ui/tests/integration-test.js`; the DB coverage is 4 tests (partial, all-blocked, not-found, rollback-on-failure).
+
+Phase 8 returned Phase 1 to In Progress because the new destructive bulk-delete endpoint is role-protected but does not validate the session CSRF cookie/header pair. AC6 is temporarily unchecked. Remediation is limited to the accepted bulk-delete contract and direct API/browser regression; no catalog feature expansion.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
