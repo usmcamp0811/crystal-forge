@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:43'
-updated_date: '2026-08-28 19:23'
+updated_date: '2026-08-29 01:49'
 labels:
   - design-parity
   - poam
@@ -108,6 +108,8 @@ Exact-head GitLab pipeline 2794857147 passed for commit `68904343a488e6a5c909fa8
 Phase-6 authorized contract correction completed on 2026-08-28: added bounded authenticated finding-remediation relationships by authoritative assessment IDs, server-filtered compatible POA&M search from a current Fail assessment, and immutable assignment-version relationship lookup. Assignment compatibility now pairs each scope with the same finding's policy lineage rather than independently matching scope and lineage across findings. PostgreSQL-backed `poam_workflows` verification passed 16/16, including the new cross-finding scope/lineage regression; Phase-6 browser workflows 29g–29m and the full Web UI Nix check also passed. These are minimal Phase-5 API corrections required by TASK-433.7 and remain part of MR !318.
 
 Phase-6 review remediation extended the minimal compatibility contract with source-neutral finding observation references for legacy policy results. Create/link actions now resolve current deployed derivation or CVE evidence server-side, recheck effective policy version and FAIL state, and never fabricate `composite_policy_assessments`. The PostgreSQL-backed `poam_workflows` suite passed 17/17, including `legacy_fail_can_create_poam_without_fabricating_composite_assessment`. The real browser workflow `29g-poam-failed-evidence-create` also passed and verifies stable `finding_id` plus observation identity, unchanged FAIL evidence, and zero fabricated composite assessments.
+
+2026-08-29 Phase-6 security hardening checkpoint: legacy observation create/link now serializes with deployed-state, derivation/CVE, and composite assessment publication through ordered derivation, system-sentinel, and finding advisory keys. Evidence finding materialization uses the same system sentinel. The focused `poam_workflows` suite passed 20/20 serially against repository-isolated PostgreSQL. This correction remains part of MR !318.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
