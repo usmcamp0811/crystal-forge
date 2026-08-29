@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:43'
-updated_date: '2026-08-29 02:51'
+updated_date: '2026-08-29 03:09'
 labels:
   - design-parity
   - poam
@@ -86,4 +86,6 @@ Architecture audit: `fetch_setup_wizard_progress()` calls the admin-only `GET /a
 Notification audit: `user_notifications` is the durable per-user inbox; `user_notification_preferences` owns category/channel boundaries; `run_user_notification_email_producer_pass` already materializes in-app events for all active users; read/dismiss/list/email all recheck `notification_visible_to_user`. The bell currently loads on mount/open without a timer, and notification GET currently materializes rows. Phase 7 will move all generation to the existing server workers, use the existing `policy_violations` preference category, and add one AppShell-owned refresh path.
 
 Completion rules selected from authoritative storage: Policy counts distinct lineages with a user-attributed policy version so migration-seeded defaults do not falsely complete the step; manual policy creation will set the trigger-created version's `created_by`, while existing imports already attribute versions. Bundle counts persisted `compliance_bundles` lineages. Track a POA&M counts persisted `poams` regardless of current status so completed historical use remains complete.
+
+AC3 setup coach implemented in the dedicated task worktree without commit or push. Extended server/Web setup-progress DTOs with policy, bundle, POA&M, and `all_coach_steps_complete`; Web additions default incomplete for rolling compatibility. Consolidated setup entity counts into one query while preserving the original five `all_required_complete` rules and agent acknowledgment. Policy counts distinct lineages with an attributed version; manual policy creation now attributes the trigger-created draft in the same transaction. Coach now renders nine ordered steps, retains the single eight-second refresh resource and server dismissal/minimize/force-show behavior, uses typed Dioxus routes, and gives finding/evidence-specific POA&M instructions. Added server scenario/query tests and Web DTO/order/status/navigation tests. Verification: scoped rustfmt passed; `git diff --check` passed; `SQLX_OFFLINE=true nix develop -c cargo test --manifest-path packages/default/crates/cf-server/Cargo.toml setup_progress --lib` passed 12 tests. Full Web tests/check are currently blocked by concurrent out-of-scope notification-refresh compile errors in `components/layout/topbar.rs:157` and `components/layout/app_shell.rs:243-245`; those files were not modified for AC3.
 <!-- SECTION:NOTES:END -->
