@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-gpt-5.6-sol
 created_date: '2026-08-29 16:26'
-updated_date: '2026-08-29 16:35'
+updated_date: '2026-08-29 16:37'
 labels:
   - backend
   - frontend
@@ -53,6 +53,8 @@ The evaluation dependency graph currently conflates closure paths, locally absen
 5. Extract frontend graph presentation calculations. Use one maximum valid dependency build count for all rows, render zero work without division, and render unavailable plan data, plan failure, and failed systems as distinct states. Update labels to systems/dependency derivations/build work.
 6. Add focused backend parser/state tests for mixed requisite paths, singular/plural build plans, substitutions, no-op output, top-level exclusion, command/configuration behavior, and failures. Add frontend unit tests for equal/proportional widths, all-zero values, unavailable plans, and failed systems.
 7. Extend the authoritative Web UI integration fixture/assertions and screenshot coverage for the dependency graph, then run targeted server/Web UI checks, package builds, migration/SQLx verification as required, and the authoritative Web UI check.
+
+Frontend/browser-check implementation: update the Web UI mirror to the system-oriented dependency graph contract; extract pure maximum, row-state, and width helpers with focused Rust tests; render complete zero, unavailable, calculating, plan failure, and system failure distinctly using a shared complete-plan maximum; add one mocked evaluation-drawer graph step to the monolithic Web UI harness and coverage manifest with state, width, terminology, and screenshot assertions; run Web UI formatting/unit tests and JavaScript/manifest syntax validation through `nix develop` where available. Backend files remain out of scope.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
