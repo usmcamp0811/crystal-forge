@@ -1,11 +1,11 @@
 ---
 id: TASK-433.8
 title: 'TASK-433 Phase 7: Dashboard, notifications, and setup-coach POA&M integration'
-status: Review
+status: In Progress
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:43'
-updated_date: '2026-08-29 15:31'
+updated_date: '2026-08-29 15:41'
 labels:
   - design-parity
   - poam
@@ -56,7 +56,7 @@ nix build .#checks.x86_64-linux.web-ui --no-link
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [x] #1 Dashboard POAM Summary and Watchlist use real batched APIs, preserve existing layouts and open detail.
-- [x] #2 POAM notifications are real deduplicated events with target/read/dismiss/navigation and no render/poll spam.
+- [ ] #2 POAM notifications are real deduplicated events with target/read/dismiss/navigation and no render/poll spam.
 - [x] #3 Setup coach adds production-derived policy, bundle and Track a POAM steps without breaking existing progress.
 <!-- AC:END -->
 
@@ -77,6 +77,8 @@ nix build .#checks.x86_64-linux.web-ui --no-link
 10. Add database/server regressions for overdue episode lifecycle, awaiting transition/re-entry, concurrent reconciliation/materialization dedupe, preferences/visibility, read/dismiss persistence, historical retention, and read-only GETs; setup-progress production counts and original-six preservation; dashboard DTO/layout/presentation/navigation tests; and real server-backed browser workflows for dashboard/layout/error/navigation, notifications/history/polling, and nine-step coach behavior.
 11. Run targeted checks, isolated migration and SQLx preparation, required server/Web UI builds and suites, authoritative Web UI check, JavaScript syntax, diff checks, and full flake check when focused checks pass. Then perform independent requirements, notification, polling, dashboard, coach, authorization, backward-compatibility, and design-comparison reviews. Resolve every P0/P1/P2.
 12. Only after AC1-AC3 are objectively proven: check exactly three criteria, move TASK-433.8 to Review, update MR !318 with the Phase-7 SHA and verification, commit/push all intended changes, confirm clean matching local/remote heads, and stop before TASK-433.9.
+
+Phase-8 owner remediation: replace per-user repeated full-history notification materialization with a bounded set-oriented producer that preserves per-user visibility/preferences, event identity, read/dismiss history, awaiting re-entry semantics, and idempotent uniqueness. Add query-count/history-scale regression and ensure overdue reconciliation plus all notification ignored DB tests run in authoritative server-regressions. Preserve the single AppShell poll and no-side-effect GET contract.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -107,4 +109,6 @@ Phase-7 implementation commit `eb4097e7` was pushed to `TASK-433-policy-poam-wor
 Phase-8 dependency gate on 2026-08-29 found the exact-head pipeline 2801611582 green at `a0d149c2`, but MR !318 had become conflict-blocked because `origin/dev` advanced to `90992d86`. Phase 7 is temporarily returned to In Progress for branch synchronization. The synchronization will merge current `origin/dev`, preserve all unrelated task/design updates exactly, resolve only overlapping TASK-433 files by current canonical state, run focused checks for any affected production files, push, and require a new exact-head green pipeline before TASK-433.9 starts.
 
 Phase-7 dependency synchronization completed at merge commit `4e77d7db253d4f47a5ab128cea2e8dbcbe7a67b9`. Current `origin/dev` (`90992d86`) was merged. The only conflicts were stale TASK-433.6 and TASK-433.7 task metadata; each conflict was inspected and resolved to preserve the later Review state, checked acceptance criteria, and remediation evidence from the task branch. All unrelated backlog and authoritative design updates from `origin/dev` were retained unchanged. MR !318 is conflict-free. Exact-head pipeline 2802078582 passed at `4e77d7db`: https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2802078582. Phase 7 returns to Review; TASK-433.9 may now begin.
+
+Phase 8 returned Phase 7 to In Progress for a notification producer performance defect. Each producer pass currently loops all active users and rescans complete eligible attention/activity history per user, then email selection repeats broad scans. Uniqueness prevents duplicates but not unbounded users×history work. AC2 is temporarily unchecked pending bounded set-oriented materialization, scale/dedupe/history regressions, and authoritative execution of the relevant ignored notification and overdue tests.
 <!-- SECTION:NOTES:END -->
