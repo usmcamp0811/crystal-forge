@@ -5,7 +5,7 @@ status: Review
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:43'
-updated_date: '2026-08-29 05:41'
+updated_date: '2026-08-29 06:21'
 labels:
   - design-parity
   - poam
@@ -18,6 +18,8 @@ references:
   - TASK-433
   - TASK-433.1
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/318'
+  - >-
+    https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/318#note_3755751599
 documentation:
   - docs/design/CrystalForge/components/DashboardView.jsx
   - docs/design/CrystalForge/components/SetupCoach.jsx
@@ -99,4 +101,6 @@ Database evidence used the repository-owned PostgreSQL service on 127.0.0.1:3042
 Final verification passed: Web UI formatting and full unit suite (246 passed, 1 ignored); targeted server setup/dashboard/notification suites; server all-target offline check; JavaScript syntax and `git diff --check`; server and Web UI Nix package builds; authoritative `nix build .#checks.x86_64-linux.web-ui --no-link`; and `nix flake check --keep-going` (`all checks passed`). The first authoritative rerun encountered a pre-existing nondeterministic Phase-6 fixture assertion in workflow 29g; an immediate identical rerun passed, and the final full flake check also passed. Browser evidence covers real dashboard APIs/layout/detail routing, all nine coach steps and typed destinations, POA&M notification read/dismiss/detail routing, and one non-overlapping AppShell polling interval. No TASK-433.9 work was started.
 
 Final post-fix review found one pagination/polling overlap risk. The shared notification loader now mutually excludes first-page polling and pagination requests, and the Load more control is disabled during either request. This prevents a poll response from replacing the list while an older page appends. Post-fix verification passed: Web UI formatting, full Web UI unit suite (247 passed, 1 ignored), and `git diff --check`. A final independent re-review found no remaining P0, P1, or P2 blockers.
+
+Phase-7 implementation commit `eb4097e7` was pushed to `TASK-433-policy-poam-workflows`. MR !318 was updated with the exact implementation SHA, verification evidence, and dashboard/Setup Coach and notification inbox screenshots. The exact-head authoritative Web UI Nix check passed after the final polling guard: `/nix/store/di9f5mmy77zxw3dgkc1mk3v8a6yw8nw3-vm-test-run-crystal-forge-web-ui-mega-integration`.
 <!-- SECTION:NOTES:END -->
