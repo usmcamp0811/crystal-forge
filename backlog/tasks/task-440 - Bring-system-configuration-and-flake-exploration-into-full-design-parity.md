@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-08-29 02:07'
+updated_date: '2026-08-29 02:39'
 labels:
   - design-parity
   - web-ui
@@ -237,6 +237,8 @@ Verification passed: `nix develop -c env SQLX_OFFLINE=true cargo test --manifest
 Remaining gap for this slice: no browser-level interaction/screenshot check was added because the user explicitly prohibited changes to `integration-test.js`. The focused Rust UI tests cover reducer transitions and required action labels, while rendered modal behavior remains for the task's later authoritative browser phase. Other TASK-440 files remain concurrently modified by parallel agents and were preserved.
 
 Authoritative browser follow-up (2026-08-28): fixed the flake module keyboard-handler ownership error; preserved Config results during refetch and added request-parameter stale-response validation; made flake pane state URL-authoritative and restored the commit grid with explicit `display:grid`; changed environment-to-flake and return navigation to typed Dioxus routes; corrected the generated evaluator expression's invalid `builtins.min` calls; and hardened TASK-440 fixtures to release all duplicate held search requests and wait for the replacement response before asserting stale-response behavior. Verification passed: `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown`, `nix develop -c env SQLX_OFFLINE=true cargo test --manifest-path packages/default/Cargo.toml -p cf-server generated_evaluation_expression_parses_when_nix_is_available`, `nix develop -c node --check checks/web-ui/tests/integration-test.js`, and `git diff --check`. Authoritative browser completion remains blocked: after the evaluator fix, the web-ui VM's background evaluator advances into repeated real Nix system builds, emits `/nix/store/.links/... has maximum number of links`, and exceeds 15-30 minute command timeouts before producing a browser summary. Earlier pre-fix runs reached the workflows and identified the corrected interaction races. No commit, push, MR, task status change, or unrelated cleanup was performed.
+
+Backend remediation verification update (2026-08-28): added strict membership filtering for flake-output declared systems/module consumers, registry/timeline build aggregation, and non-admin cached policy totals. Added direct payload-filter and literal LIKE-escape tests plus membership-filtered registry/timeline DB assertions. Verification passed: SQLX_OFFLINE cf-server --tests check; changed-backend-file rustfmt --check; git diff --check; cf-server rustdoc build (existing warnings only); 4 snapshot query unit tests; 4 security redaction tests; 7 snapshot model tests; generated Nix parser test; shallow boundary-parent Git test; auto_latest explicit-manual-choice test; 3 isolated SQLx snapshot DB tests serially; and set-based registry/timeline isolated DB test for admin and membership-filtered paths. The verified DB was the worktree-local process-compose PostgreSQL on 127.0.0.1:3042. No frontend/browser files were edited, committed, or pushed by this backend pass.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
