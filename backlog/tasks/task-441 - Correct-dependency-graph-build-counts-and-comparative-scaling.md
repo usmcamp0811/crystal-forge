@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-gpt-5.6-sol
 created_date: '2026-08-29 16:26'
-updated_date: '2026-08-29 16:37'
+updated_date: '2026-08-29 16:53'
 labels:
   - backend
   - frontend
@@ -61,4 +61,6 @@ Frontend/browser-check implementation: update the Web UI mirror to the system-or
 
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: openai-gpt-5.6-sol on gray in /home/mcamp/code/crystal-forge/TASK-441-dependency-graph-counts
+
+Backend implementation: added migration 0233 with nullable nonnegative dependency_build_count and unavailable/calculating/complete/failed state; replaced cf-server closure cache inference with strict requisites plus configured nix-store --realise --dry-run parsing; scheduled non-blocking calculation across server/mod.rs and evaluate_with_policies.rs finalization paths; updated backend query/API to system-oriented fields and explicit serde statuses. Focused parser/config tests pass with SQLX_OFFLINE=true. SQLx preparation and migration application remain pending because the configured online database denied table access and was not verified as an isolated repository database. Frontend files in the worktree were modified concurrently and were not changed as part of this backend work.
 <!-- SECTION:NOTES:END -->
