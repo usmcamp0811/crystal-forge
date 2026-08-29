@@ -3,11 +3,11 @@ id: TASK-433.7
 title: >-
   TASK-433 Phase 6: POA&M integration in evidence/finding, system, bundle,
   assignment UI
-status: In Progress
+status: Review
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:43'
-updated_date: '2026-08-28 14:28'
+updated_date: '2026-08-29 02:31'
 labels:
   - design-parity
   - poam
@@ -55,7 +55,7 @@ nix build .#checks.x86_64-linux.web-ui --no-link
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Evidence supports Create POAM and Link existing with real prefilled context and exact navigation to/from finding/bundle/system/evidence.
+- [x] #1 Evidence supports Create POAM and Link existing with real prefilled context and exact navigation to/from finding/bundle/system/evidence.
 - [x] #2 System compliance provides real committed POAM filters/counts and exact finding navigation.
 - [x] #3 Bundle compliance provides real open/on-POAM/no-POAM/overdue/awaiting-verification/closed rollups and no N+1 visible-list queries.
 - [x] #4 Assignment POAM references are first-class relationships and do not mutate immutable assignment versions.
@@ -96,4 +96,6 @@ Preflight: rebased `TASK-433-policy-poam-workflows` onto current `origin/dev` (`
 Phase-6 contract audit found blocking Phase-5 API omissions before any implementation write. AC1 cannot be implemented without client-side approximation/N+1 because evidence DTOs expose only an assessment ID and no stable finding/remediation relationship, while Phase 5 has no batch active/historical remediation lookup for visible findings/assessment IDs. AC1 Link Existing is also directionally unsupported: `GET /poams/:poam_id/compatible` returns findings compatible with a known POA&M, but the required finding-origin flow needs server-filtered POA&Ms compatible with a supplied real finding/assessment; broad `/poams?policy_lineage_id=...` listing would shift compatibility/active-link decisions into the browser. AC4 cannot render first-class relationships from the assignment surface because there is no assignment-version filter or batch lookup; assignment references are discoverable only after fetching an already-known POA&M detail. These gaps belong to TASK-433.6 AC2 and its explicit Phase-5 scope for authenticated compatible search and batched active links/assignment relationships. Per the user's stop rule, no Phase-6 code or tests were written. Required Phase-5 correction would expose bounded authorization-scoped contracts for (1) active plus completed POA&M relationships by assessment/finding IDs, (2) compatible POA&M search by authoritative assessment/finding context, and (3) POA&M relationships by immutable assignment-version IDs. Awaiting explicit authorization to amend Phase 5 or another server-contract decision.
 
 Review handoff: local and remote branch SHAs match at `fd7548ad0b983e2412a5d1fa2b84ac397280daaa`; worktree is clean. MR !318 has no conflicts and received Phase-6 summary plus dark/light browser screenshots. Exact-head pipeline 2799822073 started for `fd7548ad`: https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2799822073 (running when handed off).
+
+Final authoritative exact-head gate passed on 2026-08-28 at `ff183d032a8dcc4794acf7064eb7acd8e61cdcb6`: `nix build .#checks.x86_64-linux.web-ui --no-link` exited successfully. This proves AC1 on the final post-lock remediation head; AC1-AC4 remain checked. Phase 6 is ready for review. Phase 7 has not started.
 <!-- SECTION:NOTES:END -->
