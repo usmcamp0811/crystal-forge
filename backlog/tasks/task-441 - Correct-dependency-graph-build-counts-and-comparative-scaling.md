@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-gpt-5.6-sol
 created_date: '2026-08-29 16:26'
-updated_date: '2026-08-29 16:53'
+updated_date: '2026-08-29 17:06'
 labels:
   - backend
   - frontend
@@ -63,4 +63,6 @@ Frontend/browser-check implementation: update the Web UI mirror to the system-or
 LOCK: openai-gpt-5.6-sol on gray in /home/mcamp/code/crystal-forge/TASK-441-dependency-graph-counts
 
 Backend implementation: added migration 0233 with nullable nonnegative dependency_build_count and unavailable/calculating/complete/failed state; replaced cf-server closure cache inference with strict requisites plus configured nix-store --realise --dry-run parsing; scheduled non-blocking calculation across server/mod.rs and evaluate_with_policies.rs finalization paths; updated backend query/API to system-oriented fields and explicit serde statuses. Focused parser/config tests pass with SQLX_OFFLINE=true. SQLx preparation and migration application remain pending because the configured online database denied table access and was not verified as an isolated repository database. Frontend files in the worktree were modified concurrently and were not changed as part of this backend work.
+
+Frontend/browser-check slice implemented in the task worktree without modifying concurrent backend files. Updated the Web UI mirror to `{ commit_id, total_systems, systems }`, added typed plan/system statuses, extracted pure shared-maximum/percentage/row-state helpers, and rendered complete zero, unavailable, calculating, plan failure, and system failure distinctly with system/dependency-derivation/build-work terminology. Added six focused Rust regressions and manifest-driven browser fixture/assertions for equal widths, 10:100 scaling, zero width/`0 to build`, all distinct states, terminology, and dark/light screenshot capture setup. Updated `checks/web-ui/design-fixtures.json` and the coverage manifest. Verification passed: targeted Web UI Rust tests (6 passed), wasm32 Web UI `cargo check`, touched-file rustfmt check, Node syntax check, JSON parsing, and `git diff --check`. Focused authoritative command `CF_UI_TEST_STEPS=26bb-evaluation-dependency-graph nix build .#checks.x86_64-linux.web-ui --no-link --impure` timed out after 15 minutes while still building the Web UI/server/VM derivation set, before browser execution; no screenshot result was produced. Existing repository warnings remained. No commit or task status transition was performed.
 <!-- SECTION:NOTES:END -->
