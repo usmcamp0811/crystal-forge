@@ -1,11 +1,11 @@
 ---
 id: TASK-433.8
 title: 'TASK-433 Phase 7: Dashboard, notifications, and setup-coach POA&M integration'
-status: Review
+status: In Progress
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:43'
-updated_date: '2026-08-29 06:21'
+updated_date: '2026-08-29 14:58'
 labels:
   - design-parity
   - poam
@@ -103,4 +103,6 @@ Final verification passed: Web UI formatting and full unit suite (246 passed, 1 
 Final post-fix review found one pagination/polling overlap risk. The shared notification loader now mutually excludes first-page polling and pagination requests, and the Load more control is disabled during either request. This prevents a poll response from replacing the list while an older page appends. Post-fix verification passed: Web UI formatting, full Web UI unit suite (247 passed, 1 ignored), and `git diff --check`. A final independent re-review found no remaining P0, P1, or P2 blockers.
 
 Phase-7 implementation commit `eb4097e7` was pushed to `TASK-433-policy-poam-workflows`. MR !318 was updated with the exact implementation SHA, verification evidence, and dashboard/Setup Coach and notification inbox screenshots. The exact-head authoritative Web UI Nix check passed after the final polling guard: `/nix/store/di9f5mmy77zxw3dgkc1mk3v8a6yw8nw3-vm-test-run-crystal-forge-web-ui-mega-integration`.
+
+Phase-8 dependency gate on 2026-08-29 found the exact-head pipeline 2801611582 green at `a0d149c2`, but MR !318 had become conflict-blocked because `origin/dev` advanced to `90992d86`. Phase 7 is temporarily returned to In Progress for branch synchronization. The synchronization will merge current `origin/dev`, preserve all unrelated task/design updates exactly, resolve only overlapping TASK-433 files by current canonical state, run focused checks for any affected production files, push, and require a new exact-head green pipeline before TASK-433.9 starts.
 <!-- SECTION:NOTES:END -->
