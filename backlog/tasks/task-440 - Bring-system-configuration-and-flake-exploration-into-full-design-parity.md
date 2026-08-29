@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-08-29 04:39'
+updated_date: '2026-08-29 04:41'
 labels:
   - design-parity
   - web-ui
@@ -209,6 +209,8 @@ Move all flake-output module/declaration/default/consumer and lock input/follows
 Restore compatibility for omitted deployment `request_id`: generate a non-durable per-call legacy identity and only reuse active pending work, so terminal same-target requests can intentionally redeploy. Keep explicit UI request IDs as the durable AC #21 retry contract and document the API distinction.
 
 Extend migration 0235 with a durable explicit deployment-intent reservation keyed by system/request ID and immutable target/action. Reserve before policy conversion, carry conversion-persisted/deploy-failed/queued partial state across retries, bind the eventual deployment ID, and add an isolated concurrent reservation test proving conflicting intent loses before conversion. Run backend formatting, SQLX_OFFLINE checks/tests/docs, isolated migrated PostgreSQL tests, relevant real-Nix expression tests, and confirm frontend/check files are preserved.
+
+Backend safe-value/replay/carrier correction (2026-08-29): replace blanket string and winner-note/error redaction with one deterministic recursive policy that preserves ordinary strings, package metadata, module defaults, and diagnostics while redacting sensitive option paths and attribute keys plus credential URLs, authorization/JWT/provider-prefix tokens, and high-entropy token-like values before digest/index/persistence/API. Add pure and PostgreSQL regressions for distinct safe/package values and absence from JSON/search/API. For omitted request_id, derive a stable system/commit/action identity and reuse it across pending and terminal states for a documented durable replay window of at least 24 hours; permit a new deployment after the boundary, while explicit request IDs remain durable and unambiguous. Make the independent flake carrier persist declared outputs and inputs without nixpkgs lib, choose cfg.pkgs.lib when configurations exist or an input lib otherwise for module evaluation, and emit explicit module-evaluation unavailable/error details instead of failing the complete carrier. Run focused cf-server tests, SQLX_OFFLINE check/tests/docs, migration-backed PostgreSQL tests, real-Nix expression tests where available, rustfmt and backend-only diff checks. Do not edit frontend/check files or commit/push.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
