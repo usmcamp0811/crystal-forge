@@ -1,9 +1,11 @@
 ---
 id: TASK-433.8
 title: 'TASK-433 Phase 7: Dashboard, notifications, and setup-coach POA&M integration'
-status: Backlog
-assignee: []
+status: In Progress
+assignee:
+  - '@opencode-agent'
 created_date: '2026-08-23 01:43'
+updated_date: '2026-08-29 02:42'
 labels:
   - design-parity
   - poam
@@ -54,3 +56,9 @@ nix build .#checks.x86_64-linux.web-ui --no-link
 - [ ] #2 POAM notifications are real deduplicated events with target/read/dismiss/navigation and no render/poll spam.
 - [ ] #3 Setup coach adds production-derived policy, bundle and Track a POAM steps without breaking existing progress.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Phase-7 preflight passed at branch head `7d6eef77be055f05ead86c7ac2eecc1d44ff1b18`: local and remote branch heads match, the worktree is clean, MR !318 is conflict-free, and TASK-433.7 is Review with AC1-AC4 checked. The authoritative Phase-6 Web UI check passed at implementation head `ff183d032a8dcc4794acf7064eb7acd8e61cdcb6`; `7d6eef77` is bookkeeping only. Phase-7 scope is dashboard, durable notifications, and production-derived setup coach steps. TASK-433.9 and final Phase-8 parity work remain prohibited.
+<!-- SECTION:NOTES:END -->
