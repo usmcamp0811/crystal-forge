@@ -1,11 +1,11 @@
 ---
 id: TASK-433.6
 title: 'TASK-433 Phase 5: POA&M database schema, API, auth/audit, and server tests'
-status: Review
+status: In Progress
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:43'
-updated_date: '2026-08-28 05:20'
+updated_date: '2026-08-29 15:41'
 labels:
   - design-parity
   - poam
@@ -62,11 +62,11 @@ nix build .#checks.x86_64-linux.integration --no-link
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [x] #1 Normalized POAM tables, links, milestones, activity/history and verification references exist through additive migrations with constraints/indexes.
-- [x] #2 Authenticated APIs implement POAM creation, detail/list/filter/search, update, transitions, milestones, notes, links, verification, close, reopen, system/bundle rollups and dashboard sources.
-- [x] #3 Server validates finding context, compatibility, active-link invariant if applicable, authorization/CSRF and stale/conflict conditions.
+- [ ] #2 Authenticated APIs implement POAM creation, detail/list/filter/search, update, transitions, milestones, notes, links, verification, close, reopen, system/bundle rollups and dashboard sources.
+- [ ] #3 Server validates finding context, compatibility, active-link invariant if applicable, authorization/CSRF and stale/conflict conditions.
 - [x] #4 POAM creation/linking never changes the underlying evaluation result; FAIL remains FAIL.
-- [x] #5 Closure is authoritative and race-safe, requires current Pass or documented accepted waiver for all linked findings, stores verification and rejects failing/error/unknown/not-checked/stale findings.
-- [x] #6 POAM server tests cover real finding creation, multi-finding links, invalid links, active invariant, milestones, activity, transitions, overdue, closure rejection/acceptance, verification storage, reopen, filters, auth and concurrency.
+- [ ] #5 Closure is authoritative and race-safe, requires current Pass or documented accepted waiver for all linked findings, stores verification and rejects failing/error/unknown/not-checked/stale findings.
+- [ ] #6 POAM server tests cover real finding creation, multi-finding links, invalid links, active invariant, milestones, activity, transitions, overdue, closure rejection/acceptance, verification storage, reopen, filters, auth and concurrency.
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -90,6 +90,8 @@ Independent-review remediation checkpoint: move canonical effective-policy resol
 Complete all-context visibility and attribution for assignment references; distinguish active, explicitly unlinked, and closure-retired finding links; use authoritative exact current/closure context for detail/search/filter/system/bundle rollups; expose complete bounded verification/history and assignment/bundle/requirement navigation DTOs; validate and bound list/batch inputs with typed errors.
 
 Make activity/audit history truthful and reconstructable, enforce completed/active-link invariants, return revisions on rejected closure, make duplicate links idempotent or typed conflicts, improve query/index plans, and add forced-concurrency plus exact semantic regressions for every review finding before rerunning independent review and required verification.
+
+Phase-8 owner remediation: make canonical verification and system/bundle rollups source-neutral for both composite assessments and legacy deployed policy observations. Add a real legacy Fail → POA&M → later legacy Pass → verify → close/history regression and legacy rollup assertions without fabricating composite assessments. Restore the documented Open→Awaiting Verification transition. Bound bundle rollup historical expansion and avoid nested unbounded joins. Add `poam_workflows` plus selected ignored POA&M/auth/notification-overdue tests to authoritative Nix regression coverage. Add a populated pre-0233 upgrade rehearsal through 0235, inspect redundant indexes, and retain additive immutable history semantics.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -104,6 +106,8 @@ Verification completed against repository-isolated PostgreSQL on port 3042: fres
 Exact-head GitLab pipeline 2794857147 passed for commit `68904343a488e6a5c909fa80c4bac16052814ff1`: https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2794857147. MR !318 is conflict-free and remains open for review. Per repository lifecycle, the task remains Review until the MR is merged.
 
 Phase-6 authorized contract correction completed on 2026-08-28: added bounded authenticated finding-remediation relationships by authoritative assessment IDs, server-filtered compatible POA&M search from a current Fail assessment, and immutable assignment-version relationship lookup. Assignment compatibility now pairs each scope with the same finding's policy lineage rather than independently matching scope and lineage across findings. PostgreSQL-backed `poam_workflows` verification passed 16/16, including the new cross-finding scope/lineage regression; Phase-6 browser workflows 29g–29m and the full Web UI Nix check also passed. These are minimal Phase-5 API corrections required by TASK-433.7 and remain part of MR !318.
+
+Phase 8 returned Phase 5 to In Progress. A P1 backward-compatibility defect allows creation from source-neutral legacy FAIL evidence but verification and system/bundle rollups read only `composite_policy_assessments`; legacy POA&Ms therefore cannot close after a later legacy Pass and legacy findings are omitted from rollups. The 20-test `poam_workflows` integration target is also absent from all Nix/CI checks. P2 findings include a missing documented Open→Awaiting Verification transition, unbounded historical rollup expansion, no populated 0232→0235 upgrade rehearsal, and selected ignored auth/notification/overdue tests outside authoritative checks. AC2, AC3, AC5, and AC6 are temporarily unchecked.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
