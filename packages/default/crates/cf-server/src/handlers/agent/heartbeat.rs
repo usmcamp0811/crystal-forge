@@ -147,6 +147,44 @@ pub async fn log(
         }
     };
 
+    if let Err(e) = crate::services::composite_enforcement::lock_poam_derivations_for_store_path_tx(
+        &mut tx,
+        payload.store_path.as_deref(),
+    )
+    .await
+    {
+        debug!(
+            "❌ failed to lock deployed derivation for {}: {e:?}",
+            payload.hostname
+        );
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
+    let system_id = match crate::queries::system_events::find_system_id_by_hostname_tx(
+        &mut tx,
+        &payload.hostname,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(e) => {
+            debug!("❌ failed to resolve system {}: {e:?}", payload.hostname);
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    if let Some(system_id) = system_id {
+        if let Err(e) = crate::services::composite_enforcement::lock_poam_findings_for_system_tx(
+            &mut tx, system_id,
+        )
+        .await
+        {
+            debug!(
+                "❌ failed to lock POA&M findings for {}: {e:?}",
+                payload.hostname
+            );
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    }
     let previous_observed =
         match lock_observed_system_state_by_hostname_tx(&mut tx, &payload.hostname).await {
             Ok(value) => value,

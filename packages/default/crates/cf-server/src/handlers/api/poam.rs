@@ -159,7 +159,8 @@ pub async fn list(
 
 #[derive(Deserialize)]
 pub struct FindingRelationshipsQuery {
-    pub assessment_ids: String,
+    pub assessment_ids: Option<String>,
+    pub finding_ids: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -169,7 +170,12 @@ pub struct AssignmentRelationshipsQuery {
 
 #[derive(Deserialize)]
 pub struct CompatiblePoamsQuery {
-    pub assessment_id: Uuid,
+    pub assessment_id: Option<Uuid>,
+    pub finding_id: Option<Uuid>,
+    pub observation_source: Option<FindingObservationSource>,
+    pub observation_source_id: Option<String>,
+    pub observation_policy_version_id: Option<Uuid>,
+    pub observation_token: Option<String>,
     pub q: Option<String>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
@@ -218,15 +224,32 @@ pub async fn finding_relationships(
         Ok(value) => value,
         Err(error) => return error,
     };
-    let ids = match relationship_ids(&query.assessment_ids, "assessment_ids") {
-        Ok(ids) => ids,
-        Err(response) => return response,
-    };
     let actor = match actor(&pool, user, &headers).await {
         Ok(value) => value,
         Err(error) => return error,
     };
-    match poam::finding_relationships(&pool, &actor, &ids, &SystemClock).await {
+    let result = match (
+        query.assessment_ids.as_deref(),
+        query.finding_ids.as_deref(),
+    ) {
+        (Some(value), None) => match relationship_ids(value, "assessment_ids") {
+            Ok(ids) => poam::finding_relationships(&pool, &actor, &ids, &SystemClock).await,
+            Err(response) => return response,
+        },
+        (None, Some(value)) => match relationship_ids(value, "finding_ids") {
+            Ok(ids) => {
+                poam::finding_relationships_by_finding(&pool, &actor, &ids, &SystemClock).await
+            }
+            Err(response) => return response,
+        },
+        _ => {
+            return error_response(PoamError::Validation(
+                "invalid_ids",
+                "Provide exactly one of assessment_ids or finding_ids".into(),
+            ));
+        }
+    };
+    match result {
         Ok(value) => Json(value).into_response(),
         Err(error) => error_response(error),
     }
@@ -246,17 +269,57 @@ pub async fn compatible_poams(
         Ok(value) => value,
         Err(error) => return error,
     };
-    match poam::compatible_for_assessment(
-        &pool,
-        &actor,
+    let result = match (
         query.assessment_id,
-        query.q.as_deref(),
-        query.limit,
-        query.offset,
-        &SystemClock,
-    )
-    .await
-    {
+        query.finding_id,
+        query.observation_source,
+        query.observation_source_id,
+        query.observation_policy_version_id,
+        query.observation_token,
+    ) {
+        (Some(assessment_id), None, None, None, None, None) => {
+            poam::compatible_for_assessment(
+                &pool,
+                &actor,
+                assessment_id,
+                query.q.as_deref(),
+                query.limit,
+                query.offset,
+                &SystemClock,
+            )
+            .await
+        }
+        (
+            None,
+            Some(finding_id),
+            Some(source),
+            Some(source_id),
+            Some(policy_version_id),
+            Some(token),
+        ) => {
+            poam::compatible_for_finding(
+                &pool,
+                &actor,
+                finding_id,
+                &FindingObservationReference {
+                    source,
+                    source_id,
+                    policy_version_id,
+                    token,
+                },
+                query.q.as_deref(),
+                query.limit,
+                query.offset,
+                &SystemClock,
+            )
+            .await
+        }
+        _ => Err(PoamError::Validation(
+            "invalid_finding_observation",
+            "Provide assessment_id or a complete finding observation reference".into(),
+        )),
+    };
+    match result {
         Ok(value) => Json(value).into_response(),
         Err(error) => error_response(error),
     }

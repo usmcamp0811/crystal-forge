@@ -11,6 +11,10 @@ use crate::compliance::resolver::{
     resolve_systems_effective_policies_in_tx,
 };
 use crate::models::poam::*;
+use crate::queries::compliance::{
+    CveObservationValues, cve_observation_reference, nix_policy_observation_reference,
+    nix_policy_result,
+};
 use crate::queries::poam::{self, insert_activity_and_audit};
 
 pub trait PoamClock: Send + Sync {
@@ -231,6 +235,258 @@ struct AssessmentContext {
     effective_config: Value,
 }
 
+#[derive(Debug)]
+struct FindingActionContext {
+    assessment_id: Option<Uuid>,
+    finding_id: Uuid,
+    system_id: Uuid,
+    policy_lineage_id: Uuid,
+    policy_version_id: Uuid,
+    overall_outcome: String,
+}
+
+async fn finding_action_key_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    actor: &PoamActor,
+    assessment_id: Option<Uuid>,
+    finding_id: Option<Uuid>,
+    observation: Option<&FindingObservationReference>,
+) -> Result<(Uuid, Uuid), PoamError> {
+    let key = match (assessment_id, finding_id, observation) {
+        (Some(assessment_id), None, None) => assessment_finding_key_tx(tx, assessment_id)
+            .await?
+            .ok_or(PoamError::NotFound)?,
+        (None, Some(finding_id), Some(_)) => {
+            sqlx::query_as("SELECT system_id,policy_lineage_id FROM poam_findings WHERE id=$1")
+                .bind(finding_id)
+                .fetch_optional(&mut **tx)
+                .await?
+                .ok_or(PoamError::NotFound)?
+        }
+        _ => {
+            return Err(PoamError::Validation(
+                "invalid_finding_observation",
+                "Provide either assessment_id or both finding_id and observation".into(),
+            ));
+        }
+    };
+    // SECURITY: Only stable finding metadata is read before authorization. The
+    // caller cannot distinguish stale, invalid, or missing observation data for
+    // a system outside the caller's environment scope.
+    if !actor_can_access_systems_tx(tx, actor, &[key.0]).await? {
+        return Err(PoamError::NotFound);
+    }
+    Ok(key)
+}
+
+async fn finding_action_context_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    actor: &PoamActor,
+    assessment_id: Option<Uuid>,
+    finding_id: Option<Uuid>,
+    observation: Option<&FindingObservationReference>,
+) -> Result<FindingActionContext, PoamError> {
+    match (assessment_id, finding_id, observation) {
+        (Some(assessment_id), None, None) => {
+            let context = assessment_context_tx(tx, assessment_id)
+                .await?
+                .ok_or(PoamError::NotFound)?;
+            if !actor_can_access_systems_tx(tx, actor, &[context.system_id]).await? {
+                return Err(PoamError::NotFound);
+            }
+            validate_current_assessment_tx(tx, &context).await?;
+            Ok(FindingActionContext {
+                assessment_id: Some(assessment_id),
+                finding_id: context.finding_id,
+                system_id: context.system_id,
+                policy_lineage_id: context.policy_lineage_id,
+                policy_version_id: context.policy_version_id,
+                overall_outcome: context.overall_outcome,
+            })
+        }
+        (None, Some(finding_id), Some(observation)) => {
+            legacy_finding_action_context_tx(tx, actor, finding_id, observation).await
+        }
+        _ => Err(PoamError::Validation(
+            "invalid_finding_observation",
+            "Provide either assessment_id or both finding_id and observation".into(),
+        )),
+    }
+}
+
+async fn legacy_finding_action_context_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    actor: &PoamActor,
+    finding_id: Uuid,
+    requested: &FindingObservationReference,
+) -> Result<FindingActionContext, PoamError> {
+    let (system_id, policy_lineage_id): (Uuid, Uuid) = sqlx::query_as(
+        "SELECT system_id,policy_lineage_id FROM poam_findings WHERE id=$1 FOR SHARE",
+    )
+    .bind(finding_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or(PoamError::NotFound)?;
+    // SECURITY: Resolve policy and observation details only after the caller's
+    // environment scope is known to include the finding's system.
+    if !actor_can_access_systems_tx(tx, actor, &[system_id]).await? {
+        return Err(PoamError::NotFound);
+    }
+    let ResolutionOutcome::Resolved(resolved) =
+        resolve_system_effective_policies_in_tx(tx, system_id).await?
+    else {
+        return Err(PoamError::Precondition(
+            "policy_conflict",
+            "Current effective policy set has conflicts".into(),
+            None,
+        ));
+    };
+    let policy = resolved
+        .policies
+        .iter()
+        .find(|policy| policy.policy_lineage_id == policy_lineage_id)
+        .ok_or_else(|| {
+            PoamError::Precondition(
+                "stale_finding",
+                "Finding policy is no longer effective for the system".into(),
+                None,
+            )
+        })?;
+    let deployed: Option<(i32, String, Value)> = sqlx::query_as(
+        r#"SELECT derivation.id,deployed.store_path,derivation.policy_results
+           FROM systems system
+           JOIN LATERAL (
+             SELECT state.store_path FROM system_states state
+             WHERE state.hostname=system.hostname AND state.store_path IS NOT NULL
+               AND btrim(state.store_path)<>''
+             ORDER BY state.timestamp DESC,state.id DESC LIMIT 1
+           ) deployed ON true
+           JOIN derivations derivation
+             ON COALESCE(derivation.store_path,derivation.expected_store_path)=deployed.store_path
+            AND derivation.derivation_type='nixos'
+           WHERE system.id=$1
+           ORDER BY derivation.completed_at DESC NULLS LAST,derivation.id DESC LIMIT 1"#,
+    )
+    .bind(system_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let (derivation_id, target_store_path, policy_results) = deployed.ok_or_else(|| {
+        PoamError::Precondition(
+            "stale_finding",
+            "No current deployed policy observation exists".into(),
+            None,
+        )
+    })?;
+    let current = match requested.source {
+        FindingObservationSource::NixPolicyResult => {
+            if !matches!(
+                policy.policy_type.as_str(),
+                "require_packages" | "custom_check" | "require_cf_agent"
+            ) {
+                return Err(PoamError::Validation(
+                    "invalid_finding_observation",
+                    "Observation source does not match the policy type".into(),
+                ));
+            }
+            let (passed, details) = nix_policy_result(
+                &policy_results,
+                Some(policy.policy_version_id),
+                policy_lineage_id,
+            )
+            .map_err(|error| {
+                PoamError::Precondition("invalid_finding_observation", error.to_string(), None)
+            })?
+            .ok_or_else(|| {
+                PoamError::Precondition(
+                    "stale_finding",
+                    "The deployed evaluation has no current policy result".into(),
+                    None,
+                )
+            })?;
+            (
+                nix_policy_observation_reference(
+                    system_id,
+                    policy_lineage_id,
+                    policy.policy_version_id,
+                    &resolved.effective_set_digest,
+                    &semantic_digest(&policy.effective_config),
+                    derivation_id,
+                    &target_store_path,
+                    passed,
+                    details.as_deref(),
+                ),
+                if passed { "pass" } else { "fail" },
+            )
+        }
+        FindingObservationSource::CveScan => {
+            if policy.policy_type != "require_cve_check" {
+                return Err(PoamError::Validation(
+                    "invalid_finding_observation",
+                    "Observation source does not match the policy type".into(),
+                ));
+            }
+            let (scan_id, critical_count, high_count): (Uuid, i32, i32) = sqlx::query_as(
+                r#"SELECT id,critical_count,high_count FROM cve_scans
+                   WHERE derivation_id=$1 AND status='completed'
+                   ORDER BY completed_at DESC NULLS LAST,id DESC LIMIT 1"#,
+            )
+            .bind(derivation_id)
+            .fetch_optional(&mut **tx)
+            .await?
+            .ok_or_else(|| {
+                PoamError::Precondition(
+                    "stale_finding",
+                    "The deployed derivation has no completed CVE scan".into(),
+                    None,
+                )
+            })?;
+            let max_critical = policy
+                .effective_config
+                .get("max_critical")
+                .and_then(Value::as_i64)
+                .unwrap_or(i64::MAX);
+            let max_high = policy
+                .effective_config
+                .get("max_high")
+                .and_then(Value::as_i64);
+            let passed = i64::from(critical_count) <= max_critical
+                && max_high.is_none_or(|max| i64::from(high_count) <= max);
+            (
+                cve_observation_reference(CveObservationValues {
+                    system_id,
+                    policy_lineage_id,
+                    policy_version_id: policy.policy_version_id,
+                    effective_set_digest: &resolved.effective_set_digest,
+                    effective_config_digest: &semantic_digest(&policy.effective_config),
+                    derivation_id,
+                    target_store_path: &target_store_path,
+                    scan_id,
+                    critical_count,
+                    high_count,
+                    max_critical,
+                    max_high,
+                }),
+                if passed { "pass" } else { "fail" },
+            )
+        }
+    };
+    if current.0 != *requested {
+        return Err(PoamError::Precondition(
+            "stale_finding",
+            "Observation was superseded by newer authoritative evidence".into(),
+            None,
+        ));
+    }
+    Ok(FindingActionContext {
+        assessment_id: None,
+        finding_id,
+        system_id,
+        policy_lineage_id,
+        policy_version_id: policy.policy_version_id,
+        overall_outcome: current.1.to_string(),
+    })
+}
+
 async fn assessment_context_tx(
     tx: &mut Transaction<'_, Postgres>,
     assessment_id: Uuid,
@@ -342,6 +598,7 @@ async fn lock_assessment_finding_key_tx(
     tx: &mut Transaction<'_, Postgres>,
     key: (Uuid, Uuid),
 ) -> Result<(), PoamError> {
+    crate::services::composite_enforcement::lock_poam_system_key_tx(tx, key.0).await?;
     sqlx::query("SELECT lock_poam_finding_key($1,$2)")
         .bind(key.0)
         .bind(key.1)
@@ -492,17 +749,30 @@ pub async fn create(
     assignment_version_ids.sort_unstable();
     assignment_version_ids.dedup();
     let mut tx = pool.begin().await?;
-    let key = assessment_finding_key_tx(&mut tx, request.assessment_id)
-        .await?
-        .ok_or(PoamError::NotFound)?;
+    // CONCURRENCY: Assessment, derivation-result, and CVE-scan writers acquire
+    // this stable key before commit. Acquire it before resolving evidence so a
+    // writer that wins the lock is visible to the following READ COMMITTED
+    // statements, and a writer that loses the lock commits after this action.
+    let key = finding_action_key_tx(
+        &mut tx,
+        actor,
+        request.assessment_id,
+        request.finding_id,
+        request.observation.as_ref(),
+    )
+    .await?;
     lock_assessment_finding_key_tx(&mut tx, key).await?;
-    let context = assessment_context_tx(&mut tx, request.assessment_id)
-        .await?
-        .ok_or(PoamError::NotFound)?;
+    let context = finding_action_context_tx(
+        &mut tx,
+        actor,
+        request.assessment_id,
+        request.finding_id,
+        request.observation.as_ref(),
+    )
+    .await?;
     if !actor_can_access_systems_tx(&mut tx, actor, &[context.system_id]).await? {
         return Err(PoamError::NotFound);
     }
-    validate_current_assessment_tx(&mut tx, &context).await?;
     if context.overall_outcome != "fail" {
         return Err(PoamError::Precondition(
             "finding_not_failed",
@@ -567,13 +837,15 @@ pub async fn create(
       'poam',jsonb_build_object('id',id,'human_number',human_number,'title',title,'plan',plan,
         'owner',owner,'target_date',target_date,'risk',risk,'status',status,'revision',revision,
         'created_by',created_by,'created_at',created_at),
-      'finding',jsonb_build_object('finding_id',$2::uuid,'assessment_id',$3::uuid),
+       'finding',jsonb_build_object('finding_id',$2::uuid,'assessment_id',$3::uuid,'observation',$4::jsonb),
       'assignments',COALESCE((SELECT jsonb_agg(jsonb_build_object('assignment_id',assignment_id,
         'assignment_version_id',assignment_version_id,'added_by',added_by,'added_at',added_at)
         ORDER BY assignment_version_id) FROM poam_assignment_references WHERE poam_id=$1),'[]'::jsonb),
       'milestones',COALESCE((SELECT jsonb_agg(to_jsonb(milestone) ORDER BY ordinal)
         FROM poam_milestones milestone WHERE poam_id=$1),'[]'::jsonb)) FROM poams WHERE id=$1"#)
-      .bind(poam_id).bind(context.finding_id).bind(request.assessment_id).fetch_one(&mut *tx).await?;
+      .bind(poam_id).bind(context.finding_id).bind(context.assessment_id)
+      .bind(serde_json::to_value(&request.observation).unwrap_or(Value::Null))
+      .fetch_one(&mut *tx).await?;
     payload["poam_id"] = json!(poam_id);
     payload["revision"] = json!(1);
     insert_activity_and_audit(
@@ -1232,17 +1504,28 @@ pub async fn link_finding(
     require_mutator(actor)?;
     require_visible(pool, actor, id).await?;
     let mut tx = pool.begin().await?;
-    let key = assessment_finding_key_tx(&mut tx, request.assessment_id)
-        .await?
-        .ok_or(PoamError::NotFound)?;
+    // CONCURRENCY: Resolve authoritative evidence only after acquiring the
+    // finding key shared with assessment, derivation-result, and scan writers.
+    let key = finding_action_key_tx(
+        &mut tx,
+        actor,
+        request.assessment_id,
+        request.finding_id,
+        request.observation.as_ref(),
+    )
+    .await?;
     lock_assessment_finding_key_tx(&mut tx, key).await?;
-    let context = assessment_context_tx(&mut tx, request.assessment_id)
-        .await?
-        .ok_or(PoamError::NotFound)?;
+    let context = finding_action_context_tx(
+        &mut tx,
+        actor,
+        request.assessment_id,
+        request.finding_id,
+        request.observation.as_ref(),
+    )
+    .await?;
     if !actor_can_access_systems_tx(&mut tx, actor, &[context.system_id]).await? {
         return Err(PoamError::NotFound);
     }
-    validate_current_assessment_tx(&mut tx, &context).await?;
     if context.overall_outcome != "fail" {
         return Err(PoamError::Precondition(
             "finding_not_failed",
@@ -1290,7 +1573,7 @@ pub async fn link_finding(
     {
         return Err(db_conflict(&error).unwrap_or_else(|| error.into()));
     }
-    bump_and_audit(&mut tx,actor,id,"finding_linked",json!({"finding_id":context.finding_id,"assessment_id":request.assessment_id,"system_id":context.system_id,"policy_lineage_id":context.policy_lineage_id})).await?;
+    bump_and_audit(&mut tx,actor,id,"finding_linked",json!({"finding_id":context.finding_id,"assessment_id":context.assessment_id,"observation":&request.observation,"system_id":context.system_id,"policy_lineage_id":context.policy_lineage_id})).await?;
     tx.commit().await?;
     detail(pool, actor, id, clock).await
 }
@@ -1579,7 +1862,7 @@ pub async fn finding_relationships(
             let active_id = active_poam.as_ref().map(|summary| summary.id);
             let mut seen = BTreeSet::new();
             FindingPoamRelationship {
-                assessment_id,
+                assessment_id: Some(assessment_id),
                 finding_id,
                 active_poam,
                 historical_poams: summaries
@@ -1595,6 +1878,132 @@ pub async fn finding_relationships(
             }
         })
         .collect())
+}
+
+/// Returns visible POA&M relationships for stable finding IDs.
+///
+/// Findings outside the actor's environment scope are omitted. The request
+/// must contain between 1 and 100 IDs.
+///
+/// # Errors
+///
+/// Returns [`PoamError::Validation`] for an empty or oversized request and
+/// [`PoamError::Database`] when persistence queries fail.
+pub async fn finding_relationships_by_finding(
+    pool: &PgPool,
+    actor: &PoamActor,
+    finding_ids: &[Uuid],
+    clock: &dyn PoamClock,
+) -> Result<Vec<FindingPoamRelationship>, PoamError> {
+    if finding_ids.is_empty() || finding_ids.len() > MAX_POAM_RELATIONSHIPS as usize {
+        return Err(PoamError::Validation(
+            "invalid_finding_ids",
+            "Between 1 and 100 finding IDs are required".into(),
+        ));
+    }
+    let visible =
+        poam::visible_findings(pool, finding_ids, actor.is_admin, &actor.environment_ids).await?;
+    let visible_ids = visible.iter().map(|row| row.0).collect::<Vec<_>>();
+    let summaries = poam::finding_poam_summaries(
+        pool,
+        &visible_ids,
+        clock.today(),
+        actor.is_admin,
+        &actor.environment_ids,
+    )
+    .await?;
+    Ok(visible
+        .into_iter()
+        .map(|(finding_id, _, _)| {
+            let active_poam = summaries
+                .iter()
+                .find(|(related_finding, active, _)| *related_finding == finding_id && *active)
+                .map(|(_, _, summary)| summary.clone());
+            let active_id = active_poam.as_ref().map(|summary| summary.id);
+            let mut seen = BTreeSet::new();
+            FindingPoamRelationship {
+                assessment_id: None,
+                finding_id,
+                active_poam,
+                historical_poams: summaries
+                    .iter()
+                    .filter(|(related_finding, active, summary)| {
+                        *related_finding == finding_id
+                            && !*active
+                            && Some(summary.id) != active_id
+                            && seen.insert(summary.id)
+                    })
+                    .map(|(_, _, summary)| summary.clone())
+                    .collect(),
+            }
+        })
+        .collect())
+}
+
+/// Returns visible active POA&Ms compatible with one authoritative finding.
+///
+/// The server resolves `observation` against current deployed evidence before
+/// it searches by the finding's policy lineage. Inaccessible findings return
+/// [`PoamError::NotFound`] without revealing observation state.
+///
+/// # Errors
+///
+/// Returns a validation error for invalid bounds or search text, a precondition
+/// error for stale or non-failing evidence, and a database error for query
+/// failures.
+pub async fn compatible_for_finding(
+    pool: &PgPool,
+    actor: &PoamActor,
+    finding_id: Uuid,
+    observation: &FindingObservationReference,
+    q: Option<&str>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+    clock: &dyn PoamClock,
+) -> Result<Page<PoamSummary>, PoamError> {
+    let (limit, offset) = page_bounds(limit, offset)?;
+    let q = q.map(str::trim).filter(|value| !value.is_empty());
+    if let Some(q) = q {
+        validate_text_length(q, MAX_SEARCH_BYTES, "search_too_long", "search")?;
+    }
+    let mut tx = pool.begin().await?;
+    let context =
+        finding_action_context_tx(&mut tx, actor, None, Some(finding_id), Some(observation))
+            .await?;
+    if !actor_can_access_systems_tx(&mut tx, actor, &[context.system_id]).await? {
+        return Err(PoamError::NotFound);
+    }
+    if context.overall_outcome != "fail" {
+        return Err(PoamError::Precondition(
+            "finding_not_failed",
+            "Only a current Fail finding can search compatible POA&Ms".into(),
+            None,
+        ));
+    }
+    tx.commit().await?;
+    let mut items = poam::compatible_poams(
+        pool,
+        context.finding_id,
+        context.policy_lineage_id,
+        q,
+        clock.today(),
+        limit,
+        offset,
+        actor.is_admin,
+        &actor.environment_ids,
+    )
+    .await?;
+    let has_more = items.len() as i64 > limit;
+    if has_more {
+        items.truncate(limit as usize);
+    }
+    Ok(Page {
+        items,
+        limit,
+        offset,
+        has_more,
+        next_offset: has_more.then_some(offset + limit),
+    })
 }
 
 pub async fn compatible_for_assessment(

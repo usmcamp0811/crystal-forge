@@ -42,6 +42,7 @@ use crate::export::{
     ExportPayload, build_cf_json, build_csv, build_oscal, build_sarif, download_print_html,
     trigger_download,
 };
+use crate::routes::Route;
 use crate::state::{app_state::AppState, auth};
 use crate::views::poam_api::{
     self, AssignmentRelationshipEntry, FindingView, PoamListQuery, PoamSummary, Rollup,
@@ -1009,7 +1010,20 @@ pub fn ComplianceView(
                                     }
                                 }
                                 if let Some(system_id) = assignment_scope() {
-                                    AssignmentListPanel { scope_type: "system".to_string(), scope_id: system_id }
+                                    AssignmentListPanel {
+                                        key: "{system_id}",
+                                        scope_type: "system".to_string(),
+                                        scope_id: system_id,
+                                        on_open_finding: move |(bundle_id, bundle_version_id, finding): (uuid::Uuid, uuid::Uuid, FindingView)| {
+                                            selected_bundle_id.set(Some(bundle_id));
+                                            selected_bundle_version_id.set(Some(bundle_version_id));
+                                            drawer_open.set(true);
+                                            target_policy_id.set(Some(finding.policy_lineage_id));
+                                            open_poam_id.set(None);
+                                            assignment_scope.set(Some(finding.system_id));
+                                            on_evidence(finding.system_id);
+                                        },
+                                    }
                                 }
                                 XccdfVersionSelector { bundle: bundle.clone(), selected_version_id: *selected_bundle_version_id.read(), on_select: move |version_id| { selected_bundle_version_id.set(version_id); if let Some(bundle_id) = *selected_bundle_id.read() { start_systems_fetch(bundle_id, version_id); } } }
                                 if is_admin {
@@ -1978,6 +1992,8 @@ fn AssignmentCreatePanel(props: AssignmentCreatePanelProps) -> Element {
 struct AssignmentListPanelProps {
     scope_type: String,
     scope_id: uuid::Uuid,
+    #[props(default)]
+    on_open_finding: Option<EventHandler<(uuid::Uuid, uuid::Uuid, FindingView)>>,
 }
 
 #[derive(Props, Clone, PartialEq)]
@@ -2335,6 +2351,7 @@ fn AssignmentListPanel(props: AssignmentListPanelProps) -> Element {
         use_signal(|| None::<crate::api::models::EffectivePolicySetResponse>);
     let mut preview_loading = use_signal(|| false);
     let app_state = use_context::<Signal<AppState>>();
+    let nav = navigator();
     let viewer = !auth::is_operator_or_above(&app_state.read().auth);
     let mut relationships = use_signal(HashMap::<uuid::Uuid, AssignmentRelationshipEntry>::new);
     let mut relationships_loading = use_signal(|| false);
@@ -2555,12 +2572,19 @@ fn AssignmentListPanel(props: AssignmentListPanelProps) -> Element {
                     link_error.set(Some("This finding is not present in the exact immutable assignment bundle revision.".to_string()));
                     return;
                 }
-                let target = format!(
-                    "/compliance?bundle={bundle_id}&version={bundle_version_id}&system={}&policy={}&view=evidence",
-                    finding.system_id, finding.policy_lineage_id
-                );
-                if let Some(window) = web_sys::window() {
-                    let _ = window.location().set_href(&target);
+                open_poam.set(None);
+                open_poam_assignment.set(None);
+                if let Some(on_open_finding) = props.on_open_finding {
+                    on_open_finding.call((bundle_id, bundle_version_id, finding));
+                } else {
+                    nav.push(Route::ComplianceView {
+                        bundle: bundle_id.to_string(),
+                        version: bundle_version_id.to_string(),
+                        system: finding.system_id.to_string(),
+                        policy: finding.policy_lineage_id.to_string(),
+                        poam: String::new(),
+                        view: "evidence".to_string(),
+                    });
                 }
             },
             on_changed: move |_| refresh_relationships(assignments.read().iter().map(|assignment| assignment.current_version_id).collect()),

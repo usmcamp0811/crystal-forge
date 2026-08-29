@@ -13,10 +13,10 @@ use uuid::Uuid;
 use crate::components::icon::{Icon, IconName};
 use crate::views::poam_api::{
     self, ActivityView, AddFindingRequest, AddMilestoneRequest, AddNoteRequest, AssessmentOutcome,
-    AssignmentReferenceRequest, ClosePreconditionDetails, FindingRelationshipEntry, FindingView,
-    MilestoneView, PoamApiError, PoamDetail, PoamDetailQuery, PoamRisk, PoamStatus, PoamSummary,
-    RevisionRequest, Rollup, TransitionPoamRequest, UpdateMilestoneRequest, UpdatePoamRequest,
-    VerificationResult,
+    AssignmentReferenceRequest, ClosePreconditionDetails, FindingObservationReference,
+    FindingRelationshipEntry, FindingView, MilestoneView, PoamApiError, PoamDetail,
+    PoamDetailQuery, PoamRisk, PoamStatus, PoamSummary, RevisionRequest, Rollup,
+    TransitionPoamRequest, UpdateMilestoneRequest, UpdatePoamRequest, VerificationResult,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,7 +32,9 @@ pub struct AssignmentVersionCandidate {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FindingPoamContext {
-    pub assessment_id: Uuid,
+    pub assessment_id: Option<Uuid>,
+    pub finding_id: Uuid,
+    pub observation: Option<FindingObservationReference>,
     pub system_id: Uuid,
     pub hostname: String,
     pub policy_lineage_id: Uuid,
@@ -200,7 +202,10 @@ pub fn FindingPoamBar(props: FindingPoamBarProps) -> Element {
     let history = props.relationship.history.clone();
     let can_start = props.context.result == AssessmentOutcome::Fail && active.is_none();
 
-    if props.relationship.assessment_id != props.context.assessment_id {
+    if props.relationship.finding_id != props.context.finding_id
+        || (props.relationship.assessment_id.is_some()
+            && props.relationship.assessment_id != props.context.assessment_id)
+    {
         return rsx! {
             div { class: "sd-callout sd-callout-danger",
                 "Remediation relationship does not match this authoritative assessment. Refresh evidence before continuing."
@@ -213,7 +218,7 @@ pub fn FindingPoamBar(props: FindingPoamBarProps) -> Element {
     }
 
     rsx! {
-        section { class: "poam-bar", aria_label: "Finding remediation", "data-testid": "finding-poam-remediation", "data-assessment-id": "{props.context.assessment_id}",
+        section { class: "poam-bar", aria_label: "Finding remediation", "data-testid": "finding-poam-remediation", "data-finding-id": "{props.context.finding_id}",
             div { class: "poam-bar-label", Icon { name: IconName::Gear, size: 12 } "Remediation" }
             div { class: "poam-finding-result",
                 span { "Current result" }
@@ -254,7 +259,7 @@ pub fn FindingPoamBar(props: FindingPoamBarProps) -> Element {
                 on_created: move |detail| {
                     create_open.set(false);
                     props.on_event.call(FindingPoamEvent::Created(detail));
-                    props.on_event.call(FindingPoamEvent::InvalidateAssessment(props.context.assessment_id));
+                    props.on_event.call(FindingPoamEvent::InvalidateAssessment(props.context.assessment_id.unwrap_or(props.context.finding_id)));
                 },
             }
         }
@@ -265,7 +270,7 @@ pub fn FindingPoamBar(props: FindingPoamBarProps) -> Element {
                 on_linked: move |detail| {
                     link_open.set(false);
                     props.on_event.call(FindingPoamEvent::Linked(detail));
-                    props.on_event.call(FindingPoamEvent::InvalidateAssessment(props.context.assessment_id));
+                    props.on_event.call(FindingPoamEvent::InvalidateAssessment(props.context.assessment_id.unwrap_or(props.context.finding_id)));
                 },
             }
         }
@@ -334,7 +339,7 @@ fn PoamCreateModal(props: PoamCreateModalProps) -> Element {
                     button { class: "btn btn-primary focus-ring", disabled: pending() || title.read().trim().is_empty() || owner.read().trim().is_empty(), onclick: move |_| {
                         let parsed_target = if target.read().trim().is_empty() { Ok(None) } else { NaiveDate::parse_from_str(target.read().trim(), "%Y-%m-%d").map(Some).map_err(|_| "Enter a valid target date.".to_string()) };
                         let Ok(target_date) = parsed_target else { error.set(parsed_target.err()); return; };
-                        let request = poam_api::CreatePoamRequest { assessment_id: props.context.assessment_id, title: title.read().trim().to_string(), plan: plan.read().trim().to_string(), owner: owner.read().trim().to_string(), target_date, risk: risk(), default_milestones: milestones(), assignment_version_ids: assignments.read().iter().copied().collect() };
+                        let request = poam_api::CreatePoamRequest { assessment_id: props.context.assessment_id, finding_id: props.context.assessment_id.is_none().then_some(props.context.finding_id), observation: props.context.observation.clone(), title: title.read().trim().to_string(), plan: plan.read().trim().to_string(), owner: owner.read().trim().to_string(), target_date, risk: risk(), default_milestones: milestones(), assignment_version_ids: assignments.read().iter().copied().collect() };
                         let mut pending = pending; let mut error = error; let on_created = props.on_created;
                         spawn(async move { pending.set(true); match poam_api::create_poam(&request).await { Ok(detail) => on_created.call(detail), Err(err) => { error.set(Some(if err.is_active_remediation() { "This finding already has an active remediation plan. Refresh the finding before retrying.".to_string() } else { api_message(&err) })); pending.set(false); } } });
                     }, if pending() { "Creating..." } else { "Create POA&M" } }
@@ -351,6 +356,22 @@ fn FindingContextPanel(context: FindingPoamContext) -> Element {
         (Some(name), None) => name.clone(),
         _ => "No bundle context".to_string(),
     };
+    let observation_label = context
+        .assessment_id
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| {
+            context
+                .observation
+                .as_ref()
+                .map(|value| {
+                    let source = match value.source {
+                        poam_api::FindingObservationSource::NixPolicyResult => "nix-policy-result",
+                        poam_api::FindingObservationSource::CveScan => "cve-scan",
+                    };
+                    format!("{source}:{}", value.source_id)
+                })
+                .unwrap_or_else(|| "Unavailable".to_string())
+        });
     rsx! {
         section { class: "poam-context", "data-testid": "poam-finding-context",
             header { Icon { name: IconName::Shield, size: 12 } "Finding context" span { "Authoritative and read-only" } }
@@ -359,7 +380,7 @@ fn FindingContextPanel(context: FindingPoamContext) -> Element {
                 div { dt { "Policy / version" } dd { "{context.policy_name} · {context.policy_version}" } }
                 div { dt { "Bundle / version" } dd { "{bundle}" } }
                 div { dt { "Result" } dd { class: "poam-current-fail", "{assessment_label(context.result)}" } }
-                div { dt { "Assessment" } dd { class: "mono", "{context.assessment_id}" } }
+                div { dt { "Observation" } dd { class: "mono", "{observation_label}" } }
                 div { dt { "Evidence" } dd { "{context.evidence_summary}" } }
             }
         }
@@ -383,12 +404,17 @@ fn PoamLinkExistingModal(props: PoamLinkExistingModalProps) -> Element {
     let mut error = use_signal(|| None::<String>);
     let mut refresh_nonce = use_signal(|| 0_u64);
     let close = props.on_close;
+    let assessment_id = props.context.assessment_id;
+    let finding_id = props.context.finding_id;
+    let observation = props.context.observation.clone();
+    let search_observation = observation.clone();
 
     use_effect(move || {
         let term = query();
         let _ = refresh_nonce();
         generation += 1;
         let request_generation = generation();
+        let observation = search_observation.clone();
         spawn(async move {
             loading.set(true);
             TimeoutFuture::new(300).await;
@@ -396,7 +422,9 @@ fn PoamLinkExistingModal(props: PoamLinkExistingModalProps) -> Element {
                 return;
             }
             match poam_api::compatible_poams(
-                props.context.assessment_id,
+                assessment_id,
+                assessment_id.is_none().then_some(finding_id),
+                observation.as_ref(),
                 (!term.trim().is_empty()).then_some(term.trim()),
                 50,
                 0,
@@ -433,9 +461,11 @@ fn PoamLinkExistingModal(props: PoamLinkExistingModalProps) -> Element {
                     if !loading() && error().is_none() && results.read().is_empty() { div { class: "poam-empty", "No compatible active POA&M items match." } }
                     div { class: "poam-picker-list",
                         for item in results.read().clone() {
-                            button { key: "{item.id}", class: "poam-pick focus-ring", disabled: pending().is_some(), onclick: move |_| {
+                            {
+                            let observation = observation.clone();
+                            rsx! { button { key: "{item.id}", class: "poam-pick focus-ring", disabled: pending().is_some(), onclick: move |_| {
                                 pending.set(Some(item.id)); error.set(None);
-                                let request = AddFindingRequest { revision: item.revision, assessment_id: props.context.assessment_id };
+                                let request = AddFindingRequest { revision: item.revision, assessment_id, finding_id: assessment_id.is_none().then_some(finding_id), observation: observation.clone() };
                                 let mut pending = pending; let mut error = error; let on_linked = props.on_linked;
                                 spawn(async move { match poam_api::link_poam_finding(item.id, &request).await { Ok(detail) => on_linked.call(detail), Err(err) => { let stale = err.is_stale(); error.set(Some(if err.is_active_remediation() { "This finding already has an active remediation plan. Refresh before retrying.".to_string() } else if stale { "This POA&M changed while it was selected. Refreshed the current server results; retry the updated item.".to_string() } else { api_message(&err) })); pending.set(None); if stale { refresh_nonce += 1; } } } });
                             },
@@ -443,6 +473,7 @@ fn PoamLinkExistingModal(props: PoamLinkExistingModalProps) -> Element {
                                 strong { "{item.title}" }
                                 small { "{item.owner} · due {format_date(item.target_date)} · {item.finding_count} linked findings · revision {item.revision}" }
                                 if pending() == Some(item.id) { span { class: "poam-pending", "Linking..." } }
+                            } }
                             }
                         }
                     }
@@ -500,6 +531,60 @@ struct MilestoneDraft {
     target: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HistoryPageKind {
+    Findings,
+    Activity,
+    Verification,
+}
+
+fn append_history_page(current: &mut PoamDetail, page: PoamDetail, kind: HistoryPageKind) {
+    match kind {
+        HistoryPageKind::Findings => {
+            let existing = current
+                .findings
+                .iter()
+                .map(|item| item.link_id)
+                .collect::<HashSet<_>>();
+            current.findings.extend(
+                page.findings
+                    .into_iter()
+                    .filter(|item| !existing.contains(&item.link_id)),
+            );
+            current.findings_has_more = page.findings_has_more;
+            current.findings_next_cursor = page.findings_next_cursor;
+        }
+        HistoryPageKind::Activity => {
+            let existing = current
+                .activity
+                .iter()
+                .map(|item| item.id)
+                .collect::<HashSet<_>>();
+            current.activity.extend(
+                page.activity
+                    .into_iter()
+                    .filter(|item| !existing.contains(&item.id)),
+            );
+            current.activity_has_more = page.activity_has_more;
+            current.activity_next_cursor = page.activity_next_cursor;
+        }
+        HistoryPageKind::Verification => {
+            let existing = current
+                .verification_attempts
+                .iter()
+                .map(|item| item.id)
+                .collect::<HashSet<_>>();
+            current.verification_attempts.extend(
+                page.verification_attempts
+                    .into_iter()
+                    .filter(|item| !existing.contains(&item.id)),
+            );
+            current.verification_has_more = page.verification_has_more;
+            current.verification_next_cursor = page.verification_next_cursor;
+        }
+    }
+}
+
 #[component]
 pub fn PoamDetailTray(props: PoamDetailTrayProps) -> Element {
     let mut state = use_signal(|| DetailState::Loading);
@@ -523,6 +608,7 @@ pub fn PoamDetailTray(props: PoamDetailTrayProps) -> Element {
     let mut finding_results = use_signal(Vec::new);
     let mut finding_loading = use_signal(|| false);
     let mut assignment_choice = use_signal(String::new);
+    let mut history_loading = use_signal(|| None::<HistoryPageKind>);
     let close = props.on_close;
 
     let mut load = move |reset_drafts: bool| {
@@ -583,6 +669,42 @@ pub fn PoamDetailTray(props: PoamDetailTrayProps) -> Element {
         loaded_poam_id.set(Some(props.poam_id));
         load(true);
     });
+
+    let mut load_more = move |kind: HistoryPageKind, query: PoamDetailQuery| {
+        if history_loading().is_some() {
+            return;
+        }
+        let requested = generation();
+        history_loading.set(Some(kind));
+        spawn(async move {
+            match poam_api::fetch_poam(props.poam_id, &query).await {
+                Ok(page) if generation() == requested => {
+                    let loaded = state.read().clone();
+                    if let DetailState::Loaded(mut current) = loaded {
+                        if current.poam.revision == page.poam.revision {
+                            append_history_page(&mut current, page, kind);
+                            state.set(DetailState::Loaded(current));
+                            message.set(None);
+                        } else {
+                            history_loading.set(None);
+                            message.set(Some(
+                                "The POA&M changed while loading history; current data was refreshed."
+                                    .to_string(),
+                            ));
+                            load(false);
+                            return;
+                        }
+                    }
+                    history_loading.set(None);
+                }
+                Err(error) if generation() == requested => {
+                    history_loading.set(None);
+                    message.set(Some(format!("Could not load more history: {error}")));
+                }
+                _ => {}
+            }
+        });
+    };
 
     use_effect(move || {
         if !finding_picker() {
@@ -663,6 +785,34 @@ pub fn PoamDetailTray(props: PoamDetailTrayProps) -> Element {
     } else {
         completed_milestones * 100 / detail.milestones.len()
     };
+    let finding_page_query = detail
+        .findings_next_cursor
+        .as_ref()
+        .map(|cursor| PoamDetailQuery {
+            finding_limit: Some(100),
+            finding_before_at: Some(cursor.at),
+            finding_before_id: Some(cursor.id),
+            ..Default::default()
+        });
+    let activity_page_query = detail
+        .activity_next_cursor
+        .as_ref()
+        .map(|cursor| PoamDetailQuery {
+            activity_limit: Some(100),
+            activity_before_at: Some(cursor.at),
+            activity_before_id: Some(cursor.id),
+            ..Default::default()
+        });
+    let verification_page_query =
+        detail
+            .verification_next_cursor
+            .as_ref()
+            .map(|cursor| PoamDetailQuery {
+                verification_limit: Some(10),
+                verification_before_at: Some(cursor.at),
+                verification_before_id: Some(cursor.id),
+                ..Default::default()
+            });
 
     let mut reconcile = move |next: PoamDetail| {
         if let Some(handler) = props.on_changed {
@@ -735,13 +885,14 @@ pub fn PoamDetailTray(props: PoamDetailTrayProps) -> Element {
                         label { class: "field", span { "Risk" } select { class: "input focus-ring", value: "{risk:?}", disabled: readonly, onchange: move |event| risk.set(match event.value().as_str() { "High" => PoamRisk::High, "Low" => PoamRisk::Low, _ => PoamRisk::Medium }), option { value: "High", "CAT I - High" } option { value: "Medium", "CAT II - Medium" } option { value: "Low", "CAT III - Low" } } }
                     }
                 }
-                LifecycleSection { detail: detail.clone(), readonly, close_details: close_details(), on_transition: move |status| { let request = TransitionPoamRequest { revision, status, note: None }; busy.set(Some("Changing status".to_string())); spawn(async move { match poam_api::transition_poam(props.poam_id, &request).await { Ok(next) => reconcile(next), Err(err) => handle_error("changing status", err) } }); }, on_verify: move |_| { let request = RevisionRequest { revision }; busy.set(Some("Verifying".to_string())); spawn(async move { match poam_api::verify_poam(props.poam_id, &request).await { Ok(_) => { busy.set(None); load(true); }, Err(err) => handle_error("verifying remediation", err) } }); }, on_close: move |_| { let request = RevisionRequest { revision }; busy.set(Some("Closing".to_string())); spawn(async move { match poam_api::close_poam(props.poam_id, &request).await { Ok(next) => reconcile(next), Err(err) => handle_error("closing", err) } }); }, on_reopen: move |_| { let request = RevisionRequest { revision }; busy.set(Some("Reopening".to_string())); spawn(async move { match poam_api::reopen_poam(props.poam_id, &request).await { Ok(next) => reconcile(next), Err(err) => handle_error("reopening", err) } }); } }
+                LifecycleSection { detail: detail.clone(), readonly, close_details: close_details(), verification_loading: history_loading() == Some(HistoryPageKind::Verification), on_load_more_verification: move |_| if let Some(query) = verification_page_query.clone() { load_more(HistoryPageKind::Verification, query); }, on_transition: move |status| { let request = TransitionPoamRequest { revision, status, note: None }; busy.set(Some("Changing status".to_string())); spawn(async move { match poam_api::transition_poam(props.poam_id, &request).await { Ok(next) => reconcile(next), Err(err) => handle_error("changing status", err) } }); }, on_verify: move |_| { let request = RevisionRequest { revision }; busy.set(Some("Verifying".to_string())); spawn(async move { match poam_api::verify_poam(props.poam_id, &request).await { Ok(_) => { busy.set(None); load(true); }, Err(err) => handle_error("verifying remediation", err) } }); }, on_close: move |_| { let request = RevisionRequest { revision }; busy.set(Some("Closing".to_string())); spawn(async move { match poam_api::close_poam(props.poam_id, &request).await { Ok(next) => reconcile(next), Err(err) => handle_error("closing", err) } }); }, on_reopen: move |_| { let request = RevisionRequest { revision }; busy.set(Some("Reopening".to_string())); spawn(async move { match poam_api::reopen_poam(props.poam_id, &request).await { Ok(next) => reconcile(next), Err(err) => handle_error("reopening", err) } }); } }
                 section { class: "poam-tray-section",
                     header { h3 { "Linked findings · {detail.findings.len()}" } button { class: "btn btn-ghost xs focus-ring", disabled: readonly, onclick: move |_| finding_picker.toggle(), Icon { name: IconName::Link, size: 11 } "Link finding" } }
                     if detail.findings.is_empty() { div { class: "poam-empty", "No findings are linked." } }
                     div { class: "poam-table-wrap", table { class: "sys-table compact sys-table-dense poam-findings-table", thead { tr { th { "Host" } th { "Policy" } th { "Current result" } th { "Actions" } } } tbody {
                         for finding in detail.findings.clone() { { let finding_for_navigation = finding.clone(); let finding_id = finding.id; rsx! { tr { key: "{finding.link_id}", "data-testid": "poam-linked-finding", "data-finding-id": "{finding.id}", td { class: "mono", "{finding.hostname}" } td { "{finding.policy_name}" } td { span { class: "poam-chip {result_class(finding.resolution_state)}", "{result_label(finding.resolution_state)}" } } td { class: "poam-row-actions", button { class: "btn btn-ghost xs focus-ring", onclick: move |_| props.on_open_finding.call(finding_for_navigation.clone()), "Evidence" } button { class: "btn-icon focus-ring", title: "Unlink finding", disabled: readonly, onclick: move |_| { busy.set(Some("Unlinking finding".to_string())); spawn(async move { match poam_api::unlink_poam_finding(props.poam_id, finding_id, revision).await { Ok(next) => reconcile(next), Err(err) => handle_error("unlinking finding", err) } }); }, Icon { name: IconName::X, size: 12 } } } } } } }
                     } } }
+                    if detail.findings_has_more { button { class: "btn btn-ghost focus-ring", "data-testid": "poam-load-more-findings", disabled: history_loading().is_some(), onclick: move |_| if let Some(query) = finding_page_query.clone() { load_more(HistoryPageKind::Findings, query); }, if history_loading() == Some(HistoryPageKind::Findings) { "Loading…" } else { "Load more findings" } } }
                     if finding_picker() {
                         div { class: "poam-picker-panel",
                             div { class: "filter-search poam-search",
@@ -759,7 +910,7 @@ pub fn PoamDetailTray(props: PoamDetailTrayProps) -> Element {
                                                     message.set(Some("This candidate has no current authoritative assessment.".to_string()));
                                                     return;
                                                 };
-                                                let request = AddFindingRequest { revision, assessment_id };
+                                                let request = AddFindingRequest { revision, assessment_id: Some(assessment_id), finding_id: None, observation: None };
                                                 busy.set(Some("Linking finding".to_string()));
                                                 spawn(async move {
                                                     match poam_api::link_poam_finding(props.poam_id, &request).await {
@@ -786,7 +937,7 @@ pub fn PoamDetailTray(props: PoamDetailTrayProps) -> Element {
                 }
                 section { class: "poam-tray-section", header { h3 { "Remediation plan" } } textarea { class: "input focus-ring poam-plan", rows: "5", value: "{plan}", disabled: readonly, placeholder: "What will change, where, and how it will be verified", oninput: move |event| plan.set(event.value()) } }
                 MilestonesSection { milestones: detail.milestones.clone(), drafts: milestone_drafts, new_title: milestone_title, new_target: milestone_target, readonly, on_add: move |values: (String, String)| { let (new_title, new_target) = values; let Ok(target_date) = NaiveDate::parse_from_str(&new_target, "%Y-%m-%d") else { message.set(Some("Enter a valid milestone target date.".to_string())); return; }; let request = AddMilestoneRequest { revision, title: new_title, target_date }; busy.set(Some("Adding milestone".to_string())); spawn(async move { match poam_api::add_poam_milestone(props.poam_id, &request).await { Ok(next) => { milestone_title.set(String::new()); milestone_target.set(String::new()); reconcile(next); }, Err(err) => handle_error("adding milestone", err) } }); }, on_update: move |values: (Uuid, MilestoneDraft, Option<bool>)| { let (id, draft, completed) = values; let Ok(target_date) = NaiveDate::parse_from_str(&draft.target, "%Y-%m-%d") else { message.set(Some("Enter a valid milestone target date.".to_string())); return; }; let request = UpdateMilestoneRequest { revision, title: Some(draft.title), target_date: Some(target_date), completed }; busy.set(Some("Updating milestone".to_string())); spawn(async move { match poam_api::update_poam_milestone(props.poam_id, id, &request).await { Ok(next) => reconcile(next), Err(err) => handle_error("updating milestone", err) } }); }, on_remove: move |id| { busy.set(Some("Removing milestone".to_string())); spawn(async move { match poam_api::remove_poam_milestone(props.poam_id, id, revision).await { Ok(next) => reconcile(next), Err(err) => handle_error("removing milestone", err) } }); } }
-                section { class: "poam-tray-section", header { h3 { "Activity" } } ActivityList { activity: detail.activity.clone() } div { class: "poam-note-form", input { class: "input focus-ring", value: "{note}", placeholder: "Add a durable note", disabled: readonly, oninput: move |event| note.set(event.value()) } button { class: "btn btn-ghost focus-ring", disabled: readonly || note.read().trim().is_empty(), onclick: move |_| { let request = AddNoteRequest { revision, text: note.read().trim().to_string() }; busy.set(Some("Adding note".to_string())); spawn(async move { match poam_api::add_poam_note(props.poam_id, &request).await { Ok(next) => { note.set(String::new()); reconcile(next); }, Err(err) => handle_error("adding note", err) } }); }, "Add note" } } }
+                section { class: "poam-tray-section", header { h3 { "Activity" } } ActivityList { activity: detail.activity.clone() } if detail.activity_has_more { button { class: "btn btn-ghost focus-ring", "data-testid": "poam-load-more-activity", disabled: history_loading().is_some(), onclick: move |_| if let Some(query) = activity_page_query.clone() { load_more(HistoryPageKind::Activity, query); }, if history_loading() == Some(HistoryPageKind::Activity) { "Loading…" } else { "Load more activity" } } } div { class: "poam-note-form", input { class: "input focus-ring", value: "{note}", placeholder: "Add a durable note", disabled: readonly, oninput: move |event| note.set(event.value()) } button { class: "btn btn-ghost focus-ring", disabled: readonly || note.read().trim().is_empty(), onclick: move |_| { let request = AddNoteRequest { revision, text: note.read().trim().to_string() }; busy.set(Some("Adding note".to_string())); spawn(async move { match poam_api::add_poam_note(props.poam_id, &request).await { Ok(next) => { note.set(String::new()); reconcile(next); }, Err(err) => handle_error("adding note", err) } }); }, "Add note" } } }
             }
         }
     }
@@ -805,18 +956,20 @@ struct LifecycleSectionProps {
     on_verify: EventHandler<()>,
     on_close: EventHandler<()>,
     on_reopen: EventHandler<()>,
+    verification_loading: bool,
+    on_load_more_verification: EventHandler<()>,
 }
 
 #[component]
 fn LifecycleSection(props: LifecycleSectionProps) -> Element {
     let status = props.detail.poam.status;
-    let latest_attempt = props.detail.verification_attempts.first();
     rsx! {
         section { class: "poam-tray-section",
             header { h3 { "Remediation status" } div { class: "poam-lifecycle-actions", if status == PoamStatus::Completed { button { class: "btn btn-ghost xs focus-ring", disabled: props.readonly, onclick: move |_| props.on_reopen.call(()), Icon { name: IconName::Rollback, size: 11 } "Reopen" } } else { button { class: "btn btn-ghost xs focus-ring", disabled: props.readonly, onclick: move |_| props.on_verify.call(()), "Verify now" } if status == PoamStatus::AwaitingVerification { button { class: "btn btn-primary xs focus-ring", disabled: props.readonly, onclick: move |_| props.on_close.call(()), Icon { name: IconName::Check, size: 11 } "Authoritative close" } } } } }
             if status != PoamStatus::Completed { div { class: "seg poam-status-seg", for choice in [PoamStatus::Open, PoamStatus::InProgress, PoamStatus::Blocked, PoamStatus::AwaitingVerification] { button { class: if status == choice { "active" } else { "" }, disabled: props.readonly || status == choice, onclick: move |_| props.on_transition.call(choice), "{status_label(choice)}" } } } }
             if status == PoamStatus::AwaitingVerification { div { class: "sd-callout sd-callout-warn", Icon { name: IconName::Warn, size: 13 } div { strong { "Awaiting verification." } " Remediation is reported complete, but the finding result remains independent. Verify against current assessments, then use authoritative close." } } }
-            if let Some(attempt) = latest_attempt { div { class: "poam-verification", "data-testid": "poam-verification-result", strong { "Latest verification · {attempt.outcome:?}" } span { class: "mono", "{attempt.attempted_at}" } for item in attempt.items.clone() { div { class: "poam-verification-item", "data-finding-id": "{item.finding_id}", span { class: "mono", "{item.finding_id}" } span { class: "poam-chip {result_class(item.result)}", "{result_label(item.result)}" } span { "{item.detail}" } if item.result == VerificationResult::Waiver { strong { "Closure basis: waiver" } } } } } }
+            for (index, attempt) in props.detail.verification_attempts.clone().into_iter().enumerate() { div { class: "poam-verification", "data-testid": "poam-verification-result", strong { if index == 0 { "Latest verification · {attempt.outcome:?}" } else { "Earlier verification · {attempt.outcome:?}" } } span { class: "mono", "{attempt.attempted_at}" } for item in attempt.items.clone() { div { class: "poam-verification-item", "data-finding-id": "{item.finding_id}", span { class: "mono", "{item.finding_id}" } span { class: "poam-chip {result_class(item.result)}", "{result_label(item.result)}" } span { "{item.detail}" } if item.result == VerificationResult::Waiver { strong { "Closure basis: waiver" } } } } } }
+            if props.detail.verification_has_more { button { class: "btn btn-ghost focus-ring", "data-testid": "poam-load-more-verification", disabled: props.verification_loading, onclick: move |_| props.on_load_more_verification.call(()), if props.verification_loading { "Loading…" } else { "Load more verification attempts" } } }
             if let Some(details) = props.close_details { div { class: "poam-close-details", "data-testid": "poam-close-rejection", strong { "Closure rejected for these findings" } for item in details.items { div { "data-finding-id": "{item.finding_id}", span { class: "mono", "{item.finding_id}" } span { class: "poam-chip {result_class(item.result)}", "{result_label(item.result)}" } if item.result == VerificationResult::Waiver { span { "Accepted basis: waiver" } } } } } }
         }
     }
@@ -847,7 +1000,43 @@ fn MilestonesSection(props: MilestonesSectionProps) -> Element {
 
 #[component]
 fn ActivityList(activity: Vec<ActivityView>) -> Element {
-    rsx! { div { class: "poam-activity", if activity.is_empty() { div { class: "poam-empty", "No durable activity has been recorded." } } for item in activity { { let payload = serde_json::to_string_pretty(&item.payload).unwrap_or_else(|_| "null".to_string()); rsx! { div { class: "poam-activity-row", time { class: "mono", "{item.created_at}" } strong { "{item.kind}" } pre { "{payload}" } } } } } } }
+    rsx! { div { class: "poam-activity", if activity.is_empty() { div { class: "poam-empty", "No durable activity has been recorded." } } for item in activity { { let payload = serde_json::to_string_pretty(&item.payload).unwrap_or_else(|_| "null".to_string()); let description = activity_description(&item); let actor = item.actor_display.clone().unwrap_or_else(|| if item.actor_user_id.is_some() { "Deleted or unavailable user".to_string() } else { "System".to_string() }); rsx! { div { class: "poam-activity-row", "data-activity-kind": "{item.kind}", div { time { class: "mono", "{item.created_at}" } span { "Actor: {actor}" } } strong { "{description}" } details { summary { "Diagnostics" } pre { "{payload}" } } } } } } } }
+}
+
+fn payload_text<'a>(activity: &'a ActivityView, key: &str) -> Option<&'a str> {
+    activity
+        .payload
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+}
+
+fn activity_description(activity: &ActivityView) -> String {
+    match activity.kind.as_str() {
+        "created" => "Created the POA&M and linked its initial finding".to_string(),
+        "updated" => "Updated POA&M metadata or remediation plan".to_string(),
+        "status_changed" => match (payload_text(activity, "from"), payload_text(activity, "to")) {
+            (Some(from), Some(to)) => format!("Changed status from {from} to {to}"),
+            _ => "Changed POA&M status".to_string(),
+        },
+        "milestone_added" => payload_text(activity, "title")
+            .map(|title| format!("Added milestone “{title}”"))
+            .unwrap_or_else(|| "Added a remediation milestone".to_string()),
+        "milestone_updated" => "Updated a remediation milestone".to_string(),
+        "milestone_removed" => "Removed a remediation milestone".to_string(),
+        "note" => payload_text(activity, "text")
+            .map(|text| format!("Added note: {text}"))
+            .unwrap_or_else(|| "Added a durable note".to_string()),
+        "finding_linked" => "Linked an authoritative finding".to_string(),
+        "finding_unlinked" => "Unlinked a finding".to_string(),
+        "assignment_linked" => "Linked an immutable assignment version reference".to_string(),
+        "assignment_unlinked" => "Unlinked an immutable assignment version reference".to_string(),
+        "verification_attempted" => payload_text(activity, "outcome")
+            .map(|outcome| format!("Recorded {outcome} verification attempt"))
+            .unwrap_or_else(|| "Recorded an authoritative verification attempt".to_string()),
+        "closed" => "Closed the POA&M after authoritative verification".to_string(),
+        "reopened" => "Reopened the POA&M".to_string(),
+        other => format!("Recorded {} activity", other.replace('_', " ")),
+    }
 }
 
 #[derive(Props, Clone, PartialEq)]

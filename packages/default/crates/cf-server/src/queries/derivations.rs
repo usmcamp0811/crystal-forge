@@ -79,6 +79,9 @@ pub enum SyntheticFailureWrite {
 /// (e.g. from 4 → 7 by a build worker) cannot race between the check and
 /// the update. If the row was already modified concurrently, the `FOR UPDATE`
 /// wait ensures we see the latest committed state before deciding.
+/// Before commit, the function also acquires stable POA&M finding locks for
+/// systems that currently deploy the derivation. A create or link action cannot
+/// commit from an observation that this write supersedes.
 pub async fn record_synthetic_eval_failure(
     pool: &PgPool,
     commit_id: Option<i32>,
@@ -151,6 +154,10 @@ pub async fn record_synthetic_eval_failure(
 
             match existing {
                 Some((id, status_id)) => {
+                    crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx(
+                        &mut tx, id,
+                    )
+                    .await?;
                     sqlx::query(
                         "DELETE FROM composite_policy_assessments WHERE derivation_id = $1",
                     )
@@ -213,6 +220,18 @@ pub async fn record_synthetic_eval_failure(
         }
     };
 
+    // CONCURRENCY: Publish refreshed policy results through the same stable
+    // finding-key boundary used by POA&M create and link actions. The helper
+    // also covers legacy policies that have no composite assessment rows.
+    crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx(
+        &mut tx,
+        match &result {
+            SyntheticFailureWrite::Inserted { derivation_id }
+            | SyntheticFailureWrite::UpdatedPendingEvaluation { derivation_id }
+            | SyntheticFailureWrite::PreservedExisting { derivation_id, .. } => *derivation_id,
+        },
+    )
+    .await?;
     tx.commit().await?;
     Ok(result)
 }
@@ -397,6 +416,9 @@ pub enum SuccessfulEvalWrite {
 ///
 /// Returns the derivation id and outcome so the caller can decide whether
 /// to enqueue a build job (only for Inserted and UpdatedEvaluationState).
+/// Before commit, the function also acquires stable POA&M finding locks for
+/// systems that currently deploy the derivation. A create or link action cannot
+/// commit from an observation that this write supersedes.
 pub async fn record_successful_eval_result(
     pool: &PgPool,
     commit_id: Option<i32>,
@@ -473,6 +495,10 @@ pub async fn record_successful_eval_result(
 
             match existing {
                 Some((id, status_id)) => {
+                    crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx(
+                        &mut tx, id,
+                    )
+                    .await?;
                     sqlx::query(
                         "DELETE FROM composite_policy_assessments WHERE derivation_id = $1",
                     )
@@ -554,6 +580,18 @@ pub async fn record_successful_eval_result(
         }
     };
 
+    // CONCURRENCY: Publish refreshed policy results through the same stable
+    // finding-key boundary used by POA&M create and link actions. The helper
+    // also covers legacy policies that have no composite assessment rows.
+    crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx(
+        &mut tx,
+        match &result {
+            SuccessfulEvalWrite::Inserted { derivation_id }
+            | SuccessfulEvalWrite::UpdatedEvaluationState { derivation_id }
+            | SuccessfulEvalWrite::PreservedBuildState { derivation_id, .. } => *derivation_id,
+        },
+    )
+    .await?;
     tx.commit().await?;
     Ok(result)
 }
@@ -563,7 +601,9 @@ pub async fn record_successful_eval_result(
 /// Operates through a caller-owned transaction so multiple systems can be
 /// written atomically; if any write fails the caller can roll back all of them.
 ///
-/// State matrix and behaviour are identical to `record_successful_eval_result`.
+/// State matrix, POA&M finding locking, and behavior are identical to
+/// [`record_successful_eval_result`]. The caller holds the finding locks until
+/// it commits or rolls back the transaction.
 pub async fn record_successful_eval_result_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     commit_id: Option<i32>,
@@ -613,8 +653,8 @@ pub async fn record_successful_eval_result_in_tx(
     .fetch_optional(&mut **tx)
     .await?;
 
-    match insert_result {
-        Some((id,)) => Ok(SuccessfulEvalWrite::Inserted { derivation_id: id }),
+    let result = match insert_result {
+        Some((id,)) => Ok::<_, anyhow::Error>(SuccessfulEvalWrite::Inserted { derivation_id: id }),
         None => {
             let existing = sqlx::query_as::<_, (i32, i32)>(
                 r#"
@@ -634,6 +674,10 @@ pub async fn record_successful_eval_result_in_tx(
 
             match existing {
                 Some((id, status_id)) => {
+                    crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx(
+                        tx, id,
+                    )
+                    .await?;
                     sqlx::query(
                         "DELETE FROM composite_policy_assessments WHERE derivation_id = $1",
                     )
@@ -712,12 +756,24 @@ pub async fn record_successful_eval_result_in_tx(
                 ),
             }
         }
-    }
+    }?;
+    crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx(
+        tx,
+        match &result {
+            SuccessfulEvalWrite::Inserted { derivation_id }
+            | SuccessfulEvalWrite::UpdatedEvaluationState { derivation_id }
+            | SuccessfulEvalWrite::PreservedBuildState { derivation_id, .. } => *derivation_id,
+        },
+    )
+    .await?;
+    Ok(result)
 }
 
 /// Transaction-aware variant of `record_synthetic_eval_failure`.
 ///
 /// Operates through a caller-owned transaction for atomic multi-system writes.
+/// The caller holds the POA&M finding locks until it commits or rolls back the
+/// transaction.
 pub async fn record_synthetic_eval_failure_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     commit_id: Option<i32>,
@@ -754,8 +810,10 @@ pub async fn record_synthetic_eval_failure_in_tx(
     .fetch_optional(&mut **tx)
     .await?;
 
-    match insert_result {
-        Some((id, _)) => Ok(SyntheticFailureWrite::Inserted { derivation_id: id }),
+    let result = match insert_result {
+        Some((id, _)) => {
+            Ok::<_, anyhow::Error>(SyntheticFailureWrite::Inserted { derivation_id: id })
+        }
         None => {
             let existing = sqlx::query_as::<_, (i32, i32)>(
                 r#"
@@ -775,6 +833,10 @@ pub async fn record_synthetic_eval_failure_in_tx(
 
             match existing {
                 Some((id, status_id)) => {
+                    crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx(
+                        tx, id,
+                    )
+                    .await?;
                     sqlx::query(
                         "DELETE FROM composite_policy_assessments WHERE derivation_id = $1",
                     )
@@ -827,7 +889,17 @@ pub async fn record_synthetic_eval_failure_in_tx(
                 ),
             }
         }
-    }
+    }?;
+    crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx(
+        tx,
+        match &result {
+            SyntheticFailureWrite::Inserted { derivation_id }
+            | SyntheticFailureWrite::UpdatedPendingEvaluation { derivation_id }
+            | SyntheticFailureWrite::PreservedExisting { derivation_id, .. } => *derivation_id,
+        },
+    )
+    .await?;
+    Ok(result)
 }
 
 // Convenience function for the common case with a commit

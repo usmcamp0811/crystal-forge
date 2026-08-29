@@ -1950,6 +1950,12 @@ pub struct ComplianceControlEvidence {
     pub framework_mapping: String,
     #[serde(default)]
     pub composite_result: Option<CompositeAssessmentResult>,
+    /// Stable remediation identity for this system and policy lineage.
+    #[serde(default)]
+    pub finding_id: Option<uuid::Uuid>,
+    /// Authoritative non-composite observation used for POA&M mutations.
+    #[serde(default)]
+    pub finding_observation: Option<crate::models::poam::FindingObservationReference>,
     /// True when this control is composite even if no exact assessment exists yet.
     #[serde(default)]
     pub composite_expected: bool,

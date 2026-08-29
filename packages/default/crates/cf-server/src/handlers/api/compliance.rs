@@ -58,6 +58,7 @@ use crate::queries::framework_requirements::{
     find_policy_candidates, preview_framework_reconciliation_with_hierarchy,
     preview_requirement_reconciliation,
 };
+use crate::queries::systems::{find_system_access_row, get_user_environment_membership_ids};
 
 const MAX_GROUPING_SCHEME_NAME_BYTES: usize = 255;
 const MAX_GROUPING_GROUP_ID_BYTES: usize = 128;
@@ -427,8 +428,27 @@ pub async fn get_compliance_system_evidence(
     Path((bundle_id, system_id)): Path<(Uuid, Uuid)>,
     Query(query): Query<BundleVersionQuery>,
 ) -> impl IntoResponse {
-    if authenticated_user_roles(&pool, &headers).await.is_none() {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
+    };
+    let system = match find_system_access_row(&pool, system_id).await {
+        Ok(Some(system)) => system,
+        Ok(None) => return not_found(),
+        Err(_) => return internal_error("Failed to load system"),
+    };
+    if !has_admin_role(&roles) {
+        let environment_ids = match get_user_environment_membership_ids(&pool, user_id).await {
+            Ok(environment_ids) => environment_ids,
+            Err(_) => return internal_error("Failed to load environment memberships"),
+        };
+        if system
+            .environment_id
+            .is_none_or(|environment_id| !environment_ids.contains(&environment_id))
+        {
+            // SECURITY: Return Not Found so callers cannot enumerate systems
+            // outside their environment memberships.
+            return not_found();
+        }
     }
 
     match get_system_evidence(&pool, bundle_id, system_id, query.version_id).await {

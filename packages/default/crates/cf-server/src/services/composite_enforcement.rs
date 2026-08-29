@@ -14,6 +14,10 @@ use crate::models::deployment_policies::{
 use crate::queries::system_events::set_pending_deployment_target_tx;
 use crate::services::time_window_policy;
 
+// CONCURRENCY: This advisory-lock namespace spells "POAM" in ASCII. Keep it
+// stable so derivation evidence and deployment publication share one key space.
+const POAM_DERIVATION_LOCK_NAMESPACE: i32 = 0x504F_414D;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompositeAuthorization {
     pub outcome: EnforcementOutcome,
@@ -628,15 +632,27 @@ async fn bulk_merge_outcomes(
     let mut locked_assessment_ids = rows.iter().map(|row| row.0).collect::<Vec<_>>();
     locked_assessment_ids.sort_unstable();
     locked_assessment_ids.dedup();
-    // Rule rows do not carry the stable finding key. Lock every affected key
-    // before the first mutation so closure cannot observe a rule/aggregate gap.
+    let system_ids: Vec<Uuid> = sqlx::query_scalar(
+        r#"SELECT DISTINCT assessment.system_id
+           FROM composite_policy_assessments assessment
+           WHERE assessment.id=ANY($1)
+           ORDER BY assessment.system_id"#,
+    )
+    .bind(&locked_assessment_ids)
+    .fetch_all(&mut **tx)
+    .await?;
+    for system_id in system_ids {
+        lock_poam_system_key_tx(tx, system_id).await?;
+    }
+    // Rule rows do not carry the stable finding key. Lock every affected system
+    // sentinel and finding key before mutation so closure cannot observe a gap.
     sqlx::query(
         r#"SELECT lock_poam_finding_key(key.system_id,key.policy_lineage_id)
            FROM (
              SELECT DISTINCT assessment.system_id,assessment.policy_lineage_id
              FROM composite_policy_assessments assessment
              WHERE assessment.id=ANY($1)
-             ORDER BY assessment.system_id,assessment.policy_lineage_id
+             ORDER BY system_id,policy_lineage_id
            ) key"#,
     )
     .bind(&locked_assessment_ids)
@@ -767,6 +783,9 @@ pub async fn persist_evaluation_assessments_in_tx(
     resolved: &EffectivePolicySet,
 ) -> Result<()> {
     let policies = policy_contexts(resolved)?;
+    // CONCURRENCY: Assessment triggers acquire per-finding keys. Acquire the
+    // system sentinel first so trigger locks preserve the global lock order.
+    lock_poam_system_key_tx(tx, system_id).await?;
     sqlx::query(
         "DELETE FROM composite_policy_assessments WHERE system_id = $1 AND derivation_id = $2",
     )
@@ -860,16 +879,134 @@ pub(crate) async fn lock_poam_findings_for_derivation_tx(
     tx: &mut Transaction<'_, Postgres>,
     derivation_id: i32,
 ) -> Result<()> {
+    lock_poam_derivation_key_tx(tx, derivation_id).await?;
+    // CONCURRENCY: Legacy policies have no composite assessment rows. Include
+    // findings for systems that currently deploy this derivation so legacy Nix
+    // results and CVE scans use the same commit boundary as POA&M actions.
+    let system_ids: Vec<Uuid> = sqlx::query_scalar(
+        r#"SELECT key.system_id
+           FROM (
+             SELECT assessment.system_id
+             FROM composite_policy_assessments assessment
+             WHERE assessment.derivation_id=$1
+             UNION
+             SELECT system.id AS system_id
+             FROM derivations derivation
+             JOIN systems system ON true
+             JOIN LATERAL (
+               SELECT state.store_path FROM system_states state
+               WHERE state.hostname=system.hostname AND state.store_path IS NOT NULL
+                 AND btrim(state.store_path)<>''
+               ORDER BY state.timestamp DESC,state.id DESC LIMIT 1
+             ) deployed ON deployed.store_path=COALESCE(
+               derivation.store_path,derivation.expected_store_path
+             )
+             WHERE derivation.id=$1
+           ) key
+           ORDER BY key.system_id"#,
+    )
+    .bind(derivation_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    for system_id in system_ids {
+        lock_poam_system_key_tx(tx, system_id).await?;
+    }
     sqlx::query(
         r#"SELECT lock_poam_finding_key(key.system_id,key.policy_lineage_id)
            FROM (
-             SELECT DISTINCT assessment.system_id,assessment.policy_lineage_id
+             SELECT assessment.system_id,assessment.policy_lineage_id
              FROM composite_policy_assessments assessment
              WHERE assessment.derivation_id=$1
-             ORDER BY assessment.system_id,assessment.policy_lineage_id
+             UNION
+             SELECT finding.system_id,finding.policy_lineage_id
+             FROM derivations derivation
+             JOIN systems system ON true
+             JOIN LATERAL (
+               SELECT state.store_path FROM system_states state
+               WHERE state.hostname=system.hostname AND state.store_path IS NOT NULL
+                 AND btrim(state.store_path)<>''
+               ORDER BY state.timestamp DESC,state.id DESC LIMIT 1
+             ) deployed ON deployed.store_path=COALESCE(
+               derivation.store_path,derivation.expected_store_path
+             )
+             JOIN poam_findings finding ON finding.system_id=system.id
+             WHERE derivation.id=$1
+             ORDER BY system_id,policy_lineage_id
            ) key"#,
     )
     .bind(derivation_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn lock_poam_derivation_key_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    derivation_id: i32,
+) -> Result<()> {
+    sqlx::query("SELECT pg_advisory_xact_lock($1,$2)")
+        .bind(POAM_DERIVATION_LOCK_NAMESPACE)
+        .bind(derivation_id)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+pub(crate) async fn lock_poam_derivations_for_store_path_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    store_path: Option<&str>,
+) -> Result<()> {
+    let Some(store_path) = store_path.filter(|path| !path.trim().is_empty()) else {
+        return Ok(());
+    };
+    let derivation_ids: Vec<i32> = sqlx::query_scalar(
+        r#"SELECT id FROM derivations
+           WHERE derivation_type='nixos'
+             AND COALESCE(store_path,expected_store_path)=$1
+           ORDER BY id"#,
+    )
+    .bind(store_path)
+    .fetch_all(&mut **tx)
+    .await?;
+    for derivation_id in derivation_ids {
+        lock_poam_derivation_key_tx(tx, derivation_id).await?;
+    }
+    Ok(())
+}
+
+pub(crate) async fn lock_poam_system_key_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    system_id: Uuid,
+) -> Result<()> {
+    // CONCURRENCY: The nil policy lineage reserves a stable system-level key.
+    // Finding materialization, state publication, and POA&M actions acquire it
+    // before per-finding keys so newly inserted findings cannot bypass a writer.
+    sqlx::query("SELECT lock_poam_finding_key($1,$2)")
+        .bind(system_id)
+        .bind(Uuid::nil())
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+pub(crate) async fn lock_poam_findings_for_system_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    system_id: Uuid,
+) -> Result<()> {
+    // CONCURRENCY: All callers acquire these stable finding keys before system,
+    // assessment, or rule row locks. POA&M actions use the same key order, so an
+    // action observes either the complete old state or the complete new state.
+    lock_poam_system_key_tx(tx, system_id).await?;
+    sqlx::query(
+        r#"SELECT lock_poam_finding_key(key.system_id,key.policy_lineage_id)
+           FROM (
+             SELECT finding.system_id,finding.policy_lineage_id
+             FROM poam_findings finding
+             WHERE finding.system_id=$1
+             ORDER BY finding.system_id,finding.policy_lineage_id
+           ) key"#,
+    )
+    .bind(system_id)
     .execute(&mut **tx)
     .await?;
     Ok(())
@@ -899,19 +1036,7 @@ pub(crate) async fn persist_scan_phase_in_tx(
     if newest_id != Some(scan.id) {
         return Ok(());
     }
-    sqlx::query(
-        r#"SELECT lock_poam_finding_key(key.system_id,key.policy_lineage_id)
-           FROM (
-             SELECT DISTINCT assessment.system_id,assessment.policy_lineage_id
-             FROM composite_policy_assessments assessment
-             JOIN cve_scans scan ON scan.derivation_id=assessment.derivation_id
-             WHERE scan.id=$1
-             ORDER BY assessment.system_id,assessment.policy_lineage_id
-           ) key"#,
-    )
-    .bind(scan_id)
-    .execute(&mut **tx)
-    .await?;
+    lock_poam_findings_for_derivation_tx(tx, scan.derivation_id).await?;
     let assessments = sqlx::query_as::<_, (Uuid, serde_json::Value)>(
         r#"
         SELECT assessment.id, assessment.effective_config
@@ -959,6 +1084,7 @@ async fn authorize_target_at(
         .await?;
     // Closure uses this same deterministic key order. Acquire it before the
     // system, assessment, or rule rows so neither path can invert lock order.
+    lock_poam_system_key_tx(&mut tx, system_id).await?;
     sqlx::query(
         r#"SELECT lock_poam_finding_key(system_id,policy_lineage_id)
            FROM poam_findings WHERE system_id=$1

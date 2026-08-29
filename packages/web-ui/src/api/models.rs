@@ -1278,6 +1278,12 @@ pub struct ComplianceControlEvidence {
     pub framework_mapping: String,
     #[serde(default)]
     pub composite_result: Option<CompositeAssessmentResult>,
+    #[serde(default)]
+    /// Identifies the stable server finding used for remediation actions.
+    pub finding_id: Option<Uuid>,
+    #[serde(default)]
+    /// Binds a legacy finding to the exact authoritative observation.
+    pub finding_observation: Option<FindingObservationReference>,
     /// True when this control is composite even if no exact assessment exists yet.
     #[serde(default)]
     pub composite_expected: bool,
@@ -1288,6 +1294,29 @@ pub struct ComplianceControlEvidence {
     pub cmmc_level: Option<i32>,
     #[serde(default)]
     pub cis_section: Option<String>,
+}
+
+/// Identifies the authoritative evidence source behind a stable finding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FindingObservationSource {
+    /// Uses a deployed derivation's persisted Nix policy result.
+    NixPolicyResult,
+    /// Uses a completed CVE scan for the deployed derivation.
+    CveScan,
+}
+
+/// References one exact observation that the server can recompute.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FindingObservationReference {
+    /// Selects the authoritative evidence resolver.
+    pub source: FindingObservationSource,
+    /// Identifies the source derivation or scan.
+    pub source_id: String,
+    /// Identifies the effective immutable policy version.
+    pub policy_version_id: Uuid,
+    /// Binds the source values and effective policy semantics.
+    pub token: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

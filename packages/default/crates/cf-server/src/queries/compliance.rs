@@ -8,6 +8,7 @@ use uuid::Uuid;
 use crate::api::models::{
     BundleVersionRequirementMembership, ComplianceGroupingScheme, DeletionEligibility,
 };
+use crate::compliance::canonical::semantic_digest;
 use crate::compliance::digest::{
     BundleVersionCanonical, PolicyVersionCanonical, load_bundle_membership,
     refresh_bundle_requirement_digest, write_assignment_effective_set_digest,
@@ -18,6 +19,7 @@ use crate::compliance::resolver::{
     resolve_systems_effective_policies_for_bundle_version_batch,
     resolve_systems_effective_policies_for_bundle_versions_batch,
 };
+use crate::models::poam::{FindingObservationReference, FindingObservationSource};
 use crate::queries::deletion::{blocker, eligibility};
 
 pub async fn list_grouping_schemes(pool: &PgPool) -> Result<Vec<ComplianceGroupingScheme>> {
@@ -2683,6 +2685,30 @@ pub async fn get_system_evidence(
     } else if bundle_version_id.is_some() {
         resolution_state = Some("conflict".to_string());
     }
+    let policy_lineage_ids = policies.iter().map(|policy| policy.id).collect::<Vec<_>>();
+    if !policy_lineage_ids.is_empty() {
+        let mut tx = pool.begin().await?;
+        crate::services::composite_enforcement::lock_poam_system_key_tx(&mut tx, system.id).await?;
+        sqlx::query(
+            r#"INSERT INTO poam_findings(system_id,policy_lineage_id)
+               SELECT $1,policy_id FROM UNNEST($2::uuid[]) policy_id
+               ON CONFLICT (system_id,policy_lineage_id) DO NOTHING"#,
+        )
+        .bind(system.id)
+        .bind(&policy_lineage_ids)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+    }
+    let finding_ids = sqlx::query_as::<_, (Uuid, Uuid)>(
+        "SELECT policy_lineage_id,id FROM poam_findings WHERE system_id=$1 AND policy_lineage_id=ANY($2)",
+    )
+    .bind(system.id)
+    .bind(&policy_lineage_ids)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .collect::<HashMap<_, _>>();
     let context = assessment_context(pool, system.id).await?;
     let cve_scan = match context.as_ref() {
         Some(context) => latest_completed_cve_scan(pool, context.derivation_id).await?,
@@ -2717,6 +2743,14 @@ pub async fn get_system_evidence(
     let mut controls = Vec::with_capacity(policies.len());
     for policy in policies {
         let version_id = policy.version_id;
+        let policy_lineage_id = policy.id;
+        let finding_observation = legacy_finding_observation(
+            context.as_ref(),
+            cve_scan.as_ref(),
+            &system,
+            &policy,
+            current_effective_set_digest.as_deref(),
+        );
         let mut control = resolve_control_evidence_with_context(
             context.clone(),
             cve_scan.as_ref(),
@@ -2732,6 +2766,10 @@ pub async fn get_system_evidence(
                 _ => ComplianceControlStatus::NotChecked,
             };
         }
+        control.finding_id = finding_ids.get(&policy_lineage_id).copied();
+        control.finding_observation = matches!(control.status, ComplianceControlStatus::Fail)
+            .then_some(finding_observation)
+            .flatten();
         controls.push(control);
     }
 
@@ -3807,6 +3845,159 @@ async fn effective_policy_rollups_with_evidence_batch(
 
 type CompletedCveScan = (Uuid, i32, i32);
 
+fn observation_reference(
+    source: FindingObservationSource,
+    source_id: String,
+    policy_version_id: Uuid,
+    snapshot: Value,
+) -> FindingObservationReference {
+    FindingObservationReference {
+        source,
+        source_id,
+        policy_version_id,
+        token: semantic_digest(&snapshot),
+    }
+}
+
+/// Creates a stable reference to a deployed Nix policy result.
+///
+/// The token binds the observation to the exact effective policy set and
+/// effective configuration. A caller must treat a token mismatch as stale
+/// evidence and fetch the current evidence before retrying.
+pub fn nix_policy_observation_reference(
+    system_id: Uuid,
+    policy_lineage_id: Uuid,
+    policy_version_id: Uuid,
+    effective_set_digest: &str,
+    effective_config_digest: &str,
+    derivation_id: i32,
+    target_store_path: &str,
+    passed: bool,
+    details: Option<&str>,
+) -> FindingObservationReference {
+    observation_reference(
+        FindingObservationSource::NixPolicyResult,
+        derivation_id.to_string(),
+        policy_version_id,
+        serde_json::json!({
+            "source": "nix_policy_result",
+            "system_id": system_id,
+            "policy_lineage_id": policy_lineage_id,
+            "policy_version_id": policy_version_id,
+            "effective_set_digest": effective_set_digest,
+            "effective_config_digest": effective_config_digest,
+            "derivation_id": derivation_id,
+            "target_store_path": target_store_path,
+            "passed": passed,
+            "details": details,
+        }),
+    )
+}
+
+/// Contains the authoritative values bound into a CVE observation token.
+pub struct CveObservationValues<'a> {
+    /// Identifies the system whose deployed derivation was scanned.
+    pub system_id: Uuid,
+    /// Identifies the stable deployment-policy lineage.
+    pub policy_lineage_id: Uuid,
+    /// Identifies the effective immutable policy version.
+    pub policy_version_id: Uuid,
+    /// Identifies the complete effective policy set.
+    pub effective_set_digest: &'a str,
+    /// Identifies the effective policy configuration after assignment overlays.
+    pub effective_config_digest: &'a str,
+    /// Identifies the deployed derivation.
+    pub derivation_id: i32,
+    /// Names the exact deployed store path.
+    pub target_store_path: &'a str,
+    /// Identifies the completed CVE scan.
+    pub scan_id: Uuid,
+    /// Records the observed critical-vulnerability count.
+    pub critical_count: i32,
+    /// Records the observed high-vulnerability count.
+    pub high_count: i32,
+    /// Records the effective critical-vulnerability threshold.
+    pub max_critical: i64,
+    /// Records the optional effective high-vulnerability threshold.
+    pub max_high: Option<i64>,
+}
+
+/// Creates a stable reference to an authoritative completed CVE scan.
+pub fn cve_observation_reference(values: CveObservationValues<'_>) -> FindingObservationReference {
+    observation_reference(
+        FindingObservationSource::CveScan,
+        values.scan_id.to_string(),
+        values.policy_version_id,
+        serde_json::json!({
+            "source": "cve_scan",
+            "system_id": values.system_id,
+            "policy_lineage_id": values.policy_lineage_id,
+            "policy_version_id": values.policy_version_id,
+            "effective_set_digest": values.effective_set_digest,
+            "effective_config_digest": values.effective_config_digest,
+            "derivation_id": values.derivation_id,
+            "target_store_path": values.target_store_path,
+            "scan_id": values.scan_id,
+            "critical_count": values.critical_count,
+            "high_count": values.high_count,
+            "max_critical": values.max_critical,
+            "max_high": values.max_high,
+        }),
+    )
+}
+
+fn legacy_finding_observation(
+    context: Option<&AssessmentContext>,
+    cve_scan: Option<&CompletedCveScan>,
+    system: &SystemRow,
+    policy: &PolicyRow,
+    effective_set_digest: Option<&str>,
+) -> Option<FindingObservationReference> {
+    let context = context?;
+    let policy_version_id = policy.version_id?;
+    let effective_set_digest = effective_set_digest?;
+    let effective_config_digest = semantic_digest(&policy.config);
+    match policy.policy_type.as_str() {
+        "require_packages" | "custom_check" | "require_cf_agent" => {
+            let (passed, details) =
+                nix_policy_result(&context.policy_results, policy.version_id, policy.id).ok()??;
+            Some(nix_policy_observation_reference(
+                system.id,
+                policy.id,
+                policy_version_id,
+                effective_set_digest,
+                &effective_config_digest,
+                context.derivation_id,
+                &context.target_store_path,
+                passed,
+                details.as_deref(),
+            ))
+        }
+        "require_cve_check" => {
+            let (scan_id, critical_count, high_count) = *cve_scan?;
+            Some(cve_observation_reference(CveObservationValues {
+                system_id: system.id,
+                policy_lineage_id: policy.id,
+                policy_version_id,
+                effective_set_digest,
+                effective_config_digest: &effective_config_digest,
+                derivation_id: context.derivation_id,
+                target_store_path: &context.target_store_path,
+                scan_id,
+                critical_count,
+                high_count,
+                max_critical: policy
+                    .config
+                    .get("max_critical")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(i64::MAX),
+                max_high: policy.config.get("max_high").and_then(Value::as_i64),
+            }))
+        }
+        _ => None,
+    }
+}
+
 async fn latest_completed_cve_scans(
     pool: &PgPool,
     derivation_ids: &[i32],
@@ -4312,7 +4503,7 @@ async fn assessment_context(pool: &PgPool, system_id: Uuid) -> Result<Option<Ass
     .context("load deployed assessment context")
 }
 
-fn nix_policy_result(
+pub(crate) fn nix_policy_result(
     policy_results: &Value,
     policy_version_id: Option<Uuid>,
     policy_lineage_id: Uuid,
@@ -4557,6 +4748,8 @@ fn control_evidence_with_resolved_status(
         }],
         framework_mapping: String::new(),
         composite_result: None,
+        finding_id: None,
+        finding_observation: None,
         composite_expected: policy.policy_type == "composite",
         control_family: policy
             .compliance_metadata
@@ -4682,6 +4875,8 @@ fn control_evidence(system: &SystemRow, policy: PolicyRow) -> ComplianceControlE
         }],
         framework_mapping,
         composite_result: None,
+        finding_id: None,
+        finding_observation: None,
         composite_expected: policy.policy_type == "composite",
         control_family: policy
             .compliance_metadata

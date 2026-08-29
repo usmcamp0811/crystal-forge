@@ -9,6 +9,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::api::client::{ApiClientError, base_url, send_request_with_csrf};
+pub use crate::api::models::{FindingObservationReference, FindingObservationSource};
 
 const PAGE_SIZE: i64 = 100;
 const MAX_BATCH_IDS: usize = 100;
@@ -131,9 +132,12 @@ impl<T> Page<T> {
     }
 }
 
+/// Identifies a descending history-page boundary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistoryCursor {
+    /// Contains the last returned row's timestamp.
     pub at: DateTime<Utc>,
+    /// Contains the last returned row's stable tie-breaker ID.
     pub id: Uuid,
 }
 
@@ -254,6 +258,8 @@ pub struct VerificationAttemptView {
 pub struct ActivityView {
     pub id: Uuid,
     pub actor_user_id: Option<Uuid>,
+    /// Contains the server-resolved username or email for a known actor.
+    pub actor_display: Option<String>,
     pub kind: String,
     pub payload: Value,
     pub created_at: DateTime<Utc>,
@@ -319,7 +325,7 @@ pub struct VerifyPoamResponse {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FindingRelationshipEntry {
-    pub assessment_id: Uuid,
+    pub assessment_id: Option<Uuid>,
     pub finding_id: Uuid,
     #[serde(rename = "active_poam", alias = "active")]
     pub active: Option<PoamSummary>,
@@ -359,31 +365,53 @@ pub struct PoamListQuery {
     pub offset: Option<i64>,
 }
 
+/// Selects independent keyset pages in a POA&M detail request.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PoamDetailQuery {
+    /// Limits linked findings returned in this response.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finding_limit: Option<i64>,
+    /// Selects findings linked before this timestamp.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finding_before_at: Option<DateTime<Utc>>,
+    /// Breaks timestamp ties for `finding_before_at`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finding_before_id: Option<Uuid>,
+    /// Limits durable activity events returned in this response.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub activity_limit: Option<i64>,
+    /// Selects activity created before this timestamp.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub activity_before_at: Option<DateTime<Utc>>,
+    /// Breaks timestamp ties for `activity_before_at`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub activity_before_id: Option<Uuid>,
+    /// Limits verification attempts returned in this response.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verification_limit: Option<i64>,
+    /// Selects verification attempts created before this timestamp.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verification_before_at: Option<DateTime<Utc>>,
+    /// Breaks timestamp ties for `verification_before_at`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verification_before_id: Option<Uuid>,
 }
 
+/// Serializes one authoritative failing observation into a create request.
+///
+/// Composite callers set `assessment_id`. Source-neutral callers set both
+/// `finding_id` and `observation`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreatePoamRequest {
-    pub assessment_id: Uuid,
+    /// Identifies a current composite assessment for the compatibility API.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assessment_id: Option<Uuid>,
+    /// Identifies the stable finding for a source-neutral request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finding_id: Option<Uuid>,
+    /// Binds the stable finding to the observation displayed by the UI.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observation: Option<FindingObservationReference>,
     pub title: String,
     pub plan: String,
     pub owner: String,
@@ -436,10 +464,19 @@ pub struct UpdateMilestoneRequest {
     pub completed: Option<bool>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Serializes one authoritative failing observation into a link request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AddFindingRequest {
     pub revision: i64,
-    pub assessment_id: Uuid,
+    /// Identifies a current composite assessment for the compatibility API.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assessment_id: Option<Uuid>,
+    /// Identifies the stable finding for a source-neutral request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finding_id: Option<Uuid>,
+    /// Binds the stable finding to the observation displayed by the UI.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observation: Option<FindingObservationReference>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -752,7 +789,18 @@ pub async fn compatible_findings(
 
 #[derive(Serialize)]
 struct CompatiblePoamsQuery<'a> {
-    assessment_id: Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    assessment_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    finding_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    observation_source: Option<FindingObservationSource>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    observation_source_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    observation_policy_version_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    observation_token: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     q: Option<&'a str>,
     limit: i64,
@@ -760,13 +808,20 @@ struct CompatiblePoamsQuery<'a> {
 }
 
 pub async fn compatible_poams(
-    assessment_id: Uuid,
+    assessment_id: Option<Uuid>,
+    finding_id: Option<Uuid>,
+    observation: Option<&FindingObservationReference>,
     q: Option<&str>,
     limit: i64,
     offset: i64,
 ) -> Result<Page<PoamSummary>, PoamApiError> {
     let query = CompatiblePoamsQuery {
         assessment_id,
+        finding_id,
+        observation_source: observation.map(|value| value.source),
+        observation_source_id: observation.map(|value| value.source_id.as_str()),
+        observation_policy_version_id: observation.map(|value| value.policy_version_id),
+        observation_token: observation.map(|value| value.token.as_str()),
         q,
         limit: limit.clamp(1, PAGE_SIZE),
         offset: offset.max(0),
@@ -825,6 +880,12 @@ pub async fn finding_relationships(
         assessment_ids,
     )
     .await
+}
+
+pub async fn finding_relationships_by_finding(
+    finding_ids: &[Uuid],
+) -> Result<Vec<FindingRelationshipEntry>, PoamApiError> {
+    fetch_batches("/poams/relationships/findings", "finding_ids", finding_ids).await
 }
 
 pub async fn assignment_relationships(

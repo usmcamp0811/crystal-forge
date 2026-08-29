@@ -102,6 +102,27 @@ pub async fn visible_assessment_findings(
     .await?)
 }
 
+pub async fn visible_findings(
+    pool: &PgPool,
+    finding_ids: &[Uuid],
+    is_admin: bool,
+    environment_ids: &[Uuid],
+) -> Result<Vec<(Uuid, Uuid, Uuid)>> {
+    Ok(sqlx::query_as(
+        r#"SELECT finding.id,finding.system_id,finding.policy_lineage_id
+           FROM UNNEST($1::uuid[]) WITH ORDINALITY requested(id,ordinal)
+           JOIN poam_findings finding ON finding.id=requested.id
+           JOIN systems system ON system.id=finding.system_id
+           WHERE $2 OR system.environment_id=ANY($3)
+           ORDER BY requested.ordinal"#,
+    )
+    .bind(finding_ids)
+    .bind(is_admin)
+    .bind(environment_ids)
+    .fetch_all(pool)
+    .await?)
+}
+
 pub async fn finding_poam_summaries(
     pool: &PgPool,
     finding_ids: &[Uuid],
@@ -486,7 +507,7 @@ pub async fn detail(
         })
         .collect();
     let activity = sqlx::query_as::<_, ActivityView>(
-        "SELECT id, actor_user_id, kind, payload, created_at FROM poam_activity WHERE poam_id=$1 AND ($3::timestamptz IS NULL OR (created_at,id)<($3,$4)) ORDER BY created_at DESC, id DESC LIMIT $2")
+        "SELECT activity.id, activity.actor_user_id, COALESCE(actor.username,actor.email) AS actor_display, activity.kind, activity.payload, activity.created_at FROM poam_activity activity LEFT JOIN users actor ON actor.id=activity.actor_user_id WHERE activity.poam_id=$1 AND ($3::timestamptz IS NULL OR (activity.created_at,activity.id)<($3,$4)) ORDER BY activity.created_at DESC, activity.id DESC LIMIT $2")
         .bind(poam_id).bind(activity_limit + 1).bind(activity_before_at).bind(activity_before_id).fetch_all(&mut **tx).await?;
     let activity_has_more = activity.len() as i64 > activity_limit;
     let activity = activity

@@ -42,9 +42,22 @@ impl PoamRisk {
     }
 }
 
+/// Requests creation of a POA&M from one authoritative failing observation.
+///
+/// Callers provide either `assessment_id` for composite-assessment compatibility,
+/// or provide `finding_id` and `observation` together for source-neutral evidence.
+/// Mixing or omitting these identity forms is invalid.
 #[derive(Debug, Deserialize)]
 pub struct CreatePoamRequest {
-    pub assessment_id: Uuid,
+    /// Identifies a current composite assessment when using the compatibility API.
+    #[serde(default)]
+    pub assessment_id: Option<Uuid>,
+    /// Identifies the stable finding when using source-neutral evidence.
+    #[serde(default)]
+    pub finding_id: Option<Uuid>,
+    /// Binds a stable finding to the exact authoritative observation shown to the user.
+    #[serde(default)]
+    pub observation: Option<FindingObservationReference>,
     pub title: String,
     #[serde(default)]
     pub plan: String,
@@ -84,10 +97,47 @@ pub struct RevisionRequest {
     pub revision: i64,
 }
 
+/// Requests linking one authoritative failing observation to an existing POA&M.
+///
+/// The identity rules match [`CreatePoamRequest`].
 #[derive(Debug, Deserialize)]
 pub struct AddFindingRequest {
     pub revision: i64,
-    pub assessment_id: Uuid,
+    /// Identifies a current composite assessment when using the compatibility API.
+    #[serde(default)]
+    pub assessment_id: Option<Uuid>,
+    /// Identifies the stable finding when using source-neutral evidence.
+    #[serde(default)]
+    pub finding_id: Option<Uuid>,
+    /// Binds a stable finding to the exact authoritative observation shown to the user.
+    #[serde(default)]
+    pub observation: Option<FindingObservationReference>,
+}
+
+/// Identifies the server-owned evidence source behind a source-neutral finding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FindingObservationSource {
+    /// Uses the deployed derivation's persisted Nix policy result.
+    NixPolicyResult,
+    /// Uses the latest completed CVE scan for the deployed derivation.
+    CveScan,
+}
+
+/// Binds a stable finding to one exact, server-recomputable observation.
+///
+/// The server rechecks all fields and the semantic token against current
+/// effective policy and deployed evidence before it creates or links a POA&M.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FindingObservationReference {
+    /// Selects the authoritative evidence resolver.
+    pub source: FindingObservationSource,
+    /// Identifies the source record, such as a derivation or CVE scan.
+    pub source_id: String,
+    /// Identifies the effective immutable policy version.
+    pub policy_version_id: Uuid,
+    /// Binds source values, policy semantics, and deployment identity.
+    pub token: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -193,22 +243,39 @@ pub struct PoamListQuery {
     pub offset: Option<i64>,
 }
 
+/// Selects bounded independent history pages for a POA&M detail response.
+///
+/// Each history feed uses a `(created_at, id)` keyset cursor. A timestamp and
+/// ID for one feed must be provided together and must not be mixed with another
+/// feed's cursor.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct PoamDetailQuery {
+    /// Limits linked findings returned in this response.
     pub finding_limit: Option<i64>,
+    /// Selects findings linked before this timestamp.
     pub finding_before_at: Option<DateTime<Utc>>,
+    /// Breaks timestamp ties for `finding_before_at`.
     pub finding_before_id: Option<Uuid>,
+    /// Limits durable activity events returned in this response.
     pub activity_limit: Option<i64>,
+    /// Selects activity created before this timestamp.
     pub activity_before_at: Option<DateTime<Utc>>,
+    /// Breaks timestamp ties for `activity_before_at`.
     pub activity_before_id: Option<Uuid>,
+    /// Limits verification attempts returned in this response.
     pub verification_limit: Option<i64>,
+    /// Selects verification attempts created before this timestamp.
     pub verification_before_at: Option<DateTime<Utc>>,
+    /// Breaks timestamp ties for `verification_before_at`.
     pub verification_before_id: Option<Uuid>,
 }
 
+/// Identifies the next item boundary in a descending history feed.
 #[derive(Debug, Clone, Serialize)]
 pub struct HistoryCursor {
+    /// Contains the last returned row's authoritative timestamp.
     pub at: DateTime<Utc>,
+    /// Contains the last returned row's stable ID for deterministic tie-breaking.
     pub id: Uuid,
 }
 
@@ -233,7 +300,7 @@ pub struct PoamSummary {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct FindingPoamRelationship {
-    pub assessment_id: Uuid,
+    pub assessment_id: Option<Uuid>,
     pub finding_id: Uuid,
     pub active_poam: Option<PoamSummary>,
     pub historical_poams: Vec<PoamSummary>,
@@ -343,6 +410,8 @@ pub struct VerificationItemView {
 pub struct ActivityView {
     pub id: Uuid,
     pub actor_user_id: Option<Uuid>,
+    /// Contains the current username or email for a known actor.
+    pub actor_display: Option<String>,
     pub kind: String,
     pub payload: serde_json::Value,
     pub created_at: DateTime<Utc>,

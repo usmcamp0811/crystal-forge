@@ -3,6 +3,7 @@ use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use crystal_forge::auth::session::{
     CSRF_COOKIE_NAME, CSRF_HEADER_NAME, SESSION_COOKIE_NAME, hash_token,
 };
+use crystal_forge::compliance::canonical::semantic_digest;
 use crystal_forge::compliance::resolver::{
     EffectivePolicySet, ResolutionOutcome, resolve_system_effective_policies,
 };
@@ -15,10 +16,12 @@ use crystal_forge::models::deployment_policies::{
 };
 use crystal_forge::models::poam::{
     AddFindingRequest, AssignmentReferenceRequest, CreatePoamRequest, CreateWaiverRequest,
-    PoamDetailQuery, PoamListQuery, PoamRisk, PoamStatus, TransitionPoamRequest, UpdatePoamRequest,
-    WaiverDecision, WaiverDecisionRequest,
+    FindingObservationReference, FindingObservationSource, PoamDetailQuery, PoamListQuery,
+    PoamRisk, PoamStatus, TransitionPoamRequest, UpdatePoamRequest, WaiverDecision,
+    WaiverDecisionRequest,
 };
 use crystal_forge::models::system_states::SystemState;
+use crystal_forge::queries::compliance::nix_policy_observation_reference;
 use crystal_forge::queries::poam;
 use crystal_forge::queries::users::insert_user;
 use crystal_forge::queries::{
@@ -179,7 +182,9 @@ async fn create_service_poam(
         pool,
         actor,
         CreatePoamRequest {
-            assessment_id: current_assessment_id(pool, fixture).await,
+            assessment_id: Some(current_assessment_id(pool, fixture).await),
+            finding_id: None,
+            observation: None,
             title: title.into(),
             plan: "Matrix remediation".into(),
             owner: "Security Matrix".into(),
@@ -192,6 +197,290 @@ async fn create_service_poam(
     )
     .await
     .unwrap()
+}
+
+async fn legacy_fail_fixture(
+    pool: &PgPool,
+) -> (
+    AssessmentFixture,
+    Uuid,
+    FindingObservationReference,
+    serde_json::Value,
+) {
+    let fixture = assessment_fixture(pool).await;
+    let policy_lineage_id = fixture.resolved.policies[0].policy_lineage_id;
+    sqlx::query(
+        "UPDATE deployment_policies SET policy_type='custom_check',config='{}'::jsonb WHERE id=$1",
+    )
+    .bind(policy_lineage_id)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE deployment_policy_versions SET policy_type='custom_check',config='{}'::jsonb,trust_state='trusted' WHERE id=$1",
+    )
+    .bind(fixture.version_id)
+    .execute(pool)
+    .await
+    .unwrap();
+    let persisted_result = serde_json::json!({
+        "assigned": {
+            fixture.version_id.to_string(): {
+                "passed": false,
+                "details": "legacy custom check failed"
+            }
+        }
+    });
+    sqlx::query("UPDATE derivations SET policy_results=$1 WHERE id=$2")
+        .bind(&persisted_result)
+        .bind(fixture.derivation_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    let finding_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO poam_findings(system_id,policy_lineage_id) VALUES($1,$2) RETURNING id",
+    )
+    .bind(fixture.system_id)
+    .bind(policy_lineage_id)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    let current_resolved = match resolve_system_effective_policies(pool, fixture.system_id)
+        .await
+        .unwrap()
+    {
+        ResolutionOutcome::Resolved(resolved) => resolved,
+        ResolutionOutcome::Conflict(conflict) => panic!("unexpected policy conflict: {conflict:?}"),
+    };
+    let effective_policy = current_resolved
+        .policies
+        .iter()
+        .find(|policy| policy.policy_lineage_id == policy_lineage_id)
+        .unwrap();
+    let effective_config_digest = semantic_digest(&effective_policy.effective_config);
+    let observation = nix_policy_observation_reference(
+        fixture.system_id,
+        policy_lineage_id,
+        fixture.version_id,
+        &current_resolved.effective_set_digest,
+        &effective_config_digest,
+        fixture.derivation_id,
+        &fixture.store_path,
+        false,
+        Some("legacy custom check failed"),
+    );
+    (fixture, finding_id, observation, persisted_result)
+}
+
+fn legacy_create_request(
+    finding_id: Uuid,
+    observation: FindingObservationReference,
+) -> CreatePoamRequest {
+    CreatePoamRequest {
+        assessment_id: None,
+        finding_id: Some(finding_id),
+        observation: Some(observation),
+        title: "Legacy policy remediation".into(),
+        plan: "Correct the custom check".into(),
+        owner: "Security".into(),
+        target_date: None,
+        risk: PoamRisk::High,
+        default_milestones: false,
+        assignment_version_ids: Vec::new(),
+    }
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn legacy_fail_can_create_poam_without_fabricating_composite_assessment(pool: PgPool) {
+    let (fixture, finding_id, observation, persisted_result) = legacy_fail_fixture(&pool).await;
+    assert_eq!(
+        observation.source,
+        FindingObservationSource::NixPolicyResult
+    );
+    let clock = FixedClock(Utc.with_ymd_and_hms(2026, 8, 28, 12, 0, 0).unwrap());
+    let detail = poam_service::create(
+        &pool,
+        &admin_actor(fixture.user_id),
+        legacy_create_request(finding_id, observation),
+        &clock,
+    )
+    .await
+    .unwrap();
+    assert_eq!(detail.findings.len(), 1);
+    assert_eq!(detail.findings[0].id, finding_id);
+    let composite_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM composite_policy_assessments WHERE system_id=$1")
+            .bind(fixture.system_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(composite_count, 0);
+    let result_after: serde_json::Value =
+        sqlx::query_scalar("SELECT policy_results FROM derivations WHERE id=$1")
+            .bind(fixture.derivation_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(result_after, persisted_result);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn legacy_finding_authorizes_before_observation_validation(pool: PgPool) {
+    let (fixture, finding_id, mut observation, _) = legacy_fail_fixture(&pool).await;
+    let hidden_environment: Uuid =
+        sqlx::query_scalar("INSERT INTO environments(name) VALUES($1) RETURNING id")
+            .bind(format!("hidden-{}", Uuid::new_v4()))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    sqlx::query("UPDATE systems SET environment_id=$2 WHERE id=$1")
+        .bind(fixture.system_id)
+        .bind(hidden_environment)
+        .execute(&pool)
+        .await
+        .unwrap();
+    observation.token = "invalid-token-that-must-not-be-validated".into();
+    let actor = PoamActor {
+        user_id: fixture.user_id,
+        identifier: "out-of-scope@example.invalid".into(),
+        is_admin: false,
+        can_mutate: true,
+        environment_ids: Vec::new(),
+        request_origin: None,
+    };
+    let clock = FixedClock(Utc.with_ymd_and_hms(2026, 8, 28, 12, 0, 0).unwrap());
+    assert!(matches!(
+        poam_service::create(
+            &pool,
+            &actor,
+            legacy_create_request(finding_id, observation),
+            &clock,
+        )
+        .await,
+        Err(PoamError::NotFound)
+    ));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn legacy_observation_rejects_changed_effective_config(pool: PgPool) {
+    let (fixture, finding_id, observation, _) = legacy_fail_fixture(&pool).await;
+    let changed = serde_json::json!({"changed_after_observation": true});
+    sqlx::query("UPDATE deployment_policies SET config=$2 WHERE id=$1")
+        .bind(fixture.resolved.policies[0].policy_lineage_id)
+        .bind(&changed)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE deployment_policy_versions SET config=$2 WHERE id=$1")
+        .bind(fixture.version_id)
+        .bind(&changed)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let clock = FixedClock(Utc.with_ymd_and_hms(2026, 8, 28, 12, 0, 0).unwrap());
+    assert!(matches!(
+        poam_service::create(
+            &pool,
+            &admin_actor(fixture.user_id),
+            legacy_create_request(finding_id, observation),
+            &clock,
+        )
+        .await,
+        Err(PoamError::Precondition("stale_finding", _, _))
+    ));
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM poams")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn legacy_create_waits_for_newer_derivation_evidence(pool: PgPool) {
+    let (fixture, finding_id, observation, _) = legacy_fail_fixture(&pool).await;
+    let policy_lineage_id = fixture.resolved.policies[0].policy_lineage_id;
+    let (commit_id, derivation_name, derivation_path): (Option<i32>, String, String) =
+        sqlx::query_as(
+            "SELECT commit_id,derivation_name,derivation_path FROM derivations WHERE id=$1",
+        )
+        .bind(fixture.derivation_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    let mut blocker = pool.begin().await.unwrap();
+    sqlx::query("SELECT lock_poam_finding_key($1,$2)")
+        .bind(fixture.system_id)
+        .bind(policy_lineage_id)
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+
+    let writer_pool = pool.clone();
+    let version_id = fixture.version_id;
+    let store_path = fixture.store_path.clone();
+    let passing_result = serde_json::json!({
+        "assigned": {
+            version_id.to_string(): {
+                "passed": true,
+                "details": "legacy custom check now passes"
+            }
+        }
+    });
+    let writer = tokio::spawn(async move {
+        record_successful_eval_result(
+            &writer_pool,
+            commit_id,
+            &derivation_name,
+            "nixos",
+            None,
+            &derivation_path,
+            Some(&store_path),
+            Some(true),
+            true,
+            &passing_result,
+        )
+        .await
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !writer.is_finished(),
+        "the evidence writer must wait for the finding key"
+    );
+
+    let action_pool = pool.clone();
+    let actor = admin_actor(fixture.user_id);
+    let clock = FixedClock(Utc.with_ymd_and_hms(2026, 8, 28, 12, 0, 0).unwrap());
+    let action = tokio::spawn(async move {
+        poam_service::create(
+            &action_pool,
+            &actor,
+            legacy_create_request(finding_id, observation),
+            &clock,
+        )
+        .await
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !action.is_finished(),
+        "POA&M creation must wait behind the queued evidence writer"
+    );
+
+    blocker.commit().await.unwrap();
+    writer.await.unwrap().unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(5), action)
+        .await
+        .expect("POA&M creation remained blocked")
+        .unwrap();
+    assert!(
+        matches!(&result, Err(PoamError::Precondition("stale_finding", _, _))),
+        "unexpected create result: {result:?}"
+    );
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM poams")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
 }
 
 async fn awaiting_verification(
@@ -1391,7 +1680,9 @@ async fn close_waits_for_and_rejects_a_superseding_failed_assessment(pool: PgPoo
         &pool,
         &actor,
         CreatePoamRequest {
-            assessment_id,
+            assessment_id: Some(assessment_id),
+            finding_id: None,
+            observation: None,
             title: "Race-safe remediation".into(),
             plan: "Deploy and verify".into(),
             owner: "Security".into(),
@@ -1948,7 +2239,9 @@ async fn close_waits_for_an_uncommitted_waiver_revocation(pool: PgPool) {
         &pool,
         &actor,
         CreatePoamRequest {
-            assessment_id,
+            assessment_id: Some(assessment_id),
+            finding_id: None,
+            observation: None,
             title: "Waiver race remediation".into(),
             plan: "Validate waiver serialization".into(),
             owner: "Security".into(),
@@ -2389,7 +2682,9 @@ async fn waiver_and_closure_evidence_matrix_is_exact_and_fail_closed(pool: PgPoo
         detail.poam.id,
         AddFindingRequest {
             revision: detail.poam.revision,
-            assessment_id: secondary_assessment,
+            assessment_id: Some(secondary_assessment),
+            finding_id: None,
+            observation: None,
         },
         &clock,
     )
@@ -3582,7 +3877,7 @@ async fn relationship_services_batch_active_history_and_immutable_assignments(po
         1,
         "hidden and unknown assessments are omitted"
     );
-    assert_eq!(relationships[0].assessment_id, current_assessment);
+    assert_eq!(relationships[0].assessment_id, Some(current_assessment));
     assert_eq!(
         relationships[0].finding_id,
         finding_id(&pool, &visible).await

@@ -683,24 +683,23 @@ pub fn EvidenceDrawer(props: EvidenceDrawerProps) -> Element {
     let mut poam_state = use_signal(|| EvidencePoamState::Loading);
     let mut poam_generation = use_signal(|| 0_u64);
 
-    let mut load_relationships = move |assessment_ids: Vec<uuid::Uuid>| {
+    let mut load_relationships = move |finding_ids: Vec<uuid::Uuid>| {
         poam_generation += 1;
         let requested = poam_generation();
-        if assessment_ids.is_empty() {
+        if finding_ids.is_empty() {
             poam_state.set(EvidencePoamState::Unavailable(
-                "No current persisted composite assessment is available for POA&M lookup."
-                    .to_string(),
+                "No authoritative finding identity is available for POA&M lookup.".to_string(),
             ));
             return;
         }
         poam_state.set(EvidencePoamState::Loading);
         spawn(async move {
-            match poam_api::finding_relationships(&assessment_ids).await {
+            match poam_api::finding_relationships_by_finding(&finding_ids).await {
                 Ok(entries) if poam_generation() == requested => {
                     poam_state.set(EvidencePoamState::Loaded(
                         entries
                             .into_iter()
-                            .map(|entry| (entry.assessment_id, entry))
+                            .map(|entry| (entry.finding_id, entry))
                             .collect(),
                     ));
                 }
@@ -717,20 +716,15 @@ pub fn EvidenceDrawer(props: EvidenceDrawerProps) -> Element {
         });
     };
 
-    let assessment_ids = props
+    let finding_ids = props
         .evidence
         .controls
         .iter()
-        .filter_map(|control| {
-            control
-                .composite_result
-                .as_ref()
-                .and_then(|result| result.assessment_id)
-        })
+        .filter_map(|control| control.finding_id)
         .collect::<Vec<_>>();
     use_effect({
-        let assessment_ids = assessment_ids.clone();
-        move || load_relationships(assessment_ids.clone())
+        let finding_ids = finding_ids.clone();
+        move || load_relationships(finding_ids.clone())
     });
 
     let query = filter.read().trim().to_ascii_lowercase();
@@ -970,7 +964,7 @@ pub fn EvidenceDrawer(props: EvidenceDrawerProps) -> Element {
                             poam_state: poam_state.read().clone(),
                             on_poam_event: move |event: FindingPoamEvent| {
                                 if let FindingPoamEvent::InvalidateAssessment(_) = event {
-                                    load_relationships(assessment_ids.clone());
+                                    load_relationships(finding_ids.clone());
                                 }
                                 props.on_poam_event.call(event);
                             },
@@ -1167,34 +1161,31 @@ fn ControlEvidenceCard(props: ControlEvidenceCardProps) -> Element {
             },
         }
 
-        if let Some(result) = props.control.composite_result.as_ref() {
-            if let Some(assessment_id) = result.assessment_id {
+        if let Some(finding_id) = props.control.finding_id {
+            if let Some(policy_version_id) = props.control.composite_result.as_ref().map(|result| result.policy_version_id).or_else(|| props.control.finding_observation.as_ref().map(|observation| observation.policy_version_id)) {
                 {
-                    let assessment_outcome = match result.overall_status.as_str() {
-                        "pass" => AssessmentOutcome::Pass,
-                        "fail" => AssessmentOutcome::Fail,
-                        "error" => AssessmentOutcome::Error,
+                    let assessment_id = props.control.composite_result.as_ref().and_then(|result| result.assessment_id);
+                    let assessment_outcome = match props.control.status {
+                        ComplianceControlStatus::Pass => AssessmentOutcome::Pass,
+                        ComplianceControlStatus::Fail => AssessmentOutcome::Fail,
+                        ComplianceControlStatus::Error => AssessmentOutcome::Error,
                         _ => AssessmentOutcome::NotChecked,
                     };
                     let evidence_summary = if props.control.evidence_items.is_empty() {
                         props.control.summary.clone()
                     } else {
-                        props
-                            .control
-                            .evidence_items
-                            .iter()
-                            .map(|item| item.label.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ")
+                        props.control.evidence_items.iter().map(|item| item.label.as_str()).collect::<Vec<_>>().join(", ")
                     };
                     let context = FindingPoamContext {
                         assessment_id,
+                        finding_id,
+                        observation: props.control.finding_observation.clone(),
                         system_id: props.system_id,
                         hostname: props.hostname.clone(),
                         policy_lineage_id: props.control.policy_id,
-                        policy_version_id: result.policy_version_id,
+                        policy_version_id,
                         policy_name: props.control.policy_name.clone(),
-                        policy_version: result.policy_version_id.to_string(),
+                        policy_version: policy_version_id.to_string(),
                         bundle_id: Some(props.bundle_id),
                         bundle_name: Some(props.bundle_name.clone()),
                         bundle_version_id: props.bundle_version_id,
@@ -1204,28 +1195,13 @@ fn ControlEvidenceCard(props: ControlEvidenceCardProps) -> Element {
                         assignment_versions: props.assignment_versions.clone(),
                     };
                     match &props.poam_state {
-                        EvidencePoamState::Loading => rsx! {
-                            div { class: "sd-callout sd-callout-info", "Loading POA&M relationships for this persisted assessment…" }
-                        },
-                        EvidencePoamState::Unavailable(message) => rsx! {
-                            div { class: "sd-callout sd-callout-warn", "{message}" }
-                        },
+                        EvidencePoamState::Loading => rsx! { div { class: "sd-callout sd-callout-info", "Loading POA&M relationships for this authoritative finding…" } },
+                        EvidencePoamState::Unavailable(message) => rsx! { div { class: "sd-callout sd-callout-warn", "{message}" } },
                         EvidencePoamState::Loaded(relationships) => {
-                            if let Some(relationship) = relationships.get(&assessment_id) {
-                                rsx! {
-                                    FindingPoamBar {
-                                        context,
-                                        relationship: relationship.clone(),
-                                        viewer: props.viewer,
-                                        on_event: props.on_poam_event,
-                                    }
-                                }
+                            if let Some(relationship) = relationships.get(&finding_id) {
+                                rsx! { FindingPoamBar { context, relationship: relationship.clone(), viewer: props.viewer, on_event: props.on_poam_event } }
                             } else {
-                                rsx! {
-                                    div { class: "sd-callout sd-callout-warn",
-                                        "The authoritative POA&M relationship response did not include this assessment. Refresh evidence before acting."
-                                    }
-                                }
+                                rsx! { div { class: "sd-callout sd-callout-warn", "The authoritative POA&M relationship response did not include this finding. Refresh evidence before acting." } }
                             }
                         }
                     }
@@ -1366,6 +1342,8 @@ mod tests {
             evidence_items: Vec::new(),
             framework_mapping: String::new(),
             composite_result: None,
+            finding_id: None,
+            finding_observation: None,
             composite_expected: false,
             control_family: Some("AC".to_string()),
             cmmc_level,
