@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-08-29 05:02'
+updated_date: '2026-08-29 05:25'
 labels:
   - design-parity
   - web-ui
@@ -277,6 +277,8 @@ Legacy omitted-request-ID deployment calls now derive stable SHA-256 identity fr
 The configuration-independent flake carrier no longer throws without an input lib. It prefers the first available configuration's cfg.pkgs.lib/pkgs, falls back to an input lib/legacyPackages, and otherwise emits declared systems, exported module names, and resolved lock inputs with module_evaluation.available=false plus explicit error detail. Missing nixosConfigurations and missing flake.lock no longer abort the carrier. A real-Nix local path-input flake with no nixpkgs/lib proves declared module and input persistence.
 
 Verification passed: focused snapshot_redaction 9/9; evaluation snapshot models 9/9; generated Nix parser; real-Nix no-lib carrier; carrier structure and stable legacy identity tests; SQLX_OFFLINE cf-server --tests check; migration chain through 0235 on repository-isolated PostgreSQL 127.0.0.1:3042; migrated DB secret storage/search/API test; migrated DB 23h retry/25h redeploy test; cargo sqlx prepare --check --workspace with no metadata changes (existing unused-query warning only); cf-server cargo doc --no-deps (existing rustdoc warnings only); rustfmt and git diff --check. Frontend/check files were not edited in this correction pass and remain preserved.
+
+Frontend independent-audit remediation completed in the dedicated TASK-440 worktree. Writes were limited to `packages/web-ui`; existing server, migration, and `checks/web-ui` changes were preserved. Frontend DTOs now deserialize the exact current server evaluated-options and flake-output JSON, including optional removed options, typed diffs, lifecycle metrics, provenance status/priority/note, first-parent resolution/delta/pagination, collapse flags, typed modules/declarations/consumers, and resolved inputs/lock metadata; exact JSON contract tests were added. Config revision remounting resets search/filter/page/expanded/source state, async requests reject stale results, mutation actions are hidden without system mutation permission, protected-resource errors are non-disclosing, removed/failed/opaque/package/structured values and diffs render safely, summary/drift metrics are authoritative, and external tracked provenance retains its own input/revision. Flake pane/revision URL state is authoritative across async commit loading and popstate, stale revisions are replaced without adding history, output fetches reject stale responses, Commits shows the revision bar/server delta, Systems uses authoritative counts/collapse/pin data, Modules and Inputs render the complete typed carrier payload and warnings, and registration retains branch context. Removed the leaked commit interval and stale UI-complete/phase comments. Added tablist keyboard navigation, real row buttons, modal/source-tray focus traps and restoration, aria-modal semantics, child-event isolation, truthful auto_latest submitting state, and immediate persisted-policy display refresh. Verification passed: `nix develop -c cargo test --manifest-path packages/web-ui/Cargo.toml` (207 passed, 1 ignored); `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown`; `git diff --check -- packages/web-ui`. Existing repository warnings remain. No commit or push was made.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
