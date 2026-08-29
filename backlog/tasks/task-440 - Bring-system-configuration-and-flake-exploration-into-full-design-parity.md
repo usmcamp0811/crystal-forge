@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-08-28 19:28'
+updated_date: '2026-08-29 02:05'
 labels:
   - design-parity
   - web-ui
@@ -233,6 +233,8 @@ Web UI: added an isolated `AutoLatestDeployPrompt` and reducer with Cancel, Cont
 Verification passed: `nix develop -c env SQLX_OFFLINE=true cargo test --manifest-path packages/default/Cargo.toml -p cf-server --lib handlers::api::systems::tests` (39 passed, 2 ignored); isolated migrated DB command `... cargo test ... manual_conversion -- --ignored` (2 passed) proved failed conversion queues zero, conversion survives deployment failure, and retry reuses one pending deployment ID; `nix develop -c cargo test --manifest-path packages/web-ui/Cargo.toml auto_latest_deploy` (3 passed); touched-file `rustfmt --check`; `git diff --check`; and `git diff --exit-code -- checks/web-ui/tests/integration-test.js`. Repository warnings remain. The worktree-local database was stopped after DB verification. SQLx metadata was not refreshed because all new queries use runtime `sqlx::query`/`query_scalar` and no query macro shape changed.
 
 Remaining gap for this slice: no browser-level interaction/screenshot check was added because the user explicitly prohibited changes to `integration-test.js`. The focused Rust UI tests cover reducer transitions and required action labels, while rendered modal behavior remains for the task's later authoritative browser phase. Other TASK-440 files remain concurrently modified by parallel agents and were preserved.
+
+Authoritative browser follow-up (2026-08-28): fixed the flake module keyboard-handler ownership error; preserved Config results during refetch and added request-parameter stale-response validation; made flake pane state URL-authoritative and restored the commit grid with explicit `display:grid`; changed environment-to-flake and return navigation to typed Dioxus routes; corrected the generated evaluator expression's invalid `builtins.min` calls; and hardened TASK-440 fixtures to release all duplicate held search requests and wait for the replacement response before asserting stale-response behavior. Verification passed: `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown`, `nix develop -c env SQLX_OFFLINE=true cargo test --manifest-path packages/default/Cargo.toml -p cf-server generated_evaluation_expression_parses_when_nix_is_available`, `nix develop -c node --check checks/web-ui/tests/integration-test.js`, and `git diff --check`. Authoritative browser completion remains blocked: after the evaluator fix, the web-ui VM's background evaluator advances into repeated real Nix system builds, emits `/nix/store/.links/... has maximum number of links`, and exceeds 15-30 minute command timeouts before producing a browser summary. Earlier pre-fix runs reached the workflows and identified the corrected interaction races. No commit, push, MR, task status change, or unrelated cleanup was performed.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
