@@ -985,26 +985,80 @@ pub struct EvalPolicySystemRow {
     pub details: Vec<Option<String>>,
 }
 
-/// Dependency/derivation breakdown for a single commit evaluation.
+/// Dependency build-plan data for a single commit evaluation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EvalDependencyGraphResponse {
     pub commit_id: i32,
-    pub total_packages: i64,
-    pub packages: Vec<EvalDependencyPackageRow>,
+    /// Number of NixOS systems represented by `systems`.
+    pub total_systems: i64,
+    /// One row per evaluated or failed NixOS system.
+    pub systems: Vec<EvalDependencySystemRow>,
 }
 
+/// Dependency build-plan data for one NixOS system.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EvalDependencyPackageRow {
-    pub package_name: String,
-    /// True when ready/pending counts represent real closure package counts.
-    /// False means counts are only a temporary system-status fallback.
-    pub closure_counted: bool,
-    /// Systems with a completed build (store_path present / BuildComplete).
-    pub ready_count: i64,
-    /// Systems evaluated but not yet built (DryRunComplete / pending build).
-    pub pending_count: i64,
-    /// Systems whose eval or build failed.
-    pub failed_count: i64,
+pub struct EvalDependencySystemRow {
+    /// NixOS configuration name.
+    pub system_name: String,
+    /// Number of unique `.drv` requisites excluding the exact system derivation.
+    pub dependency_derivation_count: Option<i64>,
+    /// Number of dependency derivations Nix would build under the effective
+    /// substitute and offline configuration.
+    ///
+    /// `Some(0)` is a valid no-work plan. Non-complete plans use `None`.
+    pub dependency_build_count: Option<i64>,
+    /// State of the asynchronous dependency build-plan calculation.
+    pub build_plan_status: DependencyBuildPlanStatus,
+    /// Evaluation/build failure state of the system itself.
+    pub system_status: DependencyGraphSystemStatus,
+}
+
+/// State of an asynchronous dependency build-plan calculation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DependencyBuildPlanStatus {
+    /// No calculation exists, including rows created before build plans existed.
+    Unavailable,
+    /// Crystal Forge is calculating the plan without blocking build activation.
+    Calculating,
+    /// The optional count contains a valid result, including zero.
+    Complete,
+    /// Calculation failed and no fallback count is available.
+    Failed,
+}
+
+impl DependencyBuildPlanStatus {
+    /// Converts a database status value to its API representation.
+    pub(crate) fn from_database(value: &str) -> Option<Self> {
+        match value {
+            "unavailable" => Some(Self::Unavailable),
+            "calculating" => Some(Self::Calculating),
+            "complete" => Some(Self::Complete),
+            "failed" => Some(Self::Failed),
+            _ => None,
+        }
+    }
+}
+
+/// Failure state for a system represented in the dependency graph.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DependencyGraphSystemStatus {
+    /// The system evaluation produced a derivation.
+    Evaluated,
+    /// The system evaluation or build failed.
+    Failed,
+}
+
+impl DependencyGraphSystemStatus {
+    /// Converts a query status value to its API representation.
+    pub(crate) fn from_database(value: &str) -> Option<Self> {
+        match value {
+            "evaluated" => Some(Self::Evaluated),
+            "failed" => Some(Self::Failed),
+            _ => None,
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

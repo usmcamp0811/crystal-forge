@@ -1867,6 +1867,20 @@
       "baseline": "advisory"
     },
     {
+      "name": "26bb-evaluation-dependency-graph",
+      "description": "Evaluation dependency graph distinguishes plan states and scales build work across systems",
+      "route": "/evaluations",
+      "designRef": "docs/design/CrystalForge/components/EvalDrawer.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
       "name": "26c-evaluations-latest-per-flake-populated",
       "description": "Evaluation active and history tabs honor server-authoritative latest markers and retain the pressed filter",
       "route": "/evaluations",

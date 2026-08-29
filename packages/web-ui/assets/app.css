@@ -4757,7 +4757,7 @@ tr.kbd-focused > td {
   border: 1px solid var(--cf-divider);
 }
 
-.ed-graph-pkg {
+.ed-graph-system {
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -4769,10 +4769,6 @@ tr.kbd-focused > td {
   border-radius: 3px;
   overflow: hidden;
   background: var(--cf-subtle-bg);
-}
-
-.ed-graph-bar-cached {
-  background: #34d399;
 }
 
 .ed-graph-bar-build {

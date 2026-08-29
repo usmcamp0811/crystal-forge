@@ -5,7 +5,7 @@ use crate::compliance::canonical::semantic_digest;
 use crate::compliance::resolver::{
     AssignmentMode, ResolutionOutcome, resolve_systems_effective_policies_for_evaluation_batch,
 };
-use crate::config::{CrystalForgeConfig, FlakeConfig};
+use crate::config::{BuildConfig, CrystalForgeConfig, FlakeConfig};
 use crate::deployment::spawn_deployment_policy_manager;
 use crate::flake::commits::sync_all_watched_flakes_commits_with_ids;
 use crate::log::log_builder_worker_status;
@@ -31,7 +31,7 @@ use tokio::time::interval;
 use tracing::{debug, error, info, warn};
 
 // ⬇️ bring in the commit-eval helpers you said you added in queries/commits.rs
-use crate::derivations::utils::count_closure_packages;
+use crate::derivations::utils::calculate_dependency_build_plan;
 use crate::models::deployment_policies::{AssignedPolicy, PoliciesByConfiguration};
 use crate::queries::build_jobs::{QueuedBuild, recover_orphaned_derivation_build_jobs};
 use crate::queries::builders::{
@@ -48,12 +48,13 @@ use crate::queries::deployment_policies::{
     list_enabled_policies_for_flake, list_policy_rows_by_configuration_for_flake,
 };
 use crate::queries::derivations::{
-    cleanup_partial_derivations, reset_stuck_builds, set_closure_counts,
+    cleanup_partial_derivations, complete_dependency_build_plan, fail_dependency_build_plan,
+    mark_dependency_build_plan_calculating, reset_stuck_builds,
 };
 use crate::services::hardening_scans::trigger_commit_hardening_scans;
 
-const CLOSURE_COUNT_MAX_CONCURRENT: usize = 2;
-static CLOSURE_COUNT_LIMITER: OnceLock<Arc<Semaphore>> = OnceLock::new();
+const DEPENDENCY_BUILD_PLAN_MAX_CONCURRENT: usize = 2;
+static DEPENDENCY_BUILD_PLAN_LIMITER: OnceLock<Arc<Semaphore>> = OnceLock::new();
 
 /// Maximum number of commit evaluations (nix-eval-jobs + fallback phase)
 /// that may run concurrently across the entire server process.
@@ -69,9 +70,9 @@ fn commit_evaluation_limiter() -> Arc<Semaphore> {
         .clone()
 }
 
-fn closure_count_limiter() -> Arc<Semaphore> {
-    CLOSURE_COUNT_LIMITER
-        .get_or_init(|| Arc::new(Semaphore::new(CLOSURE_COUNT_MAX_CONCURRENT)))
+fn dependency_build_plan_limiter() -> Arc<Semaphore> {
+    DEPENDENCY_BUILD_PLAN_LIMITER
+        .get_or_init(|| Arc::new(Semaphore::new(DEPENDENCY_BUILD_PLAN_MAX_CONCURRENT)))
         .clone()
 }
 
@@ -404,6 +405,7 @@ fn is_nix_identifier_char(character: char) -> bool {
 async fn run_post_finalize_derivation_side_effects(
     pool: &PgPool,
     derivations: &[FinalizedDerivation],
+    build_config: &BuildConfig,
 ) {
     for derivation in derivations {
         match crate::builder::create_drv_gc_root(&derivation.drv_path, derivation.derivation_id)
@@ -427,37 +429,78 @@ async fn run_post_finalize_derivation_side_effects(
         let pool2 = pool.clone();
         let drv2 = derivation.drv_path.clone();
         let derivation_id = derivation.derivation_id;
-        let limiter = closure_count_limiter();
+        let build_config = build_config.clone();
+        let limiter = dependency_build_plan_limiter();
         tokio::spawn(async move {
+            if let Err(err) = mark_dependency_build_plan_calculating(&pool2, derivation_id).await {
+                warn!(
+                    "Failed to mark dependency build plan calculating for id={}: {}",
+                    derivation_id, err
+                );
+            }
             let permit = match limiter.acquire_owned().await {
                 Ok(permit) => permit,
                 Err(err) => {
                     warn!(
-                        "⚠️  Failed to acquire closure count permit for id={}: {}",
+                        "Failed to acquire dependency build-plan permit for id={}: {}",
                         derivation_id, err
                     );
+                    if let Err(persist_err) =
+                        fail_dependency_build_plan(&pool2, derivation_id).await
+                    {
+                        warn!(
+                            "Failed to mark dependency build plan failed for id={}: {}",
+                            derivation_id, persist_err
+                        );
+                    }
                     return;
                 }
             };
-            match count_closure_packages(&drv2).await {
-                Ok((total, cached)) => {
-                    if let Err(err) = set_closure_counts(&pool2, derivation_id, total, cached).await
+            match calculate_dependency_build_plan(&drv2, &build_config).await {
+                Ok(plan) => {
+                    if let Err(err) = complete_dependency_build_plan(
+                        &pool2,
+                        derivation_id,
+                        plan.dependency_derivation_count,
+                        plan.dependency_build_count,
+                    )
+                    .await
                     {
                         warn!(
-                            "⚠️  Failed to store closure counts for id={}: {}",
+                            "Failed to store dependency build plan for id={}: {}",
                             derivation_id, err
                         );
+                        if let Err(persist_err) =
+                            fail_dependency_build_plan(&pool2, derivation_id).await
+                        {
+                            warn!(
+                                "Failed to mark dependency build plan failed for id={}: {}",
+                                derivation_id, persist_err
+                            );
+                        }
                     } else {
                         info!(
-                            "📦 closure id={}: {}/{} packages cached/local",
-                            derivation_id, cached, total
+                            "Dependency build plan id={}: {} builds across {} dependency derivations",
+                            derivation_id,
+                            plan.dependency_build_count,
+                            plan.dependency_derivation_count
                         );
                     }
                 }
-                Err(err) => warn!(
-                    "⚠️  Failed to count closure packages for id={}: {}",
-                    derivation_id, err
-                ),
+                Err(err) => {
+                    warn!(
+                        "Failed to calculate dependency build plan for id={}: {}",
+                        derivation_id, err
+                    );
+                    if let Err(persist_err) =
+                        fail_dependency_build_plan(&pool2, derivation_id).await
+                    {
+                        warn!(
+                            "Failed to mark dependency build plan failed for id={}: {}",
+                            derivation_id, persist_err
+                        );
+                    }
+                }
             }
             drop(permit);
         });
@@ -2127,7 +2170,12 @@ async fn process_pending_commits(
                             );
                         }
 
-                        run_post_finalize_derivation_side_effects(pool, &derivations).await;
+                        run_post_finalize_derivation_side_effects(
+                            pool,
+                            &derivations,
+                            &build_config,
+                        )
+                        .await;
 
                         if server_config.auto_hardening_scans {
                             match trigger_commit_hardening_scans(

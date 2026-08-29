@@ -2186,25 +2186,84 @@ pub async fn mark_target_failed(
     mark_derivation_failed(pool, target_id, phase, error_message).await
 }
 
-/// Persist closure package counts on a nixos-type derivation row.
-/// Called asynchronously after eval completes for a system.
-pub async fn set_closure_counts(
+/// Marks a dependency build-plan calculation as active.
+///
+/// A new calculation clears any prior build count so clients cannot combine a
+/// stale count with the `calculating` state.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot update the derivation row.
+pub async fn mark_dependency_build_plan_calculating(
     pool: &PgPool,
     derivation_id: i32,
-    total: i32,
-    cached: i32,
 ) -> Result<()> {
-    sqlx::query!(
+    sqlx::query(
         r#"
         UPDATE derivations
-           SET closure_total  = $2,
-               closure_cached = $3
+           SET closure_total = NULL,
+               closure_cached = NULL,
+               dependency_build_count = NULL,
+               dependency_build_plan_status = 'calculating'
          WHERE id = $1
         "#,
-        derivation_id,
-        total,
-        cached,
     )
+    .bind(derivation_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Persists a completed dependency build plan.
+///
+/// `dependency_derivation_count` and `dependency_build_count` exclude the exact
+/// top-level system derivation. The build count includes only derivations that
+/// Nix reported in the dry-run build section under the effective build config.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL rejects the counts or cannot update the row.
+pub async fn complete_dependency_build_plan(
+    pool: &PgPool,
+    derivation_id: i32,
+    dependency_derivation_count: i32,
+    dependency_build_count: i32,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE derivations
+           SET closure_total = $2,
+               closure_cached = NULL,
+               dependency_build_count = $3,
+               dependency_build_plan_status = 'complete'
+         WHERE id = $1
+        "#,
+    )
+    .bind(derivation_id)
+    .bind(dependency_derivation_count)
+    .bind(dependency_build_count)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Marks dependency build-plan calculation as failed without inventing a count.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot update the derivation row.
+pub async fn fail_dependency_build_plan(pool: &PgPool, derivation_id: i32) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE derivations
+           SET closure_total = NULL,
+               closure_cached = NULL,
+               dependency_build_count = NULL,
+               dependency_build_plan_status = 'failed'
+         WHERE id = $1
+        "#,
+    )
+    .bind(derivation_id)
     .execute(pool)
     .await?;
     Ok(())

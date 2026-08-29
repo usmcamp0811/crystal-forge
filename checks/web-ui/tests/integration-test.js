@@ -11045,6 +11045,117 @@ security.audit.enable = true;</fixtext>
     },
   },
   {
+    name: "26bb-evaluation-dependency-graph",
+    description: "Evaluation dependency graph distinguishes plan states and scales build work across systems",
+    action: async (page) => {
+      const evalQueueMock = {
+        active_count: 1,
+        completed_count: 0,
+        failed_count: 0,
+        domain_total: 1,
+        filtered_total: 1,
+        execution_mode: "standard",
+        timestamp: new Date().toISOString(),
+        items: [
+          {
+            commit_id: 4410,
+            flake_id: 1,
+            flake_name: "dependency-graph-fixture",
+            branch: "main",
+            commit_hash: "4410deadbeef",
+            commit_message: "dependency graph fixture",
+            author: "ui-check",
+            committed_at: new Date(Date.now() - 3600000).toISOString(),
+            enqueued_at: new Date(Date.now() - 3590000).toISOString(),
+            is_latest_per_flake: true,
+            evaluation_status: "in_progress",
+            queue_position: 1,
+            systems: ["build-100", "build-10"],
+            system_count: 9,
+            passed_count: 8,
+            policy_failed_count: 0,
+            eval_failed_count: 1,
+          },
+        ],
+      };
+      const dependencyGraphMock = {
+        commit_id: 4410,
+        total_systems: 9,
+        systems: [
+          { system_name: "build-100", dependency_derivation_count: 320, dependency_build_count: 100, build_plan_status: "complete", system_status: "evaluated" },
+          { system_name: "build-10", dependency_derivation_count: 180, dependency_build_count: 10, build_plan_status: "complete", system_status: "evaluated" },
+          { system_name: "equal-alpha", dependency_derivation_count: 220, dependency_build_count: 40, build_plan_status: "complete", system_status: "evaluated" },
+          { system_name: "equal-beta", dependency_derivation_count: 220, dependency_build_count: 40, build_plan_status: "complete", system_status: "evaluated" },
+          { system_name: "zero-work", dependency_derivation_count: 95, dependency_build_count: 0, build_plan_status: "complete", system_status: "evaluated" },
+          { system_name: "plan-unavailable", dependency_derivation_count: null, dependency_build_count: null, build_plan_status: "unavailable", system_status: "evaluated" },
+          { system_name: "plan-calculating", dependency_derivation_count: 140, dependency_build_count: null, build_plan_status: "calculating", system_status: "evaluated" },
+          { system_name: "plan-failed", dependency_derivation_count: 150, dependency_build_count: null, build_plan_status: "failed", system_status: "evaluated" },
+          { system_name: "system-failed", dependency_derivation_count: null, dependency_build_count: null, build_plan_status: "unavailable", system_status: "failed" },
+        ],
+      };
+
+      await page.route("**/api/v1/commits/eval-queue**", async (route) => {
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(evalQueueMock) });
+      });
+      await page.route("**/api/v1/commits/4410/eval/logs**", async (route) => {
+        await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+      });
+      await page.route("**/api/v1/commits/4410/eval/dependency-graph**", async (route) => {
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(dependencyGraphMock) });
+      });
+
+      try {
+        await page.goto(`${baseUrl}/evaluations`, { timeout: LOAD_TIMEOUT });
+        const fixtureRow = page.getByText("dependency-graph-fixture", { exact: true });
+        await fixtureRow.waitFor({ timeout: 10000 });
+        await fixtureRow.click();
+
+        const drawer = page.getByRole("dialog", { name: "Evaluation detail" });
+        await assertVisible(drawer, "Expected evaluation detail drawer for dependency graph fixture");
+        await drawer.getByRole("button", { name: /Dependency graph/ }).click();
+
+        const graphRow = (name) => drawer.getByTestId(`dependency-system-row-${name}`);
+        await assertVisible(graphRow("build-100"), "Expected dependency graph system rows");
+
+        const buildWidth = async (name) =>
+          await graphRow(name).getByTestId("dependency-build-work-bar").evaluate((element) => element.style.width);
+        const width100 = await buildWidth("build-100");
+        const width10 = await buildWidth("build-10");
+        const equalAlphaWidth = await buildWidth("equal-alpha");
+        const equalBetaWidth = await buildWidth("equal-beta");
+        const zeroWidth = await buildWidth("zero-work");
+        if (width100 !== "100%" || width10 !== "10%") {
+          throw new Error(`Expected shared 10:100 build widths, got ${width10}:${width100}`);
+        }
+        if (equalAlphaWidth !== equalBetaWidth) {
+          throw new Error(`Expected equal build counts to have equal widths, got ${equalAlphaWidth} and ${equalBetaWidth}`);
+        }
+        if (zeroWidth !== "0%") {
+          throw new Error(`Expected zero build work to have zero width, got ${zeroWidth}`);
+        }
+
+        await assertVisible(graphRow("zero-work").getByText("0 to build", { exact: true }), "Expected valid complete zero to render as 0 to build");
+        await assertAttribute(graphRow("plan-unavailable"), "data-state", "unavailable", "Expected unavailable plan state");
+        await assertAttribute(graphRow("plan-calculating"), "data-state", "calculating", "Expected calculating plan state");
+        await assertAttribute(graphRow("plan-failed"), "data-state", "plan-failed", "Expected failed plan state");
+        await assertAttribute(graphRow("system-failed"), "data-state", "system-failed", "Expected failed system state");
+        await assertVisible(graphRow("plan-unavailable").getByText("Build plan unavailable", { exact: true }), "Expected unavailable plan label");
+        await assertVisible(graphRow("plan-failed").getByText("Build plan failed", { exact: true }), "Expected failed plan label");
+        await assertVisible(graphRow("system-failed").getByText("System failed", { exact: true }), "Expected failed system label");
+        await assertVisible(drawer.getByText("dependency derivations", { exact: true }).first(), "Expected dependency derivation terminology");
+        await assertVisible(drawer.getByText("Build work", { exact: true }).first(), "Expected build work terminology");
+        const staleTerminology = drawer.getByText(/cached\/local|pending closure|packages/i);
+        if (await staleTerminology.count() !== 0) {
+          throw new Error("Dependency graph should not use package, closure, or cache terminology");
+        }
+      } finally {
+        await page.unroute("**/api/v1/commits/eval-queue**");
+        await page.unroute("**/api/v1/commits/4410/eval/logs**");
+        await page.unroute("**/api/v1/commits/4410/eval/dependency-graph**");
+      }
+    },
+  },
+  {
     name: "26c-evaluations-latest-per-flake-populated",
     description: "Evaluation active and history tabs honor server-authoritative latest markers and retain the pressed filter",
     action: async (page) => {

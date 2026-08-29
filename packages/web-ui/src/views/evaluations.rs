@@ -15,7 +15,10 @@ use crate::api::{
         fetch_eval_policy_matrix, fetch_eval_queue, force_cancel_commit_evaluation,
         re_evaluate_commit, reorder_eval_queue,
     },
-    models::{EvalHistoryItem, EvalHistoryPage, EvalQueueItem},
+    models::{
+        EvalBuildPlanStatus, EvalDependencySystemRow, EvalDependencySystemStatus, EvalHistoryItem,
+        EvalHistoryPage, EvalQueueItem,
+    },
 };
 use crate::components::{Icon, IconName};
 use crate::hooks::{InfiniteScroll, use_infinite_scroll};
@@ -26,6 +29,61 @@ use crate::views::latest_filter::{
 };
 
 const FETCH_LIMIT_MAX: i64 = 10_000; // must match backend LIMIT_MAX
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum DependencyGraphRowState {
+    Complete {
+        build_count: i64,
+        width_percent: f64,
+    },
+    Unavailable,
+    Calculating,
+    PlanFailed,
+    SystemFailed,
+}
+
+fn maximum_complete_build_count(systems: &[EvalDependencySystemRow]) -> i64 {
+    systems
+        .iter()
+        .filter(|system| {
+            system.system_status == EvalDependencySystemStatus::Evaluated
+                && system.build_plan_status == EvalBuildPlanStatus::Complete
+        })
+        .filter_map(|system| system.dependency_build_count)
+        .map(|count| count.max(0))
+        .max()
+        .unwrap_or(0)
+}
+
+fn build_width_percent(build_count: i64, maximum: i64) -> f64 {
+    if maximum <= 0 {
+        return 0.0;
+    }
+
+    (build_count.max(0) as f64 * 100.0) / maximum as f64
+}
+
+fn dependency_graph_row_state(
+    system: &EvalDependencySystemRow,
+    maximum: i64,
+) -> DependencyGraphRowState {
+    if system.system_status == EvalDependencySystemStatus::Failed {
+        return DependencyGraphRowState::SystemFailed;
+    }
+
+    match system.build_plan_status {
+        EvalBuildPlanStatus::Unavailable => DependencyGraphRowState::Unavailable,
+        EvalBuildPlanStatus::Calculating => DependencyGraphRowState::Calculating,
+        EvalBuildPlanStatus::Failed => DependencyGraphRowState::PlanFailed,
+        EvalBuildPlanStatus::Complete => system.dependency_build_count.map_or(
+            DependencyGraphRowState::Unavailable,
+            |build_count| DependencyGraphRowState::Complete {
+                build_count: build_count.max(0),
+                width_percent: build_width_percent(build_count, maximum),
+            },
+        ),
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum EvaluationsTab {
@@ -2778,7 +2836,9 @@ fn EvalDrawerPolicyTab(commit_id: i32, on_open_policy: EventHandler<String>) -> 
 
 #[component]
 fn EvalDrawerGraphTab(commit_id: i32) -> Element {
-    const GRAPH_PENDING_POLL_MAX: u64 = 60;
+    // Build-plan work is bounded to two concurrent Nix processes. Large
+    // evaluations can therefore remain non-terminal for several minutes.
+    const GRAPH_PENDING_POLL_MAX: u64 = 600;
 
     let mut graph_refresh = use_signal(|| 0_u64);
     let mut has_pending_counts = use_signal(|| true);
@@ -2790,7 +2850,12 @@ fn EvalDrawerGraphTab(commit_id: i32) -> Element {
 
     use_effect(move || {
         if let Some(Ok(data)) = &*graph_resource.read() {
-            let pending = data.packages.iter().any(|p| !p.closure_counted);
+            let pending = data.systems.iter().any(|system| {
+                matches!(
+                    system.build_plan_status,
+                    EvalBuildPlanStatus::Unavailable | EvalBuildPlanStatus::Calculating
+                ) && system.system_status == EvalDependencySystemStatus::Evaluated
+            });
             has_pending_counts.set(pending);
             if !pending {
                 graph_pending_polls.set(GRAPH_PENDING_POLL_MAX);
@@ -2829,14 +2894,34 @@ fn EvalDrawerGraphTab(commit_id: i32) -> Element {
                     div { style: "color: #f87171; font-size: 12px;", "Failed to load dependency graph" }
                 },
                 Some(Ok(data)) => {
-                    let systems_total = data.packages.len() as i64;
-                    let total_packages: i64 = data.packages.iter().filter(|p| p.closure_counted).map(|p| p.ready_count + p.pending_count + p.failed_count).sum();
-                    let packages_cached: i64 = data.packages.iter().filter(|p| p.closure_counted).map(|p| p.ready_count).sum();
-                    let packages_to_build: i64 = data.packages.iter().filter(|p| p.closure_counted).map(|p| p.pending_count).sum();
-                    let packages_failed: i64 = data.packages.iter().filter(|p| p.closure_counted).map(|p| p.failed_count).sum();
+                    let maximum_build_count = maximum_complete_build_count(&data.systems);
+                    let dependency_derivation_total: i64 = data
+                        .systems
+                        .iter()
+                        .filter_map(|system| system.dependency_derivation_count)
+                        .sum();
+                    let has_dependency_counts = data
+                        .systems
+                        .iter()
+                        .any(|system| system.dependency_derivation_count.is_some());
+                    let build_work_total: i64 = data
+                        .systems
+                        .iter()
+                        .filter(|system| {
+                            system.system_status == EvalDependencySystemStatus::Evaluated
+                                && system.build_plan_status == EvalBuildPlanStatus::Complete
+                        })
+                        .filter_map(|system| system.dependency_build_count)
+                        .map(|count| count.max(0))
+                        .sum();
+                    let has_complete_plans = data.systems.iter().any(|system| {
+                        system.system_status == EvalDependencySystemStatus::Evaluated
+                            && system.build_plan_status == EvalBuildPlanStatus::Complete
+                            && system.dependency_build_count.is_some()
+                    });
                     let commit_short: String = format!("commit #{}", commit_id);
                     rsx! {
-                        // Summary flow: source → eval → systems → package closure counts
+                        // Summary flow: source → evaluation → systems → dependency work.
                         div { class: "ed-graph-summary",
                             div { class: "ed-graph-node ed-graph-source",
                                 Icon { name: IconName::Git, size: 12 }
@@ -2849,24 +2934,20 @@ fn EvalDrawerGraphTab(commit_id: i32) -> Element {
                             }
                             span { style: "color: var(--cf-text-muted);", "→" }
                             div { class: "ed-graph-node ed-graph-fan",
-                                span { style: "font-weight: 700;", "{systems_total}" }
+                                span { style: "font-weight: 700;", "{data.total_systems}" }
                                 span { style: "font-size: 10px; color: var(--cf-text-muted);", "systems" }
                             }
-                            if total_packages > 0 {
+                            if has_dependency_counts {
                                 span { style: "color: var(--cf-text-muted);", "→" }
                                 div { class: "ed-graph-node ed-graph-fan",
-                                    span { style: "font-weight: 700; color: #34d399;", "{packages_cached}" }
-                                    span { style: "font-size: 10px; color: var(--cf-text-muted);", "cached/local" }
+                                    span { style: "font-weight: 700; color: #34d399;", "{dependency_derivation_total}" }
+                                    span { style: "font-size: 10px; color: var(--cf-text-muted);", "dependency derivations" }
                                 }
+                            }
+                            if has_complete_plans {
                                 div { class: "ed-graph-node ed-graph-fan",
-                                    span { style: "font-weight: 700; color: #60a5fa;", "{packages_to_build}" }
-                                    span { style: "font-size: 10px; color: var(--cf-text-muted);", "to build" }
-                                }
-                                if packages_failed > 0 {
-                                    div { class: "ed-graph-node ed-graph-fan",
-                                        span { style: "font-weight: 700; color: #f87171;", "{packages_failed}" }
-                                        span { style: "font-size: 10px; color: var(--cf-text-muted);", "failed" }
-                                    }
+                                    span { style: "font-weight: 700; color: #60a5fa;", "{build_work_total}" }
+                                    span { style: "font-size: 10px; color: var(--cf-text-muted);", "build work" }
                                 }
                             }
                         }
@@ -2877,69 +2958,61 @@ fn EvalDrawerGraphTab(commit_id: i32) -> Element {
                                 "Systems evaluated"
                             }
                             span { style: "font-size: 11px; color: var(--cf-text-muted);",
-                                "{data.packages.len()} systems"
+                                "{data.systems.len()} systems"
                             }
                         }
 
-                        if data.packages.is_empty() {
+                        if data.systems.is_empty() {
                             div { style: "color: var(--cf-text-muted); font-size: 12px;", "No systems recorded for this commit yet." }
                         } else {
                             div { class: "ed-graph-list",
-                                for pkg in data.packages.iter() {
+                                for system in data.systems.iter() {
                                     {
-                                        let row_total = pkg.ready_count + pkg.pending_count + pkg.failed_count;
-                                        let has_counts = pkg.closure_counted && row_total > 0;
-                                        let cached_pct = if has_counts { pkg.ready_count * 100 / row_total } else { 0 };
-                                        let build_pct = if has_counts { pkg.pending_count * 100 / row_total } else { 0 };
-                                        let failed_pct = if has_counts { pkg.failed_count * 100 / row_total } else { 0 };
+                                        let row_state = dependency_graph_row_state(system, maximum_build_count);
+                                        let (state_name, detail, value, color, build_width) = match row_state {
+                                            DependencyGraphRowState::Complete { build_count, width_percent } => {
+                                                let detail = system.dependency_derivation_count.map_or_else(
+                                                    || format!("{build_count} to build · dependency derivations unavailable"),
+                                                    |count| format!("{count} dependency derivations · {build_count} to build"),
+                                                );
+                                                ("complete", detail, format!("{build_count} to build"), "#60a5fa", width_percent)
+                                            }
+                                            DependencyGraphRowState::Unavailable => ("unavailable", "Build plan unavailable".to_string(), "unavailable".to_string(), "#9ca3af", 0.0),
+                                            DependencyGraphRowState::Calculating => ("calculating", "Calculating build work".to_string(), "calculating".to_string(), "#f59e0b", 0.0),
+                                            DependencyGraphRowState::PlanFailed => ("plan-failed", "Build plan failed".to_string(), "plan failed".to_string(), "#f87171", 0.0),
+                                            DependencyGraphRowState::SystemFailed => ("system-failed", "System failed".to_string(), "system failed".to_string(), "#f87171", 0.0),
+                                        };
                                         rsx! {
-                                            div { key: "{pkg.package_name}", class: "ed-graph-row",
-                                                div { class: "ed-graph-pkg",
-                                                    span { class: "mono truncate", style: "font-size: 12px; font-weight: 600;", "{pkg.package_name}" }
-                                                    if has_counts {
-                                                        span { style: "font-size: 10px; color: var(--cf-text-muted);",
-                                                            "{pkg.ready_count}/{row_total} cached/local · {pkg.pending_count} to build"
-                                                            if pkg.failed_count > 0 { " · {pkg.failed_count} failed" }
-                                                        }
-                                                    } else if pkg.failed_count > 0 {
-                                                        span { style: "font-size: 10px; color: #f87171;", "failed before closure count" }
-                                                    } else {
-                                                        span { style: "font-size: 10px; color: #9ca3af;", "pending closure count" }
-                                                    }
+                                            div {
+                                                key: "{system.system_name}",
+                                                class: "ed-graph-row",
+                                                "data-testid": "dependency-system-row-{system.system_name}",
+                                                "data-system-name": "{system.system_name}",
+                                                "data-state": state_name,
+                                                div { class: "ed-graph-system",
+                                                    span { class: "mono truncate", style: "font-size: 12px; font-weight: 600;", "{system.system_name}" }
+                                                    span { style: "font-size: 10px; color: {color};", "{detail}" }
                                                 }
                                                 div { class: "ed-graph-bar",
-                                                    div { class: "ed-graph-bar-cached", style: "width: {cached_pct}%;" }
-                                                    div { class: "ed-graph-bar-build", style: "width: {build_pct}%;" }
-                                                    if pkg.failed_count > 0 {
-                                                        div { style: "width: {failed_pct}%; background: #f87171;" }
-                                                    }
-                                                }
-                                                if has_counts {
-                                                    div { style: "display: flex; gap: 6px; justify-content: flex-end; font-size: 11px;",
-                                                        span { style: "color: #34d399; font-weight: 600;", "{pkg.ready_count}" }
-                                                        span { style: "color: var(--cf-text-muted);", "·" }
-                                                        span { style: "color: #60a5fa; font-weight: 600;", "{pkg.pending_count}" }
-                                                        if pkg.failed_count > 0 {
-                                                            span { style: "color: var(--cf-text-muted);", "·" }
-                                                            span { style: "color: #f87171; font-weight: 600;", "{pkg.failed_count}" }
+                                                    if matches!(row_state, DependencyGraphRowState::Complete { .. }) {
+                                                        div {
+                                                            class: "ed-graph-bar-build",
+                                                            "data-testid": "dependency-build-work-bar",
+                                                            style: "width: {build_width}%;"
                                                         }
                                                     }
-                                                } else if pkg.failed_count > 0 {
-                                                    div { style: "display: flex; justify-content: flex-end; font-size: 11px; color: #f87171; font-weight: 600;", "failed" }
-                                                } else {
-                                                    div { style: "display: flex; justify-content: flex-end; font-size: 11px; color: #9ca3af;", "—" }
                                                 }
+                                                div { style: "display: flex; justify-content: flex-end; font-size: 11px; color: {color}; font-weight: 600;", "{value}" }
                                             }
                                         }
                                     }
                                 }
                             }
                             div { class: "ed-graph-legend",
-                                span { span { class: "ed-graph-sw", style: "background: #34d399;" } "Cached/local" }
-                                span { span { class: "ed-graph-sw", style: "background: #60a5fa;" } "To build" }
-                                if packages_failed > 0 {
-                                    span { span { class: "ed-graph-sw", style: "background: #f87171;" } "Failed" }
-                                }
+                                span { span { class: "ed-graph-sw", style: "background: #60a5fa;" } "Build work" }
+                                span { span { class: "ed-graph-sw", style: "background: #9ca3af;" } "Plan unavailable" }
+                                span { span { class: "ed-graph-sw", style: "background: #f59e0b;" } "Plan calculating" }
+                                span { span { class: "ed-graph-sw", style: "background: #f87171;" } "Plan or system failed" }
                             }
                         }
                     }
@@ -3203,5 +3276,174 @@ mod policy_matrix_status_tests {
         // styling, not fall through to an unstyled/default class.
         assert_eq!(policy_cell_class_suffix("infrastructure_error"), "fail");
         assert_eq!(policy_cell_class_suffix("nix_eval_failure"), "fail");
+    }
+
+    fn graph_system(
+        name: &str,
+        build_count: Option<i64>,
+        plan_status: EvalBuildPlanStatus,
+        system_status: EvalDependencySystemStatus,
+    ) -> EvalDependencySystemRow {
+        EvalDependencySystemRow {
+            system_name: name.to_string(),
+            dependency_derivation_count: Some(200),
+            dependency_build_count: build_count,
+            build_plan_status: plan_status,
+            system_status,
+        }
+    }
+
+    #[test]
+    fn dependency_graph_equal_build_counts_have_equal_full_widths() {
+        let systems = [
+            graph_system(
+                "alpha",
+                Some(40),
+                EvalBuildPlanStatus::Complete,
+                EvalDependencySystemStatus::Evaluated,
+            ),
+            graph_system(
+                "beta",
+                Some(40),
+                EvalBuildPlanStatus::Complete,
+                EvalDependencySystemStatus::Evaluated,
+            ),
+        ];
+        let maximum = maximum_complete_build_count(&systems);
+
+        assert_eq!(maximum, 40);
+        assert_eq!(
+            dependency_graph_row_state(&systems[0], maximum),
+            DependencyGraphRowState::Complete {
+                build_count: 40,
+                width_percent: 100.0
+            }
+        );
+        assert_eq!(
+            dependency_graph_row_state(&systems[1], maximum),
+            DependencyGraphRowState::Complete {
+                build_count: 40,
+                width_percent: 100.0
+            }
+        );
+    }
+
+    #[test]
+    fn dependency_graph_ten_of_one_hundred_has_ten_percent_width() {
+        let systems = [
+            graph_system(
+                "small",
+                Some(10),
+                EvalBuildPlanStatus::Complete,
+                EvalDependencySystemStatus::Evaluated,
+            ),
+            graph_system(
+                "large",
+                Some(100),
+                EvalBuildPlanStatus::Complete,
+                EvalDependencySystemStatus::Evaluated,
+            ),
+        ];
+        let maximum = maximum_complete_build_count(&systems);
+
+        assert_eq!(maximum, 100);
+        assert_eq!(
+            dependency_graph_row_state(&systems[0], maximum),
+            DependencyGraphRowState::Complete {
+                build_count: 10,
+                width_percent: 10.0
+            }
+        );
+        assert_eq!(
+            dependency_graph_row_state(&systems[1], maximum),
+            DependencyGraphRowState::Complete {
+                build_count: 100,
+                width_percent: 100.0
+            }
+        );
+    }
+
+    #[test]
+    fn dependency_graph_all_zero_build_counts_have_zero_width() {
+        let systems = [
+            graph_system(
+                "alpha",
+                Some(0),
+                EvalBuildPlanStatus::Complete,
+                EvalDependencySystemStatus::Evaluated,
+            ),
+            graph_system(
+                "beta",
+                Some(0),
+                EvalBuildPlanStatus::Complete,
+                EvalDependencySystemStatus::Evaluated,
+            ),
+        ];
+        let maximum = maximum_complete_build_count(&systems);
+
+        assert_eq!(maximum, 0);
+        assert_eq!(
+            dependency_graph_row_state(&systems[0], maximum),
+            DependencyGraphRowState::Complete {
+                build_count: 0,
+                width_percent: 0.0
+            }
+        );
+        assert_eq!(
+            dependency_graph_row_state(&systems[1], maximum),
+            DependencyGraphRowState::Complete {
+                build_count: 0,
+                width_percent: 0.0
+            }
+        );
+    }
+
+    #[test]
+    fn dependency_graph_unavailable_plan_is_not_complete_zero() {
+        let system = graph_system(
+            "alpha",
+            None,
+            EvalBuildPlanStatus::Unavailable,
+            EvalDependencySystemStatus::Evaluated,
+        );
+
+        assert_eq!(
+            dependency_graph_row_state(&system, 100),
+            DependencyGraphRowState::Unavailable
+        );
+    }
+
+    #[test]
+    fn dependency_graph_plan_failure_remains_distinct() {
+        let system = graph_system(
+            "alpha",
+            None,
+            EvalBuildPlanStatus::Failed,
+            EvalDependencySystemStatus::Evaluated,
+        );
+
+        assert_eq!(
+            dependency_graph_row_state(&system, 100),
+            DependencyGraphRowState::PlanFailed
+        );
+    }
+
+    #[test]
+    fn dependency_graph_failed_system_overrides_plan_data() {
+        let system = graph_system(
+            "alpha",
+            Some(100),
+            EvalBuildPlanStatus::Complete,
+            EvalDependencySystemStatus::Failed,
+        );
+
+        assert_eq!(
+            maximum_complete_build_count(std::slice::from_ref(&system)),
+            0
+        );
+        assert_eq!(
+            dependency_graph_row_state(&system, 100),
+            DependencyGraphRowState::SystemFailed
+        );
     }
 }
