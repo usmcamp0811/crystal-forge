@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:43'
-updated_date: '2026-08-29 15:32'
+updated_date: '2026-08-29 15:40'
 labels:
   - design-parity
   - policy
@@ -108,3 +108,13 @@ nix flake check --keep-going
 14. Reconcile TASK-433.2 through TASK-433.8, parent TASK-433 AC1-AC40, and TASK-433.9 AC1-AC11 from current-head evidence only. Keep all tasks in Review until merge and do not mark Done.
 15. Rewrite MR !318 description to summarize the full eight-phase MR, invariants, migrations, compatibility, six workflows, visual review, exact verification, final pipeline, and accepted P3 differences. Stop without merging and issue the required maintainer report.
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Initial Phase-8 independent audits on production-equivalent head `4e77d7db` (bookkeeping head `f0471b6e`) found merge blockers. Canonical browser workflows are incomplete or non-gating: the large catalog and bulk delete are route-mocked; Unmapped+real Nix enforcement is split across tests; imported STIG refinement does not add enforcement/reopen lineage; mixed Nix+CVE outcomes are inserted directly into SQL; and the POA&M workflow stops at closure rejection while successful rollup fixtures directly change assessment outcome. Required policy workflows are absent from the Web UI check's blocking list. Phase-8 AC1, AC4, AC6, AC7, AC9, AC10, and AC11 remain unproven.
+
+Owning-phase product gaps were also found and will be remediated under their original tasks before Phase 8 resumes: Phase 1 bulk-delete CSRF/direct API proof; Phase 2 policy/mapping mutation CSRF plus common editor dialog keyboard/accessibility and reference hierarchy; Phase 4 arbitrary unknown `/nix/store` rollback authorization, bounded composite validation, stale unsupported-composite helper semantics, direct rollback/deploy CSRF, and complete exposed-kind outcome matrix; Phase 5 source-neutral legacy finding verification/closure/rollups, direct Open→Awaiting Verification transition, bounded rollup history, authoritative POA&M suite gating, and upgrade coverage; Phase 7 notification producer scaling/gating. Each owner will return to Review only after focused tests and independent re-review.
+
+Current static parent matrix: 31 PASS, 8 FAIL, 1 UNVERIFIED. Confirmed failures are AC28 state matrix, AC31 exact-final-SHA verification, AC33 canonical Unmapped+Nix workflow, AC34 imported STIG refinement workflow, AC36 real mixed execution browser workflow, AC37 complete POA&M lifecycle browser workflow, AC38 complete exposed-kind matrix, and AC40 visual/artifact report. AC29 backward compatibility remains UNVERIFIED pending final-head reconciliation. Parent checkboxes remain unchanged.
+<!-- SECTION:NOTES:END -->
