@@ -1,11 +1,11 @@
 ---
 id: TASK-433.8
 title: 'TASK-433 Phase 7: Dashboard, notifications, and setup-coach POA&M integration'
-status: In Progress
+status: Review
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:43'
-updated_date: '2026-08-29 03:57'
+updated_date: '2026-08-29 05:36'
 labels:
   - design-parity
   - poam
@@ -17,6 +17,7 @@ dependencies:
 references:
   - TASK-433
   - TASK-433.1
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/318'
 documentation:
   - docs/design/CrystalForge/components/DashboardView.jsx
   - docs/design/CrystalForge/components/SetupCoach.jsx
@@ -52,9 +53,9 @@ nix build .#checks.x86_64-linux.web-ui --no-link
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Dashboard POAM Summary and Watchlist use real batched APIs, preserve existing layouts and open detail.
-- [ ] #2 POAM notifications are real deduplicated events with target/read/dismiss/navigation and no render/poll spam.
-- [ ] #3 Setup coach adds production-derived policy, bundle and Track a POAM steps without breaking existing progress.
+- [x] #1 Dashboard POAM Summary and Watchlist use real batched APIs, preserve existing layouts and open detail.
+- [x] #2 POAM notifications are real deduplicated events with target/read/dismiss/navigation and no render/poll spam.
+- [x] #3 Setup coach adds production-derived policy, bundle and Track a POAM steps without breaking existing progress.
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -90,4 +91,10 @@ Completion rules selected from authoritative storage: Policy counts distinct lin
 AC3 setup coach implemented in the dedicated task worktree without commit or push. Extended server/Web setup-progress DTOs with policy, bundle, POA&M, and `all_coach_steps_complete`; Web additions default incomplete for rolling compatibility. Consolidated setup entity counts into one query while preserving the original five `all_required_complete` rules and agent acknowledgment. Policy counts distinct lineages with an attributed version; manual policy creation now attributes the trigger-created draft in the same transaction. Coach now renders nine ordered steps, retains the single eight-second refresh resource and server dismissal/minimize/force-show behavior, uses typed Dioxus routes, and gives finding/evidence-specific POA&M instructions. Added server scenario/query tests and Web DTO/order/status/navigation tests. Verification: scoped rustfmt passed; `git diff --check` passed; `SQLX_OFFLINE=true nix develop -c cargo test --manifest-path packages/default/crates/cf-server/Cargo.toml setup_progress --lib` passed 12 tests. Full Web tests/check are currently blocked by concurrent out-of-scope notification-refresh compile errors in `components/layout/topbar.rs:157` and `components/layout/app_shell.rs:243-245`; those files were not modified for AC3.
 
 Focused Phase-7 browser coverage added only in `checks/web-ui/tests/integration-test.js`: real fixture/server-backed dashboard summary and watchlist rendering with exact detail routing; v2 layout migration to idempotent v3 with both POA&M widgets; complete nine-step coach rendering and typed policy/bundle/POA&M destinations; fixture-backed durable bell read/dismiss requests and exact POA&M detail navigation. Updated the shared setup-progress mock and existing 06h payload for Phase-7 fields. Verification: `nix develop -c node --check checks/web-ui/tests/integration-test.js` passed with exit 0; `git diff HEAD --check -- checks/web-ui/tests/integration-test.js` passed. Full browser check was not requested or run.
+
+Phase 7 final implementation and verification completed. Dashboard uses the existing server-computed summary/watchlist endpoints, shared view-owned resources keyed to authentication generation, independent retry/error/empty states, exact POA&M detail routing, and an idempotent v2-to-v3 layout migration that preserves recognized layouts and restores full defaults for empty/obsolete legacy layouts. Durable notifications use canonical overdue attention occurrence IDs and immutable awaiting-verification activity IDs, server-only materialization, all-active-user preference initialization, exact POA&M authorization, persistent read/dismiss state, account-safe AppShell polling, and exact detail navigation. Setup Coach now uses production-derived policy, bundle, and POA&M counts while retaining original-six semantics and falling back to the legacy six-step contract when an older server omits Phase-7 fields.
+
+Database evidence used the repository-owned PostgreSQL service on 127.0.0.1:3042 with the fresh task-specific database `crystal_forge_task4338_phase7`. The complete migration chain through 0235 applied successfully. Ignored focused tests passed: overdue reconciliation lifecycle/concurrent dedupe (1), notification query suite including POA&M materialization/read/dismiss/dedupe and read-only preference behavior (7), and production setup-progress counts (1). `cargo sqlx prepare --workspace` succeeded and produced no SQLx metadata drift.
+
+Final verification passed: Web UI formatting and full unit suite (246 passed, 1 ignored); targeted server setup/dashboard/notification suites; server all-target offline check; JavaScript syntax and `git diff --check`; server and Web UI Nix package builds; authoritative `nix build .#checks.x86_64-linux.web-ui --no-link`; and `nix flake check --keep-going` (`all checks passed`). The first authoritative rerun encountered a pre-existing nondeterministic Phase-6 fixture assertion in workflow 29g; an immediate identical rerun passed, and the final full flake check also passed. Browser evidence covers real dashboard APIs/layout/detail routing, all nine coach steps and typed destinations, POA&M notification read/dismiss/detail routing, and one non-overlapping AppShell polling interval. No TASK-433.9 work was started.
 <!-- SECTION:NOTES:END -->
