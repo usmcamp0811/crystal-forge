@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-08-29 02:39'
+updated_date: '2026-08-29 02:44'
 labels:
   - design-parity
   - web-ui
@@ -195,6 +195,8 @@ AC #21 implementation slice (2026-08-28): extend the existing system deploy endp
 Authoritative browser slice (2026-08-28): own `checks/web-ui`, `checks/ui-screenshots` only if required, and minimal frontend accessibility hooks. Extend the existing manifest-driven `integration-test.js` harness with deterministic routed fixtures for all AC #23-25 Config, flake, cross-surface, deployment, layering, authorization, responsive/theme, and keyboard states. Replace stale duplicate-header assertions, use role/label locators where practical, avoid new arbitrary sleeps, and make every TASK-440 workflow merge-blocking in `checks/web-ui/default.nix`. Update coverage/design fixtures consistently, run Node syntax plus manifest parity validation, focused frontend tests/checks for any accessibility edits, and as much focused authoritative Nix web-ui execution as practical. Preserve all concurrent worktree changes and do not commit or push.
 
 Backend mandatory review-remediation pass (2026-08-28): treat the user's ordered punch list as numbered issues 1-17. Restrict writes to `packages/default/crates/cf-server` and migration `0235`; preserve all frontend/browser changes and migrations 0233/0234. First harden the redaction/evaluator boundary and sanitize all evaluator diagnostics. Then repair authorization/visibility, first-parent and rewrite retention semantics, provenance/generation/failure lifecycle, bounded output/search and one-pass extraction, safe forcing and complete flake metadata/metrics/counts. Finally harden auto_latest transaction/idempotency compatibility and snapshot schema version/corruption/orphan recovery. Add nonignored pure tests plus isolated PostgreSQL tests, run SQLX_OFFLINE checks/tests and isolated migrated-DB tests where available, inspect the final backend-only diff for documentation and source-contract quality, and return evidence mapped to each numbered issue.
+
+Backend follow-up audit remediation (2026-08-28): preserve all `packages/web-ui` and `checks/web-ui` changes and own only cf-server backend plus migration 0235. Address the user's 12 concrete findings by: enforcing declaration-path-aware redaction and pre-log evaluator sanitization; tightening commit-wide reevaluation authorization; applying visibility/bounds/corruption contracts to snapshot APIs; retaining referenced snapshots across source reset and unambiguous generation identity; hardening branch-specific bounded Nix extraction and exported-module forcing; completing summary/provenance metadata; adding periodic orphan reclamation and content ceilings; making auto_latest request-idempotency and policy/queue/audit behavior transactionally truthful while preserving omitted-action rejection; and adding focused unit, isolated PostgreSQL, real-Nix-if-feasible, cross-endpoint consistency, and contract documentation tests. Update only migration 0235, then run focused SQLX_OFFLINE checks/tests and isolated migrated-database tests. Do not commit or push.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
