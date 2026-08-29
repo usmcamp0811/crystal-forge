@@ -5,7 +5,7 @@ status: Review
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:43'
-updated_date: '2026-08-29 05:36'
+updated_date: '2026-08-29 05:41'
 labels:
   - design-parity
   - poam
@@ -97,4 +97,6 @@ Phase 7 final implementation and verification completed. Dashboard uses the exis
 Database evidence used the repository-owned PostgreSQL service on 127.0.0.1:3042 with the fresh task-specific database `crystal_forge_task4338_phase7`. The complete migration chain through 0235 applied successfully. Ignored focused tests passed: overdue reconciliation lifecycle/concurrent dedupe (1), notification query suite including POA&M materialization/read/dismiss/dedupe and read-only preference behavior (7), and production setup-progress counts (1). `cargo sqlx prepare --workspace` succeeded and produced no SQLx metadata drift.
 
 Final verification passed: Web UI formatting and full unit suite (246 passed, 1 ignored); targeted server setup/dashboard/notification suites; server all-target offline check; JavaScript syntax and `git diff --check`; server and Web UI Nix package builds; authoritative `nix build .#checks.x86_64-linux.web-ui --no-link`; and `nix flake check --keep-going` (`all checks passed`). The first authoritative rerun encountered a pre-existing nondeterministic Phase-6 fixture assertion in workflow 29g; an immediate identical rerun passed, and the final full flake check also passed. Browser evidence covers real dashboard APIs/layout/detail routing, all nine coach steps and typed destinations, POA&M notification read/dismiss/detail routing, and one non-overlapping AppShell polling interval. No TASK-433.9 work was started.
+
+Final post-fix review found one pagination/polling overlap risk. The shared notification loader now mutually excludes first-page polling and pagination requests, and the Load more control is disabled during either request. This prevents a poll response from replacing the list while an older page appends. Post-fix verification passed: Web UI formatting, full Web UI unit suite (247 passed, 1 ignored), and `git diff --check`. A final independent re-review found no remaining P0, P1, or P2 blockers.
 <!-- SECTION:NOTES:END -->
