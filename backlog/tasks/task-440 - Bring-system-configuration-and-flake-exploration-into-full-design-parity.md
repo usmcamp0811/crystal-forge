@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-08-29 02:05'
+updated_date: '2026-08-29 02:07'
 labels:
   - design-parity
   - web-ui
@@ -193,6 +193,8 @@ Frontend contract-consumption slice (2026-08-28): own only `packages/web-ui`; pr
 AC #21 implementation slice (2026-08-28): extend the existing system deploy endpoint with typed deploy actions and typed policy/conversion/deployment outcome state. Add an atomic policy conversion query that commits before deployment is attempted, plus serialized pending-deployment creation that reuses an existing pending target on retry. Preserve current auth, environment non-disclosure, CSRF client use, and audit recording. Add an isolated auto_latest prompt/reducer component with Cancel, Continue on auto_latest, and Convert to manual and deploy, then integrate it into the active System Detail Deploy tab after re-reading concurrent edits. Add pure policy/reducer tests and migrated-PostgreSQL query tests for conversion failure/no queue, partial failure state, and retry deduplication. Run focused SQLX_OFFLINE cf-server and web-ui tests; do not change migrations or browser integration-test.js.
 
 Authoritative browser slice (2026-08-28): own `checks/web-ui`, `checks/ui-screenshots` only if required, and minimal frontend accessibility hooks. Extend the existing manifest-driven `integration-test.js` harness with deterministic routed fixtures for all AC #23-25 Config, flake, cross-surface, deployment, layering, authorization, responsive/theme, and keyboard states. Replace stale duplicate-header assertions, use role/label locators where practical, avoid new arbitrary sleeps, and make every TASK-440 workflow merge-blocking in `checks/web-ui/default.nix`. Update coverage/design fixtures consistently, run Node syntax plus manifest parity validation, focused frontend tests/checks for any accessibility edits, and as much focused authoritative Nix web-ui execution as practical. Preserve all concurrent worktree changes and do not commit or push.
+
+Backend mandatory review-remediation pass (2026-08-28): treat the user's ordered punch list as numbered issues 1-17. Restrict writes to `packages/default/crates/cf-server` and migration `0235`; preserve all frontend/browser changes and migrations 0233/0234. First harden the redaction/evaluator boundary and sanitize all evaluator diagnostics. Then repair authorization/visibility, first-parent and rewrite retention semantics, provenance/generation/failure lifecycle, bounded output/search and one-pass extraction, safe forcing and complete flake metadata/metrics/counts. Finally harden auto_latest transaction/idempotency compatibility and snapshot schema version/corruption/orphan recovery. Add nonignored pure tests plus isolated PostgreSQL tests, run SQLX_OFFLINE checks/tests and isolated migrated-DB tests where available, inspect the final backend-only diff for documentation and source-contract quality, and return evidence mapped to each numbered issue.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
