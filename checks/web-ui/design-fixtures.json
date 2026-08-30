@@ -108,8 +108,8 @@
       { "name": "equal-beta", "dependencyDerivations": 220, "buildWork": 40, "planStatus": "complete", "systemStatus": "evaluated" },
       { "name": "zero-work", "dependencyDerivations": 95, "buildWork": 0, "planStatus": "complete", "systemStatus": "evaluated" },
       { "name": "plan-unavailable", "dependencyDerivations": null, "buildWork": null, "planStatus": "unavailable", "systemStatus": "evaluated" },
-      { "name": "plan-calculating", "dependencyDerivations": 140, "buildWork": null, "planStatus": "calculating", "systemStatus": "evaluated" },
-      { "name": "plan-failed", "dependencyDerivations": 150, "buildWork": null, "planStatus": "failed", "systemStatus": "evaluated" },
+      { "name": "plan-calculating", "dependencyDerivations": null, "buildWork": null, "planStatus": "calculating", "systemStatus": "evaluated" },
+      { "name": "plan-failed", "dependencyDerivations": null, "buildWork": null, "planStatus": "failed", "systemStatus": "evaluated" },
       { "name": "system-failed", "dependencyDerivations": null, "buildWork": null, "planStatus": "unavailable", "systemStatus": "failed" }
     ]
   },

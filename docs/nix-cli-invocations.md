@@ -58,23 +58,23 @@ Crystal Forge binary, grouped by service. Calls listed in execution order.
 | 20 | Build derivation (direct fallback) | `nix-store --realise --log-format internal-json <drv>` | line 595 |
 | 21 | Resolve built `.drv` → output path | `nix-store --query --outputs <drv>` | line 606 |
 
-### `derivations/utils.rs` (shared with builder)
+### `cf-server/derivations/utils.rs`
 
 | # | Purpose | Command | Source |
 |---|---------|---------|--------|
-| 22 | Enumerate all drvs in a build closure | `nix path-info --derivation --recursive <drv>` | line 392 |
-| 23 | Quick check if drv outputs exist | `nix path-info --json <drv>` (exit status) | line 423 |
-| 24 | Resolve `.drv` → output path | `nix-store --query --outputs <drv>` | line 433 |
-| 25 | Enumerate all drvs in closure (with cache status) | `nix path-info --derivation --recursive <drv>` | line 453 |
-| 26 | Resolve `.drv` → output path | `nix-store --query --outputs <drv>` | line 495 |
-| 27 | Check if output path is already built | `nix path-info <store-path>` (exit status) | line 507 |
+| 24 | Resolve `.drv` → output path | `nix-store --query --outputs <drv>` | `get_store_path_from_drv` |
 | 28 | Count dependency derivations (filter `.drv` requisites and exclude the top-level system derivation) | `nix-store --query --requisites <drv>` | `calculate_dependency_build_plan` |
 | 29 | Calculate dependency build work with the effective substitute and offline configuration | `nix-store --realise --dry-run <drv> <build-options...>` | `calculate_dependency_build_plan` |
 
 The dependency build-plan command counts only derivations in Nix's build
-section. It does not count fetched paths. A successful plan with no build
-section is zero work. Command failure, timeout, malformed output, and unavailable
-legacy data remain distinct from a completed zero-build plan.
+section. It does not count fetched paths. A successful plan with no output is
+zero work. Any unrecognized nonempty output fails closed. Command failure,
+timeout, malformed output, and unavailable legacy data remain distinct from a
+completed zero-build plan. The server persists a generation-bound terminal plan
+before queue activation. Recovery replaces only expired calculations. This is a
+server-side estimate from the server store at evaluation time. Remote builders
+can have different store contents, substituters, Nix settings, or architecture,
+so the estimate does not claim to equal one remote build attempt's exact work.
 
 ### `builder/worker.rs`
 

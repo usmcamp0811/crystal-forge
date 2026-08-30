@@ -539,6 +539,11 @@ function EvalPolicyTab({ ev, onOpenSystem, onOpenPolicy, onOpenFinding, restoreS
 /* ── Dependency graph tab ────────────────────────────── */
 function EvalGraphTab({ ev }) {
   const graph = ev.graph || EVAL_DEFAULT_GRAPH(ev);
+  const completeSystems = graph.systems.filter(system => system.systemStatus === "evaluated" && system.buildPlanStatus === "complete");
+  const maximumBuildCount = Math.max(0, ...completeSystems.map(system => system.dependencyBuildCount || 0));
+  const dependencyDerivationTotal = completeSystems.reduce((total, system) => total + (system.dependencyDerivationCount || 0), 0);
+  const buildWorkTotal = completeSystems.reduce((total, system) => total + (system.dependencyBuildCount || 0), 0);
+  const hasDependencyCounts = completeSystems.some(system => system.dependencyDerivationCount != null);
 
   return (
     <div style={{ flex:1, overflow:"auto", padding:"18px" }}>
@@ -555,51 +560,73 @@ function EvalGraphTab({ ev }) {
         </div>
         <span style={{ color:"var(--cf-text-muted)" }}>→</span>
         <div className="ed-graph-node ed-graph-fan">
-          <span style={{ fontWeight:700 }}>{graph.totalDerivs}</span>
-          <span style={{ fontSize:10, color:"var(--cf-text-muted)" }}>derivations</span>
+          <span style={{ fontWeight:700 }}>{graph.totalSystems}</span>
+          <span style={{ fontSize:10, color:"var(--cf-text-muted)" }}>systems</span>
         </div>
-        <span style={{ color:"var(--cf-text-muted)" }}>→</span>
-        <div className="ed-graph-node ed-graph-fan">
-          <span style={{ fontWeight:700, color:"#34d399" }}>{graph.cached}</span>
-          <span style={{ fontSize:10, color:"var(--cf-text-muted)" }}>cached</span>
-        </div>
-        <div className="ed-graph-node ed-graph-fan">
-          <span style={{ fontWeight:700, color:"#60a5fa" }}>{graph.toBuild}</span>
-          <span style={{ fontSize:10, color:"var(--cf-text-muted)" }}>to build</span>
-        </div>
+        {hasDependencyCounts && <>
+          <span style={{ color:"var(--cf-text-muted)" }}>→</span>
+          <div className="ed-graph-node ed-graph-fan">
+            <span style={{ fontWeight:700, color:"#34d399" }}>{dependencyDerivationTotal}</span>
+            <span style={{ fontSize:10, color:"var(--cf-text-muted)" }}>dependency derivations</span>
+          </div>
+        </>}
+        {completeSystems.length > 0 && <div className="ed-graph-node ed-graph-fan">
+          <span style={{ fontWeight:700, color:"#60a5fa" }}>{buildWorkTotal}</span>
+          <span style={{ fontSize:10, color:"var(--cf-text-muted)" }}>estimated build work</span>
+        </div>}
+      </div>
+      <div style={{ margin:"-6px 0 14px", fontSize:10, color:"var(--cf-text-muted)" }}>
+        Server estimate at evaluation time. Remote builders can use different stores, architectures, substituters, or Nix settings.
       </div>
 
-      {/* List of derivations */}
+      {/* Every row is a NixOS system. Build bars share one absolute scale. */}
       <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline", marginBottom:8 }}>
-        <h3 style={{ fontSize:11, textTransform:"uppercase", letterSpacing:"0.06em", color:"var(--cf-text-muted)", fontWeight:700, margin:0 }}>Derivations by package</h3>
-        <span style={{ fontSize:11, color:"var(--cf-text-muted)" }}>{graph.packages.length} packages</span>
+        <h3 style={{ fontSize:11, textTransform:"uppercase", letterSpacing:"0.06em", color:"var(--cf-text-muted)", fontWeight:700, margin:0 }}>Systems evaluated</h3>
+        <span style={{ fontSize:11, color:"var(--cf-text-muted)" }}>{graph.systems.length} systems</span>
       </div>
       <div className="ed-graph-list">
-        {graph.packages.map(p => {
-          const total = p.cached + p.toBuild;
+        {graph.systems.map(system => {
+          const systemFailed = system.systemStatus === "failed";
+          const complete = !systemFailed && system.buildPlanStatus === "complete";
+          const buildCount = complete ? system.dependencyBuildCount : null;
+          const width = complete && maximumBuildCount > 0 ? (buildCount / maximumBuildCount) * 100 : 0;
+          const state = systemFailed ? "system failed"
+            : system.buildPlanStatus === "calculating" ? "calculating"
+            : system.buildPlanStatus === "failed" ? "plan failed"
+            : system.buildPlanStatus === "unavailable" ? "unavailable"
+            : `${buildCount} estimated builds`;
+          const detail = complete
+            ? `${system.dependencyDerivationCount} dependency derivations · ${buildCount} estimated builds`
+            : systemFailed ? "System failed"
+            : system.buildPlanStatus === "calculating" ? "Calculating build work"
+            : system.buildPlanStatus === "failed" ? "Build plan failed"
+            : "Build plan unavailable";
+          const color = systemFailed || system.buildPlanStatus === "failed" ? "#f87171"
+            : system.buildPlanStatus === "calculating" ? "#f59e0b"
+            : system.buildPlanStatus === "unavailable" ? "#9ca3af"
+            : "#60a5fa";
           return (
-            <div key={p.name} className="ed-graph-row">
-              <div className="ed-graph-pkg">
-                <span style={{ fontSize:12, fontWeight:600 }} className="mono truncate">{p.name}</span>
-                <span style={{ fontSize:10, color:"var(--cf-text-muted)" }}>{total} derivs</span>
+            <div key={system.systemName} className="ed-graph-row">
+              <div className="ed-graph-system">
+                <span style={{ fontSize:12, fontWeight:600 }} className="mono truncate">{system.systemName}</span>
+                <span style={{ fontSize:10, color }}>{detail}</span>
               </div>
               <div className="ed-graph-bar">
-                <div className="ed-graph-bar-cached" style={{ width:`${(p.cached/total)*100}%` }}/>
-                <div className="ed-graph-bar-build"  style={{ width:`${(p.toBuild/total)*100}%` }}/>
+                {complete && (
+                  <div className="ed-graph-bar-build" style={{ width:`${width}%` }}/>
+                )}
               </div>
-              <div style={{ display:"flex", gap:6, justifyContent:"flex-end", fontSize:11 }}>
-                <span style={{ color:"#34d399", fontWeight:600 }}>{p.cached}</span>
-                <span style={{ color:"var(--cf-text-muted)" }}>·</span>
-                <span style={{ color:"#60a5fa", fontWeight:600 }}>{p.toBuild}</span>
-              </div>
+              <div style={{ display:"flex", justifyContent:"flex-end", fontSize:11, color, fontWeight:600 }}>{state}</div>
             </div>
           );
         })}
       </div>
 
       <div className="ed-graph-legend">
-        <span><span className="ed-graph-sw" style={{ background:"#34d399" }}/>Cached (already in binary cache)</span>
-        <span><span className="ed-graph-sw" style={{ background:"#60a5fa" }}/>To build (will fan out to builders)</span>
+        <span><span className="ed-graph-sw" style={{ background:"#60a5fa" }}/>Estimated build work</span>
+        <span><span className="ed-graph-sw" style={{ background:"#9ca3af" }}/>Plan unavailable</span>
+        <span><span className="ed-graph-sw" style={{ background:"#f59e0b" }}/>Plan calculating</span>
+        <span><span className="ed-graph-sw" style={{ background:"#f87171" }}/>Plan or system failed</span>
       </div>
     </div>
   );
@@ -720,20 +747,15 @@ function EVAL_DEFAULT_POLICY(ev) {
 }
 
 function EVAL_DEFAULT_GRAPH(ev) {
-  const seed = ev.id.split("").reduce((a,c)=>a+c.charCodeAt(0),0);
-  const packages = [
-    { name:"systemd",     cached:48, toBuild:2 },
-    { name:"openssl",     cached:0,  toBuild:8 },
-    { name:"nginx",       cached:6,  toBuild:0 },
-    { name:"linux-kernel",cached:1,  toBuild:0 },
-    { name:"python311",   cached:34, toBuild:1 },
-    { name:"glibc",       cached:12, toBuild:0 },
-    { name:"audit",       cached:0,  toBuild:4 },
-    { name:"sops-nix",    cached:3,  toBuild:0 },
-  ].map(p => ({ ...p, cached: p.cached + (seed%5), toBuild: p.toBuild + (seed%3) }));
-  const cached = packages.reduce((a,p)=>a+p.cached, 0);
-  const toBuild = packages.reduce((a,p)=>a+p.toBuild, 0);
-  return { packages, cached, toBuild, totalDerivs: cached + toBuild };
+  const names = SYSTEMS.filter(system => system.flake === ev.flake).map(system => system.hostname).slice(0, ev.systemCount);
+  const systems = names.map((systemName, index) => ({
+    systemName,
+    dependencyDerivationCount: 80 + index * 20,
+    dependencyBuildCount: index === 0 ? 100 : index === 1 ? 10 : 0,
+    buildPlanStatus: "complete",
+    systemStatus: "evaluated",
+  }));
+  return { totalSystems: systems.length, systems };
 }
 
 Object.assign(window, { EvalDrawer });

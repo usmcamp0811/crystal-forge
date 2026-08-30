@@ -31,7 +31,6 @@ use tokio::time::interval;
 use tracing::{debug, error, info, warn};
 
 // ⬇️ bring in the commit-eval helpers you said you added in queries/commits.rs
-use crate::derivations::utils::calculate_dependency_build_plan;
 use crate::models::deployment_policies::{AssignedPolicy, PoliciesByConfiguration};
 use crate::queries::build_jobs::{QueuedBuild, recover_orphaned_derivation_build_jobs};
 use crate::queries::builders::{
@@ -47,14 +46,8 @@ use crate::queries::deployment_policies::{
     get_deployment_policies_by_versions, list_enabled_deployment_policies,
     list_enabled_policies_for_flake, list_policy_rows_by_configuration_for_flake,
 };
-use crate::queries::derivations::{
-    cleanup_partial_derivations, complete_dependency_build_plan, fail_dependency_build_plan,
-    mark_dependency_build_plan_calculating, reset_stuck_builds,
-};
+use crate::queries::derivations::{cleanup_partial_derivations, reset_stuck_builds};
 use crate::services::hardening_scans::trigger_commit_hardening_scans;
-
-const DEPENDENCY_BUILD_PLAN_MAX_CONCURRENT: usize = 2;
-static DEPENDENCY_BUILD_PLAN_LIMITER: OnceLock<Arc<Semaphore>> = OnceLock::new();
 
 /// Maximum number of commit evaluations (nix-eval-jobs + fallback phase)
 /// that may run concurrently across the entire server process.
@@ -67,12 +60,6 @@ static COMMIT_EVALUATION_LIMITER: OnceLock<Arc<Semaphore>> = OnceLock::new();
 fn commit_evaluation_limiter() -> Arc<Semaphore> {
     COMMIT_EVALUATION_LIMITER
         .get_or_init(|| Arc::new(Semaphore::new(MAX_CONCURRENT_COMMIT_EVALUATIONS)))
-        .clone()
-}
-
-fn dependency_build_plan_limiter() -> Arc<Semaphore> {
-    DEPENDENCY_BUILD_PLAN_LIMITER
-        .get_or_init(|| Arc::new(Semaphore::new(DEPENDENCY_BUILD_PLAN_MAX_CONCURRENT)))
         .clone()
 }
 
@@ -403,9 +390,9 @@ fn is_nix_identifier_char(character: char) -> bool {
 }
 
 async fn run_post_finalize_derivation_side_effects(
-    pool: &PgPool,
+    _pool: &PgPool,
     derivations: &[FinalizedDerivation],
-    build_config: &BuildConfig,
+    _build_config: &BuildConfig,
 ) {
     for derivation in derivations {
         match crate::builder::create_drv_gc_root(&derivation.drv_path, derivation.derivation_id)
@@ -425,85 +412,6 @@ async fn run_post_finalize_derivation_side_effects(
                 derivation.drv_path, derivation.derivation_id, err
             ),
         }
-
-        let pool2 = pool.clone();
-        let drv2 = derivation.drv_path.clone();
-        let derivation_id = derivation.derivation_id;
-        let build_config = build_config.clone();
-        let limiter = dependency_build_plan_limiter();
-        tokio::spawn(async move {
-            if let Err(err) = mark_dependency_build_plan_calculating(&pool2, derivation_id).await {
-                warn!(
-                    "Failed to mark dependency build plan calculating for id={}: {}",
-                    derivation_id, err
-                );
-            }
-            let permit = match limiter.acquire_owned().await {
-                Ok(permit) => permit,
-                Err(err) => {
-                    warn!(
-                        "Failed to acquire dependency build-plan permit for id={}: {}",
-                        derivation_id, err
-                    );
-                    if let Err(persist_err) =
-                        fail_dependency_build_plan(&pool2, derivation_id).await
-                    {
-                        warn!(
-                            "Failed to mark dependency build plan failed for id={}: {}",
-                            derivation_id, persist_err
-                        );
-                    }
-                    return;
-                }
-            };
-            match calculate_dependency_build_plan(&drv2, &build_config).await {
-                Ok(plan) => {
-                    if let Err(err) = complete_dependency_build_plan(
-                        &pool2,
-                        derivation_id,
-                        plan.dependency_derivation_count,
-                        plan.dependency_build_count,
-                    )
-                    .await
-                    {
-                        warn!(
-                            "Failed to store dependency build plan for id={}: {}",
-                            derivation_id, err
-                        );
-                        if let Err(persist_err) =
-                            fail_dependency_build_plan(&pool2, derivation_id).await
-                        {
-                            warn!(
-                                "Failed to mark dependency build plan failed for id={}: {}",
-                                derivation_id, persist_err
-                            );
-                        }
-                    } else {
-                        info!(
-                            "Dependency build plan id={}: {} builds across {} dependency derivations",
-                            derivation_id,
-                            plan.dependency_build_count,
-                            plan.dependency_derivation_count
-                        );
-                    }
-                }
-                Err(err) => {
-                    warn!(
-                        "Failed to calculate dependency build plan for id={}: {}",
-                        derivation_id, err
-                    );
-                    if let Err(persist_err) =
-                        fail_dependency_build_plan(&pool2, derivation_id).await
-                    {
-                        warn!(
-                            "Failed to mark dependency build plan failed for id={}: {}",
-                            derivation_id, persist_err
-                        );
-                    }
-                }
-            }
-            drop(permit);
-        });
     }
 }
 
@@ -1447,6 +1355,7 @@ pub fn spawn_background_tasks(
 
     // Get the flake config with a fallback
     let flake_config = cfg.flakes.clone();
+    let recovery_build_config = cfg.get_build_config().clone();
 
     tokio::spawn(run_flake_polling_loop(
         flake_pool,
@@ -1458,11 +1367,13 @@ pub fn spawn_background_tasks(
         flake_config.commit_evaluation_interval,
         cf_state,
         queue_notifier.clone(),
+        recovery_build_config.clone(),
     ));
     tokio::spawn(run_builder_recovery_loop(
         target_pool,
         cfg.builder.heartbeat_interval,
         queue_notifier,
+        recovery_build_config,
     ));
     tokio::spawn(run_commit_artifact_hydration_loop(artifact_pool));
     tokio::spawn(run_build_log_retention_loop(
@@ -1675,6 +1586,7 @@ pub async fn run_commit_evaluation_loop(
     interval: Duration,
     cf_state: Arc<crate::handlers::agent_request::CFState>,
     queue_notifier: Arc<QueueNotifier>,
+    build_config: BuildConfig,
 ) {
     info!(
         "🔁 Starting event-driven commit evaluation loop (fallback every {:?})...",
@@ -1697,7 +1609,7 @@ pub async fn run_commit_evaluation_loop(
     // Recover any DryRunComplete derivations that have no build job, which can
     // happen when the build-preparation task failed or the server restarted
     // between derivation persistence and build-job activation.
-    match recover_orphaned_derivation_build_jobs(&pool).await {
+    match recover_orphaned_derivation_build_jobs(&pool, &build_config).await {
         Ok(count) if count > 0 => {
             info!(
                 "🔄 Startup: queued {} orphaned build-eligible derivations",
@@ -1793,6 +1705,7 @@ async fn run_builder_recovery_loop(
     pool: PgPool,
     heartbeat_interval: Duration,
     queue_notifier: Arc<QueueNotifier>,
+    build_config: BuildConfig,
 ) {
     let tick_secs = heartbeat_interval.as_secs().max(15);
     let stale_timeout_secs = builder_stale_timeout_secs(heartbeat_interval);
@@ -1828,7 +1741,7 @@ async fn run_builder_recovery_loop(
         // Periodically recover derivations whose build-preparation task failed.
         // This runs regardless of service restarts so a build job is eventually
         // created without requiring manual intervention or a service restart.
-        match recover_orphaned_derivation_build_jobs(&pool).await {
+        match recover_orphaned_derivation_build_jobs(&pool, &build_config).await {
             Ok(count) if count > 0 => {
                 info!(
                     "🔄 Periodic recovery: queued {} orphaned build-eligible derivations",

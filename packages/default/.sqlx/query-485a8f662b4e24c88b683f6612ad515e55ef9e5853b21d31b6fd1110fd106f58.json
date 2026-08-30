@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE derivations\n        SET \n            status_id = $1,\n            started_at = NOW(),\n            attempt_count = COALESCE(attempt_count, 0) + 1\n        WHERE id = $2\n          AND status_id IN ($3, $4)\n          AND dependency_build_plan_status IN ('complete', 'failed')\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Int4",
+        "Int4",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "485a8f662b4e24c88b683f6612ad515e55ef9e5853b21d31b6fd1110fd106f58"
+}

@@ -186,16 +186,18 @@ pub async fn claim_next_derivation(pool: &PgPool, worker_id: &str) -> Result<Opt
         BuildableDerivation,
         r#"
         SELECT 
-            id as "id!",
-            derivation_name as "derivation_name!",
-            derivation_type as "derivation_type!",
-            derivation_path,
-            status_id as "status_id!",
-            nixos_id,
-            nixos_commit_ts,
-            active_workers,
-            queue_position
-        FROM view_buildable_derivations
+            v.id as "id!",
+            v.derivation_name as "derivation_name!",
+            v.derivation_type as "derivation_type!",
+            v.derivation_path,
+            v.status_id as "status_id!",
+            v.nixos_id,
+            v.nixos_commit_ts,
+            v.active_workers,
+            v.queue_position
+        FROM view_buildable_derivations v
+        JOIN derivations d ON d.id = v.id
+        WHERE d.dependency_build_plan_status IN ('complete', 'failed')
         ORDER BY queue_position
         LIMIT 1
         "#
@@ -238,6 +240,7 @@ pub async fn claim_next_derivation(pool: &PgPool, worker_id: &str) -> Result<Opt
             attempt_count = COALESCE(attempt_count, 0) + 1
         WHERE id = $2
           AND status_id IN ($3, $4)
+          AND dependency_build_plan_status IN ('complete', 'failed')
         "#,
         EvaluationStatus::BuildInProgress.as_id(),
         buildable.id,

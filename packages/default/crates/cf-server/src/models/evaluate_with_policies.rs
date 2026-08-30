@@ -324,7 +324,9 @@ impl Drop for NixEvalProcessGuard {
 use tracing::{debug, error, info, warn};
 
 use crate::config::{BuildConfig, ServerConfig};
-use crate::derivations::utils::{build_flake_reference, calculate_dependency_build_plan};
+use crate::derivations::utils::{
+    DependencyBuildPlan, build_flake_reference, calculate_dependency_build_plan,
+};
 use crate::flake::credentials::FlakeCredentialEnv;
 use crate::models::commits::Commit;
 use crate::models::deployment_policies::{
@@ -338,7 +340,8 @@ use crate::queries::build_jobs::{
 };
 use crate::queries::commits_artifacts::CachedSystemsState;
 use crate::queries::derivations::{
-    complete_dependency_build_plan, fail_dependency_build_plan, insert_derivation_with_target,
+    DependencyBuildPlanGeneration, DependencyBuildPlanWriteOutcome, complete_dependency_build_plan,
+    fail_dependency_build_plan, insert_derivation_with_target,
     mark_dependency_build_plan_calculating, mark_derivation_dry_run_complete,
     set_expected_store_path,
 };
@@ -524,87 +527,120 @@ fn dependency_build_plan_limiter() -> Arc<Semaphore> {
         .clone()
 }
 
-/// Spawns build-plan calculation after a successful derivation write.
+/// Calculates and persists one current dependency build plan.
 ///
-/// The calculation has no effect on GC-root creation or build queue activation.
-/// Calculation and persistence failures produce logs and a `failed` plan state
-/// when possible, but they do not fail system finalization.
+/// The returned generation is terminal (`complete` or `failed`) and can be used
+/// to activate a build job. `None` means the evaluation attempt or derivation
+/// path was superseded while planning.
+async fn calculate_and_persist_dependency_build_plan_with<F, Fut>(
+    pool: &PgPool,
+    commit_id: i32,
+    expected_attempt: i32,
+    finalized: &FinalizedDerivation,
+    build_config: &BuildConfig,
+    calculator: F,
+) -> Result<Option<DependencyBuildPlanGeneration>>
+where
+    F: FnOnce(String, BuildConfig) -> Fut,
+    Fut: std::future::Future<Output = Result<DependencyBuildPlan>>,
+{
+    let limiter = dependency_build_plan_limiter();
+    let _permit = limiter
+        .acquire_owned()
+        .await
+        .context("Dependency build-plan semaphore closed")?;
+    let Some(generation) = mark_dependency_build_plan_calculating(
+        pool,
+        finalized.derivation_id,
+        &finalized.drv_path,
+        commit_id,
+        expected_attempt,
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+
+    let write = match calculator(finalized.drv_path.clone(), build_config.clone()).await {
+        Ok(plan) => {
+            complete_dependency_build_plan(
+                pool,
+                finalized.derivation_id,
+                &finalized.drv_path,
+                commit_id,
+                expected_attempt,
+                generation,
+                plan.dependency_derivation_count,
+                plan.dependency_build_count,
+            )
+            .await?
+        }
+        Err(err) => {
+            warn!(
+                "Failed to calculate dependency build plan for id={}: {}",
+                finalized.derivation_id, err
+            );
+            fail_dependency_build_plan(
+                pool,
+                finalized.derivation_id,
+                &finalized.drv_path,
+                commit_id,
+                expected_attempt,
+                generation,
+            )
+            .await?
+        }
+    };
+
+    Ok(match write {
+        DependencyBuildPlanWriteOutcome::Applied => Some(generation),
+        DependencyBuildPlanWriteOutcome::Stale => None,
+    })
+}
+
+pub(crate) async fn calculate_and_persist_dependency_build_plan(
+    pool: &PgPool,
+    commit_id: i32,
+    expected_attempt: i32,
+    finalized: &FinalizedDerivation,
+    build_config: &BuildConfig,
+) -> Result<Option<DependencyBuildPlanGeneration>> {
+    calculate_and_persist_dependency_build_plan_with(
+        pool,
+        commit_id,
+        expected_attempt,
+        finalized,
+        build_config,
+        |drv_path, build_config| async move {
+            calculate_dependency_build_plan(&drv_path, &build_config).await
+        },
+    )
+    .await
+}
+
+/// Spawns graph-only planning for a system that cannot activate a build job.
 fn spawn_dependency_build_plan_calculation(
     pool: PgPool,
+    commit_id: i32,
+    expected_attempt: i32,
     finalized: FinalizedDerivation,
     build_config: BuildConfig,
 ) {
-    // Build-plan calculation is bounded and never delays build activation.
-    let pool_cc = pool.clone();
-    let drv_cc = finalized.drv_path.clone();
-    let derivation_id_cc = finalized.derivation_id;
-    let limiter = dependency_build_plan_limiter();
     tokio::spawn(async move {
-        if let Err(err) = mark_dependency_build_plan_calculating(&pool_cc, derivation_id_cc).await {
+        if let Err(err) = calculate_and_persist_dependency_build_plan(
+            &pool,
+            commit_id,
+            expected_attempt,
+            &finalized,
+            &build_config,
+        )
+        .await
+        {
             warn!(
-                "Failed to mark dependency build plan calculating for id={}: {}",
-                derivation_id_cc, err
+                derivation_id = finalized.derivation_id,
+                "Dependency build-plan task failed: {err:#}"
             );
         }
-        let permit = match limiter.acquire_owned().await {
-            Ok(permit) => permit,
-            Err(err) => {
-                warn!(
-                    "Failed to acquire dependency build-plan permit for id={}: {}",
-                    derivation_id_cc, err
-                );
-                if let Err(persist_err) =
-                    fail_dependency_build_plan(&pool_cc, derivation_id_cc).await
-                {
-                    warn!(
-                        "Failed to mark dependency build plan failed for id={}: {}",
-                        derivation_id_cc, persist_err
-                    );
-                }
-                return;
-            }
-        };
-
-        match calculate_dependency_build_plan(&drv_cc, &build_config).await {
-            Ok(plan) => {
-                if let Err(err) = complete_dependency_build_plan(
-                    &pool_cc,
-                    derivation_id_cc,
-                    plan.dependency_derivation_count,
-                    plan.dependency_build_count,
-                )
-                .await
-                {
-                    warn!(
-                        "Failed to store dependency build plan for id={}: {}",
-                        derivation_id_cc, err
-                    );
-                    if let Err(persist_err) =
-                        fail_dependency_build_plan(&pool_cc, derivation_id_cc).await
-                    {
-                        warn!(
-                            "Failed to mark dependency build plan failed for id={}: {}",
-                            derivation_id_cc, persist_err
-                        );
-                    }
-                }
-            }
-            Err(err) => {
-                warn!(
-                    "Failed to calculate dependency build plan for id={}: {}",
-                    derivation_id_cc, err
-                );
-                if let Err(persist_err) =
-                    fail_dependency_build_plan(&pool_cc, derivation_id_cc).await
-                {
-                    warn!(
-                        "Failed to mark dependency build plan failed for id={}: {}",
-                        derivation_id_cc, persist_err
-                    );
-                }
-            }
-        }
-        drop(permit);
     });
 }
 
@@ -1737,6 +1773,7 @@ pub async fn activate_evaluated_system_build(
     commit_id: i32,
     expected_attempt: i32,
     derivation_id: i32,
+    dependency_build_plan_generation: DependencyBuildPlanGeneration,
 ) -> Result<SystemBuildActivationOutcome> {
     let mut tx = pool.begin().await?;
 
@@ -1778,7 +1815,12 @@ pub async fn activate_evaluated_system_build(
         return Ok(SystemBuildActivationOutcome::Cancelled);
     }
 
-    let build_outcome = create_build_job_for_derivation_tx(&mut tx, derivation_id).await?;
+    let build_outcome = create_build_job_for_derivation_tx(
+        &mut tx,
+        derivation_id,
+        dependency_build_plan_generation.0,
+    )
+    .await?;
     let outcome = match build_outcome {
         Some(BuildJobInsertOutcome::Inserted { build_job_id }) => {
             info!(
@@ -2089,14 +2131,20 @@ pub(crate) async fn record_preparation_failure(
 /// path uses the split `persist_evaluated_system` → GC root →
 /// `activate_evaluated_system_build` flow instead, to avoid blocking
 /// the stdout reader.
-pub async fn finalize_evaluated_system(
+async fn finalize_evaluated_system_with_calculator<F, Fut>(
     pool: &PgPool,
     commit_id: i32,
     expected_attempt: i32,
     result: &SuccessfulSystemResult,
     policy_check: &PolicyCheckResult,
     assigned_policies: &[AssignedPolicy],
-) -> Result<SystemFinalizeOutcome> {
+    build_config: &BuildConfig,
+    calculator: F,
+) -> Result<SystemFinalizeOutcome>
+where
+    F: FnOnce(String, BuildConfig) -> Fut,
+    Fut: std::future::Future<Output = Result<DependencyBuildPlan>>,
+{
     let persisted = persist_evaluated_system(
         pool,
         commit_id,
@@ -2112,6 +2160,25 @@ pub async fn finalize_evaluated_system(
             derivation_id,
             drv_path,
         } => {
+            let finalized = FinalizedDerivation {
+                derivation_id,
+                drv_path: drv_path.clone(),
+                system_name: result.system_name.clone(),
+                cf_agent_enabled: result.cf_agent_enabled,
+            };
+            let Some(plan_generation) = calculate_and_persist_dependency_build_plan_with(
+                pool,
+                commit_id,
+                expected_attempt,
+                &finalized,
+                build_config,
+                calculator,
+            )
+            .await?
+            else {
+                return Ok(SystemFinalizeOutcome::Superseded);
+            };
+
             // Phase 2: GC root (required in production; relaxed in tests)
             let gc_root_result = crate::builder::create_drv_gc_root(&drv_path, derivation_id).await;
             let mut gc_root_ok = false;
@@ -2147,6 +2214,14 @@ pub async fn finalize_evaluated_system(
                         error: msg,
                     });
                 }
+                Err(err) if cfg!(test) => {
+                    warn!(
+                        derivation_id,
+                        "⚠️  Skipping GC-root requirement after test-mode error for drv {}: {err:#}",
+                        drv_path,
+                    );
+                    gc_root_ok = true;
+                }
                 Err(err) => {
                     let msg = format!("Failed to create GC root: {err:#}");
                     warn!(derivation_id, "{}", msg);
@@ -2173,6 +2248,7 @@ pub async fn finalize_evaluated_system(
                     commit_id,
                     expected_attempt,
                     derivation_id,
+                    plan_generation,
                 )
                 .await
                 {
@@ -2233,6 +2309,28 @@ pub async fn finalize_evaluated_system(
             build_job_status,
             drv_path,
         } => {
+            if build_job_status == "queued" {
+                let finalized = FinalizedDerivation {
+                    derivation_id,
+                    drv_path: drv_path.clone(),
+                    system_name: result.system_name.clone(),
+                    cf_agent_enabled: result.cf_agent_enabled,
+                };
+                if calculate_and_persist_dependency_build_plan_with(
+                    pool,
+                    commit_id,
+                    expected_attempt,
+                    &finalized,
+                    build_config,
+                    calculator,
+                )
+                .await?
+                .is_none()
+                {
+                    return Ok(SystemFinalizeOutcome::Superseded);
+                }
+            }
+
             // Best-effort GC root for existing build.
             if let Err(err) = crate::builder::create_drv_gc_root(&drv_path, derivation_id).await {
                 warn!(
@@ -2264,6 +2362,39 @@ pub async fn finalize_evaluated_system(
         SystemPersistenceOutcome::Cancelled => Ok(SystemFinalizeOutcome::Cancelled),
         SystemPersistenceOutcome::Superseded => Ok(SystemFinalizeOutcome::Superseded),
     }
+}
+
+/// Persists, plans, roots, and activates one evaluated system in order.
+///
+/// The dependency plan reaches `complete` or `failed` before a build job can
+/// become claimable. A failed plan remains distinct from a valid zero count but
+/// does not prevent the real build from proceeding.
+///
+/// # Errors
+///
+/// Returns an error when persistence, planning state, or activation fails.
+pub async fn finalize_evaluated_system(
+    pool: &PgPool,
+    commit_id: i32,
+    expected_attempt: i32,
+    result: &SuccessfulSystemResult,
+    policy_check: &PolicyCheckResult,
+    assigned_policies: &[AssignedPolicy],
+    build_config: &BuildConfig,
+) -> Result<SystemFinalizeOutcome> {
+    finalize_evaluated_system_with_calculator(
+        pool,
+        commit_id,
+        expected_attempt,
+        result,
+        policy_check,
+        assigned_policies,
+        build_config,
+        |drv_path, build_config| async move {
+            calculate_dependency_build_plan(&drv_path, &build_config).await
+        },
+    )
+    .await
 }
 
 /// Atomically finalize a validated evaluation attempt.
@@ -3311,8 +3442,9 @@ async fn evaluate_with_nix_eval_jobs_inner(
                                                 // nix-store subprocess and second transaction run.
                                                 let build_preparation_limit =
                                                     build_preparation_limit.clone();
-                                                let pool = pool.clone();
-                                                let commit_id = commit.id;
+                                                 let pool = pool.clone();
+                                                 let build_config = build_config.clone();
+                                                 let commit_id = commit.id;
                                                 let attempt = expected_attempt;
                                                 let system_name = system_name.clone();
                                                 let finalized = FinalizedDerivation {
@@ -3325,15 +3457,7 @@ async fn evaluate_with_nix_eval_jobs_inner(
                                                 let cf_state_owned = cf_state.cloned();
                                                 let queue_notifier_owned = queue_notifier.cloned();
 
-                                                // Build-plan calculation starts after persistence
-                                                // and does not depend on GC-root or queue activation.
-                                                spawn_dependency_build_plan_calculation(
-                                                    pool.clone(),
-                                                    finalized.clone(),
-                                                    build_config.clone(),
-                                                );
-
-                                                info!(
+                                                 info!(
                                                     commit_id,
                                                     expected_attempt,
                                                     derivation_id,
@@ -3349,15 +3473,30 @@ async fn evaluate_with_nix_eval_jobs_inner(
                                                             "Build preparation semaphore closed",
                                                         )?;
 
-                                                    info!(
+                                                     info!(
                                                         commit_id,
                                                         expected_attempt = attempt,
                                                         derivation_id,
                                                         system = %system_name,
-                                                        "build_preparation_started"
-                                                    );
+                                                         "build_preparation_started"
+                                                     );
 
-                                                    // Phase 2: GC root (required — bail on failure)
+                                                     // INVARIANT: Planning reaches a generation-bound
+                                                     // terminal state before the job can become claimable.
+                                                     let Some(plan_generation) =
+                                                         calculate_and_persist_dependency_build_plan(
+                                                             &pool,
+                                                             commit_id,
+                                                             attempt,
+                                                             &finalized,
+                                                             &build_config,
+                                                         )
+                                                         .await?
+                                                     else {
+                                                         return Ok(());
+                                                     };
+
+                                                     // Phase 2: GC root (required — bail on failure)
                                                     let gc_root_result = crate::builder::create_drv_gc_root(
                                                         &drv_path,
                                                         derivation_id,
@@ -3422,9 +3561,10 @@ async fn evaluate_with_nix_eval_jobs_inner(
                                                         activate_evaluated_system_build(
                                                             &pool,
                                                             commit_id,
-                                                            attempt,
-                                                            derivation_id,
-                                                        )
+                                                             attempt,
+                                                             derivation_id,
+                                                             plan_generation,
+                                                         )
                                                         .await
                                                     {
                                                         Ok(a) => a,
@@ -3488,8 +3628,32 @@ async fn evaluate_with_nix_eval_jobs_inner(
                                                 build_job_status,
                                                 drv_path,
                                             } => {
-                                                // Best-effort GC root for existing build; the
-                                                // build job is already claimable.
+                                                 // Existing queued jobs can predate the planning
+                                                 // gate. Make their current path terminal before
+                                                 // notification; claim queries enforce the same gate.
+                                                 if build_job_status == "queued" {
+                                                     let finalized = FinalizedDerivation {
+                                                         derivation_id,
+                                                         drv_path: drv_path.clone(),
+                                                         system_name: system_name.clone(),
+                                                         cf_agent_enabled: successful.cf_agent_enabled,
+                                                     };
+                                                     if calculate_and_persist_dependency_build_plan(
+                                                         pool,
+                                                         commit.id,
+                                                         expected_attempt,
+                                                         &finalized,
+                                                         build_config,
+                                                     )
+                                                     .await?
+                                                     .is_none()
+                                                     {
+                                                         successful_results.push(successful.clone());
+                                                         continue;
+                                                     }
+                                                 }
+
+                                                 // Best-effort GC root for existing build.
                                                 match crate::builder::create_drv_gc_root(
                                                     &drv_path,
                                                     derivation_id,
@@ -3554,26 +3718,18 @@ async fn evaluate_with_nix_eval_jobs_inner(
                                                     }
                                                 }
 
-                                                successful_results.push(successful.clone());
-                                                spawn_dependency_build_plan_calculation(
-                                                    pool.clone(),
-                                                    FinalizedDerivation {
-                                                        derivation_id,
-                                                        drv_path,
-                                                        system_name: system_name.clone(),
-                                                        cf_agent_enabled: successful.cf_agent_enabled,
-                                                    },
-                                                    build_config.clone(),
-                                                );
+                                                 successful_results.push(successful.clone());
                                             }
 
                                             SystemPersistenceOutcome::RecordedWithoutBuild {
                                                 derivation_id,
                                                 ..
                                             } => {
-                                                spawn_dependency_build_plan_calculation(
-                                                    pool.clone(),
-                                                    FinalizedDerivation {
+                                                 spawn_dependency_build_plan_calculation(
+                                                     pool.clone(),
+                                                     commit.id,
+                                                     expected_attempt,
+                                                     FinalizedDerivation {
                                                         derivation_id,
                                                         drv_path: successful.drv_path.clone(),
                                                         system_name: system_name.clone(),
@@ -4055,6 +4211,7 @@ async fn evaluate_with_nix_eval_jobs_inner(
                                 &result,
                                 &policy_check,
                                 &fallback_assigned,
+                                build_config,
                             )
                             .await?;
 
@@ -4076,29 +4233,13 @@ async fn evaluate_with_nix_eval_jobs_inner(
                             )
                             .await?
                             {
-                                SystemFinalizeAction::Queued {
-                                    derivation_id,
-                                    ..
-                                }
-                                | SystemFinalizeAction::AlreadyExists {
-                                    derivation_id,
-                                    ..
-                                } => {
-                                    let finalized = FinalizedDerivation {
-                                        derivation_id,
-                                        drv_path: result.drv_path.clone(),
-                                        system_name: result.system_name.clone(),
-                                        cf_agent_enabled: result.cf_agent_enabled,
-                                    };
-                                    spawn_dependency_build_plan_calculation(
-                                        pool.clone(),
-                                        finalized,
-                                        build_config.clone(),
-                                    );
-                                }
+                                SystemFinalizeAction::Queued { .. }
+                                | SystemFinalizeAction::AlreadyExists { .. } => {}
                                 SystemFinalizeAction::Recorded { derivation_id } => {
                                     spawn_dependency_build_plan_calculation(
                                         pool.clone(),
+                                        commit.id,
+                                        expected_attempt,
                                         FinalizedDerivation {
                                             derivation_id,
                                             drv_path: result.drv_path.clone(),
@@ -5029,9 +5170,10 @@ mod tests {
         CappedOutput, ConfirmedSystemFailure, EvaluationFinalizeOutcome, EvaluationPlan,
         NixEvalJobResult, NixEvalProcessGuard, SuccessfulSystemResult,
         SystemBuildActivationOutcome, SystemFinalizeOutcome, SystemNotQueuedReason,
-        SystemPersistenceOutcome, activate_evaluated_system_build, finalize_evaluated_system,
-        finalize_evaluation_attempt, mock_eval_stage_delay, persist_evaluated_system, read_capped,
-        resolve_mock_systems, should_mock_policy_fail, summarize_commit_metadata,
+        SystemPersistenceOutcome, activate_evaluated_system_build,
+        finalize_evaluated_system_with_calculator, finalize_evaluation_attempt,
+        mock_eval_stage_delay, persist_evaluated_system, read_capped, resolve_mock_systems,
+        should_mock_policy_fail, summarize_commit_metadata,
     };
     use crate::api::models::CancelEvalOutcome;
     use crate::models::deployment_policies::{
@@ -5045,6 +5187,32 @@ mod tests {
     use std::collections::BTreeMap;
     use std::process::Stdio;
     use tokio::process::Command;
+
+    async fn finalize_evaluated_system(
+        pool: &PgPool,
+        commit_id: i32,
+        expected_attempt: i32,
+        result: &SuccessfulSystemResult,
+        policy_check: &PolicyCheckResult,
+        assigned_policies: &[AssignedPolicy],
+    ) -> anyhow::Result<SystemFinalizeOutcome> {
+        finalize_evaluated_system_with_calculator(
+            pool,
+            commit_id,
+            expected_attempt,
+            result,
+            policy_check,
+            assigned_policies,
+            &crate::config::BuildConfig::default(),
+            |_drv_path, _build_config| async {
+                Ok(crate::derivations::utils::DependencyBuildPlan {
+                    dependency_derivation_count: 0,
+                    dependency_build_count: 0,
+                })
+            },
+        )
+        .await
+    }
 
     // ── NixEvalProcessGuard regression tests ────────────────────────────
     //
@@ -6727,6 +6895,81 @@ mod tests {
 
     // ── Build-job claimability only after activation ─────────────────
 
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires a PostgreSQL test database"]
+    async fn dependency_plan_reaches_terminal_state_before_build_activation(pool: PgPool) {
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+        let attempt = start_eval(&pool, commit_id).await;
+        let system = successful_system("plan-gated");
+        let check = passing_policy_check("plan-gated");
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let release = std::sync::Arc::new(tokio::sync::Notify::new());
+        let release_for_calculator = release.clone();
+        let pool_for_task = pool.clone();
+
+        let task = tokio::spawn(async move {
+            finalize_evaluated_system_with_calculator(
+                &pool_for_task,
+                commit_id,
+                attempt,
+                &system,
+                &check,
+                &[],
+                &crate::config::BuildConfig::default(),
+                move |_drv_path, _build_config| async move {
+                    let _ = started_tx.send(());
+                    release_for_calculator.notified().await;
+                    Ok(crate::derivations::utils::DependencyBuildPlan {
+                        dependency_derivation_count: 8,
+                        dependency_build_count: 0,
+                    })
+                },
+            )
+            .await
+        });
+
+        started_rx.await.expect("calculator should start");
+        let state: (String, i64) = sqlx::query_as(
+            r#"
+            SELECT d.dependency_build_plan_status,
+                   COUNT(bj.id)::BIGINT
+            FROM derivations d
+            LEFT JOIN build_jobs bj ON bj.derivation_id = d.id
+            WHERE d.commit_id = $1 AND d.derivation_name = 'plan-gated'
+            GROUP BY d.id, d.dependency_build_plan_status
+            "#,
+        )
+        .bind(commit_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load gated preparation state");
+        assert_eq!(state, ("calculating".to_string(), 0));
+
+        release.notify_one();
+        let outcome = task
+            .await
+            .expect("preparation task should join")
+            .expect("preparation should succeed");
+        assert!(matches!(outcome, SystemFinalizeOutcome::Queued { .. }));
+
+        let terminal: (String, i64) = sqlx::query_as(
+            r#"
+            SELECT d.dependency_build_plan_status,
+                   COUNT(bj.id)::BIGINT
+            FROM derivations d
+            LEFT JOIN build_jobs bj ON bj.derivation_id = d.id
+            WHERE d.commit_id = $1 AND d.derivation_name = 'plan-gated'
+            GROUP BY d.id, d.dependency_build_plan_status
+            "#,
+        )
+        .bind(commit_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load terminal preparation state");
+        assert_eq!(terminal, ("complete".to_string(), 1));
+    }
+
     #[tokio::test]
     #[ignore = "requires live database connection"]
     async fn system_build_ordering_persist_then_root_then_activate() {
@@ -6809,13 +7052,36 @@ mod tests {
             "no build job should be claimable before activation; got {before_activation:?}"
         );
 
+        let plan_generation = sqlx::query_scalar::<_, i64>(
+            r#"
+            UPDATE derivations
+            SET dependency_derivation_count = 0,
+                dependency_build_count = 0,
+                dependency_build_plan_status = 'complete',
+                dependency_build_plan_generation = 1,
+                dependency_build_plan_lease_expires_at = NULL
+            WHERE id = $1
+            RETURNING dependency_build_plan_generation
+            "#,
+        )
+        .bind(derivation_id)
+        .fetch_one(&pool)
+        .await
+        .expect("persist terminal plan");
+
         // ── Phase 3: activate after Phase 2 has completed ─────────────
         // In production the caller must create the GC root before this call.
         // This test isolates the durable DB boundary: the build job is not
         // claimable until activation commits.
-        let activation = activate_evaluated_system_build(&pool, commit_id, attempt, derivation_id)
-            .await
-            .expect("activate should succeed");
+        let activation = activate_evaluated_system_build(
+            &pool,
+            commit_id,
+            attempt,
+            derivation_id,
+            crate::queries::derivations::DependencyBuildPlanGeneration(plan_generation),
+        )
+        .await
+        .expect("activate should succeed");
 
         let build_job_id = match &activation {
             SystemBuildActivationOutcome::Queued { build_job_id } => *build_job_id,

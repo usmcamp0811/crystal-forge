@@ -5,7 +5,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use tokio::process::Command;
 use tokio::time::timeout;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 const DEPENDENCY_BUILD_PLAN_COMMAND_TIMEOUT_SECS: u64 = 120;
 
@@ -399,55 +399,6 @@ pub fn build_evaluation_target(repo_url: &str, commit_hash: &str, system_name: &
     format!("{flake_ref}#nixosConfigurations.{system_name}.config.system.build.toplevel")
 }
 
-// ============================================================================
-// Derivation closure and build status helpers
-// ============================================================================
-
-/// Get all derivations in a closure with their build status
-pub async fn get_complete_closure(
-    derivation_path: &str,
-    build_config: &BuildConfig,
-) -> Result<Vec<(String, bool)>> {
-    // Return (drv_path, is_built)
-    let output = Command::new("nix")
-        .args(["path-info", "--derivation", "--recursive", derivation_path])
-        .output()
-        .await?;
-
-    if !output.status.success() {
-        anyhow::bail!(
-            "Failed to get closure: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    let drv_paths: Vec<String> = String::from_utf8(output.stdout)?
-        .lines()
-        .filter(|line| !line.is_empty() && *line != derivation_path)
-        .map(|s| s.to_string())
-        .collect();
-
-    // Check which ones are already built in the local store
-    let mut closure = Vec::new();
-    for drv_path in drv_paths {
-        let is_built = check_if_built(&drv_path).await.unwrap_or(false);
-        closure.push((drv_path, is_built));
-    }
-
-    Ok(closure)
-}
-
-/// Check if a derivation is already built in the Nix store
-pub async fn check_if_built(drv_path: &str) -> Result<bool> {
-    // Check if all outputs of this derivation exist in the store
-    let output = Command::new("nix")
-        .args(["path-info", "--json", drv_path])
-        .output()
-        .await?;
-
-    Ok(output.status.success())
-}
-
 /// Get the store path from a .drv path
 pub async fn get_store_path_from_drv(drv_path: &str) -> Result<String> {
     let output = Command::new("nix-store")
@@ -462,85 +413,14 @@ pub async fn get_store_path_from_drv(drv_path: &str) -> Result<String> {
     Ok(String::from_utf8(output.stdout)?.trim().to_string())
 }
 
-/// Enhanced version that gets closure with cache status in one pass
-pub async fn get_complete_closure_with_cache_status(
-    derivation_path: &str,
-    build_config: &BuildConfig,
-) -> Result<Vec<(String, String, bool)>> {
-    // Returns (drv_path, store_path, is_built)
-
-    // Get all derivations in closure
-    let output = Command::new("nix")
-        .args(["path-info", "--derivation", "--recursive", derivation_path])
-        .output()
-        .await?;
-
-    if !output.status.success() {
-        anyhow::bail!(
-            "Failed to get closure: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    let drv_paths: Vec<String> = String::from_utf8(output.stdout)?
-        .lines()
-        .filter(|line| !line.is_empty() && *line != derivation_path)
-        .map(|s| s.to_string())
-        .collect();
-
-    info!(
-        "🔍 Checking build status for {} derivations...",
-        drv_paths.len()
-    );
-
-    // Check status in batches for better performance
-    let mut closure = Vec::new();
-    for drv_path in drv_paths {
-        let (store_path, is_built) = match get_store_path_and_build_status(&drv_path).await {
-            Ok(result) => result,
-            Err(e) => {
-                warn!("Failed to check status for {}: {}", drv_path, e);
-                (String::new(), false)
-            }
-        };
-        closure.push((drv_path, store_path, is_built));
-    }
-
-    Ok(closure)
-}
-
-/// Get store path and check if it's built in one call
-pub async fn get_store_path_and_build_status(drv_path: &str) -> Result<(String, bool)> {
-    // First get the store path
-    let output = Command::new("nix-store")
-        .args(["--query", "--outputs", drv_path])
-        .output()
-        .await?;
-
-    if !output.status.success() {
-        anyhow::bail!("Failed to get store path for {}", drv_path);
-    }
-
-    let store_path = String::from_utf8(output.stdout)?.trim().to_string();
-
-    // Check if it exists
-    let is_built = Command::new("nix")
-        .args(["path-info", &store_path])
-        .output()
-        .await
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-
-    Ok((store_path, is_built))
-}
-
 /// Counts dependency derivations and the subset that Nix would build.
 ///
 /// The dependency total contains only `.drv` requisites and excludes the exact
 /// top-level system derivation. The build count contains only derivations from
 /// the build section of `nix-store --realise --dry-run`; fetched paths do not
-/// contribute. The dry run uses the supplied [`BuildConfig`], so substitute and
-/// offline settings match the real build.
+/// contribute. The dry run uses the supplied server [`BuildConfig`] and current
+/// server store. It is an evaluation-time estimate; a remote builder can have
+/// different store contents or Nix daemon settings.
 ///
 /// # Errors
 ///
@@ -553,20 +433,20 @@ pub async fn calculate_dependency_build_plan(
 ) -> Result<DependencyBuildPlan> {
     info!("📦 Calculating dependency build plan for {}", drv_path);
     let command_timeout = Duration::from_secs(DEPENDENCY_BUILD_PLAN_COMMAND_TIMEOUT_SECS);
-    let req_out = timeout(
-        command_timeout,
-        Command::new("nix-store")
-            .args(["--query", "--requisites", drv_path])
-            .output(),
-    )
-    .await
-    .map_err(|_| {
-        anyhow!(
-            "nix-store --query --requisites timed out after {}s for {}",
-            DEPENDENCY_BUILD_PLAN_COMMAND_TIMEOUT_SECS,
-            drv_path
-        )
-    })??;
+    let mut requisites_command = Command::new("nix-store");
+    // Cancellation or timeout must terminate the child instead of leaving an
+    // unowned Nix process that consumes the planning concurrency budget.
+    requisites_command.kill_on_drop(true);
+    requisites_command.args(["--query", "--requisites", drv_path]);
+    let req_out = timeout(command_timeout, requisites_command.output())
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "nix-store --query --requisites timed out after {}s for {}",
+                DEPENDENCY_BUILD_PLAN_COMMAND_TIMEOUT_SECS,
+                drv_path
+            )
+        })??;
 
     if !req_out.status.success() {
         anyhow::bail!(
@@ -610,6 +490,7 @@ pub struct DependencyBuildPlan {
 
 fn dependency_build_plan_command(drv_path: &str, build_config: &BuildConfig) -> Command {
     let mut command = Command::new("nix-store");
+    command.kill_on_drop(true);
     command.args(["--realise", "--dry-run", drv_path]);
     // COMPATIBILITY: The legacy dry-run interface is human-readable. A fixed
     // locale keeps the documented singular and plural section headers stable.
@@ -633,6 +514,7 @@ fn parse_dependency_build_plan(output: &[u8], top_level_drv: &str) -> Result<i32
     let output = String::from_utf8(output.to_vec())?;
     let mut expected = None;
     let mut in_build_section = false;
+    let mut in_fetch_section = false;
     let mut reported = Vec::new();
 
     for line in output.lines() {
@@ -642,6 +524,7 @@ fn parse_dependency_build_plan(output: &[u8], top_level_drv: &str) -> Result<i32
                 anyhow::bail!("dry-run output contains multiple build sections");
             }
             in_build_section = true;
+            in_fetch_section = false;
             continue;
         }
         if let Some(value) = line
@@ -655,12 +538,14 @@ fn parse_dependency_build_plan(output: &[u8], top_level_drv: &str) -> Result<i32
                 anyhow::bail!("dry-run output contains multiple build sections");
             }
             in_build_section = true;
+            in_fetch_section = false;
             continue;
         }
         if line.ends_with(':')
             && (line.contains(" path will be fetched") || line.contains(" paths will be fetched"))
         {
             in_build_section = false;
+            in_fetch_section = true;
             continue;
         }
         if line.contains("will be built") {
@@ -671,6 +556,13 @@ fn parse_dependency_build_plan(output: &[u8], top_level_drv: &str) -> Result<i32
                 anyhow::bail!("non-derivation path in dry-run build section: {line}");
             }
             reported.push(line);
+            continue;
+        }
+        if in_fetch_section && line.starts_with("/nix/store/") {
+            continue;
+        }
+        if !line.is_empty() {
+            anyhow::bail!("unrecognized dry-run output: {line}");
         }
     }
 
@@ -753,6 +645,23 @@ mod tests {
     #[test]
     fn dependency_build_plan_accepts_successful_no_op() {
         assert_eq!(parse_dependency_build_plan(b"", TOP_LEVEL_DRV).unwrap(), 0);
+    }
+
+    #[test]
+    fn dependency_build_plan_accepts_fetch_only_plan() {
+        let output = b"this path will be fetched (1.0 MiB download, 2.0 MiB unpacked):\n  /nix/store/dddddddd-fetched\n";
+        assert_eq!(
+            parse_dependency_build_plan(output, TOP_LEVEL_DRV).unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn dependency_build_plan_rejects_unrecognized_nonempty_output() {
+        let error = parse_dependency_build_plan(b"unexpected output\n", TOP_LEVEL_DRV)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unrecognized dry-run output"));
     }
 
     #[test]

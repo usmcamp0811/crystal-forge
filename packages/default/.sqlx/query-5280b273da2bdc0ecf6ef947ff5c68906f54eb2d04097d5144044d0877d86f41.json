@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT \n            id as \"id!\",\n            derivation_name as \"derivation_name!\",\n            derivation_type as \"derivation_type!\",\n            derivation_path,\n            status_id as \"status_id!\",\n            nixos_id,\n            nixos_commit_ts,\n            active_workers,\n            queue_position\n        FROM view_buildable_derivations\n        ORDER BY queue_position\n        LIMIT 1\n        ",
+  "query": "\n        SELECT \n            v.id as \"id!\",\n            v.derivation_name as \"derivation_name!\",\n            v.derivation_type as \"derivation_type!\",\n            v.derivation_path,\n            v.status_id as \"status_id!\",\n            v.nixos_id,\n            v.nixos_commit_ts,\n            v.active_workers,\n            v.queue_position\n        FROM view_buildable_derivations v\n        JOIN derivations d ON d.id = v.id\n        WHERE d.dependency_build_plan_status IN ('complete', 'failed')\n        ORDER BY queue_position\n        LIMIT 1\n        ",
   "describe": {
     "columns": [
       {
@@ -64,5 +64,5 @@
       true
     ]
   },
-  "hash": "dc0147c412932e7f674ca051b52165a04c1e2673c762c15009fb25683db2254b"
+  "hash": "5280b273da2bdc0ecf6ef947ff5c68906f54eb2d04097d5144044d0877d86f41"
 }

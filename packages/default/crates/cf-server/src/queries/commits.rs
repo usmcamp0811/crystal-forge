@@ -1805,11 +1805,12 @@ pub struct EvalDependencySystemRow {
 
 /// Fetches dependency build-plan data for each evaluated NixOS system.
 ///
-/// A complete build count is the number of dependency derivations that Nix
-/// reported it would build under the server's effective build configuration.
-/// The count excludes the exact top-level system derivation and all fetched
-/// paths. `failed` and `unavailable` plans keep the count null, which preserves
-/// their distinction from a valid completed count of zero.
+/// A complete build count is the server-side estimate of dependency derivations
+/// that Nix reported it would build under the server's store and effective build
+/// configuration at evaluation time. A remote builder can have different store
+/// contents or Nix settings. The count excludes the exact top-level system
+/// derivation and all fetched paths. `failed` and `unavailable` plans keep the
+/// count null, which preserves their distinction from a completed zero.
 ///
 /// # Errors
 ///
@@ -1822,7 +1823,7 @@ pub async fn fetch_eval_dependency_breakdown(
         r#"
         SELECT
             COALESCE(NULLIF(BTRIM(d.derivation_name), ''), 'unknown') AS system_name,
-            d.closure_total::BIGINT AS dependency_derivation_count,
+            d.dependency_derivation_count::BIGINT AS dependency_derivation_count,
             d.dependency_build_count::BIGINT AS dependency_build_count,
             d.dependency_build_plan_status AS build_plan_status,
             CASE

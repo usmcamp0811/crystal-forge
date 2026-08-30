@@ -2957,8 +2957,9 @@ pub struct EvalDependencySystemRow {
     /// Configuration name of the evaluated NixOS system.
     pub system_name: String,
     /// Number of dependency derivations, excluding the top-level system derivation.
+    /// `Some(0)` is valid. Non-complete plans contain `None`.
     pub dependency_derivation_count: Option<i64>,
-    /// Dependency derivations that Nix plans to build with the effective build configuration.
+    /// Server-estimated dependency builds under the evaluation-time server environment.
     pub dependency_build_count: Option<i64>,
     /// Availability and outcome of the dependency build-plan calculation.
     pub build_plan_status: EvalBuildPlanStatus,
