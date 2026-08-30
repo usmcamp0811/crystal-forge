@@ -988,6 +988,7 @@ pub struct EvalPolicySystemRow {
 /// Dependency build-plan data for a single commit evaluation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EvalDependencyGraphResponse {
+    /// Commit whose evaluated systems are represented.
     pub commit_id: i32,
     /// Number of NixOS systems represented by `systems`.
     pub total_systems: i64,
@@ -1001,11 +1002,15 @@ pub struct EvalDependencySystemRow {
     /// NixOS configuration name.
     pub system_name: String,
     /// Number of unique `.drv` requisites excluding the exact system derivation.
+    /// `Some(0)` is valid. Only complete plans contain a value; unavailable,
+    /// calculating, and failed plans contain `None`.
     pub dependency_derivation_count: Option<i64>,
-    /// Number of dependency derivations Nix would build under the effective
-    /// substitute and offline configuration.
+    /// Server-side estimate of dependency derivations Nix would build under the
+    /// server's effective substitute and offline configuration.
     ///
-    /// `Some(0)` is a valid no-work plan. Non-complete plans use `None`.
+    /// The estimate uses the server store at evaluation time. A remote builder
+    /// can have different store contents or Nix settings. `Some(0)` is a valid
+    /// no-work estimate. Non-complete plans use `None`.
     pub dependency_build_count: Option<i64>,
     /// State of the asynchronous dependency build-plan calculation.
     pub build_plan_status: DependencyBuildPlanStatus,
@@ -1019,7 +1024,7 @@ pub struct EvalDependencySystemRow {
 pub enum DependencyBuildPlanStatus {
     /// No calculation exists, including rows created before build plans existed.
     Unavailable,
-    /// Crystal Forge is calculating the plan without blocking build activation.
+    /// Crystal Forge is calculating the plan before build activation.
     Calculating,
     /// The optional count contains a valid result, including zero.
     Complete,

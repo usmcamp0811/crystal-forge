@@ -37,6 +37,7 @@ const CLAIM_NEXT_JOB_SERVER_DERIVATION_WILDCARD_SQL: &str = r#"
             AND build_jobs.available_at <= NOW()
           AND d.cf_agent_enabled IS TRUE
           AND d.policy_requirements_met IS TRUE
+          AND d.dependency_build_plan_status IN ('complete', 'failed')
         ORDER BY
             build_jobs.queue_position DESC NULLS LAST,
             build_jobs.priority_weight DESC,
@@ -68,6 +69,7 @@ const CLAIM_NEXT_JOB_SERVER_DERIVATION_FILTERED_SQL: &str = r#"
           AND (build_jobs.environment_id = ANY($2) OR build_jobs.environment_id IS NULL)
           AND d.cf_agent_enabled IS TRUE
           AND d.policy_requirements_met IS TRUE
+          AND d.dependency_build_plan_status IN ('complete', 'failed')
         ORDER BY
             build_jobs.queue_position DESC NULLS LAST,
             build_jobs.priority_weight DESC,
@@ -100,6 +102,7 @@ const CLAIM_NEXT_JOB_VERIFIED_SOURCE_WILDCARD_SQL: &str = r#"
           AND build_jobs.available_at <= NOW()
           AND d.cf_agent_enabled IS TRUE
           AND d.policy_requirements_met IS TRUE
+          AND d.dependency_build_plan_status IN ('complete', 'failed')
           AND (
               NOT $2
               OR (
@@ -138,6 +141,7 @@ const CLAIM_NEXT_JOB_VERIFIED_SOURCE_FILTERED_SQL: &str = r#"
           AND (build_jobs.environment_id = ANY($2) OR build_jobs.environment_id IS NULL)
           AND d.cf_agent_enabled IS TRUE
           AND d.policy_requirements_met IS TRUE
+          AND d.dependency_build_plan_status IN ('complete', 'failed')
           AND (
               NOT $3
               OR (
@@ -1690,10 +1694,12 @@ pub async fn mark_job_failed_with_retry(
                 priority_weight, queue_position, parent_job_id, root_job_id,
                 automatic_retry_source_id, attempt_number, available_at
             )
-            VALUES (
+            SELECT
                 $1, $2, 'queued', $3, $4, $5, $6, $7, $8, $7, $9,
                 NOW() + make_interval(secs => $10)
-            )
+            FROM derivations d
+            WHERE d.id = $1
+              AND d.dependency_build_plan_status IN ('complete', 'failed')
             ON CONFLICT (automatic_retry_source_id)
                 WHERE automatic_retry_source_id IS NOT NULL DO NOTHING
             RETURNING *
@@ -1919,11 +1925,13 @@ pub async fn requeue_build_job_as_new_attempt(pool: &PgPool, job_id: &Uuid) -> R
     let inserted = sqlx::query_as::<_, BuildJobRow>(
         r#"
         WITH source_job AS (
-            SELECT derivation_id, environment_id, id,
-                   COALESCE(root_job_id, id) AS root_job_id, attempt_number
-            FROM build_jobs
-            WHERE id = $1
-              AND status IN ('cancelled', 'failed', 'success')
+            SELECT bj.derivation_id, bj.environment_id, bj.id,
+                   COALESCE(bj.root_job_id, bj.id) AS root_job_id, bj.attempt_number
+            FROM build_jobs bj
+            JOIN derivations d ON d.id = bj.derivation_id
+            WHERE bj.id = $1
+              AND bj.status IN ('cancelled', 'failed', 'success')
+              AND d.dependency_build_plan_status IN ('complete', 'failed')
         )
         INSERT INTO build_jobs (
             derivation_id,
@@ -1960,9 +1968,7 @@ pub async fn requeue_build_job_as_new_attempt(pool: &PgPool, job_id: &Uuid) -> R
     .await
     .context("Failed to requeue build job as new attempt")?
     .ok_or_else(|| {
-        anyhow::anyhow!(
-            "Build job not found or not in a requeue-eligible status (cancelled/failed/success)"
-        )
+        anyhow::anyhow!("Build job not found, not terminal, or missing a terminal dependency plan")
     })?;
 
     tx.commit()
@@ -2064,6 +2070,21 @@ mod tests {
             sql.contains("Recovery: re-queued from building by"),
             "startup recovery must append an auditable recovery log: {sql}"
         );
+    }
+
+    #[test]
+    fn every_builder_claim_strategy_requires_a_terminal_dependency_plan() {
+        for sql in [
+            CLAIM_NEXT_JOB_SERVER_DERIVATION_WILDCARD_SQL,
+            CLAIM_NEXT_JOB_SERVER_DERIVATION_FILTERED_SQL,
+            CLAIM_NEXT_JOB_VERIFIED_SOURCE_WILDCARD_SQL,
+            CLAIM_NEXT_JOB_VERIFIED_SOURCE_FILTERED_SQL,
+        ] {
+            assert!(
+                sql.contains("d.dependency_build_plan_status IN ('complete', 'failed')"),
+                "claim SQL must reject unavailable and calculating plans: {sql}",
+            );
+        }
     }
 
     async fn queue_test_pool() -> PgPool {
@@ -2177,11 +2198,20 @@ mod tests {
         .await
         .expect("Failed to insert queued build job");
 
-        // Mark derivation as policy-passing so the claim-query gates
-        // (cf_agent_enabled IS TRUE, policy_requirements_met IS TRUE)
-        // accept this job.
+        // Mark the fixture as policy-passing with a terminal zero-work plan so
+        // the same claim gates used in production accept this job.
         sqlx::query(
-            "UPDATE derivations SET cf_agent_enabled = TRUE, policy_requirements_met = TRUE WHERE id = $1",
+            r#"
+            UPDATE derivations
+            SET cf_agent_enabled = TRUE,
+                policy_requirements_met = TRUE,
+                dependency_derivation_count = 0,
+                dependency_build_count = 0,
+                dependency_build_plan_status = 'complete',
+                dependency_build_plan_generation = 1,
+                dependency_build_plan_lease_expires_at = NULL
+            WHERE id = $1
+            "#,
         )
         .bind(derivation.id)
         .execute(pool)

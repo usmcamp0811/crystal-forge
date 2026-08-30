@@ -212,12 +212,193 @@ SQL
       END
       $$;
 SQL
+    echo "=== Dependency plan 0233 to 0234 upgrade regression ==="
+    createdb dependency_plan_upgrade
+    upgrade_database_url="postgresql://$PGUSER@127.0.0.1/dependency_plan_upgrade"
+    DATABASE_URL="$upgrade_database_url" cargo sqlx migrate run \
+      --source crates/cf-server/migrations --target-version 233
+    psql "$upgrade_database_url" -v ON_ERROR_STOP=1 <<'SQL'
+    INSERT INTO derivations (
+      derivation_type, derivation_name, derivation_path, status_id,
+      cf_agent_enabled, policy_requirements_met,
+      dependency_build_plan_status, closure_total, dependency_build_count
+    ) VALUES
+      ('package', 'complete-plan', '/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-complete.drv', 5, TRUE, TRUE, 'complete', 5, 2),
+      ('package', 'abandoned-plan', '/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-abandoned.drv', 5, TRUE, TRUE, 'calculating', NULL, NULL),
+      ('package', 'queued-failed-plan', '/nix/store/cccccccccccccccccccccccccccccccc-queued.drv', 5, TRUE, TRUE, 'failed', NULL, NULL),
+      ('package', 'idle-plan', '/nix/store/dddddddddddddddddddddddddddddddd-idle.drv', 5, TRUE, TRUE, 'unavailable', NULL, NULL);
+    INSERT INTO build_jobs (derivation_id, status, queue_position)
+    SELECT id, 'queued', 1
+    FROM derivations
+    WHERE derivation_name = 'queued-failed-plan';
+    SQL
+    DATABASE_URL="$upgrade_database_url" cargo sqlx migrate run \
+      --source crates/cf-server/migrations
+    psql "$upgrade_database_url" -v ON_ERROR_STOP=1 <<'SQL'
+    DO $do$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM derivations
+        WHERE derivation_name = 'complete-plan'
+          AND dependency_build_plan_status = 'complete'
+          AND dependency_derivation_count = 5
+          AND dependency_build_count = 2
+          AND dependency_build_plan_generation = 1
+          AND dependency_build_plan_lease_expires_at IS NULL
+      ) THEN
+        RAISE EXCEPTION 'complete plan was not preserved';
+      END IF;
+      IF NOT EXISTS (
+        SELECT 1 FROM derivations
+        WHERE derivation_name = 'abandoned-plan'
+          AND dependency_build_plan_status = 'calculating'
+          AND dependency_derivation_count IS NULL
+          AND dependency_build_count IS NULL
+          AND dependency_build_plan_generation = 1
+          AND dependency_build_plan_lease_expires_at IS NOT NULL
+          AND dependency_build_plan_legacy_generation = 1
+      ) THEN
+        RAISE EXCEPTION 'in-flight legacy plan was not preserved';
+      END IF;
+      IF NOT EXISTS (
+        SELECT 1
+        FROM derivations d
+        JOIN build_jobs bj ON bj.derivation_id = d.id
+        WHERE d.derivation_name = 'queued-failed-plan'
+          AND bj.status = 'queued'
+          AND d.dependency_build_plan_status = 'failed'
+          AND d.dependency_build_plan_generation = 1
+      ) THEN
+        RAISE EXCEPTION 'queued legacy job was not kept claimable';
+      END IF;
+      IF EXISTS (
+        SELECT 1 FROM derivations
+        WHERE derivation_name IN ('complete-plan', 'abandoned-plan', 'queued-failed-plan', 'idle-plan')
+          AND (closure_total IS NOT NULL OR closure_cached IS NOT NULL)
+      ) THEN
+        RAISE EXCEPTION 'legacy closure fields were not cleared';
+      END IF;
+    END
+    $do$;
+    SQL
+    if psql "$upgrade_database_url" -v ON_ERROR_STOP=1 \
+      -c "UPDATE derivations SET dependency_derivation_count = NULL WHERE derivation_name = 'complete-plan'"; then
+      echo "0234 accepted an invalid complete plan" >&2
+      exit 1
+    fi
+    if psql "$upgrade_database_url" -v ON_ERROR_STOP=1 \
+      -c "UPDATE derivations SET dependency_derivation_count = 1 WHERE derivation_name = 'complete-plan'"; then
+      echo "0234 accepted a build count greater than the dependency count" >&2
+      exit 1
+    fi
+    if psql "$upgrade_database_url" -v ON_ERROR_STOP=1 \
+      -c "UPDATE derivations SET dependency_derivation_count = -1 WHERE derivation_name = 'complete-plan'"; then
+      echo "0234 accepted a negative dependency derivation count" >&2
+      exit 1
+    fi
+    if psql "$upgrade_database_url" -v ON_ERROR_STOP=1 \
+      -c "UPDATE derivations SET dependency_build_count = -1, dependency_derivation_count = dependency_derivation_count + 1 WHERE derivation_name = 'complete-plan'"; then
+      echo "0234 accepted a negative dependency build count" >&2
+      exit 1
+    fi
+    if psql "$upgrade_database_url" -v ON_ERROR_STOP=1 \
+      -c "UPDATE derivations SET dependency_build_plan_generation = 1 WHERE derivation_name = 'idle-plan'"; then
+      echo "0234 accepted a generation for an unavailable plan" >&2
+      exit 1
+    fi
+    if psql "$upgrade_database_url" -v ON_ERROR_STOP=1 \
+      -c "UPDATE derivations SET dependency_build_plan_lease_expires_at = NOW() WHERE derivation_name = 'idle-plan'"; then
+      echo "0234 accepted a lease for an unavailable plan" >&2
+      exit 1
+    fi
+    if psql "$upgrade_database_url" -v ON_ERROR_STOP=1 \
+      -c "UPDATE derivations SET dependency_build_plan_lease_expires_at = NULL WHERE derivation_name = 'abandoned-plan'"; then
+      echo "0234 accepted a calculating plan without a lease" >&2
+      exit 1
+    fi
+
+    echo "=== Dependency plan rolling-upgrade compatibility ==="
+    psql "$upgrade_database_url" -v ON_ERROR_STOP=1 <<'SQL'
+    UPDATE derivations
+    SET closure_total = 7,
+        closure_cached = NULL,
+        dependency_build_count = 3,
+        dependency_build_plan_status = 'complete'
+    WHERE derivation_name = 'abandoned-plan';
+
+    DO $do$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM derivations
+        WHERE derivation_name = 'abandoned-plan'
+          AND dependency_build_plan_status = 'complete'
+          AND dependency_derivation_count = 7
+          AND dependency_build_count = 3
+          AND dependency_build_plan_generation = 1
+          AND dependency_build_plan_lease_expires_at IS NULL
+      ) THEN
+        RAISE EXCEPTION '0233 server writes were not translated into the 0234 contract';
+      END IF;
+
+      UPDATE derivations
+      SET closure_total = NULL,
+          closure_cached = NULL,
+          dependency_build_count = NULL,
+          dependency_build_plan_status = 'calculating'
+      WHERE derivation_name = 'idle-plan';
+
+      UPDATE derivations
+      SET dependency_build_plan_generation = dependency_build_plan_generation + 1,
+          dependency_build_plan_lease_expires_at = NOW() + INTERVAL '10 minutes',
+          dependency_build_plan_status = 'calculating'
+      WHERE derivation_name = 'idle-plan';
+
+      UPDATE derivations
+      SET closure_total = 9,
+          closure_cached = NULL,
+          dependency_build_count = 4,
+          dependency_build_plan_status = 'complete'
+      WHERE derivation_name = 'idle-plan';
+
+      IF NOT EXISTS (
+        SELECT 1 FROM derivations
+        WHERE derivation_name = 'idle-plan'
+          AND dependency_build_plan_status = 'calculating'
+          AND dependency_derivation_count IS NULL
+          AND dependency_build_count IS NULL
+          AND dependency_build_plan_generation = 2
+          AND dependency_build_plan_legacy_generation IS NULL
+      ) THEN
+        RAISE EXCEPTION 'stale 0233 completion superseded a 0234 generation';
+      END IF;
+
+      UPDATE derivations
+      SET dependency_derivation_count = 8,
+          dependency_build_count = 3,
+          dependency_build_plan_status = 'complete',
+          dependency_build_plan_lease_expires_at = NULL
+      WHERE derivation_name = 'idle-plan';
+
+      IF NOT EXISTS (
+        SELECT 1 FROM derivations
+        WHERE derivation_name = 'idle-plan'
+          AND dependency_build_plan_status = 'complete'
+          AND dependency_derivation_count = 8
+          AND dependency_build_count = 3
+          AND dependency_build_plan_generation = 2
+      ) THEN
+        RAISE EXCEPTION '0234 terminal write did not complete the replacement generation';
+      END IF;
+    END
+    $do$;
+    SQL
 
     echo "=== Critical cf-server integration targets ==="
     cargo test --offline --package cf-server \
       --test assignment_semantics \
       --test composite_policy \
       --test evidence_for_ato \
+      --test dependency_build_plan_lifecycle \
       --test framework_version_id_lifecycle \
       --test policy_counts_defect \
       --test policy_editor_phase2 \
@@ -258,6 +439,11 @@ SQL
     echo "=== Composite AC3 authoritative Nix executor matrix ==="
     cargo test --offline --package cf-server --lib \
       ac3_actual_nix_executor_matrix_distinguishes_pass_fail_error_and_evidence \
+      -- --ignored --test-threads=1
+
+    echo "=== Dependency plan activation ordering regression ==="
+    cargo test --offline --package cf-server --lib \
+      dependency_plan_reaches_terminal_state_before_build_activation \
       -- --ignored --test-threads=1
 
     echo "=== Resolver exact-version/enforcement regressions ==="

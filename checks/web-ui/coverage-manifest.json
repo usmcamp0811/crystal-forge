@@ -1868,7 +1868,7 @@
     },
     {
       "name": "26bb-evaluation-dependency-graph",
-      "description": "Evaluation dependency graph distinguishes plan states and scales build work across systems",
+      "description": "Evaluation dependency graph distinguishes plan states, scales build work across systems, and polls only while mounted calculations remain active",
       "route": "/evaluations",
       "designRef": "docs/design/CrystalForge/components/EvalDrawer.jsx",
       "profiles": [

@@ -531,10 +531,11 @@ fn build_eval_policy_matrix_response(
 
 /// Fetch dependency build-plan data for a commit evaluation.
 ///
-/// Build counts include only dependency derivations that Nix reports it would
-/// build under the effective substitute and offline configuration. They exclude
-/// the exact top-level system derivation and fetched paths. A completed zero,
-/// unavailable data, calculation failure, and system failure remain distinct.
+/// Build counts are server-side estimates under the server's effective store,
+/// substitute, and offline configuration at evaluation time. Remote builders
+/// can have different store contents or Nix settings. Counts exclude the exact
+/// top-level system derivation and fetched paths. A completed zero, unavailable
+/// data, calculation failure, and system failure remain distinct.
 /// GET /api/v1/commits/:commit_id/eval/dependency-graph
 pub async fn get_eval_dependency_graph(
     Path(commit_id): Path<i32>,

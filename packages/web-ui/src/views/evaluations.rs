@@ -29,6 +29,7 @@ use crate::views::latest_filter::{
 };
 
 const FETCH_LIMIT_MAX: i64 = 10_000; // must match backend LIMIT_MAX
+const DEPENDENCY_GRAPH_MAX_CONSECUTIVE_ERRORS: u8 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum DependencyGraphRowState {
@@ -82,6 +83,21 @@ fn dependency_graph_row_state(
                 width_percent: build_width_percent(build_count, maximum),
             },
         ),
+    }
+}
+
+fn dependency_graph_requires_poll(systems: &[EvalDependencySystemRow]) -> bool {
+    systems.iter().any(|system| {
+        system.system_status == EvalDependencySystemStatus::Evaluated
+            && system.build_plan_status == EvalBuildPlanStatus::Calculating
+    })
+}
+
+fn dependency_graph_error_is_retryable(error: &ApiClientError) -> bool {
+    match error {
+        ApiClientError::Network(_) => true,
+        ApiClientError::Status { code, .. } => *code == 408 || *code == 429 || *code >= 500,
+        ApiClientError::Deserialize(_) => false,
     }
 }
 
@@ -1912,6 +1928,7 @@ fn EvalDrawer(
                             }
                         } else {
                             EvalDrawerGraphTab {
+                                key: "{ev.commit_id}",
                                 commit_id: ev.commit_id,
                             }
                         }
@@ -2028,6 +2045,7 @@ fn EvalDrawer(
                             }
                         } else {
                             EvalDrawerGraphTab {
+                                key: "{ev.commit_id}",
                                 commit_id: ev.commit_id,
                             }
                         }
@@ -2836,53 +2854,46 @@ fn EvalDrawerPolicyTab(commit_id: i32, on_open_policy: EventHandler<String>) -> 
 
 #[component]
 fn EvalDrawerGraphTab(commit_id: i32) -> Element {
-    // Build-plan work is bounded to two concurrent Nix processes. Large
-    // evaluations can therefore remain non-terminal for several minutes.
-    const GRAPH_PENDING_POLL_MAX: u64 = 600;
-
-    let mut graph_refresh = use_signal(|| 0_u64);
-    let mut has_pending_counts = use_signal(|| true);
-    let mut graph_pending_polls = use_signal(|| 0_u64);
-    let graph_resource = use_resource(move || async move {
-        let _ = graph_refresh();
-        fetch_eval_dependency_graph(commit_id).await
-    });
-
-    use_effect(move || {
-        if let Some(Ok(data)) = &*graph_resource.read() {
-            let pending = data.systems.iter().any(|system| {
-                matches!(
-                    system.build_plan_status,
-                    EvalBuildPlanStatus::Unavailable | EvalBuildPlanStatus::Calculating
-                ) && system.system_status == EvalDependencySystemStatus::Evaluated
-            });
-            has_pending_counts.set(pending);
-            if !pending {
-                graph_pending_polls.set(GRAPH_PENDING_POLL_MAX);
+    let mut graph_snapshot = use_signal(|| None);
+    use_future(move || async move {
+        let mut consecutive_errors = 0;
+        loop {
+            match fetch_eval_dependency_graph(commit_id).await {
+                Ok(data) => {
+                    consecutive_errors = 0;
+                    let should_poll = dependency_graph_requires_poll(&data.systems);
+                    graph_snapshot.set(Some(Ok(data)));
+                    if !should_poll {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    // Retry only temporary failures and stop after a bounded
+                    // number of consecutive errors. Component teardown
+                    // cancels this future and its pending timer.
+                    consecutive_errors += 1;
+                    let should_retry = dependency_graph_error_is_retryable(&error)
+                        && consecutive_errors < DEPENDENCY_GRAPH_MAX_CONSECUTIVE_ERRORS;
+                    if !should_retry || graph_snapshot.peek().is_none() {
+                        graph_snapshot.set(Some(Err(error)));
+                    }
+                    if !should_retry {
+                        break;
+                    }
+                }
             }
+
+            // Continue until each evaluated system leaves `calculating`, a
+            // permanent response fails, or temporary failures reach the cap.
+            #[cfg(target_arch = "wasm32")]
+            TimeoutFuture::new(2000).await;
+
+            #[cfg(not(target_arch = "wasm32"))]
+            break;
         }
     });
 
-    {
-        let mut graph_refresh = graph_refresh.clone();
-        use_future(move || async move {
-            loop {
-                #[cfg(target_arch = "wasm32")]
-                {
-                    gloo_timers::future::TimeoutFuture::new(2000).await;
-                    if has_pending_counts() && graph_pending_polls() < GRAPH_PENDING_POLL_MAX {
-                        graph_pending_polls.set(graph_pending_polls() + 1);
-                        graph_refresh.set(graph_refresh() + 1);
-                    }
-                }
-
-                #[cfg(not(target_arch = "wasm32"))]
-                break;
-            }
-        });
-    }
-
-    let graph_snapshot = graph_resource.read();
+    let graph_snapshot = graph_snapshot.read();
 
     rsx! {
         div { style: "flex: 1; overflow: auto; padding: 18px;",
@@ -2947,9 +2958,12 @@ fn EvalDrawerGraphTab(commit_id: i32) -> Element {
                             if has_complete_plans {
                                 div { class: "ed-graph-node ed-graph-fan",
                                     span { style: "font-weight: 700; color: #60a5fa;", "{build_work_total}" }
-                                    span { style: "font-size: 10px; color: var(--cf-text-muted);", "build work" }
+                                    span { style: "font-size: 10px; color: var(--cf-text-muted);", "estimated build work" }
                                 }
                             }
+                        }
+                        div { style: "margin: -6px 0 14px; font-size: 10px; color: var(--cf-text-muted);",
+                            "Server estimate at evaluation time. Remote builders can use different stores, architectures, substituters, or Nix settings."
                         }
 
                         // Per-system breakdown list
@@ -2970,12 +2984,12 @@ fn EvalDrawerGraphTab(commit_id: i32) -> Element {
                                     {
                                         let row_state = dependency_graph_row_state(system, maximum_build_count);
                                         let (state_name, detail, value, color, build_width) = match row_state {
-                                            DependencyGraphRowState::Complete { build_count, width_percent } => {
-                                                let detail = system.dependency_derivation_count.map_or_else(
-                                                    || format!("{build_count} to build · dependency derivations unavailable"),
-                                                    |count| format!("{count} dependency derivations · {build_count} to build"),
-                                                );
-                                                ("complete", detail, format!("{build_count} to build"), "#60a5fa", width_percent)
+                                             DependencyGraphRowState::Complete { build_count, width_percent } => {
+                                                 let detail = system.dependency_derivation_count.map_or_else(
+                                                     || format!("{build_count} estimated builds · dependency derivations unavailable"),
+                                                     |count| format!("{count} dependency derivations · {build_count} estimated builds"),
+                                                 );
+                                                 ("complete", detail, format!("{build_count} estimated builds"), "#60a5fa", width_percent)
                                             }
                                             DependencyGraphRowState::Unavailable => ("unavailable", "Build plan unavailable".to_string(), "unavailable".to_string(), "#9ca3af", 0.0),
                                             DependencyGraphRowState::Calculating => ("calculating", "Calculating build work".to_string(), "calculating".to_string(), "#f59e0b", 0.0),
@@ -3009,7 +3023,7 @@ fn EvalDrawerGraphTab(commit_id: i32) -> Element {
                                 }
                             }
                             div { class: "ed-graph-legend",
-                                span { span { class: "ed-graph-sw", style: "background: #60a5fa;" } "Build work" }
+                                span { span { class: "ed-graph-sw", style: "background: #60a5fa;" } "Estimated build work" }
                                 span { span { class: "ed-graph-sw", style: "background: #9ca3af;" } "Plan unavailable" }
                                 span { span { class: "ed-graph-sw", style: "background: #f59e0b;" } "Plan calculating" }
                                 span { span { class: "ed-graph-sw", style: "background: #f87171;" } "Plan or system failed" }
@@ -3284,9 +3298,11 @@ mod policy_matrix_status_tests {
         plan_status: EvalBuildPlanStatus,
         system_status: EvalDependencySystemStatus,
     ) -> EvalDependencySystemRow {
+        let dependency_derivation_count =
+            (plan_status == EvalBuildPlanStatus::Complete).then_some(200);
         EvalDependencySystemRow {
             system_name: name.to_string(),
-            dependency_derivation_count: Some(200),
+            dependency_derivation_count,
             dependency_build_count: build_count,
             build_plan_status: plan_status,
             system_status,
@@ -3445,5 +3461,85 @@ mod policy_matrix_status_tests {
             dependency_graph_row_state(&system, 100),
             DependencyGraphRowState::SystemFailed
         );
+    }
+
+    #[test]
+    fn dependency_graph_polls_only_for_evaluated_calculating_systems() {
+        let calculating = graph_system(
+            "calculating",
+            None,
+            EvalBuildPlanStatus::Calculating,
+            EvalDependencySystemStatus::Evaluated,
+        );
+        let unavailable = graph_system(
+            "unavailable",
+            None,
+            EvalBuildPlanStatus::Unavailable,
+            EvalDependencySystemStatus::Evaluated,
+        );
+        let failed_system = graph_system(
+            "failed-system",
+            None,
+            EvalBuildPlanStatus::Calculating,
+            EvalDependencySystemStatus::Failed,
+        );
+
+        assert!(dependency_graph_requires_poll(&[calculating]));
+        assert!(!dependency_graph_requires_poll(&[unavailable]));
+        assert!(!dependency_graph_requires_poll(&[failed_system]));
+    }
+
+    #[test]
+    fn dependency_graph_stops_polling_after_calculation_becomes_terminal() {
+        let calculating = graph_system(
+            "alpha",
+            None,
+            EvalBuildPlanStatus::Calculating,
+            EvalDependencySystemStatus::Evaluated,
+        );
+        let complete = graph_system(
+            "alpha",
+            Some(0),
+            EvalBuildPlanStatus::Complete,
+            EvalDependencySystemStatus::Evaluated,
+        );
+        let failed = graph_system(
+            "alpha",
+            None,
+            EvalBuildPlanStatus::Failed,
+            EvalDependencySystemStatus::Evaluated,
+        );
+
+        assert!(dependency_graph_requires_poll(&[calculating]));
+        assert!(!dependency_graph_requires_poll(&[complete]));
+        assert!(!dependency_graph_requires_poll(&[failed]));
+    }
+
+    #[test]
+    fn dependency_graph_retries_only_temporary_api_errors() {
+        assert!(dependency_graph_error_is_retryable(
+            &ApiClientError::Network("offline".to_string())
+        ));
+        assert!(dependency_graph_error_is_retryable(
+            &ApiClientError::Status {
+                code: 503,
+                body: "temporary".to_string(),
+            }
+        ));
+        assert!(dependency_graph_error_is_retryable(
+            &ApiClientError::Status {
+                code: 429,
+                body: "busy".to_string(),
+            }
+        ));
+        assert!(!dependency_graph_error_is_retryable(
+            &ApiClientError::Status {
+                code: 403,
+                body: "forbidden".to_string(),
+            }
+        ));
+        assert!(!dependency_graph_error_is_retryable(
+            &ApiClientError::Deserialize("invalid response".to_string())
+        ));
     }
 }

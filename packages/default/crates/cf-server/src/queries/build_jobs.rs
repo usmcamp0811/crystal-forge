@@ -8,6 +8,11 @@ use sqlx::{PgPool, Postgres, Transaction};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+use crate::config::BuildConfig;
+use crate::models::evaluate_with_policies::{
+    FinalizedDerivation, calculate_and_persist_dependency_build_plan,
+};
+
 /// Advisory lock serializing all build-queue-position allocations.
 /// Using the ASCII encoding of 'CFBQ' as a 64-bit integer (0x43464251).
 pub const BUILD_QUEUE_ORDER_LOCK_KEY: i64 = 0x4346_4251;
@@ -105,6 +110,7 @@ pub async fn create_build_jobs_for_commit(pool: &PgPool, commit_id: i32) -> Resu
             AND d.status_id = 5
             AND d.cf_agent_enabled = TRUE
             AND d.policy_requirements_met = TRUE
+            AND d.dependency_build_plan_status IN ('complete', 'failed')
             AND NOT EXISTS (
                 SELECT 1 FROM build_jobs bj
                 WHERE bj.derivation_id = d.id
@@ -181,6 +187,7 @@ pub async fn create_build_jobs_for_commit_tx(
             AND d.status_id = 5
             AND d.cf_agent_enabled = TRUE
             AND d.policy_requirements_met = TRUE
+            AND d.dependency_build_plan_status IN ('complete', 'failed')
             AND NOT EXISTS (
                 SELECT 1 FROM build_jobs bj
                 WHERE bj.derivation_id = d.id
@@ -202,6 +209,7 @@ pub async fn create_build_jobs_for_commit_tx(
 pub async fn create_build_job_for_derivation_tx(
     tx: &mut Transaction<'_, Postgres>,
     derivation_id: i32,
+    dependency_build_plan_generation: i64,
 ) -> Result<Option<BuildJobInsertOutcome>> {
     lock_build_queue_order(tx).await?;
 
@@ -245,12 +253,15 @@ pub async fn create_build_job_for_derivation_tx(
             AND d.status_id = 5
             AND d.cf_agent_enabled = TRUE
             AND d.policy_requirements_met = TRUE
+            AND d.dependency_build_plan_status IN ('complete', 'failed')
+            AND d.dependency_build_plan_generation = $3
         ON CONFLICT (derivation_id) DO NOTHING
         RETURNING id
         "#,
     )
     .bind(derivation_id)
     .bind(next_pos)
+    .bind(dependency_build_plan_generation)
     .fetch_optional(&mut **tx)
     .await
     .context("Failed to create build job for derivation")?;
@@ -339,6 +350,7 @@ pub async fn enqueue_build_job_for_derivation(pool: &PgPool, derivation_id: i32)
           AND d.status_id = 5  -- DryRunComplete
           AND d.cf_agent_enabled = TRUE
           AND d.policy_requirements_met = TRUE
+          AND d.dependency_build_plan_status IN ('complete', 'failed')
         ON CONFLICT (derivation_id) DO NOTHING
         "#,
     )
@@ -395,6 +407,7 @@ pub async fn get_next_job_for_builder(pool: &PgPool, builder_id: Uuid) -> Result
                 AND bj.retry_count < bj.max_retries
                 AND d.cf_agent_enabled IS TRUE
                 AND d.policy_requirements_met IS TRUE
+                AND d.dependency_build_plan_status IN ('complete', 'failed')
                 AND bj.available_at <= NOW()
                 AND (
                     -- No environment restrictions (wildcard builder)
@@ -437,7 +450,6 @@ struct RecoveryCandidate {
     derivation_path: Option<String>,
     derivation_target: Option<String>,
     commit_id: Option<i32>,
-    flake_id: Option<i32>,
     evaluation_attempt_count: Option<i32>,
 }
 
@@ -510,7 +522,43 @@ async fn record_recovery_failure(
     }
 }
 
-/// Recover derivations whose build-queue preparation failed or was interrupted.
+/// Terminates expired dependency plans that have no build-job recovery path.
+///
+/// Graph-only systems use `build_preparation_state = 'not_required'`, so build
+/// recovery must not activate a job for them. A derivation with any existing
+/// build job also bypasses build-job insertion recovery. This transition
+/// preserves the failed generation, makes a queued job claimable, and prevents
+/// clients from polling abandoned work forever.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot update the expired plans.
+pub async fn fail_expired_dependency_plans_without_recovery(pool: &PgPool) -> Result<u64> {
+    let result = sqlx::query(
+        r#"
+        UPDATE derivations
+        SET dependency_build_plan_status = 'failed',
+            dependency_build_plan_lease_expires_at = NULL,
+            dependency_build_plan_legacy_generation = NULL
+        WHERE dependency_build_plan_status = 'calculating'
+          AND dependency_build_plan_lease_expires_at <= NOW()
+          AND (
+              build_preparation_state = 'not_required'
+              OR EXISTS (
+                  SELECT 1
+                  FROM build_jobs bj
+                  WHERE bj.derivation_id = derivations.id
+              )
+          )
+        "#,
+    )
+    .execute(pool)
+    .await
+    .context("Failed to terminate expired graph-only dependency plans")?;
+    Ok(result.rows_affected())
+}
+
+/// Recovers derivations whose build-queue preparation failed or was interrupted.
 ///
 /// Only derivations explicitly marked `build_preparation_state = 'pending'` or
 /// `'failed'` are eligible. `'not_required'` (scope-excluded, policy-excluded) and
@@ -526,7 +574,19 @@ async fn record_recovery_failure(
 /// Idempotent: `ON CONFLICT (derivation_id) DO NOTHING` prevents duplicate jobs.
 ///
 /// Returns the number of build jobs successfully created.
-pub async fn recover_orphaned_derivation_build_jobs(pool: &PgPool) -> Result<usize> {
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot reconcile plan or build state.
+pub async fn recover_orphaned_derivation_build_jobs(
+    pool: &PgPool,
+    build_config: &BuildConfig,
+) -> Result<usize> {
+    // A graph-only system has no build-preparation recovery path. If its
+    // planner disappears, terminate the expired generation explicitly so the
+    // API does not advertise perpetual work and the UI does not poll forever.
+    fail_expired_dependency_plans_without_recovery(pool).await?;
+
     // Find derivations that need recovery. Only those with explicit 'pending' or
     // 'failed' state — never NULL (pre-migration rows) or 'not_required'.
     // Failed rows are subject to exponential backoff via next_attempt_at.
@@ -537,7 +597,6 @@ pub async fn recover_orphaned_derivation_build_jobs(pool: &PgPool) -> Result<usi
             d.derivation_path,
             d.derivation_target,
             d.commit_id,
-            c.flake_id,
             c.evaluation_attempt_count
         FROM derivations d
         LEFT JOIN commits c ON c.id = d.commit_id
@@ -546,6 +605,10 @@ pub async fn recover_orphaned_derivation_build_jobs(pool: &PgPool) -> Result<usi
           AND d.cf_agent_enabled = TRUE
           AND d.policy_requirements_met = TRUE
           AND c.evaluation_status = 'complete'      -- commit fully evaluated
+          AND (
+              d.dependency_build_plan_status <> 'calculating'
+              OR d.dependency_build_plan_lease_expires_at <= NOW()
+          )
           AND (d.build_preparation_next_attempt_at IS NULL
                OR d.build_preparation_next_attempt_at <= NOW())  -- backoff gate
           AND NOT EXISTS (
@@ -590,6 +653,44 @@ pub async fn recover_orphaned_derivation_build_jobs(pool: &PgPool) -> Result<usi
                 continue;
             }
         };
+
+        let finalized = FinalizedDerivation {
+            derivation_id,
+            drv_path: drv_path.clone(),
+            system_name: candidate
+                .derivation_target
+                .clone()
+                .unwrap_or_else(|| format!("derivation-{derivation_id}")),
+            cf_agent_enabled: Some(true),
+        };
+        match calculate_and_persist_dependency_build_plan(
+            pool,
+            commit_id,
+            expected_attempt,
+            &finalized,
+            build_config,
+        )
+        .await
+        {
+            Ok(Some(_)) => {}
+            Ok(None) => continue,
+            Err(err) => {
+                let msg = format!(
+                    "Recovery: dependency build-plan calculation failed for derivation {derivation_id}: {err:#}"
+                );
+                warn!("{msg}");
+                record_recovery_failure(
+                    pool,
+                    derivation_id,
+                    commit_id,
+                    expected_attempt,
+                    Some(drv_path.as_str()),
+                    &msg,
+                )
+                .await;
+                continue;
+            }
+        }
 
         // Phase 1: create / verify GC root before inserting any claimable job.
         let rooted = match crate::builder::create_drv_gc_root(&drv_path, derivation_id).await {
@@ -720,6 +821,7 @@ pub async fn recover_orphaned_derivation_build_jobs(pool: &PgPool) -> Result<usi
               AND d.status_id = 5
               AND d.cf_agent_enabled = TRUE
               AND d.policy_requirements_met = TRUE
+              AND d.dependency_build_plan_status IN ('complete', 'failed')
             FOR UPDATE OF d
             "#,
         )
@@ -799,6 +901,7 @@ pub async fn recover_orphaned_derivation_build_jobs(pool: &PgPool) -> Result<usi
               AND d.status_id = 5
               AND d.cf_agent_enabled = TRUE
               AND d.policy_requirements_met = TRUE
+              AND d.dependency_build_plan_status IN ('complete', 'failed')
             ON CONFLICT (derivation_id) DO NOTHING
             RETURNING TRUE
             "#,

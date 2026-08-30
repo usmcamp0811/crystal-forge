@@ -179,7 +179,12 @@ pub async fn record_synthetic_eval_failure(
                                 expected_store_path = NULL,
                                 cf_agent_enabled = NULL,
                                 policy_requirements_met = FALSE,
-                                policy_results = '{}'::jsonb
+                                policy_results = '{}'::jsonb,
+                                dependency_derivation_count = NULL,
+                                dependency_build_count = NULL,
+                                dependency_build_plan_status = 'unavailable',
+                                dependency_build_plan_generation = 0,
+                                dependency_build_plan_lease_expires_at = NULL
                             WHERE id = $3
                                 "#,
                             )
@@ -547,6 +552,11 @@ pub async fn record_successful_eval_result(
                                 policy_results = $7,
                                 error_message = NULL,
                                 completed_at = NOW(),
+                                dependency_derivation_count = NULL,
+                                dependency_build_count = NULL,
+                                dependency_build_plan_status = 'unavailable',
+                                dependency_build_plan_generation = 0,
+                                dependency_build_plan_lease_expires_at = NULL,
                                 evaluation_duration_ms =
                                     EXTRACT(EPOCH FROM (NOW() - COALESCE(started_at, scheduled_at))) * 1000
                             WHERE id = $8
@@ -731,6 +741,11 @@ pub async fn record_successful_eval_result_in_tx(
                                 policy_results = $7,
                                 error_message = NULL,
                                 completed_at = NOW(),
+                                dependency_derivation_count = NULL,
+                                dependency_build_count = NULL,
+                                dependency_build_plan_status = 'unavailable',
+                                dependency_build_plan_generation = 0,
+                                dependency_build_plan_lease_expires_at = NULL,
                                 evaluation_duration_ms =
                                     EXTRACT(EPOCH FROM (NOW() - COALESCE(started_at, scheduled_at))) * 1000
                             WHERE id = $8
@@ -856,7 +871,12 @@ pub async fn record_synthetic_eval_failure_in_tx(
                                 expected_store_path = NULL,
                                 cf_agent_enabled = NULL,
                                 policy_requirements_met = FALSE,
-                                policy_results = '{}'::jsonb
+                                policy_results = '{}'::jsonb,
+                                dependency_derivation_count = NULL,
+                                dependency_build_count = NULL,
+                                dependency_build_plan_status = 'unavailable',
+                                dependency_build_plan_generation = 0,
+                                dependency_build_plan_lease_expires_at = NULL
                             WHERE id = $3
                                 "#,
                             )
@@ -2186,10 +2206,24 @@ pub async fn mark_target_failed(
     mark_derivation_failed(pool, target_id, phase, error_message).await
 }
 
+/// Identifies one dependency build-plan calculation for compare-and-set writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DependencyBuildPlanGeneration(pub i64);
+
+/// Reports whether a dependency build-plan terminal write is current.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DependencyBuildPlanWriteOutcome {
+    /// The current calculating generation accepted the terminal result.
+    Applied,
+    /// A newer path, attempt, generation, or terminal result superseded the write.
+    Stale,
+}
+
 /// Marks a dependency build-plan calculation as active.
 ///
-/// A new calculation clears any prior build count so clients cannot combine a
-/// stale count with the `calculating` state.
+/// A new calculation increments the row generation and clears prior counts. The
+/// ten-minute lease exceeds the two sequential Nix command timeouts and lets a
+/// recovery process distinguish an abandoned calculation from live work.
 ///
 /// # Errors
 ///
@@ -2197,21 +2231,42 @@ pub async fn mark_target_failed(
 pub async fn mark_dependency_build_plan_calculating(
     pool: &PgPool,
     derivation_id: i32,
-) -> Result<()> {
-    sqlx::query(
+    derivation_path: &str,
+    commit_id: i32,
+    expected_attempt: i32,
+) -> Result<Option<DependencyBuildPlanGeneration>> {
+    let generation = sqlx::query_scalar::<_, i64>(
         r#"
         UPDATE derivations
-           SET closure_total = NULL,
-               closure_cached = NULL,
+           SET dependency_derivation_count = NULL,
                dependency_build_count = NULL,
-               dependency_build_plan_status = 'calculating'
+               dependency_build_plan_status = 'calculating',
+               dependency_build_plan_generation = dependency_build_plan_generation + 1,
+               dependency_build_plan_lease_expires_at = NOW() + INTERVAL '10 minutes',
+               dependency_build_plan_legacy_generation = NULL
          WHERE id = $1
+           AND derivation_path = $2
+           AND commit_id = $3
+           AND (
+               dependency_build_plan_status <> 'calculating'
+               OR dependency_build_plan_lease_expires_at <= NOW()
+           )
+           AND EXISTS (
+               SELECT 1
+               FROM commits c
+               WHERE c.id = derivations.commit_id
+                 AND c.evaluation_attempt_count = $4
+           )
+         RETURNING dependency_build_plan_generation
         "#,
     )
     .bind(derivation_id)
-    .execute(pool)
+    .bind(derivation_path)
+    .bind(commit_id)
+    .bind(expected_attempt)
+    .fetch_optional(pool)
     .await?;
-    Ok(())
+    Ok(generation.map(DependencyBuildPlanGeneration))
 }
 
 /// Persists a completed dependency build plan.
@@ -2226,25 +2281,48 @@ pub async fn mark_dependency_build_plan_calculating(
 pub async fn complete_dependency_build_plan(
     pool: &PgPool,
     derivation_id: i32,
+    derivation_path: &str,
+    commit_id: i32,
+    expected_attempt: i32,
+    generation: DependencyBuildPlanGeneration,
     dependency_derivation_count: i32,
     dependency_build_count: i32,
-) -> Result<()> {
-    sqlx::query(
+) -> Result<DependencyBuildPlanWriteOutcome> {
+    let result = sqlx::query(
         r#"
         UPDATE derivations
-           SET closure_total = $2,
-               closure_cached = NULL,
-               dependency_build_count = $3,
-               dependency_build_plan_status = 'complete'
+           SET dependency_derivation_count = $6,
+               dependency_build_count = $7,
+               dependency_build_plan_status = 'complete',
+               dependency_build_plan_lease_expires_at = NULL,
+               dependency_build_plan_legacy_generation = NULL
          WHERE id = $1
+           AND derivation_path = $2
+           AND commit_id = $3
+           AND dependency_build_plan_generation = $5
+           AND dependency_build_plan_status = 'calculating'
+           AND EXISTS (
+               SELECT 1
+               FROM commits c
+               WHERE c.id = derivations.commit_id
+                 AND c.evaluation_attempt_count = $4
+           )
         "#,
     )
     .bind(derivation_id)
+    .bind(derivation_path)
+    .bind(commit_id)
+    .bind(expected_attempt)
+    .bind(generation.0)
     .bind(dependency_derivation_count)
     .bind(dependency_build_count)
     .execute(pool)
     .await?;
-    Ok(())
+    Ok(if result.rows_affected() == 1 {
+        DependencyBuildPlanWriteOutcome::Applied
+    } else {
+        DependencyBuildPlanWriteOutcome::Stale
+    })
 }
 
 /// Marks dependency build-plan calculation as failed without inventing a count.
@@ -2252,21 +2330,47 @@ pub async fn complete_dependency_build_plan(
 /// # Errors
 ///
 /// Returns an error when PostgreSQL cannot update the derivation row.
-pub async fn fail_dependency_build_plan(pool: &PgPool, derivation_id: i32) -> Result<()> {
-    sqlx::query(
+pub async fn fail_dependency_build_plan(
+    pool: &PgPool,
+    derivation_id: i32,
+    derivation_path: &str,
+    commit_id: i32,
+    expected_attempt: i32,
+    generation: DependencyBuildPlanGeneration,
+) -> Result<DependencyBuildPlanWriteOutcome> {
+    let result = sqlx::query(
         r#"
         UPDATE derivations
-           SET closure_total = NULL,
-               closure_cached = NULL,
+           SET dependency_derivation_count = NULL,
                dependency_build_count = NULL,
-               dependency_build_plan_status = 'failed'
+               dependency_build_plan_status = 'failed',
+               dependency_build_plan_lease_expires_at = NULL,
+               dependency_build_plan_legacy_generation = NULL
          WHERE id = $1
+           AND derivation_path = $2
+           AND commit_id = $3
+           AND dependency_build_plan_generation = $5
+           AND dependency_build_plan_status = 'calculating'
+           AND EXISTS (
+               SELECT 1
+               FROM commits c
+               WHERE c.id = derivations.commit_id
+                 AND c.evaluation_attempt_count = $4
+           )
         "#,
     )
     .bind(derivation_id)
+    .bind(derivation_path)
+    .bind(commit_id)
+    .bind(expected_attempt)
+    .bind(generation.0)
     .execute(pool)
     .await?;
-    Ok(())
+    Ok(if result.rows_affected() == 1 {
+        DependencyBuildPlanWriteOutcome::Applied
+    } else {
+        DependencyBuildPlanWriteOutcome::Stale
+    })
 }
 
 /// Discover packages from derivation paths and insert them into the database

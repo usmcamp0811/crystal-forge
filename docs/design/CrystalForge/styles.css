@@ -2388,7 +2388,7 @@ html[data-theme="light"] .sd-nix {
   border-radius: 6px; background: var(--cf-card-bg);
   border: 1px solid var(--cf-divider);
 }
-.ed-graph-pkg { display: flex; flex-direction: column; gap: 2px; min-width: 0; overflow: hidden; }
+.ed-graph-system { display: flex; flex-direction: column; gap: 2px; min-width: 0; overflow: hidden; }
 .ed-graph-bar {
   display: flex; height: 10px; border-radius: 3px; overflow: hidden;
   background: var(--cf-subtle-bg);

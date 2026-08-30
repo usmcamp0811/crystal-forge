@@ -11088,8 +11088,8 @@ security.audit.enable = true;</fixtext>
           { system_name: "equal-beta", dependency_derivation_count: 220, dependency_build_count: 40, build_plan_status: "complete", system_status: "evaluated" },
           { system_name: "zero-work", dependency_derivation_count: 95, dependency_build_count: 0, build_plan_status: "complete", system_status: "evaluated" },
           { system_name: "plan-unavailable", dependency_derivation_count: null, dependency_build_count: null, build_plan_status: "unavailable", system_status: "evaluated" },
-          { system_name: "plan-calculating", dependency_derivation_count: 140, dependency_build_count: null, build_plan_status: "calculating", system_status: "evaluated" },
-          { system_name: "plan-failed", dependency_derivation_count: 150, dependency_build_count: null, build_plan_status: "failed", system_status: "evaluated" },
+          { system_name: "plan-calculating", dependency_derivation_count: null, dependency_build_count: null, build_plan_status: "calculating", system_status: "evaluated" },
+          { system_name: "plan-failed", dependency_derivation_count: null, dependency_build_count: null, build_plan_status: "failed", system_status: "evaluated" },
           { system_name: "system-failed", dependency_derivation_count: null, dependency_build_count: null, build_plan_status: "unavailable", system_status: "failed" },
         ],
       };
@@ -11100,8 +11100,24 @@ security.audit.enable = true;</fixtext>
       await page.route("**/api/v1/commits/4410/eval/logs**", async (route) => {
         await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
       });
+      let dependencyGraphRequests = 0;
+      let graphMode = "transition";
       await page.route("**/api/v1/commits/4410/eval/dependency-graph**", async (route) => {
-        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(dependencyGraphMock) });
+        dependencyGraphRequests += 1;
+        if (graphMode === "transition" && dependencyGraphRequests === 2) {
+          await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "temporary" }) });
+          return;
+        }
+        const terminal = graphMode === "terminal" || (graphMode === "transition" && dependencyGraphRequests >= 3);
+        const response = terminal ? {
+          ...dependencyGraphMock,
+          systems: dependencyGraphMock.systems.map((system) =>
+            system.system_name === "plan-calculating"
+              ? { ...system, build_plan_status: "unavailable" }
+              : system,
+          ),
+        } : dependencyGraphMock;
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(response) });
       });
 
       try {
@@ -11134,7 +11150,7 @@ security.audit.enable = true;</fixtext>
           throw new Error(`Expected zero build work to have zero width, got ${zeroWidth}`);
         }
 
-        await assertVisible(graphRow("zero-work").getByText("0 to build", { exact: true }), "Expected valid complete zero to render as 0 to build");
+        await assertVisible(graphRow("zero-work").getByText("0 estimated builds", { exact: true }), "Expected valid complete zero to render as an estimated zero");
         await assertAttribute(graphRow("plan-unavailable"), "data-state", "unavailable", "Expected unavailable plan state");
         await assertAttribute(graphRow("plan-calculating"), "data-state", "calculating", "Expected calculating plan state");
         await assertAttribute(graphRow("plan-failed"), "data-state", "plan-failed", "Expected failed plan state");
@@ -11143,11 +11159,33 @@ security.audit.enable = true;</fixtext>
         await assertVisible(graphRow("plan-failed").getByText("Build plan failed", { exact: true }), "Expected failed plan label");
         await assertVisible(graphRow("system-failed").getByText("System failed", { exact: true }), "Expected failed system label");
         await assertVisible(drawer.getByText("dependency derivations", { exact: true }).first(), "Expected dependency derivation terminology");
-        await assertVisible(drawer.getByText("Build work", { exact: true }).first(), "Expected build work terminology");
+        await assertVisible(drawer.getByText("Estimated build work", { exact: true }).first(), "Expected estimated build work terminology");
+        await assertVisible(drawer.getByText(/Server estimate at evaluation time/), "Expected server-estimate limitation");
         const staleTerminology = drawer.getByText(/cached\/local|pending closure|packages/i);
         if (await staleTerminology.count() !== 0) {
           throw new Error("Dependency graph should not use package, closure, or cache terminology");
         }
+
+        await assertVisible(graphRow("plan-calculating").getByText("Build plan unavailable", { exact: true }), "Expected polling to recover from a transient error and render the terminal plan");
+        const requestsAfterTerminalFetch = dependencyGraphRequests;
+        await page.waitForTimeout(2200);
+        if (dependencyGraphRequests !== requestsAfterTerminalFetch) {
+          throw new Error("A terminal dependency plan response must stop polling");
+        }
+
+        graphMode = "calculating";
+        await drawer.getByRole("button", { name: /Log/ }).click();
+        await drawer.getByRole("button", { name: /Dependency graph/ }).click();
+        await assertVisible(graphRow("plan-calculating").getByText("Calculating build work", { exact: true }), "Expected calculating plan after remount");
+        const requestsBeforeUnmount = dependencyGraphRequests;
+        await drawer.getByRole("button", { name: /Log/ }).click();
+        await page.waitForTimeout(2200);
+        if (dependencyGraphRequests !== requestsBeforeUnmount) {
+          throw new Error("Dependency graph polling should stop when the graph tab unmounts");
+        }
+        graphMode = "terminal";
+        await drawer.getByRole("button", { name: /Dependency graph/ }).click();
+        await assertVisible(graphRow("plan-calculating").getByText("Build plan unavailable", { exact: true }), "Expected terminal dependency graph for the coverage screenshot");
       } finally {
         await page.unroute("**/api/v1/commits/eval-queue**");
         await page.unroute("**/api/v1/commits/4410/eval/logs**");
