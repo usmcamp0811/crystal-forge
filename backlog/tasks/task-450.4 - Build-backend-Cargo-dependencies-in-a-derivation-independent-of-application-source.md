@@ -3,7 +3,7 @@ id: TASK-450.4
 title: >-
   Build backend Cargo dependencies in a derivation independent of application
   source
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-08-31 22:39'
 updated_date: '2026-08-31 22:45'
@@ -94,3 +94,11 @@ Read doc-23, `Build Invalidation Graph and CI Feedback Latency Analysis`, for th
 - [ ] #7 Checks that build or boot the server still pass
 - [ ] #8 The Nix source documents which inputs are intentionally excluded from the dependency artifact and why, so a future edit does not reintroduce an application-source dependency
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: opencode-claude-opus-5 on gray in /home/mcamp/code/crystal-forge/TASK-450-p0-build-graph
+
+Implemented together with TASK-450.1, TASK-450.2, and TASK-450.3 in a single MR at the user's explicit direction. The declared dependencies on TASK-450.1 and TASK-450.3 are satisfied within this MR by landing the source filter and the server variant split before the dependency-artifact conversion.
+<!-- SECTION:NOTES:END -->
