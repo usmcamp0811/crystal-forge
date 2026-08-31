@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - claude-agent
 created_date: '2026-08-23 01:35'
-updated_date: '2026-08-31 02:40'
+updated_date: '2026-08-31 02:41'
 labels:
   - design-parity
   - policy
@@ -228,6 +228,8 @@ Focused final-audit remediation: review the concurrent environment-scoped policy
 2026-08-30 UI re-review remediation: correct compliance evidence route initialization so deep-link reload and browser history do not transiently downgrade to bundle overview; add a state-transition unit regression where practical. Complete notification menu focus entry, keyboard event isolation, stable browser selectors, and focus restoration. Prevent policy card/row container activation from descendant keyboard events. Add reusable repository-local focus capture, trap, and restoration behavior to TASK-433 policy, compliance, evidence, and POA&M drawers. Make Setup Coach agent prerequisite and copy accurately describe the existing server-backed acknowledgement lifecycle. Preserve concurrent worktree changes; run only focused formatting/unit/static checks and diff inspection; do not commit.
 
 2026-08-31 focused eval_passed remediation: Replace the unconditional per-system provisional Pass with the exact eval_passed outcome carried by the authoritative PolicyCheckResult. Add a discriminating regression that persists a metadata-terminal Error, simulates finalization failure handling, and proves no active eval_passed row can remain Pass. Preserve concurrent changes, run only rustfmt and the targeted fast/live-DB test when available, and do not commit.
+
+2026-08-30 browser/harness re-review remediation: Make production re-evaluation polling use an unscaled wall-clock delay; strengthen static source contracts so each canonical mixed and POA&M workflow body contains production re-evaluation and no direct assessment/result SQL; reject duplicate coverage-manifest names; omit diagnostic screenshots from baseline statistics; process structured results, journal output, and artifact export before rejecting a nonzero browser exit; replace stale generic PolicyDrawer accessible-name selectors with stable title-aware locators. Preserve concurrent changes, do not run the Nix browser check, and verify only Node syntax/static contracts.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
