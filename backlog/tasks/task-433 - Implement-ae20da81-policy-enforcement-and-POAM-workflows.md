@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - claude-agent
 created_date: '2026-08-23 01:35'
-updated_date: '2026-08-31 04:19'
+updated_date: '2026-08-31 04:24'
 labels:
   - design-parity
   - policy
@@ -264,6 +264,8 @@ Focused final-audit remediation: review the concurrent environment-scoped policy
 2026-08-31 relationship pagination P2 remediation implemented in `packages/web-ui/src/views/poam_api.rs`. Finding and assignment relationship DTOs now deserialize server pagination metadata with missing-field defaults for older responses. Both relationship clients request 100-row pages, validate shared forward cursors, merge and deduplicate by stable relationship/POA&M identity, and fail through `PoamApiError` rather than return a partial list after the 10,000-record safety boundary. Existing assignment counts/lists and finding history now consume the complete merged vectors without component changes. Added pure compatibility, finding-page merge, assignment-page merge, deduplication, and invalid-cursor tests. Verification passed: web-ui rustfmt check; `cargo test --manifest-path packages/web-ui/Cargo.toml relationship_` (3 passed); `git diff --check`. Existing warnings remain. No expensive checks or commit were run.
 
 2026-08-31 final relationship-pagination compatibility remediation implemented. Relationship services now preserve the original complete response only when both history parameters are absent, with an explicit `COMPATIBILITY` contract; offset-only requests return `invalid_relationship_pagination`, while the current web client continues to send bounded limit/offset pages. Finding pages now order by immutable `linked_at` and link ID while keeping active relationships first; assignment pages order by immutable `added_at` and POA&M ID. Migration 0242 adds matching relationship-order indexes. The focused PostgreSQL regression proves no-parameter assessment, stable-finding, and assignment calls return all rows and that large `poams.updated_at` changes do not alter page order. Verification passed: backend rustfmt check; focused live-DB `relationship_services_batch_active_history_and_immutable_assignments` test (1 passed); web rustfmt check; web `relationship_` tests (3 passed); `git diff --check`. Existing unrelated warnings and concurrent worktree changes remain untouched. No broad checks and no commit were run.
+
+2026-08-30 notification bootstrap cast remediation implemented without editing applied migration 0241. Unapplied migration 0242 now replaces `backfill_user_notification_source_events` with category-and-UUID-shape `CASE` guards for every system/POA&M conversion in eligibility and materialization joins while preserving the advisory lock, tuple cursor, 256-row bound, insert-only queue behavior, and completion updates. Added an isolated PostgreSQL regression with `cves.subject_id='5'` and historical malformed system/POA&M subjects; it proves the CVE event queues, invalid scoped rows do not queue, and the cursor completes at the valid source. Verification passed: backend `cargo fmt --all --check`; `git diff --check`; migration syntax/application and focused test via `notification_bootstrap_safely_skips_malformed_scoped_subject_ids` against repository PostgreSQL at 127.0.0.1:3042 (1 passed). Existing unrelated compiler warnings remained. No broad suite and no commit.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
