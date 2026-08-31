@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - claude-agent
 created_date: '2026-08-23 01:35'
-updated_date: '2026-08-31 18:07'
+updated_date: '2026-08-31 18:10'
 labels:
   - design-parity
   - policy
@@ -254,6 +254,8 @@ Root-cause refinement: the unlink service returns retired relationship history, 
 2026-08-31 focused P2 UI remediation in `/tmp/opencode/TASK-433-publish`: add evidence-backed requirement/framework context and requirement-version detail columns without fabricating unavailable framework labels; move system POA&M ahead of bundle cards; align detail target/progress hierarchy; add live status/alert semantics for POA&M, dashboard, system, coach, and notification states; replace nested notification interactions with sibling menuitems and coherent arrow/Escape/focus behavior; restyle Setup Coach to the authoritative nine-step hierarchy while preserving server-derived completion and legacy six-step compatibility; add evidence navigation `aria-current`/`aria-expanded`; add focused pure/source tests; run web-ui rustfmt, targeted tests, and wasm check if feasible. Do not edit policy files or browser harness and do not commit.
 
 2026-08-31 remaining AC38 enforcement-matrix remediation in `/tmp/opencode/TASK-433-publish`: limit writes to server tests and authoritative Nix check wiring. Add a discriminating all-eight-kind XCCDF export, parse/validate, committed import when practical, reload, and re-export regression that preserves rule IDs, order, configuration, and phase semantics. Confirm or wire the ignored real Nix executor Pass/Fail/Error/evidence matrix into `server-regressions`. Add only small direct per-kind evidence or NotChecked assertions needed to make AC38 coverage objective. Run scoped backend rustfmt and targeted tests through `nix develop`, then `server-regressions` if feasible. Preserve concurrent edits and do not commit.
+
+2026-08-31 remaining non-overlapping UI parity/accessibility remediation in `/tmp/opencode/TASK-433-publish`: limit writes to `packages/web-ui/assets/app.css`, dashboard, notification/topbar, Setup Coach, and policy UI Rust files. Audit all TASK-433 light-theme normal-text semantic colors, including dashboard hardcoded colors, against WCAG AA 4.5:1 and add theme overrides. Independently validate notification menu sibling semantics, focus entry/restoration, Arrow navigation, Tab behavior, and Escape, then fix residual interaction defects. Add missing status/live semantics in dashboard, coach, and notification states. Ensure policy cards/rows avoid nested-invalid interactive semantics and isolate descendant keyboard events, with focused regressions. Run web-ui rustfmt, targeted tests, a WASM check, and `git diff --check`. Preserve concurrent edits, excluded compliance/POA&M/system-detail/browser-harness files, and do not commit.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
