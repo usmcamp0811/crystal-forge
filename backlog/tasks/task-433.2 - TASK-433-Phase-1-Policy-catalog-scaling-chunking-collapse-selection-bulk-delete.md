@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:42'
-updated_date: '2026-08-29 15:40'
+updated_date: '2026-08-31 22:37'
 labels:
   - design-parity
   - policy
@@ -89,6 +89,8 @@ Add/extend a browser workflow proving deep search, collapse/expand, cards/table,
 
 <!-- SECTION:PLAN:BEGIN -->
 Phase-8 owner remediation: require and directly test CSRF on the TASK-433 bulk-delete mutation while preserving admin authorization, atomic deleted/skipped reconciliation, and existing client behavior. Add production-API browser/server proof for partial, all-blocked, unexpected failure, and authorization states before returning AC6 and the task to Review.
+
+2026-08-31 remaining catalog disclosure P2 remediation in `/tmp/opencode/TASK-433-publish`: derive one effective group presentation state from the preserved explicit collapse preference plus search-forced and selected-policy-forced expansion. Use that state for content visibility, header class, `aria-expanded`, title/disabled behavior, and right/down chevrons. Add a pure discriminating presentation regression for collapsed, explicit, search-forced, and selection-forced states. Limit edits to policy catalog source, catalog CSS, and focused in-file tests; run web-ui rustfmt, targeted tests, WASM build/check, and `git diff --check`; preserve concurrent changes and do not commit.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
