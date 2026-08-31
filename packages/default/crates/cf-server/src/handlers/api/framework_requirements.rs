@@ -36,6 +36,7 @@ use uuid::Uuid;
 
 use crate::api::models::ApiError;
 use crate::compliance::framework_model::attach_artifact_and_retry_framework_recovery;
+use crate::handlers::api::auth_session::require_csrf;
 use crate::handlers::api::rbac::{
     authenticated_user_roles, has_admin_role, has_operator_or_admin_role,
 };
@@ -340,6 +341,9 @@ pub async fn create_policy_requirement_mapping(
     if !has_operator_or_admin_role(&roles) {
         return forbidden();
     }
+    if let Err(response) = require_csrf(&headers) {
+        return response;
+    }
 
     // Validate field values.
     if !matches!(
@@ -397,6 +401,9 @@ pub async fn update_policy_requirement_mapping(
     };
     if !has_operator_or_admin_role(&roles) {
         return forbidden();
+    }
+    if let Err(response) = require_csrf(&headers) {
+        return response;
     }
 
     if !matches!(
@@ -529,6 +536,9 @@ pub async fn delete_policy_requirement_mapping(
     };
     if !has_operator_or_admin_role(&roles) {
         return forbidden();
+    }
+    if let Err(response) = require_csrf(&headers) {
+        return response;
     }
 
     match delete_policy_mapping(&pool, policy_version_id, mapping_id).await {

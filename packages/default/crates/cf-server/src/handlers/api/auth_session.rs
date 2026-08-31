@@ -1,7 +1,8 @@
 use axum::{
-    extract::State,
-    http::{HeaderMap, HeaderValue, StatusCode, header},
-    response::IntoResponse,
+    Json,
+    extract::{FromRequestParts, State},
+    http::{HeaderMap, HeaderValue, StatusCode, header, request::Parts},
+    response::{IntoResponse, Response},
 };
 use chrono::{Duration, Utc};
 use sqlx::PgPool;
@@ -206,7 +207,7 @@ fn parse_session_ttl(raw: Option<&str>) -> i64 {
 
 /// Reusable double-submit CSRF validation for state-changing cookie-auth endpoints.
 ///
-/// Currently used by logout and intended to be reused by future cookie-auth write actions.
+/// Mutation handlers use this through [`RequireCsrf`] or [`require_csrf`].
 pub fn validate_csrf(headers: &HeaderMap) -> Result<(), SessionError> {
     let csrf_cookie =
         extract_cookie(headers, CSRF_COOKIE_NAME).ok_or(SessionError::MissingCsrfCookie)?;
@@ -221,6 +222,45 @@ pub fn validate_csrf(headers: &HeaderMap) -> Result<(), SessionError> {
     }
 
     Ok(())
+}
+
+/// Requires a matching double-submit CSRF cookie and request header.
+///
+/// Mutation handlers place this extractor after their authentication extractor
+/// so an authenticated session and role are not sufficient to mutate state.
+pub struct RequireCsrf;
+
+#[axum::async_trait]
+impl<S> FromRequestParts<S> for RequireCsrf
+where
+    S: Send + Sync,
+{
+    type Rejection = Response;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        require_csrf(&parts.headers)?;
+        Ok(Self)
+    }
+}
+
+/// Validates CSRF headers and returns the structured Web API rejection.
+///
+/// # Errors
+///
+/// Returns HTTP 403 with `csrf_validation_failed` when the CSRF cookie or
+/// header is absent or when their values do not match.
+pub(crate) fn require_csrf(headers: &HeaderMap) -> Result<(), Response> {
+    validate_csrf(headers).map_err(|_| {
+        (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "csrf_validation_failed",
+                "message": "CSRF validation failed",
+                "details": null
+            })),
+        )
+            .into_response()
+    })
 }
 
 #[derive(Debug)]

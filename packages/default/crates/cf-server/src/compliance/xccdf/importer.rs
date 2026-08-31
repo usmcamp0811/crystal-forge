@@ -309,6 +309,30 @@ pub fn validate_cf_native_document(
     Ok((validated, records))
 }
 
+/// Validates a CF-native document without blocking the async executor.
+///
+/// The synchronous validator remains available for offline callers and tests.
+/// Production async import paths must use this wrapper because composite policy
+/// validation can invoke the bounded Nix parser.
+///
+/// # Errors
+///
+/// Returns the synchronous validator's error. Returns `CF_NATIVE_PAYLOAD_INVALID`
+/// if Tokio cannot join the blocking validation task, including after a panic.
+pub async fn validate_cf_native_document_async(
+    parsed: &ParsedXccdf,
+) -> Result<(ValidatedImportPlan, Vec<ImportedPolicyRecord>), ImportPlanError> {
+    let parsed = parsed.clone();
+    tokio::task::spawn_blocking(move || validate_cf_native_document(&parsed))
+        .await
+        .map_err(|error| {
+            ImportPlanError::cf_native_invalid(
+                "CF_NATIVE_PAYLOAD_INVALID",
+                format!("CF-native validation task failed: {error}"),
+            )
+        })?
+}
+
 // ── SHA-256 validation helpers ────────────────────────────────────────────────
 
 /// Validate the expected_sha256 field.

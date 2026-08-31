@@ -459,8 +459,9 @@ fn validate_shared_creation_decisions(
 
 /// Commit all durable records for a foreign XCCDF import in one transaction.
 ///
-/// `policy_records` is produced by [`build_policy_records`] before this call;
-/// it is passed in so the function has no re-parsing or validation work.
+/// `policy_records` is produced by [`build_policy_records`] before this call.
+/// The query layer still validates every policy config before opening the
+/// transaction so internal callers cannot bypass the persistence boundary.
 pub async fn commit_foreign_import(
     pool: &PgPool,
     importing_user_id: Uuid,
@@ -469,10 +470,11 @@ pub async fn commit_foreign_import(
     mut policy_records: Vec<ImportedPolicyRecord>,
 ) -> Result<XccdfCommittedImportResult> {
     for record in &policy_records {
-        crate::models::deployment_policies::validate_policy_type_config(
+        crate::models::deployment_policies::validate_policy_type_config_async(
             &record.policy_type,
             &record.config,
         )
+        .await
         .map_err(anyhow::Error::msg)?;
     }
     #[derive(Debug, Clone, Copy)]
@@ -1642,10 +1644,11 @@ pub async fn commit_cf_native_import(
     policy_records: Vec<ImportedPolicyRecord>,
 ) -> Result<XccdfCommittedImportResult> {
     for record in &policy_records {
-        crate::models::deployment_policies::validate_policy_type_config(
+        crate::models::deployment_policies::validate_policy_type_config_async(
             &record.policy_type,
             &record.config,
         )
+        .await
         .map_err(anyhow::Error::msg)?;
     }
     let mut tx = pool
@@ -5207,7 +5210,7 @@ mod tests {
             .expect("native import should succeed");
 
         let preview_pkg = make_package(bytes);
-        let preview = compute_cf_native_reconciliation(&pool, &preview_pkg.parsed)
+        let preview = compute_cf_native_reconciliation(&pool, &preview_pkg.parsed, None)
             .await
             .expect("reconciliation should succeed")
             .expect("cf-native document should produce a preview");
@@ -5261,7 +5264,7 @@ mod tests {
             true,
         );
         let preview_pkg = make_package(new_bytes);
-        let preview = compute_cf_native_reconciliation(&pool, &preview_pkg.parsed)
+        let preview = compute_cf_native_reconciliation(&pool, &preview_pkg.parsed, None)
             .await
             .expect("reconciliation should succeed")
             .expect("cf-native document should produce a preview");
@@ -5306,7 +5309,7 @@ mod tests {
             false,
         );
         let preview_pkg = make_package(conflicting);
-        let preview = compute_cf_native_reconciliation(&pool, &preview_pkg.parsed)
+        let preview = compute_cf_native_reconciliation(&pool, &preview_pkg.parsed, None)
             .await
             .expect("reconciliation should succeed")
             .expect("cf-native document should produce a preview");
@@ -5351,7 +5354,7 @@ mod tests {
         assert_eq!(policy_count_before, 0);
 
         let preview_pkg = make_package(bytes);
-        let preview = compute_cf_native_reconciliation(&pool, &preview_pkg.parsed)
+        let preview = compute_cf_native_reconciliation(&pool, &preview_pkg.parsed, None)
             .await
             .expect("reconciliation should succeed")
             .expect("cf-native document should produce a preview");
@@ -5713,7 +5716,7 @@ mod tests {
 
         // Preview B: new_version for both, lineage witnesses, no blocking.
         let preview_pkg = make_package(bytes_b.clone());
-        let preview = compute_cf_native_reconciliation(&pool, &preview_pkg.parsed)
+        let preview = compute_cf_native_reconciliation(&pool, &preview_pkg.parsed, None)
             .await
             .expect("reconciliation should succeed")
             .expect("cf-native document should produce a preview");

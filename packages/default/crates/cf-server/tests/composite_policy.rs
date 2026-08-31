@@ -1,4 +1,4 @@
-use chrono::{TimeZone, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use crystal_forge::compliance::digest::PolicyVersionCanonical;
 use crystal_forge::compliance::resolver::{
     EffectivePolicySet, ResolutionOutcome, resolve_system_effective_policies,
@@ -1275,6 +1275,14 @@ async fn historical_store_path_without_derivation_is_preserved_without_composite
     .execute(&pool)
     .await
     .unwrap();
+    sqlx::query(
+        "INSERT INTO system_states (hostname, change_reason, store_path) VALUES ($1, 'startup', $2)",
+    )
+    .bind(&hostname)
+    .bind(&store_path)
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let authorization = authorize_and_set_system_target(
         &pool,
@@ -1297,6 +1305,75 @@ async fn historical_store_path_without_derivation_is_preserved_without_composite
         .await
         .unwrap();
     assert_eq!(delivery.target.as_deref(), Some(store_path.as_str()));
+}
+
+#[sqlx::test]
+async fn unknown_store_path_is_rejected_without_target_mutation_or_delivery(pool: PgPool) {
+    let system_id = Uuid::new_v4();
+    let hostname = format!("unknown-rollback-{system_id}");
+    let store_path = format!("/nix/store/{system_id}-unknown");
+    sqlx::query(
+        "INSERT INTO systems (id, hostname, is_active, public_key, derivation, reachability) VALUES ($1, $2, true, $3, $3, 'direct')",
+    )
+    .bind(system_id)
+    .bind(&hostname)
+    .bind(format!("ssh-key-{system_id}"))
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let authorization = authorize_and_set_system_target(
+        &pool,
+        system_id,
+        &store_path,
+        "manual_rollback_generation",
+    )
+    .await
+    .unwrap();
+    assert_eq!(authorization.outcome, EnforcementOutcome::Fail);
+    assert!(authorization.detail.contains("no immutable observation"));
+    let desired: Option<String> =
+        sqlx::query_scalar("SELECT desired_target FROM systems WHERE id = $1")
+            .bind(system_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(desired, None);
+
+    sqlx::query("UPDATE systems SET desired_target = $1 WHERE id = $2")
+        .bind(&store_path)
+        .bind(system_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO pending_system_deployments (system_id, target_store_path, source) VALUES ($1, $2, 'test_unknown_target')",
+    )
+    .bind(system_id)
+    .bind(&store_path)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let delivery = authorize_and_claim_desired_target(&pool, system_id, &store_path)
+        .await
+        .unwrap();
+    assert_eq!(delivery.authorization.outcome, EnforcementOutcome::Fail);
+    assert_eq!(delivery.target, None);
+    let delivery_state: (Option<String>, Option<DateTime<Utc>>) = sqlx::query_as(
+        r#"
+        SELECT system.desired_target, pending.delivered_at
+        FROM systems system
+        JOIN pending_system_deployments pending ON pending.system_id = system.id
+        WHERE system.id = $1 AND pending.target_store_path = $2
+        "#,
+    )
+    .bind(system_id)
+    .bind(&store_path)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(delivery_state, (Some(store_path), None));
 }
 
 #[sqlx::test]
@@ -1398,6 +1475,41 @@ async fn known_uncached_target_is_blocked_without_composite_policy(pool: PgPool)
         .unwrap();
     assert_eq!(delivery.authorization.outcome, EnforcementOutcome::Fail);
     assert_eq!(delivery.target, None);
+
+    sqlx::query(
+        "INSERT INTO system_states (hostname, change_reason, store_path) VALUES ($1, 'startup', $2)",
+    )
+    .bind(&hostname)
+    .bind(&store_path)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE derivations SET policy_requirements_met = false WHERE id = $1")
+        .bind(derivation_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE systems SET desired_target = NULL WHERE id = $1")
+        .bind(system_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let failed = authorize_and_set_system_target(
+        &pool,
+        system_id,
+        &store_path,
+        "manual_rollback_generation",
+    )
+    .await
+    .unwrap();
+    assert_eq!(failed.outcome, EnforcementOutcome::Fail);
+    let desired: Option<String> =
+        sqlx::query_scalar("SELECT desired_target FROM systems WHERE id = $1")
+            .bind(system_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(desired, None);
 }
 
 #[sqlx::test]

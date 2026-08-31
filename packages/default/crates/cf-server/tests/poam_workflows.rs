@@ -325,6 +325,402 @@ async fn legacy_fail_can_create_poam_without_fabricating_composite_assessment(po
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn legacy_fail_pass_verification_close_and_rollups_retain_source_neutral_history(
+    pool: PgPool,
+) {
+    let (fixture, finding_id, observation, _) = legacy_fail_fixture(&pool).await;
+    let actor = admin_actor(fixture.user_id);
+    let clock = FixedClock(Utc.with_ymd_and_hms(2026, 8, 29, 12, 0, 0).unwrap());
+    let created = poam_service::create(
+        &pool,
+        &actor,
+        legacy_create_request(finding_id, observation),
+        &clock,
+    )
+    .await
+    .unwrap();
+
+    let (assignment_id, _assignment_version_id, bundle_id) =
+        immutable_assignment_fixture_for_version(
+            &pool,
+            fixture.system_id,
+            fixture.user_id,
+            fixture.version_id,
+        )
+        .await;
+    let assignment_environment_id: Uuid =
+        sqlx::query_scalar("INSERT INTO environments(name) VALUES($1) RETURNING id")
+            .bind(format!(
+                "poam-env-{}",
+                &fixture.system_id.simple().to_string()[..8]
+            ))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    sqlx::query("UPDATE systems SET environment_id=$2 WHERE id=$1")
+        .bind(fixture.system_id)
+        .bind(assignment_environment_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE compliance_bundle_assignments
+         SET scope_type='environment',environment_id=$2,system_id=NULL
+         WHERE id=$1",
+    )
+    .bind(assignment_id)
+    .bind(assignment_environment_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let bundle_version_id: Uuid = sqlx::query_scalar(
+        "SELECT bundle_version_id FROM compliance_bundle_version_policies WHERE policy_version_id=$1",
+    )
+    .bind(fixture.version_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let mut publish = pool.begin().await.unwrap();
+    sqlx::query("UPDATE deployment_policies SET current_draft_version_id=NULL WHERE id=$1")
+        .bind(fixture.resolved.policies[0].policy_lineage_id)
+        .execute(&mut *publish)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE deployment_policy_versions SET publication_state='accepted',semantic_digest='legacy-poam-policy-v1',trust_state='trusted',implementation_state='native' WHERE id=$1")
+        .bind(fixture.version_id).execute(&mut *publish).await.unwrap();
+    sqlx::query("UPDATE deployment_policies SET current_published_version_id=$2 WHERE id=$1")
+        .bind(fixture.resolved.policies[0].policy_lineage_id)
+        .bind(fixture.version_id)
+        .execute(&mut *publish)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE compliance_bundles SET current_draft_version_id=NULL WHERE id=$1")
+        .bind(bundle_id)
+        .execute(&mut *publish)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE compliance_bundle_versions SET publication_state='accepted',semantic_digest='legacy-poam-bundle-v1',trust_state='trusted' WHERE id=$1")
+        .bind(bundle_version_id).execute(&mut *publish).await.unwrap();
+    sqlx::query("UPDATE compliance_bundles SET current_published_version_id=$2 WHERE id=$1")
+        .bind(bundle_id)
+        .bind(bundle_version_id)
+        .execute(&mut *publish)
+        .await
+        .unwrap();
+    publish.commit().await.unwrap();
+    sqlx::query("UPDATE compliance_bundle_assignments SET active=true WHERE id=$1")
+        .bind(assignment_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM system_policies WHERE system_id=$1 AND policy_id=$2")
+        .bind(fixture.system_id)
+        .bind(fixture.resolved.policies[0].policy_lineage_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let system = poam_service::system_rollups(&pool, &actor, &[fixture.system_id], &clock)
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            system[0].open_findings,
+            system[0].on_poam_findings,
+            system[0].no_poam_findings,
+        ),
+        (1, 1, 0)
+    );
+    let bundle = poam_service::bundle_rollups(&pool, &actor, &[bundle_id], &clock)
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            bundle[0].total,
+            bundle[0].active,
+            bundle[0].open_findings,
+            bundle[0].on_poam_findings,
+            bundle[0].no_poam_findings,
+        ),
+        (1, 1, 1, 1, 0)
+    );
+
+    let awaiting = poam_service::transition(
+        &pool,
+        &actor,
+        created.poam.id,
+        TransitionPoamRequest {
+            revision: created.poam.revision,
+            status: PoamStatus::AwaitingVerification,
+            note: Some("Remediation deployed".into()),
+        },
+        &clock,
+    )
+    .await
+    .unwrap();
+    assert_eq!(awaiting.poam.status, "awaiting_verification");
+
+    let passing_result = serde_json::json!({
+        "assigned": {
+            fixture.version_id.to_string(): {
+                "passed": true,
+                "details": "legacy custom check now passes"
+            }
+        }
+    });
+    sqlx::query("UPDATE derivations SET policy_results=$1 WHERE id=$2")
+        .bind(&passing_result)
+        .bind(fixture.derivation_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let verified = poam_service::verify(
+        &pool,
+        &actor,
+        awaiting.poam.id,
+        awaiting.poam.revision,
+        &clock,
+    )
+    .await
+    .unwrap();
+    assert_eq!(verified["outcome"], "accepted");
+    assert_eq!(verified["items"][0]["result"], "pass");
+    assert!(verified["items"][0]["assessment_id"].is_null());
+
+    let mut malformed_context = pool.begin().await.unwrap();
+    let malformed_context_attempt_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO poam_verification_attempts(poam_id,attempted_by,outcome,poam_revision)
+         VALUES($1,$2,'accepted',$3) RETURNING id",
+    )
+    .bind(created.poam.id)
+    .bind(actor.user_id)
+    .bind(verified["revision"].as_i64().unwrap())
+    .fetch_one(&mut *malformed_context)
+    .await
+    .unwrap();
+    let malformed_attestation = sqlx::query(
+        r#"INSERT INTO poam_effective_context_attestations(
+             attempt_id,finding_id,system_id,policy_lineage_id,policy_version_id,
+             derivation_id,target_store_path,effective_set_digest,
+             effective_config_digest,effective_config,observed_outcome,
+             observation_token,observation_snapshot)
+           SELECT $2,finding_id,system_id,policy_lineage_id,policy_version_id,
+             derivation_id,target_store_path,'caller-chosen-effective-set',
+             effective_config_digest,effective_config,observed_outcome,
+             observation_token,observation_snapshot
+           FROM poam_effective_context_attestations WHERE attempt_id=$1"#,
+    )
+    .bind(Uuid::parse_str(verified["attempt_id"].as_str().unwrap()).unwrap())
+    .bind(malformed_context_attempt_id)
+    .execute(&mut *malformed_context)
+    .await
+    .unwrap_err();
+    assert!(
+        malformed_attestation
+            .as_database_error()
+            .is_some_and(|error| error.message().contains("database-held resolver context"))
+    );
+    malformed_context.rollback().await.unwrap();
+
+    // INVARIANT: Source-neutral closure evidence must still match the
+    // authoritative deployed result when the deferred closure constraint runs.
+    // Copying a valid-looking Pass item into a new accepted attempt cannot close
+    // the POA&M after the exact derivation result changes to Fail.
+    let failing_result = serde_json::json!({
+        "assigned": {
+            fixture.version_id.to_string(): {
+                "passed": false,
+                "details": "authoritative result still fails"
+            }
+        }
+    });
+    sqlx::query("UPDATE derivations SET policy_results=$1 WHERE id=$2")
+        .bind(&failing_result)
+        .bind(fixture.derivation_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let legitimate_attempt_id = Uuid::parse_str(verified["attempt_id"].as_str().unwrap()).unwrap();
+    let mut forged = pool.begin().await.unwrap();
+    let forged_attempt_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO poam_verification_attempts(poam_id,attempted_by,outcome,poam_revision) VALUES($1,$2,'accepted',$3) RETURNING id",
+    )
+    .bind(created.poam.id)
+    .bind(actor.user_id)
+    .bind(verified["revision"].as_i64().unwrap())
+    .fetch_one(&mut *forged)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"INSERT INTO poam_verification_items(
+             attempt_id,finding_id,system_id,policy_lineage_id,result,policy_version_id,
+             assessment_id,derivation_id,target_store_path,effective_set_digest,
+             effective_config_digest,effective_config,observed_outcome,observation_token,
+             observation_snapshot,assessment_updated_at,bundle_ids,bundle_version_ids,
+             requirement_version_ids,waiver_id,observed_at,detail)
+           SELECT $1,finding_id,system_id,policy_lineage_id,result,policy_version_id,
+             assessment_id,derivation_id,target_store_path,effective_set_digest,
+             effective_config_digest,effective_config,observed_outcome,observation_token,
+             observation_snapshot,assessment_updated_at,bundle_ids,bundle_version_ids,
+             requirement_version_ids,waiver_id,observed_at,'forged source-neutral Pass'
+           FROM poam_verification_items WHERE attempt_id=$2"#,
+    )
+    .bind(forged_attempt_id)
+    .bind(legitimate_attempt_id)
+    .execute(&mut *forged)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE poam_verification_attempts SET sealed_at=CURRENT_TIMESTAMP WHERE id=$1")
+        .bind(forged_attempt_id)
+        .execute(&mut *forged)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE poam_finding_links SET retired_at=CURRENT_TIMESTAMP,retired_by=$2,retirement_reason='closed:'||$3::uuid::text WHERE poam_id=$1 AND retired_at IS NULL")
+        .bind(created.poam.id)
+        .bind(actor.user_id)
+        .bind(forged_attempt_id)
+        .execute(&mut *forged)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE poams SET status='completed',closed_at=CURRENT_TIMESTAMP,closure_attempt_id=$2 WHERE id=$1")
+        .bind(created.poam.id)
+        .bind(forged_attempt_id)
+        .execute(&mut *forged)
+        .await
+        .unwrap();
+    let forged_error = forged.commit().await.unwrap_err();
+    assert_eq!(
+        forged_error.as_database_error().unwrap().constraint(),
+        Some("poams_authoritative_closure_evidence")
+    );
+
+    sqlx::query("UPDATE derivations SET policy_results=$1 WHERE id=$2")
+        .bind(&passing_result)
+        .bind(fixture.derivation_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // INVARIANT: The active assignment pins immutable v1 even after the policy
+    // lineage publishes v2. Closure must validate the exact assigned version,
+    // not substitute the lineage's current pointer.
+    sqlx::query("UPDATE deployment_policy_versions SET publication_state='deprecated' WHERE id=$1")
+        .bind(fixture.version_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let current_v2: Uuid = sqlx::query_scalar(
+        r#"INSERT INTO deployment_policy_versions(
+             policy_id,version,publication_state,published_at,name,description,
+             policy_type,implementation_state,execution_phase,config,
+             compliance_metadata,dependencies,semantic_digest,trust_state,
+             derived_from_version_id,created_by)
+           SELECT policy_id,'2.0.0','draft',NULL,name,description,
+             policy_type,implementation_state,execution_phase,config,
+             compliance_metadata,dependencies,'legacy-poam-policy-v2',trust_state,
+             id,created_by
+           FROM deployment_policy_versions WHERE id=$1 RETURNING id"#,
+    )
+    .bind(fixture.version_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let mut publish_v2 = pool.begin().await.unwrap();
+    sqlx::query(
+        "UPDATE deployment_policy_versions \
+         SET publication_state='accepted',published_at=CURRENT_TIMESTAMP WHERE id=$1",
+    )
+    .bind(current_v2)
+    .execute(&mut *publish_v2)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE deployment_policies SET current_published_version_id=$2 WHERE id=$1")
+        .bind(fixture.resolved.policies[0].policy_lineage_id)
+        .bind(current_v2)
+        .execute(&mut *publish_v2)
+        .await
+        .unwrap();
+    publish_v2.commit().await.unwrap();
+    let pinned = match resolve_system_effective_policies(&pool, fixture.system_id)
+        .await
+        .unwrap()
+    {
+        ResolutionOutcome::Resolved(resolved) => resolved,
+        ResolutionOutcome::Conflict(conflict) => panic!("unexpected policy conflict: {conflict:?}"),
+    };
+    assert_eq!(pinned.policies[0].policy_version_id, fixture.version_id);
+    assert_ne!(pinned.policies[0].policy_version_id, current_v2);
+
+    let closed = poam_service::close(
+        &pool,
+        &actor,
+        awaiting.poam.id,
+        verified["revision"].as_i64().unwrap(),
+        &clock,
+    )
+    .await
+    .unwrap();
+    assert_eq!(closed.poam.status, "completed");
+    assert_eq!(closed.verification_attempts.len(), 2);
+    assert!(closed.verification_attempts.iter().all(|attempt| {
+        attempt.outcome == "accepted"
+            && attempt.items.len() == 1
+            && attempt.items[0].result == "pass"
+            && attempt.items[0].assessment_id.is_none()
+            && attempt.items[0]
+                .observation_snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot["source"] == "nix_policy_result")
+    }));
+    assert!(closed.activity.iter().any(|activity| {
+        activity.kind == "status_changed"
+            && activity.payload["from"] == "open"
+            && activity.payload["to"] == "awaiting_verification"
+    }));
+
+    let composite_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM composite_policy_assessments WHERE system_id=$1")
+            .bind(fixture.system_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(composite_count, 0);
+    let result_after: serde_json::Value =
+        sqlx::query_scalar("SELECT policy_results FROM derivations WHERE id=$1")
+            .bind(fixture.derivation_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(result_after, passing_result);
+
+    let system = poam_service::system_rollups(&pool, &actor, &[fixture.system_id], &clock)
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            system[0].total,
+            system[0].completed,
+            system[0].open_findings,
+            system[0].on_poam_findings,
+        ),
+        (1, 1, 0, 0)
+    );
+    let bundle = poam_service::bundle_rollups(&pool, &actor, &[bundle_id], &clock)
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            bundle[0].total,
+            bundle[0].completed,
+            bundle[0].open_findings,
+            bundle[0].on_poam_findings,
+        ),
+        (1, 1, 0, 0)
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn legacy_finding_authorizes_before_observation_validation(pool: PgPool) {
     let (fixture, finding_id, mut observation, _) = legacy_fail_fixture(&pool).await;
     let hidden_environment: Uuid =
@@ -359,6 +755,96 @@ async fn legacy_finding_authorizes_before_observation_validation(pool: PgPool) {
         .await,
         Err(PoamError::NotFound)
     ));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn closure_constraint_rejects_malformed_same_transaction_snapshot(pool: PgPool) {
+    let fixture = assessment_fixture(&pool).await;
+    let actor = admin_actor(fixture.user_id);
+    let clock = FixedClock(Utc.with_ymd_and_hms(2026, 8, 29, 13, 0, 0).unwrap());
+    let mut failed = pool.begin().await.unwrap();
+    persist_assessment(&mut failed, &fixture, EnforcementOutcome::Fail).await;
+    failed.commit().await.unwrap();
+    let created = create_service_poam(
+        &pool,
+        &fixture,
+        &actor,
+        &clock,
+        "Composite closure validation",
+    )
+    .await;
+    let awaiting = awaiting_verification(&pool, &actor, created, &clock).await;
+    let mut passing = pool.begin().await.unwrap();
+    persist_assessment(&mut passing, &fixture, EnforcementOutcome::Pass).await;
+    passing.commit().await.unwrap();
+    let verified = poam_service::verify(
+        &pool,
+        &actor,
+        awaiting.poam.id,
+        awaiting.poam.revision,
+        &clock,
+    )
+    .await
+    .unwrap();
+    assert_eq!(verified["outcome"], "accepted");
+    let legitimate_attempt_id = Uuid::parse_str(verified["attempt_id"].as_str().unwrap()).unwrap();
+
+    let mut forged = pool.begin().await.unwrap();
+    let forged_attempt_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO poam_verification_attempts(poam_id,attempted_by,outcome,poam_revision)
+         VALUES($1,$2,'accepted',$3) RETURNING id",
+    )
+    .bind(awaiting.poam.id)
+    .bind(actor.user_id)
+    .bind(verified["revision"].as_i64().unwrap())
+    .fetch_one(&mut *forged)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"INSERT INTO poam_verification_items(
+             attempt_id,finding_id,system_id,policy_lineage_id,result,policy_version_id,
+             assessment_id,derivation_id,target_store_path,effective_set_digest,
+             effective_config_digest,effective_config,observed_outcome,observation_token,
+             observation_snapshot,assessment_updated_at,bundle_ids,bundle_version_ids,
+             requirement_version_ids,waiver_id,observed_at,detail)
+           SELECT $1,finding_id,system_id,policy_lineage_id,result,policy_version_id,
+             assessment_id,derivation_id,target_store_path,'forged-effective-set',
+             effective_config_digest,effective_config,observed_outcome,
+             encode(digest(canonical_poam_observation_json(
+                 jsonb_set(observation_snapshot,'{rules}','[]'::jsonb)), 'sha256'),'hex'),
+             jsonb_set(observation_snapshot,'{rules}','[]'::jsonb),assessment_updated_at,
+             bundle_ids,bundle_version_ids,requirement_version_ids,waiver_id,
+             observed_at,'forged composite Pass'
+           FROM poam_verification_items WHERE attempt_id=$2"#,
+    )
+    .bind(forged_attempt_id)
+    .bind(legitimate_attempt_id)
+    .execute(&mut *forged)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE poam_verification_attempts SET sealed_at=CURRENT_TIMESTAMP WHERE id=$1")
+        .bind(forged_attempt_id)
+        .execute(&mut *forged)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE poam_finding_links SET retired_at=CURRENT_TIMESTAMP,retired_by=$2,retirement_reason='closed:'||$3::uuid::text WHERE poam_id=$1 AND retired_at IS NULL")
+        .bind(awaiting.poam.id)
+        .bind(actor.user_id)
+        .bind(forged_attempt_id)
+        .execute(&mut *forged)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE poams SET status='completed',closed_at=CURRENT_TIMESTAMP,closure_attempt_id=$2 WHERE id=$1")
+        .bind(awaiting.poam.id)
+        .bind(forged_attempt_id)
+        .execute(&mut *forged)
+        .await
+        .unwrap();
+    let error = forged.commit().await.unwrap_err();
+    assert_eq!(
+        error.as_database_error().unwrap().constraint(),
+        Some("poams_authoritative_closure_evidence")
+    );
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -522,12 +1008,6 @@ async fn immutable_assignment_fixture(
     system_id: Uuid,
     created_by: Uuid,
 ) -> (Uuid, Uuid, Uuid) {
-    let bundle_id = Uuid::new_v4();
-    let bundle_version_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO compliance_bundles(id,name,framework,version,description,layer,owner) VALUES($1,$2,'NIST','1.0','POAM assignment fixture','fleet','Security')")
-        .bind(bundle_id).bind(format!("poam-assignment-{bundle_id}")).execute(pool).await.unwrap();
-    sqlx::query("INSERT INTO compliance_bundle_versions(id,bundle_id,version,publication_state,name,framework,framework_version,description,layer,owner,semantic_digest,trust_state) VALUES($1,$2,'1.0','draft',$3,'NIST','1.0','Immutable fixture','fleet','Security','bundle-semantic-v1','trusted')")
-        .bind(bundle_version_id).bind(bundle_id).bind(format!("POAM bundle {bundle_id}")).execute(pool).await.unwrap();
     let policy_version_id: Uuid = sqlx::query_scalar(
         r#"SELECT assessment.policy_version_id
            FROM composite_policy_assessments assessment
@@ -538,6 +1018,21 @@ async fn immutable_assignment_fixture(
     .fetch_one(pool)
     .await
     .unwrap();
+    immutable_assignment_fixture_for_version(pool, system_id, created_by, policy_version_id).await
+}
+
+async fn immutable_assignment_fixture_for_version(
+    pool: &PgPool,
+    system_id: Uuid,
+    created_by: Uuid,
+    policy_version_id: Uuid,
+) -> (Uuid, Uuid, Uuid) {
+    let bundle_id = Uuid::new_v4();
+    let bundle_version_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO compliance_bundles(id,name,framework,version,description,layer,owner) VALUES($1,$2,'NIST','1.0','POAM assignment fixture','fleet','Security')")
+        .bind(bundle_id).bind(format!("poam-assignment-{bundle_id}")).execute(pool).await.unwrap();
+    sqlx::query("INSERT INTO compliance_bundle_versions(id,bundle_id,version,publication_state,name,framework,framework_version,description,layer,owner,semantic_digest,trust_state) VALUES($1,$2,'1.0','draft',$3,'NIST','1.0','Immutable fixture','fleet','Security','bundle-semantic-v1','trusted')")
+        .bind(bundle_version_id).bind(bundle_id).bind(format!("POAM bundle {bundle_id}")).execute(pool).await.unwrap();
     sqlx::query("INSERT INTO compliance_bundle_version_policies(bundle_version_id,policy_version_id,policy_order,selected) VALUES($1,$2,0,true)")
         .bind(bundle_version_id).bind(policy_version_id).execute(pool).await.unwrap();
     let assignment_id = Uuid::new_v4();
@@ -1651,6 +2146,79 @@ async fn every_linked_environment_must_be_visible_for_reads_and_mutations(pool: 
         ),
         (0, 0, 0, 0, 0, 0, 0, 0)
     );
+}
+
+#[sqlx::test]
+async fn retired_hidden_finding_does_not_deny_current_poam_access(pool: PgPool) {
+    let visible = fixture(&pool).await;
+    let hidden = fixture(&pool).await;
+    let visible_environment: Uuid =
+        sqlx::query_scalar("SELECT id FROM environments WHERE name='dev'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let hidden_environment: Uuid =
+        sqlx::query_scalar("SELECT id FROM environments WHERE name='prod'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    sqlx::query("UPDATE systems SET environment_id=$2 WHERE id=$1")
+        .bind(visible.system_id)
+        .bind(visible_environment)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE systems SET environment_id=$2 WHERE id=$1")
+        .bind(hidden.system_id)
+        .bind(hidden_environment)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let today = NaiveDate::from_ymd_opt(2026, 8, 26).unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    let (poam_id, _) = create_poam(&mut tx, &visible, "retired hidden context", today).await;
+    sqlx::query(
+        "INSERT INTO poam_finding_links(poam_id,finding_id,linked_by)
+         VALUES($1,$2,$3)",
+    )
+    .bind(poam_id)
+    .bind(hidden.finding_id)
+    .bind(visible.user_id)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE poam_finding_links
+         SET retired_at=NOW(),retired_by=$3,retirement_reason='unlinked'
+         WHERE poam_id=$1 AND finding_id=$2",
+    )
+    .bind(poam_id)
+    .bind(hidden.finding_id)
+    .bind(visible.user_id)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let actor = PoamActor {
+        user_id: visible.user_id,
+        identifier: "retired-hidden-operator".into(),
+        is_admin: false,
+        can_mutate: true,
+        environment_ids: vec![visible_environment],
+        request_origin: Some("test".into()),
+    };
+    let clock = FixedClock(Utc.with_ymd_and_hms(2026, 8, 26, 12, 0, 0).unwrap());
+
+    let detail = poam_service::detail(&pool, &actor, poam_id, &clock)
+        .await
+        .unwrap();
+    assert_eq!(detail.poam.id, poam_id);
+    assert_eq!(detail.findings.len(), 1);
+    assert_eq!(detail.findings[0].id, visible.finding_id);
+    let listed = poam_service::list(&pool, &actor, &PoamListQuery::default(), &clock)
+        .await
+        .unwrap();
+    assert!(listed.items.iter().any(|item| item.id == poam_id));
 }
 
 #[sqlx::test]

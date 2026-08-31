@@ -1229,6 +1229,32 @@ async fn authorize_target_at(
                     },
                 });
             }
+            let observed_for_system: bool = sqlx::query_scalar(
+                r#"
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM systems system
+                    JOIN system_states state ON state.hostname = system.hostname
+                    WHERE system.id = $1
+                      AND state.store_path = $2
+                )
+                "#,
+            )
+            .bind(system_id)
+            .bind(target)
+            .fetch_one(&mut *tx)
+            .await?;
+            if !observed_for_system {
+                tx.commit().await?;
+                return Ok(TargetDeliveryAuthorization {
+                    target: None,
+                    authorization: CompositeAuthorization {
+                        outcome: EnforcementOutcome::Fail,
+                        assessments: Vec::new(),
+                        detail: "Target has no immutable observation for this system".to_string(),
+                    },
+                });
+            }
             (-1, target.to_string())
         }
         None => {

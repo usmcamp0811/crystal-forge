@@ -23,9 +23,12 @@ use crate::api::models::{
 use crate::auth::extractors::{RequireAdmin, RequireAuth, RequireOperator};
 use crate::compliance::mappings::{normalise_cci_ids, normalise_srg_ids};
 use crate::handlers::agent_request::CFState;
+use crate::handlers::api::auth_session::RequireCsrf;
+#[cfg(test)]
+use crate::models::deployment_policies::validate_policy_type_config;
 use crate::models::deployment_policies::{
     CreateDeploymentPolicyRequest, DeploymentPolicyRecord, UpdateDeploymentPolicyRequest,
-    is_reserved_policy_result_field, validate_policy_type_config,
+    is_reserved_policy_result_field, validate_policy_type_config_async,
 };
 use crate::queries::deployment_policies;
 use crate::queries::deployment_policies::PolicyDeleteOutcome;
@@ -142,7 +145,7 @@ fn validate_and_normalize_nix_expression(expr: &str) -> Result<String, (StatusCo
     Ok(normalized)
 }
 
-fn validate_policy_config(
+fn validate_policy_config_fields(
     policy_type: &str,
     config: &Value,
 ) -> Result<Value, (StatusCode, String)> {
@@ -463,13 +466,32 @@ fn validate_policy_config(
                 }
             }
         }
-        "composite" => {
-            validate_policy_type_config(policy_type, config)
-                .map_err(|message| (StatusCode::BAD_REQUEST, message))?;
-        }
+        "composite" => {}
         _ => {}
     }
 
+    Ok(validated_config)
+}
+
+#[cfg(test)]
+fn validate_policy_config(
+    policy_type: &str,
+    config: &Value,
+) -> Result<Value, (StatusCode, String)> {
+    let validated_config = validate_policy_config_fields(policy_type, config)?;
+    validate_policy_type_config(policy_type, &validated_config)
+        .map_err(|message| (StatusCode::BAD_REQUEST, message))?;
+    Ok(validated_config)
+}
+
+async fn validate_policy_config_async(
+    policy_type: &str,
+    config: &Value,
+) -> Result<Value, (StatusCode, String)> {
+    let validated_config = validate_policy_config_fields(policy_type, config)?;
+    validate_policy_type_config_async(policy_type, &validated_config)
+        .await
+        .map_err(|message| (StatusCode::BAD_REQUEST, message))?;
     Ok(validated_config)
 }
 
@@ -747,6 +769,7 @@ fn reject_builtin_policy_type(policy_type: &str) -> Result<(), (StatusCode, Stri
 
 pub async fn create_deployment_policy(
     RequireOperator(_user): RequireOperator,
+    _csrf: RequireCsrf,
     State(state): State<CFState>,
     Json(request): Json<CreateDeploymentPolicyRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
@@ -798,7 +821,7 @@ pub async fn create_deployment_policy(
     }
 
     // Validate and normalize the config (may auto-fix expressions)
-    request.config = validate_policy_config(&request.policy_type, &request.config)?;
+    request.config = validate_policy_config_async(&request.policy_type, &request.config).await?;
 
     // Check if policy name already exists
     let name_exists =
@@ -928,6 +951,7 @@ pub async fn create_deployment_policy(
 /// Returns 409 if the new name conflicts with an existing policy.
 pub async fn update_deployment_policy(
     RequireOperator(user): RequireOperator,
+    _csrf: RequireCsrf,
     State(state): State<CFState>,
     Path(policy_id): Path<Uuid>,
     Json(request): Json<UpdateDeploymentPolicyRequest>,
@@ -1041,7 +1065,8 @@ pub async fn update_deployment_policy(
 
     if request.policy_type.is_some() || request.config.is_some() {
         // Validate and normalize the config (may auto-fix expressions)
-        candidate_config = validate_policy_config(&candidate_policy_type, &candidate_config)?;
+        candidate_config =
+            validate_policy_config_async(&candidate_policy_type, &candidate_config).await?;
         // Update the request with the normalized config
         request.config = Some(candidate_config.clone());
     }
@@ -1144,6 +1169,7 @@ pub async fn get_deployment_policy_deletion_eligibility(
 
 pub async fn delete_deployment_policy(
     RequireAdmin(_user): RequireAdmin,
+    _csrf: RequireCsrf,
     State(state): State<CFState>,
     Path(policy_id): Path<Uuid>,
 ) -> Result<StatusCode, axum::response::Response> {
@@ -1188,6 +1214,7 @@ pub async fn delete_deployment_policy(
 /// rather than trusting cached eligibility.
 pub async fn bulk_delete_deployment_policies(
     RequireAdmin(_user): RequireAdmin,
+    _csrf: RequireCsrf,
     State(state): State<CFState>,
     Json(request): Json<BulkDeletePoliciesRequest>,
 ) -> Result<Json<BulkDeletePoliciesResponse>, axum::response::Response> {

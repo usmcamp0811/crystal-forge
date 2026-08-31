@@ -16,7 +16,7 @@ use crate::compliance::mappings::{
 };
 use crate::models::deployment_policies::{
     COMPOSITE_POLICY_TYPE, CreateDeploymentPolicyRequest, DeploymentPolicyRecord,
-    UpdateDeploymentPolicyRequest, validate_policy_type_config,
+    UpdateDeploymentPolicyRequest, validate_policy_type_config_async,
 };
 use crate::queries::compliance::ensure_policy_draft;
 use crate::queries::deletion::{blocker, eligibility};
@@ -794,7 +794,8 @@ pub async fn create_deployment_policy_with_mappings(
     request: &CreateDeploymentPolicyRequest,
     actor_id: Option<Uuid>,
 ) -> Result<DeploymentPolicyRecord> {
-    validate_policy_type_config(&request.policy_type, &request.config)
+    validate_policy_type_config_async(&request.policy_type, &request.config)
+        .await
         .map_err(anyhow::Error::msg)?;
     if let Some(requirement_version_id) = duplicate_requirement_mapping_id(request) {
         anyhow::bail!(
@@ -945,10 +946,11 @@ pub async fn update_deployment_policy(
             .await
             .context("Failed to load deployment policy type/config")?;
     if let Some((current_type, current_config)) = current_pair {
-        validate_policy_type_config(
+        validate_policy_type_config_async(
             request.policy_type.as_deref().unwrap_or(&current_type),
             request.config.as_ref().unwrap_or(&current_config),
         )
+        .await
         .map_err(anyhow::Error::msg)?;
     }
 
@@ -1048,15 +1050,18 @@ pub async fn update_deployment_policy(
         let srg_cci_merged = merge_policy_mappings(&existing_meta, srg_opt, cci_opt)
             .context("Failed to merge SRG/CCI mappings")?;
         // Merge classification fields into the already-merged metadata.
-        let classified_meta = merge_classification_into_metadata(
+        let classified_meta = crate::compliance::mappings::patch_classification_into_metadata(
             &srg_cci_merged,
             request.category.as_deref(),
-            request.framework.as_deref(),
-            request.severity.as_deref(),
-            request.control_family.as_deref(),
+            request.framework.as_ref().map(|value| value.as_deref()),
+            request.severity.as_ref().map(|value| value.as_deref()),
+            request
+                .control_family
+                .as_ref()
+                .map(|value| value.as_deref()),
             request.cmmc_level,
-            request.cis_section.as_deref(),
-            request.rationale.as_deref(),
+            request.cis_section.as_ref().map(|value| value.as_deref()),
+            request.rationale.as_ref().map(|value| value.as_deref()),
         );
         // Merge evidence specs into the metadata.
         let evidence_specs = request.evidence_specs.as_deref();

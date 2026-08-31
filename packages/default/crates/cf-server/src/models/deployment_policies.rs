@@ -9,6 +9,12 @@ use uuid::Uuid;
 
 pub const COMPOSITE_POLICY_TYPE: &str = "composite";
 
+/// Maximum number of rules accepted in one composite policy version.
+///
+/// This limit bounds validation, generated Nix expressions, persisted outcome
+/// rows, and authorization work for each immutable policy version.
+pub const MAX_COMPOSITE_RULES: usize = 64;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CompositePolicyConfig {
@@ -275,14 +281,18 @@ fn validate_package_pname(pname: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_custom_eval_syntax(expression: &str) -> Result<(), String> {
-    if expression.len() > MAX_CUSTOM_EVAL_EXPRESSION_BYTES {
-        return Err(format!(
-            "expression exceeds the {} byte limit",
-            MAX_CUSTOM_EVAL_EXPRESSION_BYTES
-        ));
-    }
-    let wrapped = format!("config: ({expression})");
+fn validate_custom_eval_syntax(expressions: &[&str]) -> Result<(), String> {
+    // Parse every custom expression in one bounded subprocess. This keeps the
+    // synchronous persistence API while avoiding one blocking process and
+    // timeout for every rule on an async request path.
+    let wrapped = format!(
+        "config: [ {} ]",
+        expressions
+            .iter()
+            .map(|expression| format!("({expression})"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
     let mut child = Command::new("nix-instantiate")
         // Parsing needs no store. The dummy store also avoids initializing
         // local Nix state in restricted package-build and service sandboxes.
@@ -337,8 +347,14 @@ fn decode_policy_type_config(
     if composite.rules.is_empty() {
         return Err("composite config.rules must not be empty".to_string());
     }
+    if composite.rules.len() > MAX_COMPOSITE_RULES {
+        return Err(format!(
+            "composite config.rules must contain at most {MAX_COMPOSITE_RULES} rules"
+        ));
+    }
 
     let mut ids = std::collections::HashSet::with_capacity(composite.rules.len());
+    let mut custom_eval_expressions = Vec::new();
     for (index, rule) in composite.rules.iter().enumerate() {
         if rule.id.is_nil() {
             return Err(format!(
@@ -440,11 +456,7 @@ fn decode_policy_type_config(
                     ));
                 }
                 if validate_nix_syntax {
-                    validate_custom_eval_syntax(&custom.expression).map_err(|error| {
-                        format!(
-                            "composite config.rules[{index}].config.expression is invalid: {error}"
-                        )
-                    })?;
+                    custom_eval_expressions.push(custom.expression.as_str());
                 }
             }
             CompositeRuleKind::CveBlock(_) => {}
@@ -459,6 +471,10 @@ fn decode_policy_type_config(
                 .map_err(|error| format!("composite config.rules[{index}].config: {error}"))?;
             }
         }
+    }
+    if !custom_eval_expressions.is_empty() {
+        validate_custom_eval_syntax(&custom_eval_expressions)
+            .map_err(|error| format!("composite custom_eval expression is invalid: {error}"))?;
     }
 
     Ok(Some(composite))
@@ -480,6 +496,29 @@ pub fn validate_policy_type_config(
     config: &serde_json::Value,
 ) -> Result<Option<CompositePolicyConfig>, String> {
     decode_policy_type_config(policy_type, config, true)
+}
+
+/// Validates policy input without blocking the async executor.
+///
+/// This function preserves the contract of [`validate_policy_type_config`] but
+/// runs its bounded synchronous Nix parser invocation on Tokio's blocking pool.
+/// Async request, query, and import paths must use this function. Offline tools
+/// and unit tests may use [`validate_policy_type_config`] directly.
+///
+/// # Errors
+///
+/// Returns the same validation errors as [`validate_policy_type_config`]. Also
+/// returns an error if Tokio cannot join the blocking validation task, including
+/// when the task panics.
+pub async fn validate_policy_type_config_async(
+    policy_type: &str,
+    config: &serde_json::Value,
+) -> Result<Option<CompositePolicyConfig>, String> {
+    let policy_type = policy_type.to_owned();
+    let config = config.clone();
+    tokio::task::spawn_blocking(move || validate_policy_type_config(&policy_type, &config))
+        .await
+        .map_err(|error| format!("policy validation task failed: {error}"))?
 }
 
 // ============================================================================
@@ -757,8 +796,8 @@ pub enum DeploymentPolicy {
     /// More flexible than RequireCveCheck.
     /// NOT Nix-evaluated; checked at deployment time.
     CveThreshold { config: CveThresholdConfig },
-    /// Typed heterogeneous representation. Execution is deliberately deferred;
-    /// enforcement boundaries must reject this variant rather than flatten it.
+    /// Typed heterogeneous policy executed by the phase-specific composite
+    /// evaluator. Legacy single-expression helpers cannot represent this variant.
     Composite { config: CompositePolicyConfig },
 }
 
@@ -835,11 +874,18 @@ impl DeploymentPolicy {
         }
     }
 
-    /// Generate the Nix expression fragment for this policy.
-    /// Returns (field_name, nix_expression).
-    /// Panics if called on RequireCveCheck (use is_nix_evaluated() to guard).
-    pub fn to_nix_expression_with_index(&self, index: usize) -> (String, String) {
-        match self {
+    /// Returns the legacy Nix expression fragment for one single-expression policy.
+    ///
+    /// Composite policies use stable per-rule fields generated by
+    /// [`build_policy_fields_for_config_standalone`] and cannot be flattened to
+    /// one field without losing constituent outcomes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for policies that are not represented by one Nix
+    /// expression, including composite and deployment-phase policies.
+    pub fn to_nix_expression_with_index(&self, index: usize) -> Result<(String, String), String> {
+        let expression = match self {
             DeploymentPolicy::RequireCrystalForgeAgent { .. } => (
                 "cfAgentEnabled".to_string(),
                 "(config.systemd.services.crystal-forge-agent.enable or false) || \
@@ -849,7 +895,7 @@ impl DeploymentPolicy {
             ),
             DeploymentPolicy::RequirePackages { packages, .. } => {
                 if packages.is_empty() {
-                    return (format!("hasRequiredPackages_{index}"), "false".to_string());
+                    return Ok((format!("hasRequiredPackages_{index}"), "false".to_string()));
                 }
                 let package_list = packages
                     .iter()
@@ -884,34 +930,40 @@ impl DeploymentPolicy {
                     (rules[0].field_name.clone(), rules[0].expression.clone())
                 }
             }
-            DeploymentPolicy::RequireCveCheck { .. } => {
-                panic!("RequireCveCheck is not a Nix-evaluated policy")
-            }
-            DeploymentPolicy::TimeWindow { .. } => {
-                panic!("TimeWindow is not a Nix-evaluated policy")
-            }
-            DeploymentPolicy::RequireApprovals { .. } => {
-                panic!("RequireApprovals is not a Nix-evaluated policy")
-            }
-            DeploymentPolicy::CanaryRollout { .. } => {
-                panic!("CanaryRollout is not a Nix-evaluated policy")
-            }
-            DeploymentPolicy::CveThreshold { .. } => {
-                panic!("CveThreshold is not a Nix-evaluated policy")
+            DeploymentPolicy::RequireCveCheck { .. }
+            | DeploymentPolicy::TimeWindow { .. }
+            | DeploymentPolicy::RequireApprovals { .. }
+            | DeploymentPolicy::CanaryRollout { .. }
+            | DeploymentPolicy::CveThreshold { .. } => {
+                return Err("policy is not evaluated by Nix".to_string());
             }
             DeploymentPolicy::Composite { .. } => {
-                panic!("Composite policy execution is not supported")
+                return Err(
+                    "composite policies require phase-specific per-rule evaluation".to_string(),
+                );
             }
-        }
+        };
+        Ok(expression)
     }
 
-    pub fn to_nix_expression(&self) -> (String, String) {
+    /// Returns the legacy Nix expression fragment at index zero.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when [`Self::to_nix_expression_with_index`] cannot
+    /// represent the policy as one Nix expression.
+    pub fn to_nix_expression(&self) -> Result<(String, String), String> {
         self.to_nix_expression_with_index(0)
     }
 
-    /// Get the field name this policy uses in JSON output
-    pub fn field_name_with_index(&self, index: usize) -> String {
-        match self {
+    /// Returns the legacy JSON field name for one single-expression policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for composite policies because each evaluation-phase
+    /// rule has its own stable policy-version/rule field key.
+    pub fn field_name_with_index(&self, index: usize) -> Result<String, String> {
+        let field_name = match self {
             DeploymentPolicy::RequireCrystalForgeAgent { .. } => "cfAgentEnabled".to_string(),
             DeploymentPolicy::RequirePackages { .. } => format!("hasRequiredPackages_{index}"),
             DeploymentPolicy::CustomCheck {
@@ -929,11 +981,20 @@ impl DeploymentPolicy {
             DeploymentPolicy::RequireApprovals { .. } => "requireApprovals".to_string(),
             DeploymentPolicy::CanaryRollout { .. } => "canaryRollout".to_string(),
             DeploymentPolicy::CveThreshold { .. } => "cveThreshold".to_string(),
-            DeploymentPolicy::Composite { .. } => "compositeNotChecked".to_string(),
-        }
+            DeploymentPolicy::Composite { .. } => {
+                return Err("composite policies use stable per-rule field keys".to_string());
+            }
+        };
+        Ok(field_name)
     }
 
-    pub fn field_name(&self) -> String {
+    /// Returns the legacy JSON field name at index zero.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when [`Self::field_name_with_index`] cannot represent
+    /// the policy with one field name.
+    pub fn field_name(&self) -> Result<String, String> {
         self.field_name_with_index(0)
     }
 }
@@ -1761,11 +1822,11 @@ impl PolicyCheckResult {
         for policy in policies {
             if matches!(policy, DeploymentPolicy::Composite { .. }) {
                 warnings.push(format!(
-                    "{}: composite policy execution is not supported",
+                    "{}: legacy flat policy parser cannot evaluate composite policy",
                     system_name
                 ));
                 failed_policies.push((
-                    "Composite policy execution is not supported".to_string(),
+                    "Legacy flat policy parser cannot evaluate composite policy".to_string(),
                     true,
                 ));
                 continue;
@@ -1782,8 +1843,8 @@ impl PolicyCheckResult {
 
             match policy {
                 DeploymentPolicy::RequireCrystalForgeAgent { .. } => {
-                    let field_name = policy.field_name_with_index(policy_idx);
-                    let value = policies_json.get(&field_name).and_then(|v| v.as_bool());
+                    let field_name = "cfAgentEnabled";
+                    let value = policies_json.get(field_name).and_then(|v| v.as_bool());
                     cf_agent_enabled = value;
                     if value != Some(true) {
                         let desc = policy.description();
@@ -1795,7 +1856,7 @@ impl PolicyCheckResult {
                     }
                 }
                 DeploymentPolicy::RequirePackages { packages, .. } => {
-                    let field_name = policy.field_name_with_index(policy_idx);
+                    let field_name = format!("hasRequiredPackages_{policy_idx}");
                     let value = policies_json.get(&field_name).and_then(|v| v.as_bool());
                     has_required_packages = value;
                     if value != Some(true) {
@@ -2119,8 +2180,9 @@ fn build_policy_fields_for_config_indented(
                 // All built-in Nix-evaluated policies (require_cf_agent,
                 // require_packages) use `config.*` in their expression fragments
                 // because the checker function receives the configuration object.
-                let (_, expr) = ap.policy.to_nix_expression_with_index(idx);
-                lines.push(format!("{}{} = {};", indent, key, expr));
+                if let Ok((_, expr)) = ap.policy.to_nix_expression_with_index(idx) {
+                    lines.push(format!("{}{} = {};", indent, key, expr));
+                }
             }
         }
     }
@@ -2314,24 +2376,30 @@ pub struct UpdateDeploymentPolicyRequest {
     /// When `Some`, replace the category; `None` preserves existing.
     #[serde(default)]
     pub category: Option<String>,
-    /// When `Some`, replace the framework; `None` preserves existing.
+    /// When `Some(Some(_))`, replaces the framework. `Some(None)` clears it.
+    /// `None` preserves the existing value.
     #[serde(default)]
-    pub framework: Option<String>,
-    /// When `Some`, replace the severity; `None` preserves existing.
+    pub framework: Option<Option<String>>,
+    /// When `Some(Some(_))`, replaces the severity. `Some(None)` clears it.
+    /// `None` preserves the existing value.
     #[serde(default)]
-    pub severity: Option<String>,
-    /// When `Some`, replace the control_family; `None` preserves existing.
+    pub severity: Option<Option<String>>,
+    /// When `Some(Some(_))`, replaces the control family. `Some(None)` clears it.
+    /// `None` preserves the existing value.
     #[serde(default)]
-    pub control_family: Option<String>,
-    /// When `Some`, replace the cmmc_level; `None` preserves existing.
+    pub control_family: Option<Option<String>>,
+    /// When `Some(Some(_))`, replaces the CMMC level. `Some(None)` clears it.
+    /// `None` preserves the existing value.
     #[serde(default)]
-    pub cmmc_level: Option<i32>,
-    /// When `Some`, replace the cis_section; `None` preserves existing.
+    pub cmmc_level: Option<Option<i32>>,
+    /// When `Some(Some(_))`, replaces the CIS section. `Some(None)` clears it.
+    /// `None` preserves the existing value.
     #[serde(default)]
-    pub cis_section: Option<String>,
-    /// When `Some`, replace the rationale; `None` preserves existing.
+    pub cis_section: Option<Option<String>>,
+    /// When `Some(Some(_))`, replaces the rationale. `Some(None)` clears it.
+    /// `None` preserves the existing value.
     #[serde(default)]
-    pub rationale: Option<String>,
+    pub rationale: Option<Option<String>>,
     /// When `Some`, replace evidence specs; `Some([])` clears them.
     /// When `None`, the existing value is preserved.
     #[serde(default)]
@@ -2503,6 +2571,27 @@ mod tests {
                 .unwrap_err()
                 .contains("invalid Nix expression syntax")
         );
+    }
+
+    #[tokio::test]
+    async fn async_policy_validation_matches_sync_semantics_without_panicking() {
+        let valid = composite_config();
+        let mut malformed = composite_config();
+        malformed["rules"][2]["config"]["expression"] =
+            serde_json::json!("true); injected = true; (");
+
+        for (policy_type, config) in [
+            (COMPOSITE_POLICY_TYPE, &valid),
+            (COMPOSITE_POLICY_TYPE, &malformed),
+            (
+                "require_packages",
+                &serde_json::json!({"packages": ["curl"]}),
+            ),
+        ] {
+            let synchronous = validate_policy_type_config(policy_type, config);
+            let asynchronous = validate_policy_type_config_async(policy_type, config).await;
+            assert_eq!(asynchronous, synchronous);
+        }
     }
 
     #[test]
@@ -2699,6 +2788,51 @@ in {{ {fields} }}"#
         for config in cases {
             assert!(validate_policy_type_config(COMPOSITE_POLICY_TYPE, &config).is_err());
         }
+    }
+
+    #[test]
+    fn composite_validation_enforces_conservative_rule_limit() {
+        let rule = single_composite_rule("eval_passed", serde_json::json!({}))["rules"][0].clone();
+        let mut at_limit = single_composite_rule("eval_passed", serde_json::json!({}));
+        at_limit["rules"] = serde_json::Value::Array(
+            (0..MAX_COMPOSITE_RULES)
+                .map(|index| {
+                    let mut rule = rule.clone();
+                    rule["id"] = serde_json::json!(Uuid::from_u128(index as u128 + 1));
+                    rule
+                })
+                .collect(),
+        );
+        assert!(validate_policy_type_config(COMPOSITE_POLICY_TYPE, &at_limit).is_ok());
+
+        at_limit["rules"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "id": Uuid::from_u128(MAX_COMPOSITE_RULES as u128 + 1),
+                "kind": "eval_passed",
+                "config": {}
+            }));
+        let error = validate_policy_type_config(COMPOSITE_POLICY_TYPE, &at_limit).unwrap_err();
+        assert!(error.contains("at most 64 rules"), "{error}");
+    }
+
+    #[test]
+    fn composite_single_expression_helper_returns_explicit_error() {
+        let config = validate_policy_type_config(COMPOSITE_POLICY_TYPE, &composite_config())
+            .unwrap()
+            .unwrap();
+        let policy = DeploymentPolicy::Composite { config };
+
+        assert!(policy.is_nix_evaluated());
+        assert_eq!(
+            policy.to_nix_expression().unwrap_err(),
+            "composite policies require phase-specific per-rule evaluation"
+        );
+        assert_eq!(
+            policy.field_name().unwrap_err(),
+            "composite policies use stable per-rule field keys"
+        );
     }
 
     #[test]
@@ -3239,7 +3373,7 @@ in {{ {fields} }}"#
     #[test]
     fn test_cf_agent_policy_expression() {
         let policy = DeploymentPolicy::RequireCrystalForgeAgent { strict: false };
-        let (field_name, expr) = policy.to_nix_expression();
+        let (field_name, expr) = policy.to_nix_expression().unwrap();
         assert_eq!(field_name, "cfAgentEnabled");
         assert!(expr.contains("systemd.services.crystal-forge-agent.enable"));
         assert!(expr.contains("services.crystal-forge.enable"));
@@ -3249,7 +3383,7 @@ in {{ {fields} }}"#
     #[test]
     fn crystal_forge_agent_policy_expression_checks_systemd_service() {
         let policy = DeploymentPolicy::RequireCrystalForgeAgent { strict: true };
-        let (_, expr) = policy.to_nix_expression();
+        let (_, expr) = policy.to_nix_expression().unwrap();
 
         assert!(
             expr.starts_with("(config.systemd.services.crystal-forge-agent.enable or false)"),
@@ -3267,7 +3401,7 @@ in {{ {fields} }}"#
             packages: vec!["vim".to_string(), "git".to_string()],
             strict: false,
         };
-        let (field_name, expr) = policy.to_nix_expression_with_index(2);
+        let (field_name, expr) = policy.to_nix_expression_with_index(2).unwrap();
         assert_eq!(field_name, "hasRequiredPackages_2");
         assert!(expr.contains("\"vim\""));
         assert!(expr.contains("\"git\""));
@@ -3823,7 +3957,8 @@ in {{
             packages: vec!["openssh".into(), "auditd".into(), "aide".into()],
             strict: true,
         }
-        .to_nix_expression_with_index(0);
+        .to_nix_expression_with_index(0)
+        .unwrap();
 
         for (installed, expected) in [
             (vec!["openssh", "auditd", "aide"], true),

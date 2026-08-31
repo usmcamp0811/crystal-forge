@@ -2668,17 +2668,27 @@ pub async fn get_system_evidence(
     if let ResolutionOutcome::Resolved(effective) =
         resolve_system_effective_policies(pool, system_id).await?
     {
-        let resolved_bundle_id: Option<Uuid> =
-            sqlx::query_scalar("SELECT bundle_id FROM compliance_bundle_versions WHERE id = $1")
-                .bind(effective.bundle_version_id)
-                .fetch_optional(pool)
-                .await?;
-        let exact_requested = bundle_version_id
-            .map(|requested| effective.bundle_version_id == requested)
-            .unwrap_or(resolved_bundle_id == Some(bundle_id));
-        if exact_requested && resolved_bundle_id == Some(bundle_id) {
+        // INVARIANT: An assessment digest covers the complete effective set,
+        // but a bundle drawer shows only policies that the requested bundle
+        // authoritatively contributes. EffectivePolicySet::bundle_version_id
+        // identifies one contributing assignment and cannot select evidence
+        // when a system has multiple active bundle assignments.
+        let requested_policies = effective
+            .policies
+            .iter()
+            .filter(|policy| {
+                policy.provenance.iter().any(|entry| {
+                    entry.authoritative
+                        && entry.bundle_id == Some(bundle_id)
+                        && bundle_version_id
+                            .is_none_or(|requested| entry.bundle_version_id == Some(requested))
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if !requested_policies.is_empty() {
             current_effective_set_digest = Some(effective.effective_set_digest.clone());
-            policies = materialize_effective_policies(pool, &effective.policies).await?;
+            policies = materialize_effective_policies(pool, &requested_policies).await?;
         } else if bundle_version_id.is_some() {
             resolution_state = Some("not_applicable".to_string());
         }

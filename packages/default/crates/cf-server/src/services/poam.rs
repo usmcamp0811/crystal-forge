@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::compliance::canonical::semantic_digest;
 use crate::compliance::resolver::{
-    ResolutionOutcome, resolve_system_effective_policies_in_tx,
+    EffectivePolicy, ResolutionOutcome, resolve_system_effective_policies_in_tx,
     resolve_systems_effective_policies_in_tx,
 };
 use crate::models::poam::*;
@@ -32,6 +32,7 @@ const MAX_NOTE_BYTES: usize = 4_096;
 const MAX_PLAN_BYTES: usize = 16_384;
 const MAX_CANDIDATES_SCANNED: i64 = 1_000;
 const MAX_RESOLVER_FINDINGS: usize = 1_000;
+const MAX_ROLLUP_POAMS: i64 = 1_000;
 impl PoamClock for SystemClock {
     fn now(&self) -> DateTime<Utc> {
         Utc::now()
@@ -1276,7 +1277,7 @@ fn transition_allowed(from: &str, to: PoamStatus) -> bool {
     }
     matches!(
         (from, to),
-        ("open", "in_progress" | "blocked")
+        ("open", "in_progress" | "blocked" | "awaiting_verification")
             | ("in_progress", "open" | "blocked" | "awaiting_verification")
             | ("blocked", "open" | "in_progress" | "awaiting_verification")
             | ("awaiting_verification", "in_progress" | "blocked")
@@ -2338,6 +2339,228 @@ struct AssessmentObservation {
     observation_snapshot: Value,
 }
 
+#[derive(Debug, sqlx::FromRow)]
+struct LegacyDeployedEvidence {
+    system_id: Uuid,
+    derivation_id: i32,
+    target_store_path: String,
+    policy_results: Value,
+    observed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct LegacyCveEvidence {
+    derivation_id: i32,
+    scan_id: Uuid,
+    critical_count: i32,
+    high_count: i32,
+}
+
+#[derive(Debug)]
+struct LegacyObservation {
+    derivation_id: i32,
+    target_store_path: String,
+    effective_set_digest: String,
+    effective_config_digest: String,
+    effective_config: Value,
+    observed_outcome: String,
+    observation_token: String,
+    observation_snapshot: Value,
+    observed_at: DateTime<Utc>,
+}
+
+fn policy_bundle_context(policy: &EffectivePolicy) -> (Vec<Uuid>, Vec<Uuid>) {
+    let bundle_ids = policy
+        .provenance
+        .iter()
+        .filter(|entry| entry.authoritative)
+        .filter_map(|entry| entry.bundle_id)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let bundle_version_ids = policy
+        .provenance
+        .iter()
+        .filter(|entry| entry.authoritative)
+        .filter_map(|entry| entry.bundle_version_id)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    (bundle_ids, bundle_version_ids)
+}
+
+async fn current_legacy_observations_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    findings: &[(Uuid, Uuid, Uuid)],
+    resolved_by_system: &HashMap<Uuid, ResolutionOutcome>,
+) -> Result<HashMap<(Uuid, Uuid), LegacyObservation>, PoamError> {
+    let system_ids = findings.iter().map(|row| row.1).collect::<Vec<_>>();
+    let deployed = sqlx::query_as::<_, LegacyDeployedEvidence>(
+        r#"SELECT requested.system_id,derivation.id AS derivation_id,
+             state.store_path AS target_store_path,derivation.policy_results,
+             state.timestamp AS observed_at
+           FROM (SELECT DISTINCT unnest($1::uuid[]) AS system_id) requested
+           JOIN systems system ON system.id=requested.system_id
+           JOIN LATERAL (
+             SELECT state.store_path,state.timestamp FROM system_states state
+             WHERE state.hostname=system.hostname AND state.store_path IS NOT NULL
+               AND btrim(state.store_path)<>''
+             ORDER BY state.timestamp DESC,state.id DESC LIMIT 1
+           ) state ON true
+           JOIN LATERAL (
+             SELECT derivation.id,derivation.policy_results
+             FROM derivations derivation
+             WHERE COALESCE(derivation.store_path,derivation.expected_store_path)=state.store_path
+               AND derivation.derivation_type='nixos'
+             ORDER BY derivation.completed_at DESC NULLS LAST,derivation.id DESC LIMIT 1
+           ) derivation ON true"#,
+    )
+    .bind(&system_ids)
+    .fetch_all(&mut **tx)
+    .await?;
+    let derivation_ids = deployed
+        .iter()
+        .map(|evidence| evidence.derivation_id)
+        .collect::<Vec<_>>();
+    let scans = sqlx::query_as::<_, LegacyCveEvidence>(
+        r#"SELECT DISTINCT ON (derivation_id) derivation_id,id AS scan_id,
+             critical_count,high_count
+           FROM cve_scans WHERE derivation_id=ANY($1) AND status='completed'
+           ORDER BY derivation_id,completed_at DESC NULLS LAST,id DESC"#,
+    )
+    .bind(&derivation_ids)
+    .fetch_all(&mut **tx)
+    .await?
+    .into_iter()
+    .map(|scan| (scan.derivation_id, scan))
+    .collect::<HashMap<_, _>>();
+    let deployed = deployed
+        .into_iter()
+        .map(|evidence| (evidence.system_id, evidence))
+        .collect::<HashMap<_, _>>();
+
+    let mut observations = HashMap::new();
+    for (_, system_id, lineage_id) in findings {
+        let Some(ResolutionOutcome::Resolved(resolved)) = resolved_by_system.get(system_id) else {
+            continue;
+        };
+        let Some(policy) = resolved
+            .policies
+            .iter()
+            .find(|policy| policy.policy_lineage_id == *lineage_id)
+        else {
+            continue;
+        };
+        let Some(evidence) = deployed.get(system_id) else {
+            continue;
+        };
+        let effective_config_digest = semantic_digest(&policy.effective_config);
+        let (reference, snapshot, passed) = match policy.policy_type.as_str() {
+            "require_packages" | "custom_check" | "require_cf_agent" => {
+                let Some((passed, details)) = nix_policy_result(
+                    &evidence.policy_results,
+                    Some(policy.policy_version_id),
+                    *lineage_id,
+                )
+                .ok()
+                .flatten() else {
+                    continue;
+                };
+                let snapshot = json!({
+                    "source": "nix_policy_result",
+                    "system_id": system_id,
+                    "policy_lineage_id": lineage_id,
+                    "policy_version_id": policy.policy_version_id,
+                    "effective_set_digest": resolved.effective_set_digest,
+                    "effective_config_digest": effective_config_digest,
+                    "derivation_id": evidence.derivation_id,
+                    "target_store_path": evidence.target_store_path,
+                    "passed": passed,
+                    "details": details,
+                });
+                (
+                    nix_policy_observation_reference(
+                        *system_id,
+                        *lineage_id,
+                        policy.policy_version_id,
+                        &resolved.effective_set_digest,
+                        &effective_config_digest,
+                        evidence.derivation_id,
+                        &evidence.target_store_path,
+                        passed,
+                        details.as_deref(),
+                    ),
+                    snapshot,
+                    passed,
+                )
+            }
+            "require_cve_check" => {
+                let Some(scan) = scans.get(&evidence.derivation_id) else {
+                    continue;
+                };
+                let max_critical = policy
+                    .effective_config
+                    .get("max_critical")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(i64::MAX);
+                let max_high = policy
+                    .effective_config
+                    .get("max_high")
+                    .and_then(Value::as_i64);
+                let passed = i64::from(scan.critical_count) <= max_critical
+                    && max_high.is_none_or(|max| i64::from(scan.high_count) <= max);
+                let values = CveObservationValues {
+                    system_id: *system_id,
+                    policy_lineage_id: *lineage_id,
+                    policy_version_id: policy.policy_version_id,
+                    effective_set_digest: &resolved.effective_set_digest,
+                    effective_config_digest: &effective_config_digest,
+                    derivation_id: evidence.derivation_id,
+                    target_store_path: &evidence.target_store_path,
+                    scan_id: scan.scan_id,
+                    critical_count: scan.critical_count,
+                    high_count: scan.high_count,
+                    max_critical,
+                    max_high,
+                };
+                let snapshot = json!({
+                    "source": "cve_scan",
+                    "system_id": system_id,
+                    "policy_lineage_id": lineage_id,
+                    "policy_version_id": policy.policy_version_id,
+                    "effective_set_digest": resolved.effective_set_digest,
+                    "effective_config_digest": effective_config_digest,
+                    "derivation_id": evidence.derivation_id,
+                    "target_store_path": evidence.target_store_path,
+                    "scan_id": scan.scan_id,
+                    "critical_count": scan.critical_count,
+                    "high_count": scan.high_count,
+                    "max_critical": max_critical,
+                    "max_high": max_high,
+                });
+                (cve_observation_reference(values), snapshot, passed)
+            }
+            _ => continue,
+        };
+        debug_assert_eq!(reference.token, semantic_digest(&snapshot));
+        observations.insert(
+            (*system_id, *lineage_id),
+            LegacyObservation {
+                derivation_id: evidence.derivation_id,
+                target_store_path: evidence.target_store_path.clone(),
+                effective_set_digest: resolved.effective_set_digest.clone(),
+                effective_config_digest,
+                effective_config: policy.effective_config.clone(),
+                observed_outcome: if passed { "pass" } else { "fail" }.into(),
+                observation_token: reference.token,
+                observation_snapshot: snapshot,
+                observed_at: evidence.observed_at,
+            },
+        );
+    }
+    Ok(observations)
+}
+
 fn closure_result_is_accepted(result: &str) -> bool {
     match result {
         "pass" | "waiver" => true,
@@ -2368,6 +2591,8 @@ async fn current_verification_items_tx(
     .await?;
 
     let resolved_by_system = resolve_systems_effective_policies_in_tx(tx, &system_ids).await?;
+    let legacy_observations =
+        current_legacy_observations_tx(tx, findings, &resolved_by_system).await?;
     let policy_version_ids = resolved_by_system
         .values()
         .flat_map(|outcome| match outcome {
@@ -2529,6 +2754,38 @@ async fn current_verification_items_tx(
         });
         let Some(observation) = exact_observation.or_else(|| current_observations.clone().next())
         else {
+            if let Some(observation) = legacy_observations.get(&(*system_id, *lineage_id)) {
+                let (bundle_ids, bundle_version_ids) = policy_bundle_context(policy);
+                items.push(VerificationItem {
+                    finding_id: *finding_id,
+                    system_id: *system_id,
+                    policy_lineage_id: *lineage_id,
+                    result: observation.observed_outcome.clone(),
+                    policy_version_id: Some(policy.policy_version_id),
+                    assessment_id: None,
+                    derivation_id: Some(observation.derivation_id),
+                    target_store_path: Some(observation.target_store_path.clone()),
+                    effective_set_digest: Some(observation.effective_set_digest.clone()),
+                    effective_config_digest: Some(observation.effective_config_digest.clone()),
+                    effective_config: Some(observation.effective_config.clone()),
+                    observed_outcome: Some(observation.observed_outcome.clone()),
+                    observation_token: Some(observation.observation_token.clone()),
+                    observation_snapshot: Some(observation.observation_snapshot.clone()),
+                    assessment_updated_at: Some(observation.observed_at),
+                    bundle_ids,
+                    bundle_version_ids,
+                    requirement_version_ids: requirements_by_policy
+                        .get(&policy.policy_version_id)
+                        .cloned()
+                        .unwrap_or_default(),
+                    waiver_id: None,
+                    detail: format!(
+                        "Exact current legacy observation {}",
+                        observation.observed_outcome
+                    ),
+                });
+                continue;
+            }
             items.push(VerificationItem {
                 finding_id: *finding_id,
                 system_id: *system_id,
@@ -2761,8 +3018,68 @@ async fn insert_verification_items(
     items: &[VerificationItem],
     now: DateTime<Utc>,
 ) -> Result<(), PoamError> {
+    // SECURITY: The server is the sole supported persistence writer. SQL cannot
+    // safely duplicate resolver precedence, so the server persists resolver
+    // output outside the POA&M DML surface and the trigger requires an exact
+    // attempt/finding-bound match. This rejects malformed or accidental writes
+    // in the server transaction. The database owner and superusers are trusted;
+    // they can disable the trigger and are outside this boundary.
+    let mut attestations = HashMap::new();
+    for item in items
+        .iter()
+        .filter(|item| item.assessment_id.is_none() && item.result == "pass")
+    {
+        sqlx::query(
+            r#"INSERT INTO compliance_resolved_effective_contexts(
+                 attempt_id,finding_id,system_id,policy_lineage_id,policy_version_id,
+                 derivation_id,target_store_path,effective_set_digest,
+                 effective_config_digest,effective_config,observed_outcome,
+                 observation_token,observation_snapshot
+               ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)"#,
+        )
+        .bind(attempt_id)
+        .bind(item.finding_id)
+        .bind(item.system_id)
+        .bind(item.policy_lineage_id)
+        .bind(item.policy_version_id)
+        .bind(item.derivation_id)
+        .bind(&item.target_store_path)
+        .bind(&item.effective_set_digest)
+        .bind(&item.effective_config_digest)
+        .bind(&item.effective_config)
+        .bind(&item.observed_outcome)
+        .bind(&item.observation_token)
+        .bind(&item.observation_snapshot)
+        .execute(&mut **tx)
+        .await?;
+        let attestation_id: Uuid = sqlx::query_scalar(
+            r#"INSERT INTO poam_effective_context_attestations(
+                 attempt_id,finding_id,system_id,policy_lineage_id,policy_version_id,
+                 derivation_id,target_store_path,effective_set_digest,
+                 effective_config_digest,effective_config,observed_outcome,
+                 observation_token,observation_snapshot
+               ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+               RETURNING id"#,
+        )
+        .bind(attempt_id)
+        .bind(item.finding_id)
+        .bind(item.system_id)
+        .bind(item.policy_lineage_id)
+        .bind(item.policy_version_id)
+        .bind(item.derivation_id)
+        .bind(&item.target_store_path)
+        .bind(&item.effective_set_digest)
+        .bind(&item.effective_config_digest)
+        .bind(&item.effective_config)
+        .bind(&item.observed_outcome)
+        .bind(&item.observation_token)
+        .bind(&item.observation_snapshot)
+        .fetch_one(&mut **tx)
+        .await?;
+        attestations.insert(item.finding_id, attestation_id);
+    }
     let mut builder = sqlx::QueryBuilder::<Postgres>::new(
-        "INSERT INTO poam_verification_items(attempt_id,finding_id,system_id,policy_lineage_id,result,policy_version_id,assessment_id,derivation_id,target_store_path,effective_set_digest,effective_config_digest,effective_config,observed_outcome,observation_token,observation_snapshot,assessment_updated_at,bundle_ids,bundle_version_ids,requirement_version_ids,waiver_id,observed_at,detail) ",
+        "INSERT INTO poam_verification_items(attempt_id,finding_id,system_id,policy_lineage_id,result,policy_version_id,assessment_id,derivation_id,target_store_path,effective_set_digest,effective_config_digest,effective_config,observed_outcome,observation_token,observation_snapshot,assessment_updated_at,bundle_ids,bundle_version_ids,requirement_version_ids,waiver_id,observed_at,detail,effective_context_attestation_id) ",
     );
     builder.push_values(items, |mut row, item| {
         row.push_bind(attempt_id)
@@ -2786,7 +3103,8 @@ async fn insert_verification_items(
             .push_bind(&item.requirement_version_ids)
             .push_bind(item.waiver_id)
             .push_bind(now)
-            .push_bind(&item.detail);
+            .push_bind(&item.detail)
+            .push_bind(attestations.get(&item.finding_id).copied());
     });
     if !items.is_empty() {
         builder.build().execute(&mut **tx).await?;
@@ -3253,14 +3571,21 @@ pub async fn bundle_rollups(
                JOIN compliance_bundle_assignment_versions assignment_version ON assignment_version.id=reference.assignment_version_id
                JOIN compliance_bundle_versions bundle_version ON bundle_version.id=assignment_version.bundle_version_id
                WHERE reference.poam_id=poam.id AND bundle_version.bundle_id=ANY($4))
-           )"#,
+            ) ORDER BY poam.id LIMIT $5"#,
     )
     .bind(actor.is_admin)
     .bind(&actor.environment_ids)
     .bind(&relevant_finding_ids)
     .bind(ids)
+    .bind(MAX_ROLLUP_POAMS + 1)
     .fetch_all(pool)
     .await?;
+    if visible_poams.len() as i64 > MAX_ROLLUP_POAMS {
+        return Err(PoamError::Validation(
+            "rollup_scope_too_large",
+            "The requested rollup expands to too many POA&Ms".into(),
+        ));
+    }
     let visible_ids = visible_poams.iter().map(|row| row.0).collect::<Vec<_>>();
     let active_links = sqlx::query_as::<_, (Uuid, Uuid)>(
         "SELECT poam_id,finding_id FROM poam_finding_links WHERE poam_id=ANY($1) AND retired_at IS NULL",
@@ -3269,21 +3594,24 @@ pub async fn bundle_rollups(
     .fetch_all(pool)
     .await?;
     let closure_bundles = sqlx::query_as::<_, (Uuid, Vec<Uuid>)>(
-        r#"SELECT poam.id,item.bundle_ids FROM poams poam
-           JOIN poam_verification_items item ON item.attempt_id=poam.closure_attempt_id
-           WHERE poam.id=ANY($1)"#,
+        r#"SELECT poam.id,ARRAY(
+             SELECT DISTINCT unnest(item.bundle_ids)
+             FROM poam_verification_items item
+             WHERE item.attempt_id=poam.closure_attempt_id
+             ORDER BY 1
+           ) FROM poams poam WHERE poam.id=ANY($1)"#,
     )
     .bind(&visible_ids)
     .fetch_all(pool)
     .await?;
-    let assignment_bundles = sqlx::query_as::<_, (Uuid, Uuid)>(
-        r#"SELECT reference.poam_id,bundle_version.bundle_id
+    let assignment_bundles = sqlx::query_as::<_, (Uuid, Vec<Uuid>)>(
+        r#"SELECT reference.poam_id,array_agg(DISTINCT bundle_version.bundle_id ORDER BY bundle_version.bundle_id)
            FROM poam_assignment_references reference
            JOIN compliance_bundle_assignment_versions assignment_version
              ON assignment_version.id=reference.assignment_version_id
            JOIN compliance_bundle_versions bundle_version
              ON bundle_version.id=assignment_version.bundle_version_id
-           WHERE reference.poam_id=ANY($1)"#,
+            WHERE reference.poam_id=ANY($1) GROUP BY reference.poam_id"#,
     )
     .bind(&visible_ids)
     .fetch_all(pool)
@@ -3303,11 +3631,11 @@ pub async fn bundle_rollups(
             .or_default()
             .extend(bundle_ids);
     }
-    for (poam_id, bundle_id) in assignment_bundles {
+    for (poam_id, bundle_ids) in assignment_bundles {
         bundles_by_poam
             .entry(poam_id)
             .or_default()
-            .insert(bundle_id);
+            .extend(bundle_ids);
     }
     for rollup in &mut rollups {
         let matching = visible_poams.iter().filter(|poam| {
@@ -3402,6 +3730,7 @@ mod tests {
         let allowed = [
             ("open", "in_progress"),
             ("open", "blocked"),
+            ("open", "awaiting_verification"),
             ("in_progress", "open"),
             ("in_progress", "blocked"),
             ("in_progress", "awaiting_verification"),

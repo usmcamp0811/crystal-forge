@@ -319,6 +319,25 @@ fn merge_effective_policy_candidate(
                     authoritative: true,
                     ..provenance
                 });
+            } else if specificity == existing_spec {
+                let entry = &mut staging[existing_idx];
+                if entry.effective_config != candidate.effective_config
+                    || entry.effective_mode != candidate.effective_mode
+                {
+                    per_lineage.insert(lineage_id, (existing_ver, existing_spec, existing_idx));
+                    return MergeOutcome::Conflict(ResolutionConflict {
+                        code: "EFFECTIVE_POLICY_OVERLAY_CONFLICT".into(),
+                        message: format!(
+                            "Policy lineage {lineage_id}: the same version {version_id} has different overlays at equal specificity {specificity:?}"
+                        ),
+                    });
+                }
+                // Equal-specificity assignments with identical resolved semantics
+                // are both authoritative contexts for evidence navigation.
+                entry.provenance.push(ProvenanceEntry {
+                    authoritative: true,
+                    ..provenance
+                });
             } else {
                 staging[existing_idx].provenance.push(ProvenanceEntry {
                     authoritative: false,
@@ -1520,22 +1539,42 @@ async fn resolve_systems_effective_policies_batch_in_tx(
 
     let mut addition_pv_info: std::collections::HashMap<
         Uuid,
-        (Uuid, String, serde_json::Value, String),
+        (Uuid, String, serde_json::Value, String, String, String),
     > = std::collections::HashMap::new();
     if !all_addition_pv_ids.is_empty() {
-        let raw_addition_pvs: Vec<(Uuid, Uuid, String, serde_json::Value, String)> =
-            sqlx::query_as(
-                "SELECT id, policy_id, policy_type, config, implementation_state
+        let raw_addition_pvs: Vec<(
+            Uuid,
+            Uuid,
+            String,
+            serde_json::Value,
+            String,
+            String,
+            String,
+        )> = sqlx::query_as(
+            "SELECT id, policy_id, policy_type, config, implementation_state,
+                        publication_state, trust_state
                  FROM deployment_policy_versions
                  WHERE id = ANY($1)",
-            )
-            .bind(&all_addition_pv_ids)
-            .fetch_all(&mut **tx)
-            .await
-            .context("batch load addition policy versions")?;
+        )
+        .bind(&all_addition_pv_ids)
+        .fetch_all(&mut **tx)
+        .await
+        .context("batch load addition policy versions")?;
 
-        for (pv_id, lin_id, ptype, config, implementation_state) in raw_addition_pvs {
-            addition_pv_info.insert(pv_id, (lin_id, ptype, config, implementation_state));
+        for (pv_id, lin_id, ptype, config, implementation_state, publication_state, trust_state) in
+            raw_addition_pvs
+        {
+            addition_pv_info.insert(
+                pv_id,
+                (
+                    lin_id,
+                    ptype,
+                    config,
+                    implementation_state,
+                    publication_state,
+                    trust_state,
+                ),
+            );
         }
     }
 
@@ -1559,7 +1598,8 @@ async fn resolve_systems_effective_policies_batch_in_tx(
                    pv.publication_state = 'accepted'
                    OR (dp.current_published_version_id IS NULL
                        AND pv.publication_state IN ('incomplete', 'draft', 'interim'))
-                 )"#,
+                   )
+               ORDER BY ep.environment_id, pv.id"#,
         )
         .bind(&all_env_ids)
         .fetch_all(&mut **tx)
@@ -1594,7 +1634,8 @@ async fn resolve_systems_effective_policies_batch_in_tx(
                    pv.publication_state = 'accepted'
                    OR (dp.current_published_version_id IS NULL
                        AND pv.publication_state IN ('incomplete', 'draft', 'interim'))
-                 )"#,
+                   )
+               ORDER BY sp.system_id, pv.id"#,
         )
         .bind(system_ids)
         .fetch_all(&mut **tx)
@@ -1747,6 +1788,7 @@ async fn resolve_systems_effective_policies_batch_in_tx(
         let mut staging: Vec<EffectivePolicy> = Vec::new();
         let mut all_warnings: Vec<String> = Vec::new();
         let mut primary_bundle_version_id: Option<Uuid> = None;
+        let mut bundle_version_ids_ordered: Vec<Uuid> = Vec::new();
         let mut has_assignments = false;
 
         // Process bundle assignments (already in scope order).
@@ -1936,8 +1978,14 @@ async fn resolve_systems_effective_policies_batch_in_tx(
                     continue 'system;
                 }
 
-                let Some((lin_id, ptype, config, implementation_state)) =
-                    addition_pv_info.get(add_pv_id)
+                let Some((
+                    lin_id,
+                    ptype,
+                    config,
+                    implementation_state,
+                    publication_state,
+                    trust_state,
+                )) = addition_pv_info.get(add_pv_id)
                 else {
                     results.insert(
                         result_key,
@@ -1948,6 +1996,37 @@ async fn resolve_systems_effective_policies_batch_in_tx(
                     );
                     continue 'system;
                 };
+
+                if publication_state != "accepted" {
+                    results.insert(
+                        result_key,
+                        ResolutionOutcome::Conflict(vec![ResolutionConflict {
+                            code: "ASSIGNMENT_POLICY_NOT_ACCEPTED".to_string(),
+                            message: format!(
+                                "Addition policy version {} is in '{}' state; must be 'accepted'",
+                                add_pv_id, publication_state
+                            ),
+                        }]),
+                    );
+                    continue 'system;
+                }
+                if matches!(
+                    implementation_state.as_str(),
+                    "native" | "external" | "manual"
+                ) && trust_state != "trusted"
+                {
+                    results.insert(
+                        result_key,
+                        ResolutionOutcome::Conflict(vec![ResolutionConflict {
+                            code: "ASSIGNMENT_POLICY_UNTRUSTED".to_string(),
+                            message: format!(
+                                "Addition policy version {} is not trusted",
+                                add_pv_id
+                            ),
+                        }]),
+                    );
+                    continue 'system;
+                }
 
                 if let Some(existing_vid) = seen_lineages.get(lin_id) {
                     if existing_vid != add_pv_id {
@@ -1996,16 +2075,59 @@ async fn resolve_systems_effective_policies_batch_in_tx(
             }
 
             // Apply overrides
+            let effective_version_ids: std::collections::HashSet<Uuid> = assignment_effective
+                .iter()
+                .map(|policy| policy.policy_version_id)
+                .collect();
             for o in &overrides_for_av {
+                if exclusions_set.contains(&o.policy_version_id)
+                    || !effective_version_ids.contains(&o.policy_version_id)
+                {
+                    results.insert(
+                        result_key,
+                        ResolutionOutcome::Conflict(vec![ResolutionConflict {
+                            code: "ASSIGNMENT_OVERRIDE_TARGET_MISSING".to_string(),
+                            message: format!(
+                                "Override targets policy version {} which is not in the effective set",
+                                o.policy_version_id
+                            ),
+                        }]),
+                    );
+                    continue 'system;
+                }
                 for pol in assignment_effective.iter_mut() {
                     if pol.policy_version_id == o.policy_version_id {
-                        if let Err(e) = apply_json_path_override(
+                        if let Err(error) = validate_typed_override(
+                            &pol.policy_type,
+                            &pol.effective_config,
+                            &o.value_path,
+                            &o.value,
+                        ) {
+                            results.insert(
+                                result_key,
+                                ResolutionOutcome::Conflict(vec![ResolutionConflict {
+                                    code: "ASSIGNMENT_OVERRIDE_FIELD_INVALID".to_string(),
+                                    message: error,
+                                }]),
+                            );
+                            continue 'system;
+                        }
+                        if let Err(error) = apply_json_path_override(
                             &mut pol.effective_config,
                             &o.value_path,
                             &o.value,
                         ) {
-                            all_warnings
-                                .push(format!("Override warning for {}: {e}", o.policy_version_id));
+                            results.insert(
+                                result_key,
+                                ResolutionOutcome::Conflict(vec![ResolutionConflict {
+                                    code: "ASSIGNMENT_OVERRIDE_VALUE_INVALID".to_string(),
+                                    message: format!(
+                                        "Override at path '{}' on policy {} failed: {}",
+                                        o.value_path, o.policy_version_id, error
+                                    ),
+                                }]),
+                            );
+                            continue 'system;
                         }
                         if !pol.overrides.iter().any(|x| x.value_path == o.value_path) {
                             pol.overrides.push(o.clone());
@@ -2017,6 +2139,7 @@ async fn resolve_systems_effective_policies_batch_in_tx(
             if primary_bundle_version_id.is_none() {
                 primary_bundle_version_id = Some(*bv_id);
             }
+            bundle_version_ids_ordered.push(*bv_id);
 
             // Merge assignment policies into staging using the authoritative merge
             for mut pol in assignment_effective {
@@ -2038,7 +2161,7 @@ async fn resolve_systems_effective_policies_batch_in_tx(
                     &mut staging,
                     &mut per_lineage,
                     &mut all_warnings,
-                    true, // ignore_non_evaluation_conflicts
+                    ignore_non_evaluation_conflicts,
                 ) {
                     MergeOutcome::Conflict(conflict) => {
                         results.insert(result_key, ResolutionOutcome::Conflict(vec![conflict]));
@@ -2159,7 +2282,6 @@ async fn resolve_systems_effective_policies_batch_in_tx(
             .map(|p| p.policy_version_id)
             .collect();
         direct.sort();
-        let bundle_version_ids_ordered: Vec<Uuid> = primary_bundle_version_id.into_iter().collect();
         let canonical = CombinedEffectiveSetCanonical {
             bundle_version_ids_ordered,
             addition_policy_version_ids: additions,
@@ -2278,7 +2400,8 @@ async fn resolve_system_effective_policies_with_options_in_tx(
                          dp.current_published_version_id IS NULL
                          AND pv.publication_state IN ('incomplete', 'draft', 'interim')
                      )
-                 )"#,
+                  )
+               ORDER BY pv.id"#,
         )
         .bind(eid)
         .fetch_all(&mut **tx)
@@ -2327,7 +2450,8 @@ async fn resolve_system_effective_policies_with_options_in_tx(
                          dp.current_published_version_id IS NULL
                          AND pv.publication_state IN ('incomplete', 'draft', 'interim')
                      )
-                 )"#,
+                  )
+               ORDER BY pv.id"#,
         )
         .bind(system_id)
         .fetch_all(&mut **tx)

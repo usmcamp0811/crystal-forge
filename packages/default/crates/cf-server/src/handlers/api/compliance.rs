@@ -36,8 +36,8 @@ use crate::compliance::xccdf::export_models::{
 };
 use crate::compliance::xccdf::import_models::XccdfImportPlan;
 use crate::compliance::xccdf::importer::{
-    build_policy_records, check_document_class, validate_cf_native_document, validate_import_plan,
-    validate_sha256_match,
+    build_policy_records, check_document_class, validate_cf_native_document_async,
+    validate_import_plan, validate_sha256_match,
 };
 use crate::compliance::xccdf::package::{ProcessingError, process_xccdf_bytes};
 use crate::compliance::xccdf::reconciliation::{NativeReconcileFailure, ReconcileConflict};
@@ -3795,6 +3795,7 @@ pub struct CfNativeReconciliationPreview {
     pub import_trust_state: String, // untrusted
 }
 
+#[cfg(test)]
 fn validate_imported_policy_configs(
     records: &[crate::compliance::xccdf::import_models::ImportedPolicyRecord],
 ) -> Result<(), String> {
@@ -3811,6 +3812,7 @@ fn validate_imported_policy_configs(
 pub(crate) async fn compute_cf_native_reconciliation(
     pool: &PgPool,
     parsed: &crate::compliance::xccdf::models::ParsedXccdf,
+    policy_records: Option<Vec<crate::compliance::xccdf::import_models::ImportedPolicyRecord>>,
 ) -> Result<Option<CfNativeReconciliationPreview>, String> {
     use crate::compliance::xccdf::models::DocumentClass;
     use crate::compliance::xccdf::reconciliation::{
@@ -3823,9 +3825,15 @@ pub(crate) async fn compute_cf_native_reconciliation(
     }
 
     // Validate CF-native document to get policy records
-    let (_validated, policy_records) = validate_cf_native_document(parsed)
-        .map_err(|e| format!("CF-native validation failed: {}", e.message))?;
-    validate_imported_policy_configs(&policy_records)?;
+    let policy_records = match policy_records {
+        Some(records) => records,
+        None => {
+            validate_cf_native_document_async(parsed)
+                .await
+                .map_err(|e| format!("CF-native validation failed: {}", e.message))?
+                .1
+        }
+    };
 
     let bundle_meta = match &parsed.cf_bundle_meta {
         Some(m) => m,
@@ -4499,12 +4507,12 @@ pub async fn xccdf_preview(
             .into_response();
     }
 
-    if matches!(
+    let cf_native_policy_records = if matches!(
         parsed.class,
         crate::compliance::xccdf::models::DocumentClass::CfNativeExact
     ) {
-        let policy_records = match validate_cf_native_document(&parsed) {
-            Ok((_, records)) => records,
+        match validate_cf_native_document_async(&parsed).await {
+            Ok((_, records)) => Some(records),
             Err(error) => {
                 return (
                     StatusCode::UNPROCESSABLE_ENTITY,
@@ -4515,33 +4523,26 @@ pub async fn xccdf_preview(
                 )
                     .into_response();
             }
-        };
-        if let Err(message) = validate_imported_policy_configs(&policy_records) {
-            return (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                Json(serde_json::json!({
-                    "error": "CF_NATIVE_PAYLOAD_INVALID",
-                    "message": message,
-                })),
-            )
-                .into_response();
         }
-    }
+    } else {
+        None
+    };
 
     // Compute CF-native reconciliation data for CfNativeExact documents
-    let cf_native_reconciliation = match compute_cf_native_reconciliation(&pool, &parsed).await {
-        Ok(recon) => recon,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "error": "CF-native reconciliation failed",
-                    "message": e,
-                })),
-            )
-                .into_response();
-        }
-    };
+    let cf_native_reconciliation =
+        match compute_cf_native_reconciliation(&pool, &parsed, cf_native_policy_records).await {
+            Ok(recon) => recon,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": "CF-native reconciliation failed",
+                        "message": e,
+                    })),
+                )
+                    .into_response();
+            }
+        };
     let foreign_stig_reconciliation =
         match compute_foreign_stig_reconciliation(&pool, &parsed, &original_sha256).await {
             Ok(reconciliation) => reconciliation,
@@ -4826,7 +4827,11 @@ pub async fn xccdf_import(
             .into_response();
     }
 
-    if let Some(err) = check_document_class(&pkg.parsed) {
+    if !matches!(
+        pkg.parsed.class,
+        crate::compliance::xccdf::models::DocumentClass::CfNativeExact
+    ) && let Some(err) = check_document_class(&pkg.parsed)
+    {
         let status = if err.code == "CF_NATIVE_DIGEST_MISMATCH" {
             StatusCode::CONFLICT
         } else {
@@ -4847,7 +4852,8 @@ pub async fn xccdf_import(
         pkg.parsed.class,
         crate::compliance::xccdf::models::DocumentClass::CfNativeExact
     ) {
-        let (validated, policy_records) = match validate_cf_native_document(&pkg.parsed) {
+        let (validated, policy_records) = match validate_cf_native_document_async(&pkg.parsed).await
+        {
             Ok(value) => value,
             Err(err) => {
                 let status = if err.code == "CF_NATIVE_DIGEST_MISMATCH" {
@@ -4866,17 +4872,6 @@ pub async fn xccdf_import(
                     .into_response();
             }
         };
-        if let Err(message) = validate_imported_policy_configs(&policy_records) {
-            return (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                Json(ApiError {
-                    error: "CF_NATIVE_PAYLOAD_INVALID".into(),
-                    message,
-                    details: None,
-                }),
-            )
-                .into_response();
-        }
         let result = compliance_interchange::commit_cf_native_import(
             &pool,
             user_id,
@@ -6332,7 +6327,7 @@ pub async fn policy_interchange_import(
     };
 
     // Validate no duplicate version IDs within the document (shared validator)
-    if let Err(message) = validate_policy_interchange_document(&policies) {
+    if let Err(message) = validate_policy_interchange_document_async(&policies).await {
         return policy_interchange_invalid_response(&message).into_response();
     }
 
@@ -7123,7 +7118,7 @@ pub async fn policy_interchange_preview(
     };
 
     // Validate no duplicate version IDs within the document (shared validator)
-    if let Err(message) = validate_policy_interchange_document(&policies) {
+    if let Err(message) = validate_policy_interchange_document_async(&policies).await {
         return (
             StatusCode::UNPROCESSABLE_ENTITY,
             Json(serde_json::json!({
@@ -7191,6 +7186,7 @@ fn policy_interchange_invalid_response(message: &str) -> impl IntoResponse {
         .into_response()
 }
 
+#[cfg(test)]
 fn validate_policy_interchange_document(policies: &[NormalizedPolicyImport]) -> Result<(), String> {
     // Check for duplicate version IDs within the document
     let mut seen_versions = std::collections::HashSet::new();
@@ -7199,6 +7195,32 @@ fn validate_policy_interchange_document(policies: &[NormalizedPolicyImport]) -> 
             &policy.policy_type,
             &policy.config,
         )?;
+        if composite.is_some() && policy.execution_phase != "multi-phase" {
+            return Err(format!(
+                "composite policy version {} must use execution_phase multi-phase",
+                policy.version_id
+            ));
+        }
+        if !seen_versions.insert(policy.version_id) {
+            return Err(format!(
+                "Duplicate version ID {} in import document",
+                policy.version_id
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn validate_policy_interchange_document_async(
+    policies: &[NormalizedPolicyImport],
+) -> Result<(), String> {
+    let mut seen_versions = std::collections::HashSet::new();
+    for policy in policies {
+        let composite = crate::models::deployment_policies::validate_policy_type_config_async(
+            &policy.policy_type,
+            &policy.config,
+        )
+        .await?;
         if composite.is_some() && policy.execution_phase != "multi-phase" {
             return Err(format!(
                 "composite policy version {} must use execution_phase multi-phase",

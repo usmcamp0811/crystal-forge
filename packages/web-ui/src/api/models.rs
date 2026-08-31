@@ -2492,18 +2492,25 @@ pub struct UpdateDeploymentPolicyRequest {
     pub cci_ids: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub category: Option<String>,
+    /// Replaces, clears, or preserves the framework for `Some(Some(_))`,
+    /// `Some(None)`, or `None`, respectively.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub framework: Option<String>,
+    pub framework: Option<Option<String>>,
+    /// Replaces, clears, or preserves the severity.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub severity: Option<String>,
+    pub severity: Option<Option<String>>,
+    /// Replaces, clears, or preserves the control family.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub control_family: Option<String>,
+    pub control_family: Option<Option<String>>,
+    /// Replaces, clears, or preserves the CMMC level.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub cmmc_level: Option<i32>,
+    pub cmmc_level: Option<Option<i32>>,
+    /// Replaces, clears, or preserves the CIS section.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub cis_section: Option<String>,
+    pub cis_section: Option<Option<String>>,
+    /// Replaces, clears, or preserves the rationale.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub rationale: Option<String>,
+    pub rationale: Option<Option<String>>,
     /// When `Some`, replace evidence specs; `Some([])` clears them.
     /// `None` (omitted) preserves the existing value.
     #[serde(skip_serializing_if = "Option::is_none")]

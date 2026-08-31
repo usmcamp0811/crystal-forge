@@ -466,8 +466,11 @@ pub async fn detail(
           JOIN compliance_bundle_versions bundle_version ON bundle_version.id=version.bundle_version_id
           LEFT JOIN systems system ON system.id=assignment.system_id
           LEFT JOIN environments environment ON environment.id=assignment.environment_id
-          WHERE reference.poam_id=$1 ORDER BY reference.added_at,reference.assignment_version_id"#)
-        .bind(poam_id).fetch_all(&mut **tx).await?;
+           WHERE reference.poam_id=$1
+             AND ($2 OR assignment.environment_id=ANY($3)
+               OR system.environment_id=ANY($3))
+           ORDER BY reference.added_at,reference.assignment_version_id"#)
+        .bind(poam_id).bind(is_admin).bind(environment_ids).fetch_all(&mut **tx).await?;
     let attempt_rows = sqlx::query_as::<_, (Uuid,String,i64,Uuid,chrono::DateTime<chrono::Utc>)>(
         "SELECT id,outcome,poam_revision,attempted_by,attempted_at FROM poam_verification_attempts WHERE poam_id=$1 AND ($3::timestamptz IS NULL OR (attempted_at,id)<($3,$4)) ORDER BY attempted_at DESC,id DESC LIMIT $2")
         .bind(poam_id).bind(verification_limit + 1).bind(verification_before_at).bind(verification_before_id).fetch_all(&mut **tx).await?;
@@ -485,12 +488,15 @@ pub async fn detail(
         })
         .flatten();
     let attempt_ids = attempt_rows.iter().map(|row| row.0).collect::<Vec<_>>();
-    let verification_items=sqlx::query_as::<_,VerificationItemView>(r#"SELECT attempt_id,finding_id,system_id,policy_lineage_id,result,
-        policy_version_id,assessment_id,derivation_id,target_store_path,effective_set_digest,effective_config_digest,
-        effective_config,observed_outcome,observation_token,observation_snapshot,assessment_updated_at,bundle_ids,bundle_version_ids,
-        requirement_version_ids,waiver_id,observed_at,detail
-        FROM poam_verification_items WHERE attempt_id=ANY($1) ORDER BY finding_id"#)
-        .bind(&attempt_ids).fetch_all(&mut **tx).await?;
+    let verification_items=sqlx::query_as::<_,VerificationItemView>(r#"SELECT item.attempt_id,item.finding_id,item.system_id,item.policy_lineage_id,item.result,
+        item.policy_version_id,item.assessment_id,item.derivation_id,item.target_store_path,item.effective_set_digest,item.effective_config_digest,
+        item.effective_config,item.observed_outcome,item.observation_token,item.observation_snapshot,item.assessment_updated_at,item.bundle_ids,item.bundle_version_ids,
+        item.requirement_version_ids,item.waiver_id,item.observed_at,item.detail
+        FROM poam_verification_items item
+        JOIN systems system ON system.id=item.system_id
+        WHERE item.attempt_id=ANY($1) AND ($2 OR system.environment_id=ANY($3))
+        ORDER BY item.finding_id"#)
+        .bind(&attempt_ids).bind(is_admin).bind(environment_ids).fetch_all(&mut **tx).await?;
     let verification_attempts = attempt_rows
         .into_iter()
         .map(|row| VerificationAttemptView {
@@ -506,9 +512,40 @@ pub async fn detail(
                 .collect(),
         })
         .collect();
-    let activity = sqlx::query_as::<_, ActivityView>(
-        "SELECT activity.id, activity.actor_user_id, COALESCE(actor.username,actor.email) AS actor_display, activity.kind, activity.payload, activity.created_at FROM poam_activity activity LEFT JOIN users actor ON actor.id=activity.actor_user_id WHERE activity.poam_id=$1 AND ($3::timestamptz IS NULL OR (activity.created_at,activity.id)<($3,$4)) ORDER BY activity.created_at DESC, activity.id DESC LIMIT $2")
-        .bind(poam_id).bind(activity_limit + 1).bind(activity_before_at).bind(activity_before_id).fetch_all(&mut **tx).await?;
+    let activity = sqlx::query_as::<_, ActivityView>(r#"
+        SELECT activity.id,activity.actor_user_id,
+               COALESCE(actor.username,actor.email) AS actor_display,
+               activity.kind,activity.payload,activity.created_at
+        FROM poam_activity activity
+        LEFT JOIN users actor ON actor.id=activity.actor_user_id
+        WHERE activity.poam_id=$1
+          AND ($3::timestamptz IS NULL OR (activity.created_at,activity.id)<($3,$4))
+          AND ($5 OR (
+            (
+              COALESCE(activity.payload->>'finding_id',activity.payload#>>'{finding,finding_id}') IS NULL
+              OR EXISTS (
+                SELECT 1 FROM poam_findings finding
+                JOIN systems system ON system.id=finding.system_id
+                WHERE finding.id=COALESCE(
+                  activity.payload->>'finding_id',activity.payload#>>'{finding,finding_id}'
+                )::uuid AND system.environment_id=ANY($6)
+              )
+            )
+            AND NOT EXISTS (
+              SELECT 1
+              FROM jsonb_array_elements(COALESCE(activity.payload->'items','[]'::jsonb)) item
+              WHERE item->>'finding_id' IS NOT NULL
+                AND NOT EXISTS (
+                  SELECT 1 FROM poam_findings finding
+                  JOIN systems system ON system.id=finding.system_id
+                  WHERE finding.id=(item->>'finding_id')::uuid
+                    AND system.environment_id=ANY($6)
+                )
+            )
+          ))
+        ORDER BY activity.created_at DESC,activity.id DESC LIMIT $2"#)
+        .bind(poam_id).bind(activity_limit + 1).bind(activity_before_at).bind(activity_before_id)
+        .bind(is_admin).bind(environment_ids).fetch_all(&mut **tx).await?;
     let activity_has_more = activity.len() as i64 > activity_limit;
     let activity = activity
         .into_iter()

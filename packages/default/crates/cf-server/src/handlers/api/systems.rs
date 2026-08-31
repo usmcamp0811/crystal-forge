@@ -22,6 +22,7 @@ use crate::api::models::{
 };
 use crate::auth::models::Role;
 use crate::handlers::agent_request::CFState;
+use crate::handlers::api::auth_session::require_csrf;
 use crate::handlers::api::rbac::{
     authenticated_user_roles, extract_request_origin, require_viewer_or_above,
 };
@@ -960,6 +961,9 @@ pub async fn rollback_system(
     if !caller_role.can_mutate_systems() {
         return forbidden_mutation();
     }
+    if let Err(response) = require_csrf(&headers) {
+        return response;
+    }
 
     let target_commit = payload.target_commit.trim();
     if let Err(message) = validate_target_commit(target_commit) {
@@ -1044,6 +1048,9 @@ pub async fn rollback_system_generation(
 
     if !caller_role.can_mutate_systems() {
         return forbidden_mutation();
+    }
+    if let Err(response) = require_csrf(&headers) {
+        return response;
     }
 
     let store_path = payload.store_path.trim();
@@ -1672,6 +1679,9 @@ pub async fn deploy_system(
 
     if !caller_role.can_mutate_systems() {
         return forbidden_mutation();
+    }
+    if let Err(response) = require_csrf(&headers) {
+        return response;
     }
 
     let commit_sha = payload.commit_sha.trim();

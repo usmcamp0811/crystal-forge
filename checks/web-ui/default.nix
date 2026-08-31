@@ -631,12 +631,36 @@ in pkgs.testers.runNixOSTest {
     output = machine.succeed("cat /tmp/web-ui-tests/integration.log")
     print(output)
 
+    def export_pre_results_artifacts():
+        # Preserve all output that exists when Playwright exits before it can
+        # produce results.json. Artifact export errors must not hide the test
+        # failure that caused this path.
+        try:
+            machine.succeed(
+                "rm -rf /tmp/web-ui-pre-results-artifacts && "
+                "mkdir -p /tmp/web-ui-pre-results-artifacts && "
+                "cp -a /tmp/screenshots/. /tmp/web-ui-pre-results-artifacts/ && "
+                "cp /tmp/web-ui-tests/integration.log "
+                "/tmp/web-ui-pre-results-artifacts/integration.log && "
+                "if test -f /tmp/web-ui-tests/integration.exit; then "
+                "cp /tmp/web-ui-tests/integration.exit "
+                "/tmp/web-ui-pre-results-artifacts/integration.exit; fi"
+            )
+            machine.copy_from_vm(
+                "/tmp/web-ui-pre-results-artifacts",
+                "browser-failure-artifacts",
+            )
+        except Exception as e:
+            print(f"warning: could not export pre-results browser artifacts: {e}")
+
     # Coverage-gate failures (manifest drift) abort before any results exist.
     if machine.execute("test -f /tmp/screenshots/fatal.json")[0] == 0:
+        export_pre_results_artifacts()
         fatal_json = machine.succeed("cat /tmp/screenshots/fatal.json")
         raise Exception(f"Web UI check aborted: {json.loads(fatal_json)['error']}")
 
     if machine.execute("test -f /tmp/screenshots/results.json")[0] != 0:
+        export_pre_results_artifacts()
         exit_code = machine.succeed("cat /tmp/web-ui-tests/integration.exit").strip()
         print("=== Crystal Forge server journal after integration failure ===")
         print(
@@ -661,11 +685,12 @@ in pkgs.testers.runNixOSTest {
             )
         )
 
-    # Copy screenshots + visual reports out
+    # Copy final and intermediate screenshots for successful and failed steps.
+    # Intermediate captures are review evidence even when a later assertion in
+    # the same workflow fails.
     for r in results:
-        if r.get("ok"):
-            for visual in r.get("visuals", []):
-                machine.copy_from_vm(f"/tmp/screenshots/{visual['name']}.png", "screenshots")
+        for visual in r.get("visuals", []):
+            machine.copy_from_vm(f"/tmp/screenshots/{visual['name']}.png", "screenshots")
 
     for report_file in ["results.json", "visual-report.json", "visual-summary.md"]:
         try:
@@ -713,9 +738,16 @@ in pkgs.testers.runNixOSTest {
         print(f"warning: design-parity harness error (non-blocking): {e}")
 
     ok_count = sum(1 for r in results if r.get("ok"))
+    intermediate_count = sum(
+        1
+        for result in results
+        for visual in result.get("visuals", [])
+        if visual.get("intermediate")
+    )
 
     print("\n=== Summary ===")
     print(f"  Screenshots: {ok_count}/{len(results)} captured")
+    print(f"  Intermediate workflow artifacts: {intermediate_count} copied")
 
     for r in results:
         status = "OK" if r.get("ok") else "FAIL"
@@ -728,9 +760,8 @@ in pkgs.testers.runNixOSTest {
     if ok_count == 0:
         raise Exception("All screenshots failed")
 
-    # Fail if critical tests failed
-    # Keep this list to stable smoke checks; richer UX flows are tracked by
-    # screenshot results but not treated as merge-blocking while UI is evolving.
+    # Critical workflows must be present and successful. Treating only returned
+    # failures as fatal would let profile or manifest drift silently skip them.
     critical_tests = [
       "01-login-page",
       "02-registration",
@@ -746,16 +777,47 @@ in pkgs.testers.runNixOSTest {
       "29g-poam-failed-evidence-create",
       "29h-poam-link-compatible-findings",
       "29i-poam-detail-edits-milestones-conflicts",
-      "29j-poam-awaiting-verification-closure-rejection",
       "29k-poam-system-rollups-navigation",
       "29l-poam-bundle-rollups-batching",
       "29m-poam-assignment-relationship-immutability",
       "30a-admin-automatic-retries-defaults-reset",
       "30b-admin-automatic-retries-save-reload",
       "30c-admin-automatic-retries-failed-save-retains-draft",
+      "30d-evidence-lifecycle",
       "30e-policy-card-direct-edit-preserves-evidence",
+      "task433-canonical-large-catalog",
+      "20af-policy-catalog-selection-delete-regressions",
+      "19-policies-new-modal-fields",
+      "20-policies-new-modal-rule-builder",
+      "20a-policies-new-modal-pending-mappings",
+      "20ac-stig-import-reconciliation-fixture",
+      "20aa-policies-new-modal-mappings-roundtrip",
+      "task433-canonical-unmapped-nix-policy",
+      "20ac-policy-editor-category-and-imported-provenance",
+      "task433-canonical-imported-stig-refinement",
+      "task433-canonical-multiline-dod",
+      "20ab2-policy-editor-eight-kind-roundtrip",
+      "task433-canonical-mixed-nix-cve-evidence",
+      "20ad-stig-nixos-assertion-roundtrip",
+      "20b-policies-cve-gate-create-roundtrip",
+      "20ab-compliance-bundle-requirement-baseline-roundtrip",
+      "20c-policies-multirule-create-roundtrip",
+      "20d-policies-cve-gate-invalid-rejected",
+      "20e-policies-multirule-rules-only-no-expression-required",
+      "task433-canonical-poam-lifecycle",
     ]
-    failed_critical = [r['name'] for r in results if r['name'] in critical_tests and not r.get('ok')]
+    selected_critical_tests = (
+      critical_tests
+      if not test_steps
+      else [name for name in critical_tests if name in {
+        selected.strip() for selected in test_steps.split(",") if selected.strip()
+      }]
+    )
+    returned_names = {r.get('name') for r in results}
+    missing_critical = [name for name in selected_critical_tests if name not in returned_names]
+    if missing_critical:
+        raise Exception(f"Required critical web UI checks were absent: {missing_critical}")
+    failed_critical = [r['name'] for r in results if r['name'] in selected_critical_tests and not r.get('ok')]
     if failed_critical:
         raise Exception(f"Critical web UI checks failed: {failed_critical}")
 

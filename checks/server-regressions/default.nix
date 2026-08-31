@@ -58,6 +58,59 @@ pkgs.rustPlatform.buildRustPackage {
     # their own isolated databases from this same migration source.
     cargo sqlx migrate run --source crates/cf-server/migrations
 
+    echo "=== Populated pre-0233 migration rehearsal ==="
+    createdb cf_upgrade
+    upgradeUrl="postgresql://$PGUSER@127.0.0.1/cf_upgrade"
+    pre0233="$TMPDIR/migrations-through-0232"
+    mkdir -p "$pre0233"
+    expectedTask433Migrations=0
+    for migration in crates/cf-server/migrations/*.sql; do
+      base="''${migration##*/}"
+      version="''${base%%_*}"
+      if (( 10#$version <= 232 )); then
+        cp "$migration" "$pre0233/"
+      fi
+      if (( 10#$version >= 233 && 10#$version <= 240 )); then
+        expectedTask433Migrations=$((expectedTask433Migrations + 1))
+      fi
+    done
+    DATABASE_URL="$upgradeUrl" cargo sqlx migrate run --source "$pre0233"
+    psql "$upgradeUrl" -v ON_ERROR_STOP=1 <<'SQL'
+      INSERT INTO users(id,username,first_name,last_name,email)
+      VALUES('43360000-0000-0000-0000-000000000001','poam-upgrade','POAM','Upgrade','poam-upgrade@example.invalid');
+      INSERT INTO environments(id,name)
+      VALUES('43360000-0000-0000-0000-000000000002','POAM upgrade environment');
+      INSERT INTO systems(id,hostname,environment_id,public_key,derivation)
+      VALUES('43360000-0000-0000-0000-000000000003','poam-upgrade-system',
+        '43360000-0000-0000-0000-000000000002','poam-upgrade-key','poam-upgrade-key');
+      INSERT INTO deployment_policies(id,name,policy_type,config,enabled)
+      VALUES('43360000-0000-0000-0000-000000000004','POAM upgrade policy',
+        'custom_check','{"expression":"true"}'::jsonb,true);
+      INSERT INTO system_policies(system_id,policy_id)
+      VALUES('43360000-0000-0000-0000-000000000003',
+        '43360000-0000-0000-0000-000000000004');
+SQL
+    DATABASE_URL="$upgradeUrl" cargo sqlx migrate run --source crates/cf-server/migrations
+    appliedTask433Migrations="$(psql "$upgradeUrl" -Atc \
+       'SELECT COUNT(*) FROM _sqlx_migrations WHERE version BETWEEN 233 AND 240')"
+    if [[ "$appliedTask433Migrations" != "$expectedTask433Migrations" ]]; then
+      echo "Expected $expectedTask433Migrations migrations through 0240; applied $appliedTask433Migrations" >&2
+      exit 1
+    fi
+    psql "$upgradeUrl" -v ON_ERROR_STOP=1 <<'SQL'
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM systems WHERE id='43360000-0000-0000-0000-000000000003'
+        ) OR NOT EXISTS (
+          SELECT 1 FROM deployment_policies WHERE id='43360000-0000-0000-0000-000000000004'
+        ) THEN
+          RAISE EXCEPTION 'pre-0233 populated rows were not preserved';
+        END IF;
+      END
+      $$;
+SQL
+
     echo "=== Critical cf-server integration targets ==="
     cargo test --offline --package cf-server \
       --test assignment_semantics \
@@ -66,8 +119,27 @@ pkgs.rustPlatform.buildRustPackage {
       --test framework_version_id_lifecycle \
       --test policy_counts_defect \
       --test policy_editor_phase2 \
+      --test poam_workflows \
+      --test task433_csrf \
       --test time_window_policy_test \
       -- --test-threads=1
+
+    echo "=== Selected POA&M authorization, setup, notification, and overdue regressions ==="
+    cargo test --offline --package cf-server --lib \
+      handlers::api::poam::tests::http_requires_session_csrf_and_mutator_role \
+      -- --ignored --test-threads=1
+    cargo test --offline --package cf-server --lib \
+      handlers::api::setup_wizard::tests::setup_progress_counts_production_policy_bundle_and_poam_rows \
+      -- --ignored --test-threads=1
+    cargo test --offline --package cf-server --lib \
+      queries::user_notifications::tests:: \
+      -- --ignored --test-threads=1
+    cargo test --offline --package cf-server --lib \
+      tasks::user_notification_email::tests:: \
+      -- --ignored --test-threads=1
+    cargo test --offline --package cf-server --lib \
+      tasks::attention_reconciliation::tests::poam_overdue_reconciliation_deduplicates_resolves_and_opens_new_episode \
+      -- --ignored --test-threads=1
 
     echo "=== Composite AC3 pure validation and interchange matrix ==="
     cargo test --offline --package cf-server --lib \

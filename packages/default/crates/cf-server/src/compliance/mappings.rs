@@ -546,6 +546,53 @@ pub fn merge_classification_into_metadata(
     serde_json::Value::Object(obj)
 }
 
+/// Applies tri-state classification updates to compliance metadata.
+///
+/// An outer `None` preserves a key. `Some(Some(value))` replaces a key, and
+/// `Some(None)` removes a key. All unrelated metadata remains unchanged.
+pub fn patch_classification_into_metadata(
+    existing: &serde_json::Value,
+    category: Option<&str>,
+    framework: Option<Option<&str>>,
+    severity: Option<Option<&str>>,
+    control_family: Option<Option<&str>>,
+    cmmc_level: Option<Option<i32>>,
+    cis_section: Option<Option<&str>>,
+    rationale: Option<Option<&str>>,
+) -> serde_json::Value {
+    let mut obj = existing.as_object().cloned().unwrap_or_default();
+    if let Some(value) = category {
+        obj.insert("category".into(), serde_json::json!(value));
+    }
+    for (key, update) in [
+        ("framework", framework),
+        ("severity", severity),
+        ("control_family", control_family),
+        ("cis_section", cis_section),
+        ("rationale", rationale),
+    ] {
+        match update {
+            Some(Some(value)) => {
+                obj.insert(key.into(), serde_json::json!(value));
+            }
+            Some(None) => {
+                obj.remove(key);
+            }
+            None => {}
+        }
+    }
+    match cmmc_level {
+        Some(Some(value)) => {
+            obj.insert("cmmc_level".into(), serde_json::json!(value));
+        }
+        Some(None) => {
+            obj.remove("cmmc_level");
+        }
+        None => {}
+    }
+    serde_json::Value::Object(obj)
+}
+
 /// Infer the policy category for policies that have no stored `"category"` key
 /// in `compliance_metadata`.
 ///
@@ -726,6 +773,33 @@ mod classification_tests {
             None,
         );
         assert_eq!(merged["cmmc_level"], 3);
+    }
+
+    #[test]
+    fn classification_patch_distinguishes_clear_from_preserve() {
+        let existing = json!({
+            "framework": "DISA STIG",
+            "severity": "high",
+            "cmmc_level": 2,
+            "source": "import"
+        });
+        let patched = patch_classification_into_metadata(
+            &existing,
+            Some("deployment"),
+            Some(None),
+            None,
+            Some(Some("AC")),
+            Some(None),
+            None,
+            None,
+        );
+
+        assert_eq!(patched["category"], "deployment");
+        assert!(patched.get("framework").is_none());
+        assert_eq!(patched["severity"], "high");
+        assert_eq!(patched["control_family"], "AC");
+        assert!(patched.get("cmmc_level").is_none());
+        assert_eq!(patched["source"], "import");
     }
 }
 

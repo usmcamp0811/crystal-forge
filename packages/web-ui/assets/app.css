@@ -714,13 +714,135 @@ body {
   border-color: var(--cf-card-border) !important;
 }
 
+.cf-policy-editor-dialog {
+  width: min(960px, calc(100vw - 48px));
+  max-height: min(92vh, 900px);
+}
+
+.cf-policy-editor-dialog > .modal-head {
+  align-items: flex-start;
+}
+
+.cf-policy-editor-dialog > .modal-head > div {
+  min-width: 0;
+}
+
+.cf-policy-editor-dialog > .modal-head h2,
+.cf-policy-editor-dialog > .modal-head p {
+  overflow-wrap: anywhere;
+}
+
+.cf-policy-editor-dialog > .modal-foot {
+  background: var(--cf-card-bg);
+}
+
+.cf-policy-delete-confirmation[aria-busy="true"],
+.cf-policy-delete-actions[inert] {
+  opacity: 0.62;
+}
+
+.cf-policy-delete-recovery {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.cf-focus-sentinel {
+  position: fixed;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+
 .cf-policy-modal-body {
   display: flex;
   flex-direction: column;
+  min-height: 0;
 }
 
-.cf-policy-modal-body > .cf-modal-tabs,
-.cf-policy-modal-body > .cf-modal-tab-panel {
+.cf-policy-editor-layout {
+  display: grid;
+  grid-template-columns: 190px minmax(0, 1fr);
+  gap: 22px;
+  align-items: start;
+}
+
+.cf-policy-editor-rail {
+  position: sticky;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+.cf-policy-editor-nav {
+  flex-direction: column;
+  align-items: stretch;
+  padding: 6px;
+  border: 1px solid var(--cf-divider);
+  border-radius: 10px;
+  background: var(--cf-subtle-bg);
+}
+
+.cf-policy-editor-nav .cf-modal-tab {
+  width: 100%;
+  justify-content: flex-start;
+  border-bottom: 0;
+  border-left: 2px solid transparent;
+  text-align: left;
+}
+
+.cf-policy-editor-nav .cf-modal-tab--active {
+  border-left-color: currentColor;
+}
+
+.cf-policy-editor-content {
+  min-width: 0;
+}
+
+.cf-policy-provenance-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid color-mix(in oklab, #60a5fa 35%, var(--cf-divider));
+  border-radius: 10px;
+  background: color-mix(in oklab, #60a5fa 7%, var(--cf-card-bg));
+  font-size: 11px;
+}
+
+.cf-policy-provenance-summary-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-weight: 650;
+}
+
+.cf-policy-provenance-summary-value {
+  min-width: 0;
+  color: var(--cf-text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.cf-policy-provenance-row {
+  display: grid;
+  grid-template-columns: minmax(90px, auto) minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+}
+
+.cf-policy-provenance-row > :last-child {
+  min-width: 0;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.cf-policy-editor-content > .cf-modal-tab-panel {
   flex-shrink: 0;
 }
 
@@ -747,7 +869,22 @@ body {
   border: 1px solid rgba(248, 113, 113, 0.55) !important;
 }
 
+.cf-policy-refresh-retry {
+  margin-top: 8px;
+  color: inherit;
+  border-color: currentColor;
+}
+
 .cf-policy-modal-field-error {
+  border-color: rgba(248, 113, 113, 0.75) !important;
+  box-shadow: 0 0 0 2px rgba(248, 113, 113, 0.22) !important;
+}
+
+.cf-policy-evidence-error {
+  color: #fca5a5;
+}
+
+.cf-policy-editor-dialog [aria-invalid="true"] {
   border-color: rgba(248, 113, 113, 0.75) !important;
   box-shadow: 0 0 0 2px rgba(248, 113, 113, 0.22) !important;
 }
@@ -793,6 +930,76 @@ body {
 :root[data-theme="light"] .cf-policy-modal-editor-surface {
   background-color: var(--cf-subtle-bg) !important;
   border-color: var(--cf-card-border) !important;
+}
+
+@media (max-width: 700px) {
+  .modal-backdrop:has(.cf-policy-editor-dialog) {
+    padding: 10px;
+  }
+
+  .cf-policy-editor-dialog {
+    width: 100%;
+    max-height: calc(100dvh - 20px);
+  }
+
+  .cf-policy-editor-dialog > .modal-head,
+  .cf-policy-editor-dialog > .modal-body,
+  .cf-policy-editor-dialog > .modal-foot {
+    padding-inline: 14px;
+  }
+
+  .cf-policy-editor-layout {
+    display: block;
+  }
+
+  .cf-policy-editor-rail {
+    position: static;
+    gap: 10px;
+  }
+
+  .cf-policy-editor-nav {
+    flex-direction: row;
+    align-items: stretch;
+    margin-inline: -14px;
+    padding-inline: 6px;
+    border-inline: 0;
+    border-radius: 0;
+    overflow-x: auto;
+    scrollbar-width: thin;
+  }
+
+  .cf-policy-editor-nav .cf-modal-tab {
+    flex: 0 0 auto;
+    min-width: max-content;
+    padding-inline: 10px;
+    border-left: 0;
+    border-bottom: 2px solid transparent;
+  }
+
+  .cf-policy-editor-nav .cf-modal-tab--active {
+    border-bottom-color: currentColor;
+  }
+
+  .cf-policy-provenance-summary {
+    margin-bottom: 10px;
+  }
+
+  .cf-policy-editor-dialog .cf-modal-tab-panel {
+    padding-inline: 0;
+  }
+
+  .cf-policy-editor-dialog > .modal-foot {
+    flex-wrap: wrap;
+  }
+
+  .cf-policy-provenance-row {
+    grid-template-columns: 1fr;
+    gap: 2px;
+  }
+
+  .cf-policy-provenance-row > :last-child {
+    text-align: left;
+  }
 }
 
 .cf-flakes-history-split {

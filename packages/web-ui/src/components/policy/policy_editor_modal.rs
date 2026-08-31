@@ -10,7 +10,13 @@
 //! with each policy version.
 
 use dioxus::prelude::*;
+#[cfg(target_arch = "wasm32")]
+use std::rc::Rc;
 use uuid::Uuid;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::JsCast;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::closure::Closure;
 
 use crate::api::client::{
     ApiClientError, create_deployment_policy, create_policy_mapping, delete_deployment_policy,
@@ -143,8 +149,7 @@ const MAPPING_RELATIONSHIPS: [(&str, &str, &str); 3] = [
 
 /// A single assertion / gate rule in the builder.
 ///
-/// `persisted` indicates whether this rule kind can be encoded into the real
-/// policy API `config` payload.
+/// Supported rule kinds serialize into the policy API `config` payload.
 #[derive(Clone, Debug, PartialEq)]
 struct PolicyRule {
     /// Persisted identity. New IDs are allocated only by `new`, when the user
@@ -291,7 +296,7 @@ fn default_option_value(option_type: &str, values: &[String]) -> serde_json::Val
     }
 }
 
-/// A single evidence-for-ATO source. None of these persist yet (no backend).
+/// A single evidence-for-ATO source persisted in policy version metadata.
 #[derive(Clone, Debug, PartialEq)]
 struct PolicyEvidence {
     kind: String,
@@ -374,56 +379,57 @@ impl PolicyEvidence {
         evidence
     }
 
-    /// Validate this evidence row and return error message if invalid.
-    /// Returns None if valid, Some(error_msg) if invalid.
-    fn validate(&self) -> Option<String> {
+    /// Returns the first invalid field and its error message.
+    fn validation_error(&self) -> Option<(&'static str, String)> {
         match self.kind.as_str() {
             "command" => {
                 if self.cmd.is_empty() {
-                    return Some("Command is required".to_string());
+                    return Some(("cmd", "Command is required".to_string()));
                 }
                 if self.expect.is_empty() {
-                    return Some("Expected output is required".to_string());
+                    return Some(("expect", "Expected output is required".to_string()));
                 }
             }
             "log" => {
                 if self.unit.is_empty() {
-                    return Some("Unit/source is required".to_string());
+                    return Some(("unit", "Unit/source is required".to_string()));
                 }
                 if self.r#match.is_empty() {
-                    return Some("Match pattern is required".to_string());
+                    return Some(("match", "Match pattern is required".to_string()));
                 }
             }
             "file" => {
                 if self.path.is_empty() {
-                    return Some("File path is required".to_string());
+                    return Some(("path", "File path is required".to_string()));
                 }
             }
             "unit_state" => {
                 if self.unit.is_empty() {
-                    return Some("Unit is required".to_string());
+                    return Some(("unit", "Unit is required".to_string()));
                 }
                 if self.state.is_empty() {
-                    return Some("State is required".to_string());
+                    return Some(("state", "State is required".to_string()));
                 }
             }
             "eval_attr" => {
                 if self.attr.is_empty() {
-                    return Some("Attribute path is required".to_string());
+                    return Some(("attr", "Attribute path is required".to_string()));
                 }
             }
             "attestation" => {
                 if self.note.is_empty() {
-                    return Some("Attestation text is required".to_string());
+                    return Some(("note", "Attestation text is required".to_string()));
                 }
             }
-            _ => return Some(format!("Unknown evidence kind: {}", self.kind)),
+            _ => {
+                return Some(("kind", format!("Unknown evidence kind: {}", self.kind)));
+            }
         }
         None
     }
 
     /// Convert PolicyEvidence to EvidenceSpec for the API.
-    /// Does NOT validate - call validate() first.
+    /// The caller must validate the evidence before conversion.
     /// Preserves required_fields metadata loaded from original spec.
     fn to_evidence_spec(&self) -> EvidenceSpec {
         let kind = match self.kind.as_str() {
@@ -512,7 +518,7 @@ const EVIDENCE_OPTIONS: [(&str, &str); 6] = [
     ("attestation", "Signed attestation"),
 ];
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PolicyEditorTab {
     Details,
     Mappings,
@@ -521,6 +527,164 @@ enum PolicyEditorTab {
     /// Read-only imported origin. Only rendered when the policy has
     /// authoritative provenance recorded at import time.
     Provenance,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PolicyEditorTabMove {
+    Previous,
+    Next,
+    First,
+    Last,
+}
+
+const POLICY_EDITOR_TABS: [PolicyEditorTab; 5] = [
+    PolicyEditorTab::Details,
+    PolicyEditorTab::Enforcement,
+    PolicyEditorTab::Mappings,
+    PolicyEditorTab::Evidence,
+    PolicyEditorTab::Provenance,
+];
+
+fn policy_editor_tab_id(tab: PolicyEditorTab) -> &'static str {
+    match tab {
+        PolicyEditorTab::Details => "policy-editor-tab-details",
+        PolicyEditorTab::Mappings => "policy-editor-tab-mappings",
+        PolicyEditorTab::Enforcement => "policy-editor-tab-enforcement",
+        PolicyEditorTab::Evidence => "policy-editor-tab-evidence",
+        PolicyEditorTab::Provenance => "policy-editor-tab-provenance",
+    }
+}
+
+fn move_policy_editor_tab(
+    active: PolicyEditorTab,
+    movement: PolicyEditorTabMove,
+    include_provenance: bool,
+) -> PolicyEditorTab {
+    let tabs = if include_provenance {
+        &POLICY_EDITOR_TABS[..]
+    } else {
+        &POLICY_EDITOR_TABS[..POLICY_EDITOR_TABS.len() - 1]
+    };
+    let position = tabs.iter().position(|tab| *tab == active).unwrap_or(0);
+    match movement {
+        PolicyEditorTabMove::Previous => tabs[(position + tabs.len() - 1) % tabs.len()],
+        PolicyEditorTabMove::Next => tabs[(position + 1) % tabs.len()],
+        PolicyEditorTabMove::First => tabs[0],
+        PolicyEditorTabMove::Last => tabs[tabs.len() - 1],
+    }
+}
+
+fn focus_policy_editor_element(id: &str) {
+    #[cfg(target_arch = "wasm32")]
+    if let Some(element) = web_sys::window()
+        .and_then(|window| window.document())
+        .and_then(|document| document.get_element_by_id(id))
+        .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok())
+    {
+        let _ = element.focus();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = id;
+}
+
+fn reload_policy_page() {
+    #[cfg(target_arch = "wasm32")]
+    if let Some(window) = web_sys::window() {
+        let _ = window.location().reload();
+    }
+}
+
+fn evidence_field_id(index: usize, kind: &str, field: &str) -> String {
+    format!("policy-evidence-{kind}-{field}-{index}")
+}
+
+fn evidence_error_id(index: usize) -> String {
+    format!("policy-evidence-error-{index}")
+}
+
+#[cfg(target_arch = "wasm32")]
+fn policy_editor_tabs_are_horizontal() -> bool {
+    web_sys::window()
+        .and_then(|window| window.inner_width().ok())
+        .and_then(|width| width.as_f64())
+        .is_some_and(|width| width <= 700.0)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn restore_policy_editor_focus(target: Option<&web_sys::HtmlElement>) {
+    let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+        return;
+    };
+    if let Some(target) = target {
+        let tag_name = target.tag_name();
+        let connected = js_sys::Reflect::get(target.as_ref(), &"isConnected".into())
+            .ok()
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        if connected && !matches!(tag_name.as_str(), "BODY" | "HTML") && target.focus().is_ok() {
+            return;
+        }
+    }
+
+    // The opener can disappear when a drawer closes or a save refreshes a list.
+    // Focus the owning page instead of an unrelated policy card action.
+    if let Ok(Some(element)) = document.query_selector("main h1, main [role='heading']")
+        && let Ok(element) = element.dyn_into::<web_sys::HtmlElement>()
+    {
+        if element.tab_index() < 0 {
+            let _ = element.set_attribute("tabindex", "-1");
+        }
+        let _ = element.focus();
+    }
+}
+
+// Resolve the boundary from the rendered state so dynamic actions and disabled
+// controls cannot create a gap in the modal's focus loop.
+fn focus_policy_editor_boundary(forward: bool) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let Some(dialog) = web_sys::window()
+            .and_then(|window| window.document())
+            .and_then(|document| document.get_element_by_id("policy-editor-dialog"))
+        else {
+            return;
+        };
+        let Ok(query_selector_all) = js_sys::Reflect::get(
+            dialog.as_ref(),
+            &wasm_bindgen::JsValue::from_str("querySelectorAll"),
+        )
+        .and_then(|value| value.dyn_into::<js_sys::Function>()) else {
+            return;
+        };
+        let Ok(nodes) = query_selector_all.call1(
+            dialog.as_ref(),
+            &wasm_bindgen::JsValue::from_str("button, [href], input, select, textarea, [tabindex]"),
+        ) else {
+            return;
+        };
+        let focusable = js_sys::Array::from(&nodes)
+            .iter()
+            .filter_map(|node| node.dyn_into::<web_sys::HtmlElement>().ok())
+            .filter(|element| {
+                !element.class_list().contains("cf-focus-sentinel")
+                    && !element.has_attribute("disabled")
+                    && element.tab_index() >= 0
+                    && !js_sys::Reflect::get(element.as_ref(), &"offsetParent".into())
+                        .is_ok_and(|parent| parent.is_null())
+            })
+            .collect::<Vec<_>>();
+        if let Some(element) = if forward {
+            focusable.first()
+        } else {
+            focusable.last()
+        } {
+            let _ = element.focus();
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = forward;
 }
 
 fn rule_label(kind: &str) -> &'static str {
@@ -932,6 +1096,13 @@ enum MappingLoadState {
     Loading,
     Failed,
     Loaded,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MappingCatalogRetry {
+    Frameworks,
+    Versions,
+    Requirements,
 }
 
 /// Independent editor state dimensions.
@@ -1436,6 +1607,8 @@ fn PolicyMappingsTab(
     /// when this tab is first shown.
     mut mapping_load_state: Signal<MappingLoadState>,
     mut mapping_load_error: Signal<Option<String>>,
+    mut dialog_busy: Signal<bool>,
+    on_compliance_error: EventHandler<String>,
 ) -> Element {
     let mapping_target =
         mapping_editor_target(is_editing, editing_policy_version_id, mappings_editable);
@@ -1452,16 +1625,39 @@ fn PolicyMappingsTab(
     let mut relationship = use_signal(|| "implements".to_string());
     let mut coverage = use_signal(|| "full".to_string());
     let mut rationale = use_signal(String::new);
-    let mut saving = use_signal(|| false);
     let mut show_mapping_editor = use_signal(|| false);
     let mut editing_mapping_id: Signal<Option<Uuid>> = use_signal(|| None);
+    let mut error_focus_pending = use_signal(|| false);
+    let mut mapping_action_focus_pending = use_signal(|| false);
+    let mut frameworks_loading = use_signal(|| true);
+    let mut catalog_retry: Signal<Option<MappingCatalogRetry>> = use_signal(|| None);
+
+    use_effect(move || {
+        if error_focus_pending() && !dialog_busy() {
+            focus_policy_editor_element("policy-mapping-editor-error");
+            error_focus_pending.set(false);
+        }
+        if mapping_action_focus_pending() && !dialog_busy() {
+            focus_policy_editor_element("policy-mapping-add-trigger");
+            mapping_action_focus_pending.set(false);
+        }
+    });
 
     if !*loaded.read() {
         loaded.set(true);
         spawn(async move {
             match fetch_compliance_frameworks().await {
-                Ok(value) => frameworks.set(value),
-                Err(e) => error.set(Some(format!("Failed to load frameworks: {e}"))),
+                Ok(value) => {
+                    frameworks.set(value);
+                    frameworks_loading.set(false);
+                    catalog_retry.set(None);
+                }
+                Err(e) => {
+                    error.set(Some(format!("Failed to load frameworks: {e}")));
+                    frameworks_loading.set(false);
+                    catalog_retry.set(Some(MappingCatalogRetry::Frameworks));
+                    on_compliance_error.call("policy-mapping-editor-error".to_string());
+                }
             }
         });
     }
@@ -1493,12 +1689,66 @@ fn PolicyMappingsTab(
             div { style: "font-size:12px;color:var(--cf-text-secondary);margin-bottom:2px;line-height:1.5;",
                 "Map this policy to the compliance requirements it implements, supports, or provides evidence for. Policies can map to requirements from multiple frameworks."
             }
+            if let Some(text) = &*error.read() {
+                div { id: "policy-mapping-editor-error", class: "sd-callout sd-callout-error", role: "alert", tabindex: "-1", style: "font-size:11px;",
+                    div { "{text}" }
+                    if let Some(retry) = catalog_retry() {
+                        button {
+                            class: "btn btn-ghost xs focus-ring",
+                            "data-testid": match retry {
+                                MappingCatalogRetry::Frameworks => "policy-frameworks-retry",
+                                MappingCatalogRetry::Versions => "policy-framework-versions-retry",
+                                MappingCatalogRetry::Requirements => "policy-requirements-retry",
+                            },
+                            disabled: frameworks_loading(),
+                            style: "margin-top:6px;",
+                            onclick: move |_| {
+                                error.set(None);
+                                frameworks_loading.set(true);
+                                catalog_retry.set(None);
+                                spawn(async move {
+                                    let result = match retry {
+                                        MappingCatalogRetry::Frameworks => fetch_compliance_frameworks()
+                                            .await
+                                            .map(|value| frameworks.set(value))
+                                            .map_err(|e| format!("Failed to load frameworks: {e}")),
+                                        MappingCatalogRetry::Versions => match *framework_id.read() {
+                                            Some(id) => fetch_compliance_framework_versions(&id)
+                                                .await
+                                                .map(|value| versions.set(value))
+                                                .map_err(|e| format!("Failed to load framework versions: {e}")),
+                                            None => Err("Select a framework before retrying its versions.".to_string()),
+                                        },
+                                        MappingCatalogRetry::Requirements => match *version_id.read() {
+                                            Some(id) => {
+                                                let query = search.read().clone();
+                                                search_requirements(&id, Some(&query), None, 25, 0)
+                                                    .await
+                                                    .map(|value| results.set(value))
+                                                    .map_err(|e| format!("Failed to search requirements: {e}"))
+                                            }
+                                            None => Err("Select a framework version before retrying requirement search.".to_string()),
+                                        },
+                                    };
+                                    frameworks_loading.set(false);
+                                    if let Err(message) = result {
+                                        error.set(Some(message));
+                                        catalog_retry.set(Some(retry));
+                                        on_compliance_error.call("policy-mapping-editor-error".to_string());
+                                    }
+                                });
+                            },
+                            if frameworks_loading() { "Retrying…" } else { "Retry" }
+                        }
+                    }
+                }
+            }
             if mapping_state == MappingLoadState::Loading {
                 div { class: "sd-callout sd-callout-info", "data-testid": "policy-mappings-loading",
                     div { style: "font-size:12px;", "Loading compliance mappings…" }
                 }
             } else if mapping_state == MappingLoadState::Failed {
-                div { class: "sd-callout sd-callout-warn", "data-testid": "policy-mappings-error",
+                div { id: "policy-mappings-error", class: "sd-callout sd-callout-warn", "data-testid": "policy-mappings-error", role: "alert", tabindex: "-1",
                     div { style: "font-size:12px;",
                         strong { "Compliance mappings unavailable." }
                         span { " " }
@@ -1516,10 +1766,11 @@ fn PolicyMappingsTab(
                                 spawn(async move {
                                     match fetch_policy_requirement_mappings(&policy_version_id).await {
                                         Ok(value) => { mappings.set(value); mapping_load_state.set(MappingLoadState::Loaded); }
-                                        Err(e) => {
-                                            mapping_load_error.set(Some(format!("Failed to load compliance mappings: {e}")));
-                                            mapping_load_state.set(MappingLoadState::Failed);
-                                        }
+                                         Err(e) => {
+                                             mapping_load_error.set(Some(format!("Failed to load compliance mappings: {e}")));
+                                             mapping_load_state.set(MappingLoadState::Failed);
+                                             on_compliance_error.call("policy-mappings-error".to_string());
+                                         }
                                     }
                                 });
                             },
@@ -1553,7 +1804,7 @@ fn PolicyMappingsTab(
                                             div { style: "display:flex;gap:6px;margin-top:2px;", span { class: "chip chip-neutral", style: "font-size:10px;", {match row.relationship.as_str() { "implements" => "Implements", "supports" => "Supports", _ => "Evidence for" }} }, span { class: if row.coverage == "full" { "chip chip-success" } else { "chip chip-warn" }, style: "font-size:10px;", {if row.coverage == "full" { "Full" } else { "Partial" }} }, span { class: "chip chip-neutral", style: "font-size:10px;", "Pending" } }
                                             if let Some(text) = &row.rationale { if !text.is_empty() { div { style: "color:var(--cf-text-muted);font-size:11px;margin-top:2px;", "{text}" } } }
                                         }
-                                        button { class: "btn btn-ghost xs focus-ring", style: "color:var(--cf-text-muted);padding:4px 6px;", title: "Remove mapping", onclick: move |_| { let mut next = pending_mappings.read().clone(); remove_pending_mapping(&mut next, requirement_version_id); pending_mappings.set(next); }, "×" }
+                                        button { class: "btn btn-ghost xs focus-ring", style: "color:var(--cf-text-muted);padding:4px 6px;", title: "Remove mapping", onclick: move |_| { let mut next = pending_mappings.read().clone(); remove_pending_mapping(&mut next, requirement_version_id); pending_mappings.set(next); mapping_action_focus_pending.set(true); }, "×" }
                                     } }
                                 }
                             }
@@ -1606,7 +1857,36 @@ fn PolicyMappingsTab(
                                                      rationale.set(edit_row.rationale.clone().unwrap_or_default());
                                                      show_mapping_editor.set(true);
                                                  }, "Edit" }
-                                                 button { class: "btn btn-ghost xs focus-ring", style: "color:var(--cf-text-muted);padding:4px 6px;", title: "Remove mapping", onclick: move |_| { let row_id = row.id; spawn(async move { if let Err(e) = delete_policy_mapping(&policy_id, &row_id).await { error.set(Some(format!("Failed to remove mapping: {e}"))); } if let Ok(value) = fetch_policy_requirement_mappings(&policy_id).await { mappings.set(value); } }); }, "×" }
+                                        button { class: "btn btn-ghost xs focus-ring", style: "color:var(--cf-text-muted);padding:4px 6px;", title: "Remove mapping", onclick: move |_| {
+                                            if dialog_busy() { return; }
+                                            let row_id = row.id;
+                                            focus_policy_editor_element("policy-editor-dialog");
+                                            error.set(None);
+                                            catalog_retry.set(None);
+                                            dialog_busy.set(true);
+                                            spawn(async move {
+                                                match delete_policy_mapping(&policy_id, &row_id).await {
+                                                    Ok(()) => match fetch_policy_requirement_mappings(&policy_id).await {
+                                                        Ok(value) => {
+                                                            mappings.set(value);
+                                                            mapping_load_error.set(None);
+                                                            mapping_load_state.set(MappingLoadState::Loaded);
+                                                            mapping_action_focus_pending.set(true);
+                                                        }
+                                                        Err(e) => {
+                                                            mapping_load_error.set(Some(format!("Mapping removed, but refresh failed: {e}")));
+                                                            mapping_load_state.set(MappingLoadState::Failed);
+                                                            on_compliance_error.call("policy-mappings-error".to_string());
+                                                        }
+                                                    },
+                                                    Err(e) => {
+                                                        error.set(Some(format!("Failed to remove mapping: {e}")));
+                                                        error_focus_pending.set(true);
+                                                    }
+                                                }
+                                                dialog_busy.set(false);
+                                            });
+                                        }, "×" }
                                              }
                                          } else { span { class: "chip chip-neutral", style: "font-size:10px;", "Read-only" } }
                                     }
@@ -1618,18 +1898,18 @@ fn PolicyMappingsTab(
                 }
             }
             if mapping_target != MappingEditorTarget::Unavailable && !show_mapping_editor() {
-                button { class: "btn btn-ghost focus-ring", style: "align-self:flex-start;", onclick: move |_| show_mapping_editor.set(true), "+ Add mapping" }
+                button { id: "policy-mapping-add-trigger", class: "btn btn-ghost focus-ring", style: "align-self:flex-start;", onclick: move |_| show_mapping_editor.set(true), "+ Add mapping" }
             }
             if mapping_target != MappingEditorTarget::Unavailable && show_mapping_editor() {
                 div { style: "border:1px solid var(--cf-brand-purple);border-radius:10px;padding:14px;background:color-mix(in oklab, var(--cf-brand-purple) 5%, var(--cf-card-bg));display:flex;flex-direction:column;gap:14px;margin-top:8px;",
                      div { style: "font-size:12.5px;font-weight:600;", if editing_mapping_id.read().is_some() { "Edit mapping" } else { "Add mapping" } }
                     div { style: "font-size:11px;color:var(--cf-text-muted);margin-top:-4px;line-height:1.4;", "Map this policy to a compliance requirement it implements, supports, or provides evidence for." }
-                    div { class: "field", label { r#for: "policy-mapping-framework", style: "font-size:11px;", "Framework" }, select { id: "policy-mapping-framework", class: "input focus-ring", onchange: move |event| { let value = event.value(); if let Ok(id) = value.parse() { framework_id.set(Some(id)); spawn(async move { if let Ok(value) = fetch_compliance_framework_versions(&id).await { versions.set(value); } }); } }, option { value: "", "— Select framework —" }, for item in frameworks.read().iter() { option { value: "{item.id}", "{item.name}" } } } }
+                    div { class: "field", label { r#for: "policy-mapping-framework", style: "font-size:11px;", "Framework" }, select { id: "policy-mapping-framework", class: "input focus-ring", onchange: move |event| { let value = event.value(); versions.set(Vec::new()); version_id.set(None); requirement_id.set(None); requirement.set(None); results.set(Vec::new()); error.set(None); catalog_retry.set(None); if let Ok(id) = value.parse() { framework_id.set(Some(id)); spawn(async move { match fetch_compliance_framework_versions(&id).await { Ok(value) => versions.set(value), Err(e) => { error.set(Some(format!("Failed to load framework versions: {e}"))); catalog_retry.set(Some(MappingCatalogRetry::Versions)); on_compliance_error.call("policy-mapping-editor-error".to_string()); } } }); } }, option { value: "", "— Select framework —" }, for item in frameworks.read().iter() { option { value: "{item.id}", "{item.name}" } } } }
                     if !versions.read().is_empty() { div { class: "field", label { r#for: "policy-mapping-version", style: "font-size:11px;", "Version" }, select { id: "policy-mapping-version", class: "input focus-ring", onchange: move |event| { version_id.set(event.value().parse().ok()); }, option { value: "", "— Select version —" }, for item in versions.read().iter() { option { value: "{item.id}", "{item.version}" } } } } }
                     if version_id.read().is_some() && requirement.read().is_none() {
                         div { class: "field",
                             label { r#for: "policy-mapping-requirement", style: "font-size:11px;", "Requirement" }
-                            input { id: "policy-mapping-requirement", class: "input focus-ring", placeholder: "Search by ID, title, CCI, SRG…", value: "{search}", oninput: move |event| { let value = event.value(); search.set(value.clone()); if let Some(id) = *version_id.read() { spawn(async move { if let Ok(value) = search_requirements(&id, Some(&value), None, 25, 0).await { results.set(value); } }); } } }
+                            input { id: "policy-mapping-requirement", class: "input focus-ring", placeholder: "Search by ID, title, CCI, SRG…", value: "{search}", oninput: move |event| { let value = event.value(); search.set(value.clone()); error.set(None); catalog_retry.set(None); if let Some(id) = *version_id.read() { spawn(async move { match search_requirements(&id, Some(&value), None, 25, 0).await { Ok(value) => results.set(value), Err(e) => { results.set(Vec::new()); error.set(Some(format!("Failed to search requirements: {e}"))); catalog_retry.set(Some(MappingCatalogRetry::Requirements)); on_compliance_error.call("policy-mapping-editor-error".to_string()); } } }); } } }
                             if requirement_id.read().is_none() {
                                 for item in results.read().iter() {
                                     {
@@ -1674,31 +1954,34 @@ fn PolicyMappingsTab(
                             }
                         }
                         div { class: "field", label { r#for: "policy-mapping-rationale", style: "font-size:11px;", "Mapping rationale " span { style: "color:var(--cf-text-muted);font-weight:400;", "· optional" } }, textarea { id: "policy-mapping-rationale", class: "input focus-ring", rows: "2", value: "{rationale}", placeholder: "Why this policy satisfies the requirement", style: "resize:vertical;", oninput: move |event| rationale.set(event.value()) } }
-                        if let Some(text) = &*error.read() { div { class: "sd-callout sd-callout-error", style: "font-size:11px;", "{text}" } }
                         div { style: "display:flex;justify-content:flex-end;gap:8px;",
-                         button { class: "btn btn-ghost focus-ring", r#type: "button", onclick: move |_| { editing_mapping_id.set(None); show_mapping_editor.set(false); }, "Cancel" }
-                         button { class: "btn btn-primary focus-ring", disabled: *saving.read(), onclick: move |_| {
+                         button { class: "btn btn-ghost focus-ring", r#type: "button", onclick: move |_| { editing_mapping_id.set(None); show_mapping_editor.set(false); mapping_action_focus_pending.set(true); }, "Cancel" }
+                         button { class: "btn btn-primary focus-ring", onclick: move |_| {
+                            if dialog_busy() { return; }
                             error.set(None);
-                            let Some(rv_id) = *requirement_id.read() else { error.set(Some("Select a requirement.".into())); return; };
+                            catalog_retry.set(None);
+                            let Some(rv_id) = *requirement_id.read() else { error.set(Some("Select a requirement.".into())); error_focus_pending.set(true); return; };
                             let relationship_value = relationship.read().clone();
                             let coverage_value = coverage.read().clone();
                             let rationale_value = non_empty(rationale.read().clone());
                             match mapping_target {
                                 MappingEditorTarget::Pending => {
-                                    let Some(item) = requirement.read().clone() else { error.set(Some("Select a requirement.".into())); return; };
-                                    let Some(fw_id) = *framework_id.read() else { error.set(Some("Select a framework.".into())); return; };
-                                    let Some(fv_id) = *version_id.read() else { error.set(Some("Select a framework version.".into())); return; };
-                                    let Some(fw) = frameworks.read().iter().find(|item| item.id == fw_id).cloned() else { error.set(Some("Selected framework is unavailable.".into())); return; };
-                                    let Some(fv) = versions.read().iter().find(|item| item.id == fv_id).cloned() else { error.set(Some("Selected framework version is unavailable.".into())); return; };
+                                    let Some(item) = requirement.read().clone() else { error.set(Some("Select a requirement.".into())); error_focus_pending.set(true); return; };
+                                    let Some(fw_id) = *framework_id.read() else { error.set(Some("Select a framework.".into())); error_focus_pending.set(true); return; };
+                                    let Some(fv_id) = *version_id.read() else { error.set(Some("Select a framework version.".into())); error_focus_pending.set(true); return; };
+                                    let Some(fw) = frameworks.read().iter().find(|item| item.id == fw_id).cloned() else { error.set(Some("Selected framework is unavailable.".into())); error_focus_pending.set(true); return; };
+                                    let Some(fv) = versions.read().iter().find(|item| item.id == fv_id).cloned() else { error.set(Some("Selected framework version is unavailable.".into())); error_focus_pending.set(true); return; };
                                     let mut next = pending_mappings.read().clone();
                                     match add_pending_mapping(&mut next, pending_mapping_from_selection(&fw, &fv, &item, relationship_value, coverage_value, rationale_value)) {
-                                         Ok(()) => { pending_mappings.set(next); requirement_id.set(None); requirement.set(None); search.set(String::new()); results.set(Vec::new()); relationship.set("implements".into()); coverage.set("full".into()); rationale.set(String::new()); show_mapping_editor.set(false); }
-                                        Err(e) => error.set(Some(e.to_string())),
+                                         Ok(()) => { pending_mappings.set(next); requirement_id.set(None); requirement.set(None); search.set(String::new()); results.set(Vec::new()); relationship.set("implements".into()); coverage.set("full".into()); rationale.set(String::new()); show_mapping_editor.set(false); mapping_action_focus_pending.set(true); }
+                                        Err(e) => { error.set(Some(e.to_string())); error_focus_pending.set(true); }
                                     }
-                                }
+                                 }
                                  MappingEditorTarget::Persisted(policy_id) => {
-                                     saving.set(true);
+                                     focus_policy_editor_element("policy-editor-dialog");
+                                     dialog_busy.set(true);
                                      spawn(async move {
+                                         let was_editing = editing_mapping_id.read().is_some();
                                          let result = if let Some(mapping_id) = *editing_mapping_id.read() {
                                              let request = UpdatePolicyMappingRequest { relationship: relationship_value, coverage: coverage_value, rationale: rationale_value };
                                              update_policy_mapping(&policy_id, &mapping_id, &request).await
@@ -1707,15 +1990,43 @@ fn PolicyMappingsTab(
                                              create_policy_mapping(&policy_id, &request).await
                                          };
                                          match result {
-                                              Ok(_) => { if let Ok(value) = fetch_policy_requirement_mappings(&policy_id).await { mappings.set(value); } editing_mapping_id.set(None); requirement_id.set(None); requirement.set(None); version_id.set(None); framework_id.set(None); search.set(String::new()); rationale.set(String::new()); results.set(Vec::new()); versions.set(Vec::new()); show_mapping_editor.set(false); }
-                                            Err(e) => error.set(Some(format!("Failed to add mapping: {e}"))),
-                                        }
-                                        saving.set(false);
-                                    });
+                                             Ok(_) => {
+                                                 editing_mapping_id.set(None);
+                                                 requirement_id.set(None);
+                                                 requirement.set(None);
+                                                 version_id.set(None);
+                                                 framework_id.set(None);
+                                                 search.set(String::new());
+                                                 rationale.set(String::new());
+                                                 results.set(Vec::new());
+                                                 versions.set(Vec::new());
+                                                 show_mapping_editor.set(false);
+                                                 match fetch_policy_requirement_mappings(&policy_id).await {
+                                                     Ok(value) => {
+                                                         mappings.set(value);
+                                                         mapping_load_error.set(None);
+                                                         mapping_load_state.set(MappingLoadState::Loaded);
+                                                         mapping_action_focus_pending.set(true);
+                                                     }
+                                                     Err(e) => {
+                                                         mapping_load_error.set(Some(format!("Mapping saved, but refresh failed: {e}")));
+                                                         mapping_load_state.set(MappingLoadState::Failed);
+                                                         on_compliance_error.call("policy-mappings-error".to_string());
+                                                     }
+                                                 }
+                                             }
+                                             Err(e) => {
+                                                 let action = if was_editing { "update" } else { "add" };
+                                                 error.set(Some(format!("Failed to {action} mapping: {e}")));
+                                                 error_focus_pending.set(true);
+                                             }
+                                         }
+                                         dialog_busy.set(false);
+                                     });
                                 }
                                 MappingEditorTarget::Unavailable => {}
                             }
-                        }, if *saving.read() { "Saving..." } else if editing_mapping_id.read().is_some() { "Save mapping" } else { "Add mapping" } }
+                        }, if dialog_busy() { "Saving..." } else if editing_mapping_id.read().is_some() { "Save mapping" } else { "Add mapping" } }
                         }
                     }
                 }
@@ -1888,6 +2199,41 @@ pub fn PolicyEditorModal(
     let mut add_rule_kind = use_signal(String::new);
     let mut add_evidence_kind = use_signal(String::new);
     let mut active_tab = use_signal(|| PolicyEditorTab::Details);
+    let mut tabs_horizontal = use_signal(|| {
+        #[cfg(target_arch = "wasm32")]
+        {
+            return policy_editor_tabs_are_horizontal();
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        false
+    });
+    #[cfg(target_arch = "wasm32")]
+    let orientation_resize_handler = use_hook(|| {
+        let handler = Closure::<dyn FnMut()>::new(move || {
+            tabs_horizontal.set(policy_editor_tabs_are_horizontal());
+        });
+        if let Some(window) = web_sys::window() {
+            let _ =
+                window.add_event_listener_with_callback("resize", handler.as_ref().unchecked_ref());
+        }
+        Rc::new(handler)
+    });
+    #[cfg(target_arch = "wasm32")]
+    {
+        let handler = orientation_resize_handler.clone();
+        use_drop(move || {
+            if let Some(window) = web_sys::window() {
+                let _ = window.remove_event_listener_with_callback(
+                    "resize",
+                    handler.as_ref().as_ref().unchecked_ref(),
+                );
+            }
+        });
+    }
+    // Mount Compliance on first use and retain it afterward. Its local draft
+    // survives tab changes without fetching framework data before it is needed.
+    let mut mappings_tab_mounted = use_signal(|| false);
+    let mut compliance_error_focus_pending: Signal<Option<String>> = use_signal(|| None);
 
     // ── Mappings tab state ────────────────────────────────────────────────────
     let mut mappings: Signal<Vec<PolicyMappingRow>> = use_signal(Vec::new);
@@ -1924,6 +2270,10 @@ pub fn PolicyEditorModal(
                         mapping_load_error
                             .set(Some(format!("Failed to load compliance mappings: {error}")));
                         mapping_load_state.set(MappingLoadState::Failed);
+                        mappings_tab_mounted.set(true);
+                        active_tab.set(PolicyEditorTab::Mappings);
+                        compliance_error_focus_pending
+                            .set(Some("policy-mappings-error".to_string()));
                     }
                 }
             });
@@ -1939,8 +2289,75 @@ pub fn PolicyEditorModal(
 
     let mut save_error = use_signal(String::new);
     let mut is_saving = use_signal(|| false);
+    // A successful mutation is not retried when only the catalog refresh fails.
+    // The fallback keeps a newly created policy visible if it is outside page 1.
+    let mut catalog_refresh_failed = use_signal(|| false);
+    let mut catalog_refresh_fallback: Signal<Option<PolicyDefinition>> = use_signal(|| None);
     let mut confirm_delete = use_signal(|| false);
     let mut delete_typed = use_signal(String::new);
+    let mut delete_succeeded = use_signal(|| false);
+    let mut delete_cancel_focus_pending = use_signal(|| false);
+    let mut error_focus_pending = use_signal(|| false);
+    let mut evidence_validation_attempted = use_signal(|| false);
+    let mut evidence_focus_pending: Signal<Option<String>> = use_signal(|| None);
+    let mut rule_action_focus_pending = use_signal(|| false);
+    let mut evidence_action_focus_pending = use_signal(|| false);
+
+    use_effect(move || {
+        if delete_cancel_focus_pending() && !confirm_delete() {
+            focus_policy_editor_element("policy-editor-delete-trigger");
+            delete_cancel_focus_pending.set(false);
+        }
+        if error_focus_pending() && !is_saving() {
+            focus_policy_editor_element("policy-editor-error");
+            error_focus_pending.set(false);
+        }
+        let compliance_target = compliance_error_focus_pending.read().clone();
+        if let Some(id) = compliance_target
+            && !is_saving()
+        {
+            mappings_tab_mounted.set(true);
+            active_tab.set(PolicyEditorTab::Mappings);
+            focus_policy_editor_element(&id);
+            compliance_error_focus_pending.set(None);
+        }
+        let evidence_target = evidence_focus_pending.read().clone();
+        if let Some(id) = evidence_target {
+            focus_policy_editor_element(&id);
+            evidence_focus_pending.set(None);
+        }
+        if rule_action_focus_pending() {
+            focus_policy_editor_element("policy-editor-add-rule");
+            rule_action_focus_pending.set(false);
+        }
+        if evidence_action_focus_pending() {
+            focus_policy_editor_element("policy-editor-add-evidence");
+            evidence_action_focus_pending.set(false);
+        }
+    });
+
+    // Restore the control that opened the editor. This follows the same
+    // web_sys focus approach as the shared Import / Export menu.
+    #[cfg(target_arch = "wasm32")]
+    let restore_focus = use_hook(|| {
+        web_sys::window()
+            .and_then(|window| window.document())
+            .and_then(|document| document.active_element())
+            .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok())
+    });
+    #[cfg(target_arch = "wasm32")]
+    {
+        let restore_focus = restore_focus.clone();
+        let delete_succeeded_for_focus = delete_succeeded;
+        use_drop(move || {
+            let target = if delete_succeeded_for_focus() {
+                None
+            } else {
+                restore_focus.as_ref()
+            };
+            restore_policy_editor_focus(target);
+        });
+    }
 
     let name_value = edit_name.read().clone();
     let name_missing = name_value.trim().is_empty();
@@ -1954,7 +2371,10 @@ pub fn PolicyEditorModal(
     );
     let enforcement_opaque = is_editing
         && existing_enforcement_is_opaque(*edit_format.read(), &existing_type, &existing_config);
-    let can_save = !name_missing && current_save_blocker.is_none() && !*is_saving.read();
+    let can_save = !name_missing
+        && current_save_blocker.is_none()
+        && !*is_saving.read()
+        && !catalog_refresh_failed();
     let rule_count = rules.read().len();
     let evidence_count = evidence.read().len();
     let selected_category =
@@ -1997,51 +2417,137 @@ pub fn PolicyEditorModal(
     rsx! {
         div {
             class: "modal-backdrop cf-modal-overlay-z50",
-            onclick: move |_| on_close.call(()),
+            role: "presentation",
+            onclick: move |_| if !is_saving() { on_close.call(()) },
             div {
-                class: "modal cf-policy-modal-panel",
+                id: "policy-editor-dialog",
+                class: "modal cf-policy-modal-panel cf-policy-editor-dialog",
                 "data-testid": "policy-editor-modal",
-                style: "width:min(680px,96vw);max-height:92vh;",
+                role: "dialog",
+                aria_modal: "true",
+                aria_labelledby: "policy-editor-title",
+                aria_describedby: "policy-editor-subtitle",
+                aria_busy: if is_saving() { "true" } else { "false" },
+                tabindex: "-1",
                 onclick: |evt| evt.stop_propagation(),
+                onkeydown: move |event| {
+                    if event.key() == Key::Tab && is_saving() {
+                        event.prevent_default();
+                        focus_policy_editor_element("policy-editor-dialog");
+                        return;
+                    }
+                    if event.key() == Key::Escape && !is_saving() {
+                        event.prevent_default();
+                        if confirm_delete() {
+                            delete_cancel_focus_pending.set(true);
+                            confirm_delete.set(false);
+                            delete_typed.set(String::new());
+                        } else {
+                            on_close.call(());
+                        }
+                    }
+                },
+
+                span {
+                    class: "cf-focus-sentinel",
+                    tabindex: "0",
+                    aria_label: "End of policy editor",
+                    onfocus: move |_| if is_saving() { focus_policy_editor_element("policy-editor-dialog"); } else { focus_policy_editor_boundary(false); },
+                }
 
                 if *confirm_delete.read() {
                     // ── Danger zone: typed-confirmation delete ──────────────────
                     div { class: "modal-head", style: "background:rgba(248,113,113,0.06);",
-                        h2 { style: "color:#fecaca;display:flex;align-items:center;gap:8px;",
+                        div {
+                        h2 { id: "policy-editor-title", style: "color:#fecaca;display:flex;align-items:center;gap:8px;",
                             svg { width: "16", height: "16", view_box: "0 0 24 24", fill: "none", stroke: "#f87171", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
                                 path { d: "M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" }
                                 path { d: "M12 9v4M12 17h.01" }
                             }
                             "Remove policy"
                         }
-                        p {
+                        p { id: "policy-editor-subtitle",
                             "This deletes the "
                             span { class: "mono", style: "font-weight:600;", "{name_value}" }
                             " policy."
                         }
+                        }
+                        button {
+                            class: "btn-icon focus-ring",
+                            aria_label: "Close policy editor",
+                            disabled: is_saving(),
+                            onclick: move |_| on_close.call(()),
+                            "×"
+                        }
                     }
-                    div { class: "modal-body",
+                    div { class: "modal-body cf-policy-delete-confirmation", "inert": is_saving().then_some(""), aria_busy: if is_saving() { "true" } else { "false" },
                         div { class: "field",
                             label {
+                                r#for: "policy-editor-delete-confirm",
                                 "Type "
                                 span { class: "mono", style: "color:#fecaca;font-weight:700;", "{name_value}" }
                                 " to confirm"
                             }
                             input {
+                                id: "policy-editor-delete-confirm",
+                                autofocus: true,
                                 class: "input focus-ring mono",
+                                disabled: is_saving(),
                                 placeholder: "{name_value}",
                                 value: "{delete_typed}",
+                                aria_describedby: if save_error.read().is_empty() { "policy-editor-delete-help" } else { "policy-editor-delete-help policy-editor-error" },
                                 oninput: move |event| delete_typed.set(event.value()),
                             }
                         }
+                        p { id: "policy-editor-delete-help", class: "help", "Deletion is permanent." }
                         if !save_error.read().is_empty() {
-                            div { class: "text-xs rounded px-3 py-2 cf-policy-modal-error", "{save_error}" }
+                            div { id: "policy-editor-error", class: "text-xs rounded px-3 py-2 cf-policy-modal-error", role: "alert", tabindex: "-1",
+                                div { "{save_error}" }
+                                if delete_succeeded() {
+                                    div { class: "cf-policy-delete-recovery",
+                                        button {
+                                            class: "btn btn-ghost xs focus-ring",
+                                            "data-testid": "policy-delete-refresh-retry",
+                                            disabled: is_saving(),
+                                            onclick: move |_| {
+                                                if is_saving() { return; }
+                                                let mut policy_library = policy_library;
+                                                let mut save_error = save_error;
+                                                let mut is_saving = is_saving;
+                                                let on_close = on_close;
+                                                focus_policy_editor_element("policy-editor-dialog");
+                                                is_saving.set(true);
+                                                spawn(async move {
+                                                    match policies_api::load_policies().await {
+                                                        policies_api::PolicyLoadResult::Ok(latest) => {
+                                                            policy_library.set(latest);
+                                                            is_saving.set(false);
+                                                            on_close.call(());
+                                                        }
+                                                        policies_api::PolicyLoadResult::Err(error) => {
+                                                            save_error.set(format!("Policy removed, but refresh failed: {error}"));
+                                                            is_saving.set(false);
+                                                            error_focus_pending.set(true);
+                                                        }
+                                                    }
+                                                });
+                                            },
+                                            if is_saving() { "Retrying…" } else { "Retry catalog refresh" }
+                                        }
+                                        button { class: "btn btn-ghost xs focus-ring", "data-testid": "policy-delete-close", disabled: is_saving(), onclick: move |_| on_close.call(()), "Close editor" }
+                                        button { class: "btn btn-ghost xs focus-ring", "data-testid": "policy-delete-reload", disabled: is_saving(), onclick: move |_| reload_policy_page(), "Reload page" }
+                                    }
+                                }
+                            }
                         }
                     }
-                    div { class: "modal-foot",
+                    div { class: "modal-foot cf-policy-delete-actions", "inert": is_saving().then_some(""),
                         button {
+                            id: "policy-editor-delete-cancel",
                             class: "btn btn-ghost focus-ring",
+                            disabled: is_saving(),
                             onclick: move |_| {
+                                delete_cancel_focus_pending.set(true);
                                 confirm_delete.set(false);
                                 delete_typed.set(String::new());
                             },
@@ -2049,37 +2555,49 @@ pub fn PolicyEditorModal(
                         }
                         button {
                             class: "btn focus-ring",
-                            disabled: !delete_matches,
+                            disabled: !delete_matches || is_saving() || delete_succeeded(),
                             style: if delete_matches { "background:#dc2626;color:white;" } else { "background:var(--cf-subtle-bg);color:var(--cf-text-muted);" },
                             onclick: move |_| {
+                                if is_saving() || delete_succeeded() { return; }
                                 let Some(policy_id) = *editing_policy_id.read() else { return; };
                                 let mut policy_library = policy_library;
                                 let mut save_error = save_error;
+                                let mut is_saving = is_saving;
                                 let on_close = on_close;
+                                focus_policy_editor_element("policy-editor-dialog");
+                                is_saving.set(true);
                                 spawn(async move {
                                     match delete_deployment_policy(&policy_id).await {
                                         Ok(()) => {
+                                             delete_succeeded.set(true);
                                              match policies_api::load_policies().await {
                                                  policies_api::PolicyLoadResult::Ok(latest) => {
                                                      policy_library.set(latest);
                                                      on_close.call(());
                                                  }
-                                                 policies_api::PolicyLoadResult::Err(error) => {
-                                                     save_error.set(format!("Policy removed, but refresh failed: {error}"));
-                                                 }
+                                                  policies_api::PolicyLoadResult::Err(error) => {
+                                                      save_error.set(format!("Policy removed, but refresh failed: {error}"));
+                                                      is_saving.set(false);
+                                                      error_focus_pending.set(true);
+                                                  }
                                              }
                                         }
-                                        Err(error) => save_error.set(format!("Failed to remove policy: {error}")),
+                                        Err(error) => {
+                                            save_error.set(format!("Failed to remove policy: {error}"));
+                                            is_saving.set(false);
+                                            error_focus_pending.set(true);
+                                        }
                                     }
                                 });
                             },
-                            "Remove policy"
+                            if is_saving() { "Removing…" } else if delete_succeeded() { "Policy removed" } else { "Remove policy" }
                         }
                     }
                 } else {
                     // ── Header ──────────────────────────────────────────────────
                     div { class: "modal-head",
-                        h2 { style: "display:flex;align-items:center;gap:6px;white-space:nowrap;",
+                        div {
+                        h2 { id: "policy-editor-title", style: "display:flex;align-items:center;gap:6px;",
                             svg { width: "14", height: "14", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round", style: "flex-shrink:0;",
                                 if is_editing {
                                     circle { cx: "12", cy: "12", r: "3" }
@@ -2090,22 +2608,55 @@ pub fn PolicyEditorModal(
                             }
                             "{title}"
                         }
-                        p { style: "white-space:nowrap;", "{subtitle}" }
+                        p { id: "policy-editor-subtitle", "{subtitle}" }
+                        }
+                        button {
+                            class: "btn-icon focus-ring",
+                            aria_label: "Close policy editor",
+                            disabled: is_saving(),
+                            onclick: move |_| on_close.call(()),
+                            "×"
+                        }
                     }
 
                     // ── Body ────────────────────────────────────────────────────
-                    div { class: "modal-body cf-policy-modal-body", style: "overflow-y:auto;",
+                    div {
+                        class: "modal-body cf-policy-modal-body",
+                        style: "overflow-y:auto;",
+                        "inert": is_saving().then_some(""),
                         // Section order follows the design: Basics, Enforcement,
                         // Compliance, Evidence, then read-only Provenance.
-                        div { class: "cf-modal-tabs", role: "tablist", aria_label: "Policy editor sections",
-                            PolicyEditorTabButton { tab: PolicyEditorTab::Details, active: *active_tab.read(), label: "Basics", test_id: "policy-editor-tab-details", on_select: move |_| active_tab.set(PolicyEditorTab::Details) }
-                            PolicyEditorTabButton { tab: PolicyEditorTab::Enforcement, active: *active_tab.read(), label: if rule_count > 0 { format!("Enforcement · {rule_count}") } else if is_imported { "Enforcement · Needs refinement".to_string() } else { "Enforcement · None".to_string() }, test_id: "policy-editor-tab-enforcement", on_select: move |_| active_tab.set(PolicyEditorTab::Enforcement) }
-                            PolicyEditorTabButton { tab: PolicyEditorTab::Mappings, active: *active_tab.read(), label: match mapping_state { MappingLoadState::Loading => "Compliance · …".to_string(), MappingLoadState::Failed => "Compliance · unavailable".to_string(), MappingLoadState::Loaded if mapping_count > 0 => format!("Compliance · {mapping_count}"), MappingLoadState::Loaded => "Compliance · Unmapped".to_string() }, test_id: "policy-editor-tab-mappings", on_select: move |_| active_tab.set(PolicyEditorTab::Mappings) }
-                            PolicyEditorTabButton { tab: PolicyEditorTab::Evidence, active: *active_tab.read(), label: format!("Evidence · {evidence_count}"), test_id: "policy-editor-tab-evidence", on_select: move |_| active_tab.set(PolicyEditorTab::Evidence) }
-                            if is_imported {
-                                PolicyEditorTabButton { tab: PolicyEditorTab::Provenance, active: *active_tab.read(), label: "Provenance".to_string(), test_id: "policy-editor-tab-provenance", on_select: move |_| active_tab.set(PolicyEditorTab::Provenance) }
+                        div { class: "cf-policy-editor-layout",
+                            aside { class: "cf-policy-editor-rail",
+                                div { class: "cf-modal-tabs cf-policy-editor-nav", role: "tablist", aria_label: "Policy editor sections", aria_orientation: if tabs_horizontal() { "horizontal" } else { "vertical" },
+                                    PolicyEditorTabButton { tab: PolicyEditorTab::Details, active: *active_tab.read(), include_provenance: is_imported, horizontal: tabs_horizontal(), label: "Basics", on_select: move |tab| { if tab == PolicyEditorTab::Mappings { mappings_tab_mounted.set(true); } active_tab.set(tab); } }
+                                    PolicyEditorTabButton { tab: PolicyEditorTab::Enforcement, active: *active_tab.read(), include_provenance: is_imported, horizontal: tabs_horizontal(), label: if rule_count > 0 { format!("Enforcement · {rule_count}") } else if is_imported { "Enforcement · Needs refinement".to_string() } else { "Enforcement · None".to_string() }, on_select: move |tab| { if tab == PolicyEditorTab::Mappings { mappings_tab_mounted.set(true); } active_tab.set(tab); } }
+                                    PolicyEditorTabButton { tab: PolicyEditorTab::Mappings, active: *active_tab.read(), include_provenance: is_imported, horizontal: tabs_horizontal(), label: match mapping_state { MappingLoadState::Loading => "Compliance · …".to_string(), MappingLoadState::Failed => "Compliance · unavailable".to_string(), MappingLoadState::Loaded if mapping_count > 0 => format!("Compliance · {mapping_count}"), MappingLoadState::Loaded => "Compliance · Unmapped".to_string() }, on_select: move |tab| { mappings_tab_mounted.set(true); active_tab.set(tab); } }
+                                    PolicyEditorTabButton { tab: PolicyEditorTab::Evidence, active: *active_tab.read(), include_provenance: is_imported, horizontal: tabs_horizontal(), label: format!("Evidence · {evidence_count}"), on_select: move |tab| { if tab == PolicyEditorTab::Mappings { mappings_tab_mounted.set(true); } active_tab.set(tab); } }
+                                    if is_imported {
+                                        PolicyEditorTabButton { tab: PolicyEditorTab::Provenance, active: *active_tab.read(), include_provenance: true, horizontal: tabs_horizontal(), label: "Provenance".to_string(), on_select: move |tab| { if tab == PolicyEditorTab::Mappings { mappings_tab_mounted.set(true); } active_tab.set(tab); } }
+                                    }
+                                }
+                                if is_imported {
+                                    div { class: "cf-policy-provenance-summary", "data-testid": "policy-editor-provenance-summary",
+                                        div { class: "cf-policy-provenance-summary-title",
+                                            span { class: "chip chip-info", "Imported" }
+                                            span { "Read-only origin" }
+                                        }
+                                        div { class: "cf-policy-provenance-summary-value", "{provenance.len()} recorded source(s)" }
+                                        if let Some(origin) = provenance.first() {
+                                            div { class: "cf-policy-provenance-summary-value mono", "{origin.filename}" }
+                                            div { class: "cf-policy-provenance-summary-value mono", "{origin.media_type}" }
+                                        }
+                                        button {
+                                            class: "btn btn-ghost xs focus-ring",
+                                            onclick: move |_| active_tab.set(PolicyEditorTab::Provenance),
+                                            "View full provenance"
+                                        }
+                                    }
+                                }
                             }
-                        }
+                            div { class: "cf-policy-editor-content",
                         div { class: "sd-callout sd-callout-info", "data-testid": "policy-editor-state", style: "margin:10px 0 0;font-size:11px;",
                             "Policy state: "
                             strong { "{policy_state.enforcement}" }
@@ -2124,13 +2675,18 @@ pub fn PolicyEditorModal(
                                 span { " This policy claims {mapping_count} compliance requirement(s) but asserts nothing yet, so it cannot pass or fail. Add enforcement to make it real." }
                             }
                         }
-                        div { class: "cf-modal-tab-panel",
+                        div {
+                        id: "policy-editor-panel",
+                        class: "cf-modal-tab-panel",
+                        role: "tabpanel",
+                        aria_labelledby: policy_editor_tab_id(*active_tab.read()),
                         if *active_tab.read() == PolicyEditorTab::Details {
                         div { style: "display:grid;grid-template-columns:1fr;gap:14px;",
                             div { class: "field",
                                 label { r#for: "policy-editor-name", "Name" }
                                 input {
                                     id: "policy-editor-name",
+                                    autofocus: true,
                                     class: if name_missing { "input focus-ring mono cf-policy-modal-field-error" } else { "input focus-ring mono" },
                                     placeholder: "e.g. canary-25",
                                     value: "{edit_name}",
@@ -2218,6 +2774,7 @@ pub fn PolicyEditorModal(
                         div { class: "field",
                             label { "Framework" }
                             select {
+                                aria_label: "Framework",
                                 class: "input focus-ring", value: "{framework}",
                                 onchange: move |event| framework.set(event.value()),
                                 option { value: "", "Select a framework" }
@@ -2227,6 +2784,7 @@ pub fn PolicyEditorModal(
                             }
                             if framework.read().as_str() == "__custom__" {
                                 input {
+                                    aria_label: "Framework name",
                                     class: "input focus-ring", style: "margin-top:8px;",
                                     placeholder: "Framework name", value: "{custom_framework}",
                                     oninput: move |event| custom_framework.set(event.value()),
@@ -2267,7 +2825,7 @@ pub fn PolicyEditorModal(
                         if framework.read().as_str() == "NIST 800-53" {
                         div { class: "field",
                             label { "Control family" }
-                            select { class: "input focus-ring", value: "{control_family}", onchange: move |event| control_family.set(event.value()),
+                            select { aria_label: "Control family", class: "input focus-ring", value: "{control_family}", onchange: move |event| control_family.set(event.value()),
                                 option { value: "", "Unassigned" }
                                 for family in NIST_CONTROL_FAMILIES { option { value: "{family}", "{family}" } }
                             }
@@ -2276,7 +2834,7 @@ pub fn PolicyEditorModal(
                         if framework.read().as_str() == "CMMC 2.0" {
                         div { class: "field",
                             label { "CMMC level" }
-                            select { class: "input focus-ring", value: "{cmmc_level}", onchange: move |event| cmmc_level.set(event.value()),
+                            select { aria_label: "CMMC level", class: "input focus-ring", value: "{cmmc_level}", onchange: move |event| cmmc_level.set(event.value()),
                                 option { value: "", "Unassigned" }
                                 option { value: "1", "Level 1" }
                                 option { value: "2", "Level 2" }
@@ -2287,12 +2845,12 @@ pub fn PolicyEditorModal(
                         if framework.read().as_str() == "CIS Benchmark" {
                         div { class: "field",
                             label { "CIS section" }
-                            input { class: "input focus-ring mono", placeholder: "e.g. 5.2.3", value: "{cis_section}", oninput: move |event| cis_section.set(event.value()) }
+                            input { aria_label: "CIS section", class: "input focus-ring mono", placeholder: "e.g. 5.2.3", value: "{cis_section}", oninput: move |event| cis_section.set(event.value()) }
                         }
                         }
                         div { class: "field",
                             label { "Severity" }
-                            div { class: "seg seg-sev", role: "radiogroup", style: "width:fit-content;",
+                            div { class: "seg seg-sev", role: "radiogroup", aria_label: "Severity", style: "width:fit-content;",
                                 for (value, label, color) in [("", "Unset", "var(--cf-text-muted)"), ("high", "High", "#f87171"), ("medium", "Medium", "#fbbf24"), ("low", "Low", "#60a5fa")] {
                                     button {
                                         key: "{value}", r#type: "button", role: "radio",
@@ -2308,12 +2866,13 @@ pub fn PolicyEditorModal(
                         }
                         div { class: "field",
                             label { "Rationale" }
-                            textarea { class: "input focus-ring", rows: "2", placeholder: "Why this policy exists — shown in detail view", style: "resize:vertical;", value: "{rationale}", oninput: move |event| rationale.set(event.value()) }
+                            textarea { aria_label: "Rationale", class: "input focus-ring", rows: "2", placeholder: "Why this policy exists — shown in detail view", style: "resize:vertical;", value: "{rationale}", oninput: move |event| rationale.set(event.value()) }
                         }
                         }
                         }
 
-                           if *active_tab.read() == PolicyEditorTab::Mappings {
+                           if mappings_tab_mounted() {
+                           div { hidden: *active_tab.read() != PolicyEditorTab::Mappings,
                                PolicyMappingsTab {
                                   is_editing,
                                   editing_policy_version_id,
@@ -2322,7 +2881,14 @@ pub fn PolicyEditorModal(
                                    pending_mappings,
                                    mapping_load_state,
                                    mapping_load_error,
+                                   dialog_busy: is_saving,
+                                   on_compliance_error: move |id: String| {
+                                       mappings_tab_mounted.set(true);
+                                       active_tab.set(PolicyEditorTab::Mappings);
+                                       compliance_error_focus_pending.set(Some(id));
+                                   },
                                }
+                           }
                            }
 
                         // Read-only imported origin, recorded at import time.
@@ -2337,6 +2903,7 @@ pub fn PolicyEditorModal(
                                 }
                                 for origin in provenance.iter() {
                                     div { key: "{origin.source_artifact_id}-{origin.origin_policy_version_id}-{origin.source_identity.clone().unwrap_or_default()}",
+                                        class: "cf-policy-provenance-detail",
                                         style: "display:flex;flex-direction:column;gap:3px;padding:9px 11px;background:var(--cf-subtle-bg);border:1px solid var(--cf-divider);border-radius:8px;font-size:11.5px;",
                                         div { style: "display:flex;gap:6px;flex-wrap:wrap;align-items:center;",
                                             span { class: "chip chip-info", style: "font-size:10px;", "Imported" }
@@ -2347,17 +2914,17 @@ pub fn PolicyEditorModal(
                                                 span { class: "chip chip-neutral", style: "font-size:10px;", "{fidelity}" }
                                             }
                                         }
-                                        div { style: "display:flex;justify-content:space-between;gap:10px;", span { "Artifact" }, span { class: "mono", "{origin.filename}" } }
-                                        div { style: "display:flex;justify-content:space-between;gap:10px;", span { "Source type" }, span { class: "mono", "{origin.media_type}" } }
-                                        div { style: "display:flex;justify-content:space-between;gap:10px;", span { "SHA-256" }, span { class: "mono", style: "overflow-wrap:anywhere;", "{origin.sha256}" } }
+                                        div { class: "cf-policy-provenance-row", span { "Artifact" }, span { class: "mono", "{origin.filename}" } }
+                                        div { class: "cf-policy-provenance-row", span { "Source type" }, span { class: "mono", "{origin.media_type}" } }
+                                        div { class: "cf-policy-provenance-row", span { "SHA-256" }, span { class: "mono", "{origin.sha256}" } }
                                         if let Some(identity) = origin.source_identity.as_ref() {
-                                            div { style: "display:flex;justify-content:space-between;gap:10px;", span { {origin.object_kind.clone().map(|kind| format!("Source {kind} ID")).unwrap_or_else(|| "Source ID".to_string())} }, span { class: "mono", "{identity}" } }
+                                            div { class: "cf-policy-provenance-row", span { {origin.object_kind.clone().map(|kind| format!("Source {kind} ID")).unwrap_or_else(|| "Source ID".to_string())} }, span { class: "mono", "{identity}" } }
                                         }
                                         if let Some(xccdf) = origin.detected_xccdf_version.as_ref() {
-                                            div { style: "display:flex;justify-content:space-between;gap:10px;", span { "XCCDF version" }, span { class: "mono", "{xccdf}" } }
+                                            div { class: "cf-policy-provenance-row", span { "XCCDF version" }, span { class: "mono", "{xccdf}" } }
                                         }
-                                        div { style: "display:flex;justify-content:space-between;gap:10px;", span { "Parser" }, span { class: "mono", "{origin.parser_version}" } }
-                                        div { style: "display:flex;justify-content:space-between;gap:10px;",
+                                        div { class: "cf-policy-provenance-row", span { "Parser" }, span { class: "mono", "{origin.parser_version}" } }
+                                        div { class: "cf-policy-provenance-row",
                                             span { "Imported" }
                                             span { class: "mono", {match origin.imported_by_display.as_ref() { Some(user) => format!("{} · {}", origin.imported_at.to_rfc3339(), user), None => origin.imported_at.to_rfc3339() }} }
                                         }
@@ -2440,10 +3007,11 @@ pub fn PolicyEditorModal(
                                                 title: "Remove rule",
                                                 onclick: move |_| {
                                                     let mut next = rules.read().clone();
-                                                    if index < next.len() { next.remove(index); }
-                                                    rules.set(next);
-                                                    enforcement_changed.set(true);
-                                                },
+                                                     if index < next.len() { next.remove(index); }
+                                                     rules.set(next);
+                                                     enforcement_changed.set(true);
+                                                     rule_action_focus_pending.set(true);
+                                                 },
                                                 svg { width: "13", height: "13", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
                                                     path { d: "M18 6 6 18M6 6l12 12" }
                                                 }
@@ -2456,6 +3024,7 @@ pub fn PolicyEditorModal(
                             if !enforcement_opaque {
                                 div { style: "margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;",
                                 select {
+                                    id: "policy-editor-add-rule",
                                     class: "input focus-ring",
                                     "data-testid": "policy-editor-add-rule",
                                     aria_label: "Add enforcement rule",
@@ -2486,7 +3055,7 @@ pub fn PolicyEditorModal(
                         }
                         }
 
-                        // Evidence for ATO builder (UI-only / not persisted)
+                        // Evidence for ATO builder.
                          if *active_tab.read() == PolicyEditorTab::Evidence {
                          div { style: "margin-top:6px;",
                              div { style: "display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px;",
@@ -2511,15 +3080,16 @@ pub fn PolicyEditorModal(
                                      div {
                                          key: "ev-{index}",
                                          style: "display:grid;grid-template-columns:1fr auto;gap:8px;align-items:flex-start;padding:8px 10px;background:var(--cf-subtle-bg);border-radius:8px;",
-                                         EvidenceEditorRow { index, evidence: ev.clone(), evidence_list: evidence }
+                                         EvidenceEditorRow { index, evidence: ev.clone(), evidence_list: evidence, show_validation: evidence_validation_attempted() }
                                          button {
                                              class: "btn-icon focus-ring",
                                              title: "Remove evidence",
                                              onclick: move |_| {
                                                  let mut next = evidence.read().clone();
-                                                 if index < next.len() { next.remove(index); }
-                                                 evidence.set(next);
-                                             },
+                                                  if index < next.len() { next.remove(index); }
+                                                  evidence.set(next);
+                                                  evidence_action_focus_pending.set(true);
+                                              },
                                              svg { width: "13", height: "13", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
                                                  path { d: "M18 6 6 18M6 6l12 12" }
                                              }
@@ -2529,6 +3099,7 @@ pub fn PolicyEditorModal(
                              }
                              div { style: "margin-top:8px;display:flex;gap:6px;",
                                  select {
+                                     id: "policy-editor-add-evidence",
                                      class: "input focus-ring",
                                      "data-testid": "policy-editor-add-evidence",
                                      style: "flex:1;font-size:12px;",
@@ -2552,9 +3123,10 @@ pub fn PolicyEditorModal(
                                          class: "btn btn-ghost focus-ring",
                                          style: "color:#f87171;border-color:rgba(248,113,113,0.3);",
                                          title: "Clear all evidence",
-                                         onclick: move |_| {
-                                             evidence.set(Vec::new());
-                                         },
+                                          onclick: move |_| {
+                                              evidence.set(Vec::new());
+                                              evidence_action_focus_pending.set(true);
+                                          },
                                          "Clear all"
                                      }
                                  }
@@ -2568,6 +3140,7 @@ pub fn PolicyEditorModal(
                             div { style: "margin-top:10px;padding-top:14px;border-top:1px solid var(--cf-divider);",
                                 div { style: "font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;color:var(--cf-text-muted);margin-bottom:8px;", "Danger zone" }
                                 button {
+                                    id: "policy-editor-delete-trigger",
                                     class: "btn btn-ghost focus-ring",
                                     style: "color:#f87171;border-color:rgba(248,113,113,0.3);",
                                     onclick: move |_| confirm_delete.set(true),
@@ -2580,28 +3153,77 @@ pub fn PolicyEditorModal(
                         }
 
                         if !save_error.read().is_empty() {
-                            div { class: "text-xs rounded px-3 py-2 cf-policy-modal-error", style: "margin-top:10px;", "{save_error}" }
+                            div { id: "policy-editor-error", class: "text-xs rounded px-3 py-2 cf-policy-modal-error", role: "alert", tabindex: "-1", style: "margin-top:10px;",
+                                div { "{save_error}" }
+                                if catalog_refresh_failed() {
+                                    button {
+                                        class: "btn btn-ghost xs focus-ring cf-policy-refresh-retry",
+                                        "data-testid": "policy-catalog-refresh-retry",
+                                        disabled: is_saving(),
+                                        onclick: move |_| {
+                                            if is_saving() { return; }
+                                            let fallback = catalog_refresh_fallback.read().clone();
+                                            let mut policy_library = policy_library;
+                                            let mut save_error = save_error;
+                                            let mut is_saving = is_saving;
+                                            let mut catalog_refresh_failed = catalog_refresh_failed;
+                                            let on_close = on_close;
+                                            focus_policy_editor_element("policy-editor-dialog");
+                                            is_saving.set(true);
+                                            spawn(async move {
+                                                match policies_api::load_policies().await {
+                                                    policies_api::PolicyLoadResult::Ok(mut latest) => {
+                                                        if let Some(fallback) = fallback
+                                                            && !latest.iter().any(|policy| policy.id == fallback.id)
+                                                        {
+                                                            latest.insert(0, fallback);
+                                                        }
+                                                        policy_library.set(latest);
+                                                        catalog_refresh_failed.set(false);
+                                                        is_saving.set(false);
+                                                        on_close.call(());
+                                                    }
+                                                    policies_api::PolicyLoadResult::Err(error) => {
+                                                        save_error.set(format!("Policy saved, but catalog refresh failed: {error}"));
+                                                        is_saving.set(false);
+                                                        error_focus_pending.set(true);
+                                                    }
+                                                }
+                                            });
+                                        },
+                                        if is_saving() { "Retrying…" } else { "Retry catalog refresh" }
+                                    }
+                                }
+                            }
                         }
 
                         if let Some(blocker) = current_save_blocker.as_ref() {
-                            div { class: "text-xs rounded px-3 py-2 cf-policy-modal-error", style: "margin-top:10px;", "{blocker}" }
+                            div { id: "policy-editor-enforcement-error", role: "alert", class: "text-xs rounded px-3 py-2 cf-policy-modal-error", style: "margin-top:10px;", "{blocker}" }
+                        }
+                            }
                         }
                     }
 
                     // ── Footer ──────────────────────────────────────────────────
                     div { class: "modal-foot",
+                        "inert": is_saving().then_some(""),
                         button {
+                            id: "policy-editor-cancel",
                             class: "btn btn-ghost focus-ring",
+                            disabled: is_saving(),
                             onclick: move |_| on_close.call(()),
                             "Cancel"
                         }
                         button {
+                            id: "policy-editor-save",
                             class: "btn btn-primary focus-ring",
                             disabled: !can_save,
                             onclick: move |_| {
+                                if is_saving() { return; }
                                 let name = edit_name.read().clone();
                                 if name.trim().is_empty() {
                                     save_error.set("Policy name is required".to_string());
+                                    error_focus_pending.set(true);
                                     return;
                                 }
                                 let description = edit_description.read().clone();
@@ -2615,12 +3237,15 @@ pub fn PolicyEditorModal(
                                     &current_rules,
                                 ) {
                                     save_error.set(blocker);
+                                    error_focus_pending.set(true);
                                     return;
                                 }
                                 let mut policy_library = policy_library;
-                                let mut save_error = save_error;
-                                let mut is_saving = is_saving;
-                                let on_close = on_close;
+                                 let mut save_error = save_error;
+                                 let mut is_saving = is_saving;
+                                 let mut catalog_refresh_failed = catalog_refresh_failed;
+                                 let mut catalog_refresh_fallback = catalog_refresh_fallback;
+                                 let on_close = on_close;
 
                                 let persisted = persisted_payload_for_save(
                                     editing_id.is_some(),
@@ -2631,6 +3256,7 @@ pub fn PolicyEditorModal(
                                 );
                                 let Some((policy_type, config)) = persisted else {
                                     save_error.set("Add at least one backend-supported assertion before saving.".to_string());
+                                    error_focus_pending.set(true);
                                     return;
                                 };
 
@@ -2659,26 +3285,30 @@ pub fn PolicyEditorModal(
                                 let selected_cis_section = if is_security && selected_framework.as_deref() == Some("CIS Benchmark") { non_empty(cis_section.read().clone()) } else { None };
                                 let selected_rationale = non_empty(rationale.read().clone());
 
-                                 save_error.set(String::new());
-                                is_saving.set(true);
-
-                                 // Validate evidence rows BEFORE async block
-                                 {
-                                     let current_evidence = evidence.read();
-                                     let validation_errors: Vec<String> = current_evidence
-                                         .iter()
-                                         .enumerate()
-                                         .filter_map(|(idx, ev)| {
-                                             ev.validate().map(|err| format!("Evidence row {}: {}", idx + 1, err))
-                                         })
-                                         .collect();
-
-                                     if !validation_errors.is_empty() {
-                                         save_error.set(validation_errors.join("; "));
-                                         is_saving.set(false);
-                                         return;
-                                     }
+                                 let evidence_snapshot = evidence.read().clone();
+                                 let pending_mapping_snapshot = pending_mappings.read().clone();
+                                 let validation_errors: Vec<(usize, &'static str, String)> = evidence_snapshot
+                                     .iter()
+                                     .enumerate()
+                                     .filter_map(|(idx, ev)| {
+                                         ev.validation_error().map(|(field, error)| (idx, field, error))
+                                     })
+                                     .collect();
+                                 if !validation_errors.is_empty() {
+                                     save_error.set(validation_errors.iter().map(|(index, _, error)| format!("Evidence row {}: {error}", index + 1)).collect::<Vec<_>>().join("; "));
+                                     evidence_validation_attempted.set(true);
+                                     let (index, field, _) = &validation_errors[0];
+                                     active_tab.set(PolicyEditorTab::Evidence);
+                                     evidence_focus_pending.set(Some(evidence_field_id(*index, &evidence_snapshot[*index].kind, field)));
+                                     return;
                                  }
+
+                                  evidence_validation_attempted.set(false);
+                                  save_error.set(String::new());
+                                  catalog_refresh_failed.set(false);
+                                  catalog_refresh_fallback.set(None);
+                                  focus_policy_editor_element("policy-editor-dialog");
+                                 is_saving.set(true);
 
                                  let initial_evidence_clone = initial_evidence.clone();
                                  spawn(async move {
@@ -2689,16 +3319,15 @@ pub fn PolicyEditorModal(
                                           // - Some([]) if cleared to empty
                                           // - Some(items) if modified/added
                                           let evidence_specs = {
-                                              let current_evidence = evidence.read();
-                                              let current_count = current_evidence.len();
+                                              let current_count = evidence_snapshot.len();
                                               let initial_count = initial_evidence_clone.len();
 
                                               // No change = preserve
-                                              if current_count == initial_count && current_evidence.clone() == initial_evidence_clone {
+                                              if current_count == initial_count && evidence_snapshot == initial_evidence_clone {
                                                   None
                                               } else {
                                                   // Changed: convert and send (including empty array if cleared)
-                                                  let specs: Vec<EvidenceSpec> = current_evidence
+                                                  let specs: Vec<EvidenceSpec> = evidence_snapshot
                                                       .iter()
                                                       .map(|ev| ev.to_evidence_spec())
                                                       .collect();
@@ -2717,18 +3346,18 @@ pub fn PolicyEditorModal(
                                               srg_ids: Some(srg_raw),
                                               cci_ids: Some(cci_raw),
                                               category: selected_category,
-                                              framework: selected_framework,
-                                              severity: selected_severity,
-                                              control_family: selected_control_family,
-                                              cmmc_level: selected_cmmc_level,
-                                              cis_section: selected_cis_section,
-                                              rationale: selected_rationale,
+                                               framework: Some(selected_framework),
+                                               severity: Some(selected_severity),
+                                               control_family: Some(selected_control_family),
+                                               cmmc_level: Some(selected_cmmc_level),
+                                               cis_section: Some(selected_cis_section),
+                                               rationale: Some(selected_rationale),
                                               evidence_specs,
                                           };
                                         update_deployment_policy(&policy_id, &request).await.map(|_| None)
                                      } else {
-                                          let evidence_specs: Vec<EvidenceSpec> = evidence.read()
-                                              .iter()
+                                           let evidence_specs: Vec<EvidenceSpec> = evidence_snapshot
+                                               .iter()
                                               .map(|ev| ev.to_evidence_spec())
                                               .collect();
 
@@ -2748,8 +3377,7 @@ pub fn PolicyEditorModal(
                                               cis_section: selected_cis_section,
                                               rationale: selected_rationale,
                                               evidence_specs,
-                                              requirement_mappings: pending_mappings
-                                                  .read()
+                                              requirement_mappings: pending_mapping_snapshot
                                                   .iter()
                                                   .map(PendingPolicyMapping::mapping_request)
                                                   .collect(),
@@ -2758,15 +3386,19 @@ pub fn PolicyEditorModal(
                                     };
 
                                     match result {
-                                        Ok(created_opt) => {
-                                            // Fetch the updated list so edits (name changes, etc.) are
+                                         Ok(created_opt) => {
+                                             let created_fallback = created_opt
+                                                 .as_ref()
+                                                 .cloned()
+                                                 .map(policies_api::policy_record_to_definition);
+                                             // Fetch the updated list so edits (name changes, etc.) are
                                             // reflected globally. The list response includes the
                                             // current_version_id join that the create endpoint omits,
                                             // so for a new policy we prefer the entry from the refreshed
                                             // list over the raw create response. If the refresh fails we
                                             // fall back to the create response so the card is still shown.
                                             let created_id = created_opt.as_ref().map(|c| c.id);
-                                            match policies_api::load_policies().await {
+                                            let refresh_succeeded = match policies_api::load_policies().await {
                                                 policies_api::PolicyLoadResult::Ok(mut latest) => {
                                                     // For new policies, ensure the entry is at the front.
                                                     // The list response carries the full current_version_id,
@@ -2787,26 +3419,35 @@ pub fn PolicyEditorModal(
                                                         }
                                                     }
                                                     policy_library.set(latest);
+                                                    true
                                                 }
-                                                policies_api::PolicyLoadResult::Err(error) => {
+                                                 policies_api::PolicyLoadResult::Err(error) => {
                                                     // Best-effort: if a new policy was created, still
                                                     // insert it so the UI is not broken.
-                                                    if let Some(created) = created_opt {
-                                                        let def = policies_api::policy_record_to_definition(created);
+                                                     if let Some(created) = created_opt {
+                                                         let def = policies_api::policy_record_to_definition(created);
                                                         let mut current = policy_library.read().clone();
                                                         current.retain(|p| p.id != def.id);
                                                         current.insert(0, def);
-                                                        policy_library.set(current);
-                                                    }
-                                                    save_error.set(format!("Policy saved, but list refresh failed: {error}"));
-                                                }
-                                            }
-                                            is_saving.set(false);
-                                            on_close.call(());
+                                                         policy_library.set(current);
+                                                     }
+                                                     catalog_refresh_fallback.set(created_fallback);
+                                                     catalog_refresh_failed.set(true);
+                                                     save_error.set(format!("Policy saved, but catalog refresh failed: {error}"));
+                                                     false
+                                                 }
+                                             };
+                                             is_saving.set(false);
+                                             if refresh_succeeded {
+                                                 on_close.call(());
+                                             } else {
+                                                 error_focus_pending.set(true);
+                                             }
                                         }
                                         Err(error) => {
-                                            save_error.set(format!("Failed to save policy: {error}"));
-                                            is_saving.set(false);
+                                             save_error.set(format!("Failed to save policy: {error}"));
+                                             is_saving.set(false);
+                                             error_focus_pending.set(true);
                                         }
                                     }
                                 });
@@ -2814,9 +3455,15 @@ pub fn PolicyEditorModal(
                             svg { width: "13", height: "13", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round", style: "margin-right:6px;vertical-align:text-bottom;",
                                 path { d: "M20 6 9 17l-5-5" }
                             }
-                            if *is_saving.read() { "Saving…" } else { "{action_label}" }
+                            if *is_saving.read() { "Saving…" } else if catalog_refresh_failed() { "Saved" } else { "{action_label}" }
                         }
                     }
+                }
+                span {
+                    class: "cf-focus-sentinel",
+                    tabindex: "0",
+                    aria_label: "Start of policy editor",
+                    onfocus: move |_| if is_saving() { focus_policy_editor_element("policy-editor-dialog"); } else { focus_policy_editor_boundary(true); },
                 }
             }
         }
@@ -2841,9 +3488,10 @@ enum OptionSearchState {
 fn PolicyEditorTabButton(
     tab: PolicyEditorTab,
     active: PolicyEditorTab,
+    include_provenance: bool,
+    horizontal: bool,
     label: String,
-    test_id: String,
-    on_select: EventHandler<()>,
+    on_select: EventHandler<PolicyEditorTab>,
 ) -> Element {
     let selected = tab == active;
     let class = match tab {
@@ -2853,7 +3501,34 @@ fn PolicyEditorTabButton(
         PolicyEditorTab::Evidence => "evidence",
         PolicyEditorTab::Provenance => "provenance",
     };
-    rsx! { button { class: if selected { format!("cf-modal-tab cf-modal-tab--active cf-modal-tab--{class}") } else { format!("cf-modal-tab cf-modal-tab--{class}") }, role: "tab", aria_selected: if selected { "true" } else { "false" }, "data-testid": "{test_id}", onclick: move |_| on_select.call(()), "{label}" } }
+    rsx! { button {
+        id: policy_editor_tab_id(tab),
+        class: if selected { format!("cf-modal-tab cf-modal-tab--active cf-modal-tab--{class}") } else { format!("cf-modal-tab cf-modal-tab--{class}") },
+        role: "tab",
+        aria_controls: "policy-editor-panel",
+        aria_selected: if selected { "true" } else { "false" },
+        tabindex: if selected { "0" } else { "-1" },
+        "data-testid": policy_editor_tab_id(tab),
+        onclick: move |_| on_select.call(tab),
+        onkeydown: move |event| {
+            let movement = match event.key() {
+                Key::ArrowLeft if horizontal => Some(PolicyEditorTabMove::Previous),
+                Key::ArrowRight if horizontal => Some(PolicyEditorTabMove::Next),
+                Key::ArrowUp if !horizontal => Some(PolicyEditorTabMove::Previous),
+                Key::ArrowDown if !horizontal => Some(PolicyEditorTabMove::Next),
+                Key::Home => Some(PolicyEditorTabMove::First),
+                Key::End => Some(PolicyEditorTabMove::Last),
+                _ => None,
+            };
+            if let Some(movement) = movement {
+                event.prevent_default();
+                let next = move_policy_editor_tab(tab, movement, include_provenance);
+                on_select.call(next);
+                focus_policy_editor_element(policy_editor_tab_id(next));
+            }
+        },
+        "{label}"
+    } }
 }
 
 #[component]
@@ -2918,6 +3593,7 @@ fn RuleEditorRow(
                         span { "Block deploy when" }
                         select {
                             "data-testid": "policy-rule-cve-severity-{index}",
+                            aria_label: "CVE severity threshold",
                             class: "input focus-ring",
                             style: "width:auto;font-size:12px;padding:4px 8px;",
                             value: "{rule.severity}",
@@ -2930,6 +3606,7 @@ fn RuleEditorRow(
                         span { "CVEs exceed" }
                         input {
                             "data-testid": "policy-rule-cve-max-{index}",
+                            aria_label: "Maximum allowed CVEs",
                             r#type: "number", min: "0",
                             class: "input focus-ring mono",
                             style: "width:60px;font-size:12px;padding:4px 8px;",
@@ -3057,7 +3734,7 @@ fn RuleEditorRow(
                             match normalize_option_type(&rule.option_type) {
                                 "boolean" => rsx! { select { "data-testid": "policy-rule-nixos-value-{index}", aria_label: "Expected boolean value", class: "input focus-ring mono", value: if rule.value.as_bool().unwrap_or(false) { "true" } else { "false" }, onchange: move |event| set_rule_field!(value, serde_json::Value::Bool(event.value() == "true")), option { value: "true", "true" } option { value: "false", "false" } } },
                                 "enum" if !rule.option_values.is_empty() && rule.value.as_str().is_some_and(|value| rule.option_values.iter().any(|candidate| candidate == value)) => rsx! { select { "data-testid": "policy-rule-nixos-value-{index}", aria_label: "Expected enum value", class: "input focus-ring mono", value: "{rule.value.as_str().unwrap_or_default()}", onchange: move |event| set_rule_field!(value, serde_json::Value::String(event.value())), for value in rule.option_values.iter() { option { value: "{value}", selected: rule.value.as_str() == Some(value.as_str()), "{value}" } } } },
-                                "integer" => rsx! { input { "data-testid": "policy-rule-nixos-value-{index}", aria_label: "Expected integer value", r#type: "number", class: "input focus-ring mono", value: "{rule.value.as_i64().unwrap_or_default()}", oninput: move |event| { if let Ok(value) = event.value().parse::<i64>() { set_rule_field!(value, serde_json::json!(value)); } } } },
+                                "integer" => rsx! { input { "data-testid": "policy-rule-nixos-value-{index}", aria_label: "Expected integer value", r#type: "number", class: "input focus-ring mono", value: "{rule.value.as_i64().map(|value| value.to_string()).or_else(|| rule.value.as_str().map(str::to_string)).unwrap_or_default()}", oninput: move |event| { let raw = event.value(); if let Ok(value) = raw.parse::<i64>() { set_rule_field!(value, serde_json::json!(value)); } else { set_rule_field!(value, serde_json::Value::String(raw)); } } } },
                                 "lines" => rsx! { textarea { "data-testid": "policy-rule-nixos-value-{index}", aria_label: "Expected multiline value", class: "input focus-ring mono code-editor", rows: "8", style: "flex:1;min-width:260px;resize:vertical;", value: "{rule.value.as_str().unwrap_or_default()}", oninput: move |event| set_rule_field!(value, serde_json::Value::String(event.value())) } },
                                 _ => rsx! { input { "data-testid": "policy-rule-nixos-value-{index}", aria_label: "Expected string value", class: "input focus-ring mono", style: "flex:1;min-width:180px;", value: "{rule.value.as_str().unwrap_or_default()}", oninput: move |event| set_rule_field!(value, serde_json::Value::String(event.value())) } },
                             }
@@ -3089,12 +3766,12 @@ fn RuleEditorRow(
                 "time_window" => rsx! {
                     div { style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap;",
                         span { "Only between" }
-                        input { "data-testid": "policy-rule-time-from-{index}", class: "input focus-ring mono", style: "width:70px;font-size:12px;padding:4px 8px;", value: "{rule.from}", oninput: move |event| set_rule_field!(from, event.value()) }
+                        input { "data-testid": "policy-rule-time-from-{index}", aria_label: "Window start time", class: "input focus-ring mono", style: "width:70px;font-size:12px;padding:4px 8px;", value: "{rule.from}", oninput: move |event| set_rule_field!(from, event.value()) }
                         span { "–" }
-                        input { "data-testid": "policy-rule-time-to-{index}", class: "input focus-ring mono", style: "width:70px;font-size:12px;padding:4px 8px;", value: "{rule.to}", oninput: move |event| set_rule_field!(to, event.value()) }
+                        input { "data-testid": "policy-rule-time-to-{index}", aria_label: "Window end time", class: "input focus-ring mono", style: "width:70px;font-size:12px;padding:4px 8px;", value: "{rule.to}", oninput: move |event| set_rule_field!(to, event.value()) }
                         span { "on" }
-                        input { "data-testid": "policy-rule-time-days-{index}", class: "input focus-ring mono", style: "width:140px;font-size:12px;padding:4px 8px;", value: "{rule.days}", oninput: move |event| set_rule_field!(days, event.value()) }
-                        input { "data-testid": "policy-rule-timezone-{index}", class: "input focus-ring mono", style: "width:170px;font-size:12px;padding:4px 8px;", value: "{rule.tz}", oninput: move |event| set_rule_field!(tz, event.value()) }
+                        input { "data-testid": "policy-rule-time-days-{index}", aria_label: "Window days", class: "input focus-ring mono", style: "width:140px;font-size:12px;padding:4px 8px;", value: "{rule.days}", oninput: move |event| set_rule_field!(days, event.value()) }
+                        input { "data-testid": "policy-rule-timezone-{index}", aria_label: "Window time zone", class: "input focus-ring mono", style: "width:170px;font-size:12px;padding:4px 8px;", value: "{rule.tz}", oninput: move |event| set_rule_field!(tz, event.value()) }
                     }
                 },
                 "approval_required" => rsx! {
@@ -3129,7 +3806,7 @@ fn RuleEditorRow(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Evidence editor row (all UI-only)
+// Evidence editor row.
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[component]
@@ -3137,6 +3814,7 @@ fn EvidenceEditorRow(
     index: usize,
     evidence: PolicyEvidence,
     evidence_list: Signal<Vec<PolicyEvidence>>,
+    show_validation: bool,
 ) -> Element {
     let kind = evidence.kind.clone();
 
@@ -3159,16 +3837,21 @@ fn EvidenceEditorRow(
 
     // `match` is a reserved word; bind it locally for use in the format string.
     let match_value = evidence.r#match.clone();
+    let validation = show_validation
+        .then(|| evidence.validation_error())
+        .flatten();
+    let invalid_field = validation.as_ref().map(|(field, _)| *field);
+    let error_id = evidence_error_id(index);
 
     rsx! {
         div { style: "display:flex;flex-direction:column;gap:4px;font-size:12px;width:100%;",
             span { style: "display:flex;align-items:center;gap:6px;font-weight:600;", "{label}" }
             match kind.as_str() {
                 "command" => rsx! {
-                    input { "data-testid": "policy-evidence-command-cmd-{index}", class: "input focus-ring mono", style: "font-size:11px;padding:5px 8px;", placeholder: "sshd -T | grep permitrootlogin", value: "{evidence.cmd}", oninput: move |event| set_ev_field!(cmd, event.value()) }
+                    input { id: evidence_field_id(index, &kind, "cmd"), "data-testid": "policy-evidence-command-cmd-{index}", aria_invalid: if invalid_field == Some("cmd") { "true" } else { "false" }, aria_describedby: (invalid_field == Some("cmd")).then_some(error_id.as_str()), class: "input focus-ring mono", style: "font-size:11px;padding:5px 8px;", placeholder: "sshd -T | grep permitrootlogin", value: "{evidence.cmd}", oninput: move |event| set_ev_field!(cmd, event.value()) }
                     div { style: "display:flex;align-items:center;gap:6px;",
                         span { style: "font-size:11px;color:var(--cf-text-muted);", "expect output contains" }
-                        input { "data-testid": "policy-evidence-command-expect-{index}", class: "input focus-ring mono", style: "font-size:11px;padding:5px 8px;flex:1;", placeholder: "permitrootlogin no", value: "{evidence.expect}", oninput: move |event| set_ev_field!(expect, event.value()) }
+                        input { id: evidence_field_id(index, &kind, "expect"), "data-testid": "policy-evidence-command-expect-{index}", aria_invalid: if invalid_field == Some("expect") { "true" } else { "false" }, aria_describedby: (invalid_field == Some("expect")).then_some(error_id.as_str()), class: "input focus-ring mono", style: "font-size:11px;padding:5px 8px;flex:1;", placeholder: "permitrootlogin no", value: "{evidence.expect}", oninput: move |event| set_ev_field!(expect, event.value()) }
                     }
                 },
                 "log" => rsx! {
@@ -3183,20 +3866,23 @@ fn EvidenceEditorRow(
                             option { value: "auditd", "auditd" }
                             option { value: "file", "file" }
                         }
-                        input { "data-testid": "policy-evidence-log-unit-{index}", class: "input focus-ring mono", style: "font-size:11px;padding:5px 8px;flex:1;min-width:140px;", placeholder: "auditd.service", value: "{evidence.unit}", oninput: move |event| set_ev_field!(unit, event.value()) }
+                        input { id: evidence_field_id(index, &kind, "unit"), "data-testid": "policy-evidence-log-unit-{index}", aria_invalid: if invalid_field == Some("unit") { "true" } else { "false" }, aria_describedby: (invalid_field == Some("unit")).then_some(error_id.as_str()), class: "input focus-ring mono", style: "font-size:11px;padding:5px 8px;flex:1;min-width:140px;", placeholder: "auditd.service", value: "{evidence.unit}", oninput: move |event| set_ev_field!(unit, event.value()) }
                     }
-                    input { "data-testid": "policy-evidence-log-match-{index}", class: "input focus-ring mono", style: "font-size:11px;padding:5px 8px;", placeholder: "regex / substring to match", value: "{match_value}", oninput: move |event| set_ev_field!(r#match, event.value()) }
+                    input { id: evidence_field_id(index, &kind, "match"), "data-testid": "policy-evidence-log-match-{index}", aria_invalid: if invalid_field == Some("match") { "true" } else { "false" }, aria_describedby: (invalid_field == Some("match")).then_some(error_id.as_str()), class: "input focus-ring mono", style: "font-size:11px;padding:5px 8px;", placeholder: "regex / substring to match", value: "{match_value}", oninput: move |event| set_ev_field!(r#match, event.value()) }
                 },
                 "file" => rsx! {
-                    input { "data-testid": "policy-evidence-file-path-{index}", class: "input focus-ring mono", style: "font-size:11px;padding:5px 8px;", placeholder: "/etc/issue", value: "{evidence.path}", oninput: move |event| set_ev_field!(path, event.value()) }
+                    input { id: evidence_field_id(index, &kind, "path"), "data-testid": "policy-evidence-file-path-{index}", aria_invalid: if invalid_field == Some("path") { "true" } else { "false" }, aria_describedby: (invalid_field == Some("path")).then_some(error_id.as_str()), class: "input focus-ring mono", style: "font-size:11px;padding:5px 8px;", placeholder: "/etc/issue", value: "{evidence.path}", oninput: move |event| set_ev_field!(path, event.value()) }
                     input { class: "input focus-ring", style: "font-size:11px;padding:5px 8px;", placeholder: "What to look for / why it proves compliance", value: "{evidence.note}", oninput: move |event| set_ev_field!(note, event.value()) }
                 },
                 "unit_state" => rsx! {
                     div { style: "display:flex;gap:6px;align-items:center;flex-wrap:wrap;",
-                        input { "data-testid": "policy-evidence-unit-name-{index}", class: "input focus-ring mono", style: "font-size:11px;padding:5px 8px;flex:1;min-width:140px;", placeholder: "auditd.service", value: "{evidence.unit}", oninput: move |event| set_ev_field!(unit, event.value()) }
+                        input { id: evidence_field_id(index, &kind, "unit"), "data-testid": "policy-evidence-unit-name-{index}", aria_invalid: if invalid_field == Some("unit") { "true" } else { "false" }, aria_describedby: (invalid_field == Some("unit")).then_some(error_id.as_str()), class: "input focus-ring mono", style: "font-size:11px;padding:5px 8px;flex:1;min-width:140px;", placeholder: "auditd.service", value: "{evidence.unit}", oninput: move |event| set_ev_field!(unit, event.value()) }
                         span { style: "font-size:11px;color:var(--cf-text-muted);", "is" }
                         select {
+                            id: evidence_field_id(index, &kind, "state"),
                             "data-testid": "policy-evidence-unit-state-{index}",
+                            aria_invalid: if invalid_field == Some("state") { "true" } else { "false" },
+                            aria_describedby: (invalid_field == Some("state")).then_some(error_id.as_str()),
                             class: "input focus-ring",
                             style: "font-size:11px;padding:5px 8px;width:auto;",
                             value: "{evidence.state}",
@@ -3208,14 +3894,17 @@ fn EvidenceEditorRow(
                     }
                 },
                 "eval_attr" => rsx! {
-                    input { "data-testid": "policy-evidence-eval-attr-{index}", class: "input focus-ring mono", style: "font-size:11px;padding:5px 8px;", placeholder: "config.services.openssh.settings.PermitRootLogin", value: "{evidence.attr}", oninput: move |event| set_ev_field!(attr, event.value()) }
+                    input { id: evidence_field_id(index, &kind, "attr"), "data-testid": "policy-evidence-eval-attr-{index}", aria_invalid: if invalid_field == Some("attr") { "true" } else { "false" }, aria_describedby: (invalid_field == Some("attr")).then_some(error_id.as_str()), class: "input focus-ring mono", style: "font-size:11px;padding:5px 8px;", placeholder: "config.services.openssh.settings.PermitRootLogin", value: "{evidence.attr}", oninput: move |event| set_ev_field!(attr, event.value()) }
                     span { class: "mono", style: "font-size:10px;color:var(--cf-text-muted);", "Captured from the evaluated config — no host access needed." }
                 },
                 "attestation" => rsx! {
-                    input { "data-testid": "policy-evidence-attestation-note-{index}", class: "input focus-ring", style: "font-size:11px;padding:5px 8px;", placeholder: "What the agent attests to (signed snapshot)", value: "{evidence.note}", oninput: move |event| set_ev_field!(note, event.value()) }
+                    input { id: evidence_field_id(index, &kind, "note"), "data-testid": "policy-evidence-attestation-note-{index}", aria_invalid: if invalid_field == Some("note") { "true" } else { "false" }, aria_describedby: (invalid_field == Some("note")).then_some(error_id.as_str()), class: "input focus-ring", style: "font-size:11px;padding:5px 8px;", placeholder: "What the agent attests to (signed snapshot)", value: "{evidence.note}", oninput: move |event| set_ev_field!(note, event.value()) }
                     span { class: "mono", style: "font-size:10px;color:var(--cf-text-muted);", "Ed25519-signed by the agent at collection time." }
                 },
                 _ => rsx! { span { style: "font-style:italic;", "{kind}" } },
+            }
+            if let Some((_, error)) = validation.as_ref() {
+                span { id: "{error_id}", class: "help cf-policy-evidence-error", role: "alert", "{error}" }
             }
         }
     }
@@ -3253,6 +3942,63 @@ mod tests {
         assert!(add_pending_mapping(&mut mappings, mapping).is_err());
         remove_pending_mapping(&mut mappings, Uuid::from_u128(1));
         assert!(mappings.is_empty());
+    }
+
+    #[test]
+    fn evidence_validation_identifies_the_first_invalid_control() {
+        let mut evidence = PolicyEvidence::new("command");
+        evidence.cmd.clear();
+        evidence.expect.clear();
+        assert_eq!(
+            evidence.validation_error(),
+            Some(("cmd", "Command is required".to_string()))
+        );
+
+        evidence.cmd = "true".to_string();
+        assert_eq!(
+            evidence.validation_error(),
+            Some(("expect", "Expected output is required".to_string()))
+        );
+        assert_eq!(
+            evidence_field_id(2, "command", "expect"),
+            "policy-evidence-command-expect-2"
+        );
+    }
+
+    #[test]
+    fn tab_navigation_wraps_and_excludes_unavailable_provenance() {
+        assert_eq!(
+            move_policy_editor_tab(
+                PolicyEditorTab::Details,
+                PolicyEditorTabMove::Previous,
+                false,
+            ),
+            PolicyEditorTab::Evidence
+        );
+        assert_eq!(
+            move_policy_editor_tab(PolicyEditorTab::Evidence, PolicyEditorTabMove::Next, false,),
+            PolicyEditorTab::Details
+        );
+        assert_eq!(
+            move_policy_editor_tab(PolicyEditorTab::Evidence, PolicyEditorTabMove::Next, true,),
+            PolicyEditorTab::Provenance
+        );
+    }
+
+    #[test]
+    fn tab_navigation_home_and_end_follow_visual_order() {
+        assert_eq!(
+            move_policy_editor_tab(PolicyEditorTab::Mappings, PolicyEditorTabMove::First, true,),
+            PolicyEditorTab::Details
+        );
+        assert_eq!(
+            move_policy_editor_tab(PolicyEditorTab::Details, PolicyEditorTabMove::Last, false,),
+            PolicyEditorTab::Evidence
+        );
+        assert_eq!(
+            move_policy_editor_tab(PolicyEditorTab::Details, PolicyEditorTabMove::Last, true,),
+            PolicyEditorTab::Provenance
+        );
     }
 
     #[test]

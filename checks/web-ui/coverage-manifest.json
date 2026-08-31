@@ -1436,8 +1436,8 @@
       "baseline": "advisory"
     },
     {
-      "name": "18-policies",
-      "description": "Policies view",
+      "name": "task433-canonical-large-catalog",
+      "description": "Persisted large catalog exercises deep search, collapse, chunking, cards/table, and range selection",
       "route": "/deployment-policies",
       "designRef": "docs/design/CrystalForge/components/PoliciesView.jsx",
       "profiles": [
@@ -1446,6 +1446,20 @@
       ],
       "semanticAssertions": true,
       "interactions": false,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "20af-policy-catalog-selection-delete-regressions",
+      "description": "Collapsed selection, Ctrl-click, re-expansion, and real partial bulk deletion are a merge-blocking regression gate",
+      "route": "/deployment-policies",
+      "designRef": "docs/design/CrystalForge/components/PoliciesView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
       "mockedData": false,
       "baseline": "advisory"
     },
@@ -1534,8 +1548,8 @@
       "baseline": "advisory"
     },
     {
-      "name": "20ae-anduril-nixos-stig-import-roundtrip",
-      "description": "The full Anduril NixOS STIG reaches import and preserves the complete backend response",
+      "name": "task433-canonical-imported-stig-refinement",
+      "description": "The official Anduril NixOS STIG import preserves read-only provenance and mappings while added Nix enforcement saves, reopens, and retains lineage",
       "route": "/compliance",
       "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
       "profiles": [
@@ -1576,8 +1590,8 @@
       "baseline": "advisory"
     },
     {
-      "name": "20ab-policy-editor-no-enforcement-unmapped-roundtrip",
-      "description": "A custom policy saves with zero enforcement and zero mappings, reopens unchanged, and stays savable",
+      "name": "task433-canonical-unmapped-nix-policy",
+      "description": "An Unmapped custom policy authors real metadata-backed Nix enforcement and persists it across save and reopen",
       "route": "/deployment-policies",
       "designRef": "docs/design/CrystalForge/components/PoliciesView.jsx",
       "profiles": [
@@ -1590,8 +1604,8 @@
       "baseline": "advisory"
     },
     {
-      "name": "20ab1-policy-editor-composite-metadata-roundtrip",
-      "description": "Real NixOS metadata guides typed composites without overriding target-specific semantics across save and reload",
+      "name": "task433-canonical-multiline-dod",
+      "description": "The exact multiline DoD consent banner saves and reopens without semantic or byte-level alteration",
       "route": "/deployment-policies",
       "designRef": "docs/design/CrystalForge/data-enforcement.js",
       "profiles": [
@@ -1605,7 +1619,21 @@
     },
     {
       "name": "20ab2-policy-editor-eight-kind-roundtrip",
-      "description": "All eight exposed composite kinds author, persist, reload, and edit while incomplete approval, rollout, and build controls remain hidden",
+      "description": "All eight exposed composite kinds author, persist, reload, edit, and export without exposing incomplete controls",
+      "route": "/deployment-policies",
+      "designRef": "docs/design/CrystalForge/data-enforcement.js",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "task433-canonical-mixed-nix-cve-evidence",
+      "description": "A dedicated Nix and CVE policy renders exact persisted evaluator output through production evidence APIs and UI",
       "route": "/deployment-policies",
       "designRef": "docs/design/CrystalForge/data-enforcement.js",
       "profiles": [
@@ -1619,7 +1647,7 @@
     },
     {
       "name": "20ac-policy-editor-category-and-imported-provenance",
-      "description": "Category change preserves rules, and imported policies show read-only provenance tab",
+      "description": "Category changes preserve enforcement, and an imported policy exposes read-only provenance and mappings",
       "route": "/deployment-policies",
       "designRef": "docs/design/CrystalForge/components/PoliciesView.jsx",
       "profiles": [
@@ -1628,7 +1656,7 @@
       ],
       "semanticAssertions": true,
       "interactions": true,
-      "mockedData": true,
+      "mockedData": false,
       "baseline": "advisory"
     },
     {
@@ -2030,8 +2058,8 @@
       "baseline": "advisory"
     },
     {
-      "name": "29j-poam-awaiting-verification-closure-rejection",
-      "description": "Awaiting verification exposes real failed verification and structured authoritative closure rejection",
+      "name": "task433-canonical-poam-lifecycle",
+      "description": "A complete POA&M UI lifecycle consumes persisted evaluator output, retains failed evidence, edits and rollups, rejects failing closure, then verifies PASS, closes, reloads, and preserves history",
       "route": "/compliance",
       "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
       "profiles": ["ci_fast", "full"],
