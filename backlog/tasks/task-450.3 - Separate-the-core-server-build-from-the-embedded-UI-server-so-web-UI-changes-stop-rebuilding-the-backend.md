@@ -3,10 +3,10 @@ id: TASK-450.3
 title: >-
   Separate the core server build from the embedded-UI server so web UI changes
   stop rebuilding the backend
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-08-31 22:39'
-updated_date: '2026-08-31 22:44'
+updated_date: '2026-08-31 22:45'
 labels: []
 dependencies: []
 documentation:
@@ -98,3 +98,11 @@ Read doc-23, `Build Invalidation Graph and CI Feedback Latency Analysis`, for th
 - [ ] #6 The behavior of a core server build when it receives a request for a UI route is defined, implemented deliberately, and documented
 - [ ] #7 The Nix source documents which server build each consumer uses and why, so a future change does not silently reintroduce the web UI dependency for backend-only checks
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: opencode-claude-opus-5 on gray in /home/mcamp/code/crystal-forge/TASK-450-p0-build-graph
+
+Implemented together with TASK-450.1, TASK-450.2, and TASK-450.4 in a single MR at the user's explicit direction.
+<!-- SECTION:NOTES:END -->
