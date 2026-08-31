@@ -1114,6 +1114,7 @@ function evidenceSummary(ev) {
 function PolicyDrawer({ policy, onClose, onEdit, onOpenSystem, onSwitchPolicy, initialTab, backTo, onBack }) {
   const [tab, setTab] = React.useState(initialTab || "details");
   React.useEffect(() => { setTab(initialTab || "details"); }, [policy.lineageId || policy.id]);
+  const [maximized, setMaximized] = React.useState(false);
   React.useEffect(() => {
     const onKey = (e) => { if (e.key === "Escape") onClose(); };
     window.addEventListener("keydown", onKey);
@@ -1130,7 +1131,7 @@ function PolicyDrawer({ policy, onClose, onEdit, onOpenSystem, onSwitchPolicy, i
   return (
     <>
       <div className="fl-tray-backdrop" onClick={onClose}/>
-      <aside className="fl-tray">
+      <aside className={`fl-tray${maximized?" fl-tray-max":""}`} style={{ width: maximized ? "min(1360px, 100vw)" : undefined }}>
         <header className="fl-tray-head">
           <div style={{ display:"flex", alignItems:"center", gap:12, minWidth:0, flex:1 }}>
             {backTo && <button className="btn-icon focus-ring" title={backTo.label || "Back"} onClick={onBack}><Icon name="arrow-left" size={16}/></button>}
@@ -1154,6 +1155,7 @@ function PolicyDrawer({ policy, onClose, onEdit, onOpenSystem, onSwitchPolicy, i
           <div style={{ display:"flex", gap:6 }}>
             {policy.type === "custom" && <button className="btn btn-ghost focus-ring xs" onClick={()=>exportPolicies([policy])}><Icon name="download" size={11}/> Export</button>}
             {onEdit && <button className="btn btn-ghost focus-ring xs" onClick={onEdit}><Icon name="gear" size={11}/> Edit</button>}
+            <button className="btn-icon focus-ring" title={maximized?"Restore":"Expand"} onClick={()=>setMaximized(m=>!m)}><Icon name={maximized?"minimize":"maximize"} size={15}/></button>
             <button className="btn-icon focus-ring" onClick={onClose}><Icon name="x" size={16}/></button>
           </div>
         </header>

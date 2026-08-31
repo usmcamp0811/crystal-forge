@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - claude-agent
 created_date: '2026-08-23 01:35'
-updated_date: '2026-08-28 16:42'
+updated_date: '2026-08-31 01:29'
 labels:
   - design-parity
   - policy
@@ -220,7 +220,19 @@ Per user instruction, this plan is presented for review after Phase 0 before any
 
 ## Worktree/MR decision (user, 2026-08-22)
 All phase subtasks (TASK-433.2 through TASK-433.9) share ONE dedicated worktree/branch/eventual MR under this parent task, rather than one worktree per subtask. Worktree: /home/mcamp/code/crystal-forge/TASK-433-policy-poam-workflows, branch: TASK-433-policy-poam-workflows, based on dev @ c60b5799. TASK-433 itself now carries the lock/In Progress status for the shared implementation effort; individual TASK-433.x subtasks are moved through In Progress/Review/Done to track granular AC completion, but all commits land on this one branch and are shipped via a single MR opened once phase work is ready for review. Composite rule-set decision (open question #1) resolved: build the composite/multi-rule-kind structure now in Phase 3/4 as originally scoped, not deferred.
+
+Focused final-audit remediation: review the concurrent environment-scoped policy-version usage implementation without touching agent-owned UI/browser files; add live-DB handler/query regressions proving non-admin membership filtering and admin visibility; extend production-backed composite enforcement tests to cover phase, evidence, and pass/fail/error-or-not-checked outcomes for all eight exposed kinds where each production rule can produce them; add server-side PolicyDrawer owner and exact-version usage hydration coverage; run targeted formatting and Rust tests through the Nix development environment. Preserve all concurrent worktree changes and do not commit.
+
+2026-08-30 backend/database audit remediation: Preserve concurrent worktree edits and do not edit migrations 0233-0241. Improve additive migration 0242 so cleanup requires a non-null bootstrap completion marker, add the global deployment-failure bootstrap cursor index, and remove only the two proven duplicate POA&M indexes. Extend source-neutral waiver requests and persistence with observation-bound legacy evidence while retaining composite assessment compatibility and database-enforced immutable closure evidence. Add bounded per-request historical relationship limits with backward-compatible defaults and explicit truncation metadata. Expand PostgreSQL tests for cleanup before/after completion, legacy Fail waiver acceptance/closure, and relationship bounds. Strengthen the server-regressions pre-0233 rehearsal with populated CVE scan, desired target, immutable assignment/version overlays, deployed state, attention source, notification preferences/inbox state, then apply and assert the full current migration range. Run formatting, SQLX_OFFLINE checks, focused migrated-DB tests, migration rehearsal/server-regressions when feasible, and inspect the final scoped diff.
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-08-30 UI audit remediation: Added bidirectional compliance query synchronization so bundle/evidence/POA&M drawer state uses browser history and restores from back/reload without forcing the default bundle into a bare URL. Added keyboard activation for policy cards/table rows, compliance system rows, and POA&M rows; keyboard dashboard widget move controls; notification menu roles, Escape, arrow navigation, Enter/Space activation, and bell focus restoration. Added dialog labels/modal semantics/Escape/initial focus for policy, bundle, evidence, and POA&M drawers and modals. Evidence navigation/detail now stacks at <=640px. Imported policy details identify the importer instead of presenting imported content as manually owned. Setup Coach locks Deploy agent until a system exists and uses heartbeat-based completion copy. Added focused route, dashboard reorder, and coach prerequisite Rust tests. Verification passed: `nix develop -c cargo fmt --manifest-path packages/web-ui/Cargo.toml -- --check`; `nix develop -c cargo test --manifest-path packages/web-ui/Cargo.toml` (254 passed, 1 ignored); focused tests for compliance route round-trip, keyboard widget movement, and agent prerequisite; `nix build .#packages.x86_64-linux.web-ui --no-link`; `git diff --check`. The first two-minute Nix build attempt timed out while falling back from unavailable remote builders; the ten-minute retry succeeded. Concurrent backend, migration, docs, check, and browser-test edits remained untouched. No commit created.
+
+2026-08-30 focused policy usage regression: added a live HTTP/SQLx test for PolicyDrawer owner hydration and exact policy-version usage authorization. The fixture now follows production publication invariants by atomically updating accepted versions and lineage pointers and by finalizing a non-pending bundle digest. Against the repository-owned isolated PostgreSQL stack on 127.0.0.1:3042, `nix develop -c env DATABASE_URL=postgresql://mcamp@127.0.0.1:3042/crystal_forge CRYSTAL_FORGE_TEST_DATABASE_URL=postgresql://mcamp@127.0.0.1:3042/crystal_forge SQLX_OFFLINE=true cargo test --offline --manifest-path packages/default/Cargo.toml --package cf-server --test policy_counts_defect policy_drawer_owner_and_usage_respect_environment_visibility -- --test-threads=1` passed (1 passed). The regression proves a Viewer receives only systems in their environment memberships, an Admin retains fleet-wide usage visibility, and exact-version owner display resolves from the creating user. Earlier attempts exposed and corrected fixture-only schema length, publication-pointer, and pending-digest violations; no production authorization relaxation was made.
+<!-- SECTION:NOTES:END -->
 
 ## Comments
 

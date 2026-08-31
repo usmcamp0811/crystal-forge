@@ -147,6 +147,12 @@ const DEFAULT_DASHBOARD_LAYOUT = [
   { id: "gitGraph",        cols: 3, rows: 3 },
   { id: "recentCommits",   cols: 2 },
   { id: "cacheHealth",     cols: 1 },
+  { id: "fleetDrift",      cols: 2, rows: 2 },
+  { id: "rebootRequired",  cols: 1 },
+  { id: "closurePressure", cols: 2, rows: 2 },
+  { id: "rollbackReadiness", cols: 1 },
+  { id: "deployHeatmap",   cols: 3 },
+  { id: "fleetCalendar",   cols: 3 },
   { id: "envBreakdown",    cols: 1 },
   { id: "quickActions",    cols: 1 },
 ];

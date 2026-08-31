@@ -154,11 +154,12 @@ function FlakeTray({ flake, focusSha, focusMeta, onClose, onEdit, onOpenEval, on
   // Rollout fraction: pretend system count tied to flake's systemCount, vary by index
   const rolloutTotal = flakeManagedCount(flake);
   const rolloutOn = idx === 0 ? rolloutTotal : Math.max(0, rolloutTotal - (idx * 2));
+  const [maximized, setMaximized] = React.useState(false);
 
   return (
     <>
       <div className="fl-tray-backdrop" onClick={onClose}/>
-      <aside className="fl-tray" role="dialog" aria-label={`${flake.name} commits`}>
+      <aside className={`fl-tray${maximized?" fl-tray-max":""}`} role="dialog" aria-label={`${flake.name} commits`}>
         {/* Header */}
         <header className="fl-tray-head">
           <div style={{ display:"flex", alignItems:"center", gap:10, minWidth:0, flex:1 }}>
@@ -175,6 +176,7 @@ function FlakeTray({ flake, focusSha, focusMeta, onClose, onEdit, onOpenEval, on
           <div style={{ display:"flex", gap:6, alignItems:"center" }}>
             <button className="btn btn-ghost focus-ring xs"><Icon name="sync" size={11}/> Sync</button>
             <button className="btn btn-ghost focus-ring xs" onClick={onEdit}><Icon name="gear" size={11}/> Edit</button>
+            <button className="btn-icon focus-ring" title={maximized?"Restore":"Expand"} onClick={()=>setMaximized(m=>!m)}><Icon name={maximized?"minimize":"maximize"} size={15}/></button>
             <button className="btn-icon focus-ring" onClick={onClose} aria-label="Close"><Icon name="x" size={16}/></button>
           </div>
         </header>
@@ -680,116 +682,185 @@ function FlakeFormModal({ mode, flake, onClose }) {
     setTimeout(()=>setTesting(Math.random() > 0.25 ? "ok" : "fail"), 900);
   };
 
+  const [section, setSection] = React.useState("repo");
+  const sections = [
+    { id:"repo",   label:"Repository",  icon:"git" },
+    { id:"creds",  label:"Credentials", icon:"key" },
+    { id:"sync",   label:"Sync",        icon:"sync" },
+    ...(isEdit ? [{ id:"danger", label:"Danger zone", icon:"warn", danger:true }] : []),
+  ];
+  const credLabel = form.credType === "none" ? "public" : form.credType === "ssh" ? "SSH" : "HTTPS";
+
+  if (confirmDelete) {
+    return (
+      <div className="modal-backdrop" onClick={onClose}>
+        <div className="modal" onClick={e=>e.stopPropagation()} style={{ width:"min(560px,96vw)" }}>
+          <DeleteFlakeConfirm flake={flake} onCancel={()=>setConfirmDelete(false)} onConfirm={onClose}/>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal" onClick={e=>e.stopPropagation()} style={{ width:"min(620px,96vw)", maxHeight:"92vh" }}>
-        {confirmDelete ? (
-          <DeleteFlakeConfirm flake={flake} onCancel={()=>setConfirmDelete(false)} onConfirm={onClose}/>
-        ) : (
-        <>
-        <div className="modal-head">
-          <h2>
-            <Icon name={isEdit ? "gear" : "plus"} size={14} style={{ marginRight:6, verticalAlign:"text-bottom" }}/>
-            {isEdit ? `Edit ${flake.name}` : "Add flake"}
-          </h2>
-          <p>{isEdit ? "Update flake registration. URL changes will trigger a re-clone." : "Register a new NixOS flake repository."}</p>
-        </div>
-        <div className="modal-body" style={{ overflowY:"auto" }}>
-          <div className="field">
-            <label>Name</label>
-            <input className="input focus-ring" value={form.name} onChange={e=>set("name",e.target.value)} placeholder="e.g. infrastructure"/>
-          </div>
-          <div className="field">
-            <label>Repository URL</label>
-            <input className="input focus-ring mono" value={form.url} onChange={e=>set("url",e.target.value)} placeholder="git+ssh://git@gitlab.example.com/…" style={{ fontSize:12 }}/>
-          </div>
-          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:14 }}>
-            <div className="field">
-              <label>Branch</label>
-              <input className="input focus-ring" value={form.branch} onChange={e=>set("branch",e.target.value)}/>
+      <div className="pe-shell" onClick={e=>e.stopPropagation()}>
+        <header className="pe-head">
+          <div style={{ minWidth:0, display:"flex", flexDirection:"column", gap:3 }}>
+            <div style={{ display:"flex", alignItems:"center", gap:9, minWidth:0 }}>
+              <Icon name={isEdit ? "gear" : "plus"} size={15} style={{ color:"var(--cf-brand-purple)", flexShrink:0 }}/>
+              <span className="pe-head-title">{isEdit ? (form.name || flake.name) : "Add flake"}</span>
+              <span className="chip chip-unknown mono" style={{ fontSize:10 }}>{form.branch || "main"}</span>
+              <span className="chip chip-info">{credLabel}</span>
+              {!form.url.trim() && <span className="chip" title="A repository URL is required.">No URL</span>}
             </div>
-            <div className="field">
-              <label>Environments</label>
-              <div style={{ display:"flex", alignItems:"center", minHeight:34, gap:6, flexWrap:"wrap" }}>
-                {isEdit
-                  ? <FlakeEnvBadges flake={flake} align="flex-start" max={6}/>
-                  : <span style={{ fontSize:12, color:"var(--cf-text-muted)" }}>Populated from its systems</span>}
+            <span className="pe-head-sub">{isEdit ? "Update flake registration. URL changes will trigger a re-clone." : "Register a new NixOS flake repository."}</span>
+          </div>
+          <button className="btn-icon focus-ring" onClick={onClose} aria-label="Close"><Icon name="x" size={16}/></button>
+        </header>
+
+        <nav className="pe-rail">
+          {sections.map(s => (
+            <button key={s.id} className={`pe-rail-item focus-ring${section===s.id?" active":""}`}
+              style={s.danger && section!==s.id ? { color:"#f87171" } : null} onClick={()=>setSection(s.id)}>
+              <Icon name={s.icon} size={13}/>
+              <span className="pe-rail-label">{s.label}</span>
+              {s.id === "repo" && !form.url.trim() && <span className="pe-rail-badge warn">!</span>}
+              {s.id === "creds" && <span className="pe-rail-badge">{credLabel}</span>}
+              {s.id === "sync" && <span className="pe-rail-badge">{form.autoSync ? form.syncInterval : "off"}</span>}
+            </button>
+          ))}
+        </nav>
+
+        <div className="pe-body">
+          {section === "repo" && (
+            <>
+              <div className="pe-sec-head">
+                <h3>Repository</h3>
+                <p>Where the flake lives and which branch Crystal Forge tracks.</p>
               </div>
-              <div className="help">Derived from the systems built off this flake — not assigned here.</div>
-            </div>
-          </div>
-          <div className="field">
-            <label>Description</label>
-            <input className="input focus-ring" value={form.description} onChange={e=>set("description",e.target.value)} placeholder="Short description shown in the registry"/>
-          </div>
-
-          {/* Credentials section */}
-          <div style={{ marginTop:8, padding:14, border:"1px solid var(--cf-divider)", borderRadius:10, background:"color-mix(in oklab,var(--cf-page-bg) 50%,var(--cf-card-bg))" }}>
-            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10 }}>
-              <div style={{ fontSize:13, fontWeight:600, display:"flex", alignItems:"center", gap:6 }}>
-                <Icon name="key" size={13}/> Repository credentials
+              <div className="field">
+                <label>Name</label>
+                <input className="input focus-ring" value={form.name} onChange={e=>set("name",e.target.value)} placeholder="e.g. infrastructure"/>
               </div>
-              <button className="btn btn-ghost focus-ring xs" onClick={test} disabled={testing==="running" || form.credType==="none"}>
-                {testing==="running" ? <><Spinner size={11}/> Testing…</>
-                : testing==="ok"     ? <><Icon name="check" size={11} style={{color:"#34d399"}}/> Connected</>
-                : testing==="fail"   ? <><Icon name="warn" size={11} style={{color:"#f87171"}}/> Failed</>
-                : <>Test connection</>}
-              </button>
-            </div>
-
-            <div className="seg" style={{ marginBottom:12 }}>
-              {[
-                { v:"none",  l:"None (public)" },
-                { v:"ssh",   l:"SSH key" },
-                { v:"https", l:"HTTPS token" },
-              ].map(o => (
-                <button key={o.v} className={form.credType===o.v?"active":""} onClick={()=>{ set("credType", o.v); setTesting(null); }}>{o.l}</button>
-              ))}
-            </div>
-
-            {form.credType === "ssh"   && <SshCredPicker form={form} set={set}/>}
-            {form.credType === "https" && <HttpsCredPicker form={form} set={set}/>}
-            {form.credType === "none"  && (
-              <div style={{ fontSize:12, color:"var(--cf-text-muted)" }}>
-                No auth — works for anonymous HTTPS clones and read-only public repos.
+              <div className="field">
+                <label>Repository URL</label>
+                <input className="input focus-ring mono" value={form.url} onChange={e=>set("url",e.target.value)} placeholder="git+ssh://git@gitlab.example.com/…" style={{ fontSize:12 }}/>
               </div>
-            )}
-          </div>
+              <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:14 }}>
+                <div className="field" style={{ marginTop:0 }}>
+                  <label>Branch</label>
+                  <input className="input focus-ring" value={form.branch} onChange={e=>set("branch",e.target.value)}/>
+                </div>
+                <div className="field" style={{ marginTop:0 }}>
+                  <label>Environments</label>
+                  <div style={{ display:"flex", alignItems:"center", minHeight:34, gap:6, flexWrap:"wrap" }}>
+                    {isEdit
+                      ? <FlakeEnvBadges flake={flake} align="flex-start" max={6}/>
+                      : <span style={{ fontSize:12, color:"var(--cf-text-muted)" }}>Populated from its systems</span>}
+                  </div>
+                  <div className="help">Derived from the systems built off this flake — not assigned here.</div>
+                </div>
+              </div>
+              <div className="field">
+                <label>Description</label>
+                <input className="input focus-ring" value={form.description} onChange={e=>set("description",e.target.value)} placeholder="Short description shown in the registry"/>
+              </div>
+            </>
+          )}
 
-          {/* Sync section */}
-          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:14 }}>
-            <label style={{ display:"flex", gap:8, alignItems:"center", fontSize:13, cursor:"pointer" }}>
-              <input type="checkbox" checked={form.autoSync} onChange={e=>set("autoSync",e.target.checked)} style={{ accentColor:"var(--cf-brand-purple)" }}/>
-              <span>Auto-sync</span>
-            </label>
-            <div className="field">
-              <label>Sync interval</label>
-              <select className="input focus-ring" value={form.syncInterval} onChange={e=>set("syncInterval",e.target.value)} disabled={!form.autoSync}>
-                <option value="1m">Every 1 min</option>
-                <option value="5m">Every 5 min</option>
-                <option value="15m">Every 15 min</option>
-                <option value="1h">Every hour</option>
-              </select>
-            </div>
-          </div>
+          {section === "creds" && (
+            <>
+              <div className="pe-sec-head">
+                <h3>Repository credentials</h3>
+                <p>How Crystal Forge authenticates when it clones and fetches this repository.</p>
+              </div>
+              <div className="field">
+                <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:8 }}>
+                  <label style={{ margin:0 }}>Authentication</label>
+                  <button className="btn btn-ghost focus-ring xs" onClick={test} disabled={testing==="running" || form.credType==="none"}>
+                    {testing==="running" ? <><Spinner size={11}/> Testing…</>
+                    : testing==="ok"     ? <><Icon name="check" size={11} style={{color:"#34d399"}}/> Connected</>
+                    : testing==="fail"   ? <><Icon name="warn" size={11} style={{color:"#f87171"}}/> Failed</>
+                    : <>Test connection</>}
+                  </button>
+                </div>
+                <div className="seg" style={{ width:"fit-content", flexWrap:"wrap" }}>
+                  {[
+                    { v:"none",  l:"None (public)" },
+                    { v:"ssh",   l:"SSH key" },
+                    { v:"https", l:"HTTPS token" },
+                  ].map(o => (
+                    <button key={o.v} className={form.credType===o.v?"active":""} onClick={()=>{ set("credType", o.v); setTesting(null); }}>{o.l}</button>
+                  ))}
+                </div>
+              </div>
+              {form.credType === "ssh"   && <SshCredPicker form={form} set={set}/>}
+              {form.credType === "https" && <HttpsCredPicker form={form} set={set}/>}
+              {form.credType === "none"  && (
+                <div className="help">No auth — works for anonymous HTTPS clones and read-only public repos.</div>
+              )}
+            </>
+          )}
 
-          {isEdit && (
-            <div style={{ marginTop:10, paddingTop:14, borderTop:"1px solid var(--cf-divider)" }}>
-              <div style={{ fontSize:11, fontWeight:600, textTransform:"uppercase", letterSpacing:"0.08em", color:"var(--cf-text-muted)", marginBottom:8 }}>Danger zone</div>
+          {section === "sync" && (
+            <>
+              <div className="pe-sec-head">
+                <h3>Sync</h3>
+                <p>How often Crystal Forge polls the repository for new commits.</p>
+              </div>
+              <div className="field">
+                <label className="focus-ring" style={{ display:"flex", gap:9, alignItems:"flex-start", cursor:"pointer", margin:0, textTransform:"none", letterSpacing:0 }}>
+                  <input type="checkbox" checked={form.autoSync} onChange={e=>set("autoSync",e.target.checked)} style={{ accentColor:"var(--cf-brand-purple)", marginTop:1 }}/>
+                  <span style={{ minWidth:0 }}>
+                    <span style={{ display:"block", fontSize:13, fontWeight:600 }}>Auto-sync</span>
+                    <span className="help" style={{ display:"block", marginTop:3, fontWeight:400 }}>
+                      {form.autoSync
+                        ? "Poll on the interval below and pick up new commits automatically."
+                        : "Off: the flake only updates when synced by hand from the registry."}
+                    </span>
+                  </span>
+                </label>
+              </div>
+              <div className="field">
+                <label>Sync interval</label>
+                <select className="input focus-ring" value={form.syncInterval} onChange={e=>set("syncInterval",e.target.value)} disabled={!form.autoSync} style={{ width:"fit-content" }}>
+                  <option value="1m">Every 1 min</option>
+                  <option value="5m">Every 5 min</option>
+                  <option value="15m">Every 15 min</option>
+                  <option value="1h">Every hour</option>
+                </select>
+              </div>
+            </>
+          )}
+
+          {section === "danger" && isEdit && (
+            <>
+              <div className="pe-sec-head">
+                <h3>Danger zone</h3>
+                <p>Removing the flake stops auto-sync and unregisters it. Tracked commits and history are retained.</p>
+              </div>
               <button className="btn btn-ghost focus-ring" onClick={()=>setConfirmDelete(true)} style={{ color:"#f87171", borderColor:"rgba(248,113,113,0.3)" }}>
                 <Icon name="x" size={12}/> Remove flake from registry
               </button>
-            </div>
+            </>
           )}
         </div>
-        <div className="modal-foot">
-          <button className="btn btn-ghost focus-ring" onClick={onClose}>Cancel</button>
-          <button className="btn btn-primary focus-ring" onClick={onClose}>
-            <Icon name="check" size={13}/> {isEdit ? "Save changes" : "Add flake"}
-          </button>
-        </div>
-        </>
-        )}
+
+        <footer className="pe-foot">
+          <span className="pe-foot-state">
+            {form.name.trim() || "Unnamed flake"}
+            <span className="pe-foot-dot">·</span>
+            {form.branch || "main"}
+            <span className="pe-foot-dot">·</span>
+            {form.autoSync ? `sync ${form.syncInterval}` : "manual sync"}
+          </span>
+          <div style={{ display:"flex", gap:8 }}>
+            <button className="btn btn-ghost focus-ring" onClick={onClose}>Cancel</button>
+            <button className="btn btn-primary focus-ring" onClick={onClose}>
+              <Icon name="check" size={13}/> {isEdit ? "Save changes" : "Add flake"}
+            </button>
+          </div>
+        </footer>
       </div>
     </div>
   );

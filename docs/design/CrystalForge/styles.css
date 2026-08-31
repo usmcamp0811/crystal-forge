@@ -1573,6 +1573,8 @@ a:hover { color: var(--cf-brand-purple-hover); }
   color: var(--cf-text-primary);
 }
 .sd-callout-warn svg { color: #fbbf24; flex-shrink: 0; margin-top: 1px; }
+.sd-callout-ok { background: rgba(52,211,153,0.08); border-color: rgba(52,211,153,0.28); color: var(--cf-text-primary); }
+.sd-callout-ok svg { color: #34d399; flex-shrink: 0; margin-top: 1px; }
 
 /* Tags */
 .sd-tag-row {
@@ -1878,6 +1880,7 @@ html[data-theme="light"] .sd-nix {
 .fl-tray {
   position: fixed; top: var(--classif-h, 0); right: 0; bottom: var(--classif-h, 0);
   width: min(840px, 100vw);
+  transition: width 200ms cubic-bezier(0.2,0.8,0.2,1);
   background: var(--cf-card-bg);
   border-left: 1px solid var(--cf-card-border);
   box-shadow: -16px 0 48px rgba(0,0,0,0.4);
@@ -2549,6 +2552,20 @@ html[data-theme="light"] .sd-nix {
   font-weight: 600;
   border-right: 1px solid var(--cf-divider);
 }
+/* Bundle roll-up columns — the default once a real compliance bundle is
+   assigned, since one column per control does not survive ~100 controls. */
+.pm-controls-wrap{flex-wrap:wrap;row-gap:8px}
+.pm-new-badge{flex-shrink:0;font-size:9.5px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;padding:1px 5px;border-radius:4px;background:color-mix(in oklab,#38bdf8 18%,transparent);color:#38bdf8}
+.pm-greenfield{display:flex;align-items:flex-start;gap:9px;margin:0 16px 10px;padding:9px 12px;border:1px solid color-mix(in oklab,#38bdf8 35%,var(--cf-card-border));border-radius:8px;background:color-mix(in oklab,#38bdf8 8%,transparent);font-size:12px;color:var(--cf-text-secondary);line-height:1.5}
+.pm-greenfield svg{color:#38bdf8;flex-shrink:0;margin-top:2px}
+.pm-th-bundle{cursor:default;padding:0 !important;min-width:104px;vertical-align:bottom}
+.pm-th-bundle-inner{display:flex;flex-direction:column;gap:2px;padding:10px 10px 8px;border-right:1px solid var(--cf-divider)}
+.pm-th-bundle-name{font-size:11.5px;color:var(--cf-text-primary);white-space:nowrap}
+.pm-th-bundle-sub{font-size:10px;color:var(--cf-text-muted)}
+.pm-td-bundle{text-align:center;cursor:pointer;border-right:1px solid var(--cf-divider);white-space:nowrap}
+.pm-td-bundle:hover{background:var(--cf-hover-bg)}
+.pm-bundle-num{font-size:11.5px;font-variant-numeric:tabular-nums}
+.pm-bundle-fail{margin-left:6px;font-size:10px;font-weight:700;padding:1px 5px;border-radius:4px;background:color-mix(in oklab,#f87171 18%,transparent);color:#f87171}
 .pm-th-policy {
   cursor: pointer;
   padding: 0 !important;
@@ -3435,6 +3452,8 @@ html[data-theme="light"] .sd-log-tzbar { background: #0f172a; }
 /* ── Build log drawer: fills the tray, maximize widens it ── */
 .build-log-tray { width: min(840px, 100vw); transition: width 200ms cubic-bezier(0.2,0.8,0.2,1); }
 .build-log-tray.build-log-tray-max { width: min(1360px, 100vw); }
+/* ── Generic tray maximize (evals, flakes, cves, policies, compliance) ── */
+.fl-tray.fl-tray-max { width: min(1360px, 100vw) !important; }
 .build-log-tray .build-log-stream {
   flex: 1; min-height: 0;
   max-height: none; border-radius: 0; margin: 0;
@@ -3520,6 +3539,7 @@ mark.log-hit {
 .attention-flash {
   animation: attention-flash-pulse 1.05s ease-in-out 3;
   border-radius: 10px;
+  transition: box-shadow 180ms ease, background-color 180ms ease;
 }
 tr.attention-flash { animation-name: attention-flash-row; }
 @keyframes attention-flash-row {
@@ -3848,6 +3868,57 @@ tr.attention-flash { animation-name: attention-flash-row; }
 .pe-map-why { font-size: 10.5px; color: var(--cf-text-muted); margin-top: 3px; line-height: 1.45; }
 .pe-ev { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: flex-start; padding: 8px 10px; background: var(--cf-subtle-bg); border-radius: 8px; border: 1px solid var(--cf-divider); }
 @media (max-width: 860px) { .pe-shell { grid-template-columns: 1fr; grid-template-areas: "head" "rail" "body" "foot"; } .pe-rail { flex-direction: row; overflow-x: auto; border-right: none; border-bottom: 1px solid var(--cf-divider); } .pe-prov { display: none; } }
+
+.dash-scope-sel { width: auto; max-width: 150px; font-size: 11px; padding: 3px 6px; height: 24px; }
+
+/* ── Fleet Year calendar: fills its widget at any width, never scrolls ──
+   53 week columns are 1fr each with square cells, so the grid scales down to a
+   1-column widget instead of overflowing. Sub-pixel gaps are dropped and the
+   weekday gutter hidden at narrow widths, where they'd be illegible anyway.
+   The query container is .fc-outer (an ancestor of BOTH the grid and the legend)
+   — a container query can't style its own container, so it can't be .fc-wrap. */
+/* The widget body never scrolls: the calendar bands take the leftover height and
+   the 7 rows share it, so cells compress instead of overflowing. */
+.dash-w-body:has(.fc-outer) { overflow: hidden; }
+.fc-outer { container-type: inline-size; display: flex; flex-direction: column; gap: 10px; min-width: 0; flex: 1 1 auto; min-height: 0; overflow: hidden; }
+/* Cells stay SQUARE and still never scroll: each band is a size container, so the
+   cell edge is min(width-driven, height-driven) and the grid letterboxes. */
+.fc-wrap { container-type: size; display: flex; gap: 4px; min-width: 0; flex: 1 1 auto; min-height: 0; }
+.fc-cols, .fc-daylabels { --fc-gutter: 24px; --fc-cell: min((100cqw - var(--fc-gutter) - (var(--fc-weeks) - 1) * var(--fc-gap, 2px)) / var(--fc-weeks), (100cqh - 13px - 6 * var(--fc-gap, 2px)) / 7); }
+.fc-cols { min-width: 0; display: flex; flex-direction: column; min-height: 0; }
+.fc-daylabels { display: grid; grid-template-rows: repeat(7, var(--fc-cell)); gap: var(--fc-gap, 2px); padding-top: 13px; flex-shrink: 0; width: 20px; }
+.fc-daylabels > span { font-size: 8.5px; line-height: 1; color: var(--cf-text-muted); text-align: right; align-self: center; }
+.fc-months { flex: 0 0 auto; display: grid; grid-template-columns: repeat(var(--fc-weeks), var(--fc-cell)); gap: var(--fc-gap, 2px); height: 13px; }
+.fc-months > span { position: relative; min-width: 0; }
+.fc-months b { position: absolute; left: 0; top: 0; font-size: 8.5px; font-weight: 500; color: var(--cf-text-muted); white-space: nowrap; }
+.fc-grid { display: grid; grid-template-rows: repeat(7, var(--fc-cell)); grid-auto-flow: column; grid-auto-columns: var(--fc-cell); gap: var(--fc-gap, 2px); min-width: 0; flex: 0 0 auto; }
+.fc-cell { aspect-ratio: 1; border-radius: 2px; min-width: 0; min-height: 0; }
+.fc-cell:not(.fc-cell-empty):hover { box-shadow: inset 0 0 0 1px var(--cf-text-primary); }
+.fc-hov { color: var(--cf-text-primary); font-family: var(--font-mono); }
+.fc-cell-empty { background: transparent; }
+.fc-summary { flex: 0 0 auto; display: flex; align-items: baseline; gap: 14px; font-size: 12px; flex-wrap: nowrap; height: 20px; overflow: hidden; }
+.fc-sum-tail { margin-left: auto; font-size: 10.5px; color: var(--cf-text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.fc-legend { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; font-size: 10px; color: var(--cf-text-muted); }
+@container (max-width: 460px) {
+  .fc-grid, .fc-months, .fc-daylabels, .fc-cols { --fc-gap: 1px; }
+  .fc-cols, .fc-daylabels { --fc-gutter: 0px; }
+  .fc-daylabels { display: none; }
+  .fc-cell { border-radius: 1px; }
+  .fc-legend-note { display: none; }
+  /* At 1-column the summary would wrap to four lines and dwarf the calendar it
+     labels, pushing the legend out of the widget — so it stays one line. */
+  .fc-summary { flex-wrap: nowrap; gap: 10px; overflow: hidden; }
+  .fc-summary > span { white-space: nowrap; }
+  .fc-sum-year, .fc-sum-tail { display: none; }
+}
+@container (max-width: 300px) { .fc-months b { font-size: 7.5px; } }
+.fc-legend-note { text-align: right; }
+
+/* ── Fleet-ops widget rows ── */
+.ops-row { display: flex; align-items: center; gap: 8px; padding: 6px 9px; background: var(--cf-subtle-bg); border-radius: 6px; cursor: pointer; }
+.ops-row:hover { background: color-mix(in oklab, var(--cf-brand-purple) 8%, var(--cf-subtle-bg)); }
+.ops-bar { flex: 1; min-width: 24px; height: 4px; border-radius: 99px; background: var(--cf-divider); overflow: hidden; display: flex; }
+.ops-bar > span { height: 100%; border-radius: 99px; }
 
 /* ── POA&M ── */
 .poam-bar { display: flex; flex-direction: column; gap: 8px; padding: 11px 13px; border-radius: 10px; background: var(--cf-subtle-bg); border: 1px solid var(--cf-divider); }

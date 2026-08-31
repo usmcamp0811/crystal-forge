@@ -522,27 +522,70 @@ function EnvFormModal({ mode, env, onClose }) {
     { name:"slate",   value:"#475569" },
   ];
 
+  const [section, setSection] = React.useState("basics");
+  const sections = [
+    { id:"basics", label:"Basics",            icon:"grid" },
+    { id:"cache",  label:"Binary cache",      icon:"download" },
+    { id:"deploy", label:"Deployment",        icon:"sync" },
+    { id:"policy", label:"Policy enforcement", icon:"shield" },
+    ...(isEdit ? [{ id:"danger", label:"Danger zone", icon:"warn", danger:true }] : []),
+  ];
+  const cacheMeta = (window.CACHE_DESTINATIONS || []).find(c => c.id === form.cacheId);
+  const bundleMeta = (typeof COMPLIANCE_BUNDLES !== "undefined" ? COMPLIANCE_BUNDLES : []).find(b => b.id === form.complianceBundleId);
+
+  if (confirmDelete) {
+    return (
+      <div className="modal-backdrop" onClick={onClose}>
+        <div className="modal" onClick={e=>e.stopPropagation()} style={{ width:"min(560px,96vw)" }}>
+          <DeleteEnvConfirm env={env} onCancel={()=>setConfirmDelete(false)} onConfirm={onClose}/>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal" onClick={e=>e.stopPropagation()} style={{ width:"min(620px,96vw)", maxHeight:"92vh" }}>
-        {confirmDelete ? (
-          <DeleteEnvConfirm env={env} onCancel={()=>setConfirmDelete(false)} onConfirm={onClose}/>
-        ) : (
-          <>
-            <div className="modal-head">
-              <h2>
-                <Icon name={isEdit ? "gear" : "plus"} size={14} style={{ marginRight:6, verticalAlign:"text-bottom" }}/>
-                {isEdit ? `Edit ${env.name}` : "Add environment"}
-              </h2>
-              <p>{isEdit ? "Update environment settings, cache assignment, and deployment policy." : "Create a new environment tier."}</p>
+      <div className="pe-shell" onClick={e=>e.stopPropagation()}>
+        <header className="pe-head">
+          <div style={{ minWidth:0, display:"flex", flexDirection:"column", gap:3 }}>
+            <div style={{ display:"flex", alignItems:"center", gap:9, minWidth:0 }}>
+              <span style={{ width:10, height:10, borderRadius:99, background:form.color, flexShrink:0 }}/>
+              <span className="pe-head-title">{isEdit ? (form.name || env.name) : (form.name || "Add environment")}</span>
+              {form.isProduction && <span className="chip chip-critical">production</span>}
+              {bundleMeta && <span className="chip chip-info">{bundleMeta.framework}</span>}
+              {!form.name.trim() && <span className="chip" title="An environment needs a name.">Unnamed</span>}
             </div>
-            <div className="modal-body" style={{ overflowY:"auto" }}>
+            <span className="pe-head-sub">{isEdit ? "Update environment settings, cache assignment, and deployment policy." : "Create a new environment tier."}</span>
+          </div>
+          <button className="btn-icon focus-ring" onClick={onClose} aria-label="Close"><Icon name="x" size={16}/></button>
+        </header>
+
+        <nav className="pe-rail">
+          {sections.map(s => (
+            <button key={s.id} className={`pe-rail-item focus-ring${section===s.id?" active":""}`}
+              style={s.danger && section!==s.id ? { color:"#f87171" } : null} onClick={()=>setSection(s.id)}>
+              <Icon name={s.icon} size={13}/>
+              <span className="pe-rail-label">{s.label}</span>
+              {s.id === "basics" && !form.name.trim() && <span className="pe-rail-badge warn">!</span>}
+              {s.id === "cache" && <span className="pe-rail-badge">{cacheMeta ? cacheMeta.type : "none"}</span>}
+              {s.id === "policy" && <span className="pe-rail-badge">{form.gatePolicyIds.length + (form.complianceBundleId ? 1 : 0)}</span>}
+            </button>
+          ))}
+        </nav>
+
+        <div className="pe-body">
+          {section === "basics" && (
+            <>
+              <div className="pe-sec-head">
+                <h3>Basics</h3>
+                <p>What this tier is called, how it reads at a glance, and whether it counts as production.</p>
+              </div>
               <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:14 }}>
-                <div className="field">
+                <div className="field" style={{ marginTop:0 }}>
                   <label>Name</label>
                   <input className="input focus-ring mono" value={form.name} onChange={e=>set("name",e.target.value)} placeholder="e.g. production"/>
                 </div>
-                <div className="field">
+                <div className="field" style={{ marginTop:0 }}>
                   <label>Color</label>
                   <div style={{ display:"flex", gap:6, flexWrap:"wrap", alignItems:"center" }}>
                     {COLORS.map(c => (
@@ -559,7 +602,7 @@ function EnvFormModal({ mode, env, onClose }) {
                     ))}
                     <label className="focus-ring" title="Custom color"
                       style={{
-                        width:28, height:28, borderRadius:8, cursor:"pointer",
+                        width:28, height:28, borderRadius:8, cursor:"pointer", position:"relative",
                         background: COLORS.find(c=>c.value===form.color) ? "var(--cf-subtle-bg)" : form.color,
                         border: !COLORS.find(c=>c.value===form.color) ? "2px solid var(--cf-text-primary)" : "2px dashed var(--cf-card-border)",
                         display:"flex", alignItems:"center", justifyContent:"center",
@@ -573,20 +616,33 @@ function EnvFormModal({ mode, env, onClose }) {
                   </div>
                 </div>
               </div>
-
               <div className="field">
                 <label>Description</label>
                 <input className="input focus-ring" value={form.description} onChange={e=>set("description",e.target.value)} placeholder="What this tier is for"/>
               </div>
+              <label className="env-prod-toggle" style={{ display:"flex", gap:11, alignItems:"flex-start", cursor:"pointer", padding:"11px 13px", border:`1px solid ${form.isProduction ? "color-mix(in oklab, var(--cf-danger-berry) 55%, var(--cf-card-border))" : "var(--cf-card-border)"}`, borderRadius:10, background: form.isProduction ? "color-mix(in oklab, var(--cf-danger-berry) 10%, transparent)" : "transparent", marginTop:14 }}>
+                <input type="checkbox" checked={form.isProduction} onChange={e=>set("isProduction",e.target.checked)} style={{ accentColor:"var(--cf-danger-berry)", marginTop:2 }}/>
+                <span style={{ minWidth:0 }}>
+                  <span style={{ display:"flex", alignItems:"center", gap:7, fontSize:13, fontWeight:600 }}>
+                    <Icon name="shield" size={13} style={{ color: form.isProduction ? "#f87171" : "var(--cf-text-muted)" }}/>
+                    Production environment
+                  </span>
+                  <span style={{ display:"block", fontSize:11.5, color:"var(--cf-text-muted)", marginTop:3, lineHeight:1.45 }}>
+                    Flags hosts in this environment as production. Destructive actions (rollback, force-deploy) require a type-to-confirm guard, regardless of the environment's name.
+                  </span>
+                </span>
+              </label>
+            </>
+          )}
 
-              {/* Cache */}
-              <div style={{ padding:14, border:"1px solid var(--cf-divider)", borderRadius:10, background:"color-mix(in oklab,var(--cf-page-bg) 50%,var(--cf-card-bg))" }}>
-                <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:6, marginBottom:10 }}>
-                  <div style={{ fontSize:13, fontWeight:600, display:"flex", alignItems:"center", gap:6 }}>
-                    <Icon name="download" size={13}/> Binary cache
-                  </div>
-                  <span style={{ fontSize:11, color:"var(--cf-text-muted)" }}>Manage caches in the Caches view</span>
-                </div>
+          {section === "cache" && (
+            <>
+              <div className="pe-sec-head">
+                <h3>Binary cache</h3>
+                <p>Which substituter systems in this environment pull closures from. Manage caches in the Caches view.</p>
+              </div>
+              <div className="field">
+                <label>Assigned cache</label>
                 <select className="input focus-ring" value={form.cacheId || ""} onChange={e=>{
                   if (e.target.value === "__add__") { setAddCacheOpen(true); }
                   else { set("cacheId", e.target.value); }
@@ -597,23 +653,26 @@ function EnvFormModal({ mode, env, onClose }) {
                   ))}
                   <option value="__add__">+ Add new cache…</option>
                 </select>
-                {form.cacheId && (() => {
-                  const c = (window.CACHE_DESTINATIONS || []).find(x => x.id === form.cacheId);
-                  if (!c) return null;
-                  return (
-                    <div style={{ marginTop:10, padding:10, background:"var(--cf-card-bg)", border:"1px solid var(--cf-divider)", borderRadius:8 }}>
-                      <div className="mono" style={{ fontSize:11, color:"var(--cf-text-secondary)", marginBottom:6 }}>{c.url}</div>
-                      <div style={{ display:"flex", gap:10, flexWrap:"wrap", fontSize:11, color:"var(--cf-text-muted)" }}>
-                        <span className={`chip ${c.status === "healthy" ? "chip-healthy" : c.status === "warning" ? "chip-warning" : "chip-critical"}`}>{c.status}</span>
-                        {c.storage && <span>{c.storage.used}/{c.storage.total} {c.storage.unit} used</span>}
-                        {c.paths && <span>{c.paths.toLocaleString()} paths</span>}
-                      </div>
+                {cacheMeta && (
+                  <div style={{ marginTop:10, padding:10, background:"var(--cf-subtle-bg)", border:"1px solid var(--cf-divider)", borderRadius:8 }}>
+                    <div className="mono" style={{ fontSize:11, color:"var(--cf-text-secondary)", marginBottom:6 }}>{cacheMeta.url}</div>
+                    <div style={{ display:"flex", gap:10, flexWrap:"wrap", fontSize:11, color:"var(--cf-text-muted)" }}>
+                      <span className={`chip ${cacheMeta.status === "healthy" ? "chip-healthy" : cacheMeta.status === "warning" ? "chip-warning" : "chip-critical"}`}>{cacheMeta.status}</span>
+                      {cacheMeta.storage && <span>{cacheMeta.storage.used}/{cacheMeta.storage.total} {cacheMeta.storage.unit} used</span>}
+                      {cacheMeta.paths && <span>{cacheMeta.paths.toLocaleString()} paths</span>}
                     </div>
-                  );
-                })()}
+                  </div>
+                )}
               </div>
+            </>
+          )}
 
-              {/* Deployment behaviour + policy enforcement */}
+          {section === "deploy" && (
+            <>
+              <div className="pe-sec-head">
+                <h3>Deployment</h3>
+                <p>The mode new systems in this environment start with, plus the everyday deploy defaults.</p>
+              </div>
               <div className="field">
                 <label>Default deployment mode</label>
                 <div className="seg" style={{ width:"fit-content", flexWrap:"wrap" }}>
@@ -637,70 +696,7 @@ function EnvFormModal({ mode, env, onClose }) {
                   })()}
                 </div>
               </div>
-
-              {/* Policy enforcement — scales from a few rules to a full bundle */}
-              <div style={{ padding:14, border:"1px solid var(--cf-divider)", borderRadius:10, background:"color-mix(in oklab,var(--cf-page-bg) 50%,var(--cf-card-bg))" }}>
-                <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:6, marginBottom:4 }}>
-                  <div style={{ fontSize:13, fontWeight:600, display:"flex", alignItems:"center", gap:6 }}>
-                    <Icon name="shield" size={13}/> Policy enforcement
-                  </div>
-                  <span style={{ fontSize:11, color:"var(--cf-text-muted)" }}>Applied to every system in this env</span>
-                </div>
-                <div className="help" style={{ marginTop:0, marginBottom:12 }}>
-                  Pick a few à-la-carte gate policies, or require a full compliance bundle for regulated environments — or both.
-                </div>
-
-                {/* À la carte gate policies */}
-                <div style={{ fontSize:11, fontWeight:600, color:"var(--cf-text-secondary)", marginBottom:6 }}>Gate policies</div>
-                <GatePolicyPicker
-                  selected={form.gatePolicyIds}
-                  onChange={(ids) => set("gatePolicyIds", ids)}
-                />
-                <div className="help" style={{ marginBottom:14 }}>
-                  {form.gatePolicyIds.length === 0
-                    ? "No extra gates — just the deployment behaviour above. Fine for a homelab."
-                    : `${form.gatePolicyIds.length} gate ${form.gatePolicyIds.length === 1 ? "policy" : "policies"} must pass before any deploy in this env.`}
-                </div>
-
-                {/* Compliance bundle requirement */}
-                <div style={{ fontSize:11, fontWeight:600, color:"var(--cf-text-secondary)", marginBottom:6, display:"flex", alignItems:"center", justifyContent:"space-between" }}>
-                  <span>Required compliance bundle</span>
-                  <span style={{ fontSize:10, color:"var(--cf-text-muted)", fontWeight:400 }}>for regulated / ATO environments</span>
-                </div>
-                <select className="input focus-ring" value={form.complianceBundleId} onChange={e=>set("complianceBundleId", e.target.value)}>
-                  <option value="">None — no compliance bundle required</option>
-                  {(typeof COMPLIANCE_BUNDLES !== "undefined" ? COMPLIANCE_BUNDLES : []).map(b => (
-                    <option key={b.id} value={b.id}>{b.name} ({b.framework})</option>
-                  ))}
-                </select>
-                {form.complianceBundleId && (() => {
-                  const b = (COMPLIANCE_BUNDLES || []).find(x => x.id === form.complianceBundleId);
-                  if (!b) return null;
-                  return (
-                    <div className="sd-callout sd-callout-info" style={{ marginTop:10, fontSize:11 }}>
-                      <Icon name="shield" size={12}/>
-                      <div>
-                        Systems must satisfy all <strong>{b.policyIds.length}</strong> controls in <strong>{b.name}</strong>. Non-compliant hosts are blocked from deploy and flagged in the Compliance view.
-                      </div>
-                    </div>
-                  );
-                })()}
-              </div>
-
-              <label className="env-prod-toggle" style={{ display:"flex", gap:11, alignItems:"flex-start", cursor:"pointer", padding:"11px 13px", border:`1px solid ${form.isProduction ? "color-mix(in oklab, var(--cf-danger-berry) 55%, var(--cf-card-border))" : "var(--cf-card-border)"}`, borderRadius:10, background: form.isProduction ? "color-mix(in oklab, var(--cf-danger-berry) 10%, transparent)" : "transparent", marginBottom:14 }}>
-                <input type="checkbox" checked={form.isProduction} onChange={e=>set("isProduction",e.target.checked)} style={{ accentColor:"var(--cf-danger-berry)", marginTop:2 }}/>
-                <span style={{ minWidth:0 }}>
-                  <span style={{ display:"flex", alignItems:"center", gap:7, fontSize:13, fontWeight:600 }}>
-                    <Icon name="shield" size={13} style={{ color: form.isProduction ? "#f87171" : "var(--cf-text-muted)" }}/>
-                    Production environment
-                  </span>
-                  <span style={{ display:"block", fontSize:11.5, color:"var(--cf-text-muted)", marginTop:3, lineHeight:1.45 }}>
-                    Flags hosts in this environment as production. Destructive actions (rollback, force-deploy) require a type-to-confirm guard, regardless of the environment's name.
-                  </span>
-                </span>
-              </label>
-
-              <div style={{ display:"flex", gap:18, flexWrap:"wrap" }}>
+              <div style={{ display:"flex", gap:18, flexWrap:"wrap", marginTop:6 }}>
                 <label style={{ display:"flex", gap:8, alignItems:"center", fontSize:13, cursor:"pointer" }}>
                   <input type="checkbox" checked={form.autoSync} onChange={e=>set("autoSync",e.target.checked)} style={{ accentColor:"var(--cf-brand-purple)" }}/>
                   <span>Auto-sync flakes</span>
@@ -710,29 +706,84 @@ function EnvFormModal({ mode, env, onClose }) {
                   <span>Require approval before deploy</span>
                 </label>
               </div>
+            </>
+          )}
 
-              {isEdit && (
-                <div style={{ marginTop:10, paddingTop:14, borderTop:"1px solid var(--cf-divider)" }}>
-                  <div style={{ fontSize:11, fontWeight:600, textTransform:"uppercase", letterSpacing:"0.08em", color:"var(--cf-text-muted)", marginBottom:8 }}>Danger zone</div>
-                  <button className="btn btn-ghost focus-ring" onClick={()=>setConfirmDelete(true)} style={{ color:"#f87171", borderColor:"rgba(248,113,113,0.3)" }}>
-                    <Icon name="x" size={12}/> Remove environment
-                  </button>
-                  {env.stats.total > 0 && (
-                    <div className="help" style={{ marginTop:6 }}>
-                      <Icon name="warn" size={10} style={{ color:"#fbbf24", verticalAlign:"middle" }}/> {env.stats.total} system{env.stats.total === 1 ? "" : "s"} currently use this env. Reassign them first.
+          {section === "policy" && (
+            <>
+              <div className="pe-sec-head">
+                <h3>Policy enforcement</h3>
+                <p>Pick a few à-la-carte gate policies, or require a full compliance bundle for regulated environments — or both. Applied to every system in this env.</p>
+              </div>
+              <div className="field">
+                <label>Gate policies</label>
+                <GatePolicyPicker
+                  selected={form.gatePolicyIds}
+                  onChange={(ids) => set("gatePolicyIds", ids)}
+                />
+                <div className="help">
+                  {form.gatePolicyIds.length === 0
+                    ? "No extra gates — just the deployment behaviour above. Fine for a homelab."
+                    : `${form.gatePolicyIds.length} gate ${form.gatePolicyIds.length === 1 ? "policy" : "policies"} must pass before any deploy in this env.`}
+                </div>
+              </div>
+              <div className="field">
+                <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:8 }}>
+                  <label style={{ margin:0 }}>Required compliance bundle</label>
+                  <span style={{ fontSize:11, color:"var(--cf-text-muted)" }}>for regulated / ATO environments</span>
+                </div>
+                <select className="input focus-ring" value={form.complianceBundleId} onChange={e=>set("complianceBundleId", e.target.value)}>
+                  <option value="">None — no compliance bundle required</option>
+                  {(typeof COMPLIANCE_BUNDLES !== "undefined" ? COMPLIANCE_BUNDLES : []).map(b => (
+                    <option key={b.id} value={b.id}>{b.name} ({b.framework})</option>
+                  ))}
+                </select>
+                {bundleMeta && (
+                  <div className="sd-callout sd-callout-info" style={{ marginTop:10, fontSize:11 }}>
+                    <Icon name="shield" size={12}/>
+                    <div>
+                      Systems must satisfy all <strong>{bundleMeta.policyIds.length}</strong> controls in <strong>{bundleMeta.name}</strong>. Non-compliant hosts are blocked from deploy and flagged in the Compliance view.
                     </div>
-                  )}
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+
+          {section === "danger" && isEdit && (
+            <>
+              <div className="pe-sec-head">
+                <h3>Danger zone</h3>
+                <p>Removing an environment leaves its systems unassigned — reassign them first.</p>
+              </div>
+              <button className="btn btn-ghost focus-ring" onClick={()=>setConfirmDelete(true)} style={{ color:"#f87171", borderColor:"rgba(248,113,113,0.3)" }}>
+                <Icon name="x" size={12}/> Remove environment
+              </button>
+              {env.stats.total > 0 && (
+                <div className="help" style={{ marginTop:6 }}>
+                  <Icon name="warn" size={10} style={{ color:"#fbbf24", verticalAlign:"middle" }}/> {env.stats.total} system{env.stats.total === 1 ? "" : "s"} currently use this env. Reassign them first.
                 </div>
               )}
-            </div>
-            <div className="modal-foot">
-              <button className="btn btn-ghost focus-ring" onClick={onClose}>Cancel</button>
-              <button className="btn btn-primary focus-ring" onClick={onClose}>
-                <Icon name="check" size={13}/> {isEdit ? "Save changes" : "Add environment"}
-              </button>
-            </div>
-          </>
-        )}
+            </>
+          )}
+        </div>
+
+        <footer className="pe-foot">
+          <span className="pe-foot-state">
+            {form.name.trim() || "Unnamed environment"}
+            <span className="pe-foot-dot">·</span>
+            {cacheMeta ? cacheMeta.name : "no cache"}
+            <span className="pe-foot-dot">·</span>
+            {form.gatePolicyIds.length} gate{form.gatePolicyIds.length === 1 ? "" : "s"}
+            {bundleMeta && <><span className="pe-foot-dot">·</span>{bundleMeta.name}</>}
+          </span>
+          <div style={{ display:"flex", gap:8 }}>
+            <button className="btn btn-ghost focus-ring" onClick={onClose}>Cancel</button>
+            <button className="btn btn-primary focus-ring" onClick={onClose}>
+              <Icon name="check" size={13}/> {isEdit ? "Save changes" : "Add environment"}
+            </button>
+          </div>
+        </footer>
       </div>
       {addCacheOpen && (
         <CacheFormModal

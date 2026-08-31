@@ -265,8 +265,21 @@ function useAttentionFlash(key, hasAttention = true, opts = {}) {
     _flashedViews.add(key);
     if (ack) acknowledgeView(key);
     setFlash(true);
-    const t = setTimeout(() => setFlash(false), 3200);
-    return () => clearTimeout(t);
+    // The flash sits on clickable cards, so any sign the user has noticed it —
+    // a click, a hover, a keypress, a scroll — stops it immediately rather than
+    // making them wait out the animation on a target they're trying to hit.
+    let done = false;
+    const stop = () => {
+      if (done) return;
+      done = true;
+      setFlash(false);
+      clearTimeout(t);
+      EVENTS.forEach(ev => window.removeEventListener(ev, stop, true));
+    };
+    const EVENTS = ["pointerdown", "pointermove", "keydown", "wheel"];
+    const t = setTimeout(stop, 2600);
+    EVENTS.forEach(ev => window.addEventListener(ev, stop, true));
+    return stop;
   }, []);
   return flash;
 }
@@ -564,12 +577,33 @@ function Topbar({ theme, onTheme, onTweaks, crumb, onNavigate, onSearchResult })
         }
       });
     }
-    items.push(
-      { id:"b1", icon:"build",  color:"#f87171", title:"Build failed: openssl-3.3.2", sub:"hydra-02 · attempt 3", at:"12m ago", route:"builds", unread:true },
-      { id:"c1", icon:"shield", color:"#f87171", title:"New critical CVE: CVE-2026-31822", sub:"affects 6 systems · openssl", at:"38m ago", route:"cves", unread:true },
-      { id:"h1", icon:"warn",   color:"#fbbf24", title:"Heartbeat lost: edge-fra-01", sub:"no signal for 6h", at:"1h ago", route:"systems", unread:false },
-      { id:"e1", icon:"eval",   color:"#34d399", title:"Eval complete: infrastructure@a3f8c12", sub:"12 systems · all policies passed", at:"2h ago", route:"evals", unread:false },
-    );
+    // Demo notifications point at REAL fixture rows so clicking one lands on the
+    // actual thing: the failed build's log drawer, that CVE's drawer, that eval.
+    const failedBuild = (typeof HISTORY_BUILDS !== "undefined" ? HISTORY_BUILDS : []).find(b => b.status === "failed");
+    const critCve = (typeof CVES !== "undefined" ? CVES : []).find(c => c.severity === "critical");
+    const doneEval = (typeof HISTORY_EVALS !== "undefined" ? HISTORY_EVALS : []).find(e => e.status === "complete");
+    const staleSys = (typeof SYSTEMS !== "undefined" ? SYSTEMS : []).find(s => s.status === "Offline") ||
+      (typeof SYSTEMS !== "undefined" ? SYSTEMS : []).find(s => s.status === "Unknown" || s.status === "Critical");
+    if (failedBuild) items.push({ id:"b1", icon:"build", color:"#f87171",
+      title:`Build failed: ${failedBuild.failedPkg || failedBuild.name}`,
+      sub:`${failedBuild.system} · attempt ${failedBuild.attempts} · ${failedBuild.flake}`,
+      at:"12m ago", route:"builds", focus:{ sha: failedBuild.commit }, unread:true });
+    if (critCve) items.push({ id:"c1", icon:"shield", color:"#f87171",
+      title:`New critical CVE: ${critCve.id}`,
+      sub:`affects ${critCve.affectedCount} system${critCve.affectedCount===1?"":"s"} · ${critCve.pkg}`,
+      at:"38m ago", route:"cves", focus:{ id: critCve.id }, unread:true });
+    if (staleSys) {
+      const m = staleSys.heartbeatAge;
+      const dur = typeof m === "number" ? (m >= 60 ? `${Math.floor(m/60)}h ${m%60}m` : `${m}m`) : null;
+      items.push({ id:"h1", icon:"warn", color:"#fbbf24",
+        title:`Heartbeat lost: ${staleSys.hostname}`,
+        sub:`${staleSys.environment || staleSys.status}${dur ? ` · no signal for ${dur}` : ""}`,
+        at: staleSys.lastHeartbeat || "—", route:"systems", sysId:staleSys.id, hostname:staleSys.hostname, sysTab:"overview", unread:false });
+    }
+    if (doneEval) items.push({ id:"e1", icon:"eval", color: doneEval.policyFail ? "#fbbf24" : "#34d399",
+      title:`Eval complete: ${doneEval.flake}@${doneEval.commit}`,
+      sub:`${doneEval.systemCount} systems · ${doneEval.policyFail ? `${doneEval.policyFail} policy failure${doneEval.policyFail===1?"":"s"}` : "all policies passed"}`,
+      at:"2h ago", route:"evals", focus:{ sha: doneEval.commit }, unread:false });
     return items;
   }, []);
   const [dismissedIds, setDismissedIds] = React.useState(() => new Set());
@@ -608,7 +642,7 @@ function Topbar({ theme, onTheme, onTweaks, crumb, onNavigate, onSearchResult })
               )}
               {visibleNotifs.map(n => (
                 <button key={n.id} className={`notif-item focus-ring${n.unread ? " unread" : ""}`}
-                  onClick={() => { setNotifOpen(false); if (n.sysId || n.hostname) { window.dispatchEvent(new CustomEvent("cf-open-system", { detail:{ id:n.sysId, hostname:n.hostname, tab:n.sysTab } })); return; } onNavigate?.(n.route); if (n.poamId && typeof openPoamDetail === "function") setTimeout(() => openPoamDetail(n.poamId), 60); }}>
+                  onClick={() => { setNotifOpen(false); if (n.sysId || n.hostname) { window.dispatchEvent(new CustomEvent("cf-open-system", { detail:{ id:n.sysId, hostname:n.hostname, tab:n.sysTab } })); return; } onNavigate?.(n.route, n.focus); if (n.poamId && typeof openPoamDetail === "function") setTimeout(() => openPoamDetail(n.poamId), 60); }}>
                   <span className="notif-icon" style={{ color:n.color, background:`color-mix(in oklab, ${n.color} 16%, transparent)` }}>
                     <Icon name={n.icon} size={13}/>
                   </span>

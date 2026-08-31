@@ -11,6 +11,7 @@ function PendingDeployBanner({ stage, stages, commit, sys, kind, gen, onDismiss,
   const stepMeta = {
     "queued":    { label: "Queued", sub: `Waiting for ${sys.hostname} agent to check in (heartbeat every ${sys.heartbeatIntervalSec}s)` },
     "picked-up": { label: "Picked up", sub: `Agent fetched the ${isRollback ? "rollback" : "deployment"} command` },
+    "copying":   { label: "Copying from cache", sub: `Pulling the closure for ${commit} onto ${sys.hostname} — a failure here stalls the deploy before anything is applied` },
     "applying":  { label: isRollback ? "Reverting" : "Applying", sub: isRollback ? `Switching to generation #${gen} (${commit})` : `Building & switching to ${commit}` },
     "activated": { label: "Activated", sub: `Generation #${targetGen} is live` },
   };
@@ -49,7 +50,7 @@ function PendingDeployBanner({ stage, stages, commit, sys, kind, gen, onDismiss,
 
 // Deployment-command lifecycle stage machine (shared by SystemDetail + SystemPanel).
 // Pull-based: server queues → agent checks in → applies → activates.
-const DEPLOY_STAGES = ["queued", "picked-up", "applying", "activated"];
+const DEPLOY_STAGES = ["queued", "picked-up", "copying", "applying", "activated"];
 function useDeployStages(pendingDeploy, onClear) {
   const [stage, setStage] = React.useState(null);
   React.useEffect(() => {
@@ -58,10 +59,11 @@ function useDeployStages(pendingDeploy, onClear) {
     // Pull-based agent: it only checks in on its own heartbeat cadence, so there's
     // almost always a real wait here — never assume it's listening right away.
     const t1 = setTimeout(() => setStage("picked-up"), 15000);
-    const t2 = setTimeout(() => setStage("applying"), 17200);
-    const t3 = setTimeout(() => setStage("activated"), 20600);
-    const t4 = setTimeout(() => onClear?.(), 24300);
-    return () => { [t1,t2,t3,t4].forEach(clearTimeout); };
+    const t2 = setTimeout(() => setStage("copying"), 16600);
+    const t3 = setTimeout(() => setStage("applying"), 19400);
+    const t4 = setTimeout(() => setStage("activated"), 22800);
+    const t5 = setTimeout(() => onClear?.(), 26500);
+    return () => { [t1,t2,t3,t4,t5].forEach(clearTimeout); };
   }, [pendingDeploy?.at]);
   return stage;
 }
