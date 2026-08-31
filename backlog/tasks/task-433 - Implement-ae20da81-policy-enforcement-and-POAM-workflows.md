@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - claude-agent
 created_date: '2026-08-23 01:35'
-updated_date: '2026-08-31 22:36'
+updated_date: '2026-08-31 22:37'
 labels:
   - design-parity
   - policy
@@ -276,6 +276,8 @@ Root-cause refinement: the unlink service returns retired relationship history, 
 2026-08-31 canonical evidence assertion correction: preserve exact framework release and requirement assertions, but scope `evidence-requirement-identity` to `#compliance-evidence-dialog`; the failed artifact proves production renders `Test Mapping Framework · 1`, while `finding-poam-remediation` contains only the sibling remediation region. Run Node syntax/static contracts and the focused canonical mixed browser step if feasible. Preserve concurrent changes and do not commit.
 
 2026-08-31 final editor CSS/layout remediation in `/tmp/opencode/TASK-433-publish`: limit writes to `packages/web-ui/assets/app.css` and focused policy-editor source tests. Give the editor width selector greater specificity than the later generic `.modal` rule; reset narrow editor tabs to intrinsic width inside a horizontally scrollable rail with a persistent overflow cue and active-state border; add mapping-tab flow clearance so `+ Add mapping` remains above the footer. Add source/presentation regressions that verify the scoped selectors, cascade intent, and mapping-action placement. Run web-ui rustfmt, focused tests, the WASM build, and `git diff --check`; preserve concurrent changes and do not commit.
+
+2026-08-31 durable POA&M verification identity remediation in `/tmp/opencode/TASK-433-publish`: add additive migration 0244 with a nullable immutable verification-item hostname snapshot and transactional backfill of existing rows while suspending only the existing item-history mutation trigger. Capture the locked system hostname in all verify/close item inserts, and hydrate verification DTOs from the snapshot with live-host fallback only for rolling/pre-upgrade null rows. Extend the PostgreSQL closure-history regression to rename the system after sealing and prove reloaded history retains the original hostname. Keep `poam_workflows` wired through the existing authoritative `server-regressions` target. Run backend rustfmt, SQLX offline/live preparation as needed, the focused live PostgreSQL regression, migration/server-regressions when feasible, and `git diff --check`; preserve concurrent work and do not commit.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
