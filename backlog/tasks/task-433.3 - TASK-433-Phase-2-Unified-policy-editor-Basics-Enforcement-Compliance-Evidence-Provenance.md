@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:42'
-updated_date: '2026-08-29 15:41'
+updated_date: '2026-08-31 20:31'
 labels:
   - design-parity
   - policy
@@ -75,6 +75,8 @@ nix build .#checks.x86_64-linux.web-ui --no-link
 8. Run required formatting, web/server/unit/DB/evaluator/browser/Nix checks. Perform independent requirements/backend/performance/UI/error-state/E2E review, update MR metadata and task evidence, then move TASK-433.3 to Review only if every AC and required check is proven.
 
 Phase-8 owner remediation: bring the common editor shell up to surrounding modal/accessibility conventions with dialog semantics, accessible naming, Escape/close behavior, initial focus, focus containment/restoration where the existing Dioxus modal pattern supports it, usable narrow layout, and a wider persistent section/provenance hierarchy consistent with the authoritative design. Require CSRF on policy create/update and mapping CRUD changed by this phase, with direct server regressions and unchanged generic client CSRF behavior. Preserve immutable provenance/mapping semantics and all existing editor contracts.
+
+2026-08-31 remaining editor visual remediation in `/tmp/opencode/TASK-433-publish`: keep changes to the policy editor, `packages/web-ui/assets/app.css`, and focused tests. At the 560px narrow-desktop viewport, preserve all applicable section tabs in one horizontally scrollable tablist, expose an explicit overflow cue, and reveal the active tab. Reduce the desktop rail width, reserve scroll clearance above the footer, strengthen imported provenance hierarchy and long-value truncation, and reflow crowded multiline rule controls without changing editor state or persistence behavior. Add focused browser/pure regressions. Run web-ui rustfmt, targeted unit tests, a WASM check, Node syntax/static contracts if the browser source changes, and `git diff --check`. Do not commit.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
