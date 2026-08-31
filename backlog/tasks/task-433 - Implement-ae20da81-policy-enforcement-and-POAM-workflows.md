@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - claude-agent
 created_date: '2026-08-23 01:35'
-updated_date: '2026-08-31 18:10'
+updated_date: '2026-08-31 18:11'
 labels:
   - design-parity
   - policy
@@ -256,6 +256,8 @@ Root-cause refinement: the unlink service returns retired relationship history, 
 2026-08-31 remaining AC38 enforcement-matrix remediation in `/tmp/opencode/TASK-433-publish`: limit writes to server tests and authoritative Nix check wiring. Add a discriminating all-eight-kind XCCDF export, parse/validate, committed import when practical, reload, and re-export regression that preserves rule IDs, order, configuration, and phase semantics. Confirm or wire the ignored real Nix executor Pass/Fail/Error/evidence matrix into `server-regressions`. Add only small direct per-kind evidence or NotChecked assertions needed to make AC38 coverage objective. Run scoped backend rustfmt and targeted tests through `nix develop`, then `server-regressions` if feasible. Preserve concurrent edits and do not commit.
 
 2026-08-31 remaining non-overlapping UI parity/accessibility remediation in `/tmp/opencode/TASK-433-publish`: limit writes to `packages/web-ui/assets/app.css`, dashboard, notification/topbar, Setup Coach, and policy UI Rust files. Audit all TASK-433 light-theme normal-text semantic colors, including dashboard hardcoded colors, against WCAG AA 4.5:1 and add theme overrides. Independently validate notification menu sibling semantics, focus entry/restoration, Arrow navigation, Tab behavior, and Escape, then fix residual interaction defects. Add missing status/live semantics in dashboard, coach, and notification states. Ensure policy cards/rows avoid nested-invalid interactive semantics and isolate descendant keyboard events, with focused regressions. Run web-ui rustfmt, targeted tests, a WASM check, and `git diff --check`. Preserve concurrent edits, excluded compliance/POA&M/system-detail/browser-harness files, and do not commit.
+
+2026-08-31 remaining POA&M contract/UI remediation in `/tmp/opencode/TASK-433-publish`: On a 412 close rejection, retain local metadata/milestone drafts, fetch the committed POA&M detail at `committed_revision`, reconcile the verification attempt into the tray, and ensure subsequent mutations use that revision. Route POA&M 401 responses from detail, evidence relationships, system/bundle rollups, lists, and mutations through the application authentication-expiration state clear and login redirect while retaining scoped 403 presentation. Add additive authoritative linked-finding requirement metadata beside existing requirement UUID arrays, hydrate it with one batched query after current verification overlay, deserialize with rolling defaults, and render only available requirement/control/framework labels in create/detail/list contexts. Add Expand/Restore parity to in-scope bundle, evidence, and POA&M drawers. Add focused DTO/reconciliation/query/UI tests; run backend/web fmt, targeted tests, WASM check, and diff check. Preserve concurrent worktree changes and do not commit.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
