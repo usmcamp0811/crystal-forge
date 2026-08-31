@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - claude-agent
 created_date: '2026-08-23 01:35'
-updated_date: '2026-08-31 02:31'
+updated_date: '2026-08-31 02:40'
 labels:
   - design-parity
   - policy
@@ -224,6 +224,10 @@ All phase subtasks (TASK-433.2 through TASK-433.9) share ONE dedicated worktree/
 Focused final-audit remediation: review the concurrent environment-scoped policy-version usage implementation without touching agent-owned UI/browser files; add live-DB handler/query regressions proving non-admin membership filtering and admin visibility; extend production-backed composite enforcement tests to cover phase, evidence, and pass/fail/error-or-not-checked outcomes for all eight exposed kinds where each production rule can produce them; add server-side PolicyDrawer owner and exact-version usage hydration coverage; run targeted formatting and Rust tests through the Nix development environment. Preserve all concurrent worktree changes and do not commit.
 
 2026-08-30 backend/database audit remediation: Preserve concurrent worktree edits and do not edit migrations 0233-0241. Improve additive migration 0242 so cleanup requires a non-null bootstrap completion marker, add the global deployment-failure bootstrap cursor index, and remove only the two proven duplicate POA&M indexes. Extend source-neutral waiver requests and persistence with observation-bound legacy evidence while retaining composite assessment compatibility and database-enforced immutable closure evidence. Add bounded per-request historical relationship limits with backward-compatible defaults and explicit truncation metadata. Expand PostgreSQL tests for cleanup before/after completion, legacy Fail waiver acceptance/closure, and relationship bounds. Strengthen the server-regressions pre-0233 rehearsal with populated CVE scan, desired target, immutable assignment/version overlays, deployed state, attention source, notification preferences/inbox state, then apply and assert the full current migration range. Run formatting, SQLX_OFFLINE checks, focused migrated-DB tests, migration rehearsal/server-regressions when feasible, and inspect the final scoped diff.
+
+2026-08-30 UI re-review remediation: correct compliance evidence route initialization so deep-link reload and browser history do not transiently downgrade to bundle overview; add a state-transition unit regression where practical. Complete notification menu focus entry, keyboard event isolation, stable browser selectors, and focus restoration. Prevent policy card/row container activation from descendant keyboard events. Add reusable repository-local focus capture, trap, and restoration behavior to TASK-433 policy, compliance, evidence, and POA&M drawers. Make Setup Coach agent prerequisite and copy accurately describe the existing server-backed acknowledgement lifecycle. Preserve concurrent worktree changes; run only focused formatting/unit/static checks and diff inspection; do not commit.
+
+2026-08-31 focused eval_passed remediation: Replace the unconditional per-system provisional Pass with the exact eval_passed outcome carried by the authoritative PolicyCheckResult. Add a discriminating regression that persists a metadata-terminal Error, simulates finalization failure handling, and proves no active eval_passed row can remain Pass. Preserve concurrent changes, run only rustfmt and the targeted fast/live-DB test when available, and do not commit.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
