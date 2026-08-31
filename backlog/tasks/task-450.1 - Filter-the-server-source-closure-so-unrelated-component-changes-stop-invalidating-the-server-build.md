@@ -3,10 +3,10 @@ id: TASK-450.1
 title: >-
   Filter the server source closure so unrelated component changes stop
   invalidating the server build
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-08-31 22:38'
-updated_date: '2026-08-31 22:44'
+updated_date: '2026-08-31 22:45'
 labels: []
 dependencies: []
 documentation:
@@ -87,3 +87,11 @@ Read doc-23, `Build Invalidation Graph and CI Feedback Latency Analysis`, for th
 - [ ] #6 Existing comments in packages/default/default.nix that describe server source filtering are accurate after the change, including the comment on the serverSrc binding
 - [ ] #7 Checks that boot a server still pass
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: opencode-claude-opus-5 on gray in /home/mcamp/code/crystal-forge/TASK-450-p0-build-graph
+
+Implemented together with TASK-450.2, TASK-450.3, and TASK-450.4 in a single MR at the user's explicit direction.
+<!-- SECTION:NOTES:END -->
