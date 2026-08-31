@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-08-31 22:39'
+updated_date: '2026-08-31 22:44'
 labels: []
 dependencies: []
 documentation:
@@ -49,11 +50,38 @@ Consumers that must keep the embedded UI:
 - the production server package and the NixOS module service
 - the authoritative pre-merge browser check
 
-## Constraints
+## Non-goals
 
-The production guarantee must not weaken. At least one pre-merge check must still exercise the production server binary serving the embedded production WASM through a real browser. Reaching that guarantee through only one check is the point of the task; losing it is not acceptable.
+- Removing the `embedded-ui` Cargo feature or changing how it serves assets when enabled.
+- Changing the web UI build itself.
+- Changing which check is authoritative for browser evidence.
+- Making the core server variant a published production artifact.
 
-Any server binary that serves UI assets must behave identically to today when built with the embedded UI. Requests for UI routes against a core server build must fail in a clear, documented way rather than silently returning an empty or misleading response.
+## Architectural constraints
+
+- The production guarantee must not weaken. At least one pre-merge check must still exercise the production server binary serving the embedded production WASM through a real browser.
+- A server binary built with the embedded UI must behave identically to today.
+- Requests for UI routes against a core server build must fail in a clear, documented way rather than silently returning an empty or misleading response.
+- Both variants must come from the same crate source and differ only by Cargo feature selection and the UI asset input.
+
+## Verification plan
+
+- Compare server derivation paths before and after a scratch edit under `packages/web-ui`, for both the core variant and the checks that consume it.
+- Build the integration and oidc-auth checks and confirm they pass against the core variant.
+- Build the authoritative browser check and confirm it still passes against the embedded variant.
+- Exercise a UI route against a core server build and confirm the documented failure behavior.
+
+## Impact areas
+
+`packages/default/default.nix`, the NixOS module service definitions, `checks/integration`, `checks/oidc-auth`, `checks/web-ui`, and any lib helper that starts a server.
+
+## Risk level
+
+Medium. The risk is not build breakage but silent loss of the production embedded-UI guarantee, or a check accidentally validating a variant that is not what production ships.
+
+## Dependencies
+
+None, but it is intended to land together with the server source filtering subtask.
 
 ## Context
 
