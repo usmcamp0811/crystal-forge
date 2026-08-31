@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:42'
-updated_date: '2026-08-31 22:37'
+updated_date: '2026-08-31 22:56'
 labels:
   - design-parity
   - policy
@@ -132,6 +132,8 @@ The deferred-check note above is superseded. After the commit, all deferred chec
 The earlier implementation note describing per-policy transactions is superseded by commit e0d036db: bulk deletion now uses one transaction via `delete_deployment_policy_in_transaction`, commits expected blocked/not-found skips, and rolls back all eligible deletions on any unexpected error. The browser workflow is now extended in `checks/web-ui/tests/integration-test.js`; the DB coverage is 4 tests (partial, all-blocked, not-found, rollback-on-failure).
 
 Phase 8 returned Phase 1 to In Progress because the new destructive bulk-delete endpoint is role-protected but does not validate the session CSRF cookie/header pair. AC6 is temporarily unchecked. Remediation is limited to the accepted bulk-delete contract and direct API/browser regression; no catalog feature expansion.
+
+2026-08-31 catalog disclosure P2 remediation: Added `CatalogGroupExpansion` as the single presentation state for collapsed, explicit, search-forced, and selected-policy-forced expansion. Group content visibility, collapsed header class, `aria-expanded`, title/disabled behavior, and right/down icon now derive from that state while the explicit collapse override remains unchanged during forced expansion. Added disabled disclosure styling and a pure regression that discriminates all four states and icon directions. Verification passed: scoped `rustfmt --check`; all 15 `catalog_scaling_tests`; `cargo check --target wasm32-unknown-unknown`; and `git diff --check`. The broader manifest format check remains blocked only by concurrent pre-existing formatting drift in `packages/web-ui/src/components/layout/topbar.rs`. `nix build path:.#packages.x86_64-linux.web-ui --no-link` reached the local derivation after unavailable remote builders but timed out after 10 minutes amid non-fatal Nix store maximum-link warnings; the direct WASM check passed. No commit created.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
