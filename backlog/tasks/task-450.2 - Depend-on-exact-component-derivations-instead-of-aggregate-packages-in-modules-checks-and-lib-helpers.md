@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-08-31 22:39'
+updated_date: '2026-08-31 22:45'
 labels: []
 dependencies: []
 documentation:
@@ -40,11 +41,39 @@ The effect is that a host or test VM that needs only the server pulls a closure 
 
 Point every internal consumer at the exact derivation it executes, so component closures reflect real dependencies.
 
-## Constraints
+## Non-goals
 
-The aggregate outputs must keep existing and keep resolving. They are public compatibility surfaces consumed through `flake.nix:41-45` and by `systems/x86_64-linux/test-agent/default.nix`. This task narrows internal usage only; it does not remove outputs.
+- Removing, renaming, or changing the contents of any aggregate output.
+- Changing the set of binaries any service or test actually runs.
+- Changing NixOS module option names or their user-facing semantics.
+- Restructuring the checks beyond their package references.
 
-Do not narrow a VM closure without first confirming which binaries that VM actually runs. Removing a binary a test invokes turns a fast check into a confusing runtime failure. Where a VM genuinely needs several components, list those components explicitly rather than reintroducing an aggregate.
+## Architectural constraints
+
+- The aggregate outputs must keep existing and keep resolving. They are public compatibility surfaces consumed through `flake.nix:41-45` and by `systems/x86_64-linux/test-agent/default.nix`. This task narrows internal usage only; it does not remove outputs.
+- Do not narrow a VM closure without first confirming which binaries that VM actually runs. Removing a binary a test invokes turns a fast check into a confusing runtime failure.
+- Where a consumer genuinely needs several components, list those components explicitly rather than reintroducing an aggregate.
+- `cf-keygen` is invoked by service preStart scripts and by test setup. Trace those call sites before assuming a service needs only the server binary.
+
+## Verification plan
+
+- Repository search proving no internal aggregate references remain outside the package definition and the public flake outputs.
+- Build the NixOS module through a check that instantiates the services.
+- Build `checks/integration`, `checks/oidc-auth`, `checks/web-ui`, and `checks/xccdf-schema`.
+- Compare `nix path-info --closure-size` for the server service package and the integration check before and after.
+- Build the `test-agent` system configuration to prove the public aggregates still resolve.
+
+## Impact areas
+
+`modules/nixos/crystal-forge/default.nix`, `checks/integration`, `checks/web-ui`, `checks/xccdf-schema`, `lib/default.nix`, `lib/server-test-node/default.nix`, and `packages/dev-env/composition.nix`.
+
+## Risk level
+
+Medium. Each individual substitution is mechanical, but an incorrect narrowing produces a missing-binary failure at VM runtime rather than at evaluation time, which is slower to diagnose.
+
+## Dependencies
+
+None.
 
 ## Context
 
