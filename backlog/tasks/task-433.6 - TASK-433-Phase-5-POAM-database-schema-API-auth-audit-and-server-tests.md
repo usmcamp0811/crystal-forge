@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:43'
-updated_date: '2026-08-29 01:49'
+updated_date: '2026-08-31 16:59'
 labels:
   - design-parity
   - poam
@@ -92,6 +92,8 @@ Complete all-context visibility and attribution for assignment references; disti
 Make activity/audit history truthful and reconstructable, enforce completed/active-link invariants, return revisions on rejected closure, make duplicate links idempotent or typed conflicts, improve query/index plans, and add forced-concurrency plus exact semantic regressions for every review finding before rerunning independent review and required verification.
 
 Phase-8 owner remediation: make canonical verification and system/bundle rollups source-neutral for both composite assessments and legacy deployed policy observations. Add a real legacy Fail → POA&M → later legacy Pass → verify → close/history regression and legacy rollup assertions without fabricating composite assessments. Restore the documented Open→Awaiting Verification transition. Bound bundle rollup historical expansion and avoid nested unbounded joins. Add `poam_workflows` plus selected ignored POA&M/auth/notification-overdue tests to authoritative Nix regression coverage. Add a populated pre-0233 upgrade rehearsal through 0235, inspect redundant indexes, and retain additive immutable history semantics.
+
+2026-08-31 test-focused remediation: strengthen `poam_workflows` with a distinct later legacy derivation/store-path Pass and source-neutral verify/close assertions; add a lock-ordered legacy Fail-versus-closure regression when practical; prove system and bundle rollup expansion rejects more than 1,000 findings; and cap no-parameter finding/assignment relationship history at the existing 100-row page size while reporting truncation through existing `has_more`/`next_offset` fields. Keep `poam_workflows` in `server-regressions`, run formatting, focused isolated PostgreSQL tests, and the authoritative Nix check when feasible.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
