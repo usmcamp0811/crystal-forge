@@ -3,7 +3,7 @@ id: TASK-450.2
 title: >-
   Depend on exact component derivations instead of aggregate packages in
   modules, checks, and lib helpers
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-08-31 22:39'
 updated_date: '2026-08-31 22:45'
@@ -90,3 +90,11 @@ Read doc-23, `Build Invalidation Graph and CI Feedback Latency Analysis`, for th
 - [ ] #6 The integration, oidc-auth, web-ui, and xccdf-schema checks still pass
 - [ ] #7 A recorded closure-size comparison shows the reduction for at least the server service and the integration check
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: opencode-claude-opus-5 on gray in /home/mcamp/code/crystal-forge/TASK-450-p0-build-graph
+
+Implemented together with TASK-450.1, TASK-450.3, and TASK-450.4 in a single MR at the user's explicit direction.
+<!-- SECTION:NOTES:END -->
