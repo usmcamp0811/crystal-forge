@@ -4,6 +4,7 @@ title: Add consistent tray expansion and actionable notification deep links
 status: To Do
 assignee: []
 created_date: '2026-08-31 02:22'
+updated_date: '2026-08-31 02:23'
 labels:
   - web-ui
   - drawers
@@ -12,14 +13,16 @@ labels:
   - design-parity
 dependencies:
   - TASK-325
-  - TASK-414
   - TASK-433
   - TASK-440
+  - TASK-441
 references:
   - git commit ac582592e8ffd787f103578c272d9f30162a9480
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/321'
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/318'
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/323'
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/314'
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/322'
 documentation:
   - docs/design/CrystalForge/components/Shell.jsx
   - docs/design/CrystalForge/components/CvesView.jsx
