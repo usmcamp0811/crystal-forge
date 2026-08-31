@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - claude-agent
 created_date: '2026-08-23 01:35'
-updated_date: '2026-08-31 17:23'
+updated_date: '2026-08-31 17:41'
 labels:
   - design-parity
   - policy
@@ -252,6 +252,8 @@ Root-cause refinement: the unlink service returns retired relationship history, 
 2026-08-31 focused policy UI remediation in `/tmp/opencode/TASK-433-publish`: add explicit catalog loading/error/retry presentation state; remove nested container button semantics while retaining focused Enter/Space opening and selection; use light-theme AA semantic colors for policy status/error/chip text; enrich the unified editor header with description, category, import origin, and mapping state; render the Danger zone only in Basics; add policy drawer Expand/Restore sizing with existing dialog focus behavior; add focused pure Rust tests; run web-ui rustfmt, targeted tests, feasible wasm check, and `git diff --check`. Scope is limited to policy UI Rust files and `packages/web-ui/assets/app.css`; no backend, POA&M, coach, notification, or browser harness changes.
 
 2026-08-31 focused P2 UI remediation in `/tmp/opencode/TASK-433-publish`: add evidence-backed requirement/framework context and requirement-version detail columns without fabricating unavailable framework labels; move system POA&M ahead of bundle cards; align detail target/progress hierarchy; add live status/alert semantics for POA&M, dashboard, system, coach, and notification states; replace nested notification interactions with sibling menuitems and coherent arrow/Escape/focus behavior; restyle Setup Coach to the authoritative nine-step hierarchy while preserving server-derived completion and legacy six-step compatibility; add evidence navigation `aria-current`/`aria-expanded`; add focused pure/source tests; run web-ui rustfmt, targeted tests, and wasm check if feasible. Do not edit policy files or browser harness and do not commit.
+
+2026-08-31 remaining AC38 enforcement-matrix remediation in `/tmp/opencode/TASK-433-publish`: limit writes to server tests and authoritative Nix check wiring. Add a discriminating all-eight-kind XCCDF export, parse/validate, committed import when practical, reload, and re-export regression that preserves rule IDs, order, configuration, and phase semantics. Confirm or wire the ignored real Nix executor Pass/Fail/Error/evidence matrix into `server-regressions`. Add only small direct per-kind evidence or NotChecked assertions needed to make AC38 coverage objective. Run scoped backend rustfmt and targeted tests through `nix develop`, then `server-regressions` if feasible. Preserve concurrent edits and do not commit.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
