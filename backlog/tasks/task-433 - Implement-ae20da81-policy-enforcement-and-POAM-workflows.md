@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - claude-agent
 created_date: '2026-08-23 01:35'
-updated_date: '2026-08-31 16:58'
+updated_date: '2026-08-31 16:59'
 labels:
   - design-parity
   - policy
@@ -250,6 +250,8 @@ Root-cause refinement: the unlink service returns retired relationship history, 
 2026-08-31 browser/harness remediation in `/tmp/opencode/TASK-433-publish`: limit writes to `checks/web-ui/**` and `docs/**`. Promote the six canonical TASK-433 workflows plus critical catalog deletion to strict committed-baseline policy, wire the repository baseline directory into the Nix VM, and document the deterministic generate/review/approve sequence. Preserve `integration.log` and the Crystal Forge server journal in exported artifacts on failed Nix runs whenever the VM remains reachable. Extend isolated static direct-write checks across all seven required workflow bodies. Add structured `uncaughtException` capture and global page-runtime-error collection that becomes fatal only after normal result/report/artifact production. Add focused narrow/mobile captures for TASK-433 policy and POA&M surfaces through deterministic intermediate workflow captures. Verify Node syntax, static contracts, JSON manifest parsing, Nix parse/eval, and `git diff --check`; do not run the full browser check or commit.
 
 2026-08-31 focused policy UI remediation in `/tmp/opencode/TASK-433-publish`: add explicit catalog loading/error/retry presentation state; remove nested container button semantics while retaining focused Enter/Space opening and selection; use light-theme AA semantic colors for policy status/error/chip text; enrich the unified editor header with description, category, import origin, and mapping state; render the Danger zone only in Basics; add policy drawer Expand/Restore sizing with existing dialog focus behavior; add focused pure Rust tests; run web-ui rustfmt, targeted tests, feasible wasm check, and `git diff --check`. Scope is limited to policy UI Rust files and `packages/web-ui/assets/app.css`; no backend, POA&M, coach, notification, or browser harness changes.
+
+2026-08-31 focused P2 UI remediation in `/tmp/opencode/TASK-433-publish`: add evidence-backed requirement/framework context and requirement-version detail columns without fabricating unavailable framework labels; move system POA&M ahead of bundle cards; align detail target/progress hierarchy; add live status/alert semantics for POA&M, dashboard, system, coach, and notification states; replace nested notification interactions with sibling menuitems and coherent arrow/Escape/focus behavior; restyle Setup Coach to the authoritative nine-step hierarchy while preserving server-derived completion and legacy six-step compatibility; add evidence navigation `aria-current`/`aria-expanded`; add focused pure/source tests; run web-ui rustfmt, targeted tests, and wasm check if feasible. Do not edit policy files or browser harness and do not commit.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
