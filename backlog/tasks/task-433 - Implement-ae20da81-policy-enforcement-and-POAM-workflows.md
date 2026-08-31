@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - claude-agent
 created_date: '2026-08-23 01:35'
-updated_date: '2026-08-31 04:24'
+updated_date: '2026-08-31 05:12'
 labels:
   - design-parity
   - policy
@@ -240,6 +240,8 @@ Focused final-audit remediation: review the concurrent environment-scoped policy
 2026-08-31 final relationship-pagination compatibility remediation: Preserve legacy all-relationships responses when both pagination parameters are absent; reject offset-only requests; retain explicit bounded pagination for the current web client. Order paginated finding history by immutable link retirement/link identity and assignment relationships by immutable reference addition identity, while preserving active finding handling. Add focused PostgreSQL regressions for legacy no-parameter behavior and update-stable page order; add supporting indexes only in unapplied migration 0242 if query plans require them. Run targeted Rust/web formatting, focused backend tests when practical, and git diff --check. Preserve concurrent worktree changes and do not commit.
 
 2026-08-30 notification bootstrap cast remediation: Add a `CREATE OR REPLACE FUNCTION backfill_user_notification_source_events` correction to unapplied migration 0242 only. Guard every system/POA&M `subject_id` UUID conversion with category-aware `CASE` plus UUID-shape validation, preserving the 0241 cursor ordering, batch bound, locking, insert-only behavior, and completion semantics. Add a focused isolated PostgreSQL regression with a numeric CVE subject and malformed system/POA&M subjects; prove the CVE source is queued, invalid scoped sources are skipped, and the cursor records completion. Run SQL/diff formatting checks and only the focused ignored database test when the repository-owned isolated database is available. Do not commit.
+
+2026-08-31 five-failure focused web-ui remediation: make hidden-state assertions wait for DOM reconciliation; use the policy drawer's real accessible close name; scope Create POA&M actions to the nested dialog's accessible name; make the canonical lifecycle system clone include the required derivation; differentiate the two minimal test-flake outputs so production re-evaluation cannot violate the global derivation-path uniqueness constraint; attach immediate rejection handling to the affected response waiter without weakening its later awaited result. Run Node syntax/static contracts, Rust/Nix formatting, and the exact five-step CF_UI_TEST_STEPS web-ui check. Preserve concurrent work and do not touch TASK-440/441/442 files or commit.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
