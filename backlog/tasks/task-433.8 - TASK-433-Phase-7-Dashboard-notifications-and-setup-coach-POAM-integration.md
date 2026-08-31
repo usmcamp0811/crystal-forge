@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:43'
-updated_date: '2026-08-29 15:41'
+updated_date: '2026-08-31 16:59'
 labels:
   - design-parity
   - poam
@@ -79,6 +79,8 @@ nix build .#checks.x86_64-linux.web-ui --no-link
 12. Only after AC1-AC3 are objectively proven: check exactly three criteria, move TASK-433.8 to Review, update MR !318 with the Phase-7 SHA and verification, commit/push all intended changes, confirm clean matching local/remote heads, and stop before TASK-433.9.
 
 Phase-8 owner remediation: replace per-user repeated full-history notification materialization with a bounded set-oriented producer that preserves per-user visibility/preferences, event identity, read/dismiss history, awaiting re-entry semantics, and idempotent uniqueness. Add query-count/history-scale regression and ensure overdue reconciliation plus all notification ignored DB tests run in authoritative server-regressions. Preserve the single AppShell poll and no-side-effect GET contract.
+
+AC2 P1 history-scale remediation (migration 0243 only): add a durable bounded active-user initialization queue with trigger-fed start cursors; consume at most the producer user limit and remove all-active preference/schedule/cursor initialization plus correlated per-user history MIN scans. Replace notification source bootstrap with indexed keyset limits in each attention/activity/system source branch before merging the bounded candidates. Bound immediate-email cursor initialization similarly. Add large many-user and large-history plan/state regressions, preserve combined POA&M visibility/preferences/read-dismiss/re-entry semantics, and keep the full notification plus overdue ignored suites in server-regressions. Verify formatting, SQLX_OFFLINE checks, focused isolated PostgreSQL tests, migration compatibility, and server-regressions where feasible. Do not commit.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
