@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - claude-agent
 created_date: '2026-08-23 01:35'
-updated_date: '2026-08-31 03:32'
+updated_date: '2026-08-31 04:19'
 labels:
   - design-parity
   - policy
@@ -238,6 +238,8 @@ Focused final-audit remediation: review the concurrent environment-scoped policy
 2026-08-31 relationship pagination P2 remediation: Extend web relationship DTOs with rolling-compatible default pagination metadata. Fetch relationship batches page-by-page with the server's bounded history limit, merge each relationship by stable identity, and reject incoherent or excessive pagination through the existing visible API error path. Add pure deserialization and page-merge regressions. Preserve concurrent worktree changes; run only web-ui rustfmt and targeted fast unit tests; do not commit.
 
 2026-08-31 final relationship-pagination compatibility remediation: Preserve legacy all-relationships responses when both pagination parameters are absent; reject offset-only requests; retain explicit bounded pagination for the current web client. Order paginated finding history by immutable link retirement/link identity and assignment relationships by immutable reference addition identity, while preserving active finding handling. Add focused PostgreSQL regressions for legacy no-parameter behavior and update-stable page order; add supporting indexes only in unapplied migration 0242 if query plans require them. Run targeted Rust/web formatting, focused backend tests when practical, and git diff --check. Preserve concurrent worktree changes and do not commit.
+
+2026-08-30 notification bootstrap cast remediation: Add a `CREATE OR REPLACE FUNCTION backfill_user_notification_source_events` correction to unapplied migration 0242 only. Guard every system/POA&M `subject_id` UUID conversion with category-aware `CASE` plus UUID-shape validation, preserving the 0241 cursor ordering, batch bound, locking, insert-only behavior, and completion semantics. Add a focused isolated PostgreSQL regression with a numeric CVE subject and malformed system/POA&M subjects; prove the CVE source is queued, invalid scoped sources are skipped, and the cursor records completion. Run SQL/diff formatting checks and only the focused ignored database test when the repository-owned isolated database is available. Do not commit.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
