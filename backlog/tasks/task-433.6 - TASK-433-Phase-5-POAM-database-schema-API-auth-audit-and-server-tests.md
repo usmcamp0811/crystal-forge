@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:43'
-updated_date: '2026-08-31 16:59'
+updated_date: '2026-08-31 17:38'
 labels:
   - design-parity
   - poam
@@ -112,6 +112,10 @@ Phase-6 authorized contract correction completed on 2026-08-28: added bounded au
 Phase-6 review remediation extended the minimal compatibility contract with source-neutral finding observation references for legacy policy results. Create/link actions now resolve current deployed derivation or CVE evidence server-side, recheck effective policy version and FAIL state, and never fabricate `composite_policy_assessments`. The PostgreSQL-backed `poam_workflows` suite passed 17/17, including `legacy_fail_can_create_poam_without_fabricating_composite_assessment`. The real browser workflow `29g-poam-failed-evidence-create` also passed and verifies stable `finding_id` plus observation identity, unchanged FAIL evidence, and zero fabricated composite assessments.
 
 2026-08-29 Phase-6 security hardening checkpoint: legacy observation create/link now serializes with deployed-state, derivation/CVE, and composite assessment publication through ordered derivation, system-sentinel, and finding advisory keys. Evidence finding materialization uses the same system sentinel. The focused `poam_workflows` suite passed 20/20 serially against repository-isolated PostgreSQL. This correction remains part of MR !318.
+
+2026-08-31 test-focused remediation implemented in `/tmp/opencode/TASK-433-publish` without commit. Added a distinct later legacy commit/derivation/store-path Pass regression with verify/close/history and zero composite-assessment assertions; a finding-lock-ordered legacy Fail-versus-closure rejection race; system and bundle rollup expansion tests at 1,001 findings; and a 101-history compatibility regression for assessment, stable-finding, and assignment relationship endpoints. The no-pagination compatibility request remains valid but now uses the existing 100-row page ceiling and existing `has_more`/`next_offset` response metadata, so deployed clients retain the wire shape and can detect/continue truncation. `poam_workflows` remains authoritative in `checks/server-regressions/default.nix` line 224.
+
+Verification: `cargo fmt --manifest-path packages/default/Cargo.toml --all --check` passed; scoped `git diff --check` passed; `cargo test ... --test poam_workflows -- --test-threads=1` passed 27/27 against isolated PostgreSQL; all four focused new/strengthened tests passed, including the final source-neutral assertion rerun with `SQLX_OFFLINE=true`. `nix build .#checks.x86_64-linux.server-regressions --no-link` was attempted and failed outside TASK-433.6: 15 selected `queries::user_notifications` tests could not find `user_notification_initialization_queue` because concurrent notification code references an untracked `0243_bounded_notification_initialization_and_bootstrap.sql`, which Nix excludes from `src`. No TASK-433.6 test failed in that run. Residual remediation findings: P0=0, P1=0, P2=0; authoritative-check completion remains blocked by the unrelated concurrent untracked migration state.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
