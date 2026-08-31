@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - claude-agent
 created_date: '2026-08-23 01:35'
-updated_date: '2026-08-31 22:37'
+updated_date: '2026-08-31 22:47'
 labels:
   - design-parity
   - policy
@@ -342,6 +342,8 @@ Root-cause refinement: the unlink service returns retired relationship history, 
 Root cause for the canonical mixed evidence failure is browser locator scope, not production identity hydration. Fixture SQL stores release `1`; the API returns the same version field; the failed screenshot renders `Test Mapping Framework · 1` and `MAP-1`. The assertion incorrectly searched beneath `finding-poam-remediation`, while framework mapping is a sibling under `#compliance-evidence-dialog`.
 
 Canonical mixed evidence assertion correction implemented in `checks/web-ui/tests/integration-test.js`: the exact framework release and requirement locators now search within `#compliance-evidence-dialog` instead of the sibling-only `finding-poam-remediation` region. Verification passed: `node --check checks/web-ui/tests/integration-test.js`; `CF_WEB_UI_SOURCE_DIR=checks/web-ui CF_UI_STATIC_CONTRACTS=1 node checks/web-ui/tests/integration-test.js`; `git diff --check -- checks/web-ui/tests/integration-test.js`; and `CF_UI_TEST_STEPS=task433-canonical-mixed-nix-cve-evidence CF_UI_UPDATE_BASELINES=1 nix build --impure path:.#checks.x86_64-linux.web-ui --no-link`. The focused Nix run exercised production evaluation and exact identity assertions. Baseline-update mode bypassed only strict visual-baseline rejection. Unavailable remote builders and Nix store maximum-link messages were non-fatal. No commit created.
+
+2026-08-31 design-parity identity remediation: Confirmed the generator relied on a nonexistent `?view=&theme=` hook, so every authoritative design page remained Dashboard. Replaced the assumption with manifest-driven real navigation and explicit design/Dioxus identity markers. Added deterministic targets for system detail, compliance evidence, notifications, and Setup Coach, while retaining dashboard, policies, compliance, and all existing primary pages. Design and Dioxus capture failures now omit the invalid PNG and write per-target error reports; the design generator exits nonzero after processing any missing/mismatched target. Focused runs now capture parity entries for selected routes (including parameterized child routes), while full runs capture all entries. Added a focused manifest contract test. Verification passed: Node syntax for generator/test/comparator/integration harness; `node checks/web-ui/design-parity/generate-design-targets-test.js`; existing `CF_UI_STATIC_CONTRACTS=1` harness contracts; `jq empty` manifest parsing; `nix-instantiate --parse checks/web-ui/default.nix`; scoped `git diff --check`. Host Node does not provide Playwright, so no live browser target render was run outside the intentionally skipped full Nix browser check. `docs/design/CrystalForge/**` remains unchanged. No commit created.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
