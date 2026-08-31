@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - claude-agent
 created_date: '2026-08-23 01:35'
-updated_date: '2026-08-31 18:31'
+updated_date: '2026-08-31 19:26'
 labels:
   - design-parity
   - policy
@@ -260,6 +260,8 @@ Root-cause refinement: the unlink service returns retired relationship history, 
 2026-08-31 remaining POA&M contract/UI remediation in `/tmp/opencode/TASK-433-publish`: On a 412 close rejection, retain local metadata/milestone drafts, fetch the committed POA&M detail at `committed_revision`, reconcile the verification attempt into the tray, and ensure subsequent mutations use that revision. Route POA&M 401 responses from detail, evidence relationships, system/bundle rollups, lists, and mutations through the application authentication-expiration state clear and login redirect while retaining scoped 403 presentation. Add additive authoritative linked-finding requirement metadata beside existing requirement UUID arrays, hydrate it with one batched query after current verification overlay, deserialize with rolling defaults, and render only available requirement/control/framework labels in create/detail/list contexts. Add Expand/Restore parity to in-scope bundle, evidence, and POA&M drawers. Add focused DTO/reconciliation/query/UI tests; run backend/web fmt, targeted tests, WASM check, and diff check. Preserve concurrent worktree changes and do not commit.
 
 2026-08-31 security remediation in `/tmp/opencode/TASK-433-publish`: apply the existing double-submit CSRF validator to all nine named policy trust/publish/draft and assignment create/update/delete handlers after authentication and role authorization. Add a shared compliance scope-visibility check so all six assignment/effective-policy read or preview APIs return the same 404 for nonexistent and out-of-membership targets while Admin retains fleet-wide access. Add focused live HTTP regressions with A/B environments for Viewer/Admin and valid mutation fixtures that prove missing and mismatched CSRF cannot change trust/publication/draft/assignment state. Limit production edits to compliance handlers/services and test edits to focused server tests; run backend rustfmt, focused tests, and `SQLX_OFFLINE=true` check; do not commit.
+
+2026-08-31 policy editor/card responsive parity remediation in `/tmp/opencode/TASK-433-publish`: limit writes to `packages/web-ui/src/components/policy/policy_editor_modal.rs`, `types.rs`, `policy_card.rs`, focused in-file tests, and `packages/web-ui/assets/app.css`. Keep every editor section reachable on narrow screens with active-tab visibility; contain imported header metadata; use full desktop content width for rule editors; clamp expandable policy descriptions and multiline rule summaries in catalog cards; preserve provenance hierarchy; make the footer non-overlapping with scroll continuation; improve dark secondary/disabled contrast; align contract-compatible copy to Enforcement/Add enforcement; and remove duplicate state metadata. Preserve imported mappings as read-only while manual mappings remain addable. Run web-ui rustfmt, targeted tests, a WASM check, and `git diff --check`; preserve concurrent changes and do not commit.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
