@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - claude-agent
 created_date: '2026-08-23 01:35'
-updated_date: '2026-08-31 15:10'
+updated_date: '2026-08-31 16:58'
 labels:
   - design-parity
   - policy
@@ -246,6 +246,8 @@ Focused final-audit remediation: review the concurrent environment-scoped policy
 2026-08-31 remaining canonical lifecycle waiter remediation: Match the unlink response by URL pathname because the production client appends the required revision query parameter. Await link and unlink click/response operations together so a click failure cannot leave a response waiter to reject during teardown. Run Node syntax/static contracts, then the canonical lifecycle browser step and the exact five-step focused check. Preserve concurrent work and do not commit.
 
 Root-cause refinement: the unlink service returns retired relationship history, but query-layer rows without closure evidence use the non-contract value `unresolved`. Active rows are replaced with current verification before serialization; retired unlinked rows are not, so the web DTO rejects the successful mutation response and cannot reconcile. Emit the supported fail-closed `unknown` verification state for historical links without closure evidence, retain closed-link stored outcomes, and keep the active-link UI filtered by `link_active`. Verify backend/web formatting and checks, then rerun the lifecycle and exact five-step browser gate.
+
+2026-08-31 browser/harness remediation in `/tmp/opencode/TASK-433-publish`: limit writes to `checks/web-ui/**` and `docs/**`. Promote the six canonical TASK-433 workflows plus critical catalog deletion to strict committed-baseline policy, wire the repository baseline directory into the Nix VM, and document the deterministic generate/review/approve sequence. Preserve `integration.log` and the Crystal Forge server journal in exported artifacts on failed Nix runs whenever the VM remains reachable. Extend isolated static direct-write checks across all seven required workflow bodies. Add structured `uncaughtException` capture and global page-runtime-error collection that becomes fatal only after normal result/report/artifact production. Add focused narrow/mobile captures for TASK-433 policy and POA&M surfaces through deterministic intermediate workflow captures. Verify Node syntax, static contracts, JSON manifest parsing, Nix parse/eval, and `git diff --check`; do not run the full browser check or commit.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
