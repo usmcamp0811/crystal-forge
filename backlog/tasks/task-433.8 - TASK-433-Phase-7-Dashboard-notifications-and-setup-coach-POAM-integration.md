@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:43'
-updated_date: '2026-08-31 17:36'
+updated_date: '2026-08-31 19:29'
 labels:
   - design-parity
   - poam
@@ -81,6 +81,8 @@ nix build .#checks.x86_64-linux.web-ui --no-link
 Phase-8 owner remediation: replace per-user repeated full-history notification materialization with a bounded set-oriented producer that preserves per-user visibility/preferences, event identity, read/dismiss history, awaiting re-entry semantics, and idempotent uniqueness. Add query-count/history-scale regression and ensure overdue reconciliation plus all notification ignored DB tests run in authoritative server-regressions. Preserve the single AppShell poll and no-side-effect GET contract.
 
 AC2 P1 history-scale remediation (migration 0243 only): add a durable bounded active-user initialization queue with trigger-fed start cursors; consume at most the producer user limit and remove all-active preference/schedule/cursor initialization plus correlated per-user history MIN scans. Replace notification source bootstrap with indexed keyset limits in each attention/activity/system source branch before merging the bounded candidates. Bound immediate-email cursor initialization similarly. Add large many-user and large-history plan/state regressions, preserve combined POA&M visibility/preferences/read-dismiss/re-entry semantics, and keep the full notification plus overdue ignored suites in server-regressions. Verify formatting, SQLX_OFFLINE checks, focused isolated PostgreSQL tests, migration compatibility, and server-regressions where feasible. Do not commit.
+
+2026-08-31 responsive parity remediation in `/tmp/opencode/TASK-433-publish`: limit edits to dashboard, topbar notifications, Setup Coach, shared CSS, and focused Rust/source tests. Render every watchlist row's authoritative POA&M ID, lifecycle status, urgency, owner, title, and optional due date from `PoamSummary`, including narrow layouts. Keep notification content limited to server-provided title/summary/created timestamp, retain all read/dismiss/load/settings actions, and make the fixed panel viewport-safe. Keep Setup Coach nonmodal, add explicit action labels, and use a bottom-anchored, height-bounded scrolling presentation at narrow widths so page-header actions remain available at 560px and 375px. Improve dark secondary/disabled tokens and avoid opacity-reduced locked coach text. Verify web-ui rustfmt, focused tests, a WASM check, and `git diff --check`; do not run or edit the browser harness and do not commit.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
