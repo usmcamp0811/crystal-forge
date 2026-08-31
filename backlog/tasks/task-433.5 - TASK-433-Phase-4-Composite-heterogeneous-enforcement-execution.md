@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:42'
-updated_date: '2026-08-29 15:41'
+updated_date: '2026-08-31 16:59'
 labels:
   - design-parity
   - policy
@@ -81,6 +81,8 @@ Independent evaluator/security review remediation (2026-08-25): keep changes lim
 Review synchronization: fetch current `origin/dev`, merge it into the dedicated TASK-433 branch, resolve every conflicting file manually while preserving `origin/dev` backlog/task state outside TASK-433, verify no TASK-422/TASK-432 branch contamination, review enforcement mutation/delivery semantics, run focused server regressions and only rerun composite browser workflows if relevant UI/test files conflict, then update TASK-433.5/MR !318, commit, push, and leave exact-head CI running. No Phase-4 feature changes and no Phase 5.
 
 Phase-8 owner remediation: remove the arbitrary unknown-store-path authorization fallback. No-policy historical compatibility may authorize only an exact store path with immutable evidence that the same system previously observed or was authorized for that target; known uncached/failed and completely unknown paths fail closed. Add direct generation-rollback and delivery regressions. Bound composite rule count and move potentially blocking custom Nix validation off async request workers according to existing server patterns. Require CSRF on TASK-433-touched manual deployment and rollback mutations. Correct stale public helper semantics for Composite policies. Reconcile the complete eight-kind validation/storage/phase/outcome/evidence/interchange matrix with discriminating current tests, and add missing coverage rather than weakening the criterion.
+
+Exact-head Phase-4 P1 remediation (2026-08-31): keep the existing attempt-evidence tables and composite assessment model. On generic evaluation-attempt failure, transactionally convert current Pass/NotChecked eval_passed attempt evidence to Error, update the matching exact-commit assessment rule rows to Error under the established POA&M system/finding lock order, and recompute aggregates before retry scheduling commits. When a queued newer attempt starts, initialize its NotChecked evidence and transactionally reset matching prior composite eval_passed rules to NotChecked under the same locks, so authorization cannot consume an earlier Pass while evaluation is active. Add PostgreSQL regressions that reach these transitions through mark_commit_evaluation_failed and mark_commit_evaluation_started plus initialize_eval_passed_attempt, assert both evidence layers and authorize_deployment_at, and add a direct pin_required terminal-Pending NotChecked assertion. Run targeted rustfmt and the exact composite_policy test through nix develop; do not commit.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
