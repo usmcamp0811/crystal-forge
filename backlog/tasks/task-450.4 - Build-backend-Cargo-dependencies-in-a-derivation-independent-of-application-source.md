@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-08-31 22:39'
-updated_date: '2026-08-31 22:41'
+updated_date: '2026-08-31 22:45'
 labels: []
 dependencies:
   - TASK-450.1
@@ -44,13 +44,39 @@ Convert the server first. The server is the dependency graph pulled into the mos
 
 Do not convert every Rust package in the repository in this task. `server-regressions` and the web UI are handled separately once the pattern is proven.
 
-## Constraints
+## Non-goals
 
-Reproducibility must not regress. The resulting binaries must be built from the same locked dependency versions as today, and the build must remain offline and hermetic in the Nix sandbox.
+- Converting the agent, builder, keygen, web UI, or `server-regressions` builds.
+- Changing dependency versions or regenerating the lock file.
+- Changing binary names, output names, or installed paths.
+- Adding a binary cache. That is a separate subtask that depends on this one.
 
-The change must compose with the source filtering and the core-versus-embedded-UI split from the sibling subtasks. Sequence the work so the dependency artifact is shared rather than duplicated per server variant.
+## Architectural constraints
 
-Existing package output names, binary names, and installed paths must not change.
+- Reproducibility must not regress. Binaries must be built from the same locked dependency versions as today, and the build must remain offline and hermetic in the Nix sandbox.
+- The change must compose with the source filtering and the core-versus-embedded-UI split from the sibling subtasks. Sequence the work so the dependency artifact is shared rather than duplicated per server variant.
+- Existing package output names, binary names, and installed paths must not change.
+- SQLx compile-time verification must continue to work, including its offline metadata and migration inputs.
+- The `crane` input must be pinned in the flake lock like any other input.
+
+## Verification plan
+
+- Compare the dependency artifact derivation path before and after a scratch edit to a backend `.rs` file.
+- `nix build .#packages.x86_64-linux.server --no-link` and compare the produced binary list against the pre-change list.
+- Time a one-line backend source rebuild before and after, on an otherwise warm store, and record both numbers.
+- Build the checks that build or boot the server.
+
+## Impact areas
+
+`flake.nix`, `flake.lock`, `packages/default/default.nix`, and every consumer of the server package.
+
+## Risk level
+
+Medium to high. This replaces the build mechanism for the most depended-upon component. The likely failure modes are a broken SQLx offline build, a missing build input that `buildRustPackage` previously supplied implicitly, and feature unification differences between the dependency build and the application build.
+
+## Dependencies
+
+Requires the server source filtering and the core-versus-embedded-UI split, so the dependency artifact is defined once against the final source shape and shared by both server variants.
 
 ## Context
 
