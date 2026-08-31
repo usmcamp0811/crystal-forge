@@ -4,6 +4,7 @@ title: Report and display the real deployment closure-copy stage
 status: To Do
 assignee: []
 created_date: '2026-08-31 02:22'
+updated_date: '2026-08-31 02:23'
 labels:
   - agent
   - server
@@ -11,7 +12,8 @@ labels:
   - web-ui
   - state-machine
   - design-parity
-dependencies: []
+dependencies:
+  - TASK-440
 references:
   - git commit ac582592e8ffd787f103578c272d9f30162a9480
 documentation:
