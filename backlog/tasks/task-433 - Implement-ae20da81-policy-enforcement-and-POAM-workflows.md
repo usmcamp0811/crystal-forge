@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - claude-agent
 created_date: '2026-08-23 01:35'
-updated_date: '2026-08-31 03:25'
+updated_date: '2026-08-31 03:32'
 labels:
   - design-parity
   - policy
@@ -260,6 +260,8 @@ Focused final-audit remediation: review the concurrent environment-scoped policy
 2026-08-31 final UI review remediation implemented: assignment-list API failures now render before the empty state with a focused retry path. Nested POA&M create/link and assignment-link dialogs stop keyboard propagation before handling Escape, so busy children cannot dismiss parent evidence/bundle drawers. Compliance evidence-source, assignment-link, and system-detail evidence loading/error/context overlays now use shared focus capture, boundary trapping, opener restoration, modal labeling, and topmost Escape behavior. `SystemDetailView` reconciles tab state when router props change and listens for browser popstate tab changes; a pure route/query precedence regression covers the mapping. Verification passed: web-ui rustfmt check; focused route-tab unit test; wasm32 cargo check; git diff check. Existing unrelated warnings and concurrent worktree changes remain untouched. No browser/full suite, expensive build, or commit was run.
 
 2026-08-31 relationship pagination P2 remediation implemented in `packages/web-ui/src/views/poam_api.rs`. Finding and assignment relationship DTOs now deserialize server pagination metadata with missing-field defaults for older responses. Both relationship clients request 100-row pages, validate shared forward cursors, merge and deduplicate by stable relationship/POA&M identity, and fail through `PoamApiError` rather than return a partial list after the 10,000-record safety boundary. Existing assignment counts/lists and finding history now consume the complete merged vectors without component changes. Added pure compatibility, finding-page merge, assignment-page merge, deduplication, and invalid-cursor tests. Verification passed: web-ui rustfmt check; `cargo test --manifest-path packages/web-ui/Cargo.toml relationship_` (3 passed); `git diff --check`. Existing warnings remain. No expensive checks or commit were run.
+
+2026-08-31 final relationship-pagination compatibility remediation implemented. Relationship services now preserve the original complete response only when both history parameters are absent, with an explicit `COMPATIBILITY` contract; offset-only requests return `invalid_relationship_pagination`, while the current web client continues to send bounded limit/offset pages. Finding pages now order by immutable `linked_at` and link ID while keeping active relationships first; assignment pages order by immutable `added_at` and POA&M ID. Migration 0242 adds matching relationship-order indexes. The focused PostgreSQL regression proves no-parameter assessment, stable-finding, and assignment calls return all rows and that large `poams.updated_at` changes do not alter page order. Verification passed: backend rustfmt check; focused live-DB `relationship_services_batch_active_history_and_immutable_assignments` test (1 passed); web rustfmt check; web `relationship_` tests (3 passed); `git diff --check`. Existing unrelated warnings and concurrent worktree changes remain untouched. No broad checks and no commit were run.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
