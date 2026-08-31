@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - claude-agent
 created_date: '2026-08-23 01:35'
-updated_date: '2026-08-31 02:54'
+updated_date: '2026-08-31 02:59'
 labels:
   - design-parity
   - policy
@@ -230,6 +230,8 @@ Focused final-audit remediation: review the concurrent environment-scoped policy
 2026-08-31 focused eval_passed remediation: Replace the unconditional per-system provisional Pass with the exact eval_passed outcome carried by the authoritative PolicyCheckResult. Add a discriminating regression that persists a metadata-terminal Error, simulates finalization failure handling, and proves no active eval_passed row can remain Pass. Preserve concurrent changes, run only rustfmt and the targeted fast/live-DB test when available, and do not commit.
 
 2026-08-30 browser/harness re-review remediation: Make production re-evaluation polling use an unscaled wall-clock delay; strengthen static source contracts so each canonical mixed and POA&M workflow body contains production re-evaluation and no direct assessment/result SQL; reject duplicate coverage-manifest names; omit diagnostic screenshots from baseline statistics; process structured results, journal output, and artifact export before rejecting a nonzero browser exit; replace stale generic PolicyDrawer accessible-name selectors with stable title-aware locators. Preserve concurrent changes, do not run the Nix browser check, and verify only Node syntax/static contracts.
+
+2026-08-31 final UI review remediation: Render assignment-list fetch failures before the empty state. Stop Escape propagation in nested POA&M and assignment dialogs so only the topmost dialog closes and busy children cannot close their parent. Apply the shared dialog focus capture, boundary trap, restoration, labeling, and Escape behavior to the new evidence-source, assignment-link, and system-detail evidence/context overlays. Synchronize `SystemDetailView` tab state from route props and browser history changes. Add focused pure/unit assertions where practical, preserve concurrent changes, and run only web-ui formatting, targeted inexpensive tests, and diff inspection.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
