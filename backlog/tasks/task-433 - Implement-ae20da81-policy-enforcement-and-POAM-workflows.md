@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - claude-agent
 created_date: '2026-08-23 01:35'
-updated_date: '2026-08-31 03:19'
+updated_date: '2026-08-31 03:25'
 labels:
   - design-parity
   - policy
@@ -236,6 +236,8 @@ Focused final-audit remediation: review the concurrent environment-scoped policy
 2026-08-31 final browser/harness review remediation: Track every unhandled promise rejection as fatal browser-run state while preserving step/result and diagnostic artifact generation, force a nonzero exit after reports are written, and strengthen static contracts by isolating the `runTask433ProductionEvaluation` helper body and rejecting direct INSERT/UPDATE writes to composite assessment or rule-result tables. Preserve concurrent changes, run only Node syntax and static-contract checks, and do not commit.
 
 2026-08-31 relationship pagination P2 remediation: Extend web relationship DTOs with rolling-compatible default pagination metadata. Fetch relationship batches page-by-page with the server's bounded history limit, merge each relationship by stable identity, and reject incoherent or excessive pagination through the existing visible API error path. Add pure deserialization and page-merge regressions. Preserve concurrent worktree changes; run only web-ui rustfmt and targeted fast unit tests; do not commit.
+
+2026-08-31 final relationship-pagination compatibility remediation: Preserve legacy all-relationships responses when both pagination parameters are absent; reject offset-only requests; retain explicit bounded pagination for the current web client. Order paginated finding history by immutable link retirement/link identity and assignment relationships by immutable reference addition identity, while preserving active finding handling. Add focused PostgreSQL regressions for legacy no-parameter behavior and update-stable page order; add supporting indexes only in unapplied migration 0242 if query plans require them. Run targeted Rust/web formatting, focused backend tests when practical, and git diff --check. Preserve concurrent worktree changes and do not commit.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
