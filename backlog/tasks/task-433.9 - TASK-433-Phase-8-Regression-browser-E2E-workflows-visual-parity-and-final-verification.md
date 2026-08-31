@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:43'
-updated_date: '2026-08-31 01:09'
+updated_date: '2026-08-31 02:40'
 labels:
   - design-parity
   - policy
@@ -109,6 +109,8 @@ nix flake check --keep-going
 15. Rewrite MR !318 description to summarize the full eight-phase MR, invariants, migrations, compatibility, six workflows, visual review, exact verification, final pipeline, and accepted P3 differences. Stop without merging and issue the required maintainer report.
 
 Focused browser harness remediation requested 2026-08-30: preserve the existing integration.exit wait/status change and add static source assertions for its ordering; restore an honest visual-report schema by classifying every themed capture against the manifest policy and making any strict policy without a successful comparator a reported failure; validate manifest settings and per-step field types/enums before browser launch; replace SQL-authored composite assessments/results with production commit re-evaluation through POST /api/v1/commits/:id/re-evaluate, using only persisted completed-scan input rows as deterministic external-scanner fixture state because the server exposes no authenticated deterministic scan-result ingestion endpoint; poll for and assert production-authored assessment/rule rows; use the same re-evaluation path for POA&M FAIL and PASS; add and then remove a compatible finding link through the common POA&M UI/API lifecycle; run only Node syntax, manifest/static regression scripts, Nix parse/evaluation as practical, and git diff checks. Do not run the full web-ui Nix check.
+
+Focused non-overlapping review remediation (2026-08-31): extend `policy_counts_defect` with a live HTTP Viewer session that has zero environment memberships and assert that exact-version usage returns no systems while retaining non-sensitive bundle-version metadata. Do not edit PolicyDrawer or browser harness files owned by concurrent agents. Record the current design-file classification and a truthful visual artifact inventory in task evidence; screenshots and visual comparisons remain pending until the final browser gates run. Run only targeted formatting/static checks, not expensive suites.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
