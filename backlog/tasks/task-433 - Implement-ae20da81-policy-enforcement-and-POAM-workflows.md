@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - claude-agent
 created_date: '2026-08-23 01:35'
-updated_date: '2026-08-31 20:31'
+updated_date: '2026-08-31 20:32'
 labels:
   - design-parity
   - policy
@@ -268,6 +268,8 @@ Root-cause refinement: the unlink service returns retired relationship history, 
 2026-08-31 evidence/POA&M responsive parity remediation in `/tmp/opencode/TASK-433-publish`: limit writes to compliance evidence and POA&M components, `packages/web-ui/assets/app.css`, and focused in-module tests; do not edit the browser harness. Let the mobile evidence navigator size to its actual controls with a bounded maximum; reflow verification attempts as readable cards; strengthen scoped disabled-control contrast in both themes; retain owner, target, opened, and milestone progress in the remediation summary; render authoritative requirement/framework metadata hierarchically with UUID-only fallback; distinguish aggregate policy/finding outcomes from constituent rule outcomes; subordinate rule IDs and raw evidence. Preserve lifecycle, closure authority, and FAIL semantics. Run web-ui rustfmt, targeted tests, a WASM check, and `git diff --check`; do not commit.
 
 2026-08-31 final catalog visual remediation in `/tmp/opencode/TASK-433-publish`: limit writes to policy catalog Rust, `packages/web-ui/assets/app.css`, and focused tests. Keep selected table policy names on normal/purple selection styling instead of category danger red. Reflow partial-delete feedback into a readable stacked narrow-screen alert. Leave topbar/content behavior to the shell owner and make only catalog header/action wrapping robust against clipping. Run web-ui rustfmt, targeted tests, a WASM check, and `git diff --check`; preserve concurrent changes and do not commit.
+
+2026-08-31 remaining evidence/POA&M identity remediation in `/tmp/opencode/TASK-433-publish`: Diagnose canonical mixed-workflow identity through production policy mapping and evidence hydration. Add additive rolling-compatible requirement metadata to compliance evidence and verification-item DTOs. Hydrate policy mappings and verification history with bounded batched queries, independent of active finding links. Render framework release, requirement/control, system/host, and policy identity in evidence and completed/rejected verification history with UUID fallback only when metadata is unavailable. Strengthen canonical browser assertions and focused server/web regressions. Run backend/web rustfmt, SQLX offline checks, targeted tests, WASM/static checks, and `git diff --check`; preserve concurrent changes and do not commit.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
