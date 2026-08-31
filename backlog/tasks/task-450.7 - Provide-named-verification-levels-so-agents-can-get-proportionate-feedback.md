@@ -4,8 +4,10 @@ title: Provide named verification levels so agents can get proportionate feedbac
 status: Backlog
 assignee: []
 created_date: '2026-08-31 22:40'
+updated_date: '2026-08-31 22:41'
 labels: []
-dependencies: []
+dependencies:
+  - TASK-450.4
 documentation:
   - >-
     backlog/docs/build/build-invalidation-graph/doc-23 -
