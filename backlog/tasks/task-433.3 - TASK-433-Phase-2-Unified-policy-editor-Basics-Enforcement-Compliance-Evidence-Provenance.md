@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:42'
-updated_date: '2026-08-31 20:31'
+updated_date: '2026-08-31 20:41'
 labels:
   - design-parity
   - policy
@@ -94,6 +94,8 @@ Phase-8 owner remediation: bring the common editor shell up to surrounding modal
 - Phase-1 GitLab CI verification: not explicitly verified. Proceeded under user authorization.
 
 Phase 8 returned Phase 2 to In Progress. Independent review found the common editor lacks dialog semantics, Escape/header close, focus containment/restoration, robust narrow tabs, and the persistent section/provenance hierarchy represented by the authoritative editor. Policy and mapping mutations also rely on role/session checks without CSRF validation. AC1 and AC4 are temporarily unchecked pending focused accessibility, direct API security, responsive, and reload regressions.
+
+2026-08-31 remaining editor visual remediation: Reduced the desktop section rail from 180px to 150px and narrowed its gutter. At the 560px narrow-desktop breakpoint the editor keeps Basics, Enforcement, Compliance, Evidence, and applicable Provenance in one horizontal tablist with a visible `Scroll sections` cue, a styled scrollbar, active styling, and cue-aware active-tab auto-reveal. Added body scroll padding, content clearance, and Add mapping scroll margin so the footer cannot cover the final mapping/content controls. Reworked imported provenance into higher-contrast source-artifact cards with read-only/import hierarchy, badges, ellipsized titled identifiers, and narrow stacking. Reflowed section headings, rule actions, and multiline Nix values on compact layouts. Behavior and persistence paths are unchanged. Added a pure tab-set/navigation assertion and narrowDesktop browser assertions for tab presence/overflow/active visibility plus footer clearance. Verification passed: web-ui rustfmt check; 40 `policy_editor_modal::tests`; wasm32 cargo check; Node syntax; web-ui harness static contracts; `git diff --check`. Existing repository warnings remained. The first targeted test attempt timed out while waiting on concurrent Cargo locks; the isolated retry and full focused module suite passed. Concurrent backend/API model changes appeared during verification and were preserved untouched. No commit created.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
