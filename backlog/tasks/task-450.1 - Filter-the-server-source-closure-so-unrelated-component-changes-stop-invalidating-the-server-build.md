@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-08-31 22:38'
+updated_date: '2026-08-31 22:44'
 labels: []
 dependencies: []
 documentation:
@@ -38,6 +39,38 @@ This is the lowest-risk item in the parent task and should land first.
 `serverSrcHash` (`packages/default/default.nix:85`) is derived from `serverSrc` and is exported as `SRC_HASH` during the server build. Narrowing `serverSrc` changes the value and the meaning of that hash. Determine what reads the server `SRC_HASH` at runtime and confirm the narrower definition is still correct for those consumers, or record why it is.
 
 The server build also produces the `test-agent` and `xccdf-export-fixture` binaries. Confirm the filtered closure still contains everything those binaries need to compile.
+
+## Non-goals
+
+- Changing which binaries the server derivation produces.
+- Changing the `mkWorkspaceSrc` or `mkComponentWorkspaceManifest` helpers for the agent, builder, or keygen components.
+- Changing the meaning of `SRC_HASH` for the agent.
+- Converting the server to a different Rust build framework. That is a separate subtask.
+
+## Architectural constraints
+
+- Follow the existing `mkWorkspaceSrc` and `mkComponentWorkspaceManifest` pattern rather than introducing a new filtering mechanism.
+- The workspace manifest substituted into the build tree must list exactly the crates in the component closure, because Cargo parses every workspace member even when `--package` selects one.
+- Migrations referenced by SQLx compile-time verification must remain inside the filtered source tree.
+
+## Verification plan
+
+- Compare `nix path-info --derivation` output for the server package before and after a scratch edit under `crates/cf-builder` and under `crates/cf-agent`.
+- `nix build .#packages.x86_64-linux.server --no-link`.
+- List the binaries in the build result and compare against the pre-change list.
+- Build the checks that boot a server.
+
+## Impact areas
+
+`packages/default/default.nix`, the server derivation input, `SRC_HASH` embedded in the server binary, and every check or module that consumes the server package.
+
+## Risk level
+
+Low. The change is confined to one Nix expression and the failure mode is a loud build error rather than silent misbehavior. The one non-obvious risk is `SRC_HASH` semantics.
+
+## Dependencies
+
+None.
 
 ## Context
 
