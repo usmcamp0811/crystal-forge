@@ -4,6 +4,7 @@ title: Collect and expose real fleet operations telemetry for dashboard parity
 status: To Do
 assignee: []
 created_date: '2026-08-31 02:21'
+updated_date: '2026-08-31 02:23'
 labels:
   - dashboard
   - agent
@@ -11,7 +12,8 @@ labels:
   - api
   - design-parity
   - real-data
-dependencies: []
+dependencies:
+  - TASK-410.1
 references:
   - git commit ac582592e8ffd787f103578c272d9f30162a9480
   - TASK-410.1
