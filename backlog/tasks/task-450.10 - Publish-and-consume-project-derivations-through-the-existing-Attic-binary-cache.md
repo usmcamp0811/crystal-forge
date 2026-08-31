@@ -6,8 +6,10 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-08-31 22:41'
+updated_date: '2026-08-31 22:41'
 labels: []
-dependencies: []
+dependencies:
+  - TASK-450.4
 references:
   - 'https://docs.cachix.org/what-is-a-binary-cache'
   - 'https://nix-gitlab-ci.projects.tf/caching/'
