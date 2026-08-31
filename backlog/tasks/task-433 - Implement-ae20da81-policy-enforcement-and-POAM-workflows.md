@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - claude-agent
 created_date: '2026-08-23 01:35'
-updated_date: '2026-08-31 05:12'
+updated_date: '2026-08-31 13:33'
 labels:
   - design-parity
   - policy
@@ -242,6 +242,8 @@ Focused final-audit remediation: review the concurrent environment-scoped policy
 2026-08-30 notification bootstrap cast remediation: Add a `CREATE OR REPLACE FUNCTION backfill_user_notification_source_events` correction to unapplied migration 0242 only. Guard every system/POA&M `subject_id` UUID conversion with category-aware `CASE` plus UUID-shape validation, preserving the 0241 cursor ordering, batch bound, locking, insert-only behavior, and completion semantics. Add a focused isolated PostgreSQL regression with a numeric CVE subject and malformed system/POA&M subjects; prove the CVE source is queued, invalid scoped sources are skipped, and the cursor records completion. Run SQL/diff formatting checks and only the focused ignored database test when the repository-owned isolated database is available. Do not commit.
 
 2026-08-31 five-failure focused web-ui remediation: make hidden-state assertions wait for DOM reconciliation; use the policy drawer's real accessible close name; scope Create POA&M actions to the nested dialog's accessible name; make the canonical lifecycle system clone include the required derivation; differentiate the two minimal test-flake outputs so production re-evaluation cannot violate the global derivation-path uniqueness constraint; attach immediate rejection handling to the affected response waiter without weakening its later awaited result. Run Node syntax/static contracts, Rust/Nix formatting, and the exact five-step CF_UI_TEST_STEPS web-ui check. Preserve concurrent work and do not touch TASK-440/441/442 files or commit.
+
+2026-08-31 remaining canonical lifecycle waiter remediation: Match the unlink response by URL pathname because the production client appends the required revision query parameter. Await link and unlink click/response operations together so a click failure cannot leave a response waiter to reject during teardown. Run Node syntax/static contracts, then the canonical lifecycle browser step and the exact five-step focused check. Preserve concurrent work and do not commit.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
