@@ -4,8 +4,10 @@ title: Reuse the shared backend dependency artifact in the server-regressions ch
 status: Backlog
 assignee: []
 created_date: '2026-08-31 22:39'
+updated_date: '2026-08-31 22:41'
 labels: []
-dependencies: []
+dependencies:
+  - TASK-450.4
 documentation:
   - >-
     backlog/docs/build/build-invalidation-graph/doc-23 -
