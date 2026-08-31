@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - claude-agent
 created_date: '2026-08-23 01:35'
-updated_date: '2026-08-31 13:33'
+updated_date: '2026-08-31 14:27'
 labels:
   - design-parity
   - policy
@@ -244,6 +244,8 @@ Focused final-audit remediation: review the concurrent environment-scoped policy
 2026-08-31 five-failure focused web-ui remediation: make hidden-state assertions wait for DOM reconciliation; use the policy drawer's real accessible close name; scope Create POA&M actions to the nested dialog's accessible name; make the canonical lifecycle system clone include the required derivation; differentiate the two minimal test-flake outputs so production re-evaluation cannot violate the global derivation-path uniqueness constraint; attach immediate rejection handling to the affected response waiter without weakening its later awaited result. Run Node syntax/static contracts, Rust/Nix formatting, and the exact five-step CF_UI_TEST_STEPS web-ui check. Preserve concurrent work and do not touch TASK-440/441/442 files or commit.
 
 2026-08-31 remaining canonical lifecycle waiter remediation: Match the unlink response by URL pathname because the production client appends the required revision query parameter. Await link and unlink click/response operations together so a click failure cannot leave a response waiter to reject during teardown. Run Node syntax/static contracts, then the canonical lifecycle browser step and the exact five-step focused check. Preserve concurrent work and do not commit.
+
+Root-cause refinement: the unlink service returns retired relationship history, but query-layer rows without closure evidence use the non-contract value `unresolved`. Active rows are replaced with current verification before serialization; retired unlinked rows are not, so the web DTO rejects the successful mutation response and cannot reconcile. Emit the supported fail-closed `unknown` verification state for historical links without closure evidence, retain closed-link stored outcomes, and keep the active-link UI filtered by `link_active`. Verify backend/web formatting and checks, then rerun the lifecycle and exact five-step browser gate.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
