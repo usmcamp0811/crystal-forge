@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:42'
-updated_date: '2026-08-31 16:59'
+updated_date: '2026-08-31 17:17'
 labels:
   - design-parity
   - policy
@@ -124,4 +124,6 @@ Conflict-resolution merge committed and pushed as `b238ff9e969b525aa44d46ef27beb
 Exact-head Phase-4 dependency gate confirmed successful: GitLab pipeline 2791067463 completed successfully for `b238ff9e969b525aa44d46ef27beb4faefc30e12` at 2026-08-26 04:09 UTC. MR !318 is conflict-free and mergeable. TASK-433.5 remains in Review with AC1-AC3 checked; it is not moved to Done.
 
 Phase 8 returned Phase 4 to In Progress. A P1 security defect allows a generation rollback to an arbitrary unknown `/nix/store/...` string when no composite policies are effective; the existing compatibility test codifies this unsafe fallback. Additional gaps are unbounded per-rule custom Nix validation in async handlers, missing CSRF on TASK-433-touched deployment/rollback mutations, stale public Composite helper behavior, and incomplete consolidated proof for AC3's per-kind matrix. AC1-AC3 are temporarily unchecked until focused security, execution, and matrix regressions pass.
+
+2026-08-31 exact-head eval_passed fail-closed remediation: `mark_commit_evaluation_failed` now converts current Pass/NotChecked attempt evidence and matching exact-commit assessment rules to Error under the established POA&M system/finding lock order, then recomputes assessment aggregates in the same transaction. `mark_commit_evaluation_started` now resets every exact-commit eval_passed assessment to NotChecked in its claim transaction, before policy loading or attempt-evidence initialization, so deployment authorization cannot consume a prior Pass during a retry. Existing terminal Fail/Error evidence remains authoritative. Added live PostgreSQL regressions that create a real per-system Pass, invoke the production failure handler and manual reset/start paths, and assert attempt evidence, assessment/rule evidence, and `authorize_deployment_at` all fail closed. Added direct pin_required terminal-Pending NotChecked coverage. Verification: `nix develop -c cargo fmt --manifest-path packages/default/Cargo.toml --all -- --check` passed; full isolated-PostgreSQL `composite_policy` suite passed 21/21 with `DATABASE_URL` and `CRYSTAL_FORGE_TEST_DATABASE_URL` set to the repository-owned 127.0.0.1:3042 database and `SQLX_OFFLINE=true`; `git diff --check` passed. An initial suite invocation without the isolated URL compiled but failed all SQLx database cases at setup due `_sqlx_test` schema permission, while the direct non-DB pin test passed. Existing unrelated warnings and concurrent worktree changes remain; no commit created.
 <!-- SECTION:NOTES:END -->
