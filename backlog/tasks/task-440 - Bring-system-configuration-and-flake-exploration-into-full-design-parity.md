@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-08-31 05:56'
+updated_date: '2026-08-31 07:50'
 labels:
   - design-parity
   - web-ui
@@ -21,6 +21,7 @@ references:
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/323'
   - git commit cafc678ef
   - git commit 1b9a0594193a26da99b0935151b64323acf8f913
+  - git commit 4e09d60a
 documentation:
   - docs/design/CrystalForge/app.jsx
   - docs/design/CrystalForge/components/SystemDetail.jsx
@@ -398,6 +399,8 @@ Config summary metrics correction completed in the dedicated worktree. Migration
 Backend flake-contract closure (2026-08-31): preserved the existing Config metric/frontend/migration work and wrote only cf-server plus the already-enrolled server-regressions scope. The flake output API now has typed reconciliation filtering, revision-global mismatch totals, visible environment metadata, and complete filtered continuation coverage. Exact lock-node input additions/removals are represented separately from revision bumps. The configuration-independent Nix carrier records optional module binding source input/revision/normalized relative path from `builtins.unsafeGetAttrPos`, keeps declaration source paths separate, and emits authoritative `transitive_descendant_count` from the full lock graph while retaining `direct_descendant_count` for the current frontend consumer. Verification passed: targeted rustfmt checks; `SQLX_OFFLINE=true cargo check --offline --package cf-server --tests`; focused delta, path normalization, and real-Nix carrier tests; `git diff --check`; and `nix build path:.#checks.x86_64-linux.server-regressions -L`. The ordinary flake-form server-regressions invocation failed because Nix excluded the preserved untracked 0239 migration and the test database lacked `closure_size_bytes`; `path:.` included that migration and the full check passed. No commit or push.
 
 Frontend AC24 continuation (2026-08-30): final audit found and fixed a production-only stale helper reference that blocked the Dioxus WASM bundle. `cargo test` passed (280 passed, 1 ignored), wasm32 `cargo check` passed, and touched-file rustfmt passed. The authoritative `nix build .#checks.x86_64-linux.web-ui --no-link` then reached Playwright. The first run exposed missing authoritative module-source total and exported-module carrier provenance; frontend markup was updated, and the next run advanced both workflows. Remaining TASK-440 browser failures are: Config pending search expects `.cfg-count` text `Loading…` rather than `Querying…`; flake declaration headers need explicit accessible columnheader semantics. Unrelated browser failures also remain in non-admin Sync-all visibility and onboarding/policy locator ambiguity. Work stopped because all worktree `.git` files now point to removed `/home/mcamp/code/crystal-forge/refactor/.git/worktrees/*` metadata, so Git can no longer identify or inspect the TASK-440, dev, or main worktrees. Source files remain present. Do not move AC24 or TASK-440 to Review until worktree metadata is repaired and the authoritative web-ui check passes.
+
+Backend latest-review remediation committed and pushed as `4e09d60a` on 2026-08-31. Scope: cf-server backend, migration 0239, and checks/server-regressions only; frontend/browser worktree changes remain preserved and uncommitted. Materialized same-commit host delta, fixed four-hour drift coverage, set-based visibility-aware fleet reconciliation and globals, export-binding provenance semantics, direct/transitive input counts, duplicate-index removal, bounded closure JSON collection, first-page-only revision deltas, and AgentFingerprint documentation. Verification passed: rustfmt; SQLX_OFFLINE cf-server check; 18 focused evaluation snapshot tests; focused closure parser and binding ambiguity tests; real-Nix independent carrier and exported-module tests; cf-server rustdoc build (existing warnings only); `git diff --check`; and `nix build path:.#checks.x86_64-linux.server-regressions -L`. The Nix check includes a 1,003-system query-count/index-plan regression and a 128-configuration by 1,000-option host-delta query-count/index-plan regression.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
