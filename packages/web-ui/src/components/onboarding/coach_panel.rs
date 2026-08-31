@@ -64,7 +64,7 @@ const STEPS: [CoachStep; 9] = [
     CoachStep {
         id: "agent",
         label: "Deploy agent",
-        pending: "Completes after first system setup",
+        pending: "Review agent deployment and acknowledge it after the first system reports in",
         destination: CoachDestination::Systems,
         setup_context: true,
     },
@@ -177,6 +177,10 @@ fn step_status(step: CoachStep, progress: &SetupWizardProgressResponse) -> Setup
             count: 0,
         },
     }
+}
+
+fn step_locked(step: CoachStep, progress: &SetupWizardProgressResponse) -> bool {
+    step.id == "agent" && !progress.system.complete
 }
 
 /// Renders the dismissible nine-step administrator setup coach.
@@ -329,10 +333,13 @@ pub fn OnboardingCoachPanel() -> Element {
                     for step in visible_steps.iter().copied() {
                         {
                             let status = step_status(step, &progress_data);
+                            let locked = step_locked(step, &progress_data);
                             rsx! {
                                 button {
                                     class: "w-full rounded-lg px-3 py-2 text-left border flex items-start justify-between gap-2",
                                     "data-testid": "onboarding-step-{step.id}",
+                                    disabled: locked,
+                                    aria_label: if locked { format!("{}: register a system first", step.label) } else { step.label.to_string() },
                                     style: if status.complete {
                                         "border:1px solid rgba(16,185,129,0.6); background:rgba(6,95,70,0.35);"
                                     } else {
@@ -359,7 +366,9 @@ pub fn OnboardingCoachPanel() -> Element {
                                             } else {
                                                 "text-[11px] text-slate-400"
                                             },
-                                            if step.id == "agent" && status.complete {
+                                            if locked {
+                                                "Register a system before reviewing agent deployment"
+                                            } else if step.id == "agent" && status.complete {
                                                 "Acknowledged"
                                             } else if status.complete {
                                                 "Configured"
@@ -453,6 +462,19 @@ mod tests {
             progress.bundle.clone().unwrap()
         );
         assert_eq!(step_status(STEPS[8], &progress), progress.poam.unwrap());
+    }
+
+    #[test]
+    fn agent_step_requires_a_registered_system() {
+        let mut progress = incomplete_progress();
+        assert!(step_locked(STEPS[5], &progress));
+
+        progress.system = SetupWizardStepStatus {
+            complete: true,
+            count: 1,
+        };
+        assert!(!step_locked(STEPS[5], &progress));
+        assert!(STEPS[5].pending.contains("acknowledge"));
     }
 
     #[test]

@@ -49,12 +49,16 @@ pub fn PolicyRow(
         "chip chip-healthy"
     };
     let policy_for_open = policy.clone();
+    let policy_for_keyboard = policy.clone();
     let policy_for_edit = policy.clone();
     let policy_id = policy.id;
 
     rsx! {
         tr {
             class: if selected { "selectable selected" } else { "selectable" },
+            role: "button",
+            tabindex: "0",
+            aria_label: if selection_mode { format!("Select {}", policy.name) } else { format!("Open {}", policy.name) },
             "data-policy-row": "true",
             "data-policy-id": "{policy.id}",
             "data-policy-name": "{policy.name}",
@@ -70,6 +74,17 @@ pub fn PolicyRow(
                     on_open.call(policy_for_open.clone());
                 }
             },
+            onkeydown: move |event| {
+                let key = event.key();
+                if key == Key::Enter || matches!(key, Key::Character(ref value) if value == " ") {
+                    event.prevent_default();
+                    if selection_mode {
+                        on_toggle_select.call(!selected);
+                    } else {
+                        on_open.call(policy_for_keyboard.clone());
+                    }
+                }
+            },
             td { style: "width:28px;",
                 if selection_mode {
                     input {
@@ -78,6 +93,7 @@ pub fn PolicyRow(
                         checked: selected,
                         aria_label: "Select {policy.name}",
                         onclick: move |event| event.stop_propagation(),
+                        onkeydown: move |event| event.stop_propagation(),
                         onchange: move |event| on_toggle_select.call(event.checked()),
                     }
                 }
@@ -102,7 +118,7 @@ pub fn PolicyRow(
                 if !enabled { span { class: "chip chip-unknown", "disabled" } }
                 else if rules.is_empty() { "no automated rules" } else { "{rules.len()} rule(s)" }
             }
-            td { class: "row-actions", onclick: move |evt| evt.stop_propagation(),
+            td { class: "row-actions", onclick: move |evt| evt.stop_propagation(), onkeydown: move |event| event.stop_propagation(),
                 if is_core {
                     span { class: "chip chip-info", "protected" }
                 } else if !selection_mode && is_editable {

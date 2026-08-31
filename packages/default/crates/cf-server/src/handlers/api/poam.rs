@@ -157,15 +157,34 @@ pub async fn list(
     }
 }
 
+/// Selects finding relationships and optional bounded history pages.
+///
+/// Omitting both history fields preserves the original all-history response
+/// for deployed clients. `history_offset` requires `history_limit`.
 #[derive(Deserialize)]
 pub struct FindingRelationshipsQuery {
+    /// Contains comma-separated current composite assessment IDs.
     pub assessment_ids: Option<String>,
+    /// Contains comma-separated stable finding IDs.
     pub finding_ids: Option<String>,
+    /// Limits historical POA&Ms independently for each requested finding.
+    pub history_limit: Option<i64>,
+    /// Skips this many historical POA&Ms for each requested finding.
+    pub history_offset: Option<i64>,
 }
 
+/// Selects assignment relationships and optional bounded history pages.
+///
+/// Omitting both history fields preserves the original all-history response
+/// for deployed clients. `history_offset` requires `history_limit`.
 #[derive(Deserialize)]
 pub struct AssignmentRelationshipsQuery {
+    /// Contains comma-separated immutable assignment-version IDs.
     pub ids: String,
+    /// Limits POA&Ms independently for each requested assignment version.
+    pub history_limit: Option<i64>,
+    /// Skips this many POA&Ms for each requested assignment version.
+    pub history_offset: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -233,12 +252,30 @@ pub async fn finding_relationships(
         query.finding_ids.as_deref(),
     ) {
         (Some(value), None) => match relationship_ids(value, "assessment_ids") {
-            Ok(ids) => poam::finding_relationships(&pool, &actor, &ids, &SystemClock).await,
+            Ok(ids) => {
+                poam::finding_relationships(
+                    &pool,
+                    &actor,
+                    &ids,
+                    query.history_limit,
+                    query.history_offset,
+                    &SystemClock,
+                )
+                .await
+            }
             Err(response) => return response,
         },
         (None, Some(value)) => match relationship_ids(value, "finding_ids") {
             Ok(ids) => {
-                poam::finding_relationships_by_finding(&pool, &actor, &ids, &SystemClock).await
+                poam::finding_relationships_by_finding(
+                    &pool,
+                    &actor,
+                    &ids,
+                    query.history_limit,
+                    query.history_offset,
+                    &SystemClock,
+                )
+                .await
             }
             Err(response) => return response,
         },
@@ -347,7 +384,16 @@ pub async fn assignment_relationships(
         Ok(value) => value,
         Err(error) => return error,
     };
-    match poam::assignment_relationships(&pool, &actor, &ids, &SystemClock).await {
+    match poam::assignment_relationships(
+        &pool,
+        &actor,
+        &ids,
+        query.history_limit,
+        query.history_offset,
+        &SystemClock,
+    )
+    .await
+    {
         Ok(value) => Json(value).into_response(),
         Err(error) => error_response(error),
     }

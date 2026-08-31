@@ -180,6 +180,24 @@ fn page_bounds(limit: Option<i64>, offset: Option<i64>) -> Result<(i64, i64), Po
     Ok((limit, offset))
 }
 
+fn relationship_page_bounds(
+    limit: Option<i64>,
+    offset: Option<i64>,
+) -> Result<Option<(i64, i64)>, PoamError> {
+    match (limit, offset) {
+        // COMPATIBILITY: The original relationship endpoints returned every
+        // relationship when callers supplied no pagination parameters. Keep
+        // that exact behavior for deployed clients that do not understand the
+        // pagination metadata. Current clients always send both parameters.
+        (None, None) => Ok(None),
+        (None, Some(_)) => Err(PoamError::Validation(
+            "invalid_relationship_pagination",
+            "history_offset requires history_limit".into(),
+        )),
+        (Some(limit), offset) => page_bounds(Some(limit), offset).map(Some),
+    }
+}
+
 fn validate_text_length(
     value: &str,
     max: usize,
@@ -1803,10 +1821,23 @@ pub async fn compatible(
     })
 }
 
+/// Returns visible relationships for current composite assessments.
+///
+/// When both pagination arguments are absent, the response contains all
+/// historical relationships for compatibility with the original endpoint.
+/// Supplying `history_limit` enables bounded per-finding pagination;
+/// `history_offset` is invalid without a limit.
+///
+/// # Errors
+///
+/// Returns [`PoamError::Validation`] for invalid IDs or pagination and
+/// [`PoamError::Database`] when a persistence operation fails.
 pub async fn finding_relationships(
     pool: &PgPool,
     actor: &PoamActor,
     assessment_ids: &[Uuid],
+    history_limit: Option<i64>,
+    history_offset: Option<i64>,
     clock: &dyn PoamClock,
 ) -> Result<Vec<FindingPoamRelationship>, PoamError> {
     if assessment_ids.is_empty() || assessment_ids.len() > MAX_POAM_RELATIONSHIPS as usize {
@@ -1815,6 +1846,7 @@ pub async fn finding_relationships(
             "Between 1 and 100 assessment IDs are required".into(),
         ));
     }
+    let history_page = relationship_page_bounds(history_limit, history_offset)?;
     let candidates = poam::visible_assessment_findings(
         pool,
         assessment_ids,
@@ -1851,6 +1883,7 @@ pub async fn finding_relationships(
         clock.today(),
         actor.is_admin,
         &actor.environment_ids,
+        history_page,
     )
     .await?;
     Ok(visible
@@ -1862,20 +1895,30 @@ pub async fn finding_relationships(
                 .map(|(_, _, summary)| summary.clone());
             let active_id = active_poam.as_ref().map(|summary| summary.id);
             let mut seen = BTreeSet::new();
+            let mut historical_poams = summaries
+                .iter()
+                .filter(|(related_finding, active, summary)| {
+                    *related_finding == finding_id
+                        && !*active
+                        && Some(summary.id) != active_id
+                        && seen.insert(summary.id)
+                })
+                .map(|(_, _, summary)| summary.clone())
+                .collect::<Vec<_>>();
+            let historical_has_more = history_page
+                .is_some_and(|(history_limit, _)| historical_poams.len() as i64 > history_limit);
+            if let Some((history_limit, _)) = history_page {
+                historical_poams.truncate(history_limit as usize);
+            }
             FindingPoamRelationship {
                 assessment_id: Some(assessment_id),
                 finding_id,
                 active_poam,
-                historical_poams: summaries
-                    .iter()
-                    .filter(|(related_finding, active, summary)| {
-                        *related_finding == finding_id
-                            && !*active
-                            && Some(summary.id) != active_id
-                            && seen.insert(summary.id)
-                    })
-                    .map(|(_, _, summary)| summary.clone())
-                    .collect(),
+                historical_poams,
+                historical_has_more,
+                historical_next_offset: history_page.and_then(|(history_limit, history_offset)| {
+                    historical_has_more.then_some(history_offset + history_limit)
+                }),
             }
         })
         .collect())
@@ -1884,7 +1927,9 @@ pub async fn finding_relationships(
 /// Returns visible POA&M relationships for stable finding IDs.
 ///
 /// Findings outside the actor's environment scope are omitted. The request
-/// must contain between 1 and 100 IDs.
+/// must contain between 1 and 100 IDs. When both pagination arguments are
+/// absent, the response contains all historical relationships for compatibility
+/// with the original endpoint. `history_offset` requires `history_limit`.
 ///
 /// # Errors
 ///
@@ -1894,6 +1939,8 @@ pub async fn finding_relationships_by_finding(
     pool: &PgPool,
     actor: &PoamActor,
     finding_ids: &[Uuid],
+    history_limit: Option<i64>,
+    history_offset: Option<i64>,
     clock: &dyn PoamClock,
 ) -> Result<Vec<FindingPoamRelationship>, PoamError> {
     if finding_ids.is_empty() || finding_ids.len() > MAX_POAM_RELATIONSHIPS as usize {
@@ -1902,6 +1949,7 @@ pub async fn finding_relationships_by_finding(
             "Between 1 and 100 finding IDs are required".into(),
         ));
     }
+    let history_page = relationship_page_bounds(history_limit, history_offset)?;
     let visible =
         poam::visible_findings(pool, finding_ids, actor.is_admin, &actor.environment_ids).await?;
     let visible_ids = visible.iter().map(|row| row.0).collect::<Vec<_>>();
@@ -1911,6 +1959,7 @@ pub async fn finding_relationships_by_finding(
         clock.today(),
         actor.is_admin,
         &actor.environment_ids,
+        history_page,
     )
     .await?;
     Ok(visible
@@ -1922,20 +1971,30 @@ pub async fn finding_relationships_by_finding(
                 .map(|(_, _, summary)| summary.clone());
             let active_id = active_poam.as_ref().map(|summary| summary.id);
             let mut seen = BTreeSet::new();
+            let mut historical_poams = summaries
+                .iter()
+                .filter(|(related_finding, active, summary)| {
+                    *related_finding == finding_id
+                        && !*active
+                        && Some(summary.id) != active_id
+                        && seen.insert(summary.id)
+                })
+                .map(|(_, _, summary)| summary.clone())
+                .collect::<Vec<_>>();
+            let historical_has_more = history_page
+                .is_some_and(|(history_limit, _)| historical_poams.len() as i64 > history_limit);
+            if let Some((history_limit, _)) = history_page {
+                historical_poams.truncate(history_limit as usize);
+            }
             FindingPoamRelationship {
                 assessment_id: None,
                 finding_id,
                 active_poam,
-                historical_poams: summaries
-                    .iter()
-                    .filter(|(related_finding, active, summary)| {
-                        *related_finding == finding_id
-                            && !*active
-                            && Some(summary.id) != active_id
-                            && seen.insert(summary.id)
-                    })
-                    .map(|(_, _, summary)| summary.clone())
-                    .collect(),
+                historical_poams,
+                historical_has_more,
+                historical_next_offset: history_page.and_then(|(history_limit, history_offset)| {
+                    historical_has_more.then_some(history_offset + history_limit)
+                }),
             }
         })
         .collect())
@@ -2062,10 +2121,23 @@ pub async fn compatible_for_assessment(
     })
 }
 
+/// Returns visible POA&M relationships for immutable assignment versions.
+///
+/// When both pagination arguments are absent, the response contains all
+/// relationships for compatibility with the original endpoint. Supplying
+/// `history_limit` enables bounded per-assignment pagination;
+/// `history_offset` is invalid without a limit.
+///
+/// # Errors
+///
+/// Returns [`PoamError::Validation`] for invalid IDs or pagination and
+/// [`PoamError::Database`] when a persistence operation fails.
 pub async fn assignment_relationships(
     pool: &PgPool,
     actor: &PoamActor,
     assignment_version_ids: &[Uuid],
+    history_limit: Option<i64>,
+    history_offset: Option<i64>,
     clock: &dyn PoamClock,
 ) -> Result<Vec<AssignmentPoamRelationship>, PoamError> {
     if assignment_version_ids.is_empty()
@@ -2076,6 +2148,7 @@ pub async fn assignment_relationships(
             "Between 1 and 100 assignment-version IDs are required".into(),
         ));
     }
+    let history_page = relationship_page_bounds(history_limit, history_offset)?;
     let visible_ids = poam::visible_assignment_versions(
         pool,
         assignment_version_ids,
@@ -2089,17 +2162,30 @@ pub async fn assignment_relationships(
         clock.today(),
         actor.is_admin,
         &actor.environment_ids,
+        history_page,
     )
     .await?;
     Ok(visible_ids
         .into_iter()
-        .map(|assignment_version_id| AssignmentPoamRelationship {
-            assignment_version_id,
-            poams: summaries
+        .map(|assignment_version_id| {
+            let mut related = summaries
                 .iter()
                 .filter(|(related_id, _)| *related_id == assignment_version_id)
                 .map(|(_, summary)| summary.clone())
-                .collect(),
+                .collect::<Vec<_>>();
+            let poams_has_more =
+                history_page.is_some_and(|(history_limit, _)| related.len() as i64 > history_limit);
+            if let Some((history_limit, _)) = history_page {
+                related.truncate(history_limit as usize);
+            }
+            AssignmentPoamRelationship {
+                assignment_version_id,
+                poams: related,
+                poams_has_more,
+                poams_next_offset: history_page.and_then(|(history_limit, history_offset)| {
+                    poams_has_more.then_some(history_offset + history_limit)
+                }),
+            }
         })
         .collect())
 }
@@ -2122,37 +2208,34 @@ pub async fn create_waiver(
         "text_too_long",
         "justification",
     )?;
-    // Finding writers take the same advisory locks. READ COMMITTED gives each
-    // post-wait statement a fresh snapshot of the writer that just committed.
     let mut tx = pool.begin().await?;
-    let finding_key = sqlx::query_as::<_, (Uuid, Uuid)>(
-        "SELECT system_id,policy_lineage_id FROM poam_findings WHERE id=$1",
+    let legacy_finding_id = request
+        .assessment_id
+        .is_none()
+        .then_some(request.finding_id);
+    let key = finding_action_key_tx(
+        &mut tx,
+        actor,
+        request.assessment_id,
+        legacy_finding_id,
+        request.observation.as_ref(),
     )
-    .bind(request.finding_id)
-    .fetch_optional(&mut *tx)
-    .await?
-    .ok_or(PoamError::NotFound)?;
-    sqlx::query("SELECT lock_poam_finding_key($1,$2)")
-        .bind(finding_key.0)
-        .bind(finding_key.1)
-        .execute(&mut *tx)
-        .await?;
-    if !actor_can_access_systems_tx(&mut tx, actor, &[finding_key.0]).await? {
-        return Err(PoamError::NotFound);
-    }
-    let context = assessment_context_tx(&mut tx, request.assessment_id)
-        .await?
-        .ok_or(PoamError::NotFound)?;
+    .await?;
+    lock_assessment_finding_key_tx(&mut tx, key).await?;
+    let context = finding_action_context_tx(
+        &mut tx,
+        actor,
+        request.assessment_id,
+        legacy_finding_id,
+        request.observation.as_ref(),
+    )
+    .await?;
     if context.finding_id != request.finding_id {
-        return Err(PoamError::Validation(
-            "waiver_wrong_context",
-            "Assessment does not belong to the finding".into(),
-        ));
+        return Err(PoamError::NotFound);
     }
     if !actor_can_access_systems_tx(&mut tx, actor, &[context.system_id]).await? {
         return Err(PoamError::NotFound);
     }
-    validate_current_assessment_tx(&mut tx, &context).await?;
     if context.overall_outcome != "fail" {
         return Err(PoamError::Precondition(
             "finding_not_failed",
@@ -2160,12 +2243,60 @@ pub async fn create_waiver(
             None,
         ));
     }
-    let observation_snapshot = observation_snapshot_tx(&mut tx, request.assessment_id)
-        .await?
-        .ok_or(PoamError::NotFound)?;
-    let observation_token = semantic_digest(&observation_snapshot);
+    let (policy_version_id, observation_snapshot, observation_token) = if let Some(assessment_id) =
+        request.assessment_id
+    {
+        let observation_snapshot = observation_snapshot_tx(&mut tx, assessment_id)
+            .await?
+            .ok_or(PoamError::NotFound)?;
+        let observation_token = semantic_digest(&observation_snapshot);
+        (
+            context.policy_version_id,
+            observation_snapshot,
+            observation_token,
+        )
+    } else {
+        let items = current_verification_items_tx(
+            &mut tx,
+            &[(
+                context.finding_id,
+                context.system_id,
+                context.policy_lineage_id,
+            )],
+            Utc::now(),
+        )
+        .await?;
+        let item = items.into_iter().next().ok_or(PoamError::NotFound)?;
+        if item.observed_outcome.as_deref() != Some("fail")
+            || item.assessment_id.is_some()
+            || item.policy_version_id != Some(context.policy_version_id)
+        {
+            return Err(PoamError::Precondition(
+                "finding_not_failed",
+                "A waiver can only be requested for an exact current legacy Fail finding".into(),
+                None,
+            ));
+        }
+        (
+            context.policy_version_id,
+            item.observation_snapshot.ok_or_else(|| {
+                PoamError::Precondition(
+                    "stale_finding",
+                    "Legacy finding evidence is incomplete".into(),
+                    None,
+                )
+            })?,
+            item.observation_token.ok_or_else(|| {
+                PoamError::Precondition(
+                    "stale_finding",
+                    "Legacy finding evidence is incomplete".into(),
+                    None,
+                )
+            })?,
+        )
+    };
     let waiver_id:Uuid=sqlx::query_scalar("INSERT INTO finding_waivers(finding_id,justification,policy_version_id,assessment_id,observation_token,observation_snapshot,created_by) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id")
-      .bind(request.finding_id).bind(request.justification.trim()).bind(context.policy_version_id).bind(request.assessment_id).bind(&observation_token).bind(&observation_snapshot).bind(actor.user_id).fetch_one(&mut *tx).await?;
+      .bind(request.finding_id).bind(request.justification.trim()).bind(policy_version_id).bind(request.assessment_id).bind(&observation_token).bind(&observation_snapshot).bind(actor.user_id).fetch_one(&mut *tx).await?;
     let payload = json!({"waiver_id":waiver_id,"finding_id":request.finding_id,"assessment_id":request.assessment_id,"status":"pending"});
     sqlx::query("INSERT INTO finding_waiver_events(waiver_id,actor_user_id,to_status,payload) VALUES($1,$2,'pending',$3)")
       .bind(waiver_id).bind(actor.user_id).bind(&payload).execute(&mut *tx).await?;
@@ -2225,12 +2356,8 @@ pub async fn decide_waiver(
     let mut tx = pool.begin().await?;
     let key=sqlx::query_as::<_,(Uuid,Uuid)>("SELECT f.system_id,f.policy_lineage_id FROM finding_waivers w JOIN poam_findings f ON f.id=w.finding_id WHERE w.id=$1")
       .bind(waiver_id).fetch_optional(&mut *tx).await?.ok_or(PoamError::NotFound)?;
-    sqlx::query("SELECT lock_poam_finding_key($1,$2)")
-        .bind(key.0)
-        .bind(key.1)
-        .execute(&mut *tx)
-        .await?;
-    let row=sqlx::query_as::<_,(Uuid,String,Uuid,Uuid,String)>("SELECT w.finding_id,w.status,f.system_id,w.assessment_id,w.observation_token FROM finding_waivers w JOIN poam_findings f ON f.id=w.finding_id WHERE w.id=$1 FOR UPDATE OF w")
+    lock_assessment_finding_key_tx(&mut tx, key).await?;
+    let row=sqlx::query_as::<_,(Uuid,String,Uuid,Option<Uuid>,Uuid,String,Value)>("SELECT w.finding_id,w.status,f.system_id,w.assessment_id,w.policy_version_id,w.observation_token,w.observation_snapshot FROM finding_waivers w JOIN poam_findings f ON f.id=w.finding_id WHERE w.id=$1 FOR UPDATE OF w")
       .bind(waiver_id).fetch_optional(&mut *tx).await?.ok_or(PoamError::NotFound)?;
     if !actor_can_access_systems_tx(&mut tx, actor, &[row.2]).await? {
         return Err(PoamError::NotFound);
@@ -2252,28 +2379,58 @@ pub async fn decide_waiver(
         ));
     }
     if decision == "accepted" {
-        let context = assessment_context_tx(&mut tx, row.3)
+        if let Some(assessment_id) = row.3 {
+            let context = assessment_context_tx(&mut tx, assessment_id)
+                .await?
+                .ok_or(PoamError::NotFound)?;
+            if context.finding_id != row.0 || context.overall_outcome != "fail" {
+                return Err(PoamError::Precondition(
+                    "waiver_wrong_context",
+                    "Only the exact current Fail finding context can be accepted".into(),
+                    None,
+                ));
+            }
+            validate_current_assessment_tx(&mut tx, &context).await?;
+            if observation_snapshot_tx(&mut tx, assessment_id)
+                .await?
+                .map(|snapshot| semantic_digest(&snapshot))
+                .as_deref()
+                != Some(row.5.as_str())
+            {
+                return Err(PoamError::Precondition(
+                    "waiver_observation_changed",
+                    "The exact Fail observation changed after waiver submission".into(),
+                    None,
+                ));
+            }
+        } else {
+            let finding = sqlx::query_as::<_, (Uuid, Uuid)>(
+                "SELECT system_id,policy_lineage_id FROM poam_findings WHERE id=$1",
+            )
+            .bind(row.0)
+            .fetch_one(&mut *tx)
+            .await?;
+            let item = current_verification_items_tx(
+                &mut tx,
+                &[(row.0, finding.0, finding.1)],
+                clock.now(),
+            )
             .await?
+            .into_iter()
+            .next()
             .ok_or(PoamError::NotFound)?;
-        if context.finding_id != row.0 || context.overall_outcome != "fail" {
-            return Err(PoamError::Precondition(
-                "waiver_wrong_context",
-                "Only the exact current Fail finding context can be accepted".into(),
-                None,
-            ));
-        }
-        validate_current_assessment_tx(&mut tx, &context).await?;
-        if observation_snapshot_tx(&mut tx, row.3)
-            .await?
-            .map(|snapshot| semantic_digest(&snapshot))
-            .as_deref()
-            != Some(row.4.as_str())
-        {
-            return Err(PoamError::Precondition(
-                "waiver_observation_changed",
-                "The exact Fail observation changed after waiver submission".into(),
-                None,
-            ));
+            if item.assessment_id.is_some()
+                || item.observed_outcome.as_deref() != Some("fail")
+                || item.policy_version_id != Some(row.4)
+                || item.observation_token.as_deref() != Some(row.5.as_str())
+                || item.observation_snapshot.as_ref() != Some(&row.6)
+            {
+                return Err(PoamError::Precondition(
+                    "waiver_observation_changed",
+                    "The exact legacy Fail observation changed after waiver submission".into(),
+                    None,
+                ));
+            }
         }
         let expired_ids=sqlx::query_scalar::<_,Uuid>("UPDATE finding_waivers SET status='expired',updated_at=$2 WHERE finding_id=$1 AND status='accepted' AND expires_at<=$2 RETURNING id")
             .bind(row.0).bind(clock.now()).fetch_all(&mut *tx).await?;
@@ -2651,24 +2808,17 @@ async fn current_verification_items_tx(
     .bind(&lineage_ids)
     .fetch_all(&mut **tx)
     .await?;
-    let assessment_ids = observations
-        .iter()
-        .map(|observation| observation.assessment_id)
-        .collect::<Vec<_>>();
-    let waiver_rows = if assessment_ids.is_empty() {
-        Vec::new()
-    } else {
-        sqlx::query_as::<_, (Uuid, Uuid, Uuid, Uuid, String)>(
+    let finding_ids = findings.iter().map(|row| row.0).collect::<Vec<_>>();
+    let waiver_rows = sqlx::query_as::<_, (Uuid, Option<Uuid>, Uuid, Uuid, String)>(
             r#"SELECT finding_id,assessment_id,policy_version_id,id,observation_token FROM finding_waivers
-               WHERE assessment_id=ANY($1) AND status='accepted'
-                 AND (expires_at IS NULL OR expires_at>$2)
-               ORDER BY finding_id,assessment_id,accepted_at DESC FOR SHARE"#,
+               WHERE finding_id=ANY($1) AND status='accepted'
+                  AND (expires_at IS NULL OR expires_at>$2)
+               ORDER BY finding_id,assessment_id NULLS FIRST,accepted_at DESC FOR SHARE"#,
         )
-        .bind(&assessment_ids)
+        .bind(&finding_ids)
         .bind(now)
         .fetch_all(&mut **tx)
-        .await?
-    };
+        .await?;
     let waivers = waiver_rows
         .into_iter()
         .map(
@@ -2756,11 +2906,21 @@ async fn current_verification_items_tx(
         else {
             if let Some(observation) = legacy_observations.get(&(*system_id, *lineage_id)) {
                 let (bundle_ids, bundle_version_ids) = policy_bundle_context(policy);
+                let waiver_id = waivers
+                    .get(&(
+                        *finding_id,
+                        None,
+                        policy.policy_version_id,
+                        observation.observation_token.clone(),
+                    ))
+                    .copied();
                 items.push(VerificationItem {
                     finding_id: *finding_id,
                     system_id: *system_id,
                     policy_lineage_id: *lineage_id,
-                    result: observation.observed_outcome.clone(),
+                    result: waiver_id
+                        .map(|_| "waiver".to_string())
+                        .unwrap_or_else(|| observation.observed_outcome.clone()),
                     policy_version_id: Some(policy.policy_version_id),
                     assessment_id: None,
                     derivation_id: Some(observation.derivation_id),
@@ -2778,11 +2938,15 @@ async fn current_verification_items_tx(
                         .get(&policy.policy_version_id)
                         .cloned()
                         .unwrap_or_default(),
-                    waiver_id: None,
-                    detail: format!(
-                        "Exact current legacy observation {}",
-                        observation.observed_outcome
-                    ),
+                    waiver_id,
+                    detail: if waiver_id.is_some() {
+                        "Exact current legacy finding has an accepted waiver".into()
+                    } else {
+                        format!(
+                            "Exact current legacy observation {}",
+                            observation.observed_outcome
+                        )
+                    },
                 });
                 continue;
             }
@@ -2919,7 +3083,7 @@ async fn current_verification_items_tx(
             && let Some(waiver_id) = waivers
                 .get(&(
                     *finding_id,
-                    observation.assessment_id,
+                    Some(observation.assessment_id),
                     policy.policy_version_id,
                     observation_token.clone(),
                 ))
@@ -3025,10 +3189,9 @@ async fn insert_verification_items(
     // in the server transaction. The database owner and superusers are trusted;
     // they can disable the trigger and are outside this boundary.
     let mut attestations = HashMap::new();
-    for item in items
-        .iter()
-        .filter(|item| item.assessment_id.is_none() && item.result == "pass")
-    {
+    for item in items.iter().filter(|item| {
+        item.assessment_id.is_none() && matches!(item.result.as_str(), "pass" | "waiver")
+    }) {
         sqlx::query(
             r#"INSERT INTO compliance_resolved_effective_contexts(
                  attempt_id,finding_id,system_id,policy_lineage_id,policy_version_id,

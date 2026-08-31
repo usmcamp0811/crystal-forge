@@ -44,6 +44,9 @@ pub struct GridWidgetProps {
     pub on_drag_leave: Option<EventHandler<()>>,
     #[props(default)]
     pub on_drop: Option<EventHandler<String>>,
+    /// Moves this widget one position earlier or later for keyboard users.
+    #[props(default)]
+    pub on_move: Option<EventHandler<(String, isize)>>,
     #[props(default)]
     pub on_set_cols: Option<EventHandler<(String, usize)>>,
     #[props(default)]
@@ -73,6 +76,7 @@ pub fn GridWidget(props: GridWidgetProps) -> Element {
         on_drag_over,
         on_drag_leave,
         on_drop,
+        on_move,
         on_set_cols,
         on_set_rows,
         on_remove,
@@ -143,6 +147,28 @@ pub fn GridWidget(props: GridWidgetProps) -> Element {
                     class: "dash-widget-edit",
                     span { class: "dash-widget-grip", title: "Drag to move",
                         Icon { name: IconName::Rows, size: 12 }
+                    }
+                    button {
+                        class: "btn-icon focus-ring",
+                        aria_label: "Move {title} earlier",
+                        title: "Move earlier",
+                        onclick: {
+                            let id = id.clone();
+                            let on_move = on_move.clone();
+                            move |_| if let Some(handler) = &on_move { handler.call((id.clone(), -1)); }
+                        },
+                        Icon { name: IconName::ArrowLeft, size: 12 }
+                    }
+                    button {
+                        class: "btn-icon focus-ring",
+                        aria_label: "Move {title} later",
+                        title: "Move later",
+                        onclick: {
+                            let id = id.clone();
+                            let on_move = on_move.clone();
+                            move |_| if let Some(handler) = &on_move { handler.call((id.clone(), 1)); }
+                        },
+                        Icon { name: IconName::ArrowRight, size: 12 }
                     }
                     span {
                         class: "dash-size-group",

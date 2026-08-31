@@ -7,9 +7,9 @@ use crate::compliance::resolver::{
     AssignmentMode, EffectivePolicySet, ResolutionOutcome, resolve_system_effective_policies_in_tx,
 };
 use crate::models::deployment_policies::{
-    AssignedPolicy, CompositePolicyConfig, CompositeRuleKind, CompositeRuleOutcome,
-    CveBlockSeverity, EnforcementOutcome, EnforcementPhase, PoliciesByConfiguration,
-    PolicyCheckResult, TimeWindowConfig, composite_config_digest, deserialize_policy_type_config,
+    CompositePolicyConfig, CompositeRuleKind, CompositeRuleOutcome, CveBlockSeverity,
+    EnforcementOutcome, EnforcementPhase, PoliciesByConfiguration, PolicyCheckResult,
+    TimeWindowConfig, composite_config_digest, deserialize_policy_type_config,
 };
 use crate::queries::system_events::set_pending_deployment_target_tx;
 use crate::services::time_window_policy;
@@ -195,24 +195,25 @@ pub async fn initialize_eval_passed_attempt(
     Ok(())
 }
 
+/// Persists authoritative `eval_passed` outcomes for one evaluated system.
+///
+/// The supplied policy check is the evaluator result for this configuration.
+/// Terminal metadata errors therefore persist as Error and never pass
+/// provisionally while commit finalization is pending.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot persist an outcome.
 pub async fn persist_eval_passed_for_system_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     commit_id: i32,
     attempt_number: i32,
     system_id: Uuid,
-    configuration_name: &str,
-    assigned: &[AssignedPolicy],
-    outcome: EnforcementOutcome,
-    detail: &str,
+    policy_check: &PolicyCheckResult,
 ) -> Result<()> {
-    for policy in assigned {
-        let crate::models::deployment_policies::DeploymentPolicy::Composite { config } =
-            &policy.policy
-        else {
-            continue;
-        };
-        for rule in &config.rules {
-            if !matches!(rule.rule, CompositeRuleKind::EvalPassed(_)) {
+    for (policy_version_id, result) in &policy_check.assigned_results {
+        for outcome in &result.composite_outcomes {
+            if outcome.kind != "eval_passed" {
                 continue;
             }
             sqlx::query(
@@ -222,8 +223,7 @@ pub async fn persist_eval_passed_for_system_in_tx(
                     policy_version_id, rule_id, outcome, detail, evidence
                 )
                 SELECT attempt.id, $3, $4, $5, $6, $7, $8,
-                       jsonb_build_object('evaluation_attempt_id', attempt.id,
-                                          'attempt_number', $2, 'configuration', $4)
+                       $9
                 FROM evaluation_attempts attempt
                 WHERE attempt.commit_id = $1 AND attempt.attempt_number = $2
                   AND attempt.status = 'in_progress'
@@ -236,11 +236,12 @@ pub async fn persist_eval_passed_for_system_in_tx(
             .bind(commit_id)
             .bind(attempt_number)
             .bind(system_id)
-            .bind(configuration_name)
-            .bind(policy.policy_id)
-            .bind(rule.id)
-            .bind(outcome_str(outcome))
-            .bind(detail)
+            .bind(&policy_check.system_name)
+            .bind(policy_version_id)
+            .bind(outcome.rule_id)
+            .bind(outcome_str(outcome.outcome))
+            .bind(&outcome.detail)
+            .bind(&outcome.evidence)
             .execute(&mut **tx)
             .await?;
         }
@@ -248,13 +249,51 @@ pub async fn persist_eval_passed_for_system_in_tx(
     Ok(())
 }
 
+/// Replaces provisional `eval_passed` evidence with terminal evaluation outcomes.
+///
+/// The update covers both attempt-scoped diagnostics and deployed-target
+/// assessments consumed by POA&M verification. Assessment aggregates are
+/// recomputed before this transaction can commit.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot resolve, lock, or update the
+/// affected evaluation evidence.
 pub async fn persist_eval_passed_terminal_checks_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     commit_id: i32,
     attempt_number: i32,
     checks: &[PolicyCheckResult],
 ) -> Result<()> {
+    let mut assessment_ids = Vec::new();
     for check in checks {
+        let system_id: Option<Uuid> = sqlx::query_scalar(
+            r#"
+            SELECT system.id
+            FROM systems system
+            JOIN commits commit ON commit.id = $1 AND commit.flake_id = system.flake_id
+            WHERE COALESCE(NULLIF(BTRIM(system.system_configuration_name), ''), system.hostname) = $2
+            "#,
+        )
+        .bind(commit_id)
+        .bind(&check.system_name)
+        .fetch_optional(&mut **tx)
+        .await?;
+        if let Some(system_id) = system_id {
+            // CONCURRENCY: Finalization can replace a provisional Pass that is
+            // visible to POA&M closure. Use the standard writer lock order so
+            // closure cannot consume the assessment between the rule update
+            // and aggregate recomputation.
+            lock_poam_system_key_tx(tx, system_id).await?;
+            sqlx::query(
+                r#"SELECT lock_poam_finding_key(system_id,policy_lineage_id)
+                   FROM poam_findings WHERE system_id=$1
+                   ORDER BY system_id,policy_lineage_id"#,
+            )
+            .bind(system_id)
+            .execute(&mut **tx)
+            .await?;
+        }
         for (version_id, result) in &check.assigned_results {
             for outcome in result
                 .composite_outcomes
@@ -283,9 +322,41 @@ pub async fn persist_eval_passed_terminal_checks_in_tx(
                 .bind(outcome.rule_id)
                 .execute(&mut **tx)
                 .await?;
+
+                if let Some(system_id) = system_id {
+                    let updated: Vec<Uuid> = sqlx::query_scalar(
+                        r#"
+                        UPDATE composite_policy_rule_results rule_result
+                        SET outcome = $3, blocking = $3 <> 'pass', detail = $4,
+                            evidence = $5, evaluated_at = NOW()
+                        FROM composite_policy_assessments assessment
+                        JOIN derivations derivation ON derivation.id = assessment.derivation_id
+                        WHERE rule_result.assessment_id = assessment.id
+                          AND derivation.commit_id = $1
+                          AND assessment.system_id = $2
+                          AND assessment.policy_version_id = $6
+                          AND rule_result.rule_id = $7
+                          AND rule_result.kind = 'eval_passed'
+                        RETURNING assessment.id
+                        "#,
+                    )
+                    .bind(commit_id)
+                    .bind(system_id)
+                    .bind(outcome_str(outcome.outcome))
+                    .bind(&outcome.detail)
+                    .bind(&outcome.evidence)
+                    .bind(version_id)
+                    .bind(outcome.rule_id)
+                    .fetch_all(&mut **tx)
+                    .await?;
+                    assessment_ids.extend(updated);
+                }
             }
         }
     }
+    assessment_ids.sort_unstable();
+    assessment_ids.dedup();
+    recompute_aggregates(tx, &assessment_ids).await?;
     Ok(())
 }
 
@@ -1606,26 +1677,30 @@ mod tests {
             max_allowed: 0,
         });
         let rule_id = Uuid::from_u128(2);
-        assert_eq!(
-            scan_outcome(rule_id, &rule, None).outcome,
-            EnforcementOutcome::NotChecked
-        );
-        assert_eq!(
-            scan_outcome(rule_id, &rule, Some(&scan("in_progress", 0))).outcome,
-            EnforcementOutcome::NotChecked
-        );
-        assert_eq!(
-            scan_outcome(rule_id, &rule, Some(&scan("failed", 0))).outcome,
-            EnforcementOutcome::Error
-        );
-        assert_eq!(
-            scan_outcome(rule_id, &rule, Some(&scan("completed", 0))).outcome,
-            EnforcementOutcome::Pass
-        );
-        assert_eq!(
-            scan_outcome(rule_id, &rule, Some(&scan("completed", 1))).outcome,
-            EnforcementOutcome::Fail
-        );
+        for (scan, expected) in [
+            (None, EnforcementOutcome::NotChecked),
+            (Some(scan("in_progress", 0)), EnforcementOutcome::NotChecked),
+            (Some(scan("failed", 0)), EnforcementOutcome::Error),
+            (Some(scan("completed", 0)), EnforcementOutcome::Pass),
+            (Some(scan("completed", 1)), EnforcementOutcome::Fail),
+        ] {
+            let outcome = scan_outcome(rule_id, &rule, scan.as_ref());
+            assert_eq!(outcome.rule_id, rule_id);
+            assert_eq!(outcome.kind, "cve_block");
+            assert_eq!(outcome.phase, EnforcementPhase::Scan);
+            assert_eq!(outcome.outcome, expected);
+            assert_eq!(outcome.blocking, expected != EnforcementOutcome::Pass);
+            assert!(outcome.evidence.is_object());
+            match scan.as_ref().map(|scan| scan.status.as_str()) {
+                Some("completed") => {
+                    assert_eq!(outcome.evidence["severity"], "critical");
+                    assert_eq!(outcome.evidence["max_allowed"], 0);
+                    assert!(outcome.evidence["scan_id"].as_str().is_some());
+                }
+                Some(_) => assert!(outcome.evidence["scan_id"].as_str().is_some()),
+                None => assert_eq!(outcome.evidence, serde_json::json!({})),
+            }
+        }
     }
 
     #[test]
@@ -1638,13 +1713,17 @@ mod tests {
         });
         let inside = Utc.with_ymd_and_hms(2026, 8, 24, 12, 0, 0).unwrap();
         let outside = Utc.with_ymd_and_hms(2026, 8, 25, 12, 0, 0).unwrap();
-        assert_eq!(
-            deployment_outcome(Uuid::from_u128(3), &rule, inside).outcome,
-            EnforcementOutcome::Pass
-        );
-        assert_eq!(
-            deployment_outcome(Uuid::from_u128(3), &rule, outside).outcome,
-            EnforcementOutcome::Fail
-        );
+        for (at, expected) in [
+            (inside, EnforcementOutcome::Pass),
+            (outside, EnforcementOutcome::Fail),
+        ] {
+            let outcome = deployment_outcome(Uuid::from_u128(3), &rule, at);
+            assert_eq!(outcome.kind, "time_window");
+            assert_eq!(outcome.phase, EnforcementPhase::Deployment);
+            assert_eq!(outcome.outcome, expected);
+            assert_eq!(outcome.blocking, expected != EnforcementOutcome::Pass);
+            assert_eq!(outcome.evidence["timezone"], "UTC");
+            assert!(outcome.evidence["evaluated_at"].as_str().is_some());
+        }
     }
 }

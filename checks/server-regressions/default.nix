@@ -70,7 +70,7 @@ pkgs.rustPlatform.buildRustPackage {
       if (( 10#$version <= 232 )); then
         cp "$migration" "$pre0233/"
       fi
-      if (( 10#$version >= 233 && 10#$version <= 240 )); then
+      if (( 10#$version >= 233 )); then
         expectedTask433Migrations=$((expectedTask433Migrations + 1))
       fi
     done
@@ -89,22 +89,124 @@ pkgs.rustPlatform.buildRustPackage {
       INSERT INTO system_policies(system_id,policy_id)
       VALUES('43360000-0000-0000-0000-000000000003',
         '43360000-0000-0000-0000-000000000004');
+      INSERT INTO flakes(id,name,repo_url)
+      VALUES(433600,'POAM upgrade flake','https://example.invalid/poam-upgrade.git');
+      INSERT INTO commits(id,flake_id,git_commit_hash,commit_timestamp,evaluation_status)
+      VALUES(433600,433600,repeat('a',40),NOW()-INTERVAL '2 days','complete');
+      UPDATE systems SET flake_id=433600,
+        desired_target='/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-poam-upgrade'
+      WHERE id='43360000-0000-0000-0000-000000000003';
+      INSERT INTO derivations(
+        id,commit_id,derivation_type,derivation_name,derivation_path,status_id,
+        expected_store_path,store_path,cf_agent_enabled,policy_requirements_met,
+        completed_at,policy_results)
+      VALUES(433600,433600,'nixos','poam-upgrade-system',
+        '/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-poam-upgrade.drv',
+        (SELECT id FROM derivation_statuses ORDER BY id LIMIT 1),
+        '/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-poam-upgrade',
+        '/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-poam-upgrade',TRUE,TRUE,
+        NOW()-INTERVAL '1 day','{}'::jsonb);
+      INSERT INTO cve_scans(
+        id,derivation_id,status,scanner_name,critical_count,high_count,completed_at,created_at)
+      VALUES('43360000-0000-0000-0000-000000000005',433600,'completed','upgrade-rehearsal',2,3,
+        NOW()-INTERVAL '12 hours',NOW()-INTERVAL '1 day');
+      INSERT INTO system_states(hostname,store_path,change_reason,timestamp)
+      VALUES('poam-upgrade-system','/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-poam-upgrade',
+        'cf_deployment',NOW()-INTERVAL '10 hours');
+      INSERT INTO compliance_bundles(id,name,framework,version,owner)
+      VALUES('43360000-0000-0000-0000-000000000006','POAM upgrade bundle','custom','1.0.0','Upgrade');
+      INSERT INTO compliance_bundle_assignments(
+        id,bundle_id,bundle_version_id,scope_type,system_id,enforcement_mode,
+        assignment_overlay_digest,created_by,updated_by)
+      SELECT '43360000-0000-0000-0000-000000000007',bundle.id,version.id,
+        'system','43360000-0000-0000-0000-000000000003','enforce','upgrade-overlay',
+        '43360000-0000-0000-0000-000000000001','43360000-0000-0000-0000-000000000001'
+      FROM compliance_bundles bundle
+      JOIN compliance_bundle_versions version ON version.id=bundle.current_draft_version_id
+      WHERE bundle.id='43360000-0000-0000-0000-000000000006';
+      INSERT INTO compliance_bundle_assignment_versions(
+        id,assignment_id,version_number,bundle_version_id,enforcement_mode,
+        assignment_overlay_digest,created_by)
+      SELECT '43360000-0000-0000-0000-000000000008',assignment.id,1,
+        assignment.bundle_version_id,'enforce','upgrade-overlay',
+        '43360000-0000-0000-0000-000000000001'
+      FROM compliance_bundle_assignments assignment
+      WHERE assignment.id='43360000-0000-0000-0000-000000000007';
+      UPDATE compliance_bundle_assignments
+      SET current_version_id='43360000-0000-0000-0000-000000000008'
+      WHERE id='43360000-0000-0000-0000-000000000007';
+      INSERT INTO attention_occurrences(
+        id,category,subject_type,subject_id,source_occurrence_key,
+        opened_at,last_observed_at,resolved_at,metadata)
+      VALUES('43360000-0000-0000-0000-000000000009','builds','build_job',
+        '43360000-0000-0000-0000-000000000010','poam-upgrade-attention',
+        NOW()-INTERVAL '40 days',NOW()-INTERVAL '39 days',NOW()-INTERVAL '38 days','{}');
+      INSERT INTO user_notification_preferences(user_id,delivery_channel,build_failures,initialized_at)
+      VALUES('43360000-0000-0000-0000-000000000001','in_app',TRUE,NOW()-INTERVAL '60 days')
+      ON CONFLICT(user_id) DO UPDATE SET delivery_channel=EXCLUDED.delivery_channel;
+      INSERT INTO user_notifications(
+        id,user_id,category,source_occurrence_id,source_type,source_id,title,summary,route,
+        in_app_visible,read_at)
+      VALUES('43360000-0000-0000-0000-000000000011',
+        '43360000-0000-0000-0000-000000000001','build_failures',
+        '43360000-0000-0000-0000-000000000009','builds',
+        '43360000-0000-0000-0000-000000000010','Upgrade build','Preserved notification',
+        '/builds',TRUE,NOW()-INTERVAL '30 days');
 SQL
     DATABASE_URL="$upgradeUrl" cargo sqlx migrate run --source crates/cf-server/migrations
     appliedTask433Migrations="$(psql "$upgradeUrl" -Atc \
-       'SELECT COUNT(*) FROM _sqlx_migrations WHERE version BETWEEN 233 AND 240')"
+       'SELECT COUNT(*) FROM _sqlx_migrations WHERE version >= 233')"
     if [[ "$appliedTask433Migrations" != "$expectedTask433Migrations" ]]; then
-      echo "Expected $expectedTask433Migrations migrations through 0240; applied $appliedTask433Migrations" >&2
+      echo "Expected $expectedTask433Migrations task migrations through current; applied $appliedTask433Migrations" >&2
       exit 1
     fi
     psql "$upgradeUrl" -v ON_ERROR_STOP=1 <<'SQL'
+      SELECT check_name,passed FROM (VALUES
+        ('system',EXISTS(SELECT 1 FROM systems WHERE id='43360000-0000-0000-0000-000000000003')),
+        ('policy',EXISTS(SELECT 1 FROM deployment_policies WHERE id='43360000-0000-0000-0000-000000000004')),
+        ('cve_scan',EXISTS(SELECT 1 FROM cve_scans WHERE id='43360000-0000-0000-0000-000000000005' AND composite_phase_order IS NOT NULL)),
+        ('desired_target',EXISTS(SELECT 1 FROM composite_legacy_desired_targets WHERE system_id='43360000-0000-0000-0000-000000000003' AND target_store_path='/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-poam-upgrade')),
+        ('assignment_version',EXISTS(SELECT 1 FROM compliance_bundle_assignment_versions WHERE id='43360000-0000-0000-0000-000000000008' AND assignment_id='43360000-0000-0000-0000-000000000007')),
+        ('system_state',EXISTS(SELECT 1 FROM system_states WHERE hostname='poam-upgrade-system' AND store_path='/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-poam-upgrade')),
+        ('attention',EXISTS(SELECT 1 FROM attention_occurrences WHERE id='43360000-0000-0000-0000-000000000009')),
+        ('notification',EXISTS(SELECT 1 FROM user_notifications WHERE id='43360000-0000-0000-0000-000000000011' AND read_at IS NOT NULL AND materialization_order IS NOT NULL)),
+        ('bootstrap_incomplete',EXISTS(SELECT 1 FROM user_notification_source_bootstrap_state WHERE singleton AND completed_at IS NULL)),
+        ('deployment_failure_index',to_regclass('system_events_deployment_failure_bootstrap_idx') IS NOT NULL)
+      ) checks(check_name,passed);
       DO $$
       BEGIN
         IF NOT EXISTS (
           SELECT 1 FROM systems WHERE id='43360000-0000-0000-0000-000000000003'
         ) OR NOT EXISTS (
           SELECT 1 FROM deployment_policies WHERE id='43360000-0000-0000-0000-000000000004'
-        ) THEN
+        ) OR NOT EXISTS (
+          SELECT 1 FROM cve_scans
+          WHERE id='43360000-0000-0000-0000-000000000005'
+            AND composite_phase_order IS NOT NULL
+        ) OR NOT EXISTS (
+          SELECT 1 FROM composite_legacy_desired_targets
+          WHERE system_id='43360000-0000-0000-0000-000000000003'
+            AND target_store_path='/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-poam-upgrade'
+        ) OR NOT EXISTS (
+          SELECT 1 FROM compliance_bundle_assignment_versions
+          WHERE id='43360000-0000-0000-0000-000000000008'
+            AND assignment_id='43360000-0000-0000-0000-000000000007'
+        ) OR NOT EXISTS (
+          SELECT 1 FROM system_states
+          WHERE hostname='poam-upgrade-system'
+            AND store_path='/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-poam-upgrade'
+        ) OR NOT EXISTS (
+          SELECT 1 FROM attention_occurrences
+          WHERE id='43360000-0000-0000-0000-000000000009'
+        ) OR NOT EXISTS (
+          SELECT 1 FROM user_notifications
+          WHERE id='43360000-0000-0000-0000-000000000011'
+            AND read_at IS NOT NULL AND materialization_order IS NOT NULL
+        ) OR NOT EXISTS (
+          SELECT 1 FROM user_notification_source_bootstrap_state
+          WHERE singleton AND completed_at IS NULL
+        ) OR to_regclass('system_events_deployment_failure_bootstrap_idx') IS NULL
+        THEN
           RAISE EXCEPTION 'pre-0233 populated rows were not preserved';
         END IF;
       END

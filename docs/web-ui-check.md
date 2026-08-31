@@ -39,9 +39,11 @@ sandbox); their VMs are not booted otherwise.
 2. **Build verification** — index.html served, JS loader referenced and served,
    packaged WASM output present with a valid `\0asm` magic header. Hard gate.
 3. **Playwright steps** — coverage gate first (steps ⇄ manifest must agree
-   exactly), then each step runs its semantic assertions, captures dark and
-   light screenshots, and compares each themed screenshot to its baseline.
-4. **Critical gate** — the `critical_tests` list in `default.nix` must pass.
+   exactly), then each step runs its semantic assertions and captures dark and
+   light screenshots. Any failed step gives the integration process a nonzero
+   exit after it writes diagnostic artifacts.
+4. **Critical gate** — the `critical_tests` list in `default.nix` additionally
+   prevents focused profiles from omitting required workflows.
 5. **Visual gate** — steps with baseline policy `strict` must match within
    threshold. `advisory` steps only report.
 6. **OSCAL / SARIF export validation** — downloads validated against vendored
@@ -54,7 +56,8 @@ Policies (per step, in the manifest):
 - `none` — no comparison.
 - `advisory` (default) — compared when a baseline exists; differences are
   reported in `visual-report.json` and the MR comment, with a diff image in
-  `screenshots/diffs/`, but never fail the check.
+  `screenshots/diffs/`, but never fail the check. A missing baseline reports
+  `new`.
 - `strict` — baseline must exist and match within threshold; otherwise the
   check fails.
 
@@ -63,11 +66,12 @@ differs when `diffPixels / totalPixels > maxDiffPixelRatio`. Defaults live in
 `settings.visualDiff` in the manifest; override per step with
 `maxDiffPixelRatio`.
 
-Every covered step captures one baseline per configured visual theme. The
-default themes are listed in `settings.visualThemes` and currently require both
-`dark` and `light`, producing `checks/web-ui/baselines/<step>--dark.png` and
-`checks/web-ui/baselines/<step>--light.png`. Review and approve both files so
-theme-specific regressions are visible in CI/MR artifacts.
+Set `CF_UI_BASELINES_DIR` when invoking `integration-test.js` directly to enable
+stored-baseline comparison. The repository does not currently ship stored
+Dioxus baselines, and all manifest entries are advisory. Without a configured
+directory, advisory captures report `new`; a future strict entry fails until its
+dark and light baselines are supplied. The rendered design example remains the
+default non-blocking visual reference in the Nix check.
 
 ## Design parity gauge
 

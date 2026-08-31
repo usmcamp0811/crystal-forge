@@ -6333,6 +6333,13 @@ tr.attention-flash {
 .sys-table-dense tbody td, .sys-table-dense thead th { padding-top: 8px; padding-bottom: 8px; }
 .sys-table-dense tbody td { font-variant-numeric: tabular-nums; }
 .sys-table-dense td, .sys-table-dense th { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.compliance-evidence-layout { display: grid; grid-template-columns: minmax(0,260px) minmax(0,1fr); flex: 1; min-height: 0; overflow: hidden; }
+
+@media (max-width: 640px) {
+  .compliance-evidence-layout { grid-template-columns: 1fr; grid-template-rows: minmax(160px, 38vh) minmax(0, 1fr); }
+  .compliance-evidence-layout > nav { border-right: 0 !important; border-bottom: 1px solid var(--cf-divider); }
+  .fl-tray:has(.compliance-evidence-layout) { width: 100vw !important; }
+}
 
 /* Phase 6 POA&M workflow components. Scoped to avoid changing shared primitives. */
 .poam-bar {

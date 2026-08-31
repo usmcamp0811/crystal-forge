@@ -129,21 +129,31 @@ pub async fn finding_poam_summaries(
     today: NaiveDate,
     is_admin: bool,
     environment_ids: &[Uuid],
+    history_page: Option<(i64, i64)>,
 ) -> Result<Vec<(Uuid, bool, PoamSummary)>> {
     let mut builder = QueryBuilder::<Postgres>::new(
-        "SELECT link.finding_id AS relation_id,(p.status<>'completed' AND link.retired_at IS NULL) AS relation_active,",
+        "WITH base AS (SELECT DISTINCT ON (link.finding_id,p.id) link.finding_id,p.id,(p.status<>'completed' AND link.retired_at IS NULL) AS relation_active,link.linked_at AS relationship_at,link.id AS relationship_id FROM poam_finding_links link JOIN poams p ON p.id=link.poam_id WHERE link.finding_id=ANY(",
     );
     builder
-        .push(SUMMARY_COLUMNS_BEFORE_TODAY)
-        .push_bind(today)
-        .push(SUMMARY_COLUMNS_AFTER_TODAY)
-        .push(" FROM poam_finding_links link JOIN poams p ON p.id=link.poam_id WHERE link.finding_id=ANY(")
         .push_bind(finding_ids)
         .push(") AND (")
         .push_bind(is_admin)
         .push(" OR poam_visible_to_environments(p.id,")
         .push_bind(environment_ids)
-        .push(")) ORDER BY link.finding_id,(p.status<>'completed' AND link.retired_at IS NULL) DESC,p.updated_at DESC,p.id");
+        .push(")) ORDER BY link.finding_id,p.id,(p.status<>'completed' AND link.retired_at IS NULL) DESC,link.linked_at DESC,link.id DESC),related AS (SELECT base.*,COUNT(*) FILTER (WHERE NOT base.relation_active) OVER (PARTITION BY base.finding_id ORDER BY base.relationship_at DESC,base.relationship_id DESC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS history_row FROM base) SELECT related.finding_id AS relation_id,related.relation_active,");
+    builder
+        .push(SUMMARY_COLUMNS_BEFORE_TODAY)
+        .push_bind(today)
+        .push(SUMMARY_COLUMNS_AFTER_TODAY)
+        .push(" FROM related JOIN poams p ON p.id=related.id");
+    if let Some((history_limit, history_offset)) = history_page {
+        builder
+            .push(" WHERE related.relation_active OR related.history_row BETWEEN ")
+            .push_bind(history_offset + 1)
+            .push(" AND ")
+            .push_bind(history_offset + history_limit + 1);
+    }
+    builder.push(" ORDER BY related.finding_id,related.relation_active DESC,related.relationship_at DESC,related.relationship_id DESC");
     Ok(builder
         .build_query_as::<RelatedPoamSummary>()
         .fetch_all(pool)
@@ -227,21 +237,33 @@ pub async fn assignment_poam_summaries(
     today: NaiveDate,
     is_admin: bool,
     environment_ids: &[Uuid],
+    history_page: Option<(i64, i64)>,
 ) -> Result<Vec<(Uuid, PoamSummary)>> {
     let mut builder = QueryBuilder::<Postgres>::new(
-        "SELECT reference.assignment_version_id AS relation_id,false AS relation_active,",
+        "WITH related AS (SELECT reference.assignment_version_id,p.id,reference.added_at AS relationship_at,ROW_NUMBER() OVER (PARTITION BY reference.assignment_version_id ORDER BY reference.added_at DESC,reference.poam_id DESC) AS history_row FROM poam_assignment_references reference JOIN poams p ON p.id=reference.poam_id WHERE reference.assignment_version_id=ANY(",
     );
     builder
-        .push(SUMMARY_COLUMNS_BEFORE_TODAY)
-        .push_bind(today)
-        .push(SUMMARY_COLUMNS_AFTER_TODAY)
-        .push(" FROM poam_assignment_references reference JOIN poams p ON p.id=reference.poam_id WHERE reference.assignment_version_id=ANY(")
         .push_bind(assignment_version_ids)
         .push(") AND (")
         .push_bind(is_admin)
         .push(" OR poam_visible_to_environments(p.id,")
         .push_bind(environment_ids)
-        .push(")) ORDER BY reference.assignment_version_id,p.updated_at DESC,p.id");
+        .push("))) SELECT related.assignment_version_id AS relation_id,false AS relation_active,");
+    builder
+        .push(SUMMARY_COLUMNS_BEFORE_TODAY)
+        .push_bind(today)
+        .push(SUMMARY_COLUMNS_AFTER_TODAY)
+        .push(" FROM related JOIN poams p ON p.id=related.id");
+    if let Some((history_limit, history_offset)) = history_page {
+        builder
+            .push(" WHERE related.history_row BETWEEN ")
+            .push_bind(history_offset + 1)
+            .push(" AND ")
+            .push_bind(history_offset + history_limit + 1);
+    }
+    builder.push(
+        " ORDER BY related.assignment_version_id,related.relationship_at DESC,related.id DESC",
+    );
     Ok(builder
         .build_query_as::<RelatedPoamSummary>()
         .fetch_all(pool)
@@ -421,7 +443,7 @@ pub async fn detail(
                closure_item.policy_version_id AS current_policy_version_id,
                closure_item.target_store_path AS current_target_store_path,
                closure_item.assessment_updated_at,
-               COALESCE(closure_item.result,'unresolved') AS resolution_state,
+               COALESCE(closure_item.result,'unknown') AS resolution_state,
                closure_item.effective_set_digest,closure_item.effective_config_digest,
                COALESCE(closure_item.bundle_ids,'{}'::uuid[]) AS bundle_ids,
                COALESCE(closure_item.bundle_version_ids,'{}'::uuid[]) AS bundle_version_ids,

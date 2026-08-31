@@ -13,6 +13,7 @@ use crate::state::theme::UiTheme;
 use crate::theme;
 use chrono::{DateTime, Utc};
 use dioxus::prelude::*;
+use gloo_timers::future::TimeoutFuture;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
 
@@ -58,6 +59,65 @@ fn focus_topbar_bell() {
             }
         }
     }
+}
+
+fn focus_notification_menu() {
+    #[cfg(target_arch = "wasm32")]
+    if let Some(element) = web_sys::window()
+        .and_then(|window| window.document())
+        .and_then(|document| {
+            document
+                .query_selector("[data-testid='topbar-notifications-panel']")
+                .ok()
+                .flatten()
+        })
+        .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok())
+    {
+        let _ = element.focus();
+    }
+}
+
+fn focus_notification_item(current_id: Option<uuid::Uuid>, direction: isize) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+            return;
+        };
+        let Ok(nodes) = document.query_selector_all("[data-notification-id]") else {
+            return;
+        };
+        let items = (0..nodes.length())
+            .filter_map(|index| nodes.item(index))
+            .filter_map(|node| node.dyn_into::<web_sys::HtmlElement>().ok())
+            .collect::<Vec<_>>();
+        let target = current_id
+            .and_then(|id| {
+                items
+                    .iter()
+                    .position(|item| {
+                        item.get_attribute("data-notification-id")
+                            .is_some_and(|value| value == id.to_string())
+                    })
+                    .map(|current| {
+                        current
+                            .saturating_add_signed(direction)
+                            .min(items.len().saturating_sub(1))
+                    })
+            })
+            .unwrap_or_else(|| {
+                if direction < 0 {
+                    items.len().saturating_sub(1)
+                } else {
+                    0
+                }
+            });
+        if let Some(item) = items.get(target) {
+            let _ = item.focus();
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = (current_id, direction);
 }
 
 fn close_notifications(mut notifications_open: Signal<bool>) {
@@ -348,6 +408,10 @@ pub fn TopBar(title: String) -> Element {
                                 None,
                                 false,
                             );
+                            spawn(async move {
+                                TimeoutFuture::new(0).await;
+                                focus_notification_menu();
+                            });
                         }
                     },
                     svg {
@@ -377,10 +441,21 @@ pub fn TopBar(title: String) -> Element {
                     div {
                         "data-testid": "topbar-notifications-panel",
                         class: "notif-panel",
+                        role: "menu",
+                        aria_label: "Notifications",
                         tabindex: "-1",
                         onkeydown: move |evt| {
-                            if evt.key() == Key::Escape {
-                                close_notifications(notifications_open);
+                            match evt.key() {
+                                Key::Escape => close_notifications(notifications_open),
+                                Key::ArrowDown => {
+                                    evt.prevent_default();
+                                    focus_notification_item(None, 1);
+                                }
+                                Key::ArrowUp => {
+                                    evt.prevent_default();
+                                    focus_notification_item(None, -1);
+                                }
+                                _ => {}
                             }
                         },
                         div {
@@ -433,15 +508,22 @@ pub fn TopBar(title: String) -> Element {
                                     div {
                                         key: "notif-{item.id}",
                                         class: if item.read_at.is_none() { "notif-item unread focus-ring" } else { "notif-item focus-ring" },
-                                        role: "button",
+                                        role: "menuitem",
                                         tabindex: "0",
+                                        "data-notification-id": "{item.id}",
+                                        "data-testid": "topbar-notification-item-{item.id}",
                                         onkeydown: {
                                             let nav = nav.clone();
                                             let route = notification_route(&item.route);
                                             let item_id = item.id;
                                             let requested_generation = auth_generation;
                                             move |evt| {
-                                                if evt.key() == Key::Enter || evt.key() == Key::Character(" ".to_string()) {
+                                                if evt.key() == Key::ArrowDown || evt.key() == Key::ArrowUp {
+                                                    evt.prevent_default();
+                                                    evt.stop_propagation();
+                                                    focus_notification_item(Some(item_id), if evt.key() == Key::ArrowDown { 1 } else { -1 });
+                                                } else if evt.key() == Key::Enter || evt.key() == Key::Character(" ".to_string()) {
+                                                    evt.prevent_default();
                                                     close_notifications(notifications_open);
                                                     if let Some(route) = route.clone() {
                                                         nav.push(route);
@@ -586,6 +668,8 @@ pub fn TopBar(title: String) -> Element {
                                     button {
                                         class: "btn-icon focus-ring",
                                         title: "Dismiss notification",
+                                        aria_label: "Dismiss {item.title}",
+                                        onkeydown: move |evt| evt.stop_propagation(),
                                         onclick: move |evt| {
                                             evt.stop_propagation();
                                             let requested_generation = auth_generation;

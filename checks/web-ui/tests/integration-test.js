@@ -17,7 +17,9 @@
  * targets (generated offline by generate-design-targets.js) to produce a
  * non-blocking design-drift report and visual parity grid for the MR.
  */
-const { chromium } = require("playwright");
+const { chromium } = process.env.CF_UI_STATIC_CONTRACTS === "1"
+  ? { chromium: null }
+  : require("playwright");
 const fs = require("fs");
 const path = require("path");
 const { execSync } = require("child_process");
@@ -27,6 +29,7 @@ const { isDeepStrictEqual } = require("util");
 const baseUrl = process.argv[2] || "http://127.0.0.1:3000";
 const outputDir = process.argv[3] || "/tmp/screenshots";
 const apiBaseUrl = process.env.CF_UI_API_BASE_URL || baseUrl;
+const baselinesDir = process.env.CF_UI_BASELINES_DIR || "";
 
 function runFixtureSql(sql) {
   const encoded = Buffer.from(sql, "utf8").toString("base64");
@@ -36,15 +39,14 @@ function runFixtureSql(sql) {
 }
 
 // ── Node.js 24 safety net ──────────────────────────────────────────────────
-// Node.js 24 treats unhandled promise rejections as fatal by default.  When a
-// Playwright waitForResponse() promise times out before the await can catch it,
-// the rejection surfaces as an uncaught exception that kills the process before
-// the step runner's try/catch can record a graceful FAIL.  Registering a
-// handler prevents the hard exit; the rejection will still propagate through
-// the await and be caught by the step runner, which records a normal FAIL.
+// Preserve diagnostics for detached Playwright promises without allowing an
+// unhandled rejection to produce a successful browser process.
+const unhandledRejections = [];
 process.on("unhandledRejection", (reason) => {
-  const msg = reason instanceof Error ? reason.message : String(reason);
-  console.error(`unhandledRejection: ${msg}`);
+  const diagnostic = reason instanceof Error ? (reason.stack || reason.message) : String(reason);
+  unhandledRejections.push(diagnostic);
+  process.exitCode = 1;
+  console.error(`unhandledRejection: ${diagnostic}`);
 });
 
 function firstExistingPath(paths) {
@@ -77,6 +79,96 @@ function fatal(message) {
     );
   } catch (_) {}
   process.exit(1);
+}
+
+function validateManifest(manifest) {
+  const errors = [];
+  const allowedProfiles = new Set(["ci_fast", "full"]);
+  const allowedBaselines = new Set(["none", "advisory", "strict"]);
+  const stepNames = new Set();
+  const themes = manifest.settings?.visualThemes;
+  if (!Array.isArray(themes) || themes.length === 0 || themes.some((theme) => typeof theme !== "string" || !theme)) {
+    errors.push("settings.visualThemes must be a non-empty string array");
+  }
+  const visualDiff = manifest.settings?.visualDiff;
+  if (!Number.isFinite(visualDiff?.fuzzPercent) || visualDiff.fuzzPercent < 0 || visualDiff.fuzzPercent > 100) {
+    errors.push("settings.visualDiff.fuzzPercent must be between 0 and 100");
+  }
+  if (!Number.isFinite(visualDiff?.maxDiffPixelRatio) || visualDiff.maxDiffPixelRatio < 0 || visualDiff.maxDiffPixelRatio > 1) {
+    errors.push("settings.visualDiff.maxDiffPixelRatio must be between 0 and 1");
+  }
+  if (!Array.isArray(manifest.steps) || manifest.steps.length === 0) {
+    errors.push("steps must be a non-empty array");
+  } else {
+    for (const [index, step] of manifest.steps.entries()) {
+      const label = step?.name || `steps[${index}]`;
+      for (const field of ["name", "description", "route"]) {
+        if (typeof step?.[field] !== "string") errors.push(`${label}.${field} must be a string`);
+      }
+      if (typeof step?.name === "string") {
+        if (stepNames.has(step.name)) errors.push(`steps contains duplicate name ${step.name}`);
+        stepNames.add(step.name);
+      }
+      if (!Array.isArray(step?.profiles) || step.profiles.length === 0 || step.profiles.some((profile) => !allowedProfiles.has(profile))) {
+        errors.push(`${label}.profiles must contain only ci_fast or full`);
+      }
+      for (const field of ["semanticAssertions", "interactions", "mockedData"]) {
+        if (typeof step?.[field] !== "boolean") errors.push(`${label}.${field} must be Boolean`);
+      }
+      if (!allowedBaselines.has(step?.baseline)) errors.push(`${label}.baseline must be none, advisory, or strict`);
+      if (step?.maxDiffPixelRatio !== undefined &&
+          (!Number.isFinite(step.maxDiffPixelRatio) || step.maxDiffPixelRatio < 0 || step.maxDiffPixelRatio > 1)) {
+        errors.push(`${label}.maxDiffPixelRatio must be between 0 and 1`);
+      }
+    }
+  }
+  if (errors.length) fatal(`invalid coverage manifest: ${errors.join("; ")}`);
+}
+
+function compareToBaseline(name, step) {
+  const policy = step.baseline;
+  if (policy === "none") return { status: "skipped", policy };
+  if (!baselinesDir) return { status: "new", policy, error: "no baseline directory configured" };
+
+  const baselinePath = path.join(baselinesDir, `${name}.png`);
+  const actualPath = path.join(outputDir, `${name}.png`);
+  if (!fs.existsSync(baselinePath)) return { status: "new", policy };
+  if (!fs.existsSync(actualPath)) return { status: "error", policy, error: "no screenshot captured" };
+
+  const diffDir = path.join(outputDir, "diffs");
+  const diffPath = path.join(diffDir, `${name}.diff.png`);
+  fs.mkdirSync(diffDir, { recursive: true });
+  const fuzz = MANIFEST.settings.visualDiff.fuzzPercent;
+  const maxRatio = step.maxDiffPixelRatio ?? MANIFEST.settings.visualDiff.maxDiffPixelRatio;
+  let output;
+  try {
+    output = execSync(
+      `compare -metric AE -fuzz ${fuzz}% ${JSON.stringify(baselinePath)} ${JSON.stringify(actualPath)} ${JSON.stringify(diffPath)} 2>&1 || true`,
+      { encoding: "utf8", shell: "/bin/sh" },
+    ).trim();
+  } catch (error) {
+    return { status: "error", policy, error: `compare failed: ${error.message}` };
+  }
+  const diffPixels = Number.parseFloat(output);
+  if (!Number.isFinite(diffPixels)) {
+    return { status: "error", policy, error: `compare returned ${output.slice(0, 200)}` };
+  }
+  let totalPixels;
+  try {
+    const [width, height] = execSync(`identify -format "%w %h" ${JSON.stringify(actualPath)}`, {
+      encoding: "utf8",
+      shell: "/bin/sh",
+    }).trim().split(" ").map(Number);
+    totalPixels = width * height;
+  } catch (error) {
+    return { status: "error", policy, error: `identify failed: ${error.message}` };
+  }
+  const diffRatio = totalPixels > 0 ? diffPixels / totalPixels : 1;
+  if (diffRatio <= maxRatio) {
+    try { fs.unlinkSync(diffPath); } catch (_) {}
+    return { status: "match", policy, diffRatio, diffPixels };
+  }
+  return { status: "diff", policy, diffRatio, diffPixels };
 }
 
 
@@ -257,8 +349,9 @@ async function captureThemedBaselines(page, step, visualThemes) {
     await page.screenshot({ path: outputPath });
 
     const stats = fs.statSync(outputPath);
-    console.log(`  OK: ${captureName}.png (${stats.size} bytes)`);
-    visuals.push({ name: captureName, theme });
+    const visual = compareToBaseline(captureName, MANIFEST_STEPS.get(step.name));
+    console.log(`  OK: ${captureName}.png (${stats.size} bytes) [baseline: ${visual.status}]`);
+    visuals.push({ name: captureName, theme, ...visual });
   }
 
   return visuals;
@@ -273,8 +366,9 @@ async function captureWorkflowState(page, stepName, stateName) {
     const outputPath = `${outputDir}/${captureName}.png`;
     await page.screenshot({ path: outputPath });
     const stats = fs.statSync(outputPath);
+    const visual = compareToBaseline(captureName, MANIFEST_STEPS.get(stepName));
     console.log(`  OK intermediate: ${captureName}.png (${stats.size} bytes)`);
-    visuals.push({ name: captureName, theme, state: stateName, intermediate: true });
+    visuals.push({ name: captureName, theme, state: stateName, intermediate: true, ...visual });
   }
   if (originalTheme) await applyVisualTheme(page, originalTheme);
   intermediateVisuals.set(stepName, visuals);
@@ -742,8 +836,9 @@ async function routeStandaloneUiBootstrap(page) {
 }
 
 async function assertHidden(locator, message) {
-  const visible = await locator.isVisible({ timeout: 1500 }).catch(() => false);
-  if (visible) {
+  try {
+    await locator.waitFor({ state: "hidden", timeout: 1500 });
+  } catch (_) {
     throw new Error(message);
   }
 }
@@ -2642,83 +2737,95 @@ function phase6SemanticDigest(value) {
   return createHash("sha256").update(JSON.stringify(canonicalize(value))).digest("hex");
 }
 
-async function createTask433CompositeAssessmentFixture(page, {
-  systemId,
-  commitId,
-  policyId,
-  policyVersionId,
-  nixRuleId,
-  cveRuleId,
-  criticalCount,
-}) {
-  const effective = (await phase6Api(page, `/api/v1/systems/${systemId}/effective-policies`)).body;
-  const effectivePolicy = effective.policies.find((item) => item.policy_lineage_id === policyId);
-  if (!effectivePolicy) throw new Error(`Effective set omitted TASK-433 fixture policy ${policyId}`);
-  const assessmentId = crypto.randomUUID();
+function arrangeTask433CompletedScan(derivationId, criticalCount) {
+  // The server has no authenticated endpoint for deterministic scanner-result
+  // ingestion. Arrange only the external scanner's persisted input; commit
+  // re-evaluation below must derive every rule and aggregate outcome.
   const scanId = crypto.randomUUID();
-  const storeHash = crypto.randomUUID().replaceAll("-", "").slice(0, 32);
-  const storePath = `/nix/store/${storeHash}-task433-composite`;
-  const cveOutcome = criticalCount === 0 ? "pass" : "fail";
-  const target = runFixtureSql(`
-    WITH inserted_derivation AS (
-      INSERT INTO derivations (
-        commit_id, derivation_type, derivation_name, derivation_path, store_path,
-        expected_store_path, status_id, attempt_count, completed_at, policy_results
-      ) VALUES (
-        ${Number(commitId)}, 'nixos', 'task433-${assessmentId}', $path$${storePath}.drv$path$,
-        $path$${storePath}$path$, $path$${storePath}$path$, 10, 0, now(), '{}'::jsonb
-      ) RETURNING id
-    ), inserted_state AS (
-      INSERT INTO system_states(hostname,change_reason,store_path,generation,timestamp)
-      SELECT hostname,'cf_deployment',$path$${storePath}$path$,1,now()
-      FROM systems WHERE id='${systemId}'::uuid
-    ), inserted_target AS (
-      INSERT INTO composite_policy_derivation_targets(derivation_id,target_store_path)
-      SELECT id,$path$${storePath}$path$ FROM inserted_derivation
-    ), inserted_assessment AS (
-      INSERT INTO composite_policy_assessments(
-        id,system_id,derivation_id,target_store_path,policy_lineage_id,policy_version_id,
-        effective_set_digest,effective_config_digest,effective_config,overall_outcome
-      ) SELECT '${assessmentId}'::uuid,'${systemId}'::uuid,id,$path$${storePath}$path$,
-        '${policyId}'::uuid,'${policyVersionId}'::uuid,'${effective.effective_set_digest}',
-        '${phase6SemanticDigest(effectivePolicy.effective_config)}',
-        $config$${JSON.stringify(effectivePolicy.effective_config)}$config$::jsonb,'${cveOutcome}'
-      FROM inserted_derivation
-    ), inserted_scan AS (
-      INSERT INTO cve_scans(
-        id,derivation_id,scanner_name,scanner_version,status,total_packages,
-        total_vulnerabilities,critical_count,high_count,medium_count,low_count,
-        attempts,completed_at
-      ) SELECT '${scanId}'::uuid,id,'TASK-433 external scanner','1','completed',1,
-        ${criticalCount},${criticalCount},0,0,0,1,now() FROM inserted_derivation
-      RETURNING id,derivation_id,composite_phase_order,completed_at
-    )
-    INSERT INTO composite_policy_rule_results(
-      assessment_id,rule_id,ordinal,kind,phase,outcome,blocking,detail,evidence,
-      source_scan_id,source_scan_order,source_scan_derivation_id
-    )
-    SELECT '${assessmentId}'::uuid,'${nixRuleId}'::uuid,0,'nixos_option','evaluation',
-      'pass',false,'networking.firewall.enable matched true',
-      '{"path":"networking.firewall.enable","actual":true,"expected":true}'::jsonb,
-      NULL,NULL,NULL
-    UNION ALL
-    SELECT '${assessmentId}'::uuid,'${cveRuleId}'::uuid,1,'cve_block','scan',
-      '${cveOutcome}',${criticalCount === 0 ? "false" : "true"},
-      '${criticalCount} Critical CVEs found; maximum allowed is 0',
-      jsonb_build_object('scan_id',scan.id,'status','completed','severity','critical',
-        'count',${criticalCount},'max_allowed',0,'completed_at',scan.completed_at),
-      scan.id,scan.composite_phase_order,scan.derivation_id
-    FROM inserted_scan scan;
-    INSERT INTO poam_findings(system_id,policy_lineage_id)
-    VALUES('${systemId}'::uuid,'${policyId}'::uuid)
-    ON CONFLICT(system_id,policy_lineage_id) DO NOTHING;
-    SELECT '${assessmentId}', id, '${scanId}',
-      (SELECT derivation_id FROM composite_policy_assessments WHERE id='${assessmentId}'::uuid)
-    FROM poam_findings
-    WHERE system_id='${systemId}'::uuid AND policy_lineage_id='${policyId}'::uuid;
-  `).split("|");
-  if (target.length !== 4) throw new Error(`Could not create TASK-433 composite assessment fixture: ${JSON.stringify(target)}`);
-  return { assessmentId, findingId: target[1], scanId, derivationId: Number(target[3]), storePath };
+  runFixtureSql(`
+    INSERT INTO cve_scans (
+      id, derivation_id, scanner_name, scanner_version, status,
+      total_packages, total_vulnerabilities, critical_count,
+      high_count, medium_count, low_count, attempts, completed_at
+    ) VALUES (
+      '${scanId}'::uuid, ${Number(derivationId)}, 'TASK-433 deterministic scanner fixture',
+      '1', 'completed', 1, ${criticalCount}, ${criticalCount}, 0, 0, 0, 1, now()
+    );
+  `);
+  return scanId;
+}
+
+function arrangeTask433DeployedAssessment(hostname, targetStorePath) {
+  // The agent is not connected in this browser check. Arrange its deployment
+  // observation so compliance reads the assessment that production evaluation
+  // persisted for this exact target.
+  runFixtureSql(`
+    INSERT INTO system_states(hostname, change_reason, store_path, generation, timestamp)
+    VALUES ($hostname$${hostname}$hostname$, 'cf_deployment',
+            $path$${targetStorePath}$path$, 1, CURRENT_TIMESTAMP);
+  `);
+}
+
+async function runTask433ProductionEvaluation(page, { commitId, systemId, policyId }) {
+  for (let attempt = 0; attempt < 180; attempt += 1) {
+    const ready = runFixtureSql(`
+      SELECT (commit_row.evaluation_status IN ('complete', 'failed'))::text
+      FROM commits commit_row
+      WHERE commit_row.id=${Number(commitId)};
+    `);
+    if (ready === "true") break;
+    if (attempt === 179) {
+      throw new Error(`Commit ${commitId} did not reach a terminal evaluation state before TASK-433 re-evaluation`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+  await phase6Api(page, `/api/v1/commits/${commitId}/re-evaluate`, { method: "POST" });
+  for (let attempt = 0; attempt < 180; attempt += 1) {
+    const result = runFixtureSql(`
+      SELECT json_build_object(
+        'assessment_id', assessment.id,
+        'derivation_id', assessment.derivation_id,
+        'target_store_path', assessment.target_store_path,
+        'overall', assessment.overall_outcome,
+        'finding_id', finding.id,
+        'rows', COALESCE(json_agg(json_build_object(
+          'rule_id', result.rule_id,
+          'kind', result.kind,
+          'phase', result.phase,
+          'outcome', result.outcome,
+          'source_scan_id', result.source_scan_id,
+          'detail', result.detail,
+          'evidence', result.evidence
+        ) ORDER BY result.ordinal), '[]'::json)
+      )::text
+      FROM commits commit_row
+      JOIN composite_policy_assessments assessment
+        ON assessment.system_id='${systemId}'::uuid
+       AND assessment.policy_lineage_id='${policyId}'::uuid
+      JOIN derivations derivation
+        ON derivation.id=assessment.derivation_id AND derivation.commit_id=commit_row.id
+      LEFT JOIN composite_policy_rule_results result ON result.assessment_id=assessment.id
+      LEFT JOIN poam_findings finding
+        ON finding.system_id=assessment.system_id
+       AND finding.policy_lineage_id=assessment.policy_lineage_id
+      WHERE commit_row.id=${Number(commitId)}
+        AND commit_row.evaluation_status='complete'
+        AND commit_row.evaluation_attempt_count > 0
+      GROUP BY assessment.id, finding.id
+      ORDER BY assessment.updated_at DESC
+      LIMIT 1;
+    `);
+    if (result) return JSON.parse(result);
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+  const status = runFixtureSql(`
+    SELECT json_build_object(
+      'status', evaluation_status,
+      'attempts', evaluation_attempt_count,
+      'error', evaluation_error_message
+    )::text FROM commits WHERE id=${Number(commitId)};
+  `);
+  throw new Error(`Production commit re-evaluation did not persist the TASK-433 assessment: ${status}`);
 }
 
 async function createPhase6PoamFixture(page, label, systemCount = 1, options = {}) {
@@ -4529,14 +4636,26 @@ const steps = [
       await bell.click();
       const panel = page.locator("[data-testid='topbar-notifications-panel']");
       await assertVisible(panel, "Expected notifications panel to open");
+      await page.waitForFunction(() => document.activeElement?.getAttribute("data-testid") === "topbar-notifications-panel");
       await assertVisible(
         page.locator("[data-testid='topbar-notifications-badge']"),
         "Expected notifications unread badge",
       );
       const settingsButton = page.locator("[data-testid='topbar-notifications-settings-button']");
       await assertVisible(settingsButton, "Expected functional notification settings button");
-      const notificationRow = panel.getByText(notificationTitle, { exact: true }).locator("xpath=ancestor::*[@role='button'][1]");
+      const notificationRow = panel.locator(`[data-testid="topbar-notification-item-${notificationId}"]`);
       await assertVisible(notificationRow, "Expected durable POA&M notification row");
+      await page.keyboard.press("ArrowDown");
+      if (!(await notificationRow.evaluate((element) => element === document.activeElement))) {
+        throw new Error("Notification ArrowDown must move focus from the menu to its first item");
+      }
+      await page.keyboard.press("Escape");
+      await assertHidden(panel, "Notification Escape must close the menu");
+      if (!(await bell.evaluate((element) => element === document.activeElement))) {
+        throw new Error("Notification Escape must restore focus to the bell");
+      }
+      await bell.click();
+      await assertVisible(panel, "Expected notifications panel to reopen for activation");
       const readResponsePromise = page.waitForResponse(
         (response) => response.url().endsWith(`/api/v1/user/notifications/${notificationId}/read`),
       );
@@ -4557,12 +4676,14 @@ const steps = [
       await bell.waitFor({ state: "visible", timeout: LOAD_TIMEOUT });
       await bell.click();
       const reopenedPanel = page.locator("[data-testid='topbar-notifications-panel']");
-      const reopenedRow = reopenedPanel.getByText(notificationTitle, { exact: true }).locator("xpath=ancestor::*[@role='button'][1]");
+      const reopenedRow = reopenedPanel.locator(`[data-testid="topbar-notification-item-${notificationId}"]`);
       await assertVisible(reopenedRow, "Read POA&M notification should remain durable until dismissed");
       const dismissResponsePromise = page.waitForResponse(
         (response) => response.url().endsWith(`/api/v1/user/notifications/${notificationId}`) && response.request().method() === "DELETE",
       );
-      await reopenedRow.getByTitle("Dismiss notification").click();
+      const dismissNotification = reopenedRow.getByTitle("Dismiss notification");
+      await dismissNotification.focus();
+      await page.keyboard.press("Enter");
       if ((await dismissResponsePromise).status() !== 204) {
         throw new Error("POA&M notification dismiss request failed");
       }
@@ -7328,6 +7449,21 @@ const steps = [
       await assertCount(group.locator('[data-policy-card]'), 62, "Re-expanding must preserve the Show all state");
 
       const firstCard = page.locator(`[data-policy-card][data-policy-name="${prefix} 000"]`);
+      await firstCard.focus();
+      await page.keyboard.press("Enter");
+      const policyDrawer = page.locator("#policy-detail-dialog");
+      await assertVisible(policyDrawer, "Keyboard Enter on a policy card must open its detail drawer");
+      await page.keyboard.press("Escape");
+      await assertHidden(policyDrawer, "Policy drawer Escape must close the dialog");
+      if (!(await firstCard.evaluate((element) => element === document.activeElement))) {
+        throw new Error("Policy drawer close must restore focus to its card opener");
+      }
+      const editControl = firstCard.getByTestId("policy-card-edit");
+      await editControl.focus();
+      await page.keyboard.press("Enter");
+      await assertVisible(page.getByTestId("policy-editor-modal"), "Keyboard Edit must open only the policy editor");
+      await assertHidden(policyDrawer, "Keyboard Edit must not bubble into the policy card opener");
+      await page.getByRole("button", { name: "Cancel", exact: true }).last().click();
       await firstCard.click({ modifiers: ["Control"] });
       await assertVisible(page.getByText("1 selected", { exact: true }), "Ctrl-click must enter selection mode without opening the policy editor");
       await assertHidden(page.getByTestId("policy-editor-modal"), "Ctrl-click selection must not open the policy editor");
@@ -7940,7 +8076,7 @@ const steps = [
        await page.getByRole("button", { name: "Cancel", exact: true }).last().click();
       await page.getByRole("heading", { name: new RegExp(`Edit ${policyName}`) }).waitFor({ state: "hidden", timeout: 5000 });
       await card.click();
-      const drawer = page.getByRole("dialog", { name: "Policy detail" });
+      const drawer = page.getByRole("dialog", { name: policyName, exact: true });
       await drawer.waitFor({ timeout: 5000 });
       await assertVisible(drawer.getByText("Mapped Requirements · 2", { exact: true }), "Expected drawer mapping count");
       await assertVisible(drawer.getByText(requirementA.external_id, { exact: true }), "Expected first drawer requirement");
@@ -8692,7 +8828,7 @@ By using this IS (which includes any device attached to this IS), you consent to
       await assertAttribute(add, "aria-label", "Add enforcement rule", "Expected the rule chooser to have an accessible name");
       await assertVisible(page.getByText(/Guidance only\. Suggestions never add, remove, or restrict rules\./), "Expected recommendation guidance to remain explicitly non-authoritative");
       for (const hiddenLabel of ["Approval required", "Rollout percent", "Build must succeed"]) {
-        if (await page.getByRole("dialog").getByText(hiddenLabel, { exact: false }).count()) {
+        if (await page.getByTestId("policy-editor-modal").getByText(hiddenLabel, { exact: false }).count()) {
           throw new Error(`Hidden incomplete kind leaked into the policy editor: ${hiddenLabel}`);
         }
       }
@@ -8865,9 +9001,9 @@ By using this IS (which includes any device attached to this IS), you consent to
       if (JSON.stringify(secondValues) !== JSON.stringify(expectedSecondValues)) throw new Error(`Second backend reload lost edited typed configs: ${JSON.stringify(secondValues)}`);
       await page.getByRole("button", { name: "Cancel", exact: true }).last().click();
       await editedCard.click();
-      const summaryDrawer = page.getByRole("dialog", { name: "Policy detail" });
+      const summaryDrawer = page.getByRole("dialog", { name, exact: true });
       await assertVisible(summaryDrawer.getByText("Deploy window: 01:00-03:00", { exact: true }), "Expected nested time_window config in the reloaded policy summary");
-      await summaryDrawer.getByRole("button", { name: "Close", exact: true }).click();
+      await summaryDrawer.getByRole("button", { name: "Close policy detail", exact: true }).click();
 
       const opaqueConfig = {
         schema_version: 1,
@@ -9002,49 +9138,17 @@ By using this IS (which includes any device attached to this IS), you consent to
         }),
       });
 
-      const assessmentFixture = await createTask433CompositeAssessmentFixture(page, {
+      const initialEvaluation = await runTask433ProductionEvaluation(page, {
         systemId,
         commitId,
         policyId: policy.id,
-        policyVersionId,
-        nixRuleId: detail.config.rules[0].id,
-        cveRuleId: detail.config.rules[1].id,
-        criticalCount: 2,
       });
-      const scanId = assessmentFixture.scanId;
-
-      let outcomeJson = "";
-      for (let attempt = 0; attempt < 180; attempt += 1) {
-        outcomeJson = runFixtureSql(`
-          SELECT json_build_object(
-            'assessment_id', assessment.id,
-            'overall', assessment.overall_outcome,
-            'rows', json_agg(json_build_object(
-              'rule_id', result.rule_id,
-              'kind', result.kind,
-              'phase', result.phase,
-              'outcome', result.outcome,
-              'source_scan_id', result.source_scan_id,
-              'detail', result.detail,
-              'evidence', result.evidence
-            ) ORDER BY result.ordinal)
-          )::text
-          FROM composite_policy_assessments assessment
-          JOIN composite_policy_rule_results result ON result.assessment_id=assessment.id
-          WHERE assessment.system_id='${systemId}'::uuid
-            AND assessment.policy_lineage_id='${policy.id}'::uuid
-            AND EXISTS (
-              SELECT 1 FROM composite_policy_rule_results scan_result
-              WHERE scan_result.assessment_id=assessment.id
-                AND scan_result.source_scan_id='${scanId}'::uuid
-            )
-          GROUP BY assessment.id, assessment.overall_outcome;
-        `);
-        if (outcomeJson) break;
-        await page.waitForTimeout(1000);
-      }
-       if (!outcomeJson) throw new Error("Persisted evaluator fixture did not expose the completed scan prerequisite");
-      const outcome = JSON.parse(outcomeJson);
+      const scanId = arrangeTask433CompletedScan(initialEvaluation.derivation_id, 2);
+      const outcome = await runTask433ProductionEvaluation(page, {
+        systemId,
+        commitId,
+        policyId: policy.id,
+      });
       const [nixResult, cveResult] = outcome.rows;
       if (nixResult.kind !== "nixos_option" || nixResult.phase !== "evaluation" || nixResult.outcome !== "pass" || nixResult.source_scan_id !== null) {
         throw new Error(`Server produced incorrect Nix constituent semantics: ${JSON.stringify(nixResult)}`);
@@ -9055,11 +9159,9 @@ By using this IS (which includes any device attached to this IS), you consent to
       if (cveResult.evidence.count !== 2 || cveResult.evidence.max_allowed !== 0 || outcome.overall !== "fail") {
         throw new Error(`Server produced incorrect all-mode aggregate evidence: ${JSON.stringify(outcome)}`);
       }
-      const findingId = runFixtureSql(`
-        SELECT id FROM poam_findings
-        WHERE system_id='${systemId}'::uuid AND policy_lineage_id='${policy.id}'::uuid;
-      `);
-       if (!findingId) throw new Error("Persisted assessment fixture did not establish the canonical finding identity");
+      arrangeTask433DeployedAssessment(hostname, outcome.target_store_path);
+      const findingId = outcome.finding_id;
+      if (!findingId) throw new Error("Production assessment did not establish the canonical finding identity");
 
       const fixture = {
         policy,
@@ -11134,7 +11236,7 @@ security.audit.enable = true;</fixtext>
       if (policyDetailResponse.status() !== 200) {
         throw new Error(`Expected mapped policy detail 200, got ${policyDetailResponse.status()}`);
       }
-      const policyDrawer = page.getByRole("dialog", { name: "Policy detail" });
+      const policyDrawer = page.getByRole("dialog", { name: fixture.mapping.policy_name, exact: true });
       await policyDrawer.waitFor({ timeout: 5000 });
       await policyDrawer.getByRole("button", { name: new RegExp(`Revisions · ${mappedPolicySummary.versions.length}`) }).click();
       await assertVisible(
@@ -11979,7 +12081,7 @@ security.audit.enable = true;</fixtext>
       await assertVisible(bar.getByText("No active remediation plan. The finding remains FAIL.", { exact: true }), "Expected no-remediation state");
 
       await bar.getByRole("button", { name: "Create POA&M", exact: true }).click();
-      const modal = page.getByRole("dialog").filter({ has: page.getByRole("heading", { name: "Create POA&M", exact: true }) });
+      const modal = page.getByRole("dialog", { name: "Create POA&M", exact: true });
       const context = modal.getByTestId("poam-finding-context");
       await assertVisible(context.getByText(system.hostname, { exact: true }), "Create context must show the exact system");
       await assertVisible(context.getByText(`${fixture.policy.name} · ${fixture.policyVersionId}`, { exact: true }), "Create context must show the exact policy and version");
@@ -12002,11 +12104,12 @@ security.audit.enable = true;</fixtext>
       await modal.getByLabel("Target completion").fill("2026-09-19");
       await modal.getByLabel("Risk").selectOption("High");
       await modal.getByLabel("Remediation plan").fill("Deploy PermitRootLogin=no and verify the exact assessment target.");
-      const createResponsePromise = page.waitForResponse(
-        (response) => response.url().endsWith("/api/v1/poams") && response.request().method() === "POST",
-      );
-      await modal.getByRole("button", { name: "Create POA&M", exact: true }).click();
-      const createResponse = await createResponsePromise;
+      const [createResponse] = await Promise.all([
+        page.waitForResponse(
+          (response) => response.url().endsWith("/api/v1/poams") && response.request().method() === "POST",
+        ),
+        modal.getByRole("button", { name: "Create POA&M", exact: true }).click(),
+      ]);
       if (createResponse.status() !== 201) throw new Error(`POA&M create returned ${createResponse.status()}: ${await createResponse.text()}`);
       const posted = createResponse.request().postDataJSON();
       if (posted.assessment_id !== undefined || posted.finding_id !== system.findingId) {
@@ -12033,6 +12136,15 @@ security.audit.enable = true;</fixtext>
       const refreshedBar = page.locator(`[data-testid="finding-poam-remediation"][data-finding-id="${system.findingId}"]`);
       await assertVisible(refreshedBar.getByText("FAIL", { exact: true }), "Finding must remain FAIL after create");
       await assertVisible(refreshedBar.getByText(created.human_id, { exact: true }), "Remediation must reference the created POA&M");
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await assertVisible(refreshedBar, "Evidence deep link must survive reload while evidence is fetched");
+      if (new URL(page.url()).searchParams.get("view") !== "evidence") {
+        throw new Error(`Evidence reload downgraded its route: ${page.url()}`);
+      }
+      await page.goBack({ waitUntil: "domcontentloaded" });
+      await assertVisible(page.locator(`[data-testid="poam-detail"][data-poam-id="${created.id}"]`), "Browser Back must restore the exact POA&M detail");
+      await page.goForward({ waitUntil: "domcontentloaded" });
+      await assertVisible(refreshedBar, "Browser Forward must restore exact evidence state");
       const compositeCount = Number(runFixtureSql(`SELECT COUNT(*) FROM composite_policy_assessments WHERE system_id='${system.id}'::uuid;`));
       if (compositeCount !== 0) throw new Error(`Legacy POA&M create fabricated ${compositeCount} composite assessments`);
       const persistedResults = JSON.parse(runFixtureSql(`SELECT policy_results::text FROM derivations WHERE id=${system.derivationId};`));
@@ -12297,37 +12409,81 @@ security.audit.enable = true;</fixtext>
         }),
       });
 
-      const assessmentFixture = await createTask433CompositeAssessmentFixture(page, {
+      const linkedSystemId = crypto.randomUUID();
+      const linkedHostname = `task433-linked-${linkedSystemId.slice(0, 8)}`;
+      runFixtureSql(`
+        INSERT INTO systems (
+          id, hostname, environment_id, flake_id, is_active, public_key,
+          system_configuration_name, derivation
+        )
+        SELECT '${linkedSystemId}'::uuid, '${linkedHostname}', environment_id,
+               flake_id, true,
+               'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITask433CanonicalLinkedHost',
+               'cf-test-sys', derivation
+        FROM systems WHERE id='${systemId}'::uuid;
+      `);
+      await phase6Api(page, "/api/v1/compliance/assignments", {
+        method: "POST",
+        body: JSON.stringify({
+          bundle_version_id: bundleVersionId,
+          scope_type: "system",
+          scope_id: linkedSystemId,
+          enforcement_mode: "enforce",
+          exclusions: [],
+          additions: [],
+          value_overrides: [],
+          reason: "TASK-433 canonical finding-link edit",
+        }),
+      });
+
+      const initialEvaluation = await runTask433ProductionEvaluation(page, {
         systemId,
         commitId,
         policyId: policy.id,
-        policyVersionId,
-        nixRuleId,
-        cveRuleId,
-        criticalCount: 2,
       });
-      let assessmentId = assessmentFixture.assessmentId;
-      let derivationId = assessmentFixture.derivationId;
-      const findingId = assessmentFixture.findingId;
-      let latestAssessmentContext = null;
-      const refreshAssessmentContext = async () => {
-        const currentEffective = (await phase6Api(page, `/api/v1/systems/${systemId}/effective-policies`)).body;
-        const currentPolicy = currentEffective.policies.find((item) => item.policy_lineage_id === policy.id);
-        if (!currentPolicy) throw new Error("Canonical POA&M policy disappeared from the current effective set");
-        latestAssessmentContext = {
-          effectiveSetDigest: currentEffective.effective_set_digest,
-          effectiveConfigDigest: phase6SemanticDigest(currentPolicy.effective_config),
-          effectiveConfig: currentPolicy.effective_config,
-        };
-        runFixtureSql(`
-          UPDATE composite_policy_assessments
-          SET effective_set_digest='${latestAssessmentContext.effectiveSetDigest}',
-              effective_config_digest='${latestAssessmentContext.effectiveConfigDigest}',
-              effective_config=$config$${JSON.stringify(currentPolicy.effective_config)}$config$::jsonb,
-              updated_at=now()
-          WHERE id='${assessmentId}'::uuid;
-        `);
-      };
+      const linkedInitial = JSON.parse(runFixtureSql(`
+        SELECT json_build_object(
+          'assessment_id', assessment.id,
+          'derivation_id', assessment.derivation_id,
+          'target_store_path', assessment.target_store_path
+        )::text
+        FROM composite_policy_assessments assessment
+        WHERE assessment.system_id='${linkedSystemId}'::uuid
+          AND assessment.policy_lineage_id='${policy.id}'::uuid
+        ORDER BY assessment.updated_at DESC LIMIT 1;
+      `));
+      const failingScanId = arrangeTask433CompletedScan(initialEvaluation.derivation_id, 2);
+      arrangeTask433CompletedScan(linkedInitial.derivation_id, 2);
+      const assessmentFixture = await runTask433ProductionEvaluation(page, {
+        systemId,
+        commitId,
+        policyId: policy.id,
+      });
+      if (!assessmentFixture.rows.some((row) => row.kind === "cve_block" && row.source_scan_id === failingScanId && row.outcome === "fail")) {
+        throw new Error(`Production re-evaluation did not consume the failing scan: ${JSON.stringify(assessmentFixture)}`);
+      }
+      const linkedAssessment = JSON.parse(runFixtureSql(`
+        SELECT json_build_object(
+          'assessment_id', assessment.id,
+          'finding_id', finding.id,
+          'overall', assessment.overall_outcome
+        )::text
+        FROM composite_policy_assessments assessment
+        JOIN poam_findings finding
+          ON finding.system_id=assessment.system_id
+         AND finding.policy_lineage_id=assessment.policy_lineage_id
+        WHERE assessment.system_id='${linkedSystemId}'::uuid
+          AND assessment.policy_lineage_id='${policy.id}'::uuid
+        ORDER BY assessment.updated_at DESC LIMIT 1;
+      `));
+      if (linkedAssessment.overall !== "fail" || !linkedAssessment.finding_id) {
+        throw new Error(`Production re-evaluation did not create the compatible FAIL finding: ${JSON.stringify(linkedAssessment)}`);
+      }
+      let assessmentId = assessmentFixture.assessment_id;
+      let derivationId = assessmentFixture.derivation_id;
+      const findingId = assessmentFixture.finding_id;
+      arrangeTask433DeployedAssessment(hostname, assessmentFixture.target_store_path);
+      arrangeTask433DeployedAssessment(linkedHostname, linkedInitial.target_store_path);
       const fixture = {
         policy,
         policyVersionId,
@@ -12336,7 +12492,6 @@ security.audit.enable = true;</fixtext>
         systems: [{ id: systemId, hostname, findingId, assessmentId }],
       };
       const system = fixture.systems[0];
-      await refreshAssessmentContext();
       const remediation = await openPhase6Evidence(page, fixture, system);
       await assertVisible(
         remediation,
@@ -12345,15 +12500,16 @@ security.audit.enable = true;</fixtext>
       );
       await assertVisible(page.getByText("FAIL", { exact: true }).first(), "Canonical POA&M lifecycle must begin from persisted FAIL evidence");
       await remediation.getByRole("button", { name: "Create POA&M", exact: true }).click();
-      const createModal = page.getByRole("dialog").filter({ has: page.getByRole("heading", { name: "Create POA&M", exact: true }) });
+      const createModal = page.getByRole("dialog", { name: "Create POA&M", exact: true });
       await createModal.getByLabel("Title").fill("Canonical authoritative remediation");
       await createModal.getByLabel("Owner").fill("Security Operations");
       await createModal.getByLabel("Target completion").fill("2026-10-15");
       await createModal.getByLabel("Risk").selectOption("High");
       await createModal.getByLabel("Remediation plan").fill("Correct the mixed enforcement failure and verify authoritative evidence.");
-      const createPromise = page.waitForResponse((response) => response.url().endsWith("/api/v1/poams") && response.request().method() === "POST");
-      await createModal.getByRole("button", { name: "Create POA&M", exact: true }).click();
-      const createResponse = await createPromise;
+      const [createResponse] = await Promise.all([
+        page.waitForResponse((response) => response.url().endsWith("/api/v1/poams") && response.request().method() === "POST"),
+        createModal.getByRole("button", { name: "Create POA&M", exact: true }).click(),
+      ]);
       if (createResponse.status() !== 201) throw new Error(`Canonical POA&M create returned ${createResponse.status()}`);
       const poam = await createResponse.json();
       const detail = page.getByTestId("poam-detail");
@@ -12372,6 +12528,38 @@ security.audit.enable = true;</fixtext>
       const addedMilestone = (await addMilestoneResponse.json()).milestones.find((item) => item.title === "Authoritative reevaluation");
       if (!addedMilestone) throw new Error("Canonical milestone response omitted the persisted row");
       await assertVisible(detail.locator(`[data-testid="poam-milestone"][data-milestone-id="${addedMilestone.id}"]`), "Edited milestone must persist in the common detail UI");
+
+      await detail.getByRole("button", { name: "Link finding", exact: true }).click();
+      const findingSearch = detail.getByPlaceholder("Search compatible failing findings");
+      await findingSearch.fill(linkedHostname);
+      const linkedCandidate = detail.locator(".poam-pick").filter({ hasText: linkedHostname });
+      await linkedCandidate.waitFor({ state: "visible", timeout: 15000 });
+      const [linkFindingResponse] = await Promise.all([
+        page.waitForResponse(
+          (response) => response.url().endsWith(`/api/v1/poams/${poam.id}/findings`) && response.request().method() === "POST",
+        ),
+        linkedCandidate.click(),
+      ]);
+      if (linkFindingResponse.status() !== 200) throw new Error("Canonical finding link request failed");
+      const linkedRow = detail.locator(`[data-testid="poam-linked-finding"][data-finding-id="${linkedAssessment.finding_id}"]`);
+      await assertVisible(linkedRow.getByText("Fail", { exact: true }), "Linked compatible finding must retain its production FAIL result");
+      const [unlinkFindingResponse] = await Promise.all([
+        page.waitForResponse((response) => {
+          const url = new URL(response.url());
+          return url.pathname === `/api/v1/poams/${poam.id}/findings/${linkedAssessment.finding_id}` && response.request().method() === "DELETE";
+        }),
+        linkedRow.getByTitle("Unlink finding").click(),
+      ]);
+      if (unlinkFindingResponse.status() !== 200) throw new Error("Canonical finding unlink request failed");
+      const unlinkedDetail = await unlinkFindingResponse.json();
+      if (unlinkedDetail.findings.some((finding) => finding.id === linkedAssessment.finding_id && finding.link_active)) {
+        throw new Error(`Canonical finding remained active after unlink: ${JSON.stringify(unlinkedDetail.findings)}`);
+      }
+      await page.waitForFunction(
+        ({ poamId, revision }) => document.querySelector(`[data-testid="poam-detail"][data-poam-id="${poamId}"]`)?.dataset.poamRevision === String(revision),
+        { poamId: poam.id, revision: unlinkedDetail.revision },
+      );
+      await assertHidden(linkedRow, "Unlinked finding must leave the canonical POA&M detail");
       await captureWorkflowState(page, stepName, "failed-evidence-edited-remediation");
 
       await page.goto(`${baseUrl}/systems/${system.id}?tab=compliance`, { timeout: LOAD_TIMEOUT });
@@ -12389,20 +12577,15 @@ security.audit.enable = true;</fixtext>
       await detail.getByRole("button", { name: "In Progress", exact: true }).click();
       await detail.getByRole("button", { name: "Awaiting Verification", exact: true }).click();
       await assertVisible(detail.getByText("Awaiting verification.", { exact: true }), "Awaiting state must explain finding independence");
-      const currentFailAssessment = await createTask433CompositeAssessmentFixture(page, {
+      const currentFailAssessment = await runTask433ProductionEvaluation(page, {
         systemId,
         commitId,
         policyId: policy.id,
-        policyVersionId,
-        nixRuleId,
-        cveRuleId,
-        criticalCount: 2,
       });
-      assessmentId = currentFailAssessment.assessmentId;
-      derivationId = currentFailAssessment.derivationId;
+      assessmentId = currentFailAssessment.assessment_id;
+      derivationId = currentFailAssessment.derivation_id;
       let failedVerification = null;
       for (let attempt = 0; attempt < 3; attempt += 1) {
-        await refreshAssessmentContext();
         const verifyResponsePromise = page.waitForResponse(
           (response) => response.url().endsWith(`/api/v1/poams/${poam.id}/verify`) && response.request().method() === "POST",
         );
@@ -12426,7 +12609,7 @@ security.audit.enable = true;</fixtext>
           WHERE item.attempt_id='${failedVerification.attempt_id}'::uuid
           LIMIT 1;
         `);
-        throw new Error(`Verification did not persist authoritative FAIL: ${JSON.stringify(failedVerification)} expected=${JSON.stringify(latestAssessmentContext)} diagnostic=${verificationDiagnostic}`);
+        throw new Error(`Verification did not persist authoritative FAIL: ${JSON.stringify(failedVerification)} diagnostic=${verificationDiagnostic}`);
       }
       await assertVisible(detail.getByTestId("poam-verification-result").getByText("Fail", { exact: true }).first(), "Verification must expose authoritative FAIL", 15000);
 
@@ -12440,73 +12623,26 @@ security.audit.enable = true;</fixtext>
       await assertVisible(rejection.getByText("Closure rejected for these findings", { exact: true }), "Structured closure reason must be visible");
       await assertVisible(rejection.locator(`[data-finding-id="${system.findingId}"]`).getByText("Fail", { exact: true }), "Structured rejection must identify the failing finding");
       const persisted = (await phase6Api(page, `/api/v1/poams/${poam.id}`)).body;
-      if (persisted.status === "completed" || persisted.findings[0].resolution_state !== "fail") {
+      const persistedActiveFinding = persisted.findings.find((finding) => finding.id === system.findingId && finding.link_active);
+      if (persisted.status === "completed" || persistedActiveFinding?.resolution_state !== "fail") {
         throw new Error(`Rejected closure changed authoritative state: ${JSON.stringify(persisted)}`);
       }
       await captureWorkflowState(page, stepName, "rejected-failing-closure");
 
-      // The fixture arranges the external scanner worker's persisted output.
-      // Production verification and closure consume the resulting authoritative
-      // assessment through their normal HTTP and transaction paths. Server
-      // regressions separately exercise scan-phase recomputation.
-      const passingScanId = crypto.randomUUID();
-      runFixtureSql(`
-        INSERT INTO cve_scans (
-          id, derivation_id, scanner_name, scanner_version, status,
-          total_packages, total_vulnerabilities, critical_count,
-          high_count, medium_count, low_count, attempts, completed_at
-        ) VALUES (
-          '${passingScanId}'::uuid, ${Number(derivationId)}, 'TASK-433 external scanner', '1', 'completed',
-          1, 0, 0, 0, 0, 0, 1, now()
-        );
-        UPDATE composite_policy_rule_results result
-        SET phase='scan', outcome='pass', blocking=false,
-            detail='0 Critical CVEs found; maximum allowed is 0',
-            evidence=jsonb_build_object(
-              'scan_id',scan.id,'status','completed','severity','critical',
-              'count',0,'max_allowed',0,'completed_at',scan.completed_at
-            ), source_scan_id=scan.id,
-            source_scan_order=scan.composite_phase_order,
-            source_scan_derivation_id=scan.derivation_id,
-            evaluated_at=now()
-        FROM cve_scans scan
-        WHERE scan.id='${passingScanId}'::uuid
-          AND result.assessment_id='${assessmentId}'::uuid
-          AND result.kind='cve_block';
-        UPDATE composite_policy_assessments
-        SET overall_outcome='pass', updated_at=now()
-        WHERE id='${assessmentId}'::uuid;
-      `);
-      let passingOutcome = "";
-      for (let attempt = 0; attempt < 180; attempt += 1) {
-        passingOutcome = runFixtureSql(`
-          SELECT json_build_object(
-            'overall', assessment.overall_outcome,
-            'nix_outcome', nix_result.outcome,
-            'cve_outcome', cve_result.outcome,
-            'source_scan_id', cve_result.source_scan_id
-          )::text
-          FROM composite_policy_assessments assessment
-          JOIN composite_policy_rule_results nix_result
-            ON nix_result.assessment_id=assessment.id AND nix_result.rule_id='${nixRuleId}'::uuid
-          JOIN composite_policy_rule_results cve_result
-            ON cve_result.assessment_id=assessment.id AND cve_result.rule_id='${cveRuleId}'::uuid
-          WHERE assessment.system_id='${systemId}'::uuid
-            AND assessment.policy_lineage_id='${policy.id}'::uuid
-            AND assessment.overall_outcome='pass'
-            AND cve_result.source_scan_id='${passingScanId}'::uuid;
-        `);
-        if (passingOutcome) break;
-        await page.waitForTimeout(1000);
+      const passingScanId = arrangeTask433CompletedScan(derivationId, 0);
+      const productionPass = await runTask433ProductionEvaluation(page, {
+        systemId,
+        commitId,
+        policyId: policy.id,
+      });
+      const passNix = productionPass.rows.find((row) => row.rule_id === nixRuleId);
+      const passCve = productionPass.rows.find((row) => row.rule_id === cveRuleId);
+      if (passNix?.outcome !== "pass" || passCve?.outcome !== "pass" || productionPass.overall !== "pass" || passCve.source_scan_id !== passingScanId) {
+        throw new Error(`Production re-evaluation produced invalid closure evidence: ${JSON.stringify(productionPass)}`);
       }
-      if (!passingOutcome) throw new Error("Persisted evaluator fixture did not expose the passing scan for canonical POA&M closure");
-      const productionPass = JSON.parse(passingOutcome);
-      if (productionPass.nix_outcome !== "pass" || productionPass.cve_outcome !== "pass" || productionPass.overall !== "pass" || productionPass.source_scan_id !== passingScanId) {
-        throw new Error(`Persisted evaluator fixture produced invalid closure evidence: ${passingOutcome}`);
-      }
+      assessmentId = productionPass.assessment_id;
       await page.reload({ waitUntil: "domcontentloaded" });
       await waitForPhase6Target(page, detail, "Canonical POA&M after authoritative PASS fixture");
-      await refreshAssessmentContext();
       const passVerifyPromise = page.waitForResponse((response) => response.url().endsWith(`/api/v1/poams/${poam.id}/verify`) && response.request().method() === "POST");
       await detail.getByRole("button", { name: "Verify now", exact: true }).click();
       const passVerifyResponse = await passVerifyPromise;
@@ -12986,7 +13122,7 @@ security.audit.enable = true;</fixtext>
       await policyCard().click();
       
       // Wait for drawer to appear and click Edit button
-      const editBtn = page.getByRole("dialog", { name: "Policy detail" }).getByRole("button", { name: /Edit/i }).first();
+      const editBtn = page.getByRole("dialog", { name: policyName, exact: true }).getByRole("button", { name: /Edit/i }).first();
       await editBtn.waitFor({ state: "visible", timeout: LOAD_TIMEOUT });
       await editBtn.click();
       
@@ -13033,7 +13169,7 @@ security.audit.enable = true;</fixtext>
       await filterPolicyCatalog(page, policyName);
       await policyCard().click();
       
-      const editBtnAfter = page.getByRole("dialog", { name: "Policy detail" }).getByRole("button", { name: /Edit/i }).first();
+      const editBtnAfter = page.getByRole("dialog", { name: policyName, exact: true }).getByRole("button", { name: /Edit/i }).first();
       await editBtnAfter.waitFor({ state: "visible", timeout: LOAD_TIMEOUT });
       await editBtnAfter.click();
       
@@ -13074,7 +13210,7 @@ security.audit.enable = true;</fixtext>
       await filterPolicyCatalog(page, policyName);
       await policyCard().click();
       
-      const editBtnFinal = page.getByRole("dialog", { name: "Policy detail" }).getByRole("button", { name: /Edit/i }).first();
+      const editBtnFinal = page.getByRole("dialog", { name: policyName, exact: true }).getByRole("button", { name: /Edit/i }).first();
       await editBtnFinal.waitFor({ state: "visible", timeout: LOAD_TIMEOUT });
       await editBtnFinal.click();
       
@@ -13329,7 +13465,81 @@ security.audit.enable = true;</fixtext>
   },
 ];
 
+function runStaticHarnessContracts() {
+  const sourceDir = process.env.CF_WEB_UI_SOURCE_DIR || path.resolve(__dirname, "..");
+  const defaultNix = fs.readFileSync(path.join(sourceDir, "default.nix"), "utf8");
+  const source = fs.readFileSync(__filename, "utf8");
+  const assertContract = (condition, message) => {
+    if (!condition) throw new Error(message);
+  };
+  const waitIndex = defaultNix.indexOf('machine.wait_for_file("/tmp/web-ui-tests/integration.exit"');
+  const resultsIndex = defaultNix.indexOf('results_json = machine.succeed("cat /tmp/screenshots/results.json")');
+  assertContract(waitIndex >= 0 && resultsIndex > waitIndex, "Nix driver must wait for integration.exit before reading results");
+  assertContract(defaultNix.includes('if exit_code != "0":'), "Nix driver must reject a nonzero integration exit");
+  assertContract(defaultNix.includes("invalid counts schema"), "Nix driver must validate visual report counts");
+  assertContract(defaultNix.includes("invalid failures schema"), "Nix driver must validate visual report failures");
+  assertContract(source.includes("process.exitCode = 1;"), "Browser failures must produce a nonzero process exit");
+  assertContract(source.includes("counts: { match: 0, diff: 0, new: 0, skipped: 0, error: 0 }"), "Visual report must initialize every consumed count");
+  assertContract(source.includes("failures: []"), "Visual report must initialize strict failures");
+  const sqlAuthoredHelperName = "createTask433Composite" + "AssessmentFixture";
+  assertContract(!source.includes(`${sqlAuthoredHelperName}(`), "Canonical workflows must not use the SQL-authored assessment helper");
+  const productionHelperStart = source.indexOf("async function runTask433ProductionEvaluation(");
+  const productionHelperEnd = source.indexOf("\n}\n\nasync function createPhase6PoamFixture", productionHelperStart);
+  assertContract(productionHelperStart >= 0 && productionHelperEnd > productionHelperStart, "Could not isolate runTask433ProductionEvaluation");
+  const productionHelperSource = source.slice(productionHelperStart, productionHelperEnd);
+  const authoredOutcomeWrite = /\b(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM|MERGE\s+INTO)\s+composite_policy_(?:assessments|rule_results)\b/i;
+  assertContract(productionHelperSource.includes("/re-evaluate"), "Production evaluation helper must invoke commit re-evaluation");
+  assertContract(!authoredOutcomeWrite.test(productionHelperSource), "Production evaluation helper must not author assessment or rule-result outcomes with SQL");
+  for (const [name, nextName, minimumProductionEvaluations] of [
+    ["task433-canonical-mixed-nix-cve-evidence", "20ad-stig-nixos-assertion-roundtrip", 2],
+    ["task433-canonical-poam-lifecycle", "29k-poam-system-rollups-navigation", 4],
+  ]) {
+    const start = source.indexOf(`name: "${name}"`);
+    const end = source.indexOf(`name: "${nextName}"`, start);
+    const workflowSource = source.slice(start, end);
+    assertContract(start >= 0 && end > start, `Could not isolate canonical workflow ${name}`);
+    assertContract(!authoredOutcomeWrite.test(workflowSource), `${name} must not author evaluated outcomes with SQL`);
+    const productionEvaluationCalls = workflowSource.match(/\brunTask433ProductionEvaluation\s*\(/g) || [];
+    assertContract(
+      productionEvaluationCalls.length >= minimumProductionEvaluations,
+      `${name} must invoke production commit re-evaluation at least ${minimumProductionEvaluations} times`,
+    );
+  }
+
+  validateManifest(MANIFEST);
+  for (const name of [
+    "task433-canonical-large-catalog",
+    "20af-policy-catalog-selection-delete-regressions",
+    "task433-canonical-unmapped-nix-policy",
+    "20ac-policy-editor-category-and-imported-provenance",
+    "task433-canonical-imported-stig-refinement",
+    "task433-canonical-multiline-dod",
+    "20ab2-policy-editor-eight-kind-roundtrip",
+    "task433-canonical-mixed-nix-cve-evidence",
+    "task433-canonical-poam-lifecycle",
+  ]) {
+    const manifestStep = MANIFEST_STEPS.get(name);
+    assertContract(manifestStep, `Missing canonical manifest step ${name}`);
+    assertContract(manifestStep.mockedData === false, `${name} must remain production-data coverage`);
+    assertContract(manifestStep.semanticAssertions === true, `${name} must retain semantic assertions`);
+    assertContract(manifestStep.profiles.includes("ci_fast") && manifestStep.profiles.includes("full"), `${name} must gate both profiles`);
+  }
+  console.log("web-ui harness static contracts OK");
+}
+
+if (process.env.CF_UI_STATIC_CONTRACTS === "1") {
+  try {
+    runStaticHarnessContracts();
+    process.exit(0);
+  } catch (error) {
+    console.error(error.message);
+    process.exit(1);
+  }
+}
+
 (async () => {
+  validateManifest(MANIFEST);
+
   // ── Coverage gate: steps and manifest must agree exactly ──────────────────
   const stepNames = new Set(steps.map((s) => s.name));
   const manifestNames = new Set(MANIFEST.steps.map((s) => s.name));
@@ -13533,6 +13743,16 @@ security.audit.enable = true;</fixtext>
   await context.close();
   await browser.close();
 
+  if (unhandledRejections.length) {
+    results.push({
+      name: "harness-unhandled-rejection",
+      description: "Browser harness must not leave promise rejections unhandled",
+      ok: false,
+      error: unhandledRejections.join("\n\n"),
+      visuals: [],
+    });
+  }
+
   // ── Visual report ──────────────────────────────────────────────────────────
   const okCount = results.filter((r) => r.ok).length;
   const failCount = results.filter((r) => !r.ok).length;
@@ -13551,9 +13771,28 @@ security.audit.enable = true;</fixtext>
         stepsToRun.length > 0 ? Number(((designReferenced / stepsToRun.length) * 100).toFixed(1)) : 0,
       note: DESIGN_FIXTURE ? DESIGN_FIXTURE.note : null,
     },
+    thresholds: MANIFEST.settings.visualDiff,
+    counts: { match: 0, diff: 0, new: 0, skipped: 0, error: 0 },
+    failures: [],
     themedCaptures: themed.length,
     steps: results.map((r) => ({ name: r.name, ok: r.ok, visuals: r.visuals })),
   };
+  for (const visual of themed) {
+    if (visual.diagnostic) continue;
+    if (Object.hasOwn(visualReport.counts, visual.status)) {
+      visualReport.counts[visual.status] += 1;
+    } else {
+      visualReport.counts.error += 1;
+    }
+    if (visual.policy === "strict" && visual.status !== "match") {
+      visualReport.failures.push({
+        name: visual.name,
+        status: visual.status || "error",
+        diffRatio: visual.diffRatio ?? null,
+        error: visual.error ?? null,
+      });
+    }
+  }
   fs.writeFileSync(
     `${outputDir}/visual-report.json`,
     JSON.stringify(visualReport, null, 2),
@@ -13563,8 +13802,12 @@ security.audit.enable = true;</fixtext>
   const md = [
     `**Web UI check** — profile \`${testProfile}\`: ${okCount}/${results.length} steps passed.`,
     `**Themed captures** — ${themed.length} screenshots (${visualThemes.join(", ")}) captured for design-parity comparison.`,
+    `**Visual baselines** — ${visualReport.counts.match} match · ${visualReport.counts.diff} differ · ${visualReport.counts.new} new · ${visualReport.counts.skipped} skipped · ${visualReport.counts.error} errors.`,
     `Design-drift scoring is computed by \`compare-design-parity.js\` against the design example targets and posted as a visual parity grid below.`,
   ];
+  if (visualReport.failures.length) {
+    md.push(`**Strict visual failures** — ${visualReport.failures.map((failure) => `\`${failure.name}\``).join(", ")}`);
+  }
   fs.writeFileSync(`${outputDir}/visual-summary.md`, md.join("\n\n") + "\n");
 
   // Write results (the Nix driver waits on this file — keep it last so all
@@ -13585,7 +13828,11 @@ security.audit.enable = true;</fixtext>
     for (const r of results.filter((r) => !r.ok)) {
       console.log(`  - ${r.name}: ${r.error}`);
     }
-    // Don't exit with error - let the test script analyze results
+    // The outer Nix driver enforces the explicit critical-step and strict
+    // visual policies after it reads this report. Noncritical steps remain
+    // diagnostic so an unrelated advisory failure does not override those
+    // release policies. Fatal errors and unhandled rejections still make this
+    // process exit nonzero before the driver evaluates the report.
   }
 })().catch((err) => {
   console.error(`Fatal error: ${err.message}`);

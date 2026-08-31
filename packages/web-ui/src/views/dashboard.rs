@@ -410,6 +410,20 @@ fn persist_widget_positions(positions: &[WidgetPosition]) {
     stored.save();
 }
 
+fn move_widget_position(positions: &mut [WidgetPosition], id: &str, direction: isize) -> bool {
+    let Some(current) = positions.iter().position(|position| position.id == id) else {
+        return false;
+    };
+    let target = current
+        .saturating_add_signed(direction)
+        .min(positions.len().saturating_sub(1));
+    if current == target {
+        return false;
+    }
+    positions.swap(current, target);
+    true
+}
+
 fn should_persist_widget_positions(positions: &[WidgetPosition]) -> bool {
     if StoredLayout::load().is_some_and(|stored| stored.version > StoredLayout::VERSION) {
         return false;
@@ -707,6 +721,10 @@ pub fn DashboardView() -> Element {
         }
         dragging_id.set(None);
         drop_target_id.set(None);
+    };
+
+    let on_move_widget = move |(id, direction): (String, isize)| {
+        move_widget_position(&mut widget_positions.write(), &id, direction);
     };
 
     // Set a widget's column span.
@@ -1176,6 +1194,7 @@ pub fn DashboardView() -> Element {
                                 on_drag_over: on_drag_over,
                                 on_drag_leave: on_drag_leave,
                                 on_drop: on_drop,
+                                on_move: on_move_widget,
                                 on_set_cols: on_set_cols,
                                 on_set_rows: on_set_rows,
                                 on_remove: on_remove_widget,
@@ -1595,6 +1614,19 @@ mod tests {
         assert_eq!(ids.iter().filter(|id| **id == "poam-watchlist").count(), 1);
         assert_eq!(ids[0], "fleet-health");
         assert_eq!(ids[1], "poam-summary");
+    }
+
+    #[test]
+    fn keyboard_widget_move_is_bounded_and_preserves_widget_identity() {
+        let mut positions = default_widget_positions();
+        let first = positions[0].id;
+        let second = positions[1].id;
+
+        assert!(!move_widget_position(&mut positions, first, -1));
+        assert!(move_widget_position(&mut positions, first, 1));
+        assert_eq!(positions[0].id, second);
+        assert_eq!(positions[1].id, first);
+        assert!(!move_widget_position(&mut positions, "missing", 1));
     }
 
     #[test]

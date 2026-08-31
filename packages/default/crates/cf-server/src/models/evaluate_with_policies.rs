@@ -1486,10 +1486,7 @@ pub async fn persist_evaluated_system(
             commit_id,
             expected_attempt,
             *system_id,
-            &result.system_name,
-            assigned_policies,
-            crate::models::deployment_policies::EnforcementOutcome::Pass,
-            "Configuration evaluation completed",
+            policy_check,
         )
         .await?;
         let has_composite = resolved.policies.iter().any(|policy| {

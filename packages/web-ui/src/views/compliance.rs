@@ -30,6 +30,9 @@ use crate::components::compliance::{
     ScoreStrip, SourceCheck, SourceCheckBodyPart, SourceStigRule, SystemsMatrix, TypedPolicyValue,
     action_to_import, mapping_semantics_for,
 };
+use crate::components::dialog_focus::{
+    DialogFocusBoundary, DialogFocusRestore, DialogFocusSentinel,
+};
 use crate::components::icon::{Icon, IconName};
 use crate::components::io_menu::{IOMenu, IOMenuItem};
 use crate::components::loading::DashboardLoadingSpinner;
@@ -62,6 +65,14 @@ impl BundleDrawerView {
             Self::Overview => "overview",
             Self::Coverage => "coverage",
             Self::Poam => "poam",
+        }
+    }
+
+    fn from_query(value: Option<&str>) -> Self {
+        match value {
+            Some("coverage") => Self::Coverage,
+            Some("poam") => Self::Poam,
+            _ => Self::Overview,
         }
     }
 }
@@ -130,6 +141,32 @@ fn compliance_route_with_target(route: &str, target: &ComplianceQueryTarget) -> 
     }
 }
 
+fn compliance_target_from_state(
+    bundle: Option<uuid::Uuid>,
+    version: Option<uuid::Uuid>,
+    drawer_open: bool,
+    drawer_view: BundleDrawerView,
+    evidence_system: Option<uuid::Uuid>,
+    policy: Option<uuid::Uuid>,
+    poam: Option<uuid::Uuid>,
+) -> ComplianceQueryTarget {
+    let bundle_scoped = drawer_open || evidence_system.is_some();
+    ComplianceQueryTarget {
+        bundle: bundle_scoped.then_some(bundle).flatten(),
+        version: bundle_scoped.then_some(version).flatten(),
+        system: evidence_system,
+        policy: evidence_system.and(policy),
+        poam,
+        view: if evidence_system.is_some() {
+            Some("evidence".to_string())
+        } else if drawer_open {
+            Some(drawer_view.query_value().to_string())
+        } else {
+            None
+        },
+    }
+}
+
 #[component]
 pub fn ComplianceView(
     bundle: String,
@@ -187,11 +224,8 @@ pub fn ComplianceView(
     let mut coverage_error = use_signal(|| None::<String>);
     let mut coverage_loading = use_signal(|| false);
     let mut coverage_expanded = use_signal(|| false);
-    let mut drawer_view = use_signal(|| match initial_target.view.as_deref() {
-        Some("coverage") => BundleDrawerView::Coverage,
-        Some("poam") => BundleDrawerView::Poam,
-        _ => BundleDrawerView::Overview,
-    });
+    let mut drawer_view =
+        use_signal(|| BundleDrawerView::from_query(initial_target.view.as_deref()));
     let mut revisions_open = use_signal(|| false);
     let mut coverage_gen = use_signal(|| 0u32);
     let mut coverage_requested_version = use_signal(|| None::<uuid::Uuid>);
@@ -221,6 +255,14 @@ pub fn ComplianceView(
     let initial_assignment_scope = initial_target.system;
     let initial_evidence_open = initial_target.view.as_deref() == Some("evidence");
     let mut assignment_scope = use_signal(move || initial_assignment_scope);
+    // Route identity is independent from the evidence request. This preserves
+    // deep links while the request is loading or displaying an error.
+    let mut evidence_route_system = use_signal(move || {
+        initial_evidence_open
+            .then_some(initial_target.system)
+            .flatten()
+    });
+    let mut last_synced_route = use_signal(String::new);
 
     // Compliance opens the same unified policy editor as the policy catalog,
     // for the exact policy version the coverage row refers to.
@@ -349,7 +391,7 @@ pub fn ComplianceView(
                     bundles.set(items);
                     selected_bundle_id.set(selected_id);
                     selected_bundle_version_id.set(selected_version_id);
-                    drawer_open.set(initial_target.bundle.is_some());
+                    drawer_open.set(initial_target.bundle.is_some() && !initial_evidence_open);
                     // loaded = true before the systems fetch so the bundle list
                     // renders immediately; systems has its own loading indicator.
                     loaded.set(true);
@@ -430,6 +472,7 @@ pub fn ComplianceView(
         coverage_expanded.set(false);
         drawer_view.set(BundleDrawerView::Overview);
         evidence.set(None);
+        evidence_route_system.set(None);
         evidence_assignments.set(Vec::new());
         evidence_assignments_error.set(None);
         evidence_error.set(None);
@@ -546,6 +589,8 @@ pub fn ComplianceView(
 
     let mut on_evidence = move |system_id: uuid::Uuid| {
         if let Some(bundle_id) = *selected_bundle_id.read() {
+            drawer_open.set(false);
+            evidence_route_system.set(Some(system_id));
             evidence.set(None);
             evidence_error.set(None);
             evidence_loading.set(true);
@@ -636,24 +681,82 @@ pub fn ComplianceView(
             return;
         }
         let current = router().full_route_string();
-        let evidence_target = evidence.read().as_ref().map(|value| value.system_id);
-        let target = ComplianceQueryTarget {
-            bundle: *selected_bundle_id.read(),
-            version: *selected_bundle_version_id.read(),
-            system: evidence_target,
-            policy: evidence_target.and(*target_policy_id.read()),
-            poam: *open_poam_id.read(),
-            view: if evidence_target.is_some() {
-                Some("evidence".to_string())
-            } else if *drawer_open.read() {
-                Some(drawer_view().query_value().to_string())
+        if !last_synced_route.read().is_empty() && current != last_synced_route() {
+            let incoming = parse_compliance_target(&current);
+            let bundle_id = incoming
+                .bundle
+                .filter(|id| bundles.read().iter().any(|bundle| bundle.id == *id))
+                .or(*selected_bundle_id.read());
+            let version_id = bundle_id.and_then(|bundle_id| {
+                bundles
+                    .read()
+                    .iter()
+                    .find(|bundle| bundle.id == bundle_id)
+                    .and_then(|bundle| {
+                        incoming
+                            .version
+                            .filter(|id| bundle.versions.iter().any(|version| version.id == *id))
+                            .or(bundle.current_published_version_id)
+                            .or(bundle.current_draft_version_id)
+                    })
+            });
+            if bundle_id != *selected_bundle_id.read()
+                || version_id != *selected_bundle_version_id.read()
+            {
+                selected_bundle_id.set(bundle_id);
+                selected_bundle_version_id.set(version_id);
+                if let Some(bundle_id) = bundle_id {
+                    start_systems_fetch(bundle_id, version_id);
+                }
+            }
+            drawer_view.set(BundleDrawerView::from_query(incoming.view.as_deref()));
+            drawer_open
+                .set(incoming.bundle.is_some() && incoming.view.as_deref() != Some("evidence"));
+            open_poam_id.set(incoming.poam);
+            target_policy_id.set(incoming.policy);
+            if incoming.view.as_deref() == Some("evidence") {
+                if let (Some(bundle_id), Some(system_id)) = (bundle_id, incoming.system) {
+                    evidence_route_system.set(Some(system_id));
+                    selected_bundle_id.set(Some(bundle_id));
+                    on_evidence(system_id);
+                }
             } else {
-                None
-            },
-        };
+                evidence_route_system.set(None);
+                if evidence.read().is_some()
+                    || evidence_loading()
+                    || evidence_error.read().is_some()
+                {
+                    evidence_gen += 1;
+                    evidence.set(None);
+                    evidence_error.set(None);
+                    evidence_loading.set(false);
+                    evidence_assignments.set(Vec::new());
+                    evidence_assignments_error.set(None);
+                }
+            }
+            last_synced_route.set(current);
+            return;
+        }
+        let target = compliance_target_from_state(
+            *selected_bundle_id.read(),
+            *selected_bundle_version_id.read(),
+            *drawer_open.read(),
+            drawer_view(),
+            *evidence_route_system.read(),
+            *target_policy_id.read(),
+            *open_poam_id.read(),
+        );
         let next = compliance_route_with_target(&current, &target);
+        if last_synced_route.read().is_empty() {
+            last_synced_route.set(next.clone());
+            if next != current {
+                router().replace(next);
+            }
+            return;
+        }
         if next != current {
-            router().replace(next);
+            last_synced_route.set(next.clone());
+            router().push(next);
         }
     });
 
@@ -823,7 +926,9 @@ pub fn ComplianceView(
                 if *drawer_open.read() && policy_drawer.read().is_none() {
                     if let Some(bundle) = selected_bundle {
                         div { class: "fl-tray-backdrop", onclick: move |_| drawer_open.set(false) }
-                        aside { class: "fl-tray", style: "width:min(900px,96vw);",
+                        aside { id: "compliance-bundle-dialog", class: "fl-tray", role: "dialog", aria_modal: "true", aria_labelledby: "compliance-bundle-drawer-title", tabindex: "-1", style: "width:min(900px,96vw);", onkeydown: move |event| if event.key() == Key::Escape { drawer_open.set(false) },
+                            DialogFocusRestore {}
+                            DialogFocusSentinel { dialog_id: "compliance-bundle-dialog".to_string(), boundary: DialogFocusBoundary::Last }
                             if *drawer_view.read() != BundleDrawerView::Overview {
                                 header { class: "fl-tray-head",
                                     div { style: "display:flex;align-items:center;gap:12px;min-width:0;flex:1;",
@@ -834,20 +939,22 @@ pub fn ComplianceView(
                                             Icon { name: IconName::ArrowLeft, size: 16 }
                                         }
                                         div {
-                                            div { style: "font-size:15px;font-weight:700;", if *drawer_view.read() == BundleDrawerView::Coverage { "Requirement coverage" } else { "Bundle POA&M" } }
+                                            div { id: "compliance-bundle-drawer-title", style: "font-size:15px;font-weight:700;", if *drawer_view.read() == BundleDrawerView::Coverage { "Requirement coverage" } else { "Bundle POA&M" } }
                                             div { style: "font-size:11px;color:var(--cf-text-muted);margin-top:2px;", "{bundle.name}" }
                                         }
                                     }
-                                    button { class: "btn-icon focus-ring", onclick: move |_| drawer_open.set(false), Icon { name: IconName::X, size: 16 } }
+                                    button { class: "btn-icon focus-ring", autofocus: true, aria_label: "Close bundle detail", onclick: move |_| drawer_open.set(false), Icon { name: IconName::X, size: 16 } }
                                 }
                             } else {
                                 header { class: "fl-tray-head",
-                                    div { style: "display:flex;align-items:center;gap:12px;min-width:0;flex:1;", Icon { name: IconName::Shield, size: 18 }, span { style: "font-size:11px;color:var(--cf-text-muted);", "Compliance bundle" } }
+                                    div { style: "display:flex;align-items:center;gap:12px;min-width:0;flex:1;", Icon { name: IconName::Shield, size: 18 }, span { id: "compliance-bundle-drawer-title", style: "font-size:11px;color:var(--cf-text-muted);", "Compliance bundle · {bundle.name}" } }
                                     div { style: "display:flex;gap:6px;",
                                         if is_admin { button { class: "btn btn-ghost focus-ring xs", "data-testid": "compliance-edit-bundle", onclick: move |_| show_edit_bundle.set(true), Icon { name: IconName::Edit, size: 12 }, " Edit bundle" } }
                                         button {
                                             class: "btn-icon focus-ring",
                                             "data-testid": "compliance-drawer-close",
+                                            autofocus: true,
+                                            aria_label: "Close bundle detail",
                                             onclick: move |_| drawer_open.set(false),
                                             Icon { name: IconName::X, size: 16 }
                                         }
@@ -1098,6 +1205,7 @@ pub fn ComplianceView(
                                 }
                             }
                             }
+                            DialogFocusSentinel { dialog_id: "compliance-bundle-dialog".to_string(), boundary: DialogFocusBoundary::First }
                         }
                     }
                 }
@@ -1107,8 +1215,11 @@ pub fn ComplianceView(
         // ── Evidence drawer ────────────────────────────────────────────────
         if *evidence_loading.read() {
             div { class: "fl-tray-backdrop" }
-            aside { class: "fl-tray", "data-testid": "composite-assessment-loading", style: "width:min(480px,96vw);padding:24px;",
+            aside { id: "compliance-evidence-loading-dialog", class: "fl-tray", role: "dialog", aria_modal: "true", aria_label: "Loading compliance evidence", tabindex: "-1", autofocus: true, "data-testid": "composite-assessment-loading", style: "width:min(480px,96vw);padding:24px;",
+                DialogFocusRestore {}
+                DialogFocusSentinel { dialog_id: "compliance-evidence-loading-dialog".to_string(), boundary: DialogFocusBoundary::Last }
                 DashboardLoadingSpinner { label: "Loading composite assessments and evidence…".to_string() }
+                DialogFocusSentinel { dialog_id: "compliance-evidence-loading-dialog".to_string(), boundary: DialogFocusBoundary::First }
             }
         } else if let Some(ev) = evidence.read().as_ref() {
             {
@@ -1169,7 +1280,12 @@ pub fn ComplianceView(
                     }
                     FindingPoamEvent::InvalidateAssessment(_) => {}
                 },
-                on_close: move |_| { evidence.set(None); evidence_error.set(None); target_policy_id.set(None); },
+                on_close: move |_| {
+                    evidence_route_system.set(None);
+                    evidence.set(None);
+                    evidence_error.set(None);
+                    target_policy_id.set(None);
+                },
             } }
             }
         } else if let Some(err) = evidence_error.read().as_ref() {
@@ -1177,17 +1293,32 @@ pub fn ComplianceView(
             // doesn't silently appear to do nothing.
             div {
                 class: "fl-tray-backdrop",
-                onclick: move |_| evidence_error.set(None),
+                onclick: move |_| {
+                    evidence_route_system.set(None);
+                    evidence_error.set(None);
+                },
             }
             aside {
+                id: "compliance-evidence-error-dialog",
                 class: "fl-tray",
+                role: "dialog",
+                aria_modal: "true",
+                aria_labelledby: "compliance-evidence-error-title",
+                tabindex: "-1",
                 "data-testid": "composite-assessment-load-error",
                 style: "width:min(480px,96vw);",
+                DialogFocusRestore {}
+                DialogFocusSentinel { dialog_id: "compliance-evidence-error-dialog".to_string(), boundary: DialogFocusBoundary::Last }
                 header { class: "fl-tray-head",
-                    span { style: "font-weight:600;", "Failed to load evidence" }
+                    span { id: "compliance-evidence-error-title", style: "font-weight:600;", "Failed to load evidence" }
                     button {
                         class: "btn-icon focus-ring",
-                        onclick: move |_| evidence_error.set(None),
+                        autofocus: true,
+                        aria_label: "Close evidence error",
+                        onclick: move |_| {
+                            evidence_route_system.set(None);
+                            evidence_error.set(None);
+                        },
                         Icon { name: IconName::X, size: 16 }
                     }
                 }
@@ -1198,10 +1329,14 @@ pub fn ComplianceView(
                     }
                     button {
                         class: "btn btn-ghost focus-ring",
-                        onclick: move |_| evidence_error.set(None),
+                        onclick: move |_| {
+                            evidence_route_system.set(None);
+                            evidence_error.set(None);
+                        },
                         "Dismiss"
                     }
                 }
+                DialogFocusSentinel { dialog_id: "compliance-evidence-error-dialog".to_string(), boundary: DialogFocusBoundary::First }
             }
         }
 
@@ -1246,8 +1381,15 @@ pub fn ComplianceView(
         }
         if let Some(finding) = ambiguous_finding.read().clone() {
             div { class: "modal-backdrop", onclick: move |_| ambiguous_finding.set(None),
-                div { class: "modal poam-modal", role: "dialog", aria_modal: "true", onclick: |event| event.stop_propagation(),
-                    div { class: "modal-head", h2 { "Choose evidence source" } button { class: "btn-icon focus-ring", onclick: move |_| ambiguous_finding.set(None), Icon { name: IconName::X, size: 16 } } }
+                div { id: "compliance-evidence-source-dialog", class: "modal poam-modal", role: "dialog", aria_modal: "true", aria_labelledby: "compliance-evidence-source-title", tabindex: "-1", onclick: |event| event.stop_propagation(), onkeydown: move |event| {
+                    event.stop_propagation();
+                    if event.key() == Key::Escape {
+                        ambiguous_finding.set(None);
+                    }
+                },
+                    DialogFocusRestore {}
+                    DialogFocusSentinel { dialog_id: "compliance-evidence-source-dialog".to_string(), boundary: DialogFocusBoundary::Last }
+                    div { class: "modal-head", h2 { id: "compliance-evidence-source-title", "Choose evidence source" } button { class: "btn-icon focus-ring", autofocus: true, aria_label: "Close evidence source chooser", onclick: move |_| ambiguous_finding.set(None), Icon { name: IconName::X, size: 16 } } }
                     div { class: "modal-body", style: "display:flex;flex-direction:column;gap:8px;",
                         p { class: "poam-muted", "This finding is retained by more than one exact bundle revision. Choose the source to open; policy text search is not used." }
                         for bundle in bundles.read().iter().filter(|bundle| finding.bundle_ids.contains(&bundle.id)) {
@@ -1277,6 +1419,7 @@ pub fn ComplianceView(
                             }
                         }
                     }
+                    DialogFocusSentinel { dialog_id: "compliance-evidence-source-dialog".to_string(), boundary: DialogFocusBoundary::First }
                 }
             }
         }
@@ -1423,14 +1566,20 @@ pub fn ComplianceView(
                 environments: environments.read().clone(),
                 is_stig_import: *import_mode_stig.read(),
                 on_close: move |_| { show_import_stig.set(false); stig_import_draft.set(load_stig_import_draft()); },
-                on_success: move |_| {
+                on_success: move |imported_version_id: Option<uuid::Uuid>| {
                     clear_stig_import_draft();
                     stig_import_draft.set(None);
                     // Refresh the bundle catalog after a successful import.
                     spawn(async move {
                         if let Ok(items) = fetch_compliance_bundles().await {
-                            let first_id = items.first().map(|b| b.id);
-                            let first_version_id = items.first().and_then(|bundle| {
+                            let imported_bundle = imported_version_id
+                                .and_then(|version_id| items.iter().find(|bundle| {
+                                    bundle.current_published_version_id == Some(version_id)
+                                        || bundle.current_draft_version_id == Some(version_id)
+                                }))
+                                .or_else(|| items.first());
+                            let first_id = imported_bundle.map(|bundle| bundle.id);
+                            let first_version_id = imported_bundle.and_then(|bundle| {
                                 bundle.current_published_version_id.or(bundle.current_draft_version_id)
                             });
                             bundles.set(items);
@@ -2071,6 +2220,7 @@ fn AssignmentCard(props: AssignmentCardProps) -> Element {
     let mut edit_reason = use_signal(|| original_reason.clone());
     let mut edit_busy = use_signal(|| false);
     let mut edit_error = use_signal(|| None::<String>);
+    let mut delete_error = use_signal(|| None::<String>);
     let edits_dirty = *edit_mode.read() != current_mode
         || *edit_exclusions.read() != current_exclusions_text
         || *edit_additions.read() != current_additions_text
@@ -2113,15 +2263,24 @@ fn AssignmentCard(props: AssignmentCardProps) -> Element {
                             let a_id = assignment_id;
                             move |_| {
                                 deleting.set(true);
+                                delete_error.set(None);
                                 spawn(async move {
-                                    let _ = delete_compliance_assignment(&a_id).await;
-                                    assignments.with_mut(|list| list.retain(|a| a.id != a_id));
+                                    match delete_compliance_assignment(&a_id).await {
+                                        Ok(()) => assignments.with_mut(|list| list.retain(|a| a.id != a_id)),
+                                        Err(error) => {
+                                            deleting.set(false);
+                                            delete_error.set(Some(format!("Assignment deactivation failed: {error}")));
+                                        }
+                                    }
                                 });
                             }
                         },
                         if *deleting.read() { "Deactivating…" } else { "Deactivate" }
                     }
                 }
+            }
+            if let Some(error) = delete_error.read().as_ref() {
+                div { class: "alert alert-error", role: "alert", "{error}" }
             }
             div { style: "font-size:10px;color:var(--cf-text-muted);",
                 "scope: {assignment.scope_type}:{assignment.scope_id}"
@@ -2396,6 +2555,7 @@ fn AssignmentListPanel(props: AssignmentListPanelProps) -> Element {
     if !*fetched.read() {
         fetched.set(true);
         loading.set(true);
+        error.set(None);
         let scope_type = props.scope_type.clone();
         let scope_id = props.scope_id;
         spawn(async move {
@@ -2461,6 +2621,21 @@ fn AssignmentListPanel(props: AssignmentListPanelProps) -> Element {
         return rsx! { DashboardLoadingSpinner {} };
     }
 
+    if let Some(message) = error.read().clone() {
+        return rsx! {
+            div { class: "card", style: "padding:10px 14px;display:flex;flex-direction:column;gap:8px;",
+                div { class: "sd-callout sd-callout-danger", role: "alert",
+                    "Could not load assignments for this scope: {message}"
+                }
+                button {
+                    class: "btn btn-ghost xs focus-ring",
+                    onclick: move |_| fetched.set(false),
+                    "Retry assignments"
+                }
+            }
+        };
+    }
+
     let list = assignments.read().clone();
     if list.is_empty() {
         return rsx! {
@@ -2500,10 +2675,17 @@ fn AssignmentListPanel(props: AssignmentListPanelProps) -> Element {
         }
         if let Some(assignment_version_id) = *link_assignment_version.read() {
             div { class: "modal-backdrop", onclick: move |_| if link_pending().is_none() { link_assignment_version.set(None) },
-                div { class: "modal poam-modal", role: "dialog", aria_modal: "true", onclick: |event| event.stop_propagation(),
-                    div { class: "modal-head", div { h2 { "Link POA&M" } p { "Reference exact immutable assignment version {assignment_version_id}." } } button { class: "btn-icon focus-ring", disabled: link_pending().is_some(), onclick: move |_| link_assignment_version.set(None), Icon { name: IconName::X, size: 16 } } }
+                div { id: "assignment-poam-link-dialog", class: "modal poam-modal", role: "dialog", aria_modal: "true", aria_labelledby: "assignment-poam-link-title", tabindex: "-1", onclick: |event| event.stop_propagation(), onkeydown: move |event| {
+                    event.stop_propagation();
+                    if event.key() == Key::Escape && link_pending().is_none() {
+                        link_assignment_version.set(None);
+                    }
+                },
+                    DialogFocusRestore {}
+                    DialogFocusSentinel { dialog_id: "assignment-poam-link-dialog".to_string(), boundary: DialogFocusBoundary::Last }
+                    div { class: "modal-head", div { h2 { id: "assignment-poam-link-title", "Link POA&M" } p { "Reference exact immutable assignment version {assignment_version_id}." } } button { class: "btn-icon focus-ring", aria_label: "Close assignment POA&M link dialog", disabled: link_pending().is_some(), onclick: move |_| link_assignment_version.set(None), Icon { name: IconName::X, size: 16 } } }
                     div { class: "modal-body", style: "display:flex;flex-direction:column;gap:10px;",
-                        div { class: "filter-search poam-search", Icon { name: IconName::Search, size: 12 } input { class: "input focus-ring", "data-testid": "assignment-poam-search", value: "{link_query}", placeholder: "Search active POA&M items by ID, title, or owner", disabled: link_pending().is_some(), oninput: move |event| link_query.set(event.value()) } }
+                        div { class: "filter-search poam-search", Icon { name: IconName::Search, size: 12 } input { class: "input focus-ring", "data-testid": "assignment-poam-search", autofocus: true, value: "{link_query}", placeholder: "Search active POA&M items by ID, title, or owner", disabled: link_pending().is_some(), oninput: move |event| link_query.set(event.value()) } }
                         p { class: "poam-muted", "Search uses the server POA&M list query. Compatibility and assignment-version authorization are decided when the server links the reference." }
                         if *link_loading.read() { div { class: "poam-empty", "Searching active POA&M items…" } }
                         if let Some(error) = link_error.read().as_ref() { div { class: "sd-callout sd-callout-danger", "{error}" } }
@@ -2542,6 +2724,7 @@ fn AssignmentListPanel(props: AssignmentListPanelProps) -> Element {
                             }
                         }
                     }
+                    DialogFocusSentinel { dialog_id: "assignment-poam-link-dialog".to_string(), boundary: DialogFocusBoundary::First }
                 }
             }
         }
@@ -3126,7 +3309,8 @@ fn refined_rules_from_rules(rules: &[StigRule]) -> Vec<RefinedStigRule> {
 struct ImportStigModalProps {
     environments: Vec<EnvironmentSummary>,
     on_close: EventHandler<()>,
-    on_success: EventHandler<()>,
+    /// Selects the imported bundle by its immutable version identity.
+    on_success: EventHandler<Option<uuid::Uuid>>,
     is_stig_import: bool,
 }
 
@@ -3625,10 +3809,11 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                                 };
                                                 match import_xccdf(&file_bytes.read(), "import.xccdf", &plan).await {
                                                     Ok(result) => {
+                                                        let bundle_version_id = result.bundle_version_id;
                                                         committing.set(false);
                                                         import_result.set(Some(result));
                                                         step.set("done".to_string());
-                                                        props.on_success.call(());
+                                                        props.on_success.call(bundle_version_id);
                                                     }
                                                     Err(err) => {
                                                         committing.set(false);
@@ -3935,12 +4120,13 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                     spawn(async move {
                                         match import_xccdf(&bytes, &fname, &plan).await {
                                             Ok(result) => {
+                                                let bundle_version_id = result.bundle_version_id;
                                                 let total = result.created_policy_count + result.reused_policy_versions;
                                                 done_total.set(total as usize);
                                                 import_result.set(Some(result));
                                                 committing.set(false);
                                                 step.set("done".to_string());
-                                                on_success.call(());
+                                                on_success.call(bundle_version_id);
                                             }
                                             Err(err) => {
                                                 committing.set(false);
@@ -4154,11 +4340,12 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                 spawn(async move {
                                     match import_xccdf(&bytes, &filename, &plan).await {
                                         Ok(result) => {
+                                            let bundle_version_id = result.bundle_version_id;
                                             done_total.set((result.created_policy_count + result.reused_policy_versions) as usize);
                                             import_result.set(Some(result));
                                             committing.set(false);
                                             step.set("done".into());
-                                             props.on_success.call(());
+                                             props.on_success.call(bundle_version_id);
                                         }
                                         Err(error) => { committing.set(false); import_error.set(Some(format!("Import failed: {error}"))); }
                                     }
@@ -6045,6 +6232,61 @@ fn toggle_uuid(signal: &mut Signal<Vec<uuid::Uuid>>, id: uuid::Uuid) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compliance_route_target_round_trips_and_preserves_unrelated_query_values() {
+        let bundle = uuid::Uuid::new_v4();
+        let version = uuid::Uuid::new_v4();
+        let system = uuid::Uuid::new_v4();
+        let policy = uuid::Uuid::new_v4();
+        let poam = uuid::Uuid::new_v4();
+        let target = ComplianceQueryTarget {
+            bundle: Some(bundle),
+            version: Some(version),
+            system: Some(system),
+            policy: Some(policy),
+            poam: Some(poam),
+            view: Some("evidence".into()),
+        };
+
+        let route = compliance_route_with_target("/compliance?theme=dark&view=overview", &target);
+        assert!(route.contains("theme=dark"));
+        assert_eq!(parse_compliance_target(&route), target);
+    }
+
+    #[test]
+    fn empty_compliance_target_removes_only_owned_query_values() {
+        let route = compliance_route_with_target(
+            "/compliance?bundle=invalid&view=poam&theme=dark",
+            &ComplianceQueryTarget::default(),
+        );
+
+        assert_eq!(route, "/compliance?theme=dark");
+    }
+
+    #[test]
+    fn evidence_route_state_does_not_depend_on_loaded_evidence() {
+        let bundle = uuid::Uuid::new_v4();
+        let version = uuid::Uuid::new_v4();
+        let system = uuid::Uuid::new_v4();
+        let policy = uuid::Uuid::new_v4();
+
+        let target = compliance_target_from_state(
+            Some(bundle),
+            Some(version),
+            false,
+            BundleDrawerView::Overview,
+            Some(system),
+            Some(policy),
+            None,
+        );
+
+        assert_eq!(target.bundle, Some(bundle));
+        assert_eq!(target.version, Some(version));
+        assert_eq!(target.system, Some(system));
+        assert_eq!(target.policy, Some(policy));
+        assert_eq!(target.view.as_deref(), Some("evidence"));
+    }
 
     #[test]
     fn preserves_all_ordered_preview_check_body_parts() {

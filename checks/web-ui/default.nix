@@ -590,6 +590,11 @@ in pkgs.testers.runNixOSTest {
     # Copy test files and coverage manifest into the VM
     machine.succeed("cp -r ${testDir}/* /tmp/web-ui-tests/")
     machine.succeed("cp ${coverageManifest} /tmp/web-ui-tests/coverage-manifest.json")
+    machine.succeed("cp ${./default.nix} /tmp/web-ui-tests/default.nix")
+    machine.succeed(
+        "env CF_WEB_UI_SOURCE_DIR=/tmp/web-ui-tests CF_UI_STATIC_CONTRACTS=1 "
+        "${pkgs.nodejs}/bin/node /tmp/web-ui-tests/integration-test.js"
+    )
 
     # Design-parity harness inputs: scripts + manifest (read by integration-test.js
     # at /tmp/web-ui-tests/design-parity/manifest.json) and the offline design
@@ -624,10 +629,10 @@ in pkgs.testers.runNixOSTest {
           toString CF_TEST_SERVER_PORT
         } /tmp/screenshots; status=$?; printf \"%s\\n\" \"$status\" > /tmp/web-ui-tests/integration.exit' > /tmp/web-ui-tests/integration.log 2>&1 </dev/null &"
     )
-    machine.wait_until_succeeds(
-        "test -f /tmp/screenshots/results.json -o -f /tmp/screenshots/fatal.json -o -f /tmp/web-ui-tests/integration.exit",
-        timeout=result_timeout,
-    )
+    # The process can write results.json before post-processing finishes. Wait
+    # for the durable exit marker so a late non-zero exit cannot be hidden by
+    # an otherwise valid results artifact.
+    machine.wait_for_file("/tmp/web-ui-tests/integration.exit", timeout=result_timeout)
     output = machine.succeed("cat /tmp/web-ui-tests/integration.log")
     print(output)
 
@@ -672,6 +677,8 @@ in pkgs.testers.runNixOSTest {
             "integration process exited before producing results.json "
             f"(exit code {exit_code})"
         )
+
+    exit_code = machine.succeed("cat /tmp/web-ui-tests/integration.exit").strip()
 
     # Read results
     results_json = machine.succeed("cat /tmp/screenshots/results.json")
@@ -757,8 +764,9 @@ in pkgs.testers.runNixOSTest {
         else:
             print(f"  [{status}] {r['name']}")
 
+    integration_failures = []
     if ok_count == 0:
-        raise Exception("All screenshots failed")
+        integration_failures.append("All screenshots failed")
 
     # Critical workflows must be present and successful. Treating only returned
     # failures as fatal would let profile or manifest drift silently skip them.
@@ -816,10 +824,12 @@ in pkgs.testers.runNixOSTest {
     returned_names = {r.get('name') for r in results}
     missing_critical = [name for name in selected_critical_tests if name not in returned_names]
     if missing_critical:
-        raise Exception(f"Required critical web UI checks were absent: {missing_critical}")
+        integration_failures.append(
+            f"Required critical web UI checks were absent: {missing_critical}"
+        )
     failed_critical = [r['name'] for r in results if r['name'] in selected_critical_tests and not r.get('ok')]
     if failed_critical:
-        raise Exception(f"Critical web UI checks failed: {failed_critical}")
+        integration_failures.append(f"Critical web UI checks failed: {failed_critical}")
 
     # === Phase 4b: Visual Baseline Gate ===
     # Steps marked "strict" in coverage-manifest.json must match their
@@ -827,19 +837,33 @@ in pkgs.testers.runNixOSTest {
     # reported (with diff images in screenshots/diffs) but never block.
     visual_report_json = machine.succeed("cat /tmp/screenshots/visual-report.json")
     visual_report = json.loads(visual_report_json)
-    counts = visual_report.get("counts", {})
+    counts = visual_report.get("counts")
+    required_visual_counts = {"match", "diff", "new", "skipped", "error"}
+    if not isinstance(counts, dict) or not required_visual_counts.issubset(counts):
+        raise Exception("visual-report.json has an invalid counts schema")
+    if any(not isinstance(counts[key], int) or counts[key] < 0 for key in required_visual_counts):
+        raise Exception("visual-report.json contains invalid visual counts")
     print(
         f"  Visual baselines: {counts.get('match', 0)} match, "
         f"{counts.get('diff', 0)} differ, {counts.get('new', 0)} new, "
         f"{counts.get('skipped', 0)} skipped"
     )
-    visual_failures = visual_report.get("failures", [])
+    visual_failures = visual_report.get("failures")
+    if not isinstance(visual_failures, list):
+        raise Exception("visual-report.json has an invalid failures schema")
     if visual_failures:
         for f in visual_failures:
             print(f"  STRICT VISUAL FAIL: {f['name']} ({f['status']})")
-        raise Exception(
+        integration_failures.append(
             f"Strict visual baseline failures: {[f['name'] for f in visual_failures]}"
         )
+
+    if exit_code != "0":
+        integration_failures.append(
+            f"integration process exited non-zero after producing results.json ({exit_code})"
+        )
+    if integration_failures:
+        raise Exception("; ".join(integration_failures))
 
     if not ${if runExportValidation then "True" else "False"}:
         print("=== Focused web UI check complete; export validation skipped ===")

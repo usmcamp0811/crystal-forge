@@ -39,6 +39,9 @@ use crate::api::models::{
 };
 use crate::components::compliance::EvidenceDrawer;
 use crate::components::cve::CvesTab;
+use crate::components::dialog_focus::{
+    DialogFocusBoundary, DialogFocusRestore, DialogFocusSentinel,
+};
 use crate::components::diff::DiffViewer;
 use crate::components::icon::{Icon, IconName};
 use crate::components::layout::Card;
@@ -292,6 +295,20 @@ fn tab_from_query(search: &str) -> Tab {
     }
 }
 
+fn tab_from_route(tab: &str, search: &str) -> Tab {
+    match tab {
+        "deploy" => Tab::Deploy,
+        "history" => Tab::History,
+        "hardening" => Tab::Hardening,
+        "logs" => Tab::Logs,
+        "config" => Tab::Config,
+        "cves" => Tab::Cves,
+        "compliance" => Tab::Compliance,
+        "overview" => Tab::Overview,
+        _ => tab_from_query(search),
+    }
+}
+
 fn query_with_parameter(search: &str, name: &str, value: Option<&str>) -> String {
     let mut parts = search
         .trim_start_matches('?')
@@ -393,16 +410,40 @@ pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
     // (and any tab-specific data loading it triggers) would flash briefly before the
     // effect ever fires, and on the WASM target the effect was observed to land too
     // late to reliably override the initial tab.
-    let mut active_tab = use_signal(|| match tab.as_str() {
-        "deploy" => Tab::Deploy,
-        "history" => Tab::History,
-        "hardening" => Tab::Hardening,
-        "logs" => Tab::Logs,
-        "config" => Tab::Config,
-        "cves" => Tab::Cves,
-        "compliance" => Tab::Compliance,
-        _ => tab_from_query(&current_system_detail_query()),
-    });
+    let initial_route_tab = tab_from_route(&tab, &current_system_detail_query());
+    let mut active_tab = use_signal(|| initial_route_tab);
+    let mut observed_route_tab = use_signal(|| tab.clone());
+    // Router prop updates rerender this component but do not recreate signals.
+    // Reconcile only when the route-owned value changes so local tab clicks,
+    // which update browser history directly, are not reverted.
+    if observed_route_tab.peek().as_str() != tab {
+        observed_route_tab.set(tab.clone());
+        active_tab.set(tab_from_route(&tab, &current_system_detail_query()));
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let popstate_listener = use_hook(|| {
+            let callback = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+                active_tab.set(tab_from_query(&current_system_detail_query()));
+            });
+            if let Some(window) = web_sys::window() {
+                let _ = window.add_event_listener_with_callback(
+                    "popstate",
+                    callback.as_ref().unchecked_ref(),
+                );
+            }
+            Rc::new(callback)
+        });
+        let listener_for_drop = popstate_listener.clone();
+        use_drop(move || {
+            if let Some(window) = web_sys::window() {
+                let _ = window.remove_event_listener_with_callback(
+                    "popstate",
+                    listener_for_drop.as_ref().as_ref().unchecked_ref(),
+                );
+            }
+        });
+    }
     let mut edit_modal_open = use_signal(|| false);
     let mut remove_in_progress = use_signal(|| false);
     let mut remove_error_message: Signal<Option<String>> = use_signal(|| None);
@@ -2154,32 +2195,66 @@ fn ComplianceTab(system: SystemDetail, viewer: bool, initial_poam: String) -> El
                         rsx! {
                             div { class: "fl-tray-backdrop", onclick: move |_| { evidence_generation += 1; evidence_open.set(false); evidence_data.set(None); } }
                             aside {
+                                id: "system-evidence-error-dialog",
                                 class: "fl-tray",
+                                role: "dialog",
+                                aria_modal: "true",
+                                aria_labelledby: "system-evidence-error-title",
+                                tabindex: "-1",
                                 style: "width:min(480px,96vw);padding:24px;",
+                                onkeydown: move |event| {
+                                    event.stop_propagation();
+                                    if event.key() == Key::Escape {
+                                        evidence_generation += 1;
+                                        evidence_open.set(false);
+                                        evidence_data.set(None);
+                                    }
+                                },
+                                DialogFocusRestore {}
+                                DialogFocusSentinel { dialog_id: "system-evidence-error-dialog".to_string(), boundary: DialogFocusBoundary::Last }
                                 div { class: "sd-callout sd-callout-danger",
                                     Icon { name: IconName::Warn, size: 13 }
-                                    div { style: "font-size:12px;", "Failed to load evidence: {error}" }
+                                    div { id: "system-evidence-error-title", style: "font-size:12px;", "Failed to load evidence: {error}" }
                                 }
                                 div { style: "margin-top:14px;text-align:right;",
                                     button {
                                         class: "btn btn-ghost focus-ring",
+                                        autofocus: true,
                                         onclick: move |_| { evidence_generation += 1; evidence_open.set(false); evidence_data.set(None); },
                                         "Close"
                                     }
                                 }
+                                DialogFocusSentinel { dialog_id: "system-evidence-error-dialog".to_string(), boundary: DialogFocusBoundary::First }
                             }
                         }
                     }
                     None => {
                         rsx! {
-                            div { class: "fl-tray-backdrop" }
+                            div { class: "fl-tray-backdrop", onclick: move |_| { evidence_generation += 1; evidence_open.set(false); evidence_data.set(None); } }
                             aside {
+                                id: "system-evidence-loading-dialog",
                                 class: "fl-tray",
+                                role: "dialog",
+                                aria_modal: "true",
+                                aria_label: "Loading compliance evidence",
+                                tabindex: "-1",
+                                autofocus: true,
                                 style: "width:min(480px,96vw);padding:24px;display:flex;align-items:center;justify-content:center;",
+                                onkeydown: move |event| {
+                                    event.stop_propagation();
+                                    if event.key() == Key::Escape {
+                                        evidence_generation += 1;
+                                        evidence_open.set(false);
+                                        evidence_data.set(None);
+                                    }
+                                },
+                                DialogFocusRestore {}
+                                DialogFocusSentinel { dialog_id: "system-evidence-loading-dialog".to_string(), boundary: DialogFocusBoundary::Last }
                                 crate::components::loading::DashboardLoadingSpinner {
                                     label: "Loading evidence…".to_string(),
                                     size: 36,
                                 }
+                                DialogFocusSentinel { dialog_id: "system-evidence-loading-dialog".to_string(), boundary: DialogFocusBoundary::First }
                             }
                         }
                     }
@@ -2188,8 +2263,15 @@ fn ComplianceTab(system: SystemDetail, viewer: bool, initial_poam: String) -> El
 
             if !evidence_choices.read().is_empty() {
                 div { class: "fl-tray-backdrop", onclick: move |_| evidence_choices.set(Vec::new()) }
-                aside { class: "fl-tray", style: "width:min(520px,96vw);padding:24px;",
-                    h2 { style: "font-size:16px;margin:0 0 6px;", "Choose exact evidence context" }
+                aside { id: "system-evidence-context-dialog", class: "fl-tray", role: "dialog", aria_modal: "true", aria_labelledby: "system-evidence-context-title", tabindex: "-1", autofocus: true, style: "width:min(520px,96vw);padding:24px;", onkeydown: move |event| {
+                    event.stop_propagation();
+                    if event.key() == Key::Escape {
+                        evidence_choices.set(Vec::new());
+                    }
+                },
+                    DialogFocusRestore {}
+                    DialogFocusSentinel { dialog_id: "system-evidence-context-dialog".to_string(), boundary: DialogFocusBoundary::Last }
+                    h2 { id: "system-evidence-context-title", style: "font-size:16px;margin:0 0 6px;", "Choose exact evidence context" }
                     p { class: "poam-muted", "This finding belongs to multiple bundle revisions. Select the evidence context to open." }
                     div { class: "poam-picker-list",
                         for target in evidence_choices.read().clone() {
@@ -2220,6 +2302,7 @@ fn ComplianceTab(system: SystemDetail, viewer: bool, initial_poam: String) -> El
                         }
                     }
                     button { class: "btn btn-ghost focus-ring", onclick: move |_| evidence_choices.set(Vec::new()), "Cancel" }
+                    DialogFocusSentinel { dialog_id: "system-evidence-context-dialog".to_string(), boundary: DialogFocusBoundary::First }
                 }
             }
 
@@ -8278,7 +8361,7 @@ mod tests {
     use super::{
         HistoryEventKind, Tab, build_history_events, classify_history_entry,
         map_agent_events_to_logs, map_history_entries_to_commit_history, query_value,
-        query_with_parameter, tab_from_query,
+        query_with_parameter, tab_from_query, tab_from_route,
     };
     use crate::api::models::{SystemAgentEvent, SystemHistoryEntry};
     use chrono::{Duration, Utc};
@@ -8294,6 +8377,14 @@ mod tests {
         assert_eq!(tab_from_query("?tab=cves"), Tab::Cves);
         assert_eq!(tab_from_query("?tab=deployment"), Tab::Overview);
         assert_eq!(tab_from_query("?return=tab%3Ddeploy"), Tab::Overview);
+    }
+
+    #[test]
+    fn route_tab_takes_precedence_and_query_is_the_legacy_fallback() {
+        assert_eq!(tab_from_route("compliance", "?tab=deploy"), Tab::Compliance);
+        assert_eq!(tab_from_route("overview", "?tab=deploy"), Tab::Overview);
+        assert_eq!(tab_from_route("", "?tab=history"), Tab::History);
+        assert_eq!(tab_from_route("unknown", "?tab=cves"), Tab::Cves);
     }
 
     #[test]

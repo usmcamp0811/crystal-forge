@@ -8,6 +8,9 @@ use crate::api::models::{
     ComplianceEvidenceResponse, ComplianceRollupTotals, ComplianceSystemRollup,
     CompositeAssessmentResult,
 };
+use crate::components::dialog_focus::{
+    DialogFocusBoundary, DialogFocusRestore, DialogFocusSentinel,
+};
 use crate::components::icon::{Icon, IconName};
 use crate::components::poam::{
     AssignmentVersionCandidate, FindingPoamBar, FindingPoamContext, FindingPoamEvent,
@@ -419,7 +422,17 @@ pub fn SystemsMatrix(props: SystemsMatrixProps) -> Element {
                              rsx! {
                                  tr {
                                      style: "cursor:pointer;",
+                                     role: "button",
+                                     tabindex: "0",
+                                     aria_label: "Open evidence for {hostname}",
                                      onclick: move |_| props.on_evidence.call(system_id),
+                                     onkeydown: move |event| {
+                                         let key = event.key();
+                                         if key == Key::Enter || matches!(key, Key::Character(ref value) if value == " ") {
+                                             event.prevent_default();
+                                             props.on_evidence.call(system_id);
+                                         }
+                                     },
                                       td {
                                          div { style: "display:flex;align-items:center;gap:8px;",
                                              span {
@@ -750,7 +763,12 @@ pub fn EvidenceDrawer(props: EvidenceDrawerProps) -> Element {
     rsx! {
         div { class: "fl-tray-backdrop", onclick: move |_| props.on_close.call(()) }
         aside {
+            id: "compliance-evidence-dialog",
             class: "fl-tray",
+            role: "dialog",
+            aria_modal: "true",
+            aria_labelledby: "compliance-evidence-title",
+            tabindex: "-1",
             style: "width:min(960px,96vw);",
             onkeydown: move |event| {
                 let visible = visible_control_order(&groups_for_keyboard, &collapsed.read());
@@ -780,6 +798,11 @@ pub fn EvidenceDrawer(props: EvidenceDrawerProps) -> Element {
                     _ => {}
                 }
             },
+            DialogFocusRestore {}
+            DialogFocusSentinel {
+                dialog_id: "compliance-evidence-dialog".to_string(),
+                boundary: DialogFocusBoundary::Last,
+            }
             header {
                 class: "fl-tray-head",
                 div {
@@ -790,7 +813,7 @@ pub fn EvidenceDrawer(props: EvidenceDrawerProps) -> Element {
                     div { style: "min-width:0;",
                         div {
                             style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap;",
-                            span { class: "mono", style: "font-weight:700;font-size:15px;", "{hostname}" }
+                            span { id: "compliance-evidence-title", class: "mono", style: "font-weight:700;font-size:15px;", "{hostname}" }
                             span { style: "font-size:11px;color:var(--cf-text-muted);", "vs" }
                             span { class: "chip chip-info", "{bundle_name}" }
                         }
@@ -823,6 +846,8 @@ pub fn EvidenceDrawer(props: EvidenceDrawerProps) -> Element {
                     }
                     button {
                         class: "btn-icon focus-ring",
+                        autofocus: true,
+                        aria_label: "Close evidence",
                         title: "Close",
                         onclick: move |_| props.on_close.call(()),
                         Icon { name: IconName::X, size: 16 }
@@ -831,7 +856,7 @@ pub fn EvidenceDrawer(props: EvidenceDrawerProps) -> Element {
             }
 
             div {
-                style: "display:grid;grid-template-columns:minmax(0,260px) minmax(0,1fr);flex:1;min-height:0;overflow:hidden;",
+                class: "compliance-evidence-layout",
                 // Left: control nav
                 nav {
                     style: "border-right:1px solid var(--cf-divider);overflow-y:auto;overflow-x:hidden;background:color-mix(in oklab,var(--cf-page-bg) 30%,var(--cf-card-bg));",
@@ -971,6 +996,10 @@ pub fn EvidenceDrawer(props: EvidenceDrawerProps) -> Element {
                         }
                     }
                 }
+            }
+            DialogFocusSentinel {
+                dialog_id: "compliance-evidence-dialog".to_string(),
+                boundary: DialogFocusBoundary::First,
             }
         }
     }

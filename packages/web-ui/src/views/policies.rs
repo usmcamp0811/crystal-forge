@@ -4,6 +4,9 @@ use dioxus::prelude::*;
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::JsCast;
+
 use crate::Route;
 use crate::api::client::{
     bulk_delete_deployment_policies, delete_deployment_policy, export_policy_versions,
@@ -13,6 +16,9 @@ use crate::api::client::{
 use crate::api::models::{
     BulkDeletePoliciesResponse, ComplianceGroupingScheme, PolicyMappingRow,
     PolicyVersionUsageResponse,
+};
+use crate::components::dialog_focus::{
+    DialogFocusBoundary, DialogFocusRestore, DialogFocusSentinel,
 };
 use crate::components::io_menu::{IOMenu, IOMenuItem};
 use crate::components::layout::Card;
@@ -1218,12 +1224,13 @@ pub fn PoliciesView() -> Element {
     }
 }
 
+/// Renders the accessible detail dialog for one policy version.
 #[component]
 pub fn PolicyDrawer(
     policy: PolicyDefinition,
     is_admin: bool,
     initial_revisions: bool,
-    on_close: EventHandler<MouseEvent>,
+    on_close: EventHandler<()>,
     on_export: EventHandler<(PolicyDefinition, String)>,
     on_edit: EventHandler<PolicyDefinition>,
 ) -> Element {
@@ -1258,6 +1265,26 @@ pub fn PolicyDrawer(
     let mut usage_error: Signal<Option<String>> = use_signal(|| None);
     let mut loaded_usage_version: Signal<Option<Uuid>> = use_signal(|| None);
     let mut usage_request_generation = use_signal(|| 0_u64);
+
+    #[cfg(target_arch = "wasm32")]
+    use_effect(|| {
+        spawn(async {
+            gloo_timers::future::TimeoutFuture::new(0).await;
+            let Some(close_button) = web_sys::window()
+                .and_then(|window| window.document())
+                .and_then(|document| {
+                    document
+                        .query_selector("#policy-detail-dialog [aria-label='Close policy detail']")
+                        .ok()
+                        .flatten()
+                })
+                .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok())
+            else {
+                return;
+            };
+            let _ = close_button.focus();
+        });
+    });
 
     use_effect(move || {
         let requested_version = selected_version_id();
@@ -1353,12 +1380,26 @@ pub fn PolicyDrawer(
     rsx! {
         div {
             class: "fl-tray-backdrop",
-            onclick: move |evt| on_close.call(evt),
+            onclick: move |_| on_close.call(()),
         }
         aside {
+            id: "policy-detail-dialog",
             class: "fl-tray",
             role: "dialog",
-            "aria-label": "Policy detail",
+            aria_modal: "true",
+            aria_labelledby: "policy-drawer-title",
+            tabindex: "-1",
+            onkeydown: move |event| {
+                if event.key() == Key::Escape {
+                    event.stop_propagation();
+                    on_close.call(());
+                }
+            },
+            DialogFocusRestore {}
+            DialogFocusSentinel {
+                dialog_id: "policy-detail-dialog".to_string(),
+                boundary: DialogFocusBoundary::Last,
+            }
             header {
                 class: "fl-tray-head",
                 div {
@@ -1370,7 +1411,7 @@ pub fn PolicyDrawer(
                     div { style: "min-width: 0;",
                         div {
                             style: "display: flex; align-items: center; gap: 8px; flex-wrap: wrap;",
-                             span { class: "mono", style: "font-weight: 700; font-size: 15px;", "{displayed_policy.name}" }
+                             span { id: "policy-drawer-title", class: "mono", style: "font-weight: 700; font-size: 15px;", "{displayed_policy.name}" }
                             span {
                                 class: "chip",
                                 style: "color: {category.color()}; background: color-mix(in oklab, {category.color()} 14%, transparent);",
@@ -1477,7 +1518,9 @@ pub fn PolicyDrawer(
                     }
                     button {
                         class: "btn-icon focus-ring",
-                        onclick: move |evt| on_close.call(evt),
+                        autofocus: true,
+                        aria_label: "Close policy detail",
+                        onclick: move |_| on_close.call(()),
                         title: "Close",
                         crate::components::icon::Icon { name: crate::components::icon::IconName::X, size: 16 }
                     }
@@ -1488,8 +1531,11 @@ pub fn PolicyDrawer(
                  div { class: "ed-stat", div { class: "ed-stat-label", "Rules" } div { class: "ed-stat-val", "{rules.len()}" } }
                  div { class: "ed-stat", div { class: "ed-stat-label", "Type" } div { class: "ed-stat-val", style: "font-size:12px;", "{type_display}" } }
                   div { class: "ed-stat", div { class: "ed-stat-label", "Modified" } div { class: "ed-stat-val", style: "font-size:12px;", "{modified_at}" } }
-                   // Owner is the user who created this policy version
-                   if let Some(selected_rev) = selected_revision {
+                   if let Some(origin) = displayed_policy.provenance.first() {
+                       if let Some(display_name) = origin.imported_by_display.as_deref() {
+                           div { class: "ed-stat", div { class: "ed-stat-label", "Imported by" } div { class: "ed-stat-val", style: "font-size:11px;", "{display_name}" } }
+                       }
+                   } else if let Some(selected_rev) = selected_revision {
                        if let Some(display_name) = selected_rev.created_by_display.as_deref() {
                            div { class: "ed-stat", div { class: "ed-stat-label", "Owner" } div { class: "ed-stat-val", style: "font-size:11px;", "{display_name}" } }
                        }
@@ -1687,6 +1733,10 @@ pub fn PolicyDrawer(
                         pre { class: "mono", "{displayed_policy.body}" }
                     }
                 }
+            }
+            DialogFocusSentinel {
+                dialog_id: "policy-detail-dialog".to_string(),
+                boundary: DialogFocusBoundary::First,
             }
         }
     }

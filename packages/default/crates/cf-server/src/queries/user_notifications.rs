@@ -93,11 +93,13 @@ async fn materialize_user_notifications(
     .await?;
     sqlx::query(
         r#"INSERT INTO user_notification_source_cursors(user_id, last_event_id)
-           SELECT p.user_id, COALESCE((
-               SELECT MAX(event.id)
-               FROM user_notification_source_events event
-               WHERE event.occurred_at < p.initialized_at
-           ), 0)
+           SELECT p.user_id, COALESCE(
+               (SELECT MIN(event.id) - 1
+                FROM user_notification_source_events event
+                WHERE event.occurred_at >= p.initialized_at),
+               (SELECT MAX(event.id) FROM user_notification_source_events event),
+               0
+           )
            FROM user_notification_preferences p
            JOIN users u ON u.id = p.user_id
            WHERE u.is_active = TRUE
@@ -955,14 +957,13 @@ mod tests {
 
         sqlx::query(
             "INSERT INTO attention_occurrences
-                (id, category, subject_type, subject_id, source_occurrence_key,
-                 opened_at, last_observed_at)
-             SELECT gen_random_uuid(), 'builds', 'builds', $1 || series::text,
-                    $2 || series::text, NOW(), NOW()
-             FROM generate_series(1, $3::integer) series",
+                 (id, category, subject_type, subject_id, source_occurrence_key,
+                  opened_at, last_observed_at)
+              SELECT gen_random_uuid(), 'builds', 'builds', gen_random_uuid()::text,
+                     $1 || series::text, NOW(), NOW()
+              FROM generate_series(1, $2::integer) series",
         )
         .bind(&fixture_prefix)
-        .bind(format!("bounded-history-key-{fixture_key}-"))
         .bind(expected_count)
         .execute(&pool)
         .await
@@ -978,8 +979,11 @@ mod tests {
         for _ in 0..20 {
             let materialized: i64 = sqlx::query_scalar(
                 "SELECT COUNT(*)
-                 FROM user_notifications
-                 WHERE user_id = $1 AND source_id LIKE $2",
+                 FROM user_notifications notification
+                 JOIN attention_occurrences occurrence
+                   ON occurrence.id=notification.source_occurrence_id
+                 WHERE notification.user_id=$1
+                   AND occurrence.source_occurrence_key LIKE $2",
             )
             .bind(user_id)
             .bind(format!("{fixture_prefix}%"))
@@ -999,8 +1003,11 @@ mod tests {
 
         let materialized: i64 = sqlx::query_scalar(
             "SELECT COUNT(*)
-             FROM user_notifications
-             WHERE user_id = $1 AND source_id LIKE $2",
+             FROM user_notifications notification
+             JOIN attention_occurrences occurrence
+               ON occurrence.id=notification.source_occurrence_id
+             WHERE notification.user_id=$1
+               AND occurrence.source_occurrence_key LIKE $2",
         )
         .bind(user_id)
         .bind(format!("{fixture_prefix}%"))
@@ -1008,6 +1015,64 @@ mod tests {
         .await
         .expect("count final bounded notification history");
         assert_eq!(materialized, i64::from(expected_count));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "runs in the PostgreSQL server-regressions check"]
+    async fn notification_cursor_preserves_eligible_event_before_later_backdated_event(
+        pool: PgPool,
+    ) {
+        let user_id = create_test_user(&pool, "out-of-order-initial-cursor").await;
+        let initialized_at: chrono::DateTime<chrono::Utc> =
+            sqlx::query_scalar("SELECT created_at FROM users WHERE id=$1")
+                .bind(user_id)
+                .fetch_one(&pool)
+                .await
+                .expect("load preference boundary");
+        let eligible_id = Uuid::new_v4();
+        let historical_id = Uuid::new_v4();
+
+        sqlx::query(
+            r#"INSERT INTO attention_occurrences
+                 (id,category,subject_type,subject_id,source_occurrence_key,
+                  opened_at,last_observed_at)
+               VALUES($1,'builds','builds',$2,$3,$4,$4)"#,
+        )
+        .bind(eligible_id)
+        .bind(Uuid::new_v4().to_string())
+        .bind(format!("eligible-before-backfill-{eligible_id}"))
+        .bind(initialized_at + chrono::Duration::seconds(1))
+        .execute(&pool)
+        .await
+        .expect("insert eligible source first");
+        sqlx::query(
+            r#"INSERT INTO attention_occurrences
+                 (id,category,subject_type,subject_id,source_occurrence_key,
+                  opened_at,last_observed_at)
+               VALUES($1,'builds','builds',$2,$3,$4,$4)"#,
+        )
+        .bind(historical_id)
+        .bind(Uuid::new_v4().to_string())
+        .bind(format!("backdated-after-eligible-{historical_id}"))
+        .bind(initialized_at - chrono::Duration::seconds(1))
+        .execute(&pool)
+        .await
+        .expect("insert later backdated source");
+
+        materialize_attention_notifications_for_user(&pool, user_id, false)
+            .await
+            .expect("materialize out-of-order sources");
+
+        let delivered: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT source_occurrence_id FROM user_notifications
+             WHERE user_id=$1 AND source_occurrence_id=ANY($2) ORDER BY source_occurrence_id",
+        )
+        .bind(user_id)
+        .bind(vec![eligible_id, historical_id])
+        .fetch_all(&pool)
+        .await
+        .expect("load boundary notifications");
+        assert_eq!(delivered, vec![eligible_id]);
     }
 
     #[sqlx::test(migrations = "./migrations")]
@@ -1819,6 +1884,94 @@ mod tests {
 
     #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires repository-provided isolated PostgreSQL"]
+    async fn notification_bootstrap_safely_skips_malformed_scoped_subject_ids(pool: PgPool) {
+        let cve_occurrence_id = Uuid::new_v4();
+        let system_occurrence_id = Uuid::new_v4();
+        let poam_occurrence_id = Uuid::new_v4();
+        let missing_system_id = Uuid::new_v4();
+        let missing_poam_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO attention_occurrences(
+                 id,category,subject_type,subject_id,source_occurrence_key,
+                 opened_at,last_observed_at)
+             VALUES
+               ($1,'cves','cve','5',$4,NOW()-INTERVAL '3 seconds',NOW()),
+               ($2,'systems','system',$7,$5,NOW()-INTERVAL '2 seconds',NOW()),
+               ($3,'poams','poam',$8,$6,NOW()-INTERVAL '1 second',NOW())",
+        )
+        .bind(cve_occurrence_id)
+        .bind(system_occurrence_id)
+        .bind(poam_occurrence_id)
+        .bind(format!("numeric-cve-bootstrap-{cve_occurrence_id}"))
+        .bind(format!("malformed-system-bootstrap-{system_occurrence_id}"))
+        .bind(format!("malformed-poam-bootstrap-{poam_occurrence_id}"))
+        .bind(missing_system_id.to_string())
+        .bind(missing_poam_id.to_string())
+        .execute(&pool)
+        .await
+        .expect("insert numeric and scoped notification sources");
+        sqlx::query(
+            "UPDATE attention_occurrences
+             SET subject_id=CASE id WHEN $1 THEN 'not-a-uuid' ELSE 'also-not-a-uuid' END
+             WHERE id=ANY($2)",
+        )
+        .bind(system_occurrence_id)
+        .bind(vec![system_occurrence_id, poam_occurrence_id])
+        .execute(&pool)
+        .await
+        .expect("simulate historical malformed scoped subjects");
+        sqlx::query(
+            "DELETE FROM user_notification_source_events
+             WHERE source_kind='attention_occurrence' AND source_id=ANY($1)",
+        )
+        .bind(vec![
+            cve_occurrence_id,
+            system_occurrence_id,
+            poam_occurrence_id,
+        ])
+        .execute(&pool)
+        .await
+        .expect("simulate sources predating the notification queue");
+        sqlx::query(
+            "UPDATE user_notification_source_bootstrap_state
+             SET completed_at=NULL,cursor_occurred_at=NULL,
+                 cursor_source_kind=NULL,cursor_source_id=NULL
+             WHERE singleton=TRUE",
+        )
+        .execute(&pool)
+        .await
+        .expect("reset the bounded bootstrap cursor");
+
+        let inserted: i64 =
+            sqlx::query_scalar("SELECT backfill_user_notification_source_events(256)")
+                .fetch_one(&pool)
+                .await
+                .expect("bootstrap valid and malformed attention sources");
+        assert_eq!(inserted, 1);
+
+        let (cve_queued, invalid_scoped_queued, completed): (bool, bool, bool) = sqlx::query_as(
+            "SELECT
+                   EXISTS(SELECT 1 FROM user_notification_source_events
+                     WHERE source_kind='attention_occurrence' AND source_id=$1
+                       AND category='critical_cves' AND notification_source_id='5'),
+                   EXISTS(SELECT 1 FROM user_notification_source_events
+                     WHERE source_kind='attention_occurrence' AND source_id=ANY($2)),
+                   EXISTS(SELECT 1 FROM user_notification_source_bootstrap_state
+                     WHERE singleton=TRUE AND completed_at IS NOT NULL
+                       AND cursor_source_id=$1)",
+        )
+        .bind(cve_occurrence_id)
+        .bind(vec![system_occurrence_id, poam_occurrence_id])
+        .fetch_one(&pool)
+        .await
+        .expect("read bounded bootstrap outcome");
+        assert!(cve_queued);
+        assert!(!invalid_scoped_queued);
+        assert!(completed);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires repository-provided isolated PostgreSQL"]
     async fn cleanup_waits_for_historical_source_bootstrap_completion(pool: PgPool) {
         let occurrence_id = Uuid::new_v4();
         sqlx::query(
@@ -1843,6 +1996,17 @@ mod tests {
         .await
         .expect("simulate an unqueued pre-upgrade occurrence");
 
+        let bootstrap_incomplete: bool = sqlx::query_scalar(
+            "SELECT EXISTS(
+               SELECT 1 FROM user_notification_source_bootstrap_state
+               WHERE singleton AND completed_at IS NULL
+             )",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check incomplete bootstrap marker");
+        assert!(bootstrap_incomplete);
+
         let before_bootstrap =
             crate::queries::attention::cleanup(&pool, chrono::Duration::days(30), 1000)
                 .await
@@ -1863,7 +2027,10 @@ mod tests {
                 .expect("bootstrap historical source queue");
         assert_eq!(inserted, 1);
         let completed: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM user_notification_source_bootstrap_state)",
+            "SELECT EXISTS(
+               SELECT 1 FROM user_notification_source_bootstrap_state
+               WHERE singleton AND completed_at IS NOT NULL
+             )",
         )
         .fetch_one(&pool)
         .await

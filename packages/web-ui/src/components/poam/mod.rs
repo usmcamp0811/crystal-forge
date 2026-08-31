@@ -10,6 +10,9 @@ use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 use uuid::Uuid;
 
+use crate::components::dialog_focus::{
+    DialogFocusBoundary, DialogFocusRestore, DialogFocusSentinel,
+};
 use crate::components::icon::{Icon, IconName};
 use crate::views::poam_api::{
     self, ActivityView, AddFindingRequest, AddMilestoneRequest, AddNoteRequest, AssessmentOutcome,
@@ -304,15 +307,22 @@ fn PoamCreateModal(props: PoamCreateModalProps) -> Element {
 
     rsx! {
         div { class: "modal-backdrop", onclick: move |_| if !pending() { close.call(()) },
-            div { class: "modal poam-modal", role: "dialog", aria_modal: "true", tabindex: "-1", onclick: |event| event.stop_propagation(), onkeydown: move |event| if event.key() == Key::Escape && !pending() { close.call(()) },
+            div { id: "poam-create-dialog", class: "modal poam-modal", role: "dialog", aria_modal: "true", aria_labelledby: "poam-create-title", tabindex: "-1", onclick: |event| event.stop_propagation(), onkeydown: move |event| {
+                event.stop_propagation();
+                if event.key() == Key::Escape && !pending() {
+                    close.call(());
+                }
+            },
+                DialogFocusRestore {}
+                DialogFocusSentinel { dialog_id: "poam-create-dialog".to_string(), boundary: DialogFocusBoundary::Last }
                 div { class: "modal-head poam-modal-head",
-                    div { h2 { "Create POA&M" } p { "Track remediation for a known deficiency. The assessment result does not change." } }
+                    div { h2 { id: "poam-create-title", "Create POA&M" } p { "Track remediation for a known deficiency. The assessment result does not change." } }
                     button { class: "btn-icon focus-ring", aria_label: "Close", disabled: pending(), onclick: move |_| close.call(()), Icon { name: IconName::X, size: 16 } }
                 }
                 div { class: "modal-body poam-modal-body",
                     FindingContextPanel { context: props.context.clone() }
                     div { class: "poam-form-grid",
-                        label { class: "field poam-span-all", span { "Title" } input { class: "input focus-ring", value: "{title}", disabled: pending(), oninput: move |event| title.set(event.value()) } }
+                        label { class: "field poam-span-all", span { "Title" } input { class: "input focus-ring", autofocus: true, value: "{title}", disabled: pending(), oninput: move |event| title.set(event.value()) } }
                         label { class: "field", span { "Owner" } input { class: "input focus-ring", value: "{owner}", placeholder: "Responsible team or person", disabled: pending(), oninput: move |event| owner.set(event.value()) } }
                         label { class: "field", span { "Target completion" } input { class: "input focus-ring mono", r#type: "date", value: "{target}", disabled: pending(), oninput: move |event| target.set(event.value()) } }
                         label { class: "field", span { "Risk" } select { class: "input focus-ring", value: "{risk:?}", disabled: pending(), onchange: move |event| risk.set(match event.value().as_str() { "High" => PoamRisk::High, "Low" => PoamRisk::Low, _ => PoamRisk::Medium }), option { value: "High", "CAT I - High" } option { value: "Medium", "CAT II - Medium" } option { value: "Low", "CAT III - Low" } } }
@@ -344,6 +354,7 @@ fn PoamCreateModal(props: PoamCreateModalProps) -> Element {
                         spawn(async move { pending.set(true); match poam_api::create_poam(&request).await { Ok(detail) => on_created.call(detail), Err(err) => { error.set(Some(if err.is_active_remediation() { "This finding already has an active remediation plan. Refresh the finding before retrying.".to_string() } else { api_message(&err) })); pending.set(false); } } });
                     }, if pending() { "Creating..." } else { "Create POA&M" } }
                 }
+                DialogFocusSentinel { dialog_id: "poam-create-dialog".to_string(), boundary: DialogFocusBoundary::First }
             }
         }
     }
@@ -448,9 +459,16 @@ fn PoamLinkExistingModal(props: PoamLinkExistingModalProps) -> Element {
 
     rsx! {
         div { class: "modal-backdrop", onclick: move |_| if pending().is_none() { close.call(()) },
-            div { class: "modal poam-modal poam-link-modal", role: "dialog", aria_modal: "true", tabindex: "-1", onclick: |event| event.stop_propagation(), onkeydown: move |event| if event.key() == Key::Escape && pending().is_none() { close.call(()) },
+            div { id: "poam-link-dialog", class: "modal poam-modal poam-link-modal", role: "dialog", aria_modal: "true", aria_labelledby: "poam-link-title", tabindex: "-1", onclick: |event| event.stop_propagation(), onkeydown: move |event| {
+                event.stop_propagation();
+                if event.key() == Key::Escape && pending().is_none() {
+                    close.call(());
+                }
+            },
+                DialogFocusRestore {}
+                DialogFocusSentinel { dialog_id: "poam-link-dialog".to_string(), boundary: DialogFocusBoundary::Last }
                 div { class: "modal-head poam-modal-head",
-                    div { h2 { "Link existing POA&M" } p { "Only server-confirmed compatible remediation plans are shown for {props.context.hostname} / {props.context.policy_name}." } }
+                    div { h2 { id: "poam-link-title", "Link existing POA&M" } p { "Only server-confirmed compatible remediation plans are shown for {props.context.hostname} / {props.context.policy_name}." } }
                     button { class: "btn-icon focus-ring", aria_label: "Close", disabled: pending().is_some(), onclick: move |_| close.call(()), Icon { name: IconName::X, size: 16 } }
                 }
                 div { class: "modal-body poam-modal-body",
@@ -478,6 +496,7 @@ fn PoamLinkExistingModal(props: PoamLinkExistingModalProps) -> Element {
                         }
                     }
                 }
+                DialogFocusSentinel { dialog_id: "poam-link-dialog".to_string(), boundary: DialogFocusBoundary::First }
             }
         }
     }
@@ -780,6 +799,12 @@ pub fn PoamDetailTray(props: PoamDetailTrayProps) -> Element {
         .iter()
         .filter(|item| item.completed_at.is_some())
         .count();
+    let active_findings = detail
+        .findings
+        .iter()
+        .filter(|finding| finding.link_active)
+        .cloned()
+        .collect::<Vec<_>>();
     let progress = if detail.milestones.is_empty() {
         0
     } else {
@@ -858,10 +883,12 @@ pub fn PoamDetailTray(props: PoamDetailTrayProps) -> Element {
 
     rsx! {
         div { class: "poam-tray-backdrop", onclick: move |_| if busy().is_none() { close.call(()) } }
-        aside { class: "poam-tray", role: "dialog", aria_modal: "true", tabindex: "-1", "data-testid": "poam-detail", "data-poam-id": "{detail.poam.id}", "data-poam-revision": "{detail.poam.revision}", onkeydown: move |event| if event.key() == Key::Escape && busy().is_none() { close.call(()) },
+        aside { id: "poam-detail-dialog", class: "poam-tray", role: "dialog", aria_modal: "true", aria_labelledby: "poam-detail-title", tabindex: "-1", "data-testid": "poam-detail", "data-poam-id": "{detail.poam.id}", "data-poam-revision": "{detail.poam.revision}", onkeydown: move |event| if event.key() == Key::Escape && busy().is_none() { close.call(()) },
+            DialogFocusRestore {}
+            DialogFocusSentinel { dialog_id: "poam-detail-dialog".to_string(), boundary: DialogFocusBoundary::Last }
             header { class: "poam-tray-head",
-                div { class: "poam-tray-title", Icon { name: IconName::Gear, size: 18 } div { div { class: "poam-title-line", span { class: "mono poam-human-id", "{detail.poam.human_id}" } StatusChip { poam: detail.poam.clone() } RiskChip { risk: detail.poam.risk } } p { "{detail.poam.title}" } } }
-                button { class: "btn-icon focus-ring", aria_label: "Close", disabled: busy().is_some(), onclick: move |_| close.call(()), Icon { name: IconName::X, size: 16 } }
+                div { class: "poam-tray-title", Icon { name: IconName::Gear, size: 18 } div { div { id: "poam-detail-title", class: "poam-title-line", span { class: "mono poam-human-id", "{detail.poam.human_id}" } StatusChip { poam: detail.poam.clone() } RiskChip { risk: detail.poam.risk } } p { "{detail.poam.title}" } } }
+                button { class: "btn-icon focus-ring", autofocus: true, aria_label: "Close", disabled: busy().is_some(), onclick: move |_| close.call(()), Icon { name: IconName::X, size: 16 } }
             }
             div { class: "poam-tray-scroll",
                 if let Some(text) = message() { div { class: "poam-tray-alert sd-callout sd-callout-warn", Icon { name: IconName::Warn, size: 13 } div { "{text}" } } }
@@ -887,10 +914,10 @@ pub fn PoamDetailTray(props: PoamDetailTrayProps) -> Element {
                 }
                 LifecycleSection { detail: detail.clone(), readonly, close_details: close_details(), verification_loading: history_loading() == Some(HistoryPageKind::Verification), on_load_more_verification: move |_| if let Some(query) = verification_page_query.clone() { load_more(HistoryPageKind::Verification, query); }, on_transition: move |status| { let request = TransitionPoamRequest { revision, status, note: None }; busy.set(Some("Changing status".to_string())); spawn(async move { match poam_api::transition_poam(props.poam_id, &request).await { Ok(next) => reconcile(next), Err(err) => handle_error("changing status", err) } }); }, on_verify: move |_| { let request = RevisionRequest { revision }; busy.set(Some("Verifying".to_string())); spawn(async move { match poam_api::verify_poam(props.poam_id, &request).await { Ok(_) => { busy.set(None); load(true); }, Err(err) => handle_error("verifying remediation", err) } }); }, on_close: move |_| { let request = RevisionRequest { revision }; busy.set(Some("Closing".to_string())); spawn(async move { match poam_api::close_poam(props.poam_id, &request).await { Ok(next) => reconcile(next), Err(err) => handle_error("closing", err) } }); }, on_reopen: move |_| { let request = RevisionRequest { revision }; busy.set(Some("Reopening".to_string())); spawn(async move { match poam_api::reopen_poam(props.poam_id, &request).await { Ok(next) => reconcile(next), Err(err) => handle_error("reopening", err) } }); } }
                 section { class: "poam-tray-section",
-                    header { h3 { "Linked findings · {detail.findings.len()}" } button { class: "btn btn-ghost xs focus-ring", disabled: readonly, onclick: move |_| finding_picker.toggle(), Icon { name: IconName::Link, size: 11 } "Link finding" } }
-                    if detail.findings.is_empty() { div { class: "poam-empty", "No findings are linked." } }
+                    header { h3 { "Linked findings · {active_findings.len()}" } button { class: "btn btn-ghost xs focus-ring", disabled: readonly, onclick: move |_| finding_picker.toggle(), Icon { name: IconName::Link, size: 11 } "Link finding" } }
+                    if active_findings.is_empty() { div { class: "poam-empty", "No findings are linked." } }
                     div { class: "poam-table-wrap", table { class: "sys-table compact sys-table-dense poam-findings-table", thead { tr { th { "Host" } th { "Policy" } th { "Current result" } th { "Actions" } } } tbody {
-                        for finding in detail.findings.clone() { { let finding_for_navigation = finding.clone(); let finding_id = finding.id; rsx! { tr { key: "{finding.link_id}", "data-testid": "poam-linked-finding", "data-finding-id": "{finding.id}", td { class: "mono", "{finding.hostname}" } td { "{finding.policy_name}" } td { span { class: "poam-chip {result_class(finding.resolution_state)}", "{result_label(finding.resolution_state)}" } } td { class: "poam-row-actions", button { class: "btn btn-ghost xs focus-ring", onclick: move |_| props.on_open_finding.call(finding_for_navigation.clone()), "Evidence" } button { class: "btn-icon focus-ring", title: "Unlink finding", disabled: readonly, onclick: move |_| { busy.set(Some("Unlinking finding".to_string())); spawn(async move { match poam_api::unlink_poam_finding(props.poam_id, finding_id, revision).await { Ok(next) => reconcile(next), Err(err) => handle_error("unlinking finding", err) } }); }, Icon { name: IconName::X, size: 12 } } } } } } }
+                        for finding in active_findings.clone() { { let finding_for_navigation = finding.clone(); let finding_id = finding.id; rsx! { tr { key: "{finding.link_id}", "data-testid": "poam-linked-finding", "data-finding-id": "{finding.id}", td { class: "mono", "{finding.hostname}" } td { "{finding.policy_name}" } td { span { class: "poam-chip {result_class(finding.resolution_state)}", "{result_label(finding.resolution_state)}" } } td { class: "poam-row-actions", button { class: "btn btn-ghost xs focus-ring", onclick: move |_| props.on_open_finding.call(finding_for_navigation.clone()), "Evidence" } button { class: "btn-icon focus-ring", title: "Unlink finding", disabled: readonly, onclick: move |_| { busy.set(Some("Unlinking finding".to_string())); spawn(async move { match poam_api::unlink_poam_finding(props.poam_id, finding_id, revision).await { Ok(next) => reconcile(next), Err(err) => handle_error("unlinking finding", err) } }); }, Icon { name: IconName::X, size: 12 } } } } } } }
                     } } }
                     if detail.findings_has_more { button { class: "btn btn-ghost focus-ring", "data-testid": "poam-load-more-findings", disabled: history_loading().is_some(), onclick: move |_| if let Some(query) = finding_page_query.clone() { load_more(HistoryPageKind::Findings, query); }, if history_loading() == Some(HistoryPageKind::Findings) { "Loading…" } else { "Load more findings" } } }
                     if finding_picker() {
@@ -939,12 +966,13 @@ pub fn PoamDetailTray(props: PoamDetailTrayProps) -> Element {
                 MilestonesSection { milestones: detail.milestones.clone(), drafts: milestone_drafts, new_title: milestone_title, new_target: milestone_target, readonly, on_add: move |values: (String, String)| { let (new_title, new_target) = values; let Ok(target_date) = NaiveDate::parse_from_str(&new_target, "%Y-%m-%d") else { message.set(Some("Enter a valid milestone target date.".to_string())); return; }; let request = AddMilestoneRequest { revision, title: new_title, target_date }; busy.set(Some("Adding milestone".to_string())); spawn(async move { match poam_api::add_poam_milestone(props.poam_id, &request).await { Ok(next) => { milestone_title.set(String::new()); milestone_target.set(String::new()); reconcile(next); }, Err(err) => handle_error("adding milestone", err) } }); }, on_update: move |values: (Uuid, MilestoneDraft, Option<bool>)| { let (id, draft, completed) = values; let Ok(target_date) = NaiveDate::parse_from_str(&draft.target, "%Y-%m-%d") else { message.set(Some("Enter a valid milestone target date.".to_string())); return; }; let request = UpdateMilestoneRequest { revision, title: Some(draft.title), target_date: Some(target_date), completed }; busy.set(Some("Updating milestone".to_string())); spawn(async move { match poam_api::update_poam_milestone(props.poam_id, id, &request).await { Ok(next) => reconcile(next), Err(err) => handle_error("updating milestone", err) } }); }, on_remove: move |id| { busy.set(Some("Removing milestone".to_string())); spawn(async move { match poam_api::remove_poam_milestone(props.poam_id, id, revision).await { Ok(next) => reconcile(next), Err(err) => handle_error("removing milestone", err) } }); } }
                 section { class: "poam-tray-section", header { h3 { "Activity" } } ActivityList { activity: detail.activity.clone() } if detail.activity_has_more { button { class: "btn btn-ghost focus-ring", "data-testid": "poam-load-more-activity", disabled: history_loading().is_some(), onclick: move |_| if let Some(query) = activity_page_query.clone() { load_more(HistoryPageKind::Activity, query); }, if history_loading() == Some(HistoryPageKind::Activity) { "Loading…" } else { "Load more activity" } } } div { class: "poam-note-form", input { class: "input focus-ring", value: "{note}", placeholder: "Add a durable note", disabled: readonly, oninput: move |event| note.set(event.value()) } button { class: "btn btn-ghost focus-ring", disabled: readonly || note.read().trim().is_empty(), onclick: move |_| { let request = AddNoteRequest { revision, text: note.read().trim().to_string() }; busy.set(Some("Adding note".to_string())); spawn(async move { match poam_api::add_poam_note(props.poam_id, &request).await { Ok(next) => { note.set(String::new()); reconcile(next); }, Err(err) => handle_error("adding note", err) } }); }, "Add note" } } }
             }
+            DialogFocusSentinel { dialog_id: "poam-detail-dialog".to_string(), boundary: DialogFocusBoundary::First }
         }
     }
 }
 
 fn tray_shell(on_close: EventHandler<()>, content: Element) -> Element {
-    rsx! { div { class: "poam-tray-backdrop", onclick: move |_| on_close.call(()) } aside { class: "poam-tray", role: "dialog", aria_modal: "true", header { class: "poam-tray-head", strong { "POA&M" } button { class: "btn-icon focus-ring", onclick: move |_| on_close.call(()), Icon { name: IconName::X, size: 16 } } } {content} } }
+    rsx! { div { class: "poam-tray-backdrop", onclick: move |_| on_close.call(()) } aside { id: "poam-state-dialog", class: "poam-tray", role: "dialog", aria_modal: "true", aria_label: "POA&M detail", tabindex: "-1", onkeydown: move |event| if event.key() == Key::Escape { on_close.call(()) }, DialogFocusRestore {} DialogFocusSentinel { dialog_id: "poam-state-dialog".to_string(), boundary: DialogFocusBoundary::Last } header { class: "poam-tray-head", strong { "POA&M" } button { class: "btn-icon focus-ring", autofocus: true, aria_label: "Close", onclick: move |_| on_close.call(()), Icon { name: IconName::X, size: 16 } } } {content} DialogFocusSentinel { dialog_id: "poam-state-dialog".to_string(), boundary: DialogFocusBoundary::First } } }
 }
 
 #[derive(Props, Clone, PartialEq)]
@@ -1078,7 +1106,7 @@ pub fn PoamTable(props: PoamTableProps) -> Element {
     if props.items.is_empty() {
         return rsx! { div { class: "poam-empty", "{props.empty_note}" } };
     }
-    rsx! { div { class: "poam-table-wrap", table { class: "sys-table compact sys-table-dense poam-table", thead { tr { th { "POA&M" } th { "Title" } th { "Risk" } th { "Status" } th { "Owner" } th { "Due" } } } tbody { for item in props.items { tr { key: "{item.id}", tabindex: "0", "data-testid": "poam-row", "data-poam-id": "{item.id}", onclick: move |_| props.on_open.call(item.id), onkeydown: move |event| { let key = event.key(); if key == Key::Enter || matches!(key, Key::Character(ref value) if value == " ") { props.on_open.call(item.id); } }, td { class: "mono poam-human-id", "{item.human_id}" } td { strong { "{item.title}" } small { "{item.finding_count} linked findings" } } td { RiskChip { risk: item.risk } } td { StatusChip { poam: item.clone() } } td { "{item.owner}" } td { class: if item.overdue { "mono poam-overdue" } else { "mono" }, "{format_date(item.target_date)}" } } } } } } }
+    rsx! { div { class: "poam-table-wrap", table { class: "sys-table compact sys-table-dense poam-table", thead { tr { th { "POA&M" } th { "Title" } th { "Risk" } th { "Status" } th { "Owner" } th { "Due" } } } tbody { for item in props.items { tr { key: "{item.id}", role: "button", tabindex: "0", aria_label: "Open {item.human_id}: {item.title}", "data-testid": "poam-row", "data-poam-id": "{item.id}", "data-poam-human-id": "{item.human_id}", onclick: move |_| props.on_open.call(item.id), onkeydown: move |event| { let key = event.key(); if key == Key::Enter || matches!(key, Key::Character(ref value) if value == " ") { event.prevent_default(); props.on_open.call(item.id); } }, td { class: "mono poam-human-id", "{item.human_id}" } td { strong { "{item.title}" } small { "{item.finding_count} linked findings" } } td { RiskChip { risk: item.risk } } td { StatusChip { poam: item.clone() } } td { "{item.owner}" } td { class: if item.overdue { "mono poam-overdue" } else { "mono" }, "{format_date(item.target_date)}" } } } } } } }
 }
 
 #[derive(Props, Clone, PartialEq)]

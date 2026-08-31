@@ -169,8 +169,13 @@ pub struct AssignmentReferenceRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct CreateWaiverRequest {
+    /// Identifies the stable finding receiving the waiver.
     pub finding_id: Uuid,
-    pub assessment_id: Uuid,
+    /// Identifies composite evidence, when the finding came from a composite assessment.
+    pub assessment_id: Option<Uuid>,
+    /// Identifies source-neutral evidence, when the finding came from a legacy policy result.
+    pub observation: Option<FindingObservationReference>,
+    /// Explains why the observed failure can be accepted.
     pub justification: String,
 }
 
@@ -217,7 +222,7 @@ pub struct WaiverView {
     pub status: String,
     pub justification: String,
     pub policy_version_id: Uuid,
-    pub assessment_id: Uuid,
+    pub assessment_id: Option<Uuid>,
     pub observation_token: String,
     pub observation_snapshot: serde_json::Value,
     pub accepted_by: Option<Uuid>,
@@ -304,12 +309,20 @@ pub struct FindingPoamRelationship {
     pub finding_id: Uuid,
     pub active_poam: Option<PoamSummary>,
     pub historical_poams: Vec<PoamSummary>,
+    /// Indicates that another historical page is available.
+    pub historical_has_more: bool,
+    /// Provides the offset for the next historical page.
+    pub historical_next_offset: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AssignmentPoamRelationship {
     pub assignment_version_id: Uuid,
     pub poams: Vec<PoamSummary>,
+    /// Indicates that another related-POA&M page is available.
+    pub poams_has_more: bool,
+    /// Provides the offset for the next related-POA&M page.
+    pub poams_next_offset: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]

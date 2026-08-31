@@ -675,12 +675,23 @@ pub async fn list_bundle_version_policy_membership(
     Ok(Some(members))
 }
 
-/// Return immutable bundle membership and assignment-resolved system usage for
-/// one exact policy version. Bundle membership and effective usage are kept
-/// separate because assignment overlays can exclude or add policy versions.
+/// Returns immutable bundle membership and assignment-resolved system usage for
+/// one exact policy version.
+///
+/// Bundle membership and effective usage are kept separate because assignment
+/// overlays can exclude or add policy versions. `visible_environment_ids`
+/// restricts system usage to those environments. `None` grants fleet-wide
+/// visibility and is reserved for administrators; `Some(&[])` returns no
+/// systems.
+///
+/// # Errors
+///
+/// Returns an error when policy existence, bundle usage, assignment candidates,
+/// or effective policy resolution cannot be loaded from PostgreSQL.
 pub async fn load_policy_version_usage(
     pool: &PgPool,
     policy_version_id: Uuid,
+    visible_environment_ids: Option<&[Uuid]>,
 ) -> Result<Option<PolicyVersionUsageResponse>> {
     let policy_version_exists = sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS(SELECT 1 FROM deployment_policy_versions WHERE id = $1)",
@@ -769,10 +780,12 @@ pub async fn load_policy_version_usage(
              (a.scope_type = 'system' AND a.system_id = s.id)
              OR (a.scope_type = 'environment' AND a.environment_id = s.environment_id)
         LEFT JOIN environments e ON e.id = s.environment_id
+        WHERE $2::uuid[] IS NULL OR s.environment_id = ANY($2)
         ORDER BY b.name, bv.version, s.hostname, s.id
         "#,
     )
     .bind(policy_version_id)
+    .bind(visible_environment_ids)
     .fetch_all(pool)
     .await
     .context("load exact policy-version system candidates")?;

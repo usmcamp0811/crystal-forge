@@ -50,6 +50,7 @@ pub fn PolicyCard(
     };
     let opacity = if enabled { "1" } else { "0.72" };
     let policy_for_open = policy.clone();
+    let policy_for_keyboard = policy.clone();
     let policy_for_edit = policy.clone();
     let policy_id = policy.id;
     let policy_for_revisions = policy.clone();
@@ -57,6 +58,9 @@ pub fn PolicyCard(
     rsx! {
         div {
             class: "sys-card",
+            role: "button",
+            tabindex: "0",
+            aria_label: if selection_mode { format!("Select {}", policy.name) } else { format!("Open {}", policy.name) },
             onclick: move |evt| {
                 if selection_mode
                     || evt.modifiers().shift()
@@ -66,6 +70,17 @@ pub fn PolicyCard(
                     on_row_click.call(evt);
                 } else {
                     on_open.call(policy_for_open.clone());
+                }
+            },
+            onkeydown: move |event| {
+                let key = event.key();
+                if key == Key::Enter || matches!(key, Key::Character(ref value) if value == " ") {
+                    event.prevent_default();
+                    if selection_mode {
+                        on_toggle_select.call(!selected);
+                    } else {
+                        on_open.call(policy_for_keyboard.clone());
+                    }
                 }
             },
             style: if highlighted {
@@ -88,6 +103,7 @@ pub fn PolicyCard(
                                 checked: selected,
                                 aria_label: "Select {policy.name} for export",
                                 onclick: move |event| event.stop_propagation(),
+                                onkeydown: move |event| event.stop_propagation(),
                                 onchange: move |event| on_toggle_select.call(event.checked()),
                             }
                         }
@@ -125,7 +141,7 @@ pub fn PolicyCard(
                 div { style: "font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--cf-text-muted);font-weight:600;margin-bottom:6px;", "Rules" }
                 div { class: "flex flex-col gap-1.5",
                     if rules.is_empty() {
-                        div { class: "text-[11px] italic text-gray-500", "No automated rules — operator approves directly." }
+                        div { class: "text-[11px] italic text-gray-500", "No enforcement defined." }
                     } else {
                         for rule in rules.iter() {
                             div { class: "flex items-start gap-2", style: "font-size:11px;color:var(--cf-text-primary);",
@@ -185,6 +201,7 @@ pub fn PolicyCard(
                                 evt.stop_propagation();
                                 on_edit.call(policy_for_edit.clone());
                             },
+                            onkeydown: move |event| event.stop_propagation(),
                             Icon { name: IconName::Gear, size: 12 } "Edit"
                         }
                         button {
@@ -194,6 +211,7 @@ pub fn PolicyCard(
                                 evt.stop_propagation();
                                 on_delete.call(policy_id);
                             },
+                            onkeydown: move |event| event.stop_propagation(),
                             "Delete"
                         }
                     }
@@ -208,6 +226,7 @@ pub fn PolicyCard(
                         event.stop_propagation();
                         on_open_revisions.call(policy_for_revisions.clone());
                     },
+                    onkeydown: move |event| event.stop_propagation(),
                     span { "{policy.revisions.len()} revisions" }
                     span { "›" }
                 }

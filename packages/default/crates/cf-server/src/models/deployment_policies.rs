@@ -3001,6 +3001,10 @@ in {{ {fields} }}"#
             );
             assert_eq!(actual.phase, EnforcementPhase::Evaluation);
             assert!(actual.evidence["metadata_key"].as_str().is_some());
+            assert_eq!(
+                actual.blocking,
+                *expected_outcome != EnforcementOutcome::Pass
+            );
         }
         assert_eq!(
             persisted["assigned"][policy_id.to_string()]["rule_outcomes"]
@@ -3041,6 +3045,13 @@ in {{ {fields} }}"#
                 missing_outcome.outcome,
                 EnforcementOutcome::Error,
                 "AC3 error/missing evidence [{kind}]"
+            );
+            assert_eq!(missing_outcome.phase, EnforcementPhase::Evaluation);
+            assert!(missing_outcome.blocking);
+            assert_eq!(
+                missing_outcome.evidence["metadata_key"],
+                composite_rule_result_key(&policy_id, id),
+                "AC3 missing-evidence identity [{kind}]"
             );
         }
     }
@@ -3296,6 +3307,8 @@ in {{ {fields} }}"#
             .unwrap();
             let result = &check.assigned_results[&policy_id].composite_outcomes[0];
             assert_eq!(result.outcome, outcome, "{metadata}");
+            assert_eq!(result.phase, EnforcementPhase::Evaluation);
+            assert_eq!(result.blocking, outcome != EnforcementOutcome::Pass);
             assert_eq!(
                 result.evidence["expected_revision"],
                 serde_json::json!(expected)
@@ -3325,6 +3338,19 @@ in {{ {fields} }}"#
                 },
             },
         };
+        let passed = PolicyCheckResult::from_assigned(
+            "host".to_string(),
+            &serde_json::json!({"cfAgentEnabled": true}),
+            std::slice::from_ref(&assigned),
+        )
+        .expect("successful evaluator metadata must produce eval_passed evidence");
+        let passed = &passed.assigned_results[&policy_id].composite_outcomes[0];
+        assert_eq!(passed.rule_id, rule_id);
+        assert_eq!(passed.phase, EnforcementPhase::Evaluation);
+        assert_eq!(passed.outcome, EnforcementOutcome::Pass);
+        assert!(!passed.blocking);
+        assert_eq!(passed.evidence["configuration"], "host");
+
         for (terminal, expected) in [
             (
                 EvaluationTerminalOutcome::ConfirmedFailure,
@@ -3348,6 +3374,16 @@ in {{ {fields} }}"#
                 .expect("exact policy version ID must be retained");
             assert_eq!(result.composite_outcomes[0].rule_id, rule_id);
             assert_eq!(result.composite_outcomes[0].outcome, expected);
+            assert_eq!(
+                result.composite_outcomes[0].phase,
+                EnforcementPhase::Evaluation
+            );
+            assert!(result.composite_outcomes[0].blocking);
+            assert!(
+                result.composite_outcomes[0].evidence["terminal_outcome"]
+                    .as_str()
+                    .is_some()
+            );
         }
     }
 

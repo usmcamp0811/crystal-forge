@@ -29,6 +29,7 @@ pub mod charts;
 pub mod compliance;
 pub mod cve;
 pub mod dashboard;
+pub(crate) mod dialog_focus;
 pub mod diff;
 pub mod environments;
 pub mod eval_log_modal;

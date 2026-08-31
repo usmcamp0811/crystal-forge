@@ -325,6 +325,95 @@ async fn legacy_fail_can_create_poam_without_fabricating_composite_assessment(po
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn legacy_fail_can_close_with_observation_bound_accepted_waiver(pool: PgPool) {
+    let (fixture, finding_id, observation, persisted_result) = legacy_fail_fixture(&pool).await;
+    let actor = admin_actor(fixture.user_id);
+    let clock = FixedClock(Utc.with_ymd_and_hms(2026, 8, 30, 12, 0, 0).unwrap());
+    let created = poam_service::create(
+        &pool,
+        &actor,
+        legacy_create_request(finding_id, observation.clone()),
+        &clock,
+    )
+    .await
+    .unwrap();
+    let waiver = poam_service::create_waiver(
+        &pool,
+        &actor,
+        CreateWaiverRequest {
+            finding_id,
+            assessment_id: None,
+            observation: Some(observation),
+            justification: "Legacy remediation is accepted until replacement".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let waiver_id = Uuid::parse_str(waiver["waiver_id"].as_str().unwrap()).unwrap();
+    poam_service::decide_waiver(
+        &pool,
+        &actor,
+        waiver_id,
+        WaiverDecisionRequest {
+            status: WaiverDecision::Accepted,
+            expires_at: None,
+        },
+        &clock,
+    )
+    .await
+    .unwrap();
+    let awaiting = poam_service::transition(
+        &pool,
+        &actor,
+        created.poam.id,
+        TransitionPoamRequest {
+            revision: created.poam.revision,
+            status: PoamStatus::AwaitingVerification,
+            note: Some("Legacy risk acceptance is ready for verification".into()),
+        },
+        &clock,
+    )
+    .await
+    .unwrap();
+    let verified = poam_service::verify(
+        &pool,
+        &actor,
+        created.poam.id,
+        awaiting.poam.revision,
+        &clock,
+    )
+    .await
+    .unwrap();
+    assert_eq!(verified["outcome"], "accepted");
+    assert_eq!(verified["items"][0]["result"], "waiver");
+    assert!(verified["items"][0]["assessment_id"].is_null());
+    let closed = poam_service::close(
+        &pool,
+        &actor,
+        created.poam.id,
+        verified["revision"].as_i64().unwrap(),
+        &clock,
+    )
+    .await
+    .unwrap();
+    assert_eq!(closed.poam.status, "completed");
+    let stored_assessment: Option<Uuid> =
+        sqlx::query_scalar("SELECT assessment_id FROM finding_waivers WHERE id=$1")
+            .bind(waiver_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(stored_assessment.is_none());
+    let result_after: serde_json::Value =
+        sqlx::query_scalar("SELECT policy_results FROM derivations WHERE id=$1")
+            .bind(fixture.derivation_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(result_after, persisted_result);
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn legacy_fail_pass_verification_close_and_rollups_retain_source_neutral_history(
     pool: PgPool,
 ) {
@@ -523,10 +612,9 @@ async fn legacy_fail_pass_verification_close_and_rollups_retain_source_neutral_h
     );
     malformed_context.rollback().await.unwrap();
 
-    // INVARIANT: Source-neutral closure evidence must still match the
-    // authoritative deployed result when the deferred closure constraint runs.
-    // Copying a valid-looking Pass item into a new accepted attempt cannot close
-    // the POA&M after the exact derivation result changes to Fail.
+    // INVARIANT: A copied source-neutral Pass item is not accepted without an
+    // attempt-bound effective-context attestation. The item constraint rejects
+    // forged evidence before the deferred closure constraint must inspect it.
     let failing_result = serde_json::json!({
         "assigned": {
             fixture.version_id.to_string(): {
@@ -552,7 +640,7 @@ async fn legacy_fail_pass_verification_close_and_rollups_retain_source_neutral_h
     .fetch_one(&mut *forged)
     .await
     .unwrap();
-    sqlx::query(
+    let forged_error = sqlx::query(
         r#"INSERT INTO poam_verification_items(
              attempt_id,finding_id,system_id,policy_lineage_id,result,policy_version_id,
              assessment_id,derivation_id,target_store_path,effective_set_digest,
@@ -570,30 +658,12 @@ async fn legacy_fail_pass_verification_close_and_rollups_retain_source_neutral_h
     .bind(legitimate_attempt_id)
     .execute(&mut *forged)
     .await
-    .unwrap();
-    sqlx::query("UPDATE poam_verification_attempts SET sealed_at=CURRENT_TIMESTAMP WHERE id=$1")
-        .bind(forged_attempt_id)
-        .execute(&mut *forged)
-        .await
-        .unwrap();
-    sqlx::query("UPDATE poam_finding_links SET retired_at=CURRENT_TIMESTAMP,retired_by=$2,retirement_reason='closed:'||$3::uuid::text WHERE poam_id=$1 AND retired_at IS NULL")
-        .bind(created.poam.id)
-        .bind(actor.user_id)
-        .bind(forged_attempt_id)
-        .execute(&mut *forged)
-        .await
-        .unwrap();
-    sqlx::query("UPDATE poams SET status='completed',closed_at=CURRENT_TIMESTAMP,closure_attempt_id=$2 WHERE id=$1")
-        .bind(created.poam.id)
-        .bind(forged_attempt_id)
-        .execute(&mut *forged)
-        .await
-        .unwrap();
-    let forged_error = forged.commit().await.unwrap_err();
+    .unwrap_err();
     assert_eq!(
         forged_error.as_database_error().unwrap().constraint(),
-        Some("poams_authoritative_closure_evidence")
+        Some("poam_verification_items_accepted_evidence")
     );
+    forged.rollback().await.unwrap();
 
     sqlx::query("UPDATE derivations SET policy_results=$1 WHERE id=$2")
         .bind(&passing_result)
@@ -2584,7 +2654,8 @@ async fn elapsed_waiver_replacement_and_verification_snapshot_cleanup_are_exact(
         &actor,
         CreateWaiverRequest {
             finding_id,
-            assessment_id,
+            assessment_id: Some(assessment_id),
+            observation: None,
             justification: "First bounded waiver".into(),
         },
     )
@@ -2595,7 +2666,8 @@ async fn elapsed_waiver_replacement_and_verification_snapshot_cleanup_are_exact(
         &actor,
         CreateWaiverRequest {
             finding_id,
-            assessment_id,
+            assessment_id: Some(assessment_id),
+            observation: None,
             justification: "Replacement waiver".into(),
         },
     )
@@ -2853,7 +2925,8 @@ async fn close_waits_for_an_uncommitted_waiver_revocation(pool: PgPool) {
         &actor,
         CreateWaiverRequest {
             finding_id,
-            assessment_id,
+            assessment_id: Some(assessment_id),
+            observation: None,
             justification: "Risk accepted for a bounded interval".into(),
         },
     )
@@ -3023,7 +3096,8 @@ async fn waiver_and_closure_evidence_matrix_is_exact_and_fail_closed(pool: PgPoo
         &operator,
         CreateWaiverRequest {
             finding_id: primary_finding,
-            assessment_id: primary_assessment,
+            assessment_id: Some(primary_assessment),
+            observation: None,
             justification: "Pending matrix waiver".into(),
         },
     )
@@ -3091,7 +3165,8 @@ async fn waiver_and_closure_evidence_matrix_is_exact_and_fail_closed(pool: PgPoo
             &operator,
             CreateWaiverRequest {
                 finding_id: secondary_finding,
-                assessment_id: primary_assessment,
+                assessment_id: Some(primary_assessment),
+                observation: None,
                 justification: "Wrong finding".into(),
             },
         )
@@ -3104,7 +3179,8 @@ async fn waiver_and_closure_evidence_matrix_is_exact_and_fail_closed(pool: PgPoo
         &operator,
         CreateWaiverRequest {
             finding_id: primary_finding,
-            assessment_id: primary_assessment,
+            assessment_id: Some(primary_assessment),
+            observation: None,
             justification: "Time expiry".into(),
         },
     )
@@ -3154,7 +3230,8 @@ async fn waiver_and_closure_evidence_matrix_is_exact_and_fail_closed(pool: PgPoo
         &operator,
         CreateWaiverRequest {
             finding_id: primary_finding,
-            assessment_id: primary_assessment,
+            assessment_id: Some(primary_assessment),
+            observation: None,
             justification: "Revocation".into(),
         },
     )
@@ -3225,7 +3302,8 @@ async fn waiver_and_closure_evidence_matrix_is_exact_and_fail_closed(pool: PgPoo
         &operator,
         CreateWaiverRequest {
             finding_id: primary_finding,
-            assessment_id: primary_assessment,
+            assessment_id: Some(primary_assessment),
+            observation: None,
             justification: "Exact accepted context".into(),
         },
     )
@@ -4417,7 +4495,7 @@ async fn relationship_services_batch_active_history_and_immutable_assignments(po
     let mut passing = pool.begin().await.unwrap();
     persist_assessment(&mut passing, &visible, EnforcementOutcome::Pass).await;
     passing.commit().await.unwrap();
-    let historical = poam_service::close(
+    let first_historical = poam_service::close(
         &pool,
         &admin,
         awaiting.poam.id,
@@ -4429,13 +4507,68 @@ async fn relationship_services_batch_active_history_and_immutable_assignments(po
     let mut failing = pool.begin().await.unwrap();
     persist_assessment(&mut failing, &visible, EnforcementOutcome::Fail).await;
     failing.commit().await.unwrap();
+    let second =
+        create_service_poam(&pool, &visible, &admin, &clock, "Second historical POAM").await;
+    let second = awaiting_verification(&pool, &admin, second, &clock).await;
+    let mut passing = pool.begin().await.unwrap();
+    persist_assessment(&mut passing, &visible, EnforcementOutcome::Pass).await;
+    passing.commit().await.unwrap();
+    let second_historical =
+        poam_service::close(&pool, &admin, second.poam.id, second.poam.revision, &clock)
+            .await
+            .unwrap();
+    let mut failing = pool.begin().await.unwrap();
+    persist_assessment(&mut failing, &visible, EnforcementOutcome::Fail).await;
+    failing.commit().await.unwrap();
     let current_assessment = current_assessment_id(&pool, &visible).await;
     let active = create_service_poam(&pool, &visible, &admin, &clock, "Active POAM").await;
+
+    // COMPATIBILITY: A deployed client that sends no pagination parameters
+    // must continue to receive the complete relationship history.
+    let legacy_relationships = poam_service::finding_relationships(
+        &pool,
+        &actor,
+        &[current_assessment],
+        None,
+        None,
+        &clock,
+    )
+    .await
+    .unwrap();
+    assert_eq!(legacy_relationships[0].historical_poams.len(), 2);
+    assert!(!legacy_relationships[0].historical_has_more);
+    assert_eq!(legacy_relationships[0].historical_next_offset, None);
+    let legacy_by_finding = poam_service::finding_relationships_by_finding(
+        &pool,
+        &actor,
+        &[legacy_relationships[0].finding_id],
+        None,
+        None,
+        &clock,
+    )
+    .await
+    .unwrap();
+    assert_eq!(legacy_by_finding[0].historical_poams.len(), 2);
+    assert!(!legacy_by_finding[0].historical_has_more);
+    assert!(matches!(
+        poam_service::finding_relationships(
+            &pool,
+            &actor,
+            &[current_assessment],
+            None,
+            Some(1),
+            &clock,
+        )
+        .await,
+        Err(PoamError::Validation("invalid_relationship_pagination", _))
+    ));
 
     let relationships = poam_service::finding_relationships(
         &pool,
         &actor,
         &[current_assessment, hidden_assessment, Uuid::new_v4()],
+        Some(1),
+        Some(0),
         &clock,
     )
     .await
@@ -4455,24 +4588,95 @@ async fn relationship_services_batch_active_history_and_immutable_assignments(po
         active.poam.id
     );
     assert_eq!(relationships[0].historical_poams.len(), 1);
-    assert_eq!(relationships[0].historical_poams[0].id, historical.poam.id);
     assert_eq!(relationships[0].historical_poams[0].status, "completed");
+    assert!(relationships[0].historical_has_more);
+    assert_eq!(relationships[0].historical_next_offset, Some(1));
+    let second_page = poam_service::finding_relationships(
+        &pool,
+        &actor,
+        &[current_assessment],
+        Some(1),
+        Some(1),
+        &clock,
+    )
+    .await
+    .unwrap();
+    assert_eq!(second_page[0].historical_poams.len(), 1);
+    assert!(!second_page[0].historical_has_more);
+    assert_eq!(second_page[0].historical_next_offset, None);
+    let returned_history = [
+        relationships[0].historical_poams[0].id,
+        second_page[0].historical_poams[0].id,
+    ]
+    .into_iter()
+    .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        returned_history,
+        [first_historical.poam.id, second_historical.poam.id]
+            .into_iter()
+            .collect()
+    );
+    let original_finding_order = [
+        relationships[0].historical_poams[0].id,
+        second_page[0].historical_poams[0].id,
+    ];
+    sqlx::query("UPDATE poams SET updated_at=updated_at+INTERVAL '100 years' WHERE id=$1")
+        .bind(original_finding_order[1])
+        .execute(&pool)
+        .await
+        .unwrap();
+    let finding_after_update_first = poam_service::finding_relationships(
+        &pool,
+        &actor,
+        &[current_assessment],
+        Some(1),
+        Some(0),
+        &clock,
+    )
+    .await
+    .unwrap();
+    let finding_after_update_second = poam_service::finding_relationships(
+        &pool,
+        &actor,
+        &[current_assessment],
+        Some(1),
+        Some(1),
+        &clock,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        [
+            finding_after_update_first[0].historical_poams[0].id,
+            finding_after_update_second[0].historical_poams[0].id,
+        ],
+        original_finding_order,
+        "mutable POA&M updates must not reorder finding relationship pages"
+    );
 
     let (assignment_id, assignment_version_id, _) =
         immutable_assignment_fixture(&pool, visible.system_id, visible.user_id).await;
     let assignment_before = assignment_snapshot(&pool, assignment_version_id).await;
-    sqlx::query("INSERT INTO poam_assignment_references(poam_id,assignment_id,assignment_version_id,added_by) VALUES($1,$2,$3,$4)")
-        .bind(active.poam.id)
-        .bind(assignment_id)
-        .bind(assignment_version_id)
-        .bind(visible.user_id)
-        .execute(&pool)
-        .await
-        .unwrap();
+    for poam_id in [
+        active.poam.id,
+        first_historical.poam.id,
+        second_historical.poam.id,
+    ] {
+        sqlx::query("INSERT INTO poam_assignment_references(poam_id,assignment_id,assignment_version_id,added_by) VALUES($1,$2,$3,$4)")
+            .bind(poam_id)
+            .bind(assignment_id)
+            .bind(assignment_version_id)
+            .bind(visible.user_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
     let assignments = poam_service::assignment_relationships(
         &pool,
         &actor,
         &[assignment_version_id, Uuid::new_v4()],
+        Some(1),
+        Some(0),
         &clock,
     )
     .await
@@ -4480,7 +4684,82 @@ async fn relationship_services_batch_active_history_and_immutable_assignments(po
     assert_eq!(assignments.len(), 1);
     assert_eq!(assignments[0].assignment_version_id, assignment_version_id);
     assert_eq!(assignments[0].poams.len(), 1);
-    assert_eq!(assignments[0].poams[0].id, active.poam.id);
+    assert!(assignments[0].poams_has_more);
+    assert_eq!(assignments[0].poams_next_offset, Some(1));
+    let assignment_second_page = poam_service::assignment_relationships(
+        &pool,
+        &actor,
+        &[assignment_version_id],
+        Some(1),
+        Some(1),
+        &clock,
+    )
+    .await
+    .unwrap();
+    assert_eq!(assignment_second_page[0].poams.len(), 1);
+    assert!(assignment_second_page[0].poams_has_more);
+    assert_eq!(assignment_second_page[0].poams_next_offset, Some(2));
+    let assignment_third_page = poam_service::assignment_relationships(
+        &pool,
+        &actor,
+        &[assignment_version_id],
+        Some(1),
+        Some(2),
+        &clock,
+    )
+    .await
+    .unwrap();
+    assert_eq!(assignment_third_page[0].poams.len(), 1);
+    assert!(!assignment_third_page[0].poams_has_more);
+    let original_assignment_order = [
+        assignments[0].poams[0].id,
+        assignment_second_page[0].poams[0].id,
+        assignment_third_page[0].poams[0].id,
+    ];
+    let legacy_assignments = poam_service::assignment_relationships(
+        &pool,
+        &actor,
+        &[assignment_version_id],
+        None,
+        None,
+        &clock,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        legacy_assignments[0]
+            .poams
+            .iter()
+            .map(|poam| poam.id)
+            .collect::<Vec<_>>(),
+        original_assignment_order
+    );
+    assert!(!legacy_assignments[0].poams_has_more);
+    assert_eq!(legacy_assignments[0].poams_next_offset, None);
+
+    sqlx::query("UPDATE poams SET updated_at=updated_at+INTERVAL '200 years' WHERE id=$1")
+        .bind(original_assignment_order[2])
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut assignment_order_after_update = Vec::new();
+    for offset in 0..3 {
+        let page = poam_service::assignment_relationships(
+            &pool,
+            &actor,
+            &[assignment_version_id],
+            Some(1),
+            Some(offset),
+            &clock,
+        )
+        .await
+        .unwrap();
+        assignment_order_after_update.push(page[0].poams[0].id);
+    }
+    assert_eq!(
+        assignment_order_after_update, original_assignment_order,
+        "mutable POA&M updates must not reorder assignment relationship pages"
+    );
     assert_eq!(
         assignment_snapshot(&pool, assignment_version_id).await,
         assignment_before

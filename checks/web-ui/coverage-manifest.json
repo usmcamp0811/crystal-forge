@@ -1445,7 +1445,7 @@
         "full"
       ],
       "semanticAssertions": true,
-      "interactions": false,
+      "interactions": true,
       "mockedData": false,
       "baseline": "advisory"
     },

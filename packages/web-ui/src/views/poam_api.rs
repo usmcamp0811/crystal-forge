@@ -13,6 +13,11 @@ pub use crate::api::models::{FindingObservationReference, FindingObservationSour
 
 const PAGE_SIZE: i64 = 100;
 const MAX_BATCH_IDS: usize = 100;
+// The server accepts at most 100 relationship-history rows per request.
+const RELATIONSHIP_PAGE_SIZE: i64 = 100;
+// The server accepts offsets through 10,000. Stop at that boundary instead of
+// returning a partial relationship list or issuing an invalid next request.
+const MAX_RELATIONSHIP_PAGES: usize = 100;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -346,12 +351,24 @@ pub struct FindingRelationshipEntry {
     pub active: Option<PoamSummary>,
     #[serde(rename = "historical_poams", alias = "history")]
     pub history: Vec<PoamSummary>,
+    /// Indicates that another historical page is available.
+    #[serde(default)]
+    pub historical_has_more: bool,
+    /// Provides the offset for the next historical page.
+    #[serde(default)]
+    pub historical_next_offset: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AssignmentRelationshipEntry {
     pub assignment_version_id: Uuid,
     pub poams: Vec<PoamSummary>,
+    /// Indicates that another related-POA&M page is available.
+    #[serde(default)]
+    pub poams_has_more: bool,
+    /// Provides the offset for the next related-POA&M page.
+    #[serde(default)]
+    pub poams_next_offset: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -934,6 +951,131 @@ async fn fetch_batches<T: DeserializeOwned>(
     Ok(entries)
 }
 
+fn relationship_next_offset(
+    requested_offset: i64,
+    cursors: impl IntoIterator<Item = (bool, Option<i64>)>,
+) -> Result<Option<i64>, PoamApiError> {
+    let mut next_offset = None;
+    for (has_more, next) in cursors {
+        match (has_more, next) {
+            (false, None) => {}
+            (true, Some(next)) if next > requested_offset => {
+                if next_offset.is_some_and(|expected| expected != next) {
+                    return Err(PoamApiError::Deserialize(
+                        "incoherent POA&M relationship pagination cursors".to_string(),
+                    ));
+                }
+                next_offset = Some(next);
+            }
+            _ => {
+                return Err(PoamApiError::Deserialize(
+                    "incoherent POA&M relationship pagination response".to_string(),
+                ));
+            }
+        }
+    }
+    Ok(next_offset)
+}
+
+fn merge_finding_relationship_page(
+    merged: &mut Vec<FindingRelationshipEntry>,
+    page: Vec<FindingRelationshipEntry>,
+    requested_offset: i64,
+) -> Result<Option<i64>, PoamApiError> {
+    let next_offset = relationship_next_offset(
+        requested_offset,
+        page.iter()
+            .map(|entry| (entry.historical_has_more, entry.historical_next_offset)),
+    )?;
+    for mut entry in page {
+        if let Some(existing) = merged.iter_mut().find(|existing| {
+            existing.finding_id == entry.finding_id && existing.assessment_id == entry.assessment_id
+        }) {
+            if existing.active.as_ref().map(|poam| poam.id)
+                != entry.active.as_ref().map(|poam| poam.id)
+            {
+                return Err(PoamApiError::Deserialize(
+                    "POA&M finding relationship changed while loading history".to_string(),
+                ));
+            }
+            for poam in entry.history.drain(..) {
+                if !existing.history.iter().any(|current| current.id == poam.id) {
+                    existing.history.push(poam);
+                }
+            }
+            existing.historical_has_more = entry.historical_has_more;
+            existing.historical_next_offset = entry.historical_next_offset;
+        } else {
+            merged.push(entry);
+        }
+    }
+    Ok(next_offset)
+}
+
+fn merge_assignment_relationship_page(
+    merged: &mut Vec<AssignmentRelationshipEntry>,
+    page: Vec<AssignmentRelationshipEntry>,
+    requested_offset: i64,
+) -> Result<Option<i64>, PoamApiError> {
+    let next_offset = relationship_next_offset(
+        requested_offset,
+        page.iter()
+            .map(|entry| (entry.poams_has_more, entry.poams_next_offset)),
+    )?;
+    for mut entry in page {
+        if let Some(existing) = merged
+            .iter_mut()
+            .find(|existing| existing.assignment_version_id == entry.assignment_version_id)
+        {
+            for poam in entry.poams.drain(..) {
+                if !existing.poams.iter().any(|current| current.id == poam.id) {
+                    existing.poams.push(poam);
+                }
+            }
+            existing.poams_has_more = entry.poams_has_more;
+            existing.poams_next_offset = entry.poams_next_offset;
+        } else {
+            merged.push(entry);
+        }
+    }
+    Ok(next_offset)
+}
+
+async fn fetch_relationship_batches<T: DeserializeOwned>(
+    path: &str,
+    parameter: &str,
+    ids: &[Uuid],
+    merge_page: fn(&mut Vec<T>, Vec<T>, i64) -> Result<Option<i64>, PoamApiError>,
+) -> Result<Vec<T>, PoamApiError> {
+    let mut merged = Vec::new();
+    for chunk in ids.chunks(MAX_BATCH_IDS) {
+        let ids = chunk
+            .iter()
+            .map(Uuid::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut offset = 0;
+        for page_number in 0..MAX_RELATIONSHIP_PAGES {
+            let url = format!(
+                "{}{path}?{parameter}={ids}&history_limit={RELATIONSHIP_PAGE_SIZE}&history_offset={offset}",
+                base_url()
+            );
+            let page: Vec<T> = request("GET", &url, None::<&()>).await?;
+            let Some(next_offset) = merge_page(&mut merged, page, offset)? else {
+                break;
+            };
+            if page_number + 1 == MAX_RELATIONSHIP_PAGES {
+                return Err(PoamApiError::Deserialize(format!(
+                    "POA&M relationship history exceeds the safe client limit of {} records per relationship",
+                    RELATIONSHIP_PAGE_SIZE * MAX_RELATIONSHIP_PAGES as i64
+                )));
+            }
+            offset = next_offset;
+        }
+    }
+    Ok(merged)
+}
+
 pub async fn system_rollups(ids: &[Uuid]) -> Result<Vec<Rollup>, PoamApiError> {
     fetch_batches("/poams/rollups/systems", "ids", ids).await
 }
@@ -945,10 +1087,11 @@ pub async fn bundle_rollups(ids: &[Uuid]) -> Result<Vec<Rollup>, PoamApiError> {
 pub async fn finding_relationships(
     assessment_ids: &[Uuid],
 ) -> Result<Vec<FindingRelationshipEntry>, PoamApiError> {
-    fetch_batches(
+    fetch_relationship_batches(
         "/poams/relationships/findings",
         "assessment_ids",
         assessment_ids,
+        merge_finding_relationship_page,
     )
     .await
 }
@@ -956,16 +1099,23 @@ pub async fn finding_relationships(
 pub async fn finding_relationships_by_finding(
     finding_ids: &[Uuid],
 ) -> Result<Vec<FindingRelationshipEntry>, PoamApiError> {
-    fetch_batches("/poams/relationships/findings", "finding_ids", finding_ids).await
+    fetch_relationship_batches(
+        "/poams/relationships/findings",
+        "finding_ids",
+        finding_ids,
+        merge_finding_relationship_page,
+    )
+    .await
 }
 
 pub async fn assignment_relationships(
     assignment_version_ids: &[Uuid],
 ) -> Result<Vec<AssignmentRelationshipEntry>, PoamApiError> {
-    fetch_batches(
+    fetch_relationship_batches(
         "/poams/relationships/assignments",
         "ids",
         assignment_version_ids,
+        merge_assignment_relationship_page,
     )
     .await
 }
@@ -973,6 +1123,26 @@ pub async fn assignment_relationships(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn summary(id: u128) -> PoamSummary {
+        PoamSummary {
+            id: Uuid::from_u128(id),
+            human_id: format!("POAM-{id:04}"),
+            title: format!("POA&M {id}"),
+            plan: "Plan".to_string(),
+            owner: "Owner".to_string(),
+            target_date: None,
+            risk: PoamRisk::Medium,
+            status: PoamStatus::Completed,
+            revision: 1,
+            overdue: false,
+            finding_count: 1,
+            created_at: DateTime::from_timestamp(1, 0).unwrap(),
+            updated_at: DateTime::from_timestamp(id as i64, 0).unwrap(),
+            closed_at: None,
+            closure_attempt_id: None,
+        }
+    }
 
     #[test]
     fn status_and_risk_labels_match_product_vocabulary() {
@@ -1114,6 +1284,105 @@ mod tests {
             batch_paths("/poams/relationships/findings", "assessment_ids", &ids[..1]);
         assert!(relationships[0].starts_with("/poams/relationships/findings?assessment_ids="));
         assert!(batch_paths("/poams/rollups/bundles", "ids", &[]).is_empty());
+    }
+
+    #[test]
+    fn relationship_pagination_metadata_defaults_for_rolling_compatibility() {
+        let finding: FindingRelationshipEntry = serde_json::from_str(
+            r#"{"assessment_id":null,"finding_id":"00000000-0000-0000-0000-000000000001","active_poam":null,"historical_poams":[]}"#,
+        )
+        .unwrap();
+        assert!(!finding.historical_has_more);
+        assert_eq!(finding.historical_next_offset, None);
+
+        let assignment: AssignmentRelationshipEntry = serde_json::from_str(
+            r#"{"assignment_version_id":"00000000-0000-0000-0000-000000000002","poams":[]}"#,
+        )
+        .unwrap();
+        assert!(!assignment.poams_has_more);
+        assert_eq!(assignment.poams_next_offset, None);
+    }
+
+    #[test]
+    fn finding_relationship_pages_merge_history_by_stable_identity() {
+        let finding_id = Uuid::from_u128(10);
+        let mut merged = Vec::new();
+        let next = merge_finding_relationship_page(
+            &mut merged,
+            vec![FindingRelationshipEntry {
+                assessment_id: None,
+                finding_id,
+                active: None,
+                history: vec![summary(1)],
+                historical_has_more: true,
+                historical_next_offset: Some(100),
+            }],
+            0,
+        )
+        .unwrap();
+        assert_eq!(next, Some(100));
+
+        let next = merge_finding_relationship_page(
+            &mut merged,
+            vec![FindingRelationshipEntry {
+                assessment_id: None,
+                finding_id,
+                active: None,
+                history: vec![summary(1), summary(2)],
+                historical_has_more: false,
+                historical_next_offset: None,
+            }],
+            100,
+        )
+        .unwrap();
+        assert_eq!(next, None);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(
+            merged[0]
+                .history
+                .iter()
+                .map(|poam| poam.id)
+                .collect::<Vec<_>>(),
+            vec![Uuid::from_u128(1), Uuid::from_u128(2)]
+        );
+        assert!(!merged[0].historical_has_more);
+    }
+
+    #[test]
+    fn assignment_relationship_pages_merge_poams_and_reject_bad_cursors() {
+        let assignment_version_id = Uuid::from_u128(20);
+        let mut merged = Vec::new();
+        assert_eq!(
+            merge_assignment_relationship_page(
+                &mut merged,
+                vec![AssignmentRelationshipEntry {
+                    assignment_version_id,
+                    poams: vec![summary(3)],
+                    poams_has_more: true,
+                    poams_next_offset: Some(100),
+                }],
+                0,
+            )
+            .unwrap(),
+            Some(100)
+        );
+        assert_eq!(
+            merge_assignment_relationship_page(
+                &mut merged,
+                vec![AssignmentRelationshipEntry {
+                    assignment_version_id,
+                    poams: vec![summary(4)],
+                    poams_has_more: false,
+                    poams_next_offset: None,
+                }],
+                100,
+            )
+            .unwrap(),
+            None
+        );
+        assert_eq!(merged[0].poams.len(), 2);
+        assert!(relationship_next_offset(100, [(true, Some(100))]).is_err());
+        assert!(relationship_next_offset(100, [(false, Some(200))]).is_err());
     }
 
     #[test]

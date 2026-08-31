@@ -1626,9 +1626,7 @@ async fn upgrade_target_gets_pending_delivery_only_after_exact_authorization(poo
 }
 
 #[sqlx::test]
-async fn eval_passed_attempt_evidence_survives_missing_target_and_new_attempt_supersedes_it(
-    pool: PgPool,
-) {
+async fn eval_passed_attempt_evidence_is_authoritative_and_new_attempt_supersedes_it(pool: PgPool) {
     let config: CompositePolicyConfig =
         serde_json::from_value(single_rule_config("eval_passed", serde_json::json!({}))).unwrap();
     let context = assessment_context_with_config(&pool, config.clone()).await;
@@ -1677,16 +1675,23 @@ async fn eval_passed_attempt_evidence_survives_missing_target_and_new_attempt_su
             .unwrap();
     assert_eq!(pending, ("not_checked".into(), Some(context.system_id)));
 
-    let mut tx = pool.begin().await.unwrap();
-    persist_eval_passed_for_system_in_tx(
-        &mut tx,
-        commit_id,
-        1,
-        context.system_id,
-        &hostname,
+    let passing_check = PolicyCheckResult::from_assigned(
+        hostname.clone(),
+        &serde_json::json!({"cfAgentEnabled": true}),
         std::slice::from_ref(&assigned),
-        EnforcementOutcome::Pass,
-        "Configuration evaluation completed",
+    )
+    .unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    persist_eval_passed_for_system_in_tx(&mut tx, commit_id, 1, context.system_id, &passing_check)
+        .await
+        .unwrap();
+    persist_evaluation_assessments_in_tx(
+        &mut tx,
+        context.system_id,
+        context.derivation_id,
+        &context.store_path,
+        &policy_results_json(&passing_check, std::slice::from_ref(&assigned)),
+        &context.resolved,
     )
     .await
     .unwrap();
@@ -1698,6 +1703,14 @@ async fn eval_passed_attempt_evidence_survives_missing_target_and_new_attempt_su
     .await
     .unwrap();
     assert_eq!(passed, "pass");
+    let assessment_passed: String = sqlx::query_scalar(
+        "SELECT overall_outcome FROM composite_policy_assessments WHERE system_id=$1",
+    )
+    .bind(context.system_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(assessment_passed, "pass");
 
     sqlx::query("UPDATE evaluation_attempts SET status = 'complete' WHERE commit_id = $1")
         .bind(commit_id)
@@ -1736,7 +1749,7 @@ async fn eval_passed_attempt_evidence_survives_missing_target_and_new_attempt_su
     );
 
     let failure = PolicyCheckResult::for_evaluation_terminal(
-        hostname,
+        hostname.clone(),
         std::slice::from_ref(&assigned),
         crystal_forge::models::deployment_policies::EvaluationTerminalOutcome::ConfirmedFailure,
         "target evaluation failed",
@@ -1753,6 +1766,14 @@ async fn eval_passed_attempt_evidence_survives_missing_target_and_new_attempt_su
     .await
     .unwrap();
     assert_eq!(failed, "fail");
+    let assessment_failed: String = sqlx::query_scalar(
+        "SELECT overall_outcome FROM composite_policy_assessments WHERE system_id=$1",
+    )
+    .bind(context.system_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(assessment_failed, "fail");
 
     sqlx::query(
         "UPDATE evaluation_attempts SET status = 'complete' WHERE commit_id = $1 AND attempt_number = 2",
@@ -1778,6 +1799,32 @@ async fn eval_passed_attempt_evidence_survives_missing_target_and_new_attempt_su
     initialize_eval_passed_attempt(&pool, commit_id, 3, &policies)
         .await
         .unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    persist_eval_passed_for_system_in_tx(&mut tx, commit_id, 3, context.system_id, &passing_check)
+        .await
+        .unwrap();
+    persist_evaluation_assessments_in_tx(
+        &mut tx,
+        context.system_id,
+        context.derivation_id,
+        &context.store_path,
+        &policy_results_json(&passing_check, std::slice::from_ref(&assigned)),
+        &context.resolved,
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let terminal_error = PolicyCheckResult::for_evaluation_terminal(
+        hostname,
+        std::slice::from_ref(&assigned),
+        crystal_forge::models::deployment_policies::EvaluationTerminalOutcome::Error,
+        "policy metadata could not be parsed",
+    );
+    let mut tx = pool.begin().await.unwrap();
+    persist_eval_passed_terminal_checks_in_tx(&mut tx, commit_id, 3, &[terminal_error])
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
     mark_commit_evaluation_failed(
         &pool,
         commit_id,
@@ -1793,7 +1840,27 @@ async fn eval_passed_attempt_evidence_survives_missing_target_and_new_attempt_su
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(error, ("error".into(), "evaluator transport failed".into()));
+    assert_eq!(
+        error,
+        ("error".into(), "policy metadata could not be parsed".into()),
+        "attempt failure handling must not reveal a provisional Pass"
+    );
+    let assessment_error: (String, String) = sqlx::query_as(
+        r#"SELECT assessment.overall_outcome,rule_result.detail
+           FROM composite_policy_assessments assessment
+           JOIN composite_policy_rule_results rule_result
+             ON rule_result.assessment_id=assessment.id
+           WHERE assessment.system_id=$1 AND rule_result.kind='eval_passed'"#,
+    )
+    .bind(context.system_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        assessment_error,
+        ("error".into(), "policy metadata could not be parsed".into()),
+        "POA&M assessment evidence must receive the terminal Error"
+    );
 }
 
 #[sqlx::test]

@@ -326,11 +326,22 @@ pub async fn get_policy_version_usage(
     headers: HeaderMap,
     Path(version_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    if authenticated_user_roles(&pool, &headers).await.is_none() {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
-    }
+    };
+    // SECURITY: Policy usage contains hostnames and environment names. Admins
+    // can inspect the fleet, but other roles can inspect only their environment
+    // memberships. An empty membership list must therefore remain restrictive.
+    let visible_environment_ids = if has_admin_role(&roles) {
+        None
+    } else {
+        match get_user_environment_membership_ids(&pool, user_id).await {
+            Ok(ids) => Some(ids.into_iter().collect::<Vec<_>>()),
+            Err(_) => return internal_error("Failed to load environment memberships"),
+        }
+    };
 
-    match load_policy_version_usage(&pool, version_id).await {
+    match load_policy_version_usage(&pool, version_id, visible_environment_ids.as_deref()).await {
         Ok(Some(usage)) => (StatusCode::OK, Json(usage)).into_response(),
         Ok(None) => not_found(),
         Err(_) => internal_error("Failed to load policy version usage"),

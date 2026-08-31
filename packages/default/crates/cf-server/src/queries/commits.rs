@@ -844,6 +844,7 @@ async fn open_eval_attention_if_current(
 /// - evaluation_attempt_count → 0
 /// - evaluation_error_message → NULL
 /// - cancellation_requested → FALSE (so stale finalizer cannot cancel the reset evaluation)
+/// - stale active attempt rows on terminal commits → `cancelled`
 ///
 /// Use this for manual re-evaluation after fixing issues.
 pub async fn reset_commit_evaluation(pool: &PgPool, commit_id: i32) -> Result<()> {
@@ -854,6 +855,27 @@ pub async fn reset_commit_evaluation(pool: &PgPool, commit_id: i32) -> Result<()
     }
 
     let mut tx = pool.begin().await?;
+    // CONCURRENCY: A worker can fail the commit after it claims an attempt but
+    // before it marks that attempt terminal. Retire only these orphaned rows.
+    // An active attempt on a non-terminal commit remains authoritative.
+    sqlx::query(
+        r#"
+        UPDATE evaluation_attempts attempt
+        SET status = 'cancelled',
+            completed_at = COALESCE(completed_at, NOW()),
+            error_message = COALESCE(error_message, 'Superseded by manual re-evaluation'),
+            failure_class = COALESCE(failure_class, 'cancelled'),
+            updated_at = NOW()
+        FROM commits commit_row
+        WHERE attempt.commit_id = commit_row.id
+          AND commit_row.id = $1
+          AND commit_row.evaluation_status IN ('complete', 'failed', 'cancelled')
+          AND attempt.status IN ('queued', 'in_progress')
+        "#,
+    )
+    .bind(commit_id)
+    .execute(&mut *tx)
+    .await?;
     let result = sqlx::query_as::<_, ResetResult>(
         r#"
         UPDATE commits
