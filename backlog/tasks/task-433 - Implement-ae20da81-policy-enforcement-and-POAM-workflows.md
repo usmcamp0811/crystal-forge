@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - claude-agent
 created_date: '2026-08-23 01:35'
-updated_date: '2026-08-31 21:47'
+updated_date: '2026-08-31 22:11'
 labels:
   - design-parity
   - policy
@@ -332,6 +332,8 @@ Root-cause refinement: the unlink service returns retired relationship history, 
 2026-08-31 evidence/POA&M identity remediation in `/tmp/opencode/TASK-433-publish`: Root cause was production evidence hydration, not the canonical fixture. Both compliance evidence constructors initialized `framework_mapping` empty and the response never joined exact `policy_requirement_mappings`. Added additive normalized requirement identity to evidence DTOs, one batched exact-policy-version mapping query per evidence response, hierarchical UI rendering, and strict canonical assertions for framework release, requirement ID, and no false Unmapped state. Verification items now hydrate hostname, exact policy-version name/version, and requirement/framework metadata with the existing bounded attempt query plus one shared metadata query; rolling clients default new fields and UI falls back to stable UUIDs only when labels are unavailable. Canonical POA&M assertions cover rejected and completed history after links retire. Live PostgreSQL tests passed for exact-version mapping hydration and identity retention after closure/link retirement and assessment deletion. Also passed backend/web rustfmt checks, SQLX_OFFLINE poam_workflows check, three focused web DTO/presentation tests, wasm32 cargo check, Node syntax, web harness static contracts, and `git diff --check`. Existing repository warnings remained. No full browser VM run and no commit.
 
 Root cause for the canonical mixed evidence failure is browser locator scope, not production identity hydration. Fixture SQL stores release `1`; the API returns the same version field; the failed screenshot renders `Test Mapping Framework · 1` and `MAP-1`. The assertion incorrectly searched beneath `finding-poam-remediation`, while framework mapping is a sibling under `#compliance-evidence-dialog`.
+
+Canonical mixed evidence assertion correction implemented in `checks/web-ui/tests/integration-test.js`: the exact framework release and requirement locators now search within `#compliance-evidence-dialog` instead of the sibling-only `finding-poam-remediation` region. Verification passed: `node --check checks/web-ui/tests/integration-test.js`; `CF_WEB_UI_SOURCE_DIR=checks/web-ui CF_UI_STATIC_CONTRACTS=1 node checks/web-ui/tests/integration-test.js`; `git diff --check -- checks/web-ui/tests/integration-test.js`; and `CF_UI_TEST_STEPS=task433-canonical-mixed-nix-cve-evidence CF_UI_UPDATE_BASELINES=1 nix build --impure path:.#checks.x86_64-linux.web-ui --no-link`. The focused Nix run exercised production evaluation and exact identity assertions. Baseline-update mode bypassed only strict visual-baseline rejection. Unavailable remote builders and Nix store maximum-link messages were non-fatal. No commit created.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
