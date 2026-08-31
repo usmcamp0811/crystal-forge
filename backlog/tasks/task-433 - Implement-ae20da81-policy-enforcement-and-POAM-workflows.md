@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - claude-agent
 created_date: '2026-08-23 01:35'
-updated_date: '2026-08-31 19:46'
+updated_date: '2026-08-31 20:31'
 labels:
   - design-parity
   - policy
@@ -266,6 +266,8 @@ Root-cause refinement: the unlink service returns retired relationship history, 
 2026-08-31 policy catalog parity remediation in `/tmp/opencode/TASK-433-publish`: replace normal page-header actions with a selected-count, Shift-click guidance, selected export, eligible bulk delete, and Cancel control while selection mode is active; keep partial-delete feedback adjacent and sticky on narrow layouts; remove direct card/table Delete controls while retaining bulk delete and editor Danger zone; consolidate policy toolbar hierarchy, strengthen group icon/header/divider treatment, add purple non-danger selection visuals, wrap tables in card containers, improve narrow page-header wrapping, and add catalog-only bottom clearance so Setup Coach does not cover policy warnings. Preserve keyboard and logical-selection behavior. Limit edits to policy catalog/card/row Rust, `app.css`, and focused tests. Run web-ui rustfmt, targeted tests, WASM check, and `git diff --check`; do not edit browser harness or commit.
 
 2026-08-31 evidence/POA&M responsive parity remediation in `/tmp/opencode/TASK-433-publish`: limit writes to compliance evidence and POA&M components, `packages/web-ui/assets/app.css`, and focused in-module tests; do not edit the browser harness. Let the mobile evidence navigator size to its actual controls with a bounded maximum; reflow verification attempts as readable cards; strengthen scoped disabled-control contrast in both themes; retain owner, target, opened, and milestone progress in the remediation summary; render authoritative requirement/framework metadata hierarchically with UUID-only fallback; distinguish aggregate policy/finding outcomes from constituent rule outcomes; subordinate rule IDs and raw evidence. Preserve lifecycle, closure authority, and FAIL semantics. Run web-ui rustfmt, targeted tests, a WASM check, and `git diff --check`; do not commit.
+
+2026-08-31 final catalog visual remediation in `/tmp/opencode/TASK-433-publish`: limit writes to policy catalog Rust, `packages/web-ui/assets/app.css`, and focused tests. Keep selected table policy names on normal/purple selection styling instead of category danger red. Reflow partial-delete feedback into a readable stacked narrow-screen alert. Leave topbar/content behavior to the shell owner and make only catalog header/action wrapping robust against clipping. Run web-ui rustfmt, targeted tests, a WASM check, and `git diff --check`; preserve concurrent changes and do not commit.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
