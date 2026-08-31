@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - claude-agent
 created_date: '2026-08-23 01:35'
-updated_date: '2026-08-31 22:11'
+updated_date: '2026-08-31 22:36'
 labels:
   - design-parity
   - policy
@@ -274,6 +274,8 @@ Root-cause refinement: the unlink service returns retired relationship history, 
 2026-08-31 shell/theme responsive remediation in `/tmp/opencode/TASK-433-publish`: limit production writes to shell/layout/topbar/Setup Coach and `packages/web-ui/assets/app.css`; use the existing mobile overlay drawer below 768px and collapse the shell grid to one viewport-width content column; keep topbar actions usable at 560px and 375px; explicitly enforce light sidebar surface/text contrast; reserve content space for the minimized Setup Guide tab; add focused source tests. Extend only dedicated Setup Coach browser captures with deterministic mixed completed/current nine-step progress and assertions for the selected semantic step, nonmodal behavior, absent competing overlays, responsive shell width/navigation, and light/dark captures at narrow/mobile. Run web-ui rustfmt, targeted Rust tests, WASM check, Node syntax/static contracts, and `git diff --check`; do not commit and preserve concurrent changes.
 
 2026-08-31 canonical evidence assertion correction: preserve exact framework release and requirement assertions, but scope `evidence-requirement-identity` to `#compliance-evidence-dialog`; the failed artifact proves production renders `Test Mapping Framework · 1`, while `finding-poam-remediation` contains only the sibling remediation region. Run Node syntax/static contracts and the focused canonical mixed browser step if feasible. Preserve concurrent changes and do not commit.
+
+2026-08-31 final editor CSS/layout remediation in `/tmp/opencode/TASK-433-publish`: limit writes to `packages/web-ui/assets/app.css` and focused policy-editor source tests. Give the editor width selector greater specificity than the later generic `.modal` rule; reset narrow editor tabs to intrinsic width inside a horizontally scrollable rail with a persistent overflow cue and active-state border; add mapping-tab flow clearance so `+ Add mapping` remains above the footer. Add source/presentation regressions that verify the scoped selectors, cascade intent, and mapping-action placement. Run web-ui rustfmt, focused tests, the WASM build, and `git diff --check`; preserve concurrent changes and do not commit.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
