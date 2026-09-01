@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - opencode-gpt-5.6-sol
 created_date: '2026-09-01 03:12'
-updated_date: '2026-09-01 15:24'
+updated_date: '2026-09-01 16:28'
 labels:
   - web-ui
   - testing
@@ -75,6 +75,8 @@ TASK-438 is the correctness prerequisite because runtime measurements are not me
 Post-fleet correction: encode required versus advisory ownership for every ci_fast step while preserving exactly-once shard execution and compatibility smoke's six required steps. Extend browser and aggregate verdicts so only required failures block, while advisory failures and missing advisory results remain visible. Fix route teardown across failed steps/page recreation, make 12f and 12h focused fixtures self-contained and condition-synchronized, preserve context-scoped coach suppression, update gate documentation, and run focused/static/Nix verification without rerunning the full fleet unless needed.
 
 User-approved scope expansion: correct the production OSCAL Assessment Results generator so the real browser download passes the vendored NIST OSCAL 1.1.2 schema. Limit the production change to the three observed shape defects, add focused generator regression assertions, rerun the isolated blocking exports VM check, then continue the existing final verification and MR plan.
+
+Final review correction: make generated OSCAL control IDs NCName-safe and stable, cover names with punctuation, keep empty-scope exports schema-valid or explicitly constrained, and correct the documented AP/SSP reference guarantee. Add producer cache-state and queue metadata plus aggregate per-job timing, median, maximum, and blocking critical-path reporting before representative MR runs. Run the aggregate report through a flake-pinned Node/curl package instead of a mutable Alpine image. Correct stale baseline and SARIF fixture prose, remove local result links, then rerun focused Rust/schema and static CI/Nix verification.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
