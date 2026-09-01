@@ -3,11 +3,11 @@ id: TASK-433.7
 title: >-
   TASK-433 Phase 6: POA&M integration in evidence/finding, system, bundle,
   assignment UI
-status: Review
+status: In Progress
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:43'
-updated_date: '2026-09-01 07:29'
+updated_date: '2026-09-01 13:35'
 labels:
   - design-parity
   - poam
@@ -88,6 +88,8 @@ Legacy observation design decision: preserve the deployed Phase-5 composite-asse
 Implement this as a focused additive contract: shared canonical legacy-observation snapshot/token helpers; evidence DTO fields; finding-ID batch relationship and compatible lookup; authoritative create/link validation; Web UI adapter and evidence-bar wiring; server/unit/browser regression proving a persisted legacy failure can create a POA&M and remains FAIL afterward. Then implement the independent pagination/activity/typed-routing findings and verify serially.
 
 Phase-8 visual remediation: correct dark-theme contrast for the shared POA&M detail tray's Expand and Reopen actions. Keep behavior and lifecycle semantics unchanged. Verify with focused TASK-433 POA&M browser captures before returning the owner to Review.
+
+Review remediation at candidate `da7ae7de`: separate metadata and remediation-plan persistence in `PoamDetailTray`. Keep `Save metadata` scoped to title, owner, target date, and risk. Add an adjacent `Save plan` action to the Remediation plan section that PATCHes only the plan with the current optimistic revision, uses existing stale/error reconciliation, and remains disabled for viewers or active mutations. Update the existing server-backed POA&M detail and canonical lifecycle browser workflows so plan persistence uses the labeled local action and survives reload. Run Web UI formatting, Node syntax/static contracts, targeted Rust tests, and focused POA&M browser verification through Nix before returning this owner to Review.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -108,4 +110,6 @@ Serial verification passed: default Rust formatting (`cargo fmt --all --check`),
 Phase 8 independent artifact review found a P2 dark-theme contrast defect in completed POA&M detail captures: the desktop Expand and Reopen actions are effectively unreadable. TASK-433.7 is returned to In Progress for a CSS-only presentation correction and focused visual verification.
 
 Phase-8 dark-theme visual remediation completed. The shared POA&M tray now gives Expand an opaque subtle surface and readable primary text, and disabled Reopen uses readable muted text. Focused `task433-canonical-poam-lifecycle` update-mode browser verification passed, the post-fix captures passed independent visual review with no remaining P0-P2 finding, and the normal strict Web UI gate matched all 60 approved TASK-433 baselines. Lifecycle behavior and persistence semantics are unchanged.
+
+Post-candidate review found a P2 interaction defect: `Remediation plan` is a distant section from `Save metadata`, and that mislabeled control is the only persistence path. The current browser tests reproduce the hidden dependency by filling the plan and later clicking `Save metadata`. TASK-433.7 is returned to In Progress for the focused UI and regression fix.
 <!-- SECTION:NOTES:END -->
