@@ -3,16 +3,20 @@ id: TASK-450.1
 title: >-
   Filter the server source closure so unrelated component changes stop
   invalidating the server build
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-08-31 22:38'
-updated_date: '2026-08-31 22:45'
+updated_date: '2026-09-01 02:04'
 labels: []
 dependencies: []
+references:
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/324'
 documentation:
   - >-
     backlog/docs/build/build-invalidation-graph/doc-23 -
     Build-Invalidation-Graph-and-CI-Feedback-Latency-Analysis.md
+modified_files:
+  - packages/default/default.nix
 parent_task_id: TASK-450
 priority: high
 type: enhancement
@@ -79,13 +83,13 @@ Read doc-23, `Build Invalidation Graph and CI Feedback Latency Analysis`, for th
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 The server derivation input contains workspace metadata and only the local crates in the cf-server transitive closure
-- [ ] #2 A source-only change under the builder crate does not change the server derivation hash, demonstrated by comparing derivation paths before and after the edit
-- [ ] #3 A source-only change under the agent crate does not change the server derivation hash, demonstrated the same way
-- [ ] #4 The server package still builds and still produces every binary it produced before, including test-agent and xccdf-export-fixture
-- [ ] #5 The behavior and meaning of the server SRC_HASH after filtering is documented in the Nix source, including why the narrower hash is correct for its runtime consumers
-- [ ] #6 Existing comments in packages/default/default.nix that describe server source filtering are accurate after the change, including the comment on the serverSrc binding
-- [ ] #7 Checks that boot a server still pass
+- [x] #1 The server derivation input contains workspace metadata and only the local crates in the cf-server transitive closure
+- [x] #2 A source-only change under the builder crate does not change the server derivation hash, demonstrated by comparing derivation paths before and after the edit
+- [x] #3 A source-only change under the agent crate does not change the server derivation hash, demonstrated the same way
+- [x] #4 The server package still builds and still produces every binary it produced before, including test-agent and xccdf-export-fixture
+- [x] #5 The behavior and meaning of the server SRC_HASH after filtering is documented in the Nix source, including why the narrower hash is correct for its runtime consumers
+- [x] #6 Existing comments in packages/default/default.nix that describe server source filtering are accurate after the change, including the comment on the serverSrc binding
+- [x] #7 Checks that boot a server still pass
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -94,4 +98,16 @@ Read doc-23, `Build Invalidation Graph and CI Feedback Latency Analysis`, for th
 LOCK: opencode-claude-opus-5 on gray in /home/mcamp/code/crystal-forge/TASK-450-p0-build-graph
 
 Implemented together with TASK-450.2, TASK-450.3, and TASK-450.4 in a single MR at the user's explicit direction.
+
+Verification: the original unfiltered expression changed cf-server from cyn1qw4a… to p6ibfini… after a builder edit. The filtered expression kept cf-server unchanged. Final probe kept both embedded and core server derivations unchanged after simultaneous builder and agent edits.
+
+Verification passed: server package build, integration, oidc-auth, xccdf-schema, web-ui, test-agent NixOS system build, and one complete nix flake check --keep-going -L run. TASK-451 tracks the discovered duplicate SQLx cache.
+
+LOCK RELEASED: implementation is pushed and MR !324 is awaiting review.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Filtered the server source closure to the cf-server transitive local-crate closure, workspace metadata, and required workspace-root SQLx metadata. Added a matching component workspace manifest and documented the narrowed SRC_HASH semantics. Builder and agent edits no longer invalidate either server variant.
+<!-- SECTION:FINAL_SUMMARY:END -->
