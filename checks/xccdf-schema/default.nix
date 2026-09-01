@@ -2,7 +2,10 @@
 let
   xccdfSchemas = pkgs.crystal-forge.xccdf-1-2-schemas;
   cfSchema = ../../schemas/cf-xccdf-1/cf-xccdf-1.xsd;
-  writerFixture = pkgs.crystal-forge.default.server;
+  # This check runs only the xccdf-export-fixture binary. That binary comes
+  # from the cf-server crate, so the core server build is sufficient and keeps
+  # the builder, keygen, and web UI closures out of the check.
+  writerFixture = pkgs.crystal-forge.default.cf-server-core-drv;
 in
 pkgs.runCommand "xccdf-schema-validation" {
   nativeBuildInputs = [ pkgs.libxml2 pkgs.openscap writerFixture ];

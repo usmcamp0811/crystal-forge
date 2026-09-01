@@ -129,10 +129,29 @@ let
     echo "DpOiy7W+DqZEg3KR0fvP5Q8k4FR4K1NB+qyYQLxhnFc=" > $out/agent.pub
   '';
   derivation-paths = lib.crystal-forge.derivation-paths pkgs;
+
+  # Components this check actually runs.
+  #
+  # This check enables the server, the builder, and the agent, so all three
+  # components are required. They are listed explicitly rather than through an
+  # aggregate so the closure states what the VM runs.
+  #
+  # AUTHORITATIVE UI GATE: the server here is the production embedded-UI build,
+  # not the core build used by the integration and oidc-auth checks. This is
+  # the one check that must prove the production server binary serves the
+  # production WASM through a real browser. Do not switch this to the core
+  # build; doing so would silently remove the only pre-merge guarantee that the
+  # shipped server can serve the shipped UI.
+  cfServer = pkgs.crystal-forge.default.cf-server-drv;
+  cfAgent = pkgs.crystal-forge.default.cf-agent-drv;
+  cfBuilder = pkgs.crystal-forge.default.cf-builder-drv;
+
   systemBuildClosure = pkgs.closureInfo {
     rootPaths = [
       inputs.self.nixosConfigurations.cf-test-sys.config.system.build.toplevel
-      pkgs.crystal-forge.default
+      cfServer
+      cfAgent
+      cfBuilder
       pkgs.path
     ] ++ lib.crystal-forge.prefetchedPaths;
   };
@@ -186,7 +205,9 @@ in pkgs.testers.runNixOSTest {
         pkgs.git
         # ImageMagick provides `compare`/`identify` for screenshot baseline diffs
         pkgs.imagemagick
-        pkgs.crystal-forge.default
+        cfServer
+        cfAgent
+        cfBuilder
         pkgs.crystal-forge.default.migrate
         pkgs.crystal-forge.cf-test-suite.runTests
         pkgs.crystal-forge.cf-test-suite.testRunner
@@ -250,6 +271,7 @@ in pkgs.testers.runNixOSTest {
 
         client = {
           enable = true;
+          package = cfAgent;
           server_host = "localhost";
           server_port = CF_TEST_SERVER_PORT;
           private_key = "/etc/server.key";
@@ -264,12 +286,15 @@ in pkgs.testers.runNixOSTest {
 
         server = {
           enable = true;
+          # Production embedded-UI build. See the cfServer binding above.
+          package = cfServer;
           port = CF_TEST_SERVER_PORT;
           host = "0.0.0.0";
         };
 
         build = {
           enable = true;
+          package = cfBuilder;
           offline = false;
         };
 

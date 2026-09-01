@@ -1007,10 +1007,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    #[cfg(feature = "embedded-ui")]
-    {
-        app = app.fallback(get(ui::serve_ui));
-    }
+    app = add_ui_fallback(app);
 
     // Add CORS layer for development (allows frontend dev server to talk to backend)
     // In production, the UI is served from the same origin, so this is permissive for dev
@@ -1048,6 +1045,45 @@ async fn main() -> anyhow::Result<()> {
     .await?;
 
     Ok(())
+}
+
+/// Adds the single-page application fallback when the server embeds the UI.
+///
+/// Without the `embedded-ui` feature, the router remains unchanged. Axum then
+/// returns `404 Not Found` for `/` and every other unmatched route. This
+/// negative guarantee prevents a core server from appearing to serve a UI.
+fn add_ui_fallback<S>(app: Router<S>) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    #[cfg(feature = "embedded-ui")]
+    {
+        app.fallback(get(ui::serve_ui))
+    }
+
+    #[cfg(not(feature = "embedded-ui"))]
+    {
+        app
+    }
+}
+
+#[cfg(all(test, not(feature = "embedded-ui")))]
+mod core_server_tests {
+    use super::add_ui_fallback;
+    use axum::Router;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn unmatched_root_route_returns_not_found_without_embedded_ui() {
+        let response = add_ui_fallback(Router::new())
+            .oneshot(Request::new(Body::empty()))
+            .await
+            .expect("an infallible Axum router must return a response");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
 }
 
 fn is_local_db_host(host: &str) -> bool {
