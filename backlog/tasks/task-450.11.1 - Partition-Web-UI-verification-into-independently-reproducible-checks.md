@@ -1,10 +1,11 @@
 ---
 id: TASK-450.11.1
 title: Partition Web UI verification into independently reproducible checks
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - opencode-gpt-5.6-sol
 created_date: '2026-09-01 03:27'
-updated_date: '2026-09-01 03:30'
+updated_date: '2026-09-01 03:31'
 labels:
   - web-ui
   - testing
@@ -63,4 +64,6 @@ The task must preserve shared derivation identity so separate checks can reuse N
 
 <!-- SECTION:NOTES:BEGIN -->
 The user selected this task for one focused Web UI optimization MR with TASK-438, TASK-354, TASK-450.11.2, and TASK-450.11.3.
+
+LOCK: opencode-gpt-5.6-sol in /home/mcamp/code/crystal-forge/TASK-450-web-ui-parallel-checks on branch TASK-450.11-web-ui-parallel-checks, based on TASK-450-p0-build-graph at 437efd55.
 <!-- SECTION:NOTES:END -->
