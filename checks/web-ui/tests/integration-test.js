@@ -11046,7 +11046,7 @@ security.audit.enable = true;</fixtext>
   },
   {
     name: "26bb-evaluation-dependency-graph",
-    description: "Evaluation dependency graph distinguishes plan states and scales build work across systems",
+    description: "Evaluation dependency graph distinguishes plan states, scales build work, and preserves modal and mobile behavior",
     action: async (page) => {
       const evalQueueMock = {
         active_count: 1,
@@ -11068,7 +11068,7 @@ security.audit.enable = true;</fixtext>
             committed_at: new Date(Date.now() - 3600000).toISOString(),
             enqueued_at: new Date(Date.now() - 3590000).toISOString(),
             is_latest_per_flake: true,
-            evaluation_status: "in_progress",
+            evaluation_status: "cancelling",
             queue_position: 1,
             systems: ["build-100", "build-10"],
             system_count: 9,
@@ -11087,29 +11087,61 @@ security.audit.enable = true;</fixtext>
           { system_name: "equal-alpha", dependency_derivation_count: 220, dependency_build_count: 40, build_plan_status: "complete", system_status: "evaluated" },
           { system_name: "equal-beta", dependency_derivation_count: 220, dependency_build_count: 40, build_plan_status: "complete", system_status: "evaluated" },
           { system_name: "zero-work", dependency_derivation_count: 95, dependency_build_count: 0, build_plan_status: "complete", system_status: "evaluated" },
-          { system_name: "plan-unavailable", dependency_derivation_count: null, dependency_build_count: null, build_plan_status: "unavailable", system_status: "evaluated" },
-          { system_name: "plan-calculating", dependency_derivation_count: null, dependency_build_count: null, build_plan_status: "calculating", system_status: "evaluated" },
-          { system_name: "plan-failed", dependency_derivation_count: null, dependency_build_count: null, build_plan_status: "failed", system_status: "evaluated" },
-          { system_name: "system-failed", dependency_derivation_count: null, dependency_build_count: null, build_plan_status: "unavailable", system_status: "failed" },
+          { system_name: "plan-unavailable", dependency_derivation_count: 901, dependency_build_count: 91, build_plan_status: "unavailable", system_status: "evaluated" },
+          { system_name: "plan-calculating", dependency_derivation_count: 902, dependency_build_count: 92, build_plan_status: "calculating", system_status: "evaluated" },
+          { system_name: "plan-failed", dependency_derivation_count: 903, dependency_build_count: 93, build_plan_status: "failed", system_status: "evaluated" },
+          { system_name: "system-failed", dependency_derivation_count: 904, dependency_build_count: 94, build_plan_status: "complete", system_status: "failed" },
+        ],
+      };
+      const allZeroGraphMock = {
+        commit_id: 4410,
+        total_systems: 2,
+        systems: [
+          { system_name: "zero-alpha", dependency_derivation_count: 12, dependency_build_count: 0, build_plan_status: "complete", system_status: "evaluated" },
+          { system_name: "zero-beta", dependency_derivation_count: 18, dependency_build_count: 0, build_plan_status: "complete", system_status: "evaluated" },
         ],
       };
 
+      let queueMode = "active";
+      let queueRequests = 0;
+      const queueWaiters = [];
+      const waitForQueueRequest = (target, timeoutMs = 8000) => new Promise((resolve, reject) => {
+        if (queueRequests >= target) return resolve();
+        const timer = setTimeout(() => reject(new Error(`Timed out waiting for eval queue request ${target}; saw ${queueRequests}`)), timeoutMs);
+        queueWaiters.push({ target, resolve: () => { clearTimeout(timer); resolve(); } });
+      });
+
       await page.route("**/api/v1/commits/eval-queue**", async (route) => {
-        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(evalQueueMock) });
+        queueRequests += 1;
+        const response = queueMode === "terminal" ? {
+          ...evalQueueMock,
+          active_count: 0,
+          completed_count: 1,
+          items: evalQueueMock.items.map((item) => ({ ...item, evaluation_status: "complete" })),
+        } : evalQueueMock;
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(response) });
+        for (let index = queueWaiters.length - 1; index >= 0; index -= 1) {
+          if (queueRequests >= queueWaiters[index].target) queueWaiters.splice(index, 1)[0].resolve();
+        }
       });
       await page.route("**/api/v1/commits/4410/eval/logs**", async (route) => {
         await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
       });
       let dependencyGraphRequests = 0;
-      let graphMode = "transition";
+      let graphMode = "empty";
+      const graphWaiters = [];
+      const waitForGraphRequest = (target, timeoutMs = 8000) => new Promise((resolve, reject) => {
+        if (dependencyGraphRequests >= target) return resolve();
+        const timer = setTimeout(() => reject(new Error(`Timed out waiting for dependency graph request ${target}; saw ${dependencyGraphRequests}`)), timeoutMs);
+        graphWaiters.push({ target, resolve: () => { clearTimeout(timer); resolve(); } });
+      });
       await page.route("**/api/v1/commits/4410/eval/dependency-graph**", async (route) => {
         dependencyGraphRequests += 1;
-        if (graphMode === "transition" && dependencyGraphRequests === 2) {
-          await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "temporary" }) });
-          return;
-        }
-        const terminal = graphMode === "terminal" || (graphMode === "transition" && dependencyGraphRequests >= 3);
-        const response = terminal ? {
+        const response = graphMode === "empty"
+          ? { ...dependencyGraphMock, total_systems: 0, systems: [] }
+          : graphMode === "all-zero"
+            ? allZeroGraphMock
+            : graphMode === "mixed-terminal" ? {
           ...dependencyGraphMock,
           systems: dependencyGraphMock.systems.map((system) =>
             system.system_name === "plan-calculating"
@@ -11118,7 +11150,26 @@ security.audit.enable = true;</fixtext>
           ),
         } : dependencyGraphMock;
         await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(response) });
+        for (let index = graphWaiters.length - 1; index >= 0; index -= 1) {
+          if (dependencyGraphRequests >= graphWaiters[index].target) graphWaiters.splice(index, 1)[0].resolve();
+        }
       });
+      let forceCancelRequests = 0;
+      await page.route("**/api/v1/commits/4410/force-cancel-evaluation", async (route) => {
+        forceCancelRequests += 1;
+        await route.fulfill({ status: 204 });
+      });
+
+      const assertNoGraphRequest = async (message, timeoutMs = 2500) => {
+        const request = await page.waitForRequest(
+          (candidate) => candidate.url().includes("/commits/4410/eval/dependency-graph"),
+          { timeout: timeoutMs },
+        ).catch((error) => {
+          if (error.name === "TimeoutError") return null;
+          throw error;
+        });
+        if (request) throw new Error(message);
+      };
 
       try {
         await page.goto(`${baseUrl}/evaluations`, { timeout: LOAD_TIMEOUT });
@@ -11128,27 +11179,53 @@ security.audit.enable = true;</fixtext>
 
         const drawer = page.getByRole("dialog", { name: "Evaluation detail" });
         await assertVisible(drawer, "Expected evaluation detail drawer for dependency graph fixture");
+
+        const forceCancelButton = drawer.getByRole("button", { name: "Force-cancel", exact: true });
+        await forceCancelButton.click();
+        let forceDialog = page.getByRole("alertdialog", { name: "Force-cancel evaluation?" });
+        await assertVisible(forceDialog, "Expected the styled force-cancel confirmation dialog");
+        await forceDialog.press("Escape");
+        await assertHidden(forceDialog, "Escape should dismiss the force-cancel dialog");
+        if (forceCancelRequests !== 0) throw new Error("Escape dismissal must not send a force-cancel request");
+
+        await forceCancelButton.click();
+        forceDialog = page.getByRole("alertdialog", { name: "Force-cancel evaluation?" });
+        await forceDialog.getByRole("button", { name: "Keep running" }).click();
+        await assertHidden(forceDialog, "Keep running should dismiss the force-cancel dialog");
+        if (forceCancelRequests !== 0) throw new Error("Keep running dismissal must not send a force-cancel request");
+
+        await forceCancelButton.click();
+        forceDialog = page.getByRole("alertdialog", { name: "Force-cancel evaluation?" });
+        const forceRequestPromise = page.waitForRequest(
+          (request) => request.method() === "POST" && request.url().endsWith("/api/v1/commits/4410/force-cancel-evaluation"),
+          { timeout: 5000 },
+        );
+        await forceDialog.getByRole("button", { name: "Force-cancel", exact: true }).click();
+        await forceRequestPromise;
+        if (forceCancelRequests !== 1) throw new Error(`Force-cancel confirmation must send exactly one request; saw ${forceCancelRequests}`);
+
         await drawer.getByRole("button", { name: /Dependency graph/ }).click();
 
         const graphRow = (name) => drawer.getByTestId(`dependency-system-row-${name}`);
+        await waitForGraphRequest(1);
+        await assertVisible(drawer.getByText("No systems recorded for this commit yet."), "Expected the active empty dependency graph state");
+
+        queueMode = "terminal";
+        await waitForQueueRequest(queueRequests + 1);
+        const requestsAtTerminalQueue = dependencyGraphRequests;
+        await assertNoGraphRequest("An active empty graph must stop polling after a queue refresh makes the evaluation terminal");
+        if (dependencyGraphRequests !== requestsAtTerminalQueue) throw new Error("Terminal queue refresh started another empty-graph request");
+
+        graphMode = "mixed-calculating";
+        await drawer.getByRole("button", { name: /Log/ }).click();
+        const mixedRequest = dependencyGraphRequests + 1;
+        await drawer.getByRole("button", { name: /Dependency graph/ }).click();
+        await waitForGraphRequest(mixedRequest);
         await assertVisible(graphRow("build-100"), "Expected dependency graph system rows");
 
-        const buildWidth = async (name) =>
-          await graphRow(name).getByTestId("dependency-build-work-bar").evaluate((element) => element.style.width);
-        const width100 = await buildWidth("build-100");
-        const width10 = await buildWidth("build-10");
-        const equalAlphaWidth = await buildWidth("equal-alpha");
-        const equalBetaWidth = await buildWidth("equal-beta");
-        const zeroWidth = await buildWidth("zero-work");
-        if (width100 !== "100%" || width10 !== "10%") {
-          throw new Error(`Expected shared 10:100 build widths, got ${width10}:${width100}`);
-        }
-        if (equalAlphaWidth !== equalBetaWidth) {
-          throw new Error(`Expected equal build counts to have equal widths, got ${equalAlphaWidth} and ${equalBetaWidth}`);
-        }
-        if (zeroWidth !== "0%") {
-          throw new Error(`Expected zero build work to have zero width, got ${zeroWidth}`);
-        }
+        await assertAttribute(drawer.getByTestId("dependency-derivation-total"), "data-testid", "dependency-derivation-total", "Expected complete-only dependency total");
+        if ((await drawer.getByTestId("dependency-derivation-total").innerText()) !== "1035") throw new Error("Dependency total must exclude stale counts from non-complete rows");
+        if ((await drawer.getByTestId("dependency-build-total").innerText()) !== "190") throw new Error("Build total must exclude stale counts from non-complete rows");
 
         await assertVisible(graphRow("zero-work").getByText("0 estimated builds", { exact: true }), "Expected valid complete zero to render as an estimated zero");
         await assertAttribute(graphRow("plan-unavailable"), "data-state", "unavailable", "Expected unavailable plan state");
@@ -11166,30 +11243,79 @@ security.audit.enable = true;</fixtext>
           throw new Error("Dependency graph should not use package, closure, or cache terminology");
         }
 
-        await assertVisible(graphRow("plan-calculating").getByText("Build plan unavailable", { exact: true }), "Expected polling to recover from a transient error and render the terminal plan");
-        const requestsAfterTerminalFetch = dependencyGraphRequests;
-        await page.waitForTimeout(2200);
-        if (dependencyGraphRequests !== requestsAfterTerminalFetch) {
-          throw new Error("A terminal dependency plan response must stop polling");
-        }
+        graphMode = "mixed-terminal";
+        const terminalRequest = dependencyGraphRequests + 1;
+        await waitForGraphRequest(terminalRequest);
+        await assertVisible(graphRow("plan-calculating").getByText("Build plan unavailable", { exact: true }), "Expected the calculating plan to become terminal");
+        await assertNoGraphRequest("A terminal dependency graph response must stop polling");
 
-        graphMode = "calculating";
+        graphMode = "mixed-calculating";
         await drawer.getByRole("button", { name: /Log/ }).click();
+        const calculatingRequest = dependencyGraphRequests + 1;
         await drawer.getByRole("button", { name: /Dependency graph/ }).click();
+        await waitForGraphRequest(calculatingRequest);
         await assertVisible(graphRow("plan-calculating").getByText("Calculating build work", { exact: true }), "Expected calculating plan after remount");
-        const requestsBeforeUnmount = dependencyGraphRequests;
         await drawer.getByRole("button", { name: /Log/ }).click();
-        await page.waitForTimeout(2200);
-        if (dependencyGraphRequests !== requestsBeforeUnmount) {
-          throw new Error("Dependency graph polling should stop when the graph tab unmounts");
-        }
-        graphMode = "terminal";
+        await assertNoGraphRequest("Dependency graph polling should stop when the graph tab unmounts");
+
+        graphMode = "mixed-terminal";
+        await page.setViewportSize({ width: 375, height: 812 });
+        const mobileRequest = dependencyGraphRequests + 1;
         await drawer.getByRole("button", { name: /Dependency graph/ }).click();
-        await assertVisible(graphRow("plan-calculating").getByText("Build plan unavailable", { exact: true }), "Expected terminal dependency graph for the coverage screenshot");
+        await waitForGraphRequest(mobileRequest);
+        await assertVisible(graphRow("plan-calculating").getByText("Build plan unavailable", { exact: true }), "Expected terminal dependency graph at mobile width");
+
+        const geometry = await page.evaluate(() => {
+          const names = ["build-100", "build-10", "equal-alpha", "equal-beta", "zero-work"];
+          const rows = Object.fromEntries(names.map((name) => {
+            const row = document.querySelector(`[data-testid='dependency-system-row-${name}']`);
+            const track = row.querySelector("[data-testid='dependency-build-work-track']").getBoundingClientRect();
+            const bar = row.querySelector("[data-testid='dependency-build-work-bar']").getBoundingClientRect();
+            const system = row.querySelector(".ed-graph-system").getBoundingClientRect();
+            const rowRect = row.getBoundingClientRect();
+            return [name, { trackWidth: track.width, barWidth: bar.width, row: rowRect.toJSON(), system: system.toJSON() }];
+          }));
+          const content = document.querySelector("[data-testid='dependency-graph-content']");
+          return {
+            rows,
+            contentOverflow: content.scrollWidth - content.clientWidth,
+            documentOverflow: document.documentElement.scrollWidth - window.innerWidth,
+          };
+        });
+        const tolerance = 1.5;
+        const trackWidth = geometry.rows["build-100"].trackWidth;
+        for (const [name, item] of Object.entries(geometry.rows)) {
+          if (Math.abs(item.trackWidth - trackWidth) > tolerance) throw new Error(`${name} does not use the common build-work track`);
+          if (item.system.left < item.row.left - tolerance || item.system.right > item.row.right + tolerance) throw new Error(`${name} system text exceeds its row bounds at 375px`);
+        }
+        const ratio = (name) => geometry.rows[name].barWidth / trackWidth;
+        if (Math.abs(ratio("build-100") - 1) > 0.02) throw new Error("100-build bar does not fill the common track");
+        if (Math.abs(ratio("build-10") - 0.1) > 0.02) throw new Error("10-build bar is not one tenth of the common track");
+        if (Math.abs(ratio("equal-alpha") - 0.4) > 0.02 || Math.abs(geometry.rows["equal-alpha"].barWidth - geometry.rows["equal-beta"].barWidth) > tolerance) throw new Error("Equal 40-build bars do not share equal 40% geometry");
+        if (geometry.rows["zero-work"].barWidth > tolerance) throw new Error("Zero-build bar must have zero geometry");
+        if (geometry.contentOverflow > tolerance || geometry.documentOverflow > tolerance) throw new Error(`Dependency graph overflows at 375px (content=${geometry.contentOverflow}, document=${geometry.documentOverflow})`);
+
+        graphMode = "all-zero";
+        await drawer.getByRole("button", { name: /Log/ }).click();
+        const zeroRequest = dependencyGraphRequests + 1;
+        await drawer.getByRole("button", { name: /Dependency graph/ }).click();
+        await waitForGraphRequest(zeroRequest);
+        await assertVisible(graphRow("zero-alpha"), "Expected all-complete all-zero graph response");
+        if ((await drawer.getByTestId("dependency-derivation-total").innerText()) !== "30") throw new Error("All-zero graph must retain its dependency total");
+        if ((await drawer.getByTestId("dependency-build-total").innerText()) !== "0") throw new Error("All-zero graph must render a stable zero build total");
+        await assertCount(drawer.getByText("0 estimated builds", { exact: true }), 2, "Every all-zero row should render an explicit zero-work label");
+        for (const name of ["zero-alpha", "zero-beta"]) {
+          const widths = await graphRow(name).evaluate((row) => ({
+            track: row.querySelector("[data-testid='dependency-build-work-track']").getBoundingClientRect().width,
+            bar: row.querySelector("[data-testid='dependency-build-work-bar']").getBoundingClientRect().width,
+          }));
+          if (widths.track <= 0 || widths.bar > tolerance) throw new Error(`${name} must retain a visible track with a stable 0% bar`);
+        }
       } finally {
         await page.unroute("**/api/v1/commits/eval-queue**");
         await page.unroute("**/api/v1/commits/4410/eval/logs**");
         await page.unroute("**/api/v1/commits/4410/eval/dependency-graph**");
+        await page.unroute("**/api/v1/commits/4410/force-cancel-evaluation");
       }
     },
   },

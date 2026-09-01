@@ -38,6 +38,23 @@ const CLAIM_NEXT_JOB_SERVER_DERIVATION_WILDCARD_SQL: &str = r#"
           AND d.cf_agent_enabled IS TRUE
           AND d.policy_requirements_met IS TRUE
           AND d.dependency_build_plan_status IN ('complete', 'failed')
+          AND (
+              d.commit_id IS NULL
+              OR EXISTS (
+                  SELECT 1
+                  FROM commits c
+                  JOIN evaluation_attempts ea
+                    ON ea.commit_id = c.id
+                   AND ea.attempt_number = c.evaluation_attempt_count
+                  WHERE c.id = d.commit_id
+                    AND c.evaluation_status = 'complete'
+                    AND ea.status = 'complete'
+                    AND (
+                        ea.dependency_plan_barrier = 'legacy_released'
+                        OR (ea.dependency_plan_barrier = 'ready' AND d.evaluation_attempt_id = ea.id)
+                    )
+              )
+          )
         ORDER BY
             build_jobs.queue_position DESC NULLS LAST,
             build_jobs.priority_weight DESC,
@@ -70,6 +87,23 @@ const CLAIM_NEXT_JOB_SERVER_DERIVATION_FILTERED_SQL: &str = r#"
           AND d.cf_agent_enabled IS TRUE
           AND d.policy_requirements_met IS TRUE
           AND d.dependency_build_plan_status IN ('complete', 'failed')
+          AND (
+              d.commit_id IS NULL
+              OR EXISTS (
+                  SELECT 1
+                  FROM commits c
+                  JOIN evaluation_attempts ea
+                    ON ea.commit_id = c.id
+                   AND ea.attempt_number = c.evaluation_attempt_count
+                  WHERE c.id = d.commit_id
+                    AND c.evaluation_status = 'complete'
+                    AND ea.status = 'complete'
+                    AND (
+                        ea.dependency_plan_barrier = 'legacy_released'
+                        OR (ea.dependency_plan_barrier = 'ready' AND d.evaluation_attempt_id = ea.id)
+                    )
+              )
+          )
         ORDER BY
             build_jobs.queue_position DESC NULLS LAST,
             build_jobs.priority_weight DESC,
@@ -103,6 +137,22 @@ const CLAIM_NEXT_JOB_VERIFIED_SOURCE_WILDCARD_SQL: &str = r#"
           AND d.cf_agent_enabled IS TRUE
           AND d.policy_requirements_met IS TRUE
           AND d.dependency_build_plan_status IN ('complete', 'failed')
+          AND (
+              d.commit_id IS NULL
+              OR (
+                  c.evaluation_status = 'complete'
+                  AND EXISTS (
+                      SELECT 1 FROM evaluation_attempts ea
+                      WHERE ea.commit_id = c.id
+                        AND ea.attempt_number = c.evaluation_attempt_count
+                        AND ea.status = 'complete'
+                        AND (
+                            ea.dependency_plan_barrier = 'legacy_released'
+                            OR (ea.dependency_plan_barrier = 'ready' AND d.evaluation_attempt_id = ea.id)
+                        )
+                  )
+              )
+          )
           AND (
               NOT $2
               OR (
@@ -142,6 +192,22 @@ const CLAIM_NEXT_JOB_VERIFIED_SOURCE_FILTERED_SQL: &str = r#"
           AND d.cf_agent_enabled IS TRUE
           AND d.policy_requirements_met IS TRUE
           AND d.dependency_build_plan_status IN ('complete', 'failed')
+          AND (
+              d.commit_id IS NULL
+              OR (
+                  c.evaluation_status = 'complete'
+                  AND EXISTS (
+                      SELECT 1 FROM evaluation_attempts ea
+                      WHERE ea.commit_id = c.id
+                        AND ea.attempt_number = c.evaluation_attempt_count
+                        AND ea.status = 'complete'
+                        AND (
+                            ea.dependency_plan_barrier = 'legacy_released'
+                            OR (ea.dependency_plan_barrier = 'ready' AND d.evaluation_attempt_id = ea.id)
+                        )
+                  )
+              )
+          )
           AND (
               NOT $3
               OR (
@@ -1700,6 +1766,7 @@ pub async fn mark_job_failed_with_retry(
             FROM derivations d
             WHERE d.id = $1
               AND d.dependency_build_plan_status IN ('complete', 'failed')
+              AND derivation_evaluation_barrier_released(d.id)
             ON CONFLICT (automatic_retry_source_id)
                 WHERE automatic_retry_source_id IS NOT NULL DO NOTHING
             RETURNING *
@@ -1932,6 +1999,7 @@ pub async fn requeue_build_job_as_new_attempt(pool: &PgPool, job_id: &Uuid) -> R
             WHERE bj.id = $1
               AND bj.status IN ('cancelled', 'failed', 'success')
               AND d.dependency_build_plan_status IN ('complete', 'failed')
+              AND derivation_evaluation_barrier_released(d.id)
         )
         INSERT INTO build_jobs (
             derivation_id,

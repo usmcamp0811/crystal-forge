@@ -212,11 +212,11 @@ SQL
       END
       $$;
 SQL
-    echo "=== Dependency plan 0233 to 0234 upgrade regression ==="
+    echo "=== Dependency plan 0245 through 0247 upgrade regression ==="
     createdb dependency_plan_upgrade
     upgrade_database_url="postgresql://$PGUSER@127.0.0.1/dependency_plan_upgrade"
     DATABASE_URL="$upgrade_database_url" cargo sqlx migrate run \
-      --source crates/cf-server/migrations --target-version 233
+      --source crates/cf-server/migrations --target-version 245
     psql "$upgrade_database_url" -v ON_ERROR_STOP=1 <<'SQL'
     INSERT INTO derivations (
       derivation_type, derivation_name, derivation_path, status_id,
@@ -231,7 +231,7 @@ SQL
     SELECT id, 'queued', 1
     FROM derivations
     WHERE derivation_name = 'queued-failed-plan';
-    SQL
+SQL
     DATABASE_URL="$upgrade_database_url" cargo sqlx migrate run \
       --source crates/cf-server/migrations
     psql "$upgrade_database_url" -v ON_ERROR_STOP=1 <<'SQL'
@@ -278,42 +278,74 @@ SQL
       ) THEN
         RAISE EXCEPTION 'legacy closure fields were not cleared';
       END IF;
+      IF EXISTS (
+        SELECT 1 FROM evaluation_attempts
+        WHERE dependency_plan_barrier <> 'legacy_released'
+      ) THEN
+        RAISE EXCEPTION 'historical attempts were not explicitly legacy-released';
+      END IF;
+      IF EXISTS (
+        SELECT 1 FROM derivations
+        WHERE derivation_name IN ('complete-plan', 'abandoned-plan', 'queued-failed-plan', 'idle-plan')
+          AND evaluation_attempt_id IS NOT NULL
+      ) THEN
+        RAISE EXCEPTION '0247 incorrectly tagged historical derivations';
+      END IF;
+      IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conrelid = 'derivations'::regclass
+          AND conname = 'derivations_derivation_path_unique'
+      ) THEN
+        RAISE EXCEPTION 'release A removed the legacy derivation-path constraint';
+      END IF;
     END
     $do$;
-    SQL
+
+    -- A release-A server can coexist with an older process whose prepared SQL
+    -- still uses the legacy path conflict target.
+    INSERT INTO derivations (
+      derivation_type, derivation_name, derivation_path, status_id
+    ) VALUES (
+      'package', 'old-process-path-upsert',
+      '/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-complete.drv', 5
+    )
+    ON CONFLICT (derivation_path) DO UPDATE
+    SET derivation_path = EXCLUDED.derivation_path;
+SQL
     if psql "$upgrade_database_url" -v ON_ERROR_STOP=1 \
       -c "UPDATE derivations SET dependency_derivation_count = NULL WHERE derivation_name = 'complete-plan'"; then
-      echo "0234 accepted an invalid complete plan" >&2
+      echo "0246 accepted an invalid complete plan" >&2
       exit 1
     fi
     if psql "$upgrade_database_url" -v ON_ERROR_STOP=1 \
       -c "UPDATE derivations SET dependency_derivation_count = 1 WHERE derivation_name = 'complete-plan'"; then
-      echo "0234 accepted a build count greater than the dependency count" >&2
+      echo "0246 accepted a build count greater than the dependency count" >&2
       exit 1
     fi
     if psql "$upgrade_database_url" -v ON_ERROR_STOP=1 \
       -c "UPDATE derivations SET dependency_derivation_count = -1 WHERE derivation_name = 'complete-plan'"; then
-      echo "0234 accepted a negative dependency derivation count" >&2
+      echo "0246 accepted a negative dependency derivation count" >&2
       exit 1
     fi
     if psql "$upgrade_database_url" -v ON_ERROR_STOP=1 \
       -c "UPDATE derivations SET dependency_build_count = -1, dependency_derivation_count = dependency_derivation_count + 1 WHERE derivation_name = 'complete-plan'"; then
-      echo "0234 accepted a negative dependency build count" >&2
+      echo "0246 accepted a negative dependency build count" >&2
       exit 1
     fi
     if psql "$upgrade_database_url" -v ON_ERROR_STOP=1 \
       -c "UPDATE derivations SET dependency_build_plan_generation = 1 WHERE derivation_name = 'idle-plan'"; then
-      echo "0234 accepted a generation for an unavailable plan" >&2
+      echo "0246 accepted a generation for an unavailable plan" >&2
       exit 1
     fi
     if psql "$upgrade_database_url" -v ON_ERROR_STOP=1 \
       -c "UPDATE derivations SET dependency_build_plan_lease_expires_at = NOW() WHERE derivation_name = 'idle-plan'"; then
-      echo "0234 accepted a lease for an unavailable plan" >&2
+      echo "0246 accepted a lease for an unavailable plan" >&2
       exit 1
     fi
     if psql "$upgrade_database_url" -v ON_ERROR_STOP=1 \
       -c "UPDATE derivations SET dependency_build_plan_lease_expires_at = NULL WHERE derivation_name = 'abandoned-plan'"; then
-      echo "0234 accepted a calculating plan without a lease" >&2
+      echo "0246 accepted a calculating plan without a lease" >&2
       exit 1
     fi
 
@@ -337,7 +369,7 @@ SQL
           AND dependency_build_plan_generation = 1
           AND dependency_build_plan_lease_expires_at IS NULL
       ) THEN
-        RAISE EXCEPTION '0233 server writes were not translated into the 0234 contract';
+        RAISE EXCEPTION '0245 server writes were not translated into the 0246 contract';
       END IF;
 
       UPDATE derivations
@@ -369,7 +401,7 @@ SQL
           AND dependency_build_plan_generation = 2
           AND dependency_build_plan_legacy_generation IS NULL
       ) THEN
-        RAISE EXCEPTION 'stale 0233 completion superseded a 0234 generation';
+        RAISE EXCEPTION 'stale 0245 completion superseded a 0246 generation';
       END IF;
 
       UPDATE derivations
@@ -387,11 +419,11 @@ SQL
           AND dependency_build_count = 3
           AND dependency_build_plan_generation = 2
       ) THEN
-        RAISE EXCEPTION '0234 terminal write did not complete the replacement generation';
+        RAISE EXCEPTION '0246 terminal write did not complete the replacement generation';
       END IF;
     END
     $do$;
-    SQL
+SQL
 
     echo "=== Critical cf-server integration targets ==="
     cargo test --offline --package cf-server \
@@ -445,6 +477,31 @@ SQL
     cargo test --offline --package cf-server --lib \
       dependency_plan_reaches_terminal_state_before_build_activation \
       -- --ignored --test-threads=1
+
+    echo "=== Evaluation-wide dependency plan barrier and concurrency regression ==="
+    cargo test --offline --package cf-server --lib -- --ignored --list \
+      > selected-cf-server-lib-tests.txt
+    run_exact_ignored_lib_test() {
+      test_name="$1"
+      if ! grep -Fqx "$test_name: test" selected-cf-server-lib-tests.txt; then
+        echo "Selected cf-server regression does not exist: $test_name" >&2
+        exit 1
+      fi
+      cargo test --offline --package cf-server --lib "$test_name" \
+        -- --ignored --exact --test-threads=1
+    }
+    run_exact_ignored_lib_test \
+      models::evaluate_with_policies::tests::coordinator_holds_activation_until_all_dependency_plans_finish
+    run_exact_ignored_lib_test \
+      models::evaluate_with_policies::tests::per_system_activation_rejects_partial_three_system_plan
+    run_exact_ignored_lib_test \
+      models::evaluate_with_policies::tests::cancellation_while_dependency_plan_is_blocked_never_activates
+    run_exact_ignored_lib_test \
+      models::evaluate_with_policies::tests::replacement_attempt_supersedes_blocked_dependency_plan
+    run_exact_ignored_lib_test \
+      models::evaluate_with_policies::tests::terminal_existing_jobs_do_not_require_missing_drv_paths_during_re_evaluation
+    run_exact_ignored_lib_test \
+      queries::build_jobs::tests::recovery_ignores_planning_attempt_and_uses_released_terminal_plan
 
     echo "=== Resolver exact-version/enforcement regressions ==="
     cargo test --offline --package cf-server \

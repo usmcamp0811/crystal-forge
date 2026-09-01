@@ -1,5 +1,5 @@
 -- Dependency-plan totals must not reuse legacy closure accounting columns.
--- Only complete values produced after migration 0233 have the new semantics.
+-- Only complete values produced after migration 0245 have the new semantics.
 ALTER TABLE derivations
     ADD COLUMN dependency_derivation_count integer,
     ADD COLUMN dependency_build_plan_generation bigint NOT NULL DEFAULT 0,
@@ -13,7 +13,7 @@ WHERE dependency_build_plan_status = 'complete'
   AND closure_total IS NOT NULL
   AND dependency_build_count IS NOT NULL;
 
--- Preserve in-flight 0233 calculations under generation 1. The compatibility
+-- Preserve in-flight 0245 calculations under generation 1. The compatibility
 -- trigger below accepts only the matching legacy terminal write. Recovery can
 -- replace an abandoned calculation after its lease expires.
 UPDATE derivations
@@ -56,9 +56,9 @@ UPDATE derivations
 SET closure_total = NULL,
     closure_cached = NULL;
 
--- COMPATIBILITY: A server from the 0233 release can remain active while this
--- migration runs. Translate its state-only writes into the 0234 contract until
--- a later release can remove this trigger after all 0233 servers are drained.
+-- COMPATIBILITY: A server from the 0245 release can remain active while this
+-- migration runs. Translate its state-only writes into the 0246 contract until
+-- a later release can remove this trigger after all 0245 servers are drained.
 CREATE FUNCTION normalize_legacy_dependency_build_plan_write() RETURNS trigger AS $$
 BEGIN
     IF NEW.dependency_build_plan_status = 'calculating'
@@ -77,7 +77,7 @@ BEGIN
         NEW.dependency_build_plan_lease_expires_at := NOW() + INTERVAL '10 minutes';
         NEW.dependency_build_plan_legacy_generation := NEW.dependency_build_plan_generation;
     ELSIF NEW.dependency_build_plan_status = 'calculating' THEN
-        -- A 0234 writer supplies a new generation and lease explicitly.
+        -- A 0246 writer supplies a new generation and lease explicitly.
         NEW.dependency_build_plan_legacy_generation := NULL;
     ELSIF NEW.dependency_build_plan_status = 'complete'
           AND (
@@ -93,8 +93,8 @@ BEGIN
             NEW.dependency_build_plan_lease_expires_at := NULL;
             NEW.dependency_build_plan_legacy_generation := NULL;
         ELSE
-            -- A 0233 terminal write has no generation token. Ignore it after
-            -- a 0234 writer supersedes the legacy generation.
+            -- A 0245 terminal write has no generation token. Ignore it after
+            -- a 0246 writer supersedes the legacy generation.
             RETURN OLD;
         END IF;
     ELSIF NEW.dependency_build_plan_status = 'failed'

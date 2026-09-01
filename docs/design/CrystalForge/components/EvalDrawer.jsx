@@ -6,10 +6,14 @@ function EvalDrawer({ ev, onClose, onCancel, onOpenSystem, onOpenPolicy, onOpenF
   const [maximized, setMaximized] = React.useState(false);
 
   React.useEffect(() => {
-    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    const onKey = (e) => {
+      if (e.key !== "Escape") return;
+      if (confirmForce) setConfirmForce(false);
+      else onClose();
+    };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [confirmForce, onClose]);
 
   const isLive = ev.status === "in_progress" || ev.status === "queued" || ev.status === "cancelling";
 
@@ -65,10 +69,6 @@ function EvalDrawer({ ev, onClose, onCancel, onOpenSystem, onOpenPolicy, onOpenF
               <span style={{ fontSize:12, color:"var(--cf-text-muted)" }}>/</span>
               <span style={{ color: ev.policyFail > 0 ? "#f87171" : "var(--cf-text-muted)" }}>{ev.policyFail}</span>
             </div>
-          </div>
-          <div className="ed-stat">
-            <div className="ed-stat-label">Derivations</div>
-            <div className="ed-stat-val">{ev.derivCount || ev.systemCount * 18}</div>
           </div>
         </div>
 
@@ -635,14 +635,14 @@ function EvalGraphTab({ ev }) {
 /* ── Force-cancel confirmation ───────────────────────── */
 function ConfirmForceCancel({ ev, onConfirm, onCancel }) {
   return (
-    <div className="modal-backdrop" onClick={onCancel} style={{ zIndex:90 }}>
-      <div className="modal" onClick={e=>e.stopPropagation()} style={{ maxWidth:440 }}>
+    <div className="modal-backdrop" onClick={onCancel} style={{ zIndex:190 }}>
+      <div className="modal" role="alertdialog" aria-modal="true" aria-labelledby="force-cancel-title" aria-describedby="force-cancel-description" tabIndex={-1} onClick={e=>e.stopPropagation()} style={{ maxWidth:440 }}>
         <div className="modal-head">
-          <h2 style={{ display:"flex", gap:8, alignItems:"center" }}>
+          <h2 id="force-cancel-title" style={{ display:"flex", gap:8, alignItems:"center" }}>
             <Icon name="warn" size={18} style={{ color:"#f87171" }}/>
             Force-cancel evaluation?
           </h2>
-          <p>This terminates <span className="mono">{ev.id}</span> immediately. In-flight builds may leave partial state in the Nix store. This action cannot be undone.</p>
+          <p id="force-cancel-description">This terminates <span className="mono">{ev.id}</span> immediately. In-flight builds may leave partial state in the Nix store. This action cannot be undone.</p>
         </div>
         <div className="modal-body" style={{ paddingTop:0 }}>
           <div className="sd-callout sd-callout-danger">
@@ -651,8 +651,8 @@ function ConfirmForceCancel({ ev, onConfirm, onCancel }) {
           </div>
         </div>
         <div className="modal-foot">
-          <button className="btn btn-ghost focus-ring" onClick={onCancel}>Keep running</button>
-          <button className="btn focus-ring" onClick={onConfirm} style={{ background:"#dc2626", color:"white" }}>Force-cancel</button>
+          <button className="btn btn-ghost focus-ring" autoFocus onClick={onCancel}>Keep running</button>
+          <button className="btn btn-danger focus-ring" onClick={onConfirm}>Force-cancel</button>
         </div>
       </div>
     </div>

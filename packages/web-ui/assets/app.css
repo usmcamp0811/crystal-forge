@@ -3855,7 +3855,7 @@ html[data-theme="light"] .sd-nix {
 
 .ed-stats {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: 1px;
   background: var(--cf-divider);
   flex-shrink: 0;
@@ -4748,7 +4748,7 @@ tr.kbd-focused > td {
 
 .ed-graph-row {
   display: grid;
-  grid-template-columns: 220px 1fr 70px;
+  grid-template-columns: 220px 1fr 115px;
   align-items: center;
   gap: 12px;
   padding: 8px 12px;
@@ -4775,6 +4775,14 @@ tr.kbd-focused > td {
 
 .ed-graph-bar-build {
   background: #60a5fa;
+}
+
+.ed-graph-value {
+  display: flex;
+  justify-content: flex-end;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
 }
 
 .ed-graph-legend {
@@ -4929,6 +4937,39 @@ tr.kbd-focused > td {
   display: flex;
   gap: 8px;
   justify-content: flex-end;
+}
+
+@media (max-width: 480px) {
+  .fl-tray-head {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .ed-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .ed-graph-summary {
+    flex-wrap: wrap;
+    overflow-x: visible;
+  }
+
+  .ed-graph-row {
+    grid-template-columns: minmax(0, 1fr) 115px;
+    gap: 8px;
+  }
+
+  .ed-graph-system {
+    grid-column: 1 / -1;
+  }
+
+  .ed-graph-bar {
+    grid-column: 1;
+  }
+
+  .modal-backdrop {
+    padding: 16px;
+  }
 }
 
 .cve-bar {
