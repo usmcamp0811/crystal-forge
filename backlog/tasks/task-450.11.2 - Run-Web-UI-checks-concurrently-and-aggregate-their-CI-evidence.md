@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-gpt-5.6-sol
 created_date: '2026-09-01 03:27'
-updated_date: '2026-09-01 03:46'
+updated_date: '2026-09-01 04:33'
 labels:
   - web-ui
   - testing
@@ -55,11 +55,10 @@ The pipeline must remain correct when fewer runners are available: jobs may queu
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-1. Keep non-UI checks in their existing matrix and add a dedicated blocking Web UI matrix whose entries match the new stable flake attributes.
-2. For each producer, build the blocking check, recover its successful evidence derivation regardless of verdict, and publish under a check-specific collision-free directory before returning the blocking status.
-3. Run design parity as a separate advisory producer. Mark deterministic side-effect-free Web UI producers interruptible.
-4. Replace the single-producer screenshot assumption with one `when: always` aggregator that waits for all expected producers, identifies failed or missing output, combines reports and artifacts, and publishes one pipeline-specific reviewer comment.
-5. Validate the expanded GitLab configuration, blocking/advisory semantics, artifact paths, failure handling, and behavior when runners serialize jobs.
+1. Remove `web-ui` from the generic flake matrix and add a required five-entry Web UI producer matrix plus one advisory design-parity producer, all with aligned merge-request/main rules and safe cancellation.
+2. Add a focused producer script that records the gate exit status, always builds the check's `.evidence` output without repeating successful VM work, copies it to `web-ui-evidence/<check>/`, records machine-readable producer status, and returns the blocking result while identifying evidence infrastructure failures.
+3. Add one `when: always`, non-blocking aggregator that downloads all producer artifacts with `needs`, reports every expected producer and detailed evidence, owns MR uploads/commenting, and always retains a report artifact.
+4. Add fixture-driven Node tests for producer and aggregation behavior, update the Web UI CI runbook, and validate scripts, tests, Nix evaluation, and GitLab YAML syntax with repository/Nix tooling.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
