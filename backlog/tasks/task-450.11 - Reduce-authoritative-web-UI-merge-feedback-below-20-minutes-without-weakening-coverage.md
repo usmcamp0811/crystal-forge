@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - opencode-gpt-5.6-sol
 created_date: '2026-09-01 03:12'
-updated_date: '2026-09-01 03:46'
+updated_date: '2026-09-01 05:17'
 labels:
   - web-ui
   - testing
@@ -80,4 +80,8 @@ The user approved a multiple-check topology so GitLab can schedule Web UI work c
 The user selected the umbrella and its three subtasks for one shared branch, worktree, and MR together with prerequisite TASK-438 and flakiness task TASK-354. TASK-430, TASK-450.8, and TASK-450.10 remain outside this focused MR.
 
 LOCK: opencode-gpt-5.6-sol in /home/mcamp/code/crystal-forge/TASK-450-web-ui-parallel-checks on branch TASK-450.11-web-ui-parallel-checks, based on TASK-450-p0-build-graph at 437efd55.
+
+Applied focused post-audit fixes in the existing TASK-450.11 worktree. Browser coach suppression now uses BrowserContext init scripts for non-onboarding selections; compatibility smoke retains ordered auth, dashboard, embedded assets, and Chromium with duplicated shell steps removed. Advisory design commands no longer swallow statuses and record command failures/missing outputs in check-verdict.json; producer metadata classifies false advisory verdicts, evidence lookup failures, and evidence copy failures. Added VM phase timings, producer gate/transfer timings, aggregate timing metadata, producer-specific required evidence, bounded inline uploads, aggregate evidence retention, masked GITLAB_TOKEN PRIVATE-TOKEN publication behavior, exact reusable gate checker regression fixtures, export-only semantic skip, and corrected runbook baseline/CI claims.
+
+Verification completed without VM execution: Nix dev-shell Node syntax and 20 Node tests passed; ownership validator reported 100 ci_fast steps partitioned across fleet/pipeline/governance; bash -n and nixpkgs shellcheck passed; all six Nix files parsed and all six path:. check names evaluated; .gitlab-ci.yml parsed with nixpkgs yq-go; git diff --check passed. No commit or push was made.
 <!-- SECTION:NOTES:END -->
