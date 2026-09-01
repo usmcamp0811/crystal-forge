@@ -24,8 +24,8 @@ use crystal_forge::{
             admin, auth_dev, auth_local, auth_oidc, auth_session, auth_status, auth_whoami,
             builders, caches, commits, compliance, config_health, cves, dashboard,
             deployment_policies, deployments, environments, flakes, framework_requirements,
-            hardening, navigation, scanning, setup_wizard, systems, user_notifications,
-            user_preferences, user_sessions,
+            hardening, navigation, nixos_options, poam, scanning, setup_wizard, systems,
+            user_notifications, user_preferences, user_sessions,
         },
         status,
         webhook::webhook_handler,
@@ -229,8 +229,61 @@ async fn main() -> anyhow::Result<()> {
         .route("/webhook", post(webhook_handler))
         // REST API v1
         .route(
+            "/api/v1/nixos/options",
+            get(nixos_options::search_nixos_options),
+        )
+        .route(
             "/api/v1/dashboard/summary",
             get(dashboard::dashboard_summary),
+        )
+        .route("/api/v1/poams", get(poam::list).post(poam::create))
+        .route("/api/v1/poams/dashboard", get(poam::dashboard))
+        .route("/api/v1/poams/dashboard/watchlist", get(poam::watchlist))
+        .route("/api/v1/poams/rollups/systems", get(poam::system_rollups))
+        .route("/api/v1/poams/rollups/bundles", get(poam::bundle_rollups))
+        .route(
+            "/api/v1/poams/relationships/findings",
+            get(poam::finding_relationships),
+        )
+        .route(
+            "/api/v1/poams/relationships/assignments",
+            get(poam::assignment_relationships),
+        )
+        .route("/api/v1/poams/compatible", get(poam::compatible_poams))
+        .route("/api/v1/poams/:id", get(poam::get).patch(poam::update))
+        .route("/api/v1/poams/:id/transition", post(poam::transition))
+        .route("/api/v1/poams/:id/notes", post(poam::note))
+        .route("/api/v1/poams/:id/milestones", post(poam::add_milestone))
+        .route(
+            "/api/v1/poams/:id/milestones/:milestone_id",
+            patch(poam::update_milestone).delete(poam::remove_milestone),
+        )
+        .route("/api/v1/poams/:id/findings", post(poam::link_finding))
+        .route(
+            "/api/v1/poams/:id/findings/:finding_id",
+            delete(poam::unlink_finding),
+        )
+        .route("/api/v1/poams/:id/assignments", post(poam::link_assignment))
+        .route(
+            "/api/v1/poams/:id/assignments/:assignment_version_id",
+            delete(poam::unlink_assignment),
+        )
+        .route("/api/v1/poams/:id/compatible", get(poam::compatible))
+        .route("/api/v1/poams/:id/verify", post(poam::verify))
+        .route("/api/v1/poams/:id/close", post(poam::close))
+        .route("/api/v1/poams/:id/reopen", post(poam::reopen))
+        .route(
+            "/api/v1/finding-waivers",
+            get(poam::list_waivers).post(poam::create_waiver),
+        )
+        .route("/api/v1/finding-waivers/:id", get(poam::get_waiver))
+        .route(
+            "/api/v1/finding-waivers/:id/status",
+            post(poam::decide_waiver),
+        )
+        .route(
+            "/api/v1/dashboard/activity",
+            get(dashboard::dashboard_activity),
         )
         .route(
             "/api/v1/cves/summary",
@@ -652,6 +705,10 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/deployment-policies/:id/deletion-eligibility",
             get(deployment_policies::get_deployment_policy_deletion_eligibility),
         )
+        .route(
+            "/api/v1/deployment-policies/bulk-delete",
+            post(deployment_policies::bulk_delete_deployment_policies),
+        )
         // Deployment policy workflow endpoints (approvals, rollout status)
         .route(
             "/api/v1/deployments/commit/:commit_id/approve",
@@ -1003,10 +1060,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    #[cfg(feature = "embedded-ui")]
-    {
-        app = app.fallback(get(ui::serve_ui));
-    }
+    app = add_ui_fallback(app);
 
     // Add CORS layer for development (allows frontend dev server to talk to backend)
     // In production, the UI is served from the same origin, so this is permissive for dev
@@ -1044,6 +1098,45 @@ async fn main() -> anyhow::Result<()> {
     .await?;
 
     Ok(())
+}
+
+/// Adds the single-page application fallback when the server embeds the UI.
+///
+/// Without the `embedded-ui` feature, the router remains unchanged. Axum then
+/// returns `404 Not Found` for `/` and every other unmatched route. This
+/// negative guarantee prevents a core server from appearing to serve a UI.
+fn add_ui_fallback<S>(app: Router<S>) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    #[cfg(feature = "embedded-ui")]
+    {
+        app.fallback(get(ui::serve_ui))
+    }
+
+    #[cfg(not(feature = "embedded-ui"))]
+    {
+        app
+    }
+}
+
+#[cfg(all(test, not(feature = "embedded-ui")))]
+mod core_server_tests {
+    use super::add_ui_fallback;
+    use axum::Router;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn unmatched_root_route_returns_not_found_without_embedded_ui() {
+        let response = add_ui_fallback(Router::new())
+            .oneshot(Request::new(Body::empty()))
+            .await
+            .expect("an infallible Axum router must return a response");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
 }
 
 fn is_local_db_host(host: &str) -> bool {

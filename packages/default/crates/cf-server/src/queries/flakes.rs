@@ -1292,142 +1292,136 @@ pub async fn fetch_dashboard_flake_timelines(
     pool: &PgPool,
     max_commits_per_flake: i64,
     flake_ids: Option<&[i32]>,
+    user_id: Option<uuid::Uuid>,
 ) -> Result<Vec<FlakeTimeline>> {
     let flake_filter: Option<Vec<i32>> = flake_ids.map(|ids| ids.to_vec());
-    let flakes = sqlx::query_as::<_, (i32, String, String)>(
-        "SELECT id, name, repo_url FROM flakes WHERE deleted_at IS NULL AND ($1::int[] IS NULL OR id = ANY($1)) ORDER BY name ASC",
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        flake_id: i32,
+        flake_name: String,
+        repo_url: String,
+        id: Option<i32>,
+        hash: Option<String>,
+        message: Option<String>,
+        author: Option<String>,
+        committed_at: Option<chrono::DateTime<chrono::Utc>>,
+        system_count: i64,
+        systems: Vec<String>,
+        commits_behind: Option<i64>,
+        build_status: Option<String>,
+        evaluation_status: Option<String>,
+        evaluation_error_message: Option<String>,
+    }
+
+    let rows = sqlx::query_as::<_, Row>(
+        r#"WITH visible_flakes AS (
+          SELECT f.id, f.name, f.repo_url, f.snapshot_ready_at
+          FROM flakes f
+          WHERE f.deleted_at IS NULL AND ($1::int[] IS NULL OR f.id = ANY($1))
+            AND ($3::uuid IS NULL OR EXISTS (
+              SELECT 1 FROM systems s JOIN user_environment_memberships uem ON uem.environment_id = s.environment_id
+              WHERE s.flake_id = f.id AND uem.user_id = $3
+            ))
+        ), ranked AS (
+          SELECT vf.id AS flake_id, vf.name AS flake_name, vf.repo_url, c.id AS commit_id,
+                 CASE WHEN vf.snapshot_ready_at IS NOT NULL THEN fbcs.position::bigint
+                      ELSE ROW_NUMBER() OVER (PARTITION BY c.flake_id ORDER BY c.commit_timestamp DESC, c.id DESC) - 1 END AS commits_behind,
+                 ROW_NUMBER() OVER (PARTITION BY c.flake_id ORDER BY
+                   CASE WHEN vf.snapshot_ready_at IS NOT NULL THEN 0 ELSE 1 END,
+                   CASE WHEN vf.snapshot_ready_at IS NOT NULL THEN fbcs.position ELSE 0 END,
+                   c.commit_timestamp DESC, c.id DESC) AS rn
+          FROM visible_flakes vf LEFT JOIN commits c ON c.flake_id = vf.id
+          LEFT JOIN flake_branch_commit_snapshot fbcs ON fbcs.flake_id = vf.id AND fbcs.commit_id = c.id
+          WHERE c.id IS NULL OR vf.snapshot_ready_at IS NULL OR fbcs.commit_id IS NOT NULL
+        ), deployments AS (
+          SELECT s.flake_id, v.current_commit_hash,
+                 COUNT(DISTINCT s.id)::bigint AS system_count,
+                 array_agg(DISTINCT s.hostname ORDER BY s.hostname) AS systems
+          FROM systems s JOIN view_system_deployment_status v ON v.hostname = s.hostname
+          WHERE v.current_commit_hash IS NOT NULL
+            AND ($3::uuid IS NULL OR EXISTS (SELECT 1 FROM user_environment_memberships uem WHERE uem.user_id = $3 AND uem.environment_id = s.environment_id))
+          GROUP BY s.flake_id, v.current_commit_hash
+        ), builds AS (
+          SELECT d.commit_id, CASE
+            WHEN COUNT(*) FILTER (WHERE bj.status IN ('building', 'cancelling')) > 0 THEN 'building'
+            WHEN COUNT(*) FILTER (WHERE bj.status = 'queued') > 0 THEN 'queued'
+            WHEN COUNT(*) FILTER (WHERE bj.status = 'failed') > 0 THEN 'failed'
+            WHEN COUNT(*) FILTER (WHERE bj.status = 'success') > 0 THEN 'complete'
+            ELSE NULL END AS build_status
+          FROM build_jobs bj JOIN derivations d ON d.id = bj.derivation_id
+          WHERE d.commit_id IN (SELECT commit_id FROM ranked WHERE rn <= $2)
+            AND ($3::uuid IS NULL OR (
+              (bj.environment_id IS NOT NULL AND EXISTS (
+                SELECT 1 FROM user_environment_memberships uem
+                WHERE uem.user_id = $3 AND uem.environment_id = bj.environment_id
+              )) OR (bj.environment_id IS NULL AND EXISTS (
+                SELECT 1 FROM systems s
+                JOIN user_environment_memberships uem ON uem.environment_id = s.environment_id
+                WHERE uem.user_id = $3
+                  AND (s.hostname = d.derivation_target OR s.system_configuration_name = d.derivation_target)
+              ))
+            ))
+          GROUP BY d.commit_id
+        )
+        SELECT r.flake_id, r.flake_name, r.repo_url, c.id, c.git_commit_hash AS hash,
+               c.message, c.author, c.commit_timestamp AS committed_at,
+               COALESCE(dp.system_count, 0) AS system_count,
+               COALESCE(dp.systems, ARRAY[]::text[]) AS systems,
+               r.commits_behind, b.build_status, c.evaluation_status, c.evaluation_error_message
+        FROM ranked r LEFT JOIN commits c ON c.id = r.commit_id
+        LEFT JOIN deployments dp ON dp.flake_id = r.flake_id AND dp.current_commit_hash = c.git_commit_hash
+        LEFT JOIN builds b ON b.commit_id = c.id
+        WHERE r.rn <= $2
+        ORDER BY lower(r.flake_name), r.rn"#,
     )
     .bind(&flake_filter)
+    .bind(max_commits_per_flake)
+    .bind(user_id)
     .fetch_all(pool)
     .await?;
 
     let mut timelines = Vec::new();
-
-    for (flake_id, flake_name, repo_url) in flakes {
-        let commits_rows = sqlx::query_as::<
-            _,
-            (
-                i32,
-                String,
-                chrono::DateTime<chrono::Utc>,
-                i64,
-                Vec<String>,
-                i64,
-                Option<String>,
-                Option<String>,
-            ),
-        >(
-            r#"
-            SELECT
-                c.id,
-                c.git_commit_hash,
-                c.commit_timestamp,
-                COALESCE(
-                    (
-                        SELECT COUNT(DISTINCT s.hostname)::bigint
-                        FROM view_system_deployment_status s
-                        WHERE s.current_commit_hash = c.git_commit_hash
-                    ),
-                    0
-                ) AS system_count,
-                COALESCE(
-                    (
-                        SELECT ARRAY_AGG(DISTINCT s.hostname ORDER BY s.hostname)
-                        FROM view_system_deployment_status s
-                        WHERE s.current_commit_hash = c.git_commit_hash
-                    ),
-                    ARRAY[]::text[]
-                ) AS systems,
-                (
-                    SELECT COUNT(*)::bigint
-                    FROM commits c2
-                    WHERE c2.flake_id = c.flake_id
-                    AND c2.commit_timestamp > c.commit_timestamp
-                ) AS commits_behind,
-                (
-                    SELECT
-                        CASE
-                            WHEN COUNT(*) FILTER (WHERE bj.status = 'building') > 0 THEN 'building'
-                            WHEN COUNT(*) FILTER (WHERE bj.status = 'queued') > 0 THEN 'queued'
-                            WHEN COUNT(*) FILTER (WHERE bj.status = 'failed') > 0 THEN 'failed'
-                            WHEN COUNT(*) FILTER (WHERE bj.status = 'success') > 0 THEN 'complete'
-                            ELSE NULL
-                        END
-                    FROM build_jobs bj
-                    JOIN derivations d ON d.id = bj.derivation_id
-                    WHERE d.commit_id = c.id
-                ) AS build_status,
-                (
-                    SELECT
-                        CASE
-                            WHEN COUNT(*) FILTER (WHERE d.status_id = 4) > 0 THEN 'running'
-                            WHEN COUNT(*) FILTER (WHERE d.status_id = 3) > 0 THEN 'queued'
-                            WHEN COUNT(*) FILTER (WHERE d.status_id = 6) > 0 THEN 'failed'
-                            WHEN COUNT(*) FILTER (WHERE d.status_id = 5) > 0 THEN 'complete'
-                            ELSE 'idle'
-                        END
-                    FROM derivations d
-                    WHERE d.commit_id = c.id
-                ) AS evaluation_status
-            FROM commits c
-            WHERE c.flake_id = $1
-            ORDER BY c.commit_timestamp DESC
-            LIMIT $2
-            "#,
-        )
-        .bind(flake_id)
-        .bind(max_commits_per_flake)
-        .fetch_all(pool)
-        .await?;
-
-        let commits: Vec<FlakeCommit> = commits_rows
-            .into_iter()
-            .map(
-                |(
-                    id,
-                    hash,
-                    committed_at,
-                    system_count,
-                    systems,
-                    commits_behind,
-                    build_status,
-                    evaluation_status,
-                )| {
-                    let build_status = build_status.as_deref().map(|status| match status {
-                        "queued" => BuildStatus::Queued,
-                        "building" => BuildStatus::Building,
-                        "failed" => BuildStatus::Failed,
-                        "complete" => BuildStatus::Complete,
-                        _ => BuildStatus::Idle,
-                    });
-
-                    FlakeCommit {
-                        id,
-                        hash,
-                        message: "".to_string(),
-                        author: "".to_string(),
-                        committed_at,
-                        system_count,
-                        commits_behind,
-                        systems,
-                        system_paths: Vec::new(),
-                        build_status,
-                        evaluation_status,
-                        evaluation_error_message: None,
-                        metadata: None, // Dashboard view doesn't need metadata
-                    }
-                },
-            )
-            .collect();
-
-        timelines.push(FlakeTimeline {
-            flake_id,
-            flake_name,
-            repo_url,
-            commits,
+    for row in rows {
+        if timelines
+            .last()
+            .map(|timeline: &FlakeTimeline| timeline.flake_id)
+            != Some(row.flake_id)
+        {
+            timelines.push(FlakeTimeline {
+                flake_id: row.flake_id,
+                flake_name: row.flake_name.clone(),
+                repo_url: row.repo_url.clone(),
+                commits: Vec::new(),
+            });
+        }
+        let build_status = row.build_status.as_deref().map(|status| match status {
+            "queued" => BuildStatus::Queued,
+            "building" => BuildStatus::Building,
+            "failed" => BuildStatus::Failed,
+            "complete" => BuildStatus::Complete,
+            _ => BuildStatus::Idle,
         });
+        if let (Some(id), Some(hash), Some(committed_at), Some(commits_behind)) =
+            (row.id, row.hash, row.committed_at, row.commits_behind)
+        {
+            let timeline_index = timelines.len() - 1;
+            timelines[timeline_index].commits.push(FlakeCommit {
+                id,
+                hash,
+                message: row.message.unwrap_or_default(),
+                author: row.author.unwrap_or_default(),
+                committed_at,
+                system_count: row.system_count,
+                commits_behind,
+                systems: row.systems,
+                system_paths: Vec::new(),
+                build_status,
+                evaluation_status: row.evaluation_status,
+                evaluation_error_message: row.evaluation_error_message,
+                metadata: None,
+            });
+        }
     }
-
     Ok(timelines)
 }
 

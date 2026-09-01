@@ -4,9 +4,16 @@
   pkgs,
   ...
 }: let
+  # This API-focused development VM runs the core server and the agent. The
+  # builder is disabled and the VM does not serve the browser UI, so neither
+  # the builder nor the embedded web UI belongs in its closure.
+  cfServer = pkgs.crystal-forge.default.cf-server-core-drv;
+  cfAgent = pkgs.crystal-forge.default.cf-agent-drv;
+  cfKeygen = pkgs.crystal-forge.default.cf-keygen-drv;
+
   keyPair = pkgs.runCommand "agent-keypair" {} ''
     mkdir -p $out
-    ${pkgs.crystal-forge.default.cf-keygen}/bin/cf-keygen -f $out/agent.key
+    ${cfKeygen}/bin/cf-keygen -f $out/agent.key
   '';
   keyPath = pkgs.runCommand "agent.key" {} ''
     mkdir -p $out
@@ -23,7 +30,8 @@
   systemBuildClosure = pkgs.closureInfo {
     rootPaths = [
       inputs.self.nixosConfigurations.cf-test-sys.config.system.build.toplevel
-      pkgs.crystal-forge.default
+      cfServer
+      cfAgent
       pkgs.path
     ] ++ lib.crystal-forge.prefetchedPaths;
   };
@@ -86,7 +94,8 @@ in
           jq
           hello
           curl
-          crystal-forge.default
+          cfServer
+          cfAgent
           # Development tools
           postgresql
           vim
@@ -112,6 +121,7 @@ in
           
           client = {
             enable = true;
+            package = cfAgent;
             server_host = "server";
             server_port = CF_SERVER_PORT;
             private_key = "/etc/agent.key";
@@ -126,6 +136,7 @@ in
 
           server = {
             enable = true;
+            package = cfServer;
             port = CF_SERVER_PORT;
             host = "0.0.0.0";
           };

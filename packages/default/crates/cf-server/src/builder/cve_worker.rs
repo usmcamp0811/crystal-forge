@@ -1395,6 +1395,17 @@ mod tests {
         let store_path = tempdir.path().join("task-396-scan-cycle-store-path");
         std::fs::create_dir_all(&store_path).expect("store path dir should be created");
 
+        // This test uses the dedicated shared test database rather than a
+        // per-test database. Retire leftovers from interrupted prior runs so
+        // the worker's one-target cycle deterministically selects this fixture.
+        sqlx::query(
+            "UPDATE derivations SET status_id = $1 WHERE derivation_name LIKE 'task-396-cycle-%'",
+        )
+        .bind(EvaluationStatus::BuildFailed.as_id())
+        .execute(&pool)
+        .await
+        .expect("prior scan-cycle fixtures should be retired");
+
         sqlx::query(
             r#"
             INSERT INTO scan_schedule_policy (id, on_build, deployed_interval, recent_interval, archived_interval, archived_enabled)
@@ -1421,7 +1432,7 @@ mod tests {
             r#"
             UPDATE derivations
             SET status_id = $2,
-                completed_at = NOW(),
+                completed_at = '1900-01-01 00:00:00+00'::timestamptz,
                 store_path = $3
             WHERE id = $1
             "#,

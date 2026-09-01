@@ -3,11 +3,11 @@ id: TASK-433.3
 title: >-
   TASK-433 Phase 2: Unified policy editor
   (Basics/Enforcement/Compliance/Evidence/Provenance)
-status: Review
+status: In Progress
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:42'
-updated_date: '2026-08-23 19:01'
+updated_date: '2026-09-01 15:22'
 labels:
   - design-parity
   - policy
@@ -54,10 +54,10 @@ nix build .#checks.x86_64-linux.web-ui --no-link
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [x] #1 All policy origins use one editor with Basics, Enforcement, Compliance, Evidence and read-only Provenance.
+- [ ] #1 All policy origins use one editor with Basics, Enforcement, Compliance, Evidence and read-only Provenance.
 - [x] #2 Category changes preserve every rule and change guidance only; cross-category rules remain composable.
 - [x] #3 Zero mappings save as valid Unmapped; mapped/no-enforcement and No enforcement are distinct states.
-- [x] #4 Manual mappings have permitted CRUD; imported mappings/provenance remain read-only and survive reload.
+- [ ] #4 Manual mappings have permitted CRUD; imported mappings/provenance remain read-only and survive reload.
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -73,6 +73,12 @@ nix build .#checks.x86_64-linux.web-ui --no-link
 6. Preserve existing safe serializer blockers and Evidence persistence/validation/required_fields behavior; do not add Phase 3 rule kinds or execution.
 7. Extend repository-backed browser workflows for custom Unmapped reload, category preservation, manual mapping CRUD reload, imported provenance/draft lineage, non-manual read-only mappings, imported needs-refinement, and mapped-without-enforcement.
 8. Run required formatting, web/server/unit/DB/evaluator/browser/Nix checks. Perform independent requirements/backend/performance/UI/error-state/E2E review, update MR metadata and task evidence, then move TASK-433.3 to Review only if every AC and required check is proven.
+
+Phase-8 owner remediation: bring the common editor shell up to surrounding modal/accessibility conventions with dialog semantics, accessible naming, Escape/close behavior, initial focus, focus containment/restoration where the existing Dioxus modal pattern supports it, usable narrow layout, and a wider persistent section/provenance hierarchy consistent with the authoritative design. Require CSRF on policy create/update and mapping CRUD changed by this phase, with direct server regressions and unchanged generic client CSRF behavior. Preserve immutable provenance/mapping semantics and all existing editor contracts.
+
+2026-08-31 remaining editor visual remediation in `/tmp/opencode/TASK-433-publish`: keep changes to the policy editor, `packages/web-ui/assets/app.css`, and focused tests. At the 560px narrow-desktop viewport, preserve all applicable section tabs in one horizontally scrollable tablist, expose an explicit overflow cue, and reveal the active tab. Reduce the desktop rail width, reserve scroll clearance above the footer, strengthen imported provenance hierarchy and long-value truncation, and reflow crowded multiline rule controls without changing editor state or persistence behavior. Add focused browser/pure regressions. Run web-ui rustfmt, targeted unit tests, a WASM check, Node syntax/static contracts if the browser source changes, and `git diff --check`. Do not commit.
+
+Exact-candidate CI remediation at `da7ae7de`: pipeline 2809426014 failed only because critical browser workflow `20a-policies-new-modal-pending-mappings` retained stale hidden mapping-error nodes after retry and its global duplicate-ID locator selected those hidden nodes. Keep production mapping behavior unchanged. Scope the workflow's error and retry assertions to the currently visible mapping alert so the second intentional failure proves the rendered active state instead of matching retired hidden DOM. Run Node syntax/static contracts and diff checks locally; let the already-running exact-head CI execute the browser workflow per user direction.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -88,6 +94,14 @@ nix build .#checks.x86_64-linux.web-ui --no-link
 ## Out-of-Scope Decisions
 - System-detail PolicyTab: flagged as using a local shadow `PolicyDefinition` type. Left as-is because it edits local presets, not real API policies. Would require TASK-422 architecture rewrite to route through shared editor.
 - Phase-1 GitLab CI verification: not explicitly verified. Proceeded under user authorization.
+
+Phase 8 returned Phase 2 to In Progress. Independent review found the common editor lacks dialog semantics, Escape/header close, focus containment/restoration, robust narrow tabs, and the persistent section/provenance hierarchy represented by the authoritative editor. Policy and mapping mutations also rely on role/session checks without CSRF validation. AC1 and AC4 are temporarily unchecked pending focused accessibility, direct API security, responsive, and reload regressions.
+
+2026-08-31 remaining editor visual remediation: Reduced the desktop section rail from 180px to 150px and narrowed its gutter. At the 560px narrow-desktop breakpoint the editor keeps Basics, Enforcement, Compliance, Evidence, and applicable Provenance in one horizontal tablist with a visible `Scroll sections` cue, a styled scrollbar, active styling, and cue-aware active-tab auto-reveal. Added body scroll padding, content clearance, and Add mapping scroll margin so the footer cannot cover the final mapping/content controls. Reworked imported provenance into higher-contrast source-artifact cards with read-only/import hierarchy, badges, ellipsized titled identifiers, and narrow stacking. Reflowed section headings, rule actions, and multiline Nix values on compact layouts. Behavior and persistence paths are unchanged. Added a pure tab-set/navigation assertion and narrowDesktop browser assertions for tab presence/overflow/active visibility plus footer clearance. Verification passed: web-ui rustfmt check; 40 `policy_editor_modal::tests`; wasm32 cargo check; Node syntax; web-ui harness static contracts; `git diff --check`. Existing repository warnings remained. The first targeted test attempt timed out while waiting on concurrent Cargo locks; the isolated retry and full focused module suite passed. Concurrent backend/API model changes appeared during verification and were preserved untouched. No commit created.
+
+Pipeline 2809426014 failed in `flake-check: [web-ui]` with required step 20a only. All seven TASK-433 strict workflows and Phase-6 POA&M workflows passed at that head. The failing assertion waited on hidden `#policy-mapping-editor-error` nodes after the first retry; the active second error was not selected. This is an owning Phase-2 browser-regression defect, so TASK-433.3 remains In Progress while the locator is corrected.
+
+Corrected workflow 20a to select only the currently visible `policy-mapping-editor-error` and to scope both retry controls to that active alert. Node syntax, harness static contracts, and `git diff --check` passed. Committed as `82922c7e` (`Stabilize policy mapping error workflow`) and pushed to MR !318. Exact-head pipeline 2810061607 is pending: https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2810061607. Keep AC1/AC4 unchecked and task In Progress until CI proves the browser workflow.
 <!-- SECTION:NOTES:END -->
 
 ## Comments

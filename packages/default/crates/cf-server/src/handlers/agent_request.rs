@@ -128,6 +128,7 @@ pub async fn authenticate_agent_request(
 }
 
 use crate::config::ServerConfig;
+use crate::nixos_options_metadata::NixosOptionsMetadataProvider;
 use crate::queue::QueueNotifier;
 use crate::server::jobs::BackgroundJobRegistry;
 
@@ -139,6 +140,7 @@ pub struct CFState {
     pub started_at: Instant,
     pub queue_notifier: Arc<QueueNotifier>,
     pub job_registry: BackgroundJobRegistry,
+    pub nixos_options_metadata: NixosOptionsMetadataProvider,
     pub eval_log_channels: Arc<
         tokio::sync::Mutex<std::collections::HashMap<i32, tokio::sync::broadcast::Sender<String>>>,
     >,
@@ -162,6 +164,7 @@ impl CFState {
             started_at: Instant::now(),
             queue_notifier,
             job_registry,
+            nixos_options_metadata: NixosOptionsMetadataProvider::from_runtime(),
             eval_log_channels: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             eval_log_history: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             build_log_channels: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
@@ -183,6 +186,19 @@ impl FromRef<CFState> for PgPool {
 impl FromRef<CFState> for ServerConfig {
     fn from_ref(state: &CFState) -> ServerConfig {
         state.server_config.clone()
+    }
+}
+
+impl FromRef<CFState> for NixosOptionsMetadataProvider {
+    fn from_ref(state: &CFState) -> NixosOptionsMetadataProvider {
+        state.nixos_options_metadata.clone()
+    }
+}
+
+#[cfg(test)]
+impl FromRef<PgPool> for NixosOptionsMetadataProvider {
+    fn from_ref(_pool: &PgPool) -> NixosOptionsMetadataProvider {
+        NixosOptionsMetadataProvider::from_runtime()
     }
 }
 

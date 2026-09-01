@@ -16,6 +16,7 @@ use crate::components::flake::FlakeTimelineWidget;
 use crate::components::icon::{Icon, IconName};
 use crate::components::loading::DashboardLoadingSpinner;
 use crate::components::notifications::{AlertBanner, AlertSeverity};
+use crate::components::poam::status_label;
 use crate::components::widget_grid::{GridWidget, StoredLayout, WidgetGrid};
 use crate::dashboard::adapter::{
     empty_dashboard_summary, load_dashboard_with_fallback, load_flake_timelines_with_fallback,
@@ -26,6 +27,7 @@ use crate::state::auth;
 use crate::state::navigation_focus::NavigationFocus;
 use crate::theme;
 use crate::views::hardening::render_top_services_compact;
+use crate::views::poam_api::{self, PoamApiError, PoamDashboardSummary, PoamSummary};
 
 /// Global filter state for the dashboard - shared across all widgets.
 /// Supports multi-select: empty set means "all flakes", otherwise only selected flakes.
@@ -131,6 +133,30 @@ fn widget_registry() -> &'static [WidgetMeta] {
             default_cols: 1,
             default_rows: 1,
             height_resizable: false,
+            admin_only: false,
+        },
+        WidgetMeta {
+            id: "poam-summary",
+            title: "POA&M Summary",
+            description: "Open remediation plans, overdue and awaiting verification",
+            icon: IconName::History,
+            category: "Security",
+            nav: Some("compliance"),
+            default_cols: 1,
+            default_rows: 1,
+            height_resizable: false,
+            admin_only: false,
+        },
+        WidgetMeta {
+            id: "poam-watchlist",
+            title: "POA&M Watchlist",
+            description: "Overdue and awaiting-verification remediation plans needing attention",
+            icon: IconName::History,
+            category: "Security",
+            nav: Some("compliance"),
+            default_cols: 2,
+            default_rows: 1,
+            height_resizable: true,
             admin_only: false,
         },
         WidgetMeta {
@@ -268,6 +294,7 @@ impl WidgetPosition {
 fn default_widget_positions() -> Vec<WidgetPosition> {
     [
         "fleet-health",
+        "poam-summary",
         "cve-summary",
         "build-queue",
         "build-summary",
@@ -277,19 +304,84 @@ fn default_widget_positions() -> Vec<WidgetPosition> {
         "quick-actions",
         "config-health",
         "hardening-top-services",
+        "poam-watchlist",
     ]
     .iter()
     .filter_map(|id| widget_meta(id).map(WidgetPosition::from_meta))
     .collect()
 }
 
-/// Build positions from a stored layout, falling back to defaults.
+/// Migrates a legacy stored layout to the current schema.
+///
+/// Legacy recognized entries retain their order, width, and supported height.
+/// Duplicate and unknown entries are removed. Version 3 layouts are returned
+/// unchanged so a widget that the user removed is not added again.
+fn migrate_stored_layout(stored: StoredLayout) -> StoredLayout {
+    if stored.version >= StoredLayout::VERSION {
+        return stored;
+    }
+
+    let mut seen = HashSet::new();
+    let mut entries = stored
+        .entries
+        .into_iter()
+        .filter_map(|(id, cols, rows)| {
+            let meta = widget_meta(&id)?;
+            if !seen.insert(id.clone()) {
+                return None;
+            }
+            Some((
+                id,
+                cols.clamp(1, 3),
+                if meta.height_resizable {
+                    rows.clamp(1, 3)
+                } else {
+                    meta.default_rows
+                },
+            ))
+        })
+        .collect::<Vec<_>>();
+
+    // A corrupt or obsolete legacy layout must retain the established
+    // full-dashboard fallback instead of becoming a two-widget layout.
+    if entries.is_empty() {
+        entries = default_widget_positions()
+            .into_iter()
+            .map(|position| (position.id.to_string(), position.cols, position.rows))
+            .collect();
+        return StoredLayout {
+            version: StoredLayout::VERSION,
+            entries,
+        };
+    }
+
+    if !seen.contains("poam-summary") {
+        let summary = ("poam-summary".to_string(), 1, 1);
+        let insert_at = entries
+            .iter()
+            .position(|(id, _, _)| id == "fleet-health")
+            .map_or(0, |index| index + 1);
+        entries.insert(insert_at, summary);
+        seen.insert("poam-summary".to_string());
+    }
+    if !seen.contains("poam-watchlist") {
+        entries.push(("poam-watchlist".to_string(), 2, 1));
+    }
+
+    StoredLayout {
+        version: StoredLayout::VERSION,
+        entries,
+    }
+}
+
+/// Builds positions from a stored layout, falling back to fresh defaults.
 fn load_widget_positions() -> Vec<WidgetPosition> {
     let Some(stored) = StoredLayout::load() else {
         return default_widget_positions();
     };
+    let stored = migrate_stored_layout(stored);
 
-    let mut positions: Vec<WidgetPosition> = stored
+    stored
         .entries
         .iter()
         .filter_map(|(id, cols, rows)| {
@@ -305,13 +397,7 @@ fn load_widget_positions() -> Vec<WidgetPosition> {
                 pos
             })
         })
-        .collect();
-
-    if positions.is_empty() {
-        positions = default_widget_positions();
-    }
-
-    positions
+        .collect()
 }
 
 fn persist_widget_positions(positions: &[WidgetPosition]) {
@@ -325,11 +411,106 @@ fn persist_widget_positions(positions: &[WidgetPosition]) {
     stored.save();
 }
 
+fn move_widget_position(positions: &mut [WidgetPosition], id: &str, direction: isize) -> bool {
+    let Some(current) = positions.iter().position(|position| position.id == id) else {
+        return false;
+    };
+    let target = current
+        .saturating_add_signed(direction)
+        .min(positions.len().saturating_sub(1));
+    if current == target {
+        return false;
+    }
+    positions.swap(current, target);
+    true
+}
+
 fn should_persist_widget_positions(positions: &[WidgetPosition]) -> bool {
+    if StoredLayout::load().is_some_and(|stored| stored.version > StoredLayout::VERSION) {
+        return false;
+    }
     StoredLayout::exists() || positions != default_widget_positions()
 }
 
-/// The main dashboard page.
+#[derive(Clone, Debug, PartialEq)]
+enum PoamDashboardState<T> {
+    Loading,
+    Loaded(T),
+    Empty,
+    Unauthorized,
+    Error,
+}
+
+fn poam_summary_state(
+    result: Option<&Result<PoamDashboardSummary, PoamApiError>>,
+) -> PoamDashboardState<PoamDashboardSummary> {
+    match result {
+        None => PoamDashboardState::Loading,
+        Some(Ok(summary)) if summary.total == 0 => PoamDashboardState::Empty,
+        Some(Ok(summary)) => PoamDashboardState::Loaded(summary.clone()),
+        Some(Err(error)) if error.is_unauthorized() => PoamDashboardState::Unauthorized,
+        Some(Err(_)) => PoamDashboardState::Error,
+    }
+}
+
+fn poam_watchlist_state(
+    result: Option<&Result<poam_api::Page<PoamSummary>, PoamApiError>>,
+) -> PoamDashboardState<Vec<PoamSummary>> {
+    match result {
+        None => PoamDashboardState::Loading,
+        Some(Ok(page)) if page.items.is_empty() => PoamDashboardState::Empty,
+        Some(Ok(page)) => PoamDashboardState::Loaded(page.items.clone()),
+        Some(Err(error)) if error.is_unauthorized() => PoamDashboardState::Unauthorized,
+        Some(Err(_)) => PoamDashboardState::Error,
+    }
+}
+
+fn poam_watchlist_row_count(rows: usize) -> usize {
+    match rows {
+        1 => 4,
+        2 => 8,
+        _ => 13,
+    }
+}
+
+fn poam_attention_label(poam: &PoamSummary) -> &'static str {
+    if poam.overdue {
+        "Overdue"
+    } else {
+        "Awaiting verification"
+    }
+}
+
+fn poam_watchlist_accessible_label(poam: &PoamSummary) -> String {
+    let due = poam
+        .target_date
+        .map(|date| format!(" Due {date}."))
+        .unwrap_or_default();
+    format!(
+        "Open {}: {}. Status {}. Urgency {}. Owner {}.{due}",
+        poam.human_id,
+        poam.title,
+        status_label(poam.status),
+        poam_attention_label(poam),
+        poam.owner,
+    )
+}
+
+fn compliance_route(poam: Option<uuid::Uuid>) -> Route {
+    Route::ComplianceView {
+        bundle: String::new(),
+        version: String::new(),
+        system: String::new(),
+        policy: String::new(),
+        poam: poam.map_or_else(String::new, |id| id.to_string()),
+        view: String::new(),
+    }
+}
+
+/// Renders the fleet dashboard from independently loaded server summaries.
+///
+/// Widgets own presentation and navigation state only. POA&M counts, watchlist
+/// ordering, visibility, and status remain server-authoritative.
 #[component]
 pub fn DashboardView() -> Element {
     let nav = navigator();
@@ -356,6 +537,18 @@ pub fn DashboardView() -> Element {
         } else {
             None
         }
+    });
+    // These view-owned resources issue exactly one batched request per endpoint.
+    // Widgets consume the shared results and never initiate their own requests.
+    let mut poam_summary_resource = use_resource(move || {
+        // Reading the generation makes Dioxus cancel and replace account-scoped
+        // requests whenever authentication changes.
+        let _ = app_state.read().auth_generation;
+        async { poam_api::dashboard_summary().await }
+    });
+    let mut poam_watchlist_resource = use_resource(move || {
+        let _ = app_state.read().auth_generation;
+        async { poam_api::dashboard_watchlist().await }
     });
 
     {
@@ -436,15 +629,40 @@ pub fn DashboardView() -> Element {
         };
     }
 
+    let poam_authentication_failed = poam_summary_resource
+        .read_unchecked()
+        .as_ref()
+        .is_some_and(|result| result.as_ref().is_err_and(PoamApiError::is_unauthenticated))
+        || poam_watchlist_resource
+            .read_unchecked()
+            .as_ref()
+            .is_some_and(|result| result.as_ref().is_err_and(PoamApiError::is_unauthenticated));
+    if poam_authentication_failed {
+        nav.push(Route::LoginView {});
+        return rsx! {
+            div {
+                class: "min-h-screen flex items-center justify-center {theme::surface::PAGE_BG}",
+                p { class: "{theme::text::SECONDARY}", "Redirecting to login..." }
+            }
+        };
+    }
+
     let dashboard = dashboard.read().clone();
     let timelines = flake_timelines.read().clone();
     let systems = dashboard_systems.read().clone();
+    let poam_summary = poam_summary_state(poam_summary_resource.read_unchecked().as_ref());
+    let poam_watchlist = poam_watchlist_state(poam_watchlist_resource.read_unchecked().as_ref());
     let build_queue = dashboard
         .build_queue
         .clone()
         .unwrap_or_else(|| BuildQueueSummary {
             building_count: 0,
             queued_count: 0,
+            failed_24h_count: 0,
+            active_workers: 0,
+            total_workers: 0,
+            used_slots: 0,
+            total_slots: 0,
             items: vec![],
             timestamp: dashboard.timestamp,
         });
@@ -524,6 +742,10 @@ pub fn DashboardView() -> Element {
         drop_target_id.set(None);
     };
 
+    let on_move_widget = move |(id, direction): (String, isize)| {
+        move_widget_position(&mut widget_positions.write(), &id, direction);
+    };
+
     // Set a widget's column span.
     let on_set_cols = move |(id, cols): (String, usize)| {
         let mut positions = widget_positions.write();
@@ -590,7 +812,7 @@ pub fn DashboardView() -> Element {
     };
 
     // Render widget content based on id
-    let render_widget_content = |id: &str| -> Element {
+    let render_widget_content = |id: &str, rows: usize| -> Element {
         let filter_display = if is_filtered {
             Some(filter_label.clone())
         } else {
@@ -624,6 +846,103 @@ pub fn DashboardView() -> Element {
                     cves: dashboard.cve_summary.clone(),
                     flake_filter: filter_display.clone()
                 }
+            },
+            "poam-summary" => match &poam_summary {
+                PoamDashboardState::Loading => rsx! {
+                    p { role: "status", aria_live: "polite", class: "text-xs {theme::text::SECONDARY}", "Loading POA&M summary..." }
+                },
+                PoamDashboardState::Empty => rsx! {
+                    p { role: "status", aria_live: "polite", class: "text-xs {theme::text::SECONDARY}", "No POA&M records are visible." }
+                },
+                PoamDashboardState::Unauthorized => rsx! {
+                    p { role: "alert", class: "text-xs {theme::text::SECONDARY}", "You are not authorized to view POA&M summary data." }
+                },
+                PoamDashboardState::Error => rsx! {
+                    div { role: "alert", class: "flex items-center gap-2",
+                        p { class: "text-xs text-red-300", "Unable to load POA&M summary data." }
+                        button { class: "btn btn-ghost focus-ring text-xs", onclick: move |_| poam_summary_resource.restart(), "Retry" }
+                    }
+                },
+                PoamDashboardState::Loaded(summary) => rsx! {
+                    div { role: "status", aria_live: "polite", aria_atomic: "true", style: "display:flex;flex-direction:column;gap:10px;",
+                        div { style: "display:flex;justify-content:space-between;align-items:baseline;",
+                            span {
+                                style: if summary.active > 0 { "font-size:32px;font-weight:700;color:var(--cf-policy-blue);line-height:1;font-variant-numeric:tabular-nums;" } else { "font-size:32px;font-weight:700;color:var(--cf-policy-emerald);line-height:1;font-variant-numeric:tabular-nums;" },
+                                "{summary.active}"
+                            }
+                            span { style: "font-size:12px;color:var(--cf-text-muted);", "open remediation plans" }
+                        }
+                        if summary.overdue > 0 {
+                            div {
+                                style: "padding:8px 10px;border-radius:6px;background:var(--cf-red-bg);border:1px solid color-mix(in oklab, var(--cf-policy-red) 28%, transparent);font-size:11px;color:var(--cf-policy-red);",
+                                "{summary.overdue} overdue"
+                            }
+                        }
+                        div { style: "display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:11px;",
+                            div { class: "dash-w-mini", span { "Awaiting verification" } strong { style: if summary.awaiting_verification > 0 { "color:var(--cf-policy-violet);" } else { "" }, "{summary.awaiting_verification}" } }
+                            div { class: "dash-w-mini", span { "Completed" } strong { style: "color:var(--cf-policy-emerald);", "{summary.completed}" } }
+                        }
+                    }
+                },
+            },
+            "poam-watchlist" => match &poam_watchlist {
+                PoamDashboardState::Loading => rsx! {
+                    p { role: "status", aria_live: "polite", class: "text-xs {theme::text::SECONDARY}", "Loading POA&M watchlist..." }
+                },
+                PoamDashboardState::Empty => rsx! {
+                    p { role: "status", aria_live: "polite", class: "text-xs {theme::text::SECONDARY}", "Nothing is overdue or awaiting verification." }
+                },
+                PoamDashboardState::Unauthorized => rsx! {
+                    p { role: "alert", class: "text-xs {theme::text::SECONDARY}", "You are not authorized to view the POA&M watchlist." }
+                },
+                PoamDashboardState::Error => rsx! {
+                    div { role: "alert", class: "flex items-center gap-2",
+                        p { class: "text-xs text-red-300", "Unable to load the POA&M watchlist." }
+                        button { class: "btn btn-ghost focus-ring text-xs", onclick: move |_| poam_watchlist_resource.restart(), "Retry" }
+                    }
+                },
+                PoamDashboardState::Loaded(items) => rsx! {
+                    div { style: "display:flex;flex-direction:column;gap:6px;",
+                        span { role: "status", aria_live: "polite", class: "sr-only", "{items.len()} POA&M records need attention." }
+                        for poam in items.iter().take(poam_watchlist_row_count(rows)) {
+                            {
+                                let poam_id = poam.id;
+                                let attention = poam_attention_label(poam);
+                                let status = status_label(poam.status);
+                                let accessible_label = poam_watchlist_accessible_label(poam);
+                                let attention_style = if poam.overdue {
+                                    "font-size:9.5px;flex-shrink:0;color:var(--cf-policy-red);background:var(--cf-red-bg);"
+                                } else {
+                                    "font-size:9.5px;flex-shrink:0;color:var(--cf-policy-violet);background:color-mix(in oklab, var(--cf-policy-violet) 16%, transparent);"
+                                };
+                                rsx! {
+                                    button {
+                                        key: "{poam.id}",
+                                        class: "poam-watchlist-row focus-ring",
+                                        "data-poam-id": "{poam.id}",
+                                        title: "Open {poam.human_id}: {poam.title}",
+                                        aria_label: "{accessible_label}",
+                                        onclick: move |_| {
+                                            nav.push(compliance_route(Some(poam_id)));
+                                        },
+                                        span { class: "poam-watchlist-main",
+                                            span { class: "mono poam-watchlist-id", "{poam.human_id}" }
+                                            span { class: "poam-watchlist-title", "{poam.title}" }
+                                        }
+                                        span { class: "poam-watchlist-meta",
+                                            span { class: "chip poam-watchlist-status", "{status}" }
+                                            span { class: "chip poam-watchlist-urgency", style: attention_style, "{attention}" }
+                                            span { class: "poam-watchlist-owner", "Owner: {poam.owner}" }
+                                            if let Some(target_date) = poam.target_date {
+                                                span { class: "poam-watchlist-due", "Due: {target_date}" }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
             },
             "recent-deployments" => rsx! {
                 RecentDeploymentsList {
@@ -766,10 +1085,10 @@ pub fn DashboardView() -> Element {
                 match &*hardening_top_services.read_unchecked() {
                     Some(Some(Ok(rows))) => render_top_services_compact(rows),
                     Some(Some(Err(_))) => rsx! {
-                        p { class: "text-xs {theme::text::SECONDARY}", "Unable to load hardening service risk data." }
+                        p { role: "alert", class: "text-xs {theme::text::SECONDARY}", "Unable to load hardening service risk data." }
                     },
                     _ => rsx! {
-                        p { class: "text-xs {theme::text::SECONDARY}", "Loading hardening service risk..." }
+                        p { role: "status", aria_live: "polite", class: "text-xs {theme::text::SECONDARY}", "Loading hardening service risk..." }
                     },
                 }
             }
@@ -858,12 +1177,14 @@ pub fn DashboardView() -> Element {
             }
             if let Some(message) = dashboard_notice.read().clone() {
                 p {
+                    role: "alert",
                     class: "text-xs px-3 py-2 rounded-lg border text-amber-100 cf-chip-warning",
                     "{message}"
                 }
             }
             if let Some(message) = timelines_notice.read().clone() {
                 p {
+                    role: "alert",
                     class: "text-xs px-3 py-2 rounded-lg border text-amber-100 cf-chip-warning",
                     "{message}"
                 }
@@ -877,7 +1198,7 @@ pub fn DashboardView() -> Element {
                         let action_label = pos
                             .nav
                             .filter(|route| can_view_widget_route_for_user(route, is_admin_user))
-                            .map(|_| "View →".to_string());
+                            .map(|_| if pos.id.starts_with("poam-") { "Review →" } else { "View →" }.to_string());
                         rsx! {
                             GridWidget {
                                 key: "{pos.id}",
@@ -903,10 +1224,11 @@ pub fn DashboardView() -> Element {
                                 on_drag_over: on_drag_over,
                                 on_drag_leave: on_drag_leave,
                                 on_drop: on_drop,
+                                on_move: on_move_widget,
                                 on_set_cols: on_set_cols,
                                 on_set_rows: on_set_rows,
                                 on_remove: on_remove_widget,
-                                children: render_widget_content(pos.id)
+                                children: render_widget_content(pos.id, pos.rows)
                             }
                         }
                     }
@@ -1230,6 +1552,7 @@ fn route_for_nav(route: &str) -> Option<Route> {
         "cves" => Route::CvesView {},
         "caches" => Route::CachesView {},
         "environments" => Route::EnvironmentsView {},
+        "compliance" => compliance_route(None),
         _ => return None,
     })
 }
@@ -1293,4 +1616,289 @@ fn hostnames_for_deployment(
         .map(|system| system.hostname.clone())
         .take(24)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn relative_luminance(rgb: [u8; 3]) -> f64 {
+        let channel = |value: u8| {
+            let value = f64::from(value) / 255.0;
+            if value <= 0.04045 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(rgb[0]) + 0.7152 * channel(rgb[1]) + 0.0722 * channel(rgb[2])
+    }
+
+    fn contrast_ratio(foreground: [u8; 3], background: [u8; 3]) -> f64 {
+        let foreground = relative_luminance(foreground);
+        let background = relative_luminance(background);
+        (foreground.max(background) + 0.05) / (foreground.min(background) + 0.05)
+    }
+
+    #[test]
+    fn poam_widgets_are_available_to_all_roles_and_in_fresh_defaults() {
+        let summary = widget_meta("poam-summary").unwrap();
+        assert_eq!(summary.category, "Security");
+        assert_eq!(summary.default_cols, 1);
+        assert!(!summary.height_resizable);
+        assert!(!summary.admin_only);
+
+        let watchlist = widget_meta("poam-watchlist").unwrap();
+        assert_eq!(watchlist.category, "Security");
+        assert_eq!(watchlist.default_cols, 2);
+        assert!(watchlist.height_resizable);
+        assert!(!watchlist.admin_only);
+
+        let ids = default_widget_positions()
+            .into_iter()
+            .map(|position| position.id)
+            .collect::<Vec<_>>();
+        assert_eq!(ids.iter().filter(|id| **id == "poam-summary").count(), 1);
+        assert_eq!(ids.iter().filter(|id| **id == "poam-watchlist").count(), 1);
+        assert_eq!(ids[0], "fleet-health");
+        assert_eq!(ids[1], "poam-summary");
+    }
+
+    #[test]
+    fn light_theme_task_433_semantic_text_colors_meet_wcag_aa() {
+        let white = [255, 255, 255];
+        let semantic_colors = [
+            [4, 120, 87],  // emerald-700
+            [146, 64, 14], // amber-800
+            [185, 28, 28], // red-700
+            [29, 78, 216], // blue-700
+            [109, 40, 217],
+        ];
+        assert!(
+            semantic_colors
+                .into_iter()
+                .all(|color| contrast_ratio(color, white) >= 4.5)
+        );
+
+        let css = include_str!("../../assets/app.css");
+        for declaration in [
+            "--cf-emerald: #047857",
+            "--cf-amber: #92400e",
+            "--cf-red: #b91c1c",
+            "--cf-blue: #1d4ed8",
+            "--cf-policy-violet: #6d28d9",
+        ] {
+            assert!(css.contains(declaration), "missing {declaration}");
+        }
+    }
+
+    #[test]
+    fn dark_secondary_and_disabled_text_tokens_meet_wcag_aa() {
+        let card = [15, 23, 42];
+        assert!(contrast_ratio([193, 202, 215], card) >= 4.5);
+        assert!(contrast_ratio([154, 166, 183], card) >= 4.5);
+        assert!(contrast_ratio([135, 147, 165], card) >= 4.5);
+
+        let css = include_str!("../../assets/app.css");
+        for declaration in [
+            "--cf-text-secondary: #c1cad7",
+            "--cf-text-muted: #9aa6b7",
+            "--cf-text-disabled: #8793a5",
+        ] {
+            assert!(css.contains(declaration), "missing {declaration}");
+        }
+    }
+
+    #[test]
+    fn task433_responsive_watchlist_retains_authoritative_fields() {
+        let timestamp = chrono::DateTime::parse_from_rfc3339("2026-08-31T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let poam = PoamSummary {
+            id: uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000433").unwrap(),
+            human_id: "POAM-0433".into(),
+            title: "Rotate signing material".into(),
+            plan: "Use the approved rotation procedure".into(),
+            owner: "Platform Security".into(),
+            target_date: Some(chrono::NaiveDate::from_ymd_opt(2026, 9, 15).unwrap()),
+            risk: poam_api::PoamRisk::High,
+            status: poam_api::PoamStatus::Blocked,
+            revision: 4,
+            overdue: true,
+            finding_count: 1,
+            created_at: timestamp,
+            updated_at: timestamp,
+            closed_at: None,
+            closure_attempt_id: None,
+        };
+
+        let label = poam_watchlist_accessible_label(&poam);
+        for value in [
+            "POAM-0433",
+            "Rotate signing material",
+            "Status Blocked",
+            "Urgency Overdue",
+            "Owner Platform Security",
+            "Due 2026-09-15",
+        ] {
+            assert!(label.contains(value), "missing {value} in {label}");
+        }
+
+        let css = include_str!("../../assets/app.css");
+        assert!(css.contains(".poam-watchlist-row"));
+        assert!(css.contains(".poam-watchlist-owner"));
+        assert!(css.contains(".poam-watchlist-due"));
+        assert!(css.contains("@media (max-width: 640px)"));
+    }
+
+    #[test]
+    fn keyboard_widget_move_is_bounded_and_preserves_widget_identity() {
+        let mut positions = default_widget_positions();
+        let first = positions[0].id;
+        let second = positions[1].id;
+
+        assert!(!move_widget_position(&mut positions, first, -1));
+        assert!(move_widget_position(&mut positions, first, 1));
+        assert_eq!(positions[0].id, second);
+        assert_eq!(positions[1].id, first);
+        assert!(!move_widget_position(&mut positions, "missing", 1));
+    }
+
+    #[test]
+    fn legacy_layout_migration_preserves_recognized_entries_and_adds_poam_once() {
+        let migrated = migrate_stored_layout(StoredLayout {
+            version: 2,
+            entries: vec![
+                ("build-queue".into(), 3, 3),
+                ("recent-deployments".into(), 2, 3),
+                ("build-queue".into(), 1, 1),
+                ("removed-widget".into(), 2, 2),
+                ("fleet-health".into(), 2, 3),
+            ],
+        });
+
+        assert_eq!(migrated.version, StoredLayout::VERSION);
+        assert_eq!(
+            migrated.entries,
+            vec![
+                ("build-queue".into(), 3, 1),
+                ("recent-deployments".into(), 2, 3),
+                ("fleet-health".into(), 2, 1),
+                ("poam-summary".into(), 1, 1),
+                ("poam-watchlist".into(), 2, 1),
+            ]
+        );
+        assert_eq!(migrate_stored_layout(migrated.clone()), migrated);
+    }
+
+    #[test]
+    fn missing_version_is_legacy_but_current_layout_preserves_removed_widgets() {
+        let legacy = migrate_stored_layout(StoredLayout {
+            version: 0,
+            entries: vec![("cve-summary".into(), 1, 1)],
+        });
+        assert!(legacy.entries.iter().any(|entry| entry.0 == "poam-summary"));
+        assert!(
+            legacy
+                .entries
+                .iter()
+                .any(|entry| entry.0 == "poam-watchlist")
+        );
+
+        let current = StoredLayout {
+            version: StoredLayout::VERSION,
+            entries: vec![("cve-summary".into(), 1, 1)],
+        };
+        assert_eq!(migrate_stored_layout(current.clone()), current);
+    }
+
+    #[test]
+    fn empty_or_unknown_legacy_layout_restores_full_defaults() {
+        let expected = default_widget_positions()
+            .into_iter()
+            .map(|position| (position.id.to_string(), position.cols, position.rows))
+            .collect::<Vec<_>>();
+
+        for entries in [vec![], vec![("obsolete-widget".into(), 3, 3)]] {
+            let migrated = migrate_stored_layout(StoredLayout {
+                version: 2,
+                entries,
+            });
+            assert_eq!(migrated.version, StoredLayout::VERSION);
+            assert_eq!(migrated.entries, expected);
+        }
+    }
+
+    #[test]
+    fn poam_states_do_not_treat_errors_or_zero_counts_as_loaded_data() {
+        let empty = PoamDashboardSummary {
+            total: 0,
+            active: 0,
+            overdue: 0,
+            awaiting_verification: 0,
+            completed: 0,
+        };
+        assert_eq!(
+            poam_summary_state(Some(&Ok(empty))),
+            PoamDashboardState::Empty
+        );
+        assert_eq!(
+            poam_summary_state(Some(&Err(PoamApiError::Network("down".into())))),
+            PoamDashboardState::Error
+        );
+        let unauthorized = PoamApiError::Server(poam_api::PoamServerError {
+            status: 403,
+            code: "forbidden".into(),
+            message: "denied".into(),
+            details: None,
+        });
+        assert_eq!(
+            poam_summary_state(Some(&Err(unauthorized))),
+            PoamDashboardState::Unauthorized
+        );
+        assert_eq!(poam_summary_state(None), PoamDashboardState::Loading);
+
+        let empty_watchlist = poam_api::Page {
+            items: vec![],
+            limit: 13,
+            offset: 0,
+            has_more: false,
+            next_offset: None,
+        };
+        assert_eq!(
+            poam_watchlist_state(Some(&Ok(empty_watchlist))),
+            PoamDashboardState::Empty
+        );
+        assert_eq!(
+            poam_watchlist_state(Some(&Err(PoamApiError::Network("down".into())))),
+            PoamDashboardState::Error
+        );
+    }
+
+    #[test]
+    fn poam_watchlist_height_and_navigation_use_stable_contracts() {
+        assert_eq!(poam_watchlist_row_count(1), 4);
+        assert_eq!(poam_watchlist_row_count(2), 8);
+        assert_eq!(poam_watchlist_row_count(3), 13);
+
+        let id = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000433").unwrap();
+        match compliance_route(Some(id)) {
+            Route::ComplianceView {
+                bundle,
+                version,
+                system,
+                policy,
+                poam,
+                view,
+            } => {
+                assert!(bundle.is_empty());
+                assert!(version.is_empty());
+                assert!(system.is_empty());
+                assert!(policy.is_empty());
+                assert_eq!(poam, id.to_string());
+                assert!(view.is_empty());
+            }
+            _ => panic!("expected compliance route"),
+        }
+    }
 }

@@ -279,6 +279,8 @@ pub struct DashboardSummary {
     pub total_systems: i64,
     pub active_builds: i64,
     pub build_queue: Option<BuildQueueSummary>,
+    #[serde(default)]
+    pub cache_health: Option<CacheHealthSummary>,
     pub recent_deployments: Vec<RecentDeployment>,
     pub timestamp: DateTime<Utc>,
 }
@@ -625,6 +627,73 @@ pub struct RecentDeployment {
     pub commit_message: Option<String>,
     pub deployed_at: DateTime<Utc>,
     pub status: DeploymentStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CacheHealthSummary {
+    pub status: CacheHealthStatus,
+    pub destination_count: i64,
+    pub enabled_destination_count: i64,
+    pub successful_pushes_24h: i64,
+    pub failed_pushes_24h: i64,
+    pub last_activity_at: Option<DateTime<Utc>>,
+    pub used_bytes: Option<i64>,
+    pub capacity_bytes: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheHealthStatus {
+    Healthy,
+    Degraded,
+    Unknown,
+    Disabled,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DashboardActivity {
+    #[serde(default)]
+    pub id: String,
+    pub kind: DashboardActivityKind,
+    pub status: DashboardActivityStatus,
+    pub occurred_at: DateTime<Utc>,
+    pub title: String,
+    pub system_id: Option<Uuid>,
+    pub flake_id: Option<i32>,
+    pub commit_id: Option<i32>,
+    pub commit_hash: Option<String>,
+    pub build_job_id: Option<Uuid>,
+    pub deployment_id: Option<Uuid>,
+    #[serde(default)]
+    pub evaluation_attempt_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DashboardActivityKind {
+    Deployment,
+    Build,
+    Evaluation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DashboardActivityStatus {
+    DeploymentStarted,
+    DeploymentSucceeded,
+    DeploymentFailed,
+    BuildQueued,
+    BuildBuilding,
+    BuildCancelling,
+    BuildSucceeded,
+    BuildFailed,
+    BuildCancelled,
+    EvaluationPending,
+    EvaluationInProgress,
+    EvaluationCancelling,
+    EvaluationSucceeded,
+    EvaluationFailed,
+    EvaluationCancelled,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1198,6 +1267,27 @@ pub struct ComplianceEvidenceResponse {
     pub resolution_state: Option<String>,
 }
 
+/// Describes one normalized requirement mapping attached to compliance evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComplianceRequirementIdentity {
+    /// Identifies the immutable requirement version.
+    pub requirement_version_id: Uuid,
+    /// Contains the framework-published requirement or control identifier.
+    pub external_id: String,
+    /// Contains the optional human-readable requirement title.
+    pub title: Option<String>,
+    /// Identifies the authoritative framework lineage.
+    pub framework_id: Uuid,
+    /// Contains the human-readable framework name.
+    pub framework_name: String,
+    /// Identifies the immutable framework release.
+    pub framework_version_id: Uuid,
+    /// Contains the human-readable framework release version.
+    pub framework_version: String,
+    /// Contains the optional human-readable framework release title.
+    pub framework_title: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ComplianceControlEvidence {
     pub policy_id: Uuid,
@@ -1207,6 +1297,21 @@ pub struct ComplianceControlEvidence {
     pub summary: String,
     pub evidence_items: Vec<ComplianceEvidenceItem>,
     pub framework_mapping: String,
+    /// Contains normalized mapping identity when supplied by the server.
+    #[serde(default)]
+    pub requirements: Vec<ComplianceRequirementIdentity>,
+    /// Contains the authoritative composite assessment when one was recorded.
+    #[serde(default)]
+    pub composite_result: Option<CompositeAssessmentResult>,
+    /// Identifies the stable server finding used for remediation actions.
+    #[serde(default)]
+    pub finding_id: Option<Uuid>,
+    /// Binds a legacy finding to the exact authoritative observation.
+    #[serde(default)]
+    pub finding_observation: Option<FindingObservationReference>,
+    /// True when this control is composite even if no exact assessment exists yet.
+    #[serde(default)]
+    pub composite_expected: bool,
     /// Grouping metadata from the exact policy version used for this control.
     #[serde(default)]
     pub control_family: Option<String>,
@@ -1214,6 +1319,72 @@ pub struct ComplianceControlEvidence {
     pub cmmc_level: Option<i32>,
     #[serde(default)]
     pub cis_section: Option<String>,
+}
+
+/// Identifies the authoritative evidence source behind a stable finding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FindingObservationSource {
+    /// Uses a deployed derivation's persisted Nix policy result.
+    NixPolicyResult,
+    /// Uses a completed CVE scan for the deployed derivation.
+    CveScan,
+}
+
+/// References one exact observation that the server can recompute.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FindingObservationReference {
+    /// Selects the authoritative evidence resolver.
+    pub source: FindingObservationSource,
+    /// Identifies the source derivation or scan.
+    pub source_id: String,
+    /// Identifies the effective immutable policy version.
+    pub policy_version_id: Uuid,
+    /// Binds the source values and effective policy semantics.
+    pub token: String,
+}
+
+/// Describes the server-computed result of one composite policy assessment.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CompositeAssessmentResult {
+    /// Identifies the persisted assessment when the server stored one.
+    #[serde(default)]
+    pub assessment_id: Option<Uuid>,
+    /// Identifies the evaluation attempt that produced the assessment.
+    #[serde(default)]
+    pub evaluation_attempt_id: Option<Uuid>,
+    /// Identifies the immutable policy semantics used for evaluation.
+    pub policy_version_id: Uuid,
+    /// Identifies the evaluated derivation when the assessment targeted one.
+    #[serde(default)]
+    pub target_store_path: Option<String>,
+    /// Contains the digest of the effective policy set.
+    #[serde(default)]
+    pub effective_set_digest: Option<String>,
+    /// Contains the digest of the effective policy configuration.
+    #[serde(default)]
+    pub effective_config_digest: Option<String>,
+    /// Contains the server-derived aggregate assessment status.
+    pub overall_status: String,
+    /// Contains the ordered results for each evaluated policy rule.
+    pub rule_results: Vec<CompositeAssessmentRuleResult>,
+}
+
+/// Describes one server-evaluated rule in a composite assessment.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CompositeAssessmentRuleResult {
+    /// Identifies the rule within its immutable policy version.
+    pub rule_id: Uuid,
+    /// Contains the rule evaluator kind.
+    pub kind: String,
+    /// Contains the evaluation phase in which the rule ran.
+    pub phase: String,
+    /// Contains the server-derived rule status.
+    pub status: String,
+    /// Contains the human-readable evaluation explanation.
+    pub detail: String,
+    /// Contains evaluator-specific evidence without changing its JSON shape.
+    pub evidence: serde_json::Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1323,6 +1494,55 @@ pub struct DeploymentPolicySummary {
     /// Human-readable rationale
     #[serde(default)]
     pub rationale: Option<String>,
+}
+
+/// Search metadata for one NixOS option. The server derives these fields from
+/// the pinned NixOS module option set; `value_type` controls the policy value
+/// editor while unknown types deliberately fall back to a semantic string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NixosOptionValueType {
+    /// Uses a boolean editor and JSON boolean value.
+    Boolean,
+    /// Uses the server-supplied set of allowed values.
+    Enum,
+    /// Uses a signed integer editor and JSON number value.
+    Integer,
+    /// Uses a single-line semantic string value.
+    String,
+    /// Uses a multiline semantic string value.
+    Lines,
+    /// Preserves an unrecognized type as a semantic string.
+    Unknown,
+}
+
+impl NixosOptionValueType {
+    /// Returns the stable editor type name used by policy authoring state.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Boolean => "boolean",
+            Self::Enum => "enum",
+            Self::Integer => "integer",
+            Self::String => "string",
+            Self::Lines => "lines",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// Describes one option from the server's pinned NixOS metadata index.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NixosOptionMetadata {
+    /// Contains the canonical NixOS option path.
+    pub path: String,
+    /// Selects the value editor without overriding target evaluation semantics.
+    pub value_type: NixosOptionValueType,
+    /// Contains allowed enum values when the option has a closed value set.
+    #[serde(default)]
+    pub enum_values: Vec<serde_json::Value>,
+    /// Contains the option documentation supplied by the metadata index.
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1449,6 +1669,57 @@ pub struct DeploymentPolicyVersionSummary {
     /// Evidence collection specifications for ATO audits
     #[serde(default)]
     pub evidence_specs: Vec<EvidenceSpec>,
+    /// Authoritative imported-origin provenance recorded at import time.
+    /// Empty for policies authored in Crystal Forge. Read-only: the editor
+    /// renders it and never submits it.
+    #[serde(default)]
+    pub provenance: Vec<PolicyOriginProvenance>,
+}
+
+/// One authoritative imported-origin record for a policy version, mirroring the
+/// server DTO. Populated from the immutable source artifact and its recorded
+/// source-object mapping, including origins inherited from the version a draft
+/// was derived from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicyOriginProvenance {
+    /// Identifies the immutable imported source artifact.
+    pub source_artifact_id: Uuid,
+    /// Contains the original source filename.
+    pub filename: String,
+    /// Contains the source artifact media type.
+    pub media_type: String,
+    /// Contains the artifact's lowercase SHA-256 digest.
+    pub sha256: String,
+    /// Contains the importer version that parsed the source.
+    pub parser_version: String,
+    /// Contains the detected XCCDF version when the artifact declared one.
+    #[serde(default)]
+    pub detected_xccdf_version: Option<String>,
+    /// Contains the imported source object kind when available.
+    #[serde(default)]
+    pub object_kind: Option<String>,
+    /// Contains the source object's stable external identity when available.
+    #[serde(default)]
+    pub source_identity: Option<String>,
+    /// Describes the recorded import fidelity when available.
+    #[serde(default)]
+    pub fidelity: Option<String>,
+    /// Identifies the user who imported the source when retained by the server.
+    #[serde(default)]
+    pub imported_by: Option<Uuid>,
+    /// Contains the server-resolved importer display name when available.
+    #[serde(default)]
+    pub imported_by_display: Option<String>,
+    /// Records when the source artifact was imported.
+    pub imported_at: DateTime<Utc>,
+    /// Identifies the first policy version created from this source object.
+    pub origin_policy_version_id: Uuid,
+    /// Counts derivation edges from the original imported policy version.
+    #[serde(default)]
+    pub lineage_depth: i32,
+    /// Indicates that the current version inherited rather than created this origin.
+    #[serde(default)]
+    pub inherited: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2169,6 +2440,39 @@ impl DeletionEligibility {
     }
 }
 
+/// Request body for bulk-deleting policies from the catalog's multi-select
+/// toolbar (TASK-433 Phase 1 — policy catalog scaling).
+#[derive(Debug, Clone, Serialize)]
+pub struct BulkDeletePoliciesRequest {
+    /// Identifies the policy lineages to delete independently.
+    pub policy_ids: Vec<Uuid>,
+}
+
+/// One policy that a bulk-delete request could not remove, with the same
+/// authoritative eligibility payload the single-policy delete endpoint
+/// returns on conflict.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BulkDeleteSkippedPolicy {
+    /// Identifies the requested policy lineage that was not deleted.
+    pub policy_id: Uuid,
+    /// Stable machine-readable reason: "not_found" or "deletion_blocked".
+    pub reason: String,
+    /// Contains authoritative deletion blockers for a blocked policy.
+    #[serde(default)]
+    pub eligibility: Option<DeletionEligibility>,
+}
+
+/// Response for a bulk-delete request. Every requested id resolves into
+/// exactly one of `deleted` or `skipped`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BulkDeletePoliciesResponse {
+    /// Contains policy lineage IDs that the server deleted.
+    pub deleted: Vec<Uuid>,
+    /// Contains requested policies the server did not delete and the reason.
+    #[serde(default)]
+    pub skipped: Vec<BulkDeleteSkippedPolicy>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AssignmentListResponse {
     pub assignments: Vec<AssignmentResponse>,
@@ -2234,6 +2538,7 @@ pub struct CreateDeploymentPolicyRequest {
     /// Evidence collection specifications for ATO audits
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence_specs: Vec<EvidenceSpec>,
+    /// Creates normalized requirement mappings with the new policy version.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub requirement_mappings: Vec<CreatePolicyMappingRequest>,
 }
@@ -2261,18 +2566,25 @@ pub struct UpdateDeploymentPolicyRequest {
     pub cci_ids: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub category: Option<String>,
+    /// Replaces, clears, or preserves the framework for `Some(Some(_))`,
+    /// `Some(None)`, or `None`, respectively.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub framework: Option<String>,
+    pub framework: Option<Option<String>>,
+    /// Replaces, clears, or preserves the severity.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub severity: Option<String>,
+    pub severity: Option<Option<String>>,
+    /// Replaces, clears, or preserves the control family.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub control_family: Option<String>,
+    pub control_family: Option<Option<String>>,
+    /// Replaces, clears, or preserves the CMMC level.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub cmmc_level: Option<i32>,
+    pub cmmc_level: Option<Option<i32>>,
+    /// Replaces, clears, or preserves the CIS section.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub cis_section: Option<String>,
+    pub cis_section: Option<Option<String>>,
+    /// Replaces, clears, or preserves the rationale.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub rationale: Option<String>,
+    pub rationale: Option<Option<String>>,
     /// When `Some`, replace evidence specs; `Some([])` clears them.
     /// `None` (omitted) preserves the existing value.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2446,6 +2758,16 @@ pub struct BuildQueueSummary {
     pub building_count: i64,
     /// Number of builds waiting in the queue.
     pub queued_count: i64,
+    #[serde(default)]
+    pub failed_24h_count: i64,
+    #[serde(default)]
+    pub active_workers: i64,
+    #[serde(default)]
+    pub total_workers: i64,
+    #[serde(default)]
+    pub used_slots: i64,
+    #[serde(default)]
+    pub total_slots: i64,
     /// List of active build items (building + queued, limited).
     pub items: Vec<BuildQueueItem>,
     /// Server timestamp for freshness.
@@ -2511,6 +2833,8 @@ fn default_attempt_number() -> i32 {
 pub struct EvalQueueSummary {
     pub active_count: i64,
     pub completed_count: i64,
+    #[serde(default)]
+    pub successful_count: i64,
     pub failed_count: i64,
     #[serde(default)]
     pub domain_total: i64,
@@ -3431,22 +3755,73 @@ pub struct AdminUpdateUserRequest {
     pub password: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Reports whether one server-derived setup coach step is complete.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SetupWizardStepStatus {
+    /// Indicates whether at least one qualifying entity exists.
     pub complete: bool,
+    /// Gives the number of qualifying persisted records or lineages for the step.
     pub count: i64,
 }
 
+/// Reports administrator setup coach progress derived from persisted state.
+///
+/// Optional coach fields preserve compatibility with the legacy six-step API.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SetupWizardProgressResponse {
+    /// Indicates whether the current administrator dismissed the coach.
     pub dismissed: bool,
+    /// Indicates whether the current administrator acknowledged agent setup.
     pub agent_acknowledged: bool,
+    /// Reports environment setup progress.
     pub environment: SetupWizardStepStatus,
+    /// Reports flake setup progress.
     pub flake: SetupWizardStepStatus,
+    /// Reports builder setup progress.
     pub builder: SetupWizardStepStatus,
+    /// Reports cache destination setup progress.
     pub cache: SetupWizardStepStatus,
+    /// Reports progress for systems linked to an environment and flake.
     pub system: SetupWizardStepStatus,
+    /// Reports policy lineage progress from user-attributed policy versions.
+    #[serde(default)]
+    pub policy: Option<SetupWizardStepStatus>,
+    /// Reports compliance bundle lineage progress.
+    #[serde(default)]
+    pub bundle: Option<SetupWizardStepStatus>,
+    /// Reports POA&M progress across all lifecycle states.
+    #[serde(default)]
+    pub poam: Option<SetupWizardStepStatus>,
+    /// Indicates whether the original five infrastructure steps are complete.
     pub all_required_complete: bool,
+    /// Indicates whether all nine setup coach steps are complete.
+    #[serde(default)]
+    pub all_coach_steps_complete: Option<bool>,
+}
+
+#[cfg(test)]
+mod setup_wizard_tests {
+    use super::*;
+
+    #[test]
+    fn older_setup_progress_preserves_absent_new_steps() {
+        let progress: SetupWizardProgressResponse = serde_json::from_value(serde_json::json!({
+            "dismissed": false,
+            "agent_acknowledged": true,
+            "environment": { "complete": true, "count": 1 },
+            "flake": { "complete": true, "count": 1 },
+            "builder": { "complete": true, "count": 1 },
+            "cache": { "complete": true, "count": 1 },
+            "system": { "complete": true, "count": 1 },
+            "all_required_complete": true
+        }))
+        .expect("older setup progress should deserialize");
+
+        assert_eq!(progress.policy, None);
+        assert_eq!(progress.bundle, None);
+        assert_eq!(progress.poam, None);
+        assert_eq!(progress.all_coach_steps_complete, None);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -4222,7 +4597,36 @@ pub struct UpdatePolicyMappingRequest {
 
 #[cfg(test)]
 mod tests {
-    use super::XccdfPreviewResponse;
+    use super::{ComplianceControlEvidence, XccdfPreviewResponse};
+
+    #[test]
+    fn compliance_requirement_identity_is_additive_and_rolling_compatible() {
+        let mut value = serde_json::json!({
+            "policy_id": "00000000-0000-0000-0000-000000000001",
+            "policy_name": "Mapped policy",
+            "status": "pass",
+            "severity": "high",
+            "summary": "Passed",
+            "evidence_items": [],
+            "framework_mapping": "NIST SP 800-53 Rev. 5 · AC-2"
+        });
+        let legacy: ComplianceControlEvidence = serde_json::from_value(value.clone()).unwrap();
+        assert!(legacy.requirements.is_empty());
+
+        value["requirements"] = serde_json::json!([{
+            "requirement_version_id": "00000000-0000-0000-0000-000000000002",
+            "external_id": "AC-2",
+            "title": "Account Management",
+            "framework_id": "00000000-0000-0000-0000-000000000003",
+            "framework_name": "NIST SP 800-53",
+            "framework_version_id": "00000000-0000-0000-0000-000000000004",
+            "framework_version": "Rev. 5",
+            "framework_title": null
+        }]);
+        let enriched: ComplianceControlEvidence = serde_json::from_value(value).unwrap();
+        assert_eq!(enriched.requirements[0].external_id, "AC-2");
+        assert_eq!(enriched.requirements[0].framework_version, "Rev. 5");
+    }
 
     #[test]
     fn deserializes_20ac_shared_implementation_group() {

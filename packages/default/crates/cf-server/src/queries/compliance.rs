@@ -2,11 +2,13 @@ use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::api::models::{
     BundleVersionRequirementMembership, ComplianceGroupingScheme, DeletionEligibility,
 };
+use crate::compliance::canonical::semantic_digest;
 use crate::compliance::digest::{
     BundleVersionCanonical, PolicyVersionCanonical, load_bundle_membership,
     refresh_bundle_requirement_digest, write_assignment_effective_set_digest,
@@ -17,6 +19,7 @@ use crate::compliance::resolver::{
     resolve_systems_effective_policies_for_bundle_version_batch,
     resolve_systems_effective_policies_for_bundle_versions_batch,
 };
+use crate::models::poam::{FindingObservationReference, FindingObservationSource};
 use crate::queries::deletion::{blocker, eligibility};
 
 pub async fn list_grouping_schemes(pool: &PgPool) -> Result<Vec<ComplianceGroupingScheme>> {
@@ -672,12 +675,23 @@ pub async fn list_bundle_version_policy_membership(
     Ok(Some(members))
 }
 
-/// Return immutable bundle membership and assignment-resolved system usage for
-/// one exact policy version. Bundle membership and effective usage are kept
-/// separate because assignment overlays can exclude or add policy versions.
+/// Returns immutable bundle membership and assignment-resolved system usage for
+/// one exact policy version.
+///
+/// Bundle membership and effective usage are kept separate because assignment
+/// overlays can exclude or add policy versions. `visible_environment_ids`
+/// restricts system usage to those environments. `None` grants fleet-wide
+/// visibility and is reserved for administrators; `Some(&[])` returns no
+/// systems.
+///
+/// # Errors
+///
+/// Returns an error when policy existence, bundle usage, assignment candidates,
+/// or effective policy resolution cannot be loaded from PostgreSQL.
 pub async fn load_policy_version_usage(
     pool: &PgPool,
     policy_version_id: Uuid,
+    visible_environment_ids: Option<&[Uuid]>,
 ) -> Result<Option<PolicyVersionUsageResponse>> {
     let policy_version_exists = sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS(SELECT 1 FROM deployment_policy_versions WHERE id = $1)",
@@ -766,10 +780,12 @@ pub async fn load_policy_version_usage(
              (a.scope_type = 'system' AND a.system_id = s.id)
              OR (a.scope_type = 'environment' AND a.environment_id = s.environment_id)
         LEFT JOIN environments e ON e.id = s.environment_id
+        WHERE $2::uuid[] IS NULL OR s.environment_id = ANY($2)
         ORDER BY b.name, bv.version, s.hostname, s.id
         "#,
     )
     .bind(policy_version_id)
+    .bind(visible_environment_ids)
     .fetch_all(pool)
     .await
     .context("load exact policy-version system candidates")?;
@@ -910,6 +926,8 @@ pub(crate) struct SystemRow {
 pub(crate) struct PolicyRow {
     pub id: Uuid,
     #[sqlx(default)]
+    pub version_id: Option<Uuid>,
+    #[sqlx(default)]
     pub bundle_id: Uuid,
     pub name: String,
     pub description: Option<String>,
@@ -918,6 +936,67 @@ pub(crate) struct PolicyRow {
     pub enabled: bool,
     #[sqlx(default)]
     pub compliance_metadata: Value,
+}
+
+#[derive(Debug, FromRow)]
+struct PolicyRequirementIdentityRow {
+    policy_version_id: Uuid,
+    requirement_version_id: Uuid,
+    external_id: String,
+    title: Option<String>,
+    framework_id: Uuid,
+    framework_name: String,
+    framework_version_id: Uuid,
+    framework_version: String,
+    framework_title: Option<String>,
+}
+
+async fn load_policy_requirement_identities(
+    pool: &PgPool,
+    policy_version_ids: &[Uuid],
+) -> Result<HashMap<Uuid, Vec<crate::api::models::ComplianceRequirementIdentity>>> {
+    if policy_version_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let rows = sqlx::query_as::<_, PolicyRequirementIdentityRow>(
+        r#"SELECT mapping.policy_version_id,
+                  requirement.id AS requirement_version_id,
+                  requirement.external_id,requirement.title,
+                  framework.id AS framework_id,framework.name AS framework_name,
+                  framework_version.id AS framework_version_id,
+                  framework_version.version AS framework_version,
+                  framework_version.title AS framework_title
+           FROM policy_requirement_mappings mapping
+           JOIN compliance_requirement_versions requirement
+             ON requirement.id=mapping.requirement_version_id
+           JOIN compliance_framework_versions framework_version
+             ON framework_version.id=requirement.framework_version_id
+           JOIN compliance_frameworks framework
+             ON framework.id=framework_version.framework_id
+           WHERE mapping.policy_version_id=ANY($1)
+           ORDER BY mapping.policy_version_id,framework.name,
+                    framework_version.version,requirement.external_id,requirement.id"#,
+    )
+    .bind(policy_version_ids)
+    .fetch_all(pool)
+    .await?;
+    let mut identities =
+        HashMap::<Uuid, Vec<crate::api::models::ComplianceRequirementIdentity>>::new();
+    for row in rows {
+        identities.entry(row.policy_version_id).or_default().push(
+            crate::api::models::ComplianceRequirementIdentity {
+                requirement_version_id: row.requirement_version_id,
+                external_id: row.external_id,
+                title: row.title,
+                framework_id: row.framework_id,
+                framework_name: row.framework_name,
+                framework_version_id: row.framework_version_id,
+                framework_version: row.framework_version,
+                framework_title: row.framework_title,
+            },
+        );
+    }
+    Ok(identities)
 }
 
 fn bundle_from_row(row: BundleRow) -> ComplianceBundleSummary {
@@ -1099,6 +1178,7 @@ async fn list_bundle_summary_aggregates(
                         (bundle_id, version_id),
                         system.clone(),
                         set.policies.clone(),
+                        set.effective_set_digest.clone(),
                     ));
                     None
                 }
@@ -2095,7 +2175,7 @@ pub async fn list_bundle_systems_for_version(
     .flatten();
 
     let policies = sqlx::query_as::<_, PolicyRow>(
-        r#"SELECT pv.policy_id AS id, $2 AS bundle_id, pv.name, pv.description,
+        r#"SELECT pv.policy_id AS id, pv.id AS version_id, $2 AS bundle_id, pv.name, pv.description,
                   pv.policy_type, pv.config, (dp.enabled AND pv.publication_state IN ('accepted', 'deprecated')) AS enabled
            FROM compliance_bundle_version_policies cbvp
            JOIN deployment_policy_versions pv ON pv.id = cbvp.policy_version_id
@@ -2150,9 +2230,9 @@ pub async fn list_bundle_systems_for_version(
 
     // Load assessment context for all systems in one batch
     let contexts: std::collections::HashMap<Uuid, AssessmentContext> = {
-        let context_rows: Vec<(Uuid, i32, Value)> = sqlx::query_as(
+        let context_rows: Vec<(Uuid, i32, String, Value)> = sqlx::query_as(
             r#"
-            SELECT s.id, d.id AS derivation_id, d.policy_results
+            SELECT s.id, d.id AS derivation_id, deployed.store_path, d.policy_results
             FROM systems s
             JOIN LATERAL (
                 SELECT ss.store_path
@@ -2173,9 +2253,10 @@ pub async fn list_bundle_systems_for_version(
 
         context_rows.into_iter().fold(
             std::collections::HashMap::new(),
-            |mut contexts, (system_id, derivation_id, policy_results)| {
+            |mut contexts, (system_id, derivation_id, target_store_path, policy_results)| {
                 contexts.entry(system_id).or_insert(AssessmentContext {
                     derivation_id,
+                    target_store_path,
                     policy_results,
                 });
                 contexts
@@ -2191,6 +2272,23 @@ pub async fn list_bundle_systems_for_version(
         .map(|context| context.derivation_id)
         .collect();
     let cve_scans = latest_completed_cve_scans(pool, &derivation_ids).await?;
+    let assessment_requests = effective
+        .iter()
+        .filter_map(|(system_id, outcome)| {
+            let ResolutionOutcome::Resolved(set) = outcome else {
+                return None;
+            };
+            contexts.get(system_id).map(|context| {
+                (
+                    *system_id,
+                    context.derivation_id,
+                    context.target_store_path.clone(),
+                    set.effective_set_digest.clone(),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    let composite_statuses = load_composite_assessment_statuses(pool, &assessment_requests).await?;
 
     let mut rollups = Vec::with_capacity(systems.len());
     for system in systems {
@@ -2215,15 +2313,28 @@ pub async fn list_bundle_systems_for_version(
                     .and_then(|context| cve_scans.get(&context.derivation_id));
 
                 for policy in system_policies {
-                    statuses.push(
+                    let status = if policy.policy_type == "composite" {
+                        policy
+                            .version_id
+                            .and_then(|version_id| {
+                                composite_statuses.get(&(
+                                    system.id,
+                                    set.effective_set_digest.clone(),
+                                    version_id,
+                                ))
+                            })
+                            .cloned()
+                            .unwrap_or(ComplianceControlStatus::NotChecked)
+                    } else {
                         resolve_control_evidence_with_context(
                             context.clone(),
                             cve_scan,
                             &system,
                             policy,
                         )
-                        .status,
-                    );
+                        .status
+                    };
+                    statuses.push(status);
                 }
 
                 let report_only = set
@@ -2492,12 +2603,24 @@ pub async fn list_system_bundles(
         let policies = policies_by_bundle.remove(&bundle.id).unwrap_or_default();
         bundles.push((
             bundle,
-            effective_policy_rollup_with_evidence(pool, &system, &policies, assignment_status)
-                .await?,
+            effective_policy_rollup_with_evidence(
+                pool,
+                &system,
+                &policies,
+                &effective.effective_set_digest,
+                assignment_status,
+            )
+            .await?,
         ));
     }
-    let direct_rollup =
-        effective_policy_rollup_with_evidence(pool, &system, &direct_policies, None).await?;
+    let direct_rollup = effective_policy_rollup_with_evidence(
+        pool,
+        &system,
+        &direct_policies,
+        &effective.effective_set_digest,
+        None,
+    )
+    .await?;
 
     // For overall rollup, use the preloaded assignment status
     let overall_assignment_status = if let Some(eff_bundle_id) = bundle_for_effective {
@@ -2512,6 +2635,7 @@ pub async fn list_system_bundles(
         pool,
         &system,
         &effective.policies,
+        &effective.effective_set_digest,
         overall_assignment_status,
     )
     .await?;
@@ -2597,7 +2721,7 @@ pub async fn get_system_evidence(
                 return Ok(None);
             }
             sqlx::query_as::<_, PolicyRow>(
-                r#"SELECT pv.policy_id AS id, $2 AS bundle_id, pv.name, pv.description,
+                r#"SELECT pv.policy_id AS id, pv.id AS version_id, $2 AS bundle_id, pv.name, pv.description,
                            pv.policy_type, pv.config, pv.compliance_metadata,
                           (dp.enabled AND pv.publication_state IN ('accepted', 'deprecated')) AS enabled
                    FROM compliance_bundle_version_policies cbvp
@@ -2614,38 +2738,148 @@ pub async fn get_system_evidence(
         None => list_bundle_policies(pool, bundle_id).await?,
     };
     let mut resolution_state: Option<String> = None;
+    let mut current_effective_set_digest: Option<String> = None;
     if let ResolutionOutcome::Resolved(effective) =
         resolve_system_effective_policies(pool, system_id).await?
     {
-        let resolved_bundle_id: Option<Uuid> =
-            sqlx::query_scalar("SELECT bundle_id FROM compliance_bundle_versions WHERE id = $1")
-                .bind(effective.bundle_version_id)
-                .fetch_optional(pool)
-                .await?;
-        let exact_requested = bundle_version_id
-            .map(|requested| effective.bundle_version_id == requested)
-            .unwrap_or(resolved_bundle_id == Some(bundle_id));
-        if exact_requested && resolved_bundle_id == Some(bundle_id) {
-            policies = materialize_effective_policies(pool, &effective.policies).await?;
+        // INVARIANT: An assessment digest covers the complete effective set,
+        // but a bundle drawer shows only policies that the requested bundle
+        // authoritatively contributes. EffectivePolicySet::bundle_version_id
+        // identifies one contributing assignment and cannot select evidence
+        // when a system has multiple active bundle assignments.
+        let requested_policies = effective
+            .policies
+            .iter()
+            .filter(|policy| {
+                policy.provenance.iter().any(|entry| {
+                    entry.authoritative
+                        && entry.bundle_id == Some(bundle_id)
+                        && bundle_version_id
+                            .is_none_or(|requested| entry.bundle_version_id == Some(requested))
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if !requested_policies.is_empty() {
+            current_effective_set_digest = Some(effective.effective_set_digest.clone());
+            policies = materialize_effective_policies(pool, &requested_policies).await?;
         } else if bundle_version_id.is_some() {
             resolution_state = Some("not_applicable".to_string());
         }
     } else if bundle_version_id.is_some() {
         resolution_state = Some("conflict".to_string());
     }
+    let policy_lineage_ids = policies.iter().map(|policy| policy.id).collect::<Vec<_>>();
+    if !policy_lineage_ids.is_empty() {
+        let mut tx = pool.begin().await?;
+        crate::services::composite_enforcement::lock_poam_system_key_tx(&mut tx, system.id).await?;
+        sqlx::query(
+            r#"INSERT INTO poam_findings(system_id,policy_lineage_id)
+               SELECT $1,policy_id FROM UNNEST($2::uuid[]) policy_id
+               ON CONFLICT (system_id,policy_lineage_id) DO NOTHING"#,
+        )
+        .bind(system.id)
+        .bind(&policy_lineage_ids)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+    }
+    let finding_ids = sqlx::query_as::<_, (Uuid, Uuid)>(
+        "SELECT policy_lineage_id,id FROM poam_findings WHERE system_id=$1 AND policy_lineage_id=ANY($2)",
+    )
+    .bind(system.id)
+    .bind(&policy_lineage_ids)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .collect::<HashMap<_, _>>();
     let context = assessment_context(pool, system.id).await?;
     let cve_scan = match context.as_ref() {
         Some(context) => latest_completed_cve_scan(pool, context.derivation_id).await?,
         None => None,
     };
+    let mut composite_results = match context.as_ref() {
+        Some(context) => match current_effective_set_digest.as_deref() {
+            Some(digest) => {
+                load_composite_assessment_results(
+                    pool,
+                    system.id,
+                    context.derivation_id,
+                    &context.target_store_path,
+                    digest,
+                )
+                .await?
+            }
+            None => HashMap::new(),
+        },
+        None => HashMap::new(),
+    };
+    let composite_version_ids = policies
+        .iter()
+        .filter(|policy| policy.policy_type == "composite")
+        .filter_map(|policy| policy.version_id)
+        .collect::<Vec<_>>();
+    for (version_id, result) in
+        load_current_eval_attempt_results(pool, system.id, &composite_version_ids).await?
+    {
+        composite_results.entry(version_id).or_insert(result);
+    }
+    let policy_version_ids = policies
+        .iter()
+        .filter_map(|policy| policy.version_id)
+        .collect::<Vec<_>>();
+    // PERFORMANCE: Resolve mappings for every control in one exact-version query.
+    let mut requirement_identities =
+        load_policy_requirement_identities(pool, &policy_version_ids).await?;
     let mut controls = Vec::with_capacity(policies.len());
     for policy in policies {
-        controls.push(resolve_control_evidence_with_context(
+        let version_id = policy.version_id;
+        let policy_lineage_id = policy.id;
+        let finding_observation = legacy_finding_observation(
+            context.as_ref(),
+            cve_scan.as_ref(),
+            &system,
+            &policy,
+            current_effective_set_digest.as_deref(),
+        );
+        let mut control = resolve_control_evidence_with_context(
             context.clone(),
             cve_scan.as_ref(),
             &system,
             policy,
-        ));
+        );
+        control.composite_result = version_id.and_then(|id| composite_results.get(&id).cloned());
+        if let Some(result) = control.composite_result.as_ref() {
+            control.status = match result.overall_status.as_str() {
+                "pass" => ComplianceControlStatus::Pass,
+                "fail" => ComplianceControlStatus::Fail,
+                "error" => ComplianceControlStatus::Error,
+                _ => ComplianceControlStatus::NotChecked,
+            };
+        }
+        control.finding_id = finding_ids.get(&policy_lineage_id).copied();
+        control.finding_observation = matches!(control.status, ComplianceControlStatus::Fail)
+            .then_some(finding_observation)
+            .flatten();
+        if let Some(version_id) = version_id {
+            control.requirements = requirement_identities
+                .remove(&version_id)
+                .unwrap_or_default();
+            control.framework_mapping = control
+                .requirements
+                .iter()
+                .map(|requirement| {
+                    format!(
+                        "{} {} · {}",
+                        requirement.framework_name,
+                        requirement.framework_version,
+                        requirement.external_id
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+        }
+        controls.push(control);
     }
 
     Ok(Some(ComplianceEvidenceResponse {
@@ -3477,6 +3711,7 @@ pub(crate) async fn effective_policy_rollup_with_evidence(
     pool: &PgPool,
     system: &SystemRow,
     effective_policies: &[crate::compliance::resolver::EffectivePolicy],
+    effective_set_digest: &str,
     assignment_status: Option<String>,
 ) -> Result<ComplianceSystemRollup> {
     // Wrapper for legacy use cases; convert status to metadata for consistency
@@ -3489,6 +3724,7 @@ pub(crate) async fn effective_policy_rollup_with_evidence(
         pool,
         system,
         effective_policies,
+        effective_set_digest,
         metadata.as_ref(),
     )
     .await
@@ -3498,6 +3734,7 @@ pub(crate) async fn effective_policy_rollup_with_evidence_and_metadata(
     pool: &PgPool,
     system: &SystemRow,
     effective_policies: &[crate::compliance::resolver::EffectivePolicy],
+    effective_set_digest: &str,
     assignment_metadata: Option<&AssignmentMetadata>,
 ) -> Result<ComplianceSystemRollup> {
     let policies = materialize_effective_policies(pool, effective_policies).await?;
@@ -3517,18 +3754,46 @@ pub(crate) async fn effective_policy_rollup_with_evidence_and_metadata(
         Some(context) => latest_completed_cve_scan(pool, context.derivation_id).await?,
         None => None,
     };
+    let composite_statuses = match context.as_ref() {
+        Some(context) => {
+            load_composite_assessment_statuses(
+                pool,
+                &[(
+                    system.id,
+                    context.derivation_id,
+                    context.target_store_path.clone(),
+                    effective_set_digest.to_string(),
+                )],
+            )
+            .await?
+        }
+        None => HashMap::new(),
+    };
 
     let mut statuses = Vec::with_capacity(policies.len());
     for policy in policies {
-        statuses.push(
+        let status = if policy.policy_type == "composite" {
+            policy
+                .version_id
+                .and_then(|version_id| {
+                    composite_statuses.get(&(
+                        system.id,
+                        effective_set_digest.to_string(),
+                        version_id,
+                    ))
+                })
+                .cloned()
+                .unwrap_or(ComplianceControlStatus::NotChecked)
+        } else {
             resolve_control_evidence_with_context(
                 context.clone(),
                 cve_scan.as_ref(),
                 system,
                 policy,
             )
-            .status,
-        );
+            .status
+        };
+        statuses.push(status);
     }
     Ok(rollup_from_statuses_with_metadata(
         system.clone(),
@@ -3548,6 +3813,7 @@ async fn effective_policy_rollups_with_evidence_batch(
         (Uuid, Uuid),
         SystemRow,
         Vec<crate::compliance::resolver::EffectivePolicy>,
+        String,
     )],
     _assignment_status_by_version: &std::collections::HashMap<Uuid, Option<String>>,
 ) -> Result<Vec<((Uuid, Uuid), ComplianceSystemRollup)>> {
@@ -3557,7 +3823,7 @@ async fn effective_policy_rollups_with_evidence_batch(
 
     let effective_policies: Vec<_> = work
         .iter()
-        .flat_map(|(_, _, policies)| policies.iter().cloned())
+        .flat_map(|(_, _, policies, _)| policies.iter().cloned())
         .collect();
     let materialized = materialize_effective_policies(pool, &effective_policies).await?;
     let policies_by_version = materialized
@@ -3572,13 +3838,13 @@ async fn effective_policy_rollups_with_evidence_batch(
 
     let system_ids: Vec<Uuid> = work
         .iter()
-        .map(|(_, system, _)| system.id)
+        .map(|(_, system, _, _)| system.id)
         .collect::<std::collections::HashSet<_>>()
         .into_iter()
         .collect();
-    let context_rows: Vec<(Uuid, i32, Value)> = sqlx::query_as(
+    let context_rows: Vec<(Uuid, i32, String, Value)> = sqlx::query_as(
         r#"
-        SELECT s.id, d.id AS derivation_id, d.policy_results
+        SELECT s.id, d.id AS derivation_id, deployed.store_path, d.policy_results
         FROM systems s
         JOIN LATERAL (
             SELECT ss.store_path
@@ -3598,9 +3864,10 @@ async fn effective_policy_rollups_with_evidence_batch(
     .await?;
     let contexts = context_rows.into_iter().fold(
         std::collections::HashMap::<Uuid, AssessmentContext>::new(),
-        |mut contexts, (system_id, derivation_id, policy_results)| {
+        |mut contexts, (system_id, derivation_id, target_store_path, policy_results)| {
             contexts.entry(system_id).or_insert(AssessmentContext {
                 derivation_id,
+                target_store_path,
                 policy_results,
             });
             contexts
@@ -3611,11 +3878,25 @@ async fn effective_policy_rollups_with_evidence_batch(
         .map(|context| context.derivation_id)
         .collect();
     let scans = latest_completed_cve_scans(pool, &derivation_ids).await?;
+    let assessment_requests = work
+        .iter()
+        .filter_map(|(_, system, _, digest)| {
+            contexts.get(&system.id).map(|context| {
+                (
+                    system.id,
+                    context.derivation_id,
+                    context.target_store_path.clone(),
+                    digest.clone(),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    let composite_statuses = load_composite_assessment_statuses(pool, &assessment_requests).await?;
 
     // Collect all (bundle_id, system_id) pairs for batch assignment loading
     let assignment_pairs: Vec<(Uuid, Uuid)> = work
         .iter()
-        .map(|((bundle_id, _), system, _)| (*bundle_id, system.id))
+        .map(|((bundle_id, _), system, _, _)| (*bundle_id, system.id))
         .collect();
 
     // Load all assignment statuses in one batch query
@@ -3626,7 +3907,7 @@ async fn effective_policy_rollups_with_evidence_batch(
     };
 
     let mut result = Vec::with_capacity(work.len());
-    for (pair, system, policies) in work {
+    for (pair, system, policies, effective_set_digest) in work {
         let (bundle_id, _version_id) = *pair;
         // Look up pre-loaded assignment status
         let assignment_status = assignment_statuses
@@ -3653,10 +3934,14 @@ async fn effective_policy_rollups_with_evidence_batch(
             // but effective_config is runtime state after assignment overlays.
             // Never let one system's override overwrite another's evaluation.
             policy.config = effective.effective_config.clone();
+            let composite_status = policy.version_id.and_then(|version_id| {
+                composite_statuses.get(&(system.id, effective_set_digest.clone(), version_id))
+            });
             statuses.push(batch_evidence_status(
                 &policy,
                 context,
                 context.and_then(|context| scans.get(&context.derivation_id)),
+                composite_status,
             ));
         }
         result.push((
@@ -3668,6 +3953,159 @@ async fn effective_policy_rollups_with_evidence_batch(
 }
 
 type CompletedCveScan = (Uuid, i32, i32);
+
+fn observation_reference(
+    source: FindingObservationSource,
+    source_id: String,
+    policy_version_id: Uuid,
+    snapshot: Value,
+) -> FindingObservationReference {
+    FindingObservationReference {
+        source,
+        source_id,
+        policy_version_id,
+        token: semantic_digest(&snapshot),
+    }
+}
+
+/// Creates a stable reference to a deployed Nix policy result.
+///
+/// The token binds the observation to the exact effective policy set and
+/// effective configuration. A caller must treat a token mismatch as stale
+/// evidence and fetch the current evidence before retrying.
+pub fn nix_policy_observation_reference(
+    system_id: Uuid,
+    policy_lineage_id: Uuid,
+    policy_version_id: Uuid,
+    effective_set_digest: &str,
+    effective_config_digest: &str,
+    derivation_id: i32,
+    target_store_path: &str,
+    passed: bool,
+    details: Option<&str>,
+) -> FindingObservationReference {
+    observation_reference(
+        FindingObservationSource::NixPolicyResult,
+        derivation_id.to_string(),
+        policy_version_id,
+        serde_json::json!({
+            "source": "nix_policy_result",
+            "system_id": system_id,
+            "policy_lineage_id": policy_lineage_id,
+            "policy_version_id": policy_version_id,
+            "effective_set_digest": effective_set_digest,
+            "effective_config_digest": effective_config_digest,
+            "derivation_id": derivation_id,
+            "target_store_path": target_store_path,
+            "passed": passed,
+            "details": details,
+        }),
+    )
+}
+
+/// Contains the authoritative values bound into a CVE observation token.
+pub struct CveObservationValues<'a> {
+    /// Identifies the system whose deployed derivation was scanned.
+    pub system_id: Uuid,
+    /// Identifies the stable deployment-policy lineage.
+    pub policy_lineage_id: Uuid,
+    /// Identifies the effective immutable policy version.
+    pub policy_version_id: Uuid,
+    /// Identifies the complete effective policy set.
+    pub effective_set_digest: &'a str,
+    /// Identifies the effective policy configuration after assignment overlays.
+    pub effective_config_digest: &'a str,
+    /// Identifies the deployed derivation.
+    pub derivation_id: i32,
+    /// Names the exact deployed store path.
+    pub target_store_path: &'a str,
+    /// Identifies the completed CVE scan.
+    pub scan_id: Uuid,
+    /// Records the observed critical-vulnerability count.
+    pub critical_count: i32,
+    /// Records the observed high-vulnerability count.
+    pub high_count: i32,
+    /// Records the effective critical-vulnerability threshold.
+    pub max_critical: i64,
+    /// Records the optional effective high-vulnerability threshold.
+    pub max_high: Option<i64>,
+}
+
+/// Creates a stable reference to an authoritative completed CVE scan.
+pub fn cve_observation_reference(values: CveObservationValues<'_>) -> FindingObservationReference {
+    observation_reference(
+        FindingObservationSource::CveScan,
+        values.scan_id.to_string(),
+        values.policy_version_id,
+        serde_json::json!({
+            "source": "cve_scan",
+            "system_id": values.system_id,
+            "policy_lineage_id": values.policy_lineage_id,
+            "policy_version_id": values.policy_version_id,
+            "effective_set_digest": values.effective_set_digest,
+            "effective_config_digest": values.effective_config_digest,
+            "derivation_id": values.derivation_id,
+            "target_store_path": values.target_store_path,
+            "scan_id": values.scan_id,
+            "critical_count": values.critical_count,
+            "high_count": values.high_count,
+            "max_critical": values.max_critical,
+            "max_high": values.max_high,
+        }),
+    )
+}
+
+fn legacy_finding_observation(
+    context: Option<&AssessmentContext>,
+    cve_scan: Option<&CompletedCveScan>,
+    system: &SystemRow,
+    policy: &PolicyRow,
+    effective_set_digest: Option<&str>,
+) -> Option<FindingObservationReference> {
+    let context = context?;
+    let policy_version_id = policy.version_id?;
+    let effective_set_digest = effective_set_digest?;
+    let effective_config_digest = semantic_digest(&policy.config);
+    match policy.policy_type.as_str() {
+        "require_packages" | "custom_check" | "require_cf_agent" => {
+            let (passed, details) =
+                nix_policy_result(&context.policy_results, policy.version_id, policy.id).ok()??;
+            Some(nix_policy_observation_reference(
+                system.id,
+                policy.id,
+                policy_version_id,
+                effective_set_digest,
+                &effective_config_digest,
+                context.derivation_id,
+                &context.target_store_path,
+                passed,
+                details.as_deref(),
+            ))
+        }
+        "require_cve_check" => {
+            let (scan_id, critical_count, high_count) = *cve_scan?;
+            Some(cve_observation_reference(CveObservationValues {
+                system_id: system.id,
+                policy_lineage_id: policy.id,
+                policy_version_id,
+                effective_set_digest,
+                effective_config_digest: &effective_config_digest,
+                derivation_id: context.derivation_id,
+                target_store_path: &context.target_store_path,
+                scan_id,
+                critical_count,
+                high_count,
+                max_critical: policy
+                    .config
+                    .get("max_critical")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(i64::MAX),
+                max_high: policy.config.get("max_high").and_then(Value::as_i64),
+            }))
+        }
+        _ => None,
+    }
+}
 
 async fn latest_completed_cve_scans(
     pool: &PgPool,
@@ -3706,16 +4144,20 @@ fn batch_evidence_status(
     policy: &PolicyRow,
     context: Option<&AssessmentContext>,
     scan: Option<&(Uuid, i32, i32)>,
+    composite_status: Option<&ComplianceControlStatus>,
 ) -> ComplianceControlStatus {
     if !policy.enabled {
         return ComplianceControlStatus::NotChecked;
     }
     match policy.policy_type.as_str() {
+        "composite" => composite_status
+            .cloned()
+            .unwrap_or(ComplianceControlStatus::NotChecked),
         "require_cf_agent" | "require_packages" | "custom_check" => {
             let Some(context) = context else {
                 return ComplianceControlStatus::NotChecked;
             };
-            match nix_policy_result(&context.policy_results, policy.id) {
+            match nix_policy_result(&context.policy_results, policy.version_id, policy.id) {
                 Ok(None) => ComplianceControlStatus::NotChecked,
                 Ok(Some((true, _))) => ComplianceControlStatus::Pass,
                 Ok(Some((false, _))) => ComplianceControlStatus::Fail,
@@ -3789,6 +4231,7 @@ async fn materialize_effective_policies(
         };
         policies.push(PolicyRow {
             id: effective.policy_lineage_id,
+            version_id: Some(effective.policy_version_id),
             bundle_id: Uuid::nil(),
             name,
             description,
@@ -3899,13 +4342,255 @@ fn policy_status(system: &SystemRow, policy: &PolicyRow) -> ComplianceControlSta
 #[derive(Debug, Clone, FromRow)]
 struct AssessmentContext {
     derivation_id: i32,
+    target_store_path: String,
     policy_results: Value,
+}
+
+#[derive(Debug, FromRow)]
+struct CompositeAssessmentResultRow {
+    assessment_id: Uuid,
+    policy_version_id: Uuid,
+    target_store_path: String,
+    effective_set_digest: String,
+    effective_config_digest: String,
+    overall_status: String,
+    rule_id: Uuid,
+    kind: String,
+    phase: String,
+    status: String,
+    detail: String,
+    evidence: Value,
+}
+
+#[derive(Debug, FromRow)]
+struct EvalAttemptRuleResultRow {
+    evaluation_attempt_id: Uuid,
+    policy_version_id: Uuid,
+    rule_id: Uuid,
+    status: String,
+    detail: String,
+    evidence: Value,
+}
+
+fn normalized_composite_overall<'a>(statuses: impl Iterator<Item = &'a str>) -> String {
+    let statuses = statuses.collect::<Vec<_>>();
+    if statuses.contains(&"error") {
+        "error"
+    } else if statuses.contains(&"fail") {
+        "fail"
+    } else if statuses.contains(&"not_checked") {
+        "not_checked"
+    } else if !statuses.is_empty() && statuses.iter().all(|status| *status == "pass") {
+        "pass"
+    } else {
+        "not_checked"
+    }
+    .to_string()
+}
+
+fn compliance_status_from_composite_outcome(outcome: &str) -> ComplianceControlStatus {
+    match outcome {
+        "pass" => ComplianceControlStatus::Pass,
+        "fail" => ComplianceControlStatus::Fail,
+        "error" => ComplianceControlStatus::Error,
+        _ => ComplianceControlStatus::NotChecked,
+    }
+}
+
+async fn load_composite_assessment_statuses(
+    pool: &PgPool,
+    requests: &[(Uuid, i32, String, String)],
+) -> Result<HashMap<(Uuid, String, Uuid), ComplianceControlStatus>> {
+    if requests.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let system_ids = requests.iter().map(|row| row.0).collect::<Vec<_>>();
+    let derivation_ids = requests.iter().map(|row| row.1).collect::<Vec<_>>();
+    let target_store_paths = requests.iter().map(|row| row.2.clone()).collect::<Vec<_>>();
+    let effective_set_digests = requests.iter().map(|row| row.3.clone()).collect::<Vec<_>>();
+    let rows = sqlx::query_as::<_, (Uuid, String, Uuid, String)>(
+        r#"
+        SELECT assessment.system_id, assessment.effective_set_digest,
+               assessment.policy_version_id, assessment.overall_outcome
+        FROM composite_policy_assessments assessment
+        JOIN UNNEST($1::uuid[], $2::int[], $3::text[], $4::text[])
+             AS requested(system_id, derivation_id, target_store_path, effective_set_digest)
+          ON requested.system_id = assessment.system_id
+         AND requested.derivation_id = assessment.derivation_id
+         AND requested.target_store_path = assessment.target_store_path
+         AND requested.effective_set_digest = assessment.effective_set_digest
+        "#,
+    )
+    .bind(&system_ids)
+    .bind(&derivation_ids)
+    .bind(&target_store_paths)
+    .bind(&effective_set_digests)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(system_id, digest, version_id, outcome)| {
+            (
+                (system_id, digest, version_id),
+                compliance_status_from_composite_outcome(&outcome),
+            )
+        })
+        .collect())
+}
+
+async fn load_composite_assessment_results(
+    pool: &PgPool,
+    system_id: Uuid,
+    derivation_id: i32,
+    target_store_path: &str,
+    effective_set_digest: &str,
+) -> Result<HashMap<Uuid, crate::api::models::CompositeAssessmentResult>> {
+    let rows = sqlx::query_as::<_, CompositeAssessmentResultRow>(
+        r#"
+        WITH exact AS (
+            SELECT id, policy_version_id, target_store_path, effective_set_digest,
+                   effective_config_digest, effective_config
+            FROM composite_policy_assessments
+            WHERE system_id = $1 AND derivation_id = $2
+              AND target_store_path = $3 AND effective_set_digest = $4
+        )
+        SELECT exact.id AS assessment_id,
+               exact.policy_version_id,
+               exact.target_store_path,
+               exact.effective_set_digest,
+               exact.effective_config_digest,
+               'not_checked'::text AS overall_status,
+               (expected.rule ->> 'id')::uuid AS rule_id,
+               expected.rule ->> 'kind' AS kind,
+               COALESCE(result.phase, CASE
+                   WHEN expected.rule ->> 'kind' = 'cve_block' THEN 'scan'
+                   WHEN expected.rule ->> 'kind' = 'time_window' THEN 'deployment'
+                   ELSE 'evaluation'
+               END) AS phase,
+               COALESCE(result.outcome, 'not_checked') AS status,
+               COALESCE(result.detail, 'Phase has not completed') AS detail,
+               COALESCE(result.evidence, '{}'::jsonb) AS evidence
+        FROM exact
+        CROSS JOIN LATERAL jsonb_array_elements(exact.effective_config -> 'rules')
+             WITH ORDINALITY AS expected(rule, ordinal)
+        LEFT JOIN composite_policy_rule_results result
+          ON result.assessment_id = exact.id
+         AND result.rule_id = (expected.rule ->> 'id')::uuid
+        ORDER BY exact.policy_version_id, expected.ordinal
+        "#,
+    )
+    .bind(system_id)
+    .bind(derivation_id)
+    .bind(target_store_path)
+    .bind(effective_set_digest)
+    .fetch_all(pool)
+    .await?;
+
+    let mut results = HashMap::new();
+    for row in rows {
+        let assessment = results.entry(row.policy_version_id).or_insert_with(|| {
+            crate::api::models::CompositeAssessmentResult {
+                assessment_id: Some(row.assessment_id),
+                evaluation_attempt_id: None,
+                policy_version_id: row.policy_version_id,
+                target_store_path: Some(row.target_store_path.clone()),
+                effective_set_digest: Some(row.effective_set_digest.clone()),
+                effective_config_digest: Some(row.effective_config_digest.clone()),
+                overall_status: row.overall_status.clone(),
+                rule_results: Vec::new(),
+            }
+        });
+        assessment
+            .rule_results
+            .push(crate::api::models::CompositeAssessmentRuleResult {
+                rule_id: row.rule_id,
+                kind: row.kind,
+                phase: row.phase,
+                status: row.status,
+                detail: row.detail,
+                evidence: row.evidence,
+            });
+    }
+    for assessment in results.values_mut() {
+        assessment.overall_status = normalized_composite_overall(
+            assessment
+                .rule_results
+                .iter()
+                .map(|result| result.status.as_str()),
+        );
+    }
+    Ok(results)
+}
+
+async fn load_current_eval_attempt_results(
+    pool: &PgPool,
+    system_id: Uuid,
+    policy_version_ids: &[Uuid],
+) -> Result<HashMap<Uuid, crate::api::models::CompositeAssessmentResult>> {
+    if policy_version_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let rows = sqlx::query_as::<_, EvalAttemptRuleResultRow>(
+        r#"
+        SELECT DISTINCT ON (result.policy_version_id, result.rule_id)
+               result.evaluation_attempt_id, result.policy_version_id,
+               result.rule_id, result.outcome AS status, result.detail, result.evidence
+        FROM systems system
+        JOIN commits commit ON commit.flake_id = system.flake_id
+        JOIN evaluation_attempts attempt ON attempt.commit_id = commit.id
+        JOIN composite_eval_attempt_rule_results result
+          ON result.evaluation_attempt_id = attempt.id
+         AND result.configuration_name =
+             COALESCE(NULLIF(BTRIM(system.system_configuration_name), ''), system.hostname)
+        WHERE system.id = $1
+          AND result.policy_version_id = ANY($2)
+          AND result.superseded_at IS NULL
+        ORDER BY result.policy_version_id, result.rule_id,
+                 attempt.started_at DESC NULLS LAST, attempt.created_at DESC, attempt.id DESC
+        "#,
+    )
+    .bind(system_id)
+    .bind(policy_version_ids)
+    .fetch_all(pool)
+    .await?;
+
+    let mut results = HashMap::new();
+    for row in rows {
+        let result = results.entry(row.policy_version_id).or_insert_with(|| {
+            crate::api::models::CompositeAssessmentResult {
+                assessment_id: None,
+                evaluation_attempt_id: Some(row.evaluation_attempt_id),
+                policy_version_id: row.policy_version_id,
+                target_store_path: None,
+                effective_set_digest: None,
+                effective_config_digest: None,
+                overall_status: "not_checked".to_string(),
+                rule_results: Vec::new(),
+            }
+        });
+        result
+            .rule_results
+            .push(crate::api::models::CompositeAssessmentRuleResult {
+                rule_id: row.rule_id,
+                kind: "eval_passed".to_string(),
+                phase: "evaluation".to_string(),
+                status: row.status,
+                detail: row.detail,
+                evidence: row.evidence,
+            });
+    }
+    for result in results.values_mut() {
+        result.overall_status = normalized_composite_overall(
+            result.rule_results.iter().map(|rule| rule.status.as_str()),
+        );
+    }
+    Ok(results)
 }
 
 async fn assessment_context(pool: &PgPool, system_id: Uuid) -> Result<Option<AssessmentContext>> {
     sqlx::query_as(
         r#"
-        SELECT d.id AS derivation_id, d.policy_results
+        SELECT d.id AS derivation_id, deployed.store_path AS target_store_path, d.policy_results
         FROM systems s
         JOIN LATERAL (
             SELECT ss.store_path
@@ -3927,9 +4612,10 @@ async fn assessment_context(pool: &PgPool, system_id: Uuid) -> Result<Option<Ass
     .context("load deployed assessment context")
 }
 
-fn nix_policy_result(
+pub(crate) fn nix_policy_result(
     policy_results: &Value,
-    policy_id: Uuid,
+    policy_version_id: Option<Uuid>,
+    policy_lineage_id: Uuid,
 ) -> Result<Option<(bool, Option<String>)>> {
     let Some(assigned) = policy_results.get("assigned") else {
         return Ok(None);
@@ -3937,7 +4623,11 @@ fn nix_policy_result(
     let assigned = assigned
         .as_object()
         .context("persisted policy results have a non-object assigned map")?;
-    let Some(result) = assigned.get(&policy_id.to_string()) else {
+    let result = match policy_version_id {
+        Some(version_id) => assigned.get(&version_id.to_string()),
+        None => assigned.get(&policy_lineage_id.to_string()),
+    };
+    let Some(result) = result else {
         return Ok(None);
     };
     let result = result
@@ -3972,7 +4662,7 @@ fn resolve_control_evidence_with_context(
         );
     }
     let (status, summary, body, artifact_type, artifact_title) = match policy.policy_type.as_str() {
-        "require_cf_agent" | "require_packages" | "custom_check" => match context {
+        "require_cf_agent" | "require_packages" | "custom_check" | "composite" => match context {
             None => (
                 ComplianceControlStatus::NotChecked,
                 format!(
@@ -3983,51 +4673,55 @@ fn resolve_control_evidence_with_context(
                 "policy_eval",
                 "No applicable Nix evaluation",
             ),
-            Some(context) => match nix_policy_result(&context.policy_results, policy.id) {
-                Ok(None) => (
-                    ComplianceControlStatus::NotChecked,
-                    format!(
-                        "The deployed evaluation contains no result for '{}' on {}.",
-                        policy.name, system.hostname
+            Some(context) => {
+                match nix_policy_result(&context.policy_results, policy.version_id, policy.id) {
+                    Ok(None) => (
+                        ComplianceControlStatus::NotChecked,
+                        format!(
+                            "The deployed evaluation contains no result for '{}' on {}.",
+                            policy.name, system.hostname
+                        ),
+                        format!(
+                            "derivation_id={} policy_lineage_id={}",
+                            context.derivation_id, policy.id
+                        ),
+                        "policy_eval",
+                        "No applicable Nix policy result",
                     ),
-                    format!(
-                        "derivation_id={} policy_lineage_id={}",
-                        context.derivation_id, policy.id
+                    Ok(Some((true, details))) => (
+                        ComplianceControlStatus::Pass,
+                        format!(
+                            "The deployed Nix evaluation passed '{}' on {}.",
+                            policy.name, system.hostname
+                        ),
+                        details
+                            .unwrap_or_else(|| "Persisted Nix policy result passed.".to_string()),
+                        "policy_eval",
+                        "Persisted Nix policy result",
                     ),
-                    "policy_eval",
-                    "No applicable Nix policy result",
-                ),
-                Ok(Some((true, details))) => (
-                    ComplianceControlStatus::Pass,
-                    format!(
-                        "The deployed Nix evaluation passed '{}' on {}.",
-                        policy.name, system.hostname
+                    Ok(Some((false, details))) => (
+                        ComplianceControlStatus::Fail,
+                        format!(
+                            "The deployed Nix evaluation failed '{}' on {}.",
+                            policy.name, system.hostname
+                        ),
+                        details
+                            .unwrap_or_else(|| "Persisted Nix policy result failed.".to_string()),
+                        "policy_eval",
+                        "Persisted Nix policy result",
                     ),
-                    details.unwrap_or_else(|| "Persisted Nix policy result passed.".to_string()),
-                    "policy_eval",
-                    "Persisted Nix policy result",
-                ),
-                Ok(Some((false, details))) => (
-                    ComplianceControlStatus::Fail,
-                    format!(
-                        "The deployed Nix evaluation failed '{}' on {}.",
-                        policy.name, system.hostname
+                    Err(error) => (
+                        ComplianceControlStatus::Error,
+                        format!(
+                            "The persisted evaluation result for '{}' is invalid.",
+                            policy.name
+                        ),
+                        error.to_string(),
+                        "policy_eval",
+                        "Invalid persisted Nix policy result",
                     ),
-                    details.unwrap_or_else(|| "Persisted Nix policy result failed.".to_string()),
-                    "policy_eval",
-                    "Persisted Nix policy result",
-                ),
-                Err(error) => (
-                    ComplianceControlStatus::Error,
-                    format!(
-                        "The persisted evaluation result for '{}' is invalid.",
-                        policy.name
-                    ),
-                    error.to_string(),
-                    "policy_eval",
-                    "Invalid persisted Nix policy result",
-                ),
-            },
+                }
+            }
         },
         "require_cve_check" => match context {
             None => (
@@ -4162,6 +4856,11 @@ fn control_evidence_with_resolved_status(
             }),
         }],
         framework_mapping: String::new(),
+        requirements: Vec::new(),
+        composite_result: None,
+        finding_id: None,
+        finding_observation: None,
+        composite_expected: policy.policy_type == "composite",
         control_family: policy
             .compliance_metadata
             .get("control_family")
@@ -4230,7 +4929,7 @@ fn control_evidence(system: &SystemRow, policy: PolicyRow) -> ComplianceControlE
             policy.name, system.hostname
         ),
         PolicyEval::Evaluated(ComplianceControlStatus::Error) => format!(
-            "Evaluator error when assessing '{}' on {}.",
+            "Assessment error for '{}' on {}.",
             policy.name, system.hostname
         ),
         PolicyEval::Disabled => format!(
@@ -4285,6 +4984,11 @@ fn control_evidence(system: &SystemRow, policy: PolicyRow) -> ComplianceControlE
             }),
         }],
         framework_mapping,
+        requirements: Vec::new(),
+        composite_result: None,
+        finding_id: None,
+        finding_observation: None,
+        composite_expected: policy.policy_type == "composite",
         control_family: policy
             .compliance_metadata
             .get("control_family")
@@ -4311,6 +5015,24 @@ mod tests {
     };
     use sqlx::PgPool;
     use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn composite_dto_overall_uses_normalized_all_aggregate() {
+        assert_eq!(normalized_composite_overall(["pass"].into_iter()), "pass");
+        assert_eq!(
+            normalized_composite_overall(["pass", "not_checked"].into_iter()),
+            "not_checked"
+        );
+        assert_eq!(
+            normalized_composite_overall(["pass", "fail", "not_checked"].into_iter()),
+            "fail"
+        );
+        assert_eq!(
+            normalized_composite_overall(["pass", "fail", "error"].into_iter()),
+            "error"
+        );
+        assert_eq!(normalized_composite_overall([].into_iter()), "not_checked");
+    }
 
     #[test]
     fn requirement_validation_allows_requirement_only_baselines() {
@@ -4980,6 +5702,7 @@ mod tests {
     fn named_policy(policy_type: &str, name: &str, config: Value, enabled: bool) -> PolicyRow {
         PolicyRow {
             id: Uuid::nil(),
+            version_id: None,
             bundle_id: Uuid::nil(),
             name: name.to_string(),
             description: None,
@@ -5023,6 +5746,7 @@ mod tests {
     fn detailed_cve_evidence_uses_completed_scan_thresholds() {
         let context = AssessmentContext {
             derivation_id: 42,
+            target_store_path: "/nix/store/test".to_string(),
             policy_results: Value::Null,
         };
         let cve_policy = policy(
@@ -5129,7 +5853,7 @@ mod tests {
             }
         });
 
-        let result = nix_policy_result(&results, policy_id).unwrap();
+        let result = nix_policy_result(&results, None, policy_id).unwrap();
         assert_eq!(
             result,
             Some((false, Some("firewall is disabled".to_string())))
@@ -5139,8 +5863,32 @@ mod tests {
     #[test]
     fn missing_persisted_nix_result_is_not_an_evaluation() {
         let result =
-            nix_policy_result(&serde_json::json!({"assigned": {}}), Uuid::new_v4()).unwrap();
+            nix_policy_result(&serde_json::json!({"assigned": {}}), None, Uuid::new_v4()).unwrap();
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn persisted_nix_result_requires_exact_version_and_only_falls_back_without_one() {
+        let lineage_id = Uuid::new_v4();
+        let version_id = Uuid::new_v4();
+        let results = serde_json::json!({
+            "assigned": {
+                lineage_id.to_string(): {"passed": false, "details": "legacy"},
+                version_id.to_string(): {"passed": true, "details": "exact"}
+            }
+        });
+        assert_eq!(
+            nix_policy_result(&results, Some(version_id), lineage_id).unwrap(),
+            Some((true, Some("exact".to_string())))
+        );
+        assert_eq!(
+            nix_policy_result(&results, Some(Uuid::new_v4()), lineage_id).unwrap(),
+            None
+        );
+        assert_eq!(
+            nix_policy_result(&results, None, lineage_id).unwrap(),
+            Some((false, Some("legacy".to_string())))
+        );
     }
 
     #[test]
@@ -5150,7 +5898,7 @@ mod tests {
             "assigned": { policy_id.to_string(): { "passed": "yes" } }
         });
 
-        assert!(nix_policy_result(&results, policy_id).is_err());
+        assert!(nix_policy_result(&results, None, policy_id).is_err());
     }
 
     fn bundle(id: Uuid, name: &str) -> ComplianceBundleSummary {
@@ -5183,6 +5931,7 @@ mod tests {
     fn bundled_policy(bundle_id: Uuid, name: &str, enabled: bool) -> PolicyRow {
         PolicyRow {
             id: Uuid::new_v4(),
+            version_id: None,
             bundle_id,
             name: name.to_string(),
             description: None,
@@ -5503,6 +6252,81 @@ mod tests {
              got: {:?}",
             ev.framework_mapping
         );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires the repository-provided isolated PostgreSQL database"]
+    async fn policy_requirement_identity_hydration_uses_exact_versions(pool: PgPool) {
+        let framework_id = Uuid::new_v4();
+        let framework_version_id = Uuid::new_v4();
+        let requirement_id = Uuid::new_v4();
+        let requirement_version_id = Uuid::new_v4();
+        let policy_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO deployment_policies(name,policy_type,config) VALUES('Mapped evidence policy','custom_check','{}') RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let policy_version_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO deployment_policy_versions(policy_id,version,name,policy_type,config,semantic_digest) VALUES($1,'7','Mapped evidence policy','custom_check','{}','mapped-evidence') RETURNING id",
+        )
+        .bind(policy_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO compliance_frameworks(id,name,canonical_source_key) VALUES($1,'NIST SP 800-53',$2)",
+        )
+        .bind(framework_id)
+        .bind(format!("mapped-evidence-{framework_id}"))
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO compliance_framework_versions(id,framework_id,version,canonical_release_key,title) VALUES($1,$2,'Rev. 5',$3,'Security and Privacy Controls')",
+        )
+        .bind(framework_version_id)
+        .bind(framework_id)
+        .bind(format!("mapped-release-{framework_version_id}"))
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO compliance_requirements(id,framework_id,canonical_requirement_key) VALUES($1,$2,'AC-2')",
+        )
+        .bind(requirement_id)
+        .bind(framework_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO compliance_requirement_versions(id,requirement_id,framework_version_id,external_id,title,kind) VALUES($1,$2,$3,'AC-2','Account Management','control')",
+        )
+        .bind(requirement_version_id)
+        .bind(requirement_id)
+        .bind(framework_version_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO policy_requirement_mappings(policy_version_id,requirement_version_id,relationship,coverage,provenance,trust_state) VALUES($1,$2,'implements','full','manual','trusted')",
+        )
+        .bind(policy_version_id)
+        .bind(requirement_version_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let hydrated =
+            load_policy_requirement_identities(&pool, &[policy_version_id, Uuid::new_v4()])
+                .await
+                .unwrap();
+        assert_eq!(hydrated.len(), 1);
+        let identity = &hydrated[&policy_version_id][0];
+        assert_eq!(identity.framework_name, "NIST SP 800-53");
+        assert_eq!(identity.framework_version, "Rev. 5");
+        assert_eq!(identity.external_id, "AC-2");
+        assert_eq!(identity.title.as_deref(), Some("Account Management"));
     }
 
     #[test]

@@ -338,7 +338,7 @@
 
         if [ ! -f "$BUILDER_API_KEY_PATH" ]; then
           echo "Generating builder API key for Crystal Forge API mode..."
-          ${pkgs.crystal-forge.default.server}/bin/cf-keygen -y -f "$BUILDER_API_KEY_PATH"
+          ${pkgs.crystal-forge.default.cf-keygen-drv}/bin/cf-keygen -y -f "$BUILDER_API_KEY_PATH"
           echo "Builder API key generated at $BUILDER_API_KEY_PATH"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo "📋 BUILDER REGISTRATION REQUIRED"
@@ -382,6 +382,20 @@
     includeBuilderApiKeySetup = false;
   };
 
+  # Each service script references only the component derivation that provides
+  # the binary it executes. Referencing an aggregate package instead would put
+  # unrelated components in the unit's closure, so any change to any component
+  # would rebuild and re-copy this closure.
+  #
+  #   serverScript          server            -> cfg.server.package
+  #   hardeningWorkerScript hardening-worker  -> cfg.server.package
+  #   builderScript         builder           -> cfg.build.package
+  #   agentScript           agent             -> cfg.client.package
+  #   builder API key setup cf-keygen         -> cf-keygen-drv
+  #
+  # INVARIANT: a script may only run binaries provided by the package it
+  # references. Adding a binary invocation here requires confirming that the
+  # referenced package actually installs it.
   serverScript = pkgs.writeShellScript "crystal-forge-server" ''
     export CRYSTAL_FORGE_CONFIG="${serverConfigPath}"
 
@@ -403,12 +417,12 @@
       fi
     ''}
 
-    exec ${pkgs.crystal-forge.default.server}/bin/server "$@"
+    exec ${cfg.server.package}/bin/server "$@"
   '';
 
   hardeningWorkerScript = pkgs.writeShellScript "crystal-forge-hardening-worker" ''
     export CRYSTAL_FORGE_CONFIG="${serverConfigPath}"
-    exec ${pkgs.crystal-forge.default.server}/bin/hardening-worker "$@"
+    exec ${cfg.server.package}/bin/hardening-worker "$@"
   '';
 
   builderScript = pkgs.writeShellScript "crystal-forge-builder" ''
@@ -435,12 +449,12 @@
     mkdir -p /var/lib/crystal-forge/workdir
     cd /var/lib/crystal-forge/workdir
     cleanup_old_builds
-    exec ${pkgs.crystal-forge.default.server}/bin/builder "$@"
+    exec ${cfg.build.package}/bin/builder "$@"
   '';
 
   agentScript = pkgs.writeShellScript "crystal-forge-agent" ''
     export CRYSTAL_FORGE_CONFIG="${agentConfigPath}"
-    exec ${pkgs.crystal-forge.default.agent}/bin/agent "$@"
+    exec ${cfg.client.package}/bin/agent "$@"
   '';
 in {
   options.services.crystal-forge = {
@@ -672,6 +686,15 @@ in {
         type = lib.types.bool;
         default = cfg.server.enable;
         description = "Crystal Forge Builder";
+      };
+
+      package = lib.mkOption {
+        type = lib.types.package;
+        default = pkgs.crystal-forge.default.cf-builder-drv;
+        defaultText = lib.literalExpression "pkgs.crystal-forge.default.cf-builder-drv";
+        description = lib.mdDoc ''
+          Package providing the `builder` binary.
+        '';
       };
 
       # === BUILD CONCURRENCY SETTINGS ===
@@ -1535,6 +1558,23 @@ in {
 
     server = {
       enable = lib.mkEnableOption "Crystal Forge Server";
+      package = lib.mkOption {
+        type = lib.types.package;
+        default = pkgs.crystal-forge.default.cf-server-drv;
+        defaultText = lib.literalExpression "pkgs.crystal-forge.default.cf-server-drv";
+        description = lib.mdDoc ''
+          Package providing the `server` and `hardening-worker` binaries.
+
+          The default is the production server, which embeds the web UI and
+          therefore depends on the web UI build.
+
+          Set this to `pkgs.crystal-forge.default.cf-server-core-drv` for a
+          deployment or test that does not serve the browser UI. The core
+          build has no web UI input, so a web UI change does not rebuild it.
+          A core build answers a UI route with 404 Not Found; API routes are
+          unaffected.
+        '';
+      };
       host = lib.mkOption {
         type = lib.types.str;
         default = "127.0.0.1";
@@ -1964,6 +2004,14 @@ in {
 
     client = {
       enable = lib.mkEnableOption "Crystal Forge Agent";
+      package = lib.mkOption {
+        type = lib.types.package;
+        default = pkgs.crystal-forge.default.cf-agent-drv;
+        defaultText = lib.literalExpression "pkgs.crystal-forge.default.cf-agent-drv";
+        description = lib.mdDoc ''
+          Package providing the `agent` binary.
+        '';
+      };
       server_host = lib.mkOption {
         type = lib.types.str;
         default = "127.0.0.1";

@@ -6,10 +6,11 @@ use crate::vulnix::vulnix_parser::{VulnixParser, VulnixScanOutput};
 use anyhow::Result;
 use bigdecimal::BigDecimal;
 use bigdecimal::FromPrimitive;
+#[cfg(test)]
 use chrono::Utc;
 use sqlx::PgPool;
 use sqlx::Row;
-use tracing::{debug, error, warn};
+use tracing::debug;
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
@@ -149,6 +150,12 @@ pub async fn create_cve_scan(
     scanner_version: Option<String>,
 ) -> Result<CreateCveScanOutcome> {
     let scan_id = Uuid::new_v4();
+    let mut tx = pool.begin().await?;
+    crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx(
+        &mut tx,
+        derivation_id,
+    )
+    .await?;
 
     let inserted = sqlx::query(
         r#"
@@ -180,7 +187,7 @@ pub async fn create_cve_scan(
     .bind(derivation_id)
     .bind(scanner_name)
     .bind(scanner_version)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await?;
 
     let Some(inserted) = inserted else {
@@ -201,7 +208,7 @@ pub async fn create_cve_scan(
             "#,
             derivation_id
         )
-        .fetch_optional(pool)
+        .fetch_optional(&mut *tx)
         .await?
         .ok_or_else(|| {
             anyhow::anyhow!(
@@ -209,14 +216,19 @@ pub async fn create_cve_scan(
                 derivation_id
             )
         })?;
+        tx.commit().await?;
         return Ok(CreateCveScanOutcome::Existing(existing));
     };
 
-    Ok(CreateCveScanOutcome::Created(CveScanExecutionClaim {
+    let claim = CveScanExecutionClaim {
         scan_id: inserted.get("scan_id"),
         derivation_id: inserted.get("derivation_id"),
         execution_id: inserted.get("execution_id"),
-    }))
+    };
+    crate::services::composite_enforcement::persist_scan_phase_in_tx(&mut tx, claim.scan_id)
+        .await?;
+    tx.commit().await?;
+    Ok(CreateCveScanOutcome::Created(claim))
 }
 
 /// Complete a CVE scan with results
@@ -294,6 +306,16 @@ async fn complete_cve_scan_for_owner(
     scan_metadata: Option<serde_json::Value>,
     execution_id: Option<Uuid>,
 ) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    let derivation_id: i32 = sqlx::query_scalar("SELECT derivation_id FROM cve_scans WHERE id=$1")
+        .bind(scan_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx(
+        &mut tx,
+        derivation_id,
+    )
+    .await?;
     let result = sqlx::query(
         r#"
         UPDATE cve_scans
@@ -327,10 +349,13 @@ async fn complete_cve_scan_for_owner(
     .bind(scan_duration_ms)
     .bind(scan_metadata)
     .bind(execution_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
 
-    require_owned_transition(result.rows_affected(), scan_id, "complete")
+    require_owned_transition(result.rows_affected(), scan_id, "complete")?;
+    crate::services::composite_enforcement::persist_scan_phase_in_tx(&mut tx, scan_id).await?;
+    tx.commit().await?;
+    Ok(())
 }
 
 /// Mark a specific CVE scan as failed.
@@ -367,6 +392,11 @@ async fn mark_cve_scan_failed_for_owner(
         "derivation_path": target.derivation_path
     });
 
+    let mut tx = pool.begin().await?;
+    crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx(
+        &mut tx, target.id,
+    )
+    .await?;
     let result = sqlx::query(
         r#"
         UPDATE cve_scans
@@ -387,10 +417,13 @@ async fn mark_cve_scan_failed_for_owner(
     .bind(scan_id)
     .bind(metadata)
     .bind(execution_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
 
-    require_owned_transition(result.rows_affected(), scan_id, "fail")
+    require_owned_transition(result.rows_affected(), scan_id, "fail")?;
+    crate::services::composite_enforcement::persist_scan_phase_in_tx(&mut tx, scan_id).await?;
+    tx.commit().await?;
+    Ok(())
 }
 
 /// Mark a specific CVE scan as failed when the full derivation row is not
@@ -433,6 +466,12 @@ async fn mark_cve_scan_failed_by_id_for_owner(
         "derivation_id": derivation_id,
     });
 
+    let mut tx = pool.begin().await?;
+    crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx(
+        &mut tx,
+        derivation_id,
+    )
+    .await?;
     let result = sqlx::query(
         r#"
         UPDATE cve_scans
@@ -452,10 +491,13 @@ async fn mark_cve_scan_failed_by_id_for_owner(
     .bind(scan_id)
     .bind(metadata)
     .bind(execution_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
 
-    require_owned_transition(result.rows_affected(), scan_id, "fail")
+    require_owned_transition(result.rows_affected(), scan_id, "fail")?;
+    crate::services::composite_enforcement::persist_scan_phase_in_tx(&mut tx, scan_id).await?;
+    tx.commit().await?;
+    Ok(())
 }
 
 fn require_owned_transition(rows_affected: u64, scan_id: Uuid, transition: &str) -> Result<()> {
@@ -875,6 +917,8 @@ async fn save_scan_results_for_owner(
     for cve_id in &affected_cve_ids {
         attention::reconcile_cve_attention_subject_tx(&mut tx, cve_id).await?;
     }
+
+    crate::services::composite_enforcement::persist_scan_phase_in_tx(&mut tx, scan_id).await?;
 
     tx.commit().await?;
 
@@ -1449,58 +1493,64 @@ pub async fn recover_stale_scans(
     // by every current execution claim path. The `created_at` fallback remains
     // only for legacy in-progress rows created before execution leases existed.
     const REVOCATION_GRACE_SECONDS: i64 = 60;
-    let row = sqlx::query(
+    let mut tx = pool.begin().await?;
+    let revoked_ids = sqlx::query_scalar::<_, Uuid>(
         r#"
-        WITH revoked AS (
-            UPDATE cve_scans
-            SET scan_metadata = COALESCE(scan_metadata, '{}'::jsonb)
+        UPDATE cve_scans
+        SET scan_metadata = COALESCE(scan_metadata, '{}'::jsonb)
+            || jsonb_build_object(
+                'execution_revoked_at', NOW(),
+                'stale_recovery_reason', 'stale-execution-revoked'
+            )
+        WHERE status = 'in_progress'
+          AND scan_metadata ? 'execution_id'
+          AND NOT (scan_metadata ? 'execution_revoked_at')
+          AND COALESCE(
+                  (scan_metadata ->> 'execution_heartbeat_at')::timestamptz,
+                  (scan_metadata ->> 'execution_started_at')::timestamptz,
+                  created_at
+              ) < NOW() - ($1::bigint) * INTERVAL '1 second'
+        RETURNING id
+        "#,
+    )
+    .bind(stale_threshold.as_secs() as i64)
+    .fetch_all(&mut *tx)
+    .await?;
+
+    let failed_ids = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        UPDATE cve_scans
+        SET status = 'failed',
+            completed_at = NOW(),
+            attempts = attempts + 1,
+            scan_metadata = COALESCE(scan_metadata, '{}'::jsonb)
                 || jsonb_build_object(
-                    'execution_revoked_at', NOW(),
-                    'stale_recovery_reason', 'stale-execution-revoked'
+                    'stale_recovered_at', NOW(),
+                    'stale_recovery_reason', 'server-crash-recovery'
                 )
-            WHERE status = 'in_progress'
-              AND scan_metadata ? 'execution_id'
-              AND NOT (scan_metadata ? 'execution_revoked_at')
-              AND COALESCE(
-                      (scan_metadata ->> 'execution_heartbeat_at')::timestamptz,
-                      (scan_metadata ->> 'execution_started_at')::timestamptz,
-                      created_at
-                  ) < NOW() - ($1::bigint) * INTERVAL '1 second'
-            RETURNING id
-        ),
-        failed AS (
-            UPDATE cve_scans
-            SET status = 'failed',
-                completed_at = NOW(),
-                attempts = attempts + 1,
-                scan_metadata = COALESCE(scan_metadata, '{}'::jsonb)
-                    || jsonb_build_object(
-                        'stale_recovered_at', NOW(),
-                        'stale_recovery_reason', 'server-crash-recovery'
-                    )
-            WHERE status = 'in_progress'
-              AND (
-                  (
-                      NOT (COALESCE(scan_metadata, '{}'::jsonb) ? 'execution_id')
-                      AND created_at < NOW() - ($1::bigint) * INTERVAL '1 second'
-                  )
-                  OR (scan_metadata ->> 'execution_revoked_at')::timestamptz
-                      < NOW() - ($2::bigint) * INTERVAL '1 second'
+        WHERE status = 'in_progress'
+          AND (
+              (
+                  NOT (COALESCE(scan_metadata, '{}'::jsonb) ? 'execution_id')
+                  AND created_at < NOW() - ($1::bigint) * INTERVAL '1 second'
               )
-            RETURNING id
-        )
-        SELECT (
-            (SELECT COUNT(*) FROM revoked)
-            + (SELECT COUNT(*) FROM failed)
-        )::bigint AS recovered
+              OR (scan_metadata ->> 'execution_revoked_at')::timestamptz
+                  < NOW() - ($2::bigint) * INTERVAL '1 second'
+          )
+        RETURNING id
         "#,
     )
     .bind(stale_threshold.as_secs() as i64)
     .bind(REVOCATION_GRACE_SECONDS)
-    .fetch_one(pool)
+    .fetch_all(&mut *tx)
     .await?;
 
-    Ok(row.get("recovered"))
+    for scan_id in &failed_ids {
+        crate::services::composite_enforcement::persist_scan_phase_in_tx(&mut tx, *scan_id).await?;
+    }
+
+    tx.commit().await?;
+    Ok((revoked_ids.len() + failed_ids.len()) as i64)
 }
 
 /// Get derivations whose most recent completed CVE scan is stale according to

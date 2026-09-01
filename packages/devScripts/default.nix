@@ -35,7 +35,7 @@ let
       runtimeInputs = with pkgs; [
         hostname
         coreutils
-        pkgs.crystal-forge.default.cf-keygen
+        pkgs.crystal-forge.default.cf-keygen-drv
       ];
       text = ''
         set -euo pipefail
@@ -253,7 +253,7 @@ let
       if [[ "''${1:-}" == "--dev" ]]; then
         exec sudo -E nix run .#agent
       else
-        exec sudo -E ${pkgs.crystal-forge.default.agent}/bin/agent
+        exec sudo -E ${pkgs.crystal-forge.default.cf-agent-drv}/bin/agent
       fi
     '';
   };
@@ -270,7 +270,7 @@ let
       if [[ "''${1:-}" == "--dev" ]]; then
         exec nix run .#server
       else
-        exec ${pkgs.crystal-forge.default.server}/bin/server
+        exec ${pkgs.crystal-forge.default.cf-server-drv}/bin/server
       fi
     '';
   };
@@ -279,7 +279,7 @@ let
     name = "bootstrap-dev-builder";
     runtimeInputs = with pkgs; [
       postgresql
-      pkgs.crystal-forge.default.cf-keygen
+      pkgs.crystal-forge.default.cf-keygen-drv
       coreutils
     ];
     text = ''
@@ -356,7 +356,7 @@ let
       if [[ "''${1:-}" == "--dev" ]]; then
         exec nix run .#builder
       else
-        exec ${pkgs.crystal-forge.default.builder}/bin/builder
+        exec ${pkgs.crystal-forge.default.cf-builder-drv}/bin/builder
       fi
     '';
   };
@@ -374,7 +374,7 @@ let
       if [[ "''${1:-}" == "--dev" ]]; then
         exec nix run .#server
       else
-        exec ${pkgs.crystal-forge.default.server}/bin/server
+        exec ${pkgs.crystal-forge.default.cf-server-drv}/bin/server
       fi
     '';
   };
@@ -537,7 +537,10 @@ let
         echo "   (dev mode — building server from source)"
         nix run "$PROJECT_ROOT#server" &
       else
-        ${pkgs.crystal-forge.default.server}/bin/server &
+        # The Dioxus development server provides the UI in this workflow. Use
+        # the core backend so changing UI source does not rebuild an unused
+        # embedded copy of that same UI.
+        ${pkgs.crystal-forge.default.cf-server-core-drv}/bin/server &
       fi
       SERVER_PID=$!
 
@@ -596,7 +599,7 @@ let
       if [[ "''${1:-}" == "--dev" ]]; then
         exec nix run .#builder
       else
-        exec ${pkgs.crystal-forge.default.builder}/bin/builder
+        exec ${pkgs.crystal-forge.default.cf-builder-drv}/bin/builder
       fi
     '';
   };
@@ -636,6 +639,30 @@ let
         CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
           cargo test --manifest-path Cargo.toml \
           -p cf-server --lib models::evaluate_with_policies::tests::migration_0184_ \
+          -- --ignored --test-threads=1
+      "
+    '';
+  };
+
+  runDashboardVisibilityTests = pkgs.writeShellApplication {
+    name = "run-dashboard-visibility-tests";
+    runtimeInputs = with pkgs; [ nix coreutils ];
+    text = ''
+      set -euo pipefail
+
+      REPO_ROOT="''${PROJECT_ROOT:-$PWD}"
+      DB_URL="postgresql://crystal_forge:${db_password}@127.0.0.1:${toString db_port}/crystal_forge"
+
+      nix develop "$REPO_ROOT#sqlx" -c bash -euo pipefail -c "
+        cd \"$REPO_ROOT/packages/default\"
+        DATABASE_URL=\"$DB_URL\" cargo sqlx migrate run --source crates/cf-server/migrations
+        CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
+          cargo test --manifest-path Cargo.toml \
+          -p cf-server --lib queries::dashboard::tests::visibility_ \
+          -- --ignored --test-threads=1
+        CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
+          cargo test --manifest-path Cargo.toml \
+          -p cf-server --lib handlers::api::dashboard::tests::visibility_ \
           -- --ignored --test-threads=1
       "
     '';
@@ -1245,6 +1272,15 @@ let
     };
   };
 
+  dashboard-visibility-test-module = {
+    settings.processes.dashboard-visibility-tests = {
+      inherit namespace;
+      command = runDashboardVisibilityTests;
+      availability.exit_on_end = true;
+      depends_on."db".condition = "process_healthy";
+    };
+  };
+
   full-stack = pkgs.process-compose-flake.evalModules {
     modules = [
       inputs.services-flake.processComposeModules.default
@@ -1293,6 +1329,14 @@ let
     ];
   };
 
+  dashboardVisibilityTest = pkgs.process-compose-flake.evalModules {
+    modules = [
+      inputs.services-flake.processComposeModules.default
+      db-core-module
+      dashboard-visibility-test-module
+    ];
+  };
+
   oidc-stack = pkgs.process-compose-flake.evalModules {
     modules = [
       inputs.services-flake.processComposeModules.default
@@ -1307,6 +1351,7 @@ in full-stack.config.outputs.package // {
     runUiDev runUiFrontend runCveProcessingTest bootstrapDevBuilder envExports;
   cve-test = cveTest.config.outputs.package;
   state-machine-test = stateMachineTest.config.outputs.package;
+  dashboard-visibility-test = dashboardVisibilityTest.config.outputs.package;
   db-only = dbOnly.config.outputs.package;
   server-only = server-only.config.outputs.package;
   server-stack-mock = server-stack-mock.config.outputs.package;

@@ -3,11 +3,11 @@ id: TASK-433.2
 title: >-
   TASK-433 Phase 1: Policy catalog scaling (chunking, collapse, selection, bulk
   delete)
-status: Review
+status: In Progress
 assignee:
-  - claude-agent
+  - '@opencode-agent'
 created_date: '2026-08-23 01:42'
-updated_date: '2026-08-23 14:05'
+updated_date: '2026-08-31 22:56'
 labels:
   - design-parity
   - policy
@@ -81,9 +81,17 @@ Add/extend a browser workflow proving deep search, collapse/expand, cards/table,
 - [x] #3 Search reveals matches in collapsed groups and clearing search restores prior explicit collapse state.
 - [x] #4 Cards and table views preserve equivalent policy semantics and logical selection.
 - [x] #5 Individual, Shift-range, group, cross-chunk, clear, selected export and selected delete work on filtered logical order.
-- [x] #6 Bulk delete uses server eligibility, reports deleted/skipped/reasons, handles partial/all-blocked/failure, and preserves immutable blockers.
+- [ ] #6 Bulk delete uses server eligibility, reports deleted/skipped/reasons, handles partial/all-blocked/failure, and preserves immutable blockers.
 - [x] #7 Existing catalog API pagination is preserved; chunking remains client rendering only.
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+Phase-8 owner remediation: require and directly test CSRF on the TASK-433 bulk-delete mutation while preserving admin authorization, atomic deleted/skipped reconciliation, and existing client behavior. Add production-API browser/server proof for partial, all-blocked, unexpected failure, and authorization states before returning AC6 and the task to Review.
+
+2026-08-31 remaining catalog disclosure P2 remediation in `/tmp/opencode/TASK-433-publish`: derive one effective group presentation state from the preserved explicit collapse preference plus search-forced and selected-policy-forced expansion. Use that state for content visibility, header class, `aria-expanded`, title/disabled behavior, and right/down chevrons. Add a pure discriminating presentation regression for collapsed, explicit, search-forced, and selection-forced states. Limit edits to policy catalog source, catalog CSS, and focused in-file tests; run web-ui rustfmt, targeted tests, WASM build/check, and `git diff --check`; preserve concurrent changes and do not commit.
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
@@ -122,6 +130,10 @@ The deferred-check note above is superseded. After the commit, all deferred chec
 
 ## Remediation correction
 The earlier implementation note describing per-policy transactions is superseded by commit e0d036db: bulk deletion now uses one transaction via `delete_deployment_policy_in_transaction`, commits expected blocked/not-found skips, and rolls back all eligible deletions on any unexpected error. The browser workflow is now extended in `checks/web-ui/tests/integration-test.js`; the DB coverage is 4 tests (partial, all-blocked, not-found, rollback-on-failure).
+
+Phase 8 returned Phase 1 to In Progress because the new destructive bulk-delete endpoint is role-protected but does not validate the session CSRF cookie/header pair. AC6 is temporarily unchecked. Remediation is limited to the accepted bulk-delete contract and direct API/browser regression; no catalog feature expansion.
+
+2026-08-31 catalog disclosure P2 remediation: Added `CatalogGroupExpansion` as the single presentation state for collapsed, explicit, search-forced, and selected-policy-forced expansion. Group content visibility, collapsed header class, `aria-expanded`, title/disabled behavior, and right/down icon now derive from that state while the explicit collapse override remains unchanged during forced expansion. Added disabled disclosure styling and a pure regression that discriminates all four states and icon directions. Verification passed: scoped `rustfmt --check`; all 15 `catalog_scaling_tests`; `cargo check --target wasm32-unknown-unknown`; and `git diff --check`. The broader manifest format check remains blocked only by concurrent pre-existing formatting drift in `packages/web-ui/src/components/layout/topbar.rs`. `nix build path:.#packages.x86_64-linux.web-ui --no-link` reached the local derivation after unavailable remote builders but timed out after 10 minutes amid non-fatal Nix store maximum-link warnings; the direct WASM check passed. No commit created.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
