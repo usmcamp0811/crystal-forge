@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-gpt-5.6-sol
 created_date: '2026-06-13 19:35'
-updated_date: '2026-09-01 03:46'
+updated_date: '2026-09-01 03:59'
 labels:
   - web-ui
   - testing
@@ -14,6 +14,10 @@ labels:
 dependencies: []
 references:
   - TASK-450.11
+modified_files:
+  - checks/web-ui/tests/integration-test.js
+  - checks/web-ui/tests/oscal-export-test.js
+  - checks/web-ui/tests/sarif-export-test.js
 priority: medium
 ordinal: 299000
 ---
@@ -66,4 +70,6 @@ TASK-450.11 sets a less-than-20-minute blocking web UI feedback target. Resolve 
 The user selected this task for the focused Web UI latency bundle and explicitly requested one shared branch, worktree, and MR with TASK-438 and TASK-450.11.1 through TASK-450.11.3.
 
 LOCK: opencode-gpt-5.6-sol in /home/mcamp/code/crystal-forge/TASK-450-web-ui-parallel-checks on branch TASK-450.11-web-ui-parallel-checks, based on TASK-450-p0-build-graph at 437efd55.
+
+Implemented the requested harness fixes in the shared TASK-450 worktree. Non-onboarding profiles/focused runs now suppress the setup coach, full onboarding keeps its route-backed walkthrough and cleans routes/storage when leaving the onboarding block, and focused onboarding installs its own fixture. Step 12h now selects `role=tab` and cleans every route in `finally`. Step 12f now waits for modal state, selected commit state, POST request, and successful response instead of a delay. OSCAL/SARIF catches now record the interrupted step so prior successes cannot hide partial failure. Targeted Node syntax checks passed; browser/VM execution was not run in this focused harness pass.
 <!-- SECTION:NOTES:END -->
