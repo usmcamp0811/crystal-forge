@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:43'
-updated_date: '2026-09-01 14:02'
+updated_date: '2026-09-01 15:22'
 labels:
   - design-parity
   - policy
@@ -173,4 +173,6 @@ Remote verification after the user's push found MR !318 at `3fd41e264f0ec41ff20e
 Post-candidate parity remediation implemented but not committed. Added direct authoritative design/Dioxus targets for `PolicyEditor.jsx` and `PoamViews.jsx`; exact manifest contract assertions now run in the Web UI VM static gate. The POA&M target arranges one stable-visible, server-backed overdue POA&M immediately before the final parity target, uses an exact title, clears only dashboard layout state for that target, and cannot contaminate earlier surface captures. Added `data-poam-id` to dashboard watchlist rows. Added `docs/task-433-design-parity-review.md` with the complete affected-surface source/contract inventory, retained production deviations, demo-only classification, artifact names, and explicit pending exact-head visual status. Fast verification passed: Web UI rustfmt; Node syntax; manifest contracts; harness static contracts; Nix parse; `git diff --check`; independent review found no P0-P2 blockers. No local browser/VM check was run per user direction.
 
 Correction to the obsolete remote-mismatch note: the user authorized a force-with-lease update and MR !318 now points to candidate `da7ae7de480c485ee79db676f8d99893bf07c572`, is conflict-free, and pipeline 2809426014 is running. This pipeline does not include the current uncommitted review remediation and cannot be final-head evidence after a new commit.
+
+Review remediation was committed as `09d1b16e` and the exact-candidate workflow-20a correction as `82922c7e5495011a9162a5bc9db852fde4316a5a`. Local and remote branch heads match and the worktree is clean. MR !318 is conflict-free. Exact-head pipeline 2810061607 is pending: https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2810061607. Preceding pipeline 2809426014 at `da7ae7de` failed only critical workflow 20a; all seven TASK-433 strict workflows and POA&M Phase-6 workflows passed there. Do not reconcile acceptance criteria until pipeline 2810061607 finishes and its Web UI artifacts are inspected.
 <!-- SECTION:NOTES:END -->
