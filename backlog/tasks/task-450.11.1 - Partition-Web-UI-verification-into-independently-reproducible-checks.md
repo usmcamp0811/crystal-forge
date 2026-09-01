@@ -1,9 +1,10 @@
 ---
 id: TASK-450.11.1
 title: Partition Web UI verification into independently reproducible checks
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-09-01 03:27'
+updated_date: '2026-09-01 03:30'
 labels:
   - web-ui
   - testing
@@ -57,3 +58,9 @@ The task must preserve shared derivation identity so separate checks can reuse N
 - [ ] #8 A deliberately failing required browser step fails only its responsible check and preserves its step name, reason, and available artifacts
 - [ ] #9 The existing `web-ui` flake attribute has an explicitly documented compatibility role and does not silently weaken the complete merge gate
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+The user selected this task for one focused Web UI optimization MR with TASK-438, TASK-354, TASK-450.11.2, and TASK-450.11.3.
+<!-- SECTION:NOTES:END -->
