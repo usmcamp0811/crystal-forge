@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - opencode-gpt-5.6-sol
 created_date: '2026-09-01 03:12'
-updated_date: '2026-09-01 16:28'
+updated_date: '2026-09-01 17:34'
 labels:
   - web-ui
   - testing
@@ -103,4 +103,12 @@ Full `web-ui-fleet` validation now completes with the final timeout and route-re
 Final static verification passed: Node syntax, 28/28 browser/group/CI tests, Nix parse for `checks/web-ui/default.nix`, and `git diff --check`. This local result does not satisfy acceptance criterion 2, which still requires three representative merge-request pipeline runs below 20 minutes. No commit or push was made.
 
 Remaining exports VM verification exposed a production OSCAL 1.1.2 defect after the isolated harness was updated to current local-auth, compliance routing, Import / Export menu, and setup-coach behavior. The real OSCAL download fails the vendored NIST schema because `assessment-results.local-definitions.components` is not allowed, `objectives-and-methods` has the wrong shape, and `reviewed-controls.control-selections` is missing. The same run's real SARIF download passes schema and semantic validation. No existing dedicated OSCAL schema bug task was found; TASK-318 is a broader Backlog feature. This scope decision requires user approval before changing production export generation or weakening the new blocking gate.
+
+Final review corrections are implemented and locally verified. OSCAL control IDs now use stable NCName-safe policy UUID tokens. Control selections enumerate the selected policy controls and represent an empty scope explicitly. The generator omits optional empty arrays, emits mandatory SSP sentinels for an empty scope, maps all control statuses to valid OSCAL target states, and omits empty `relevant-evidence`. The browser export fixture covers punctuation, `NotChecked`, `NotApplicable`, controls without evidence, and a second empty-scope download.
+
+Final `nix build path:.#checks.x86_64-linux.web-ui-exports -L --no-link` passed. The VM recorded 35.288 seconds total and 15.946 seconds in export validation. Populated and empty-scope Assessment Results, embedded Assessment Plans, and embedded SSPs all passed vendored NIST OSCAL 1.1.2 schemas and reference-chain checks. SARIF schema and semantic validation also passed.
+
+CI producer metadata now records bounded GitLab Jobs API runner queue duration, local/substituted/built/mixed cache state, Nix realization time, evidence lookup, and evidence copy. Aggregation reports every job duration and only computes median, maximum, and blocking critical path when all five blocking producer timings are present. Producer and aggregate scripts run through flake-pinned Nix packages; the mutable Alpine report image was removed.
+
+Final static verification passed: 28/28 Node tests; ownership validation (100 ci_fast, 17 required, 83 advisory); JavaScript syntax; `bash -n`; ShellCheck 0.11.0; GitLab YAML parse with yq-go; targeted Rust OSCAL test; rustfmt check; both helper package builds; all six check attribute evaluations; helper package evaluations; and `git diff --check`. The three representative MR pipelines required by acceptance criterion 2 remain pending until the branch is committed, pushed, and an MR exists.
 <!-- SECTION:NOTES:END -->
