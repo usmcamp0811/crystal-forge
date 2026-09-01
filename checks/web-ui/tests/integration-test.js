@@ -8015,12 +8015,12 @@ const steps = [
         );
         await frameworkSelect.selectOption(frameworkId);
         await failedVersionResponse;
-        const mappingCatalogAlert = page.locator("#policy-mapping-editor-error");
+        const mappingCatalogAlert = page.locator("#policy-mapping-editor-error:visible").last();
         await assertVisible(mappingCatalogAlert.getByText(/Failed to load framework versions/), "Framework-version failure must be visible", 15000);
         await assertAttribute(mappingCatalogAlert, "role", "alert", "Framework-version failure must be announced");
-        await assertVisible(page.getByTestId("policy-framework-versions-retry"), "Framework-version failure must provide retry");
+        await assertVisible(mappingCatalogAlert.getByTestId("policy-framework-versions-retry"), "Framework-version failure must provide retry");
         failVersionLoad = false;
-        await page.getByTestId("policy-framework-versions-retry").click();
+        await mappingCatalogAlert.getByTestId("policy-framework-versions-retry").click();
         const versionSelect = page.getByLabel("Version").last();
         await versionSelect.locator(`option[value="${versionId}"]`).waitFor({ state: "attached", timeout: 5000 });
         await versionSelect.selectOption(versionId);
@@ -8036,9 +8036,9 @@ const steps = [
         await failedSearchResponse;
         await assertVisible(mappingCatalogAlert.getByText(/Failed to search requirements/), "Requirement-search failure must be visible", 15000);
         await assertAttribute(mappingCatalogAlert, "role", "alert", "Requirement-search failure must be announced");
-        await assertVisible(page.getByTestId("policy-requirements-retry"), "Requirement-search failure must provide retry");
+        await assertVisible(mappingCatalogAlert.getByTestId("policy-requirements-retry"), "Requirement-search failure must provide retry");
         failRequirementSearch = false;
-        await page.getByTestId("policy-requirements-retry").click();
+        await mappingCatalogAlert.getByTestId("policy-requirements-retry").click();
         await page.getByRole("button", { name: /SC-45 · control · System Time Synchronization/i }).click();
         await page.getByText("Supports", { exact: true }).last().click();
         await page.getByRole("button", { name: "Partial", exact: true }).last().click();
