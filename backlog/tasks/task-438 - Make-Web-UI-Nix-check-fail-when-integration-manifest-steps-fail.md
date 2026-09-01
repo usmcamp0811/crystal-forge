@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-gpt-5.6-sol
 created_date: '2026-08-26 01:33'
-updated_date: '2026-09-01 03:46'
+updated_date: '2026-09-01 03:59'
 labels:
   - web-ui
   - testing
@@ -16,6 +16,8 @@ references:
   - TASK-450.11
 modified_files:
   - checks/web-ui/default.nix
+  - checks/web-ui/tests/browser-verdict.js
+  - checks/web-ui/tests/browser-verdict.test.js
   - checks/web-ui/tests/integration-test.js
 priority: high
 type: bug
@@ -52,4 +54,6 @@ TASK-450.11 treats this bug as a correctness prerequisite for web UI latency wor
 The user selected this task for the focused Web UI latency bundle and explicitly requested one shared branch, worktree, and MR with TASK-354 and TASK-450.11.1 through TASK-450.11.3.
 
 LOCK: opencode-gpt-5.6-sol in /home/mcamp/code/crystal-forge/TASK-450-web-ui-parallel-checks on branch TASK-450.11-web-ui-parallel-checks, based on TASK-450-p0-build-graph at 437efd55.
+
+Implemented the JavaScript/harness reliability portion in the shared TASK-450 worktree. Added a versioned selected-step verdict contract with Node built-in regression tests, wrote results and verdict before assigning the process exit code, made unhandled rejections process-fatal without suppressing report production, and changed the Nix driver to wait for `integration.exit` and report every selected failed step. Verification passed in `nix develop`: Node syntax checks for all changed scripts, 3/3 `node:test` cases, `nix-instantiate --parse checks/web-ui/default.nix`, and `git diff --check`. Full VM execution was not run in this focused harness pass.
 <!-- SECTION:NOTES:END -->
