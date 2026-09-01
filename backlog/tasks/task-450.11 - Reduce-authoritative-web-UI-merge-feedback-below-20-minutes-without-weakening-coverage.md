@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - opencode-gpt-5.6-sol
 created_date: '2026-09-01 03:12'
-updated_date: '2026-09-01 13:54'
+updated_date: '2026-09-01 14:29'
 labels:
   - web-ui
   - testing
@@ -96,4 +96,6 @@ Final verification passed: 27/27 Node tests; static ownership validator (`100 ci
 Full `web-ui-fleet` validation now completes with the final timeout and route-recovery changes. `nix build path:.#checks.x86_64-linux.web-ui-fleet -L --no-link` passed. Evidence `/nix/store/j3sygsbqlzvy2l6x8l2dymgsq24j7i94-vm-test-run-crystal-forge-web-ui-fleet-evidence` records a 139.873-second total VM evidence duration and 120.822-second browser semantic duration. Its blocking check verdict is `ok: true`; all required steps passed; OSCAL and SARIF component verdicts are true; `processError` is null. Six advisory failures remain explicit: 12d2, 12e, 12k, 12g, 16c, and 28. Updated 12f and 12h contracts both passed.
 
 Final static verification passed: Node syntax, 28/28 browser/group/CI tests, Nix parse for `checks/web-ui/default.nix`, and `git diff --check`. This local result does not satisfy acceptance criterion 2, which still requires three representative merge-request pipeline runs below 20 minutes. No commit or push was made.
+
+Remaining exports VM verification exposed a production OSCAL 1.1.2 defect after the isolated harness was updated to current local-auth, compliance routing, Import / Export menu, and setup-coach behavior. The real OSCAL download fails the vendored NIST schema because `assessment-results.local-definitions.components` is not allowed, `objectives-and-methods` has the wrong shape, and `reviewed-controls.control-selections` is missing. The same run's real SARIF download passes schema and semantic validation. No existing dedicated OSCAL schema bug task was found; TASK-318 is a broader Backlog feature. This scope decision requires user approval before changing production export generation or weakening the new blocking gate.
 <!-- SECTION:NOTES:END -->
