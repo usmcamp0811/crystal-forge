@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - opencode-gpt-5.6-sol
 created_date: '2026-09-01 03:12'
-updated_date: '2026-09-01 06:03'
+updated_date: '2026-09-01 13:54'
 labels:
   - web-ui
   - testing
@@ -92,4 +92,8 @@ Post-fleet correction implemented without commit/push. `check-groups.json` now c
 Focused VM evidence command `CF_UI_TEST_STEPS="12f-systems-deploy-modal,12h-system-detail-cves-grouped-justification" nix build --impure path:.#checks.x86_64-linux.web-ui-fleet.evidence -L --no-link` completed successfully in 59.26 seconds. It produced schema-v2 browser/check verdicts with `ok: true`, no required failures, both selected failures under `failedAdvisorySteps`, and `processError: null`; the prior detached `Route is already handled` rejection did not recur. 12f and 12h remain product-contract blockers rather than test flakiness: current System Detail Deploy only selects an inline Deploy tab and never opens `DeploySystemModal`; current CVE component explicitly groups package-first and omits the asserted CVE-first filters. 12h retained `role=tab` and now records decisive surface text diagnostics. Assertions were not weakened.
 
 Final verification passed: 27/27 Node tests; static ownership validator (`100 ci_fast`, `17 required`, `83 advisory`); JSON parse; Node syntax for all 14 Web UI/CI JS files; Nix parse for six Web UI check files; all six check names evaluated earlier; final generated NixOS test driver built and its Python `test-script` compiled; `bash -n`; ShellCheck 0.11.0; `.gitlab-ci.yml` yq parse; exact checker against focused advisory evidence exited 0 while printing both advisory failures; `git diff --check`. Full fleet was not rerun. Historical remaining advisory failures are 12d2, 12e, 12f, 12k, 12h, 12g, 16c, and 28; only 12f/12h were focused browser-verified in this pass.
+
+Full `web-ui-fleet` validation now completes with the final timeout and route-recovery changes. `nix build path:.#checks.x86_64-linux.web-ui-fleet -L --no-link` passed. Evidence `/nix/store/j3sygsbqlzvy2l6x8l2dymgsq24j7i94-vm-test-run-crystal-forge-web-ui-fleet-evidence` records a 139.873-second total VM evidence duration and 120.822-second browser semantic duration. Its blocking check verdict is `ok: true`; all required steps passed; OSCAL and SARIF component verdicts are true; `processError` is null. Six advisory failures remain explicit: 12d2, 12e, 12k, 12g, 16c, and 28. Updated 12f and 12h contracts both passed.
+
+Final static verification passed: Node syntax, 28/28 browser/group/CI tests, Nix parse for `checks/web-ui/default.nix`, and `git diff --check`. This local result does not satisfy acceptance criterion 2, which still requires three representative merge-request pipeline runs below 20 minutes. No commit or push was made.
 <!-- SECTION:NOTES:END -->
