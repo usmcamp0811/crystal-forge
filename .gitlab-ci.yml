@@ -185,7 +185,6 @@ flake-check:
           - integration
           - oidc-auth
           - server-regressions
-          - web-ui
   before_script:
     # Create .netrc using CI job token (more secure)
     - echo "machine ${CI_SERVER_HOST}" > ~/.netrc
@@ -194,31 +193,14 @@ flake-check:
     - chmod 600 ~/.netrc
   script:
     - nix build ".#checks.x86_64-linux.${CHECK_NAME}" -L --show-trace
-    # Copy web-ui screenshots out of the Nix build result into the CI workspace
-    - mkdir -p web-ui-screenshots
-    - |
-      if [ "$CHECK_NAME" = "web-ui" ]; then
-        STORE_PATH=$(readlink -f result)
-        if [ -d "$STORE_PATH/screenshots" ]; then
-          cp -r "$STORE_PATH/screenshots/"* web-ui-screenshots/
-          echo "Copied web-ui screenshots to workspace"
-        else
-          echo "No screenshots found in build result (tests may have failed)"
-        fi
-      fi
-  artifacts:
-    when: always
-    expire_in: 30 days
-    paths:
-      - web-ui-screenshots/
-    expose_as: "Web UI Screenshots"
   only:
     - merge_requests
     - main
 
 # Generates reviewable strict-baseline candidates without weakening the normal
 # Web UI gate. Start this job only after a strict visual failure is confirmed as
-# intentional; semantic and critical-workflow failures still fail the job.
+# intentional. The governance shard owns all strict workflows, and semantic
+# failures still fail this job.
 web-ui-baseline-candidates:
   stage: check
   tags:
@@ -231,7 +213,7 @@ web-ui-baseline-candidates:
     - echo "password ${CI_JOB_TOKEN}" >> ~/.netrc
     - chmod 600 ~/.netrc
   script:
-    - CF_UI_UPDATE_BASELINES=1 nix build --impure ".#checks.x86_64-linux.web-ui" -L --show-trace
+    - CF_UI_UPDATE_BASELINES=1 nix build --impure ".#checks.x86_64-linux.web-ui-governance" -L --show-trace
     - mkdir -p web-ui-baseline-candidates
     - STORE_PATH=$(readlink -f result)
     - test -d "$STORE_PATH/screenshots"
@@ -244,149 +226,96 @@ web-ui-baseline-candidates:
   only:
     - merge_requests
 
-# Post web UI screenshots as MR comment (with inline images)
-# Uses CI_JOB_TOKEN (always available) instead of GITLAB_TOKEN (protected variable).
-web-ui-screenshots-mr-comment:
+# These five required jobs form one logical Web UI merge gate. The matrix lets
+# runners execute checks concurrently without changing behavior when they queue.
+web-ui-check:
+  stage: check
+  tags:
+    - nix
+  interruptible: true
+  retry:
+    max: 2
+    when:
+      - runner_system_failure
+  parallel:
+    matrix:
+      - CHECK_NAME:
+          - web-ui
+          - web-ui-fleet
+          - web-ui-pipeline
+          - web-ui-governance
+          - web-ui-exports
+  before_script:
+    - echo "machine ${CI_SERVER_HOST}" > ~/.netrc
+    - echo "login gitlab-ci-token" >> ~/.netrc
+    - echo "password ${CI_JOB_TOKEN}" >> ~/.netrc
+    - chmod 600 ~/.netrc
+  script:
+    - WEB_UI_BLOCKING=true nix run .#web-ui-producer
+  artifacts:
+    when: always
+    expire_in: 30 days
+    name: "web-ui-evidence-${CHECK_NAME}-${CI_JOB_ID}"
+    paths:
+      - web-ui-evidence/${CHECK_NAME}/
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+# Design parity is useful reviewer evidence, but drift does not block merging.
+web-ui-design-parity:
+  stage: check
+  tags:
+    - nix
+  interruptible: true
+  allow_failure: true
+  variables:
+    CHECK_NAME: web-ui-design-parity
+    WEB_UI_BLOCKING: "false"
+  before_script:
+    - echo "machine ${CI_SERVER_HOST}" > ~/.netrc
+    - echo "login gitlab-ci-token" >> ~/.netrc
+    - echo "password ${CI_JOB_TOKEN}" >> ~/.netrc
+    - chmod 600 ~/.netrc
+  script:
+    - nix run .#web-ui-producer
+  artifacts:
+    when: always
+    expire_in: 30 days
+    name: "web-ui-evidence-${CHECK_NAME}-${CI_JOB_ID}"
+    paths:
+      - web-ui-evidence/${CHECK_NAME}/
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+# This single advisory consumer owns uploads and comments. Producer failures
+# still fail their blocking jobs; reporting failures do not fail the pipeline.
+# Configure GITLAB_TOKEN as a masked project variable with API scope. Without
+# it, the complete report and downloaded evidence remain job artifacts.
+web-ui-evidence-report:
   stage: metrics
   tags:
     - nix
-  image: alpine:latest
-  before_script:
-    - apk add --no-cache curl jq
+  interruptible: true
+  when: always
+  allow_failure: true
   script:
-    - |
-      # Use CI_JOB_TOKEN for GitLab API auth (available in every job)
-      AUTH_HEADER="JOB-TOKEN: ${CI_JOB_TOKEN}"
-
-      if [ -z "${CI_MERGE_REQUEST_IID}" ]; then
-        echo "Not a merge request, skipping screenshot upload"
-        exit 0
-      fi
-
-      # Check if any screenshots exist
-      SCREENSHOT_COUNT=$(ls -1 web-ui-screenshots/*.png 2>/dev/null | wc -l)
-      if [ "$SCREENSHOT_COUNT" -eq 0 ]; then
-        echo "No screenshots found, skipping MR comment"
-        exit 0
-      fi
-
-      # Build markdown body with inline screenshot images
-      SCREENSHOT_MD="## Web UI Screenshots\n\n"
-
-      # Prepend the coverage + visual-baseline summary emitted by the check
-      if [ -f web-ui-screenshots/visual-summary.md ]; then
-        SUMMARY_CONTENT=$(cat web-ui-screenshots/visual-summary.md | sed 's/\\/\\\\/g')
-        SCREENSHOT_MD="${SCREENSHOT_MD}${SUMMARY_CONTENT}\n\n---\n\n"
-      fi
-
-      # Prepend the non-blocking design-parity (design drift) summary
-      if [ -f web-ui-screenshots/design-drift-summary.md ]; then
-        DRIFT_CONTENT=$(cat web-ui-screenshots/design-drift-summary.md | sed 's/\\/\\\\/g')
-        SCREENSHOT_MD="${SCREENSHOT_MD}${DRIFT_CONTENT}\n\n---\n\n"
-      fi
-
-      SCREENSHOT_MD="${SCREENSHOT_MD}The following screenshots were captured during the web UI check:\n\n"
-      for f in web-ui-screenshots/*.png; do
-        [ -f "$f" ] || continue
-        FILENAME=$(basename "$f" .png)
-        echo "Uploading: $FILENAME"
-        # Upload screenshot as GitLab attachment; skip on failure
-        UPLOAD_RESP=$(curl -s --header "${AUTH_HEADER}" \
-          --form "file=@$f" \
-          "${GITLAB_API_URL}/projects/${CI_PROJECT_ID}/uploads" 2>/dev/null || echo "")
-        MARKDOWN=$(echo "$UPLOAD_RESP" | jq -r '.markdown' 2>/dev/null || echo "")
-        if [ -n "$MARKDOWN" ] && [ "$MARKDOWN" != "null" ]; then
-          SCREENSHOT_MD="${SCREENSHOT_MD}### ${FILENAME}\n${MARKDOWN}\n\n"
-        else
-          echo "  WARNING: upload failed for $FILENAME (response: $(echo "$UPLOAD_RESP" | head -c 200))"
-          SCREENSHOT_MD="${SCREENSHOT_MD}### ${FILENAME}\n*Upload failed*\n\n"
-        fi
-      done
-
-      # Attach the design-parity matrix grid (combined view — primary visual)
-      if [ -f web-ui-screenshots/design-parity-matrix.png ]; then
-        echo "Uploading design-parity matrix grid"
-        UPLOAD_RESP=$(curl -s --header "${AUTH_HEADER}" \
-          --form "file=@web-ui-screenshots/design-parity-matrix.png" \
-          "${GITLAB_API_URL}/projects/${CI_PROJECT_ID}/uploads" 2>/dev/null || echo "")
-        MATRIX_MD=$(echo "$UPLOAD_RESP" | jq -r '.markdown' 2>/dev/null || echo "")
-        if [ -n "$MATRIX_MD" ] && [ "$MATRIX_MD" != "null" ]; then
-          SCREENSHOT_MD="${SCREENSHOT_MD}---\n\n## Design Parity Matrix\n\nLeft = design example target · Right = real Dioxus UI (same shared fixture). Non-blocking.\n\n${MATRIX_MD}\n\n"
-        fi
-      fi
-
-      # Attach per-view design-parity montages (design target | real Dioxus)
-      if [ -d web-ui-screenshots/montages ]; then
-        MONTAGE_COUNT=$(find web-ui-screenshots/montages -maxdepth 1 -type f -name '*.png' | wc -l)
-      else
-        MONTAGE_COUNT=0
-      fi
-      if [ "$MONTAGE_COUNT" -gt 0 ]; then
-        SCREENSHOT_MD="${SCREENSHOT_MD}## Per-View Montages (${MONTAGE_COUNT})\n\nSide-by-side comparisons showing design (left) vs Dioxus (right) for each view and theme.\n\n"
-        MUP=0
-        for f in web-ui-screenshots/montages/*.png; do
-          [ -f "$f" ] || continue
-          if [ "$MUP" -ge 26 ]; then
-            SCREENSHOT_MD="${SCREENSHOT_MD}*...and $((MONTAGE_COUNT - 26)) more (see job artifacts).*\n\n"
-            break
-          fi
-          FILENAME=$(basename "$f" .png)
-          echo "Uploading montage: $FILENAME"
-          UPLOAD_RESP=$(curl -s --header "${AUTH_HEADER}" \
-            --form "file=@$f" \
-            "${GITLAB_API_URL}/projects/${CI_PROJECT_ID}/uploads" 2>/dev/null || echo "")
-          MARKDOWN=$(echo "$UPLOAD_RESP" | jq -r '.markdown' 2>/dev/null || echo "")
-          if [ -n "$MARKDOWN" ] && [ "$MARKDOWN" != "null" ]; then
-            SCREENSHOT_MD="${SCREENSHOT_MD}### ${FILENAME}\n${MARKDOWN}\n\n"
-            MUP=$((MUP + 1))
-          fi
-        done
-      fi
-
-      SCREENSHOT_MD="${SCREENSHOT_MD}---\n*Generated by pipeline ${CI_PIPELINE_ID} | Job ${CI_JOB_ID}*"
-
-      # Escape for JSON
-      SUMMARY_ESCAPED=$(printf "%b" "$SCREENSHOT_MD" | jq -Rs '.')
-
-      # Find existing comment by this bot to update (overwrite previous screenshots)
-      EXISTING_COMMENTS=$(curl -s --header "${AUTH_HEADER}" \
-        "${GITLAB_API_URL}/projects/${CI_PROJECT_ID}/merge_requests/${CI_MERGE_REQUEST_IID}/notes" || echo "[]")
-
-      if ! echo "$EXISTING_COMMENTS" | jq -e 'type == "array"' >/dev/null 2>&1; then
-        echo "WARNING: could not read MR notes with CI job token; screenshots remain available as job artifacts"
-        echo "${SCREENSHOT_MD}" > web-ui-screenshots/mr-comment.md
-        exit 0
-      fi
-
-      COMMENT_ID=$(echo "$EXISTING_COMMENTS" | jq -r '.[] | select(.body | contains("Web UI Screenshots")) | .id' | head -1)
-
-      if [ -n "$COMMENT_ID" ] && [ "$COMMENT_ID" != "null" ]; then
-        COMMENT_RESP=$(curl -s -X PUT --header "${AUTH_HEADER}" \
-          --header "Content-Type: application/json" \
-          --data "{\"body\": $SUMMARY_ESCAPED}" \
-          "${GITLAB_API_URL}/projects/${CI_PROJECT_ID}/merge_requests/${CI_MERGE_REQUEST_IID}/notes/$COMMENT_ID" || echo "")
-        if echo "$COMMENT_RESP" | jq -e '.id' >/dev/null 2>&1; then
-          echo "Updated existing MR comment ($COMMENT_ID) with new screenshots"
-        else
-          echo "WARNING: MR comment update failed; screenshots remain available as job artifacts"
-          echo "${SCREENSHOT_MD}" > web-ui-screenshots/mr-comment.md
-        fi
-      else
-        COMMENT_RESP=$(curl -s -X POST --header "${AUTH_HEADER}" \
-          --header "Content-Type: application/json" \
-          --data "{\"body\": $SUMMARY_ESCAPED}" \
-          "${GITLAB_API_URL}/projects/${CI_PROJECT_ID}/merge_requests/${CI_MERGE_REQUEST_IID}/notes" || echo "")
-        if echo "$COMMENT_RESP" | jq -e '.id' >/dev/null 2>&1; then
-          echo "Posted new MR comment with web UI screenshots"
-        else
-          echo "WARNING: MR comment creation failed; screenshots remain available as job artifacts"
-          echo "${SCREENSHOT_MD}" > web-ui-screenshots/mr-comment.md
-        fi
-      fi
-  dependencies:
-    - flake-check
-  only:
-    - merge_requests
+    - nix run .#web-ui-evidence-report
+  needs:
+    - job: web-ui-check
+      artifacts: true
+    - job: web-ui-design-parity
+      artifacts: true
+  artifacts:
+    when: always
+    expire_in: 30 days
+    paths:
+      - web-ui-report/
+      - web-ui-evidence/
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
 
 # Runs the CVE scan loop processing test (scan_cycle_processes_target_with_fake_runner)
 # via the repo-owned `devScripts.cve-test` process-compose project. That target

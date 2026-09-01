@@ -2,9 +2,10 @@
  * SARIF Export Integration Test
  *
  * Exercises the real production SARIF 2.1.0 export path in the web UI:
- * 1. Registers an admin user and logs in
- * 2. Routes compliance API endpoints with deterministic data (2 systems:
- *    one with a failing control, one fully passing, one with a waiver)
+ * 1. Ensures a local admin exists and authenticates
+ * 2. Routes compliance API endpoints with deterministic data for two systems:
+ *    one has failing and warning controls; the other passes all evaluated
+ *    controls. Both systems have a shared waived control.
  * 3. Opens the Export evidence modal, selects SARIF 2.1.0 format
  * 4. Captures the browser-triggered file download
  * 5. Validates the downloaded file against the vendored OASIS SARIF 2.1.0
@@ -20,18 +21,11 @@
 const { chromium } = require("playwright");
 const fs = require("fs");
 const { execSync } = require("child_process");
+const { ensureLocalAdmin } = require("./export-auth");
 
 const baseUrl   = process.argv[2] || "http://127.0.0.1:3000";
 const outputDir = process.argv[3] || "/tmp/screenshots";
 const schemaPath = process.argv[4] || "";
-
-const TEST_USER = {
-  username:  "admin",
-  email:     "admin@example.com",
-  password:  "testpassword123",
-  firstName: "Test",
-  lastName:  "Admin",
-};
 
 const LOAD_TIMEOUT = 10000;
 
@@ -155,7 +149,7 @@ async function assertVisible(locator, message, timeoutMs = 5000) {
 }
 
 async function routeCompliance(page) {
-  await page.route("**/api/v1/compliance/bundles*", async (route) => {
+  const handleRoute = async (route) => {
     const url    = route.request().url();
     const method = route.request().method();
 
@@ -181,30 +175,14 @@ async function routeCompliance(page) {
     }
 
     await route.continue();
-  });
-}
+  };
 
-async function registerUser(page) {
-  await page.goto(`${baseUrl}/register`, { timeout: LOAD_TIMEOUT });
-  await page.waitForTimeout(1500);
-  await page.fill('input[name="username"]',   TEST_USER.username);
-  await page.fill('input[name="password"]',   TEST_USER.password);
-  await page.fill('input[name="email"]',      TEST_USER.email);
-  await page.fill('input[name="first_name"]', TEST_USER.firstName);
-  await page.fill('input[name="last_name"]',  TEST_USER.lastName);
-  await page.waitForTimeout(200);
-  await page.getByRole("button", { name: /sign up|register|submit/i }).first().click({ force: true });
-  await page.waitForTimeout(1500);
-}
-
-async function loginUser(page) {
-  await page.goto(`${baseUrl}/login`, { timeout: LOAD_TIMEOUT });
-  await page.waitForTimeout(1500);
-  await page.fill('input[name="username"]', TEST_USER.username);
-  await page.fill('input[name="password"]', TEST_USER.password);
-  await page.waitForTimeout(200);
-  await page.getByRole("button", { name: /sign in|log in|login/i }).first().click({ force: true });
-  await page.waitForTimeout(1500);
+  await page.route("**/api/v1/compliance/bundles*", handleRoute);
+  await page.route(`**/api/v1/compliance/bundles/${BUNDLE_ID}/systems*`, handleRoute);
+  await page.route(
+    `**/api/v1/compliance/bundles/${BUNDLE_ID}/systems/*/evidence*`,
+    handleRoute,
+  );
 }
 
 // ── Main ────────────────────────────────────────────────────────────────────
@@ -219,6 +197,10 @@ async function loginUser(page) {
   const results = [];
   let stepOk    = true;
   let stepError = null;
+  let currentStep = {
+    name: "sarif-export",
+    description: "SARIF export end-to-end",
+  };
 
   const browser = await chromium.launch();
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
@@ -230,21 +212,17 @@ async function loginUser(page) {
   };
 
   try {
-    // ── Step 1: Auth ─────────────────────────────────────────────────────────
-    console.log("Step: register");
-    try {
-      await registerUser(page);
-      record("register", "Register admin user", true);
-    } catch (err) {
-      console.log(`  Note: ${err.message} (may already exist)`);
-      record("register", "Register admin user", true);
-    }
-
-    console.log("Step: login");
-    await loginUser(page);
-    record("login", "Login as admin", true);
+    // ── Step 1: Authenticate ───────────────────────────────────────────────
+    currentStep = { name: "authenticate", description: "Authenticate local admin" };
+    console.log("Step: authenticate");
+    await ensureLocalAdmin(page, baseUrl);
+    record("authenticate", "Authenticate local admin", true);
 
     // ── Step 2: Navigate to compliance with mocked data ───────────────────
+    currentStep = {
+      name: "compliance-navigate",
+      description: "Navigate to compliance with mocked data",
+    };
     console.log("Step: compliance-navigate");
     await routeCompliance(page);
     await page.goto(`${baseUrl}/compliance`, { timeout: LOAD_TIMEOUT });
@@ -266,11 +244,14 @@ async function loginUser(page) {
       page.getByText("prod-web-01").first(),
       "Expected system hostname in matrix",
     );
+    await page.getByTestId("compliance-drawer-close").click();
     record("compliance-navigate", "Navigate to compliance with mocked data", true);
 
     // ── Step 3: Open export modal ─────────────────────────────────────────
+    currentStep = { name: "export-open", description: "Open export modal" };
     console.log("Step: export-open");
-    await page.getByRole("button", { name: /Export evidence/i }).first().click({ force: true });
+    await page.getByRole("button", { name: /Import \/ Export/i }).click();
+    await page.getByText(/Export evidence report/i).click();
     await page.waitForTimeout(800);
 
     await assertVisible(
@@ -280,6 +261,7 @@ async function loginUser(page) {
     record("export-open", "Open export modal", true);
 
     // ── Step 4: Select SARIF format ───────────────────────────────────────
+    currentStep = { name: "select-sarif", description: "Select SARIF 2.1.0 format" };
     console.log("Step: select-sarif");
     await page.getByText(/SARIF 2\.1\.0/i).first().click({ force: true });
     await page.waitForTimeout(400);
@@ -292,6 +274,7 @@ async function loginUser(page) {
     record("select-sarif", "Select SARIF 2.1.0 format", true);
 
     // ── Step 5: Trigger download ──────────────────────────────────────────
+    currentStep = { name: "export-download", description: "Trigger SARIF download" };
     console.log("Step: export-download");
 
     const downloadPromise = page.waitForEvent("download", { timeout: 30000 });
@@ -309,6 +292,10 @@ async function loginUser(page) {
     record("export-download", "Trigger SARIF download", true);
 
     // ── Step 6: Schema + semantic validation ──────────────────────────────
+    currentStep = {
+      name: "export-validate",
+      description: "Validate SARIF against OASIS schema + semantic checks",
+    };
     console.log("Step: export-validate");
 
     if (!schemaPath) throw new Error("Schema path not provided — pass as third argument");
@@ -332,6 +319,9 @@ async function loginUser(page) {
   } catch (err) {
     stepOk    = false;
     stepError = err.message;
+    if (!results.some((result) => result.name === currentStep.name)) {
+      record(currentStep.name, currentStep.description, false, stepError);
+    }
     console.error(`  FAIL: ${err.message}`);
   } finally {
     if (results.length === 0) {

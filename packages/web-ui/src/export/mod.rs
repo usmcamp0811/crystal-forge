@@ -476,15 +476,23 @@ pub fn build_sarif(p: &ExportPayload<'_>) -> String {
 
 // ─── OSCAL 1.1.2 Assessment Results ──────────────────────────────────────────
 
-/// OSCAL 1.1.2 Assessment Results (JSON).
-/// Produces a minimal but valid AR document from the rollup + evidence data.
+/// Builds an OSCAL 1.1.2 Assessment Results JSON document.
+///
+/// The document embeds the Assessment Plan and System Security Plan resources
+/// needed to resolve the Assessment Results import chain. The generated SSP
+/// identifies its source profile with a placeholder URI because compliance
+/// bundles do not currently retain an OSCAL profile document.
 pub fn build_oscal(p: &ExportPayload<'_>) -> String {
-    use serde_json::{Value, json};
-
     let now = js_sys::Date::new_0()
         .to_iso_string()
         .as_string()
         .unwrap_or_default();
+    build_oscal_at(p, &now)
+}
+
+fn build_oscal_at(p: &ExportPayload<'_>, now: &str) -> String {
+    use serde_json::{Value, json};
+
     let ar_uuid = uuid::Uuid::new_v4().to_string();
     let ap_uuid = uuid::Uuid::new_v4().to_string();
 
@@ -513,13 +521,28 @@ pub fn build_oscal(p: &ExportPayload<'_>) -> String {
         .iter()
         .map(|ctrl| json!({"objective-id": objective_id_for(ctrl.policy_id, &ctrl.policy_name)}))
         .collect();
+    let include_controls_list: Vec<Value> = unique_policies
+        .iter()
+        .map(|ctrl| json!({"control-id": control_id_for(ctrl.policy_id)}))
+        .collect();
+    let control_selection = if include_controls_list.is_empty() {
+        json!({
+            "description": "No controls matched the selected Crystal Forge export scope.",
+            "remarks": "The selection is intentionally empty.",
+        })
+    } else {
+        json!({
+            "description": format!("Controls assessed for bundle '{}'", p.bundle.name),
+            "include-controls": include_controls_list,
+        })
+    };
 
     let objectives: Vec<Value> = unique_policies
         .iter()
         .map(|ctrl| {
+            let objective_id = objective_id_for(ctrl.policy_id, &ctrl.policy_name);
             json!({
-                "id": objective_id_for(ctrl.policy_id, &ctrl.policy_name),
-                "title": ctrl.policy_name,
+                "control-id": control_id_for(ctrl.policy_id),
                 "description": ctrl.summary,
                 "props": [{
                     "name": "policy-uuid",
@@ -529,13 +552,19 @@ pub fn build_oscal(p: &ExportPayload<'_>) -> String {
                     "name": "framework-mapping",
                     "ns": CF_NS,
                     "value": ctrl.framework_mapping,
-                }]
+                }],
+                "parts": [{
+                    "id": objective_id,
+                    "name": "objective",
+                    "title": ctrl.policy_name,
+                    "prose": ctrl.summary,
+                }],
             })
         })
         .collect();
 
     // Components = one per host
-    let components: Vec<Value> = p
+    let mut components: Vec<Value> = p
         .scoped_systems()
         .iter()
         .map(|s| {
@@ -548,10 +577,39 @@ pub fn build_oscal(p: &ExportPayload<'_>) -> String {
             })
         })
         .collect();
+    // OSCAL SSP components and implemented requirements are mandatory,
+    // non-empty arrays. An empty export scope uses explicit sentinel records
+    // instead of emitting arrays that fail the OSCAL 1.1.2 schema.
+    if components.is_empty() {
+        components.push(json!({
+            "uuid": uuid::Uuid::new_v4().to_string(),
+            "type": "software",
+            "title": "Crystal Forge empty assessment scope",
+            "description": "No Crystal Forge systems matched the selected export scope.",
+            "status": { "state": "disposition" },
+        }));
+    }
+    let mut implemented_requirements: Vec<Value> = unique_policies
+        .iter()
+        .map(|ctrl| {
+            json!({
+                "uuid": uuid::Uuid::new_v4().to_string(),
+                "control-id": control_id_for(ctrl.policy_id),
+            })
+        })
+        .collect();
+    if implemented_requirements.is_empty() {
+        implemented_requirements.push(json!({
+            "uuid": uuid::Uuid::new_v4().to_string(),
+            "control-id": "cf-no-controls-selected",
+            "remarks": "No Crystal Forge policy evidence matched the selected export scope.",
+        }));
+    }
 
     // Clone reused data for embedded documents (consumed by outer json! later)
     let objectives_ap = objectives.clone();
     let include_objectives_ap = include_objectives_list.clone();
+    let control_selection_ap = control_selection.clone();
     let components_ssp = components.clone();
 
     // Generate a minimal OSCAL System Security Plan so the AP's import-ssp
@@ -577,17 +635,42 @@ pub fn build_oscal(p: &ExportPayload<'_>) -> String {
                 }]
             },
             "import-profile": {
-                "href": "#generated-profile",
-                "remarks": "Minimal SSP auto-generated by Crystal Forge export. No external profile is referenced."
+                "href": format!("urn:crystal-forge:compliance-bundle:{}", p.bundle.id),
+                "remarks": "Crystal Forge does not currently retain the source OSCAL profile. This URI identifies the compliance bundle used to generate the SSP."
             },
             "system-characteristics": {
                 "system-name": p.bundle.name.clone(),
-                "system-id": p.bundle.id.to_string(),
+                "system-ids": [{
+                    "identifier-type": "https://ietf.org/rfc/rfc4122",
+                    "id": p.bundle.id.to_string(),
+                }],
                 "security-sensitivity-level": "low",
                 "description": p.bundle.description.clone().unwrap_or_default(),
+                "system-information": {
+                    "information-types": [{
+                        "uuid": uuid::Uuid::new_v4().to_string(),
+                        "title": "Crystal Forge compliance evidence",
+                        "description": "Compliance evidence processed by the assessed Crystal Forge systems.",
+                    }],
+                },
+                "status": {
+                    "state": "operational",
+                },
+                "authorization-boundary": {
+                    "description": "The systems selected for this Crystal Forge evidence export.",
+                },
             },
             "system-implementation": {
+                "users": [{
+                    "uuid": uuid::Uuid::new_v4().to_string(),
+                    "title": "Crystal Forge administrator",
+                    "description": "Administrator who generated the compliance evidence export.",
+                }],
                 "components": components_ssp,
+            },
+            "control-implementation": {
+                "description": "Control implementation references represented by Crystal Forge policies.",
+                "implemented-requirements": implemented_requirements,
             }
         }
     });
@@ -595,8 +678,7 @@ pub fn build_oscal(p: &ExportPayload<'_>) -> String {
     let ssp_base64 = BASE64.encode(ssp_json_str.as_bytes());
 
     // Build a minimal OSCAL Assessment Plan referencing the SSP above.
-    let ap_json = json!({
-        "assessment-plan": {
+    let mut ap_root = json!({
             "uuid": ap_uuid,
             "metadata": {
                 "title": format!("Assessment Plan for {}", p.bundle.name),
@@ -617,19 +699,20 @@ pub fn build_oscal(p: &ExportPayload<'_>) -> String {
             "import-ssp": {
                 "href": format!("#{}", ssp_uuid),
             },
-            "local-definitions": {
-                "objectives-and-methods": {
-                    "objectives": objectives_ap,
-                }
-            },
             "reviewed-controls": {
-                "control-objective-selections": [{
-                    "description": format!("Control objectives assessed for bundle '{}'", p.bundle.name),
-                    "include-objectives": include_objectives_ap,
-                }]
+                "control-selections": [control_selection_ap]
             }
-        }
     });
+    if !objectives_ap.is_empty() {
+        ap_root["local-definitions"] = json!({
+            "objectives-and-methods": objectives_ap,
+        });
+        ap_root["reviewed-controls"]["control-objective-selections"] = json!([{
+            "description": format!("Control objectives assessed for bundle '{}'", p.bundle.name),
+            "include-objectives": include_objectives_ap,
+        }]);
+    }
+    let ap_json = json!({ "assessment-plan": ap_root });
     let ap_json_str = serde_json::to_string_pretty(&ap_json).unwrap_or_default();
     let ap_base64 = BASE64.encode(ap_json_str.as_bytes());
 
@@ -646,15 +729,7 @@ pub fn build_oscal(p: &ExportPayload<'_>) -> String {
             let obs_uuid = uuid::Uuid::new_v4().to_string();
             let finding_uuid = uuid::Uuid::new_v4().to_string();
 
-            let (oscal_state, oscal_reason) = match ctrl.status {
-                ComplianceControlStatus::Pass => ("satisfied", "pass"),
-                ComplianceControlStatus::Warn => ("not-satisfied", "other"),
-                ComplianceControlStatus::Fail => ("not-satisfied", "fail-adjusted"),
-                ComplianceControlStatus::Waiver => ("not-satisfied", "accept-risk"),
-                ComplianceControlStatus::NotChecked => ("not-satisficed", "not-checked"),
-                ComplianceControlStatus::NotApplicable => ("not-applicable", "not-applicable"),
-                ComplianceControlStatus::Error => ("not-satisfied", "error"),
-            };
+            let (oscal_state, oscal_reason) = oscal_target_status(ctrl.status);
 
             // Collect evidence items as relevant evidence
             let relevant_evidence: Vec<Value> = if p.include_source {
@@ -694,7 +769,7 @@ pub fn build_oscal(p: &ExportPayload<'_>) -> String {
                 obs_props.push(json!({"name": "disposition", "ns": CF_NS, "value": "waived"}));
             }
 
-            observations.push(json!({
+            let mut observation = json!({
                 "uuid": obs_uuid,
                 "title": format!("{} — {}", ev.hostname, ctrl.policy_name),
                 "description": ctrl.summary,
@@ -705,10 +780,13 @@ pub fn build_oscal(p: &ExportPayload<'_>) -> String {
                     "type": "component",
                     "title": ev.hostname,
                 }],
-                "relevant-evidence": relevant_evidence,
                 "collected": now,
                 "props": obs_props,
-            }));
+            });
+            if !relevant_evidence.is_empty() {
+                observation["relevant-evidence"] = json!(relevant_evidence);
+            }
+            observations.push(observation);
 
             let objective_id = objective_id_for(ctrl.policy_id, &ctrl.policy_name);
 
@@ -742,8 +820,47 @@ pub fn build_oscal(p: &ExportPayload<'_>) -> String {
         }
     }
 
-    let doc = json!({
-        "assessment-results": {
+    let mut result = json!({
+        "uuid": uuid::Uuid::new_v4().to_string(),
+        "title": format!("{} v{} Assessment", p.bundle.name, p.bundle.version),
+        "description": p.bundle.description.as_deref().unwrap_or(""),
+        "start": now,
+        "end": now,
+        "props": [{
+            "name": "overall-score",
+            "ns": CF_NS,
+            "value": p.totals.overall_score.to_string(),
+        }, {
+            "name": "framework",
+            "ns": CF_NS,
+            "value": p.bundle.framework.clone(),
+        }, {
+            "name": "compliant-hosts",
+            "ns": CF_NS,
+            "value": format!("{} of {}", p.totals.fully_compliant_count, p.totals.system_count),
+        }],
+        "local-definitions": {
+            "components": components,
+        },
+        "reviewed-controls": {
+            "description": format!("{} control objectives reviewed", p.totals.total_controls),
+            "control-selections": [control_selection],
+        },
+    });
+    if !include_objectives_list.is_empty() {
+        result["reviewed-controls"]["control-objective-selections"] = json!([{
+            "description": format!("Control objectives assessed for bundle '{}'", p.bundle.name),
+            "include-objectives": include_objectives_list,
+        }]);
+    }
+    if !observations.is_empty() {
+        result["observations"] = json!(observations);
+    }
+    if !findings.is_empty() {
+        result["findings"] = json!(findings);
+    }
+
+    let mut assessment_results = json!({
             "uuid": ar_uuid,
             "metadata": {
                 "title": format!("{} Assessment Results", p.bundle.name),
@@ -763,12 +880,6 @@ pub fn build_oscal(p: &ExportPayload<'_>) -> String {
             },
             "import-ap": {
                 "href": format!("#{}", ap_uuid),
-            },
-            "local-definitions": {
-                "components": components,
-                "objectives-and-methods": {
-                    "objectives": objectives,
-                }
             },
             "back-matter": {
                 "resources": [
@@ -794,36 +905,15 @@ pub fn build_oscal(p: &ExportPayload<'_>) -> String {
                     }
                 ]
             },
-            "results": [{
-                "uuid": uuid::Uuid::new_v4().to_string(),
-                "title": format!("{} v{} Assessment", p.bundle.name, p.bundle.version),
-                "description": p.bundle.description.as_deref().unwrap_or(""),
-                "start": now,
-                "end": now,
-                "props": [{
-                    "name": "overall-score",
-                    "ns": CF_NS,
-                    "value": p.totals.overall_score.to_string(),
-                }, {
-                    "name": "framework",
-                    "ns": CF_NS,
-                    "value": p.bundle.framework.clone(),
-                }, {
-                    "name": "compliant-hosts",
-                    "ns": CF_NS,
-                    "value": format!("{} of {}", p.totals.fully_compliant_count, p.totals.system_count),
-                }],
-                "reviewed-controls": {
-                    "description": format!("{} control objectives reviewed", p.totals.total_controls),
-                    "control-objective-selections": [{
-                        "description": format!("Control objectives assessed for bundle '{}'", p.bundle.name),
-                        "include-objectives": include_objectives_list
-                    }]
-                },
-                "observations": observations,
-                "findings": findings,
-            }]
-        }
+            "results": [result]
+    });
+    if !objectives.is_empty() {
+        assessment_results["local-definitions"] = json!({
+            "objectives-and-methods": objectives,
+        });
+    }
+    let doc = json!({
+        "assessment-results": assessment_results,
     });
 
     serde_json::to_string_pretty(&doc).unwrap_or_default()
@@ -1061,4 +1151,206 @@ fn objective_id_for(policy_id: Uuid, policy_name: &str) -> String {
     let short_id = policy_id.simple().to_string();
     // Keep the first 8 hex chars of the UUID for readability + collision resistance
     format!("cf-obj-{}-{}", slug, &short_id[..8])
+}
+
+/// Produces an NCName-safe OSCAL control ID for a Crystal Forge policy.
+fn control_id_for(policy_id: Uuid) -> String {
+    format!("cf-policy-{}", policy_id.simple())
+}
+
+/// Maps a Crystal Forge control status to OSCAL target status values.
+fn oscal_target_status(status: ComplianceControlStatus) -> (&'static str, &'static str) {
+    match status {
+        ComplianceControlStatus::Pass => ("satisfied", "pass"),
+        ComplianceControlStatus::Warn => ("not-satisfied", "other"),
+        ComplianceControlStatus::Fail => ("not-satisfied", "fail-adjusted"),
+        ComplianceControlStatus::Waiver => ("not-satisfied", "accept-risk"),
+        ComplianceControlStatus::NotChecked => ("not-satisfied", "not-checked"),
+        ComplianceControlStatus::NotApplicable => ("not-satisfied", "not-applicable"),
+        ComplianceControlStatus::Error => ("not-satisfied", "error"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::models::{
+        ComplianceBundleSummary, ComplianceControlEvidence, ComplianceControlStatus,
+        ComplianceEvidenceResponse, ComplianceRollupTotals, ComplianceSystemRollup,
+    };
+    use serde_json::Value;
+
+    #[test]
+    fn oscal_assessment_shapes_match_version_1_1_2() {
+        let bundle_id = Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").unwrap();
+        let system_id = Uuid::parse_str("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb").unwrap();
+        let policy_id = Uuid::parse_str("dddddddd-dddd-4ddd-8ddd-dddddddddddd").unwrap();
+        let bundle = ComplianceBundleSummary {
+            id: bundle_id,
+            name: "NIST 800-53 High".to_string(),
+            framework: "NIST 800-53".to_string(),
+            version: "rev5".to_string(),
+            description: Some("Test bundle".to_string()),
+            layer: "fleet".to_string(),
+            owner: "Platform Security".to_string(),
+            last_review: None,
+            policy_ids: vec![policy_id],
+            required_envs: vec![],
+            control_count: 1,
+            environment_count: 1,
+            active_assignment_count: 1,
+            current_draft_version_id: None,
+            current_published_version_id: None,
+            current_draft_version: None,
+            current_published_version: None,
+            versions: vec![],
+            policy_count: 1,
+            requirement_count: 1,
+            applicable_system_count: 1,
+            aggregate_score: Some(0),
+        };
+        let totals = ComplianceRollupTotals {
+            system_count: 1,
+            fail: 1,
+            total_controls: 1,
+            evaluated_controls: 1,
+            overall_score: 0,
+            ..ComplianceRollupTotals::default()
+        };
+        let systems = vec![ComplianceSystemRollup {
+            system_id,
+            hostname: "prod-web-01".to_string(),
+            environment: Some("production".to_string()),
+            applies: true,
+            total: 1,
+            evaluated_total: 1,
+            pass: 0,
+            warn: 0,
+            fail: 1,
+            waiver: 0,
+            not_checked: 0,
+            not_applicable: 0,
+            error: 0,
+            report_only: 0,
+            score: 0,
+            resolution_state: Some("resolved".to_string()),
+            assignment_status: None,
+            assignment_reason: None,
+            assignment_approved_by: None,
+        }];
+        let evidence = vec![ComplianceEvidenceResponse {
+            bundle_id,
+            bundle_version_id: None,
+            framework: Some("NIST 800-53".to_string()),
+            system_id,
+            hostname: "prod-web-01".to_string(),
+            controls: vec![ComplianceControlEvidence {
+                policy_id,
+                policy_name: "Require: no critical CVEs!".to_string(),
+                status: ComplianceControlStatus::Fail,
+                severity: "high".to_string(),
+                summary: "Critical CVEs detected".to_string(),
+                evidence_items: vec![],
+                framework_mapping: "SI-2".to_string(),
+                control_family: Some("SI".to_string()),
+                cmmc_level: None,
+                cis_section: None,
+            }],
+            resolution_state: Some("resolved".to_string()),
+        }];
+        let payload = ExportPayload {
+            bundle: &bundle,
+            totals: &totals,
+            systems: &systems,
+            evidence: &evidence,
+            include_waivers: true,
+            include_source: true,
+            scope: "all",
+        };
+
+        let document: Value =
+            serde_json::from_str(&build_oscal_at(&payload, "2026-09-01T00:00:00Z")).unwrap();
+        let assessment_results = &document["assessment-results"];
+        assert!(assessment_results["local-definitions"]["objectives-and-methods"].is_array());
+        assert_eq!(
+            assessment_results["local-definitions"]["objectives-and-methods"][0]["control-id"],
+            "cf-policy-dddddddddddd4ddd8ddddddddddddddd",
+        );
+        assert!(
+            assessment_results["local-definitions"]["objectives-and-methods"][0]["parts"]
+                .is_array(),
+        );
+        assert!(
+            assessment_results["local-definitions"]
+                .get("components")
+                .is_none()
+        );
+
+        let result = &assessment_results["results"][0];
+        assert!(result["local-definitions"]["components"].is_array());
+        assert!(result["reviewed-controls"]["control-selections"].is_array());
+
+        let encoded_plan = assessment_results["back-matter"]["resources"][0]["base64"]["value"]
+            .as_str()
+            .unwrap();
+        let plan: Value = serde_json::from_slice(&BASE64.decode(encoded_plan).unwrap()).unwrap();
+        let assessment_plan = &plan["assessment-plan"];
+        assert!(assessment_plan["local-definitions"]["objectives-and-methods"].is_array());
+        assert!(assessment_plan["reviewed-controls"]["control-selections"].is_array());
+
+        let encoded_ssp = assessment_results["back-matter"]["resources"][1]["base64"]["value"]
+            .as_str()
+            .unwrap();
+        let ssp: Value = serde_json::from_slice(&BASE64.decode(encoded_ssp).unwrap()).unwrap();
+        let system_security_plan = &ssp["system-security-plan"];
+        assert!(system_security_plan["system-characteristics"]["system-ids"].is_array());
+        assert!(
+            system_security_plan["system-characteristics"]["system-information"]
+                ["information-types"]
+                .is_array(),
+        );
+        assert!(system_security_plan["system-implementation"]["users"].is_array());
+        assert!(
+            system_security_plan["control-implementation"]["implemented-requirements"].is_array(),
+        );
+
+        let empty_payload = ExportPayload {
+            scope: "clean",
+            ..payload
+        };
+        let empty_document: Value =
+            serde_json::from_str(&build_oscal_at(&empty_payload, "2026-09-01T00:00:00Z")).unwrap();
+        let empty_results = &empty_document["assessment-results"];
+        assert!(empty_results.get("local-definitions").is_none());
+        assert!(empty_results["results"][0].get("observations").is_none());
+        assert!(empty_results["results"][0].get("findings").is_none());
+        assert_eq!(
+            empty_results["results"][0]["local-definitions"]["components"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1,
+        );
+        assert_eq!(
+            empty_results["results"][0]["reviewed-controls"]["control-selections"][0]["remarks"],
+            "The selection is intentionally empty.",
+        );
+        let empty_plan_encoded = empty_results["back-matter"]["resources"][0]["base64"]["value"]
+            .as_str()
+            .unwrap();
+        let empty_plan: Value =
+            serde_json::from_slice(&BASE64.decode(empty_plan_encoded).unwrap()).unwrap();
+        assert_eq!(
+            empty_plan["assessment-plan"]["reviewed-controls"]["control-selections"][0]["remarks"],
+            "The selection is intentionally empty.",
+        );
+        assert_eq!(
+            oscal_target_status(ComplianceControlStatus::NotChecked),
+            ("not-satisfied", "not-checked"),
+        );
+        assert_eq!(
+            oscal_target_status(ComplianceControlStatus::NotApplicable),
+            ("not-satisfied", "not-applicable"),
+        );
+    }
 }

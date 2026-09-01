@@ -1,8 +1,16 @@
-# Web UI Integration Check
+# Shared Web UI Check Constructor
 #
-# Manifest-driven Playwright verification of the web UI against a real
-# Crystal Forge server (PostgreSQL + gitserver), with:
-# - Explicit build verification (served index.html/JS loader, packaged WASM magic header)
+# Every stable Web UI check imports this constructor. The constructor keeps the
+# production server, browser, fixture, and test inputs identical while selecting
+# one independently reproducible responsibility through the parameters below.
+# The outer derivation is the logical gate. Its `evidence` passthru points to the
+# VM derivation, which succeeds after recording browser failures so CI can copy
+# failed-step evidence without rerunning the VM. Infrastructure failures still
+# fail the evidence derivation.
+#
+# Manifest-driven Playwright verification runs against a real Crystal Forge
+# server (PostgreSQL + gitserver), with:
+# - Explicit build verification (served index, JS loader, and packaged WASM)
 # - Semantic assertions + screenshots per coverage-manifest.json step
 # - Design-parity visual comparison: Dioxus screenshots vs rendered design
 #   example targets (docs/design/CrystalForge, vendored offline, non-blocking)
@@ -20,19 +28,33 @@
 { lib
 , pkgs
 , inputs
-, testProfile ? "ci_fast"
+, checkName ? "web-ui"
+, testProfile ? "compatibility"
 , testSteps ? builtins.getEnv "CF_UI_TEST_STEPS"
-, runExportValidation ? true
+, runAssetVerification ? true
+, runBrowserSemanticValidation ? true
+, runExportValidation ? false
+, runDesignParity ? false
+, gateBrowserValidation ? true
+, blocking ? true
 , updateVisualBaselines ? builtins.getEnv "CF_UI_UPDATE_BASELINES" == "1"
-, playwrightResultTimeout ? 1800
+, playwrightProcessTimeout ? 900
+, playwrightResultTimeout ? 960
 , ...
 }:
 let
   testDir = ./tests;
   coverageManifest = ./coverage-manifest.json;
+  checkGroups = ./check-groups.json;
   baselinesDir = ./baselines;
   designParityDir = ./design-parity;
+  gateVerdictChecker = ../../ci/check-web-ui-verdict.js;
   CF_TEST_SERVER_PORT = 3000;
+  debugProcessTimeout = builtins.getEnv "CF_UI_PROCESS_TIMEOUT";
+  effectivePlaywrightProcessTimeout =
+    if debugProcessTimeout == ""
+    then playwrightProcessTimeout
+    else builtins.fromJSON debugProcessTimeout;
 
   # ── Design-parity harness (non-blocking) ────────────────────────────────────
   # Vendor the design example's CDN dependencies so the tracked design gold
@@ -138,12 +160,12 @@ let
   # components are required. They are listed explicitly rather than through an
   # aggregate so the closure states what the VM runs.
   #
-  # AUTHORITATIVE UI GATE: the server here is the production embedded-UI build,
-  # not the core build used by the integration and oidc-auth checks. This is
-  # the one check that must prove the production server binary serves the
-  # production WASM through a real browser. Do not switch this to the core
-  # build; doing so would silently remove the only pre-merge guarantee that the
-  # shipped server can serve the shipped UI.
+  # COMPATIBILITY: Every partition uses the production embedded-UI server, not
+  # the core build used by API-only checks. The `web-ui` wrapper also enables
+  # `verifyWebUiAssets` and proves that this server serves the shipped WASM in
+  # real Chromium. Do not replace this binding in a wrapper. A replacement
+  # would break shared derivation identity and could remove the production
+  # packaging guarantee.
   cfServer = pkgs.crystal-forge.default.cf-server-drv;
   cfAgent = pkgs.crystal-forge.default.cf-agent-drv;
   cfBuilder = pkgs.crystal-forge.default.cf-builder-drv;
@@ -157,8 +179,8 @@ let
       pkgs.path
     ] ++ lib.crystal-forge.prefetchedPaths;
   };
-in pkgs.testers.runNixOSTest {
-  name = "crystal-forge-web-ui-mega-integration";
+  evidence = pkgs.testers.runNixOSTest {
+    name = "crystal-forge-${checkName}-evidence";
 
   skipLint = true;
   skipTypeCheck = true;
@@ -356,10 +378,41 @@ in pkgs.testers.runNixOSTest {
   testScript = ''
     import json
     import base64
+    import datetime
     import os
     import pytest
+    import time
 
     os.environ["NIXOS_TEST_DRIVER"] = "1"
+
+    producer_started_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    producer_started = time.monotonic()
+    phase_timings = {}
+
+    def start_phase():
+        return {
+            "startedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "monotonic": time.monotonic(),
+        }
+
+    def finish_phase(name, started, status="completed", **details):
+        ended = time.monotonic()
+        phase_timings[name] = {
+            "status": status,
+            "startedAt": started["startedAt"],
+            "endedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "durationSeconds": round(ended - started["monotonic"], 3),
+            **details,
+        }
+
+    def skip_phase(name):
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        phase_timings[name] = {
+            "status": "skipped",
+            "startedAt": now,
+            "endedAt": now,
+            "durationSeconds": 0,
+        }
 
     # Cache + builder mega phases are opt-in. They can only run interactively
     # (the env var cannot cross the Nix build sandbox), so in CI the attic and
@@ -367,6 +420,7 @@ in pkgs.testers.runNixOSTest {
     # Only start the VMs that this run will actually exercise.
     run_mega_phases = os.environ.get("CF_WEB_UI_RUN_MEGA_PHASES", "0") == "1"
 
+    setup_timing = start_phase()
     machine.start()
     gitserver.start()
     if run_mega_phases:
@@ -426,54 +480,6 @@ in pkgs.testers.runNixOSTest {
       WHERE f.canonical_source_key = 'web-ui-mapping-roundtrip' AND r.canonical_requirement_key = 'MAP-2'
         AND v.canonical_release_key = 'web-ui-mapping-roundtrip-v1'
       ON CONFLICT (requirement_id, framework_version_id) DO NOTHING;
-
-      -- TASK-433 Phase 2: an imported policy with authoritative origin
-      -- provenance, written through the real schema (immutable source artifact,
-      -- source-object mapping, and an imported requirement mapping) so the
-      -- unified editor's read-only Provenance section and read-only mapping
-      -- behavior are exercised against persisted server state.
-      INSERT INTO compliance_source_artifacts
-          (content, filename, media_type, sha256, parser_version, detected_xccdf_version)
-      SELECT '<Benchmark id="web-ui-provenance"/>'::bytea,
-             'U_WEBUI_PROVENANCE_STIG.xml',
-             'application/xml',
-             encode(digest('<Benchmark id="web-ui-provenance"/>'::bytea, 'sha256'), 'hex'),
-             'xccdf-1.2',
-             '1.2'
-      WHERE NOT EXISTS (
-          SELECT 1 FROM compliance_source_artifacts
-           WHERE filename = 'U_WEBUI_PROVENANCE_STIG.xml'
-      );
-      INSERT INTO deployment_policies (name, policy_type, config, enabled)
-      SELECT 'Imported provenance control', 'custom_check', '{"mode":"all","rules":[]}'::jsonb, false
-      WHERE NOT EXISTS (
-          SELECT 1 FROM deployment_policies WHERE name = 'Imported provenance control'
-      );
-      UPDATE deployment_policy_versions v
-         SET source_artifact_id = a.id
-        FROM deployment_policies p, compliance_source_artifacts a
-       WHERE p.name = 'Imported provenance control'
-         AND v.id = p.current_draft_version_id
-         AND a.filename = 'U_WEBUI_PROVENANCE_STIG.xml'
-         AND v.source_artifact_id IS NULL;
-      INSERT INTO compliance_source_object_mappings
-          (source_artifact_id, object_kind, source_identity, policy_version_id, fidelity)
-      SELECT a.id, 'rule', 'SV-WEBUI-1_rule', p.current_draft_version_id, 'preserved_opaque'
-        FROM deployment_policies p, compliance_source_artifacts a
-       WHERE p.name = 'Imported provenance control'
-         AND a.filename = 'U_WEBUI_PROVENANCE_STIG.xml'
-      ON CONFLICT (source_artifact_id, object_kind, source_identity) DO NOTHING;
-      INSERT INTO policy_requirement_mappings
-          (policy_version_id, requirement_version_id, relationship, coverage,
-           rationale, provenance, source_artifact_id, trust_state)
-      SELECT p.current_draft_version_id, rv.id, 'implements', 'full',
-             'Recorded by the source benchmark import.', 'imported', a.id, 'trusted'
-        FROM deployment_policies p, compliance_source_artifacts a,
-             compliance_requirement_versions rv
-       WHERE p.name = 'Imported provenance control'
-         AND a.filename = 'U_WEBUI_PROVENANCE_STIG.xml'
-         AND rv.external_id = 'MAP-2'
-      ON CONFLICT (policy_version_id, requirement_version_id) DO NOTHING;
     """
     encoded_mapping_fixture_sql = base64.b64encode(
       mapping_fixture_sql.encode("utf-8")
@@ -534,6 +540,7 @@ in pkgs.testers.runNixOSTest {
       "atticCache": atticCache,
       "s3Cache": s3Cache,
     }
+    finish_phase("vmFixtureSetup", setup_timing)
 
     # Optional mega phases (cache + builder) are flaky in constrained CI VMs.
     # Keep them opt-in so the web-ui check remains focused on Playwright UI validation.
@@ -567,20 +574,33 @@ in pkgs.testers.runNixOSTest {
     else:
       print("=== Skipping mega non-UI phases (set CF_WEB_UI_RUN_MEGA_PHASES=1 to enable) ===")
 
-    # === Phase 4a: Web UI Build Verification ===
-    print("=== Phase 4a: Web UI Build Verification ===")
+    browser_ok = ${if runBrowserSemanticValidation then "True" else "None"}
+    visual_ok = ${if runBrowserSemanticValidation then "True" else "None"}
+    oscal_ok = True
+    sarif_ok = True
+    design_parity = {
+        "status": "skipped",
+        "ok": None,
+        "commandStatuses": {},
+        "missingOutputs": [],
+    }
 
-    # Verify server is responding
+    # === Phase 4a: Web UI Build Verification ===
+    if ${if runAssetVerification then "True" else "False"}:
+      print("=== Phase 4a: Web UI Build Verification ===")
+
+    # Every partition verifies server readiness. Only the compatibility check
+    # verifies the complete embedded asset chain as its production smoke role.
     machine.succeed("curl -sf http://127.0.0.1:${
       toString CF_TEST_SERVER_PORT
     }/status | jq .")
     print("Server is up and responding")
 
-    # Explicitly verify the UI build: index.html served, JS loader served, and
-    # the packaged WASM output has a valid magic header.
-    print(machine.succeed("${verifyWebUiAssets} http://127.0.0.1:${
-      toString CF_TEST_SERVER_PORT
-    } ${pkgs.crystal-forge.web-ui}/public"))
+    if ${if runAssetVerification then "True" else "False"}:
+      # Verify index.html, its JS loader, and the packaged WASM magic header.
+      print(machine.succeed("${verifyWebUiAssets} http://127.0.0.1:${
+        toString CF_TEST_SERVER_PORT
+      } ${pkgs.crystal-forge.web-ui}/public"))
 
     # === Phase 4: Web UI Tests (Playwright) ===
     print("=== Phase 4: Web UI Tests (Playwright) ===")
@@ -592,24 +612,34 @@ in pkgs.testers.runNixOSTest {
     # Copy test files and coverage manifest into the VM
     machine.succeed("cp -r ${testDir}/* /tmp/web-ui-tests/")
     machine.succeed("cp ${coverageManifest} /tmp/web-ui-tests/coverage-manifest.json")
+    machine.succeed("cp ${checkGroups} /tmp/web-ui-tests/check-groups.json")
     machine.succeed("mkdir -p /tmp/web-ui-baselines && cp -r ${baselinesDir}/. /tmp/web-ui-baselines/")
     machine.succeed("cp ${./default.nix} /tmp/web-ui-tests/default.nix")
-
-    # Design-parity harness inputs must be present before static contracts run.
-    machine.succeed("mkdir -p /tmp/web-ui-tests/design-parity")
-    machine.succeed("cp -r ${designParityDir}/. /tmp/web-ui-tests/design-parity/")
-    machine.succeed("mkdir -p /tmp/design-example && cp -r ${designExampleOffline}/. /tmp/design-example/")
-    machine.succeed(
-        "${pkgs.nodejs}/bin/node /tmp/web-ui-tests/design-parity/generate-design-targets-test.js"
-    )
     machine.succeed(
         "env CF_WEB_UI_SOURCE_DIR=/tmp/web-ui-tests CF_UI_STATIC_CONTRACTS=1 "
         "${pkgs.nodejs}/bin/node /tmp/web-ui-tests/integration-test.js"
     )
 
+    # Design-parity harness inputs: scripts + manifest (read by integration-test.js
+    # at /tmp/web-ui-tests/design-parity/manifest.json) and the offline design
+    # example bundle.
+    ${lib.optionalString runDesignParity ''
+machine.succeed("mkdir -p /tmp/web-ui-tests/design-parity")
+machine.succeed("cp -r ${designParityDir}/. /tmp/web-ui-tests/design-parity/")
+machine.succeed("mkdir -p /tmp/design-example && cp -r ${designExampleOffline}/. /tmp/design-example/")
+machine.succeed("${pkgs.nodejs}/bin/node /tmp/web-ui-tests/design-parity/generate-design-targets-test.js")
+''}
+
+    ${lib.optionalString runBrowserSemanticValidation ''
+    browser_timing = start_phase()
     test_profile = "${testProfile}"
     test_steps = ${if testSteps == null then "None" else "\"${testSteps}\""}
     test_steps_env = f" CF_UI_TEST_STEPS={test_steps}" if test_steps else ""
+    # The browser process gets 15 minutes of the 20-minute gate budget. This
+    # leaves five minutes for VM setup and evidence publication while remaining
+    # well above healthy shard browser runtimes. The driver waits one additional
+    # minute so the wrapper can terminate Chromium and publish integration.exit.
+    process_timeout = ${toString effectivePlaywrightProcessTimeout}
     result_timeout = ${toString playwrightResultTimeout}
 
     # Deployment-policy fixture state. Browser steps that read the policy
@@ -627,16 +657,15 @@ in pkgs.testers.runNixOSTest {
     )
 
     # Run the integration test script
-    machine.succeed("rm -f /tmp/web-ui-tests/integration.exit /tmp/screenshots/results.json /tmp/screenshots/fatal.json")
+    machine.succeed("rm -f /tmp/web-ui-tests/integration.exit /tmp/web-ui-tests/integration.exit.tmp /tmp/screenshots/results.json /tmp/screenshots/verdict.json /tmp/screenshots/fatal.json /tmp/screenshots/current-step.json")
     machine.succeed(
-        f"nohup sh -c 'env CF_UI_BASELINES_DIR=/tmp/web-ui-baselines CF_UI_TEST_PROFILE={test_profile}{test_steps_env} ${pkgs.nodejs}/bin/node /tmp/web-ui-tests/integration-test.js http://127.0.0.1:${
+        f"nohup sh -c '${pkgs.coreutils}/bin/timeout --signal=TERM --kill-after=30s "
+        f"{process_timeout}s env CF_UI_BASELINES_DIR=/tmp/web-ui-baselines "
+        f"CF_UI_TEST_PROFILE={test_profile} CF_UI_SKIP_DESIGN_PARITY=${if runDesignParity then "0" else "1"}{test_steps_env} ${pkgs.nodejs}/bin/node /tmp/web-ui-tests/integration-test.js http://127.0.0.1:${
           toString CF_TEST_SERVER_PORT
-        } /tmp/screenshots; status=$?; printf \"%s\\n\" \"$status\" > /tmp/web-ui-tests/integration.exit' > /tmp/web-ui-tests/integration.log 2>&1 </dev/null &"
+        } /tmp/screenshots; status=$?; printf \"%s\\n\" \"$status\" > /tmp/web-ui-tests/integration.exit.tmp; mv /tmp/web-ui-tests/integration.exit.tmp /tmp/web-ui-tests/integration.exit' > /tmp/web-ui-tests/integration.log 2>&1 </dev/null &"
     )
-
     def export_failure_artifacts():
-        # Preserve browser output and server diagnostics before rejecting the
-        # derivation. Artifact export errors must not hide the original failure.
         try:
             machine.succeed(
                 "journalctl -u crystal-forge-server.service --no-pager -n 300 "
@@ -644,50 +673,42 @@ in pkgs.testers.runNixOSTest {
                 "rm -rf /tmp/web-ui-failure-artifacts && "
                 "mkdir -p /tmp/web-ui-failure-artifacts && "
                 "cp -a /tmp/screenshots/. /tmp/web-ui-failure-artifacts/ && "
-                "cp /tmp/web-ui-tests/integration.log "
-                "/tmp/web-ui-failure-artifacts/integration.log && "
-                "cp /tmp/web-ui-tests/server-journal.log "
-                "/tmp/web-ui-failure-artifacts/server-journal.log && "
+                "cp /tmp/web-ui-tests/integration.log /tmp/web-ui-failure-artifacts/integration.log && "
+                "cp /tmp/web-ui-tests/server-journal.log /tmp/web-ui-failure-artifacts/server-journal.log && "
                 "if test -f /tmp/web-ui-tests/integration.exit; then "
-                "cp /tmp/web-ui-tests/integration.exit "
-                "/tmp/web-ui-failure-artifacts/integration.exit; fi"
+                "cp /tmp/web-ui-tests/integration.exit /tmp/web-ui-failure-artifacts/integration.exit; fi"
             )
-            machine.copy_from_vm(
-                "/tmp/web-ui-failure-artifacts",
-                "browser-failure-artifacts",
-            )
+            machine.copy_from_vm("/tmp/web-ui-failure-artifacts", "browser-failure-artifacts")
         except Exception as e:
             print(f"warning: could not export browser failure artifacts: {e}")
 
-    def print_browser_diagnostics(reason):
-        # Print diagnostics while the VM is reachable. Failed derivations do
-        # not reliably retain files copied only into the test-driver workdir.
-        print(f"=== Web UI browser diagnostics: {reason} ===")
-        try:
-            print(machine.succeed("cat /tmp/web-ui-tests/integration.log || true"))
-        except Exception as e:
-            print(f"warning: could not print integration.log: {e}")
-        print("=== Crystal Forge server journal ===")
-        try:
-            print(
-                machine.succeed(
-                    "journalctl -u crystal-forge-server.service --no-pager -n 300 || true"
-                )
-            )
-        except Exception as e:
-            print(f"warning: could not print server journal: {e}")
-
-    # The process can write results.json before post-processing finishes. Wait
-    # for the durable exit marker so a late non-zero exit cannot be hidden by
-    # an otherwise valid results artifact. Preserve partial output on timeout.
     try:
         machine.wait_for_file("/tmp/web-ui-tests/integration.exit", timeout=result_timeout)
     except Exception:
-        print_browser_diagnostics("timed out waiting for integration.exit")
+        print(machine.succeed("cat /tmp/web-ui-tests/integration.log || true"))
+        print(machine.succeed("journalctl -u crystal-forge-server.service --no-pager -n 300 || true"))
         export_failure_artifacts()
         raise
     output = machine.succeed("cat /tmp/web-ui-tests/integration.log")
     print(output)
+
+    exit_code = machine.succeed("cat /tmp/web-ui-tests/integration.exit").strip()
+
+    if exit_code in ["124", "137"]:
+        print("=== Web UI browser shard timeout ===")
+        print("Current step:")
+        print(machine.succeed("cat /tmp/screenshots/current-step.json 2>/dev/null || printf '%s\\n' '{\"error\":\"current step unavailable\"}'"))
+        print("=== Crystal Forge server journal after browser shard timeout ===")
+        print(
+            machine.succeed(
+                "journalctl -u crystal-forge-server.service --no-pager -n 300 || true"
+            )
+        )
+        export_failure_artifacts()
+        raise Exception(
+            f"Web UI browser shard exceeded the {process_timeout}-second process timeout "
+            f"(exit code {exit_code}); no logical verdict was produced"
+        )
 
     # Coverage-gate failures (manifest drift) abort before any results exist.
     if machine.execute("test -f /tmp/screenshots/fatal.json")[0] == 0:
@@ -697,7 +718,6 @@ in pkgs.testers.runNixOSTest {
 
     if machine.execute("test -f /tmp/screenshots/results.json")[0] != 0:
         export_failure_artifacts()
-        exit_code = machine.succeed("cat /tmp/web-ui-tests/integration.exit").strip()
         print("=== Crystal Forge server journal after integration failure ===")
         print(
             machine.succeed(
@@ -709,11 +729,11 @@ in pkgs.testers.runNixOSTest {
             f"(exit code {exit_code})"
         )
 
-    exit_code = machine.succeed("cat /tmp/web-ui-tests/integration.exit").strip()
-
     # Read results
     results_json = machine.succeed("cat /tmp/screenshots/results.json")
     results = json.loads(results_json)
+    verdict_json = machine.succeed("cat /tmp/screenshots/verdict.json")
+    verdict = json.loads(verdict_json)
 
     if any(not result.get("ok") for result in results):
         print("=== Crystal Forge server journal after failed browser step ===")
@@ -723,18 +743,21 @@ in pkgs.testers.runNixOSTest {
             )
         )
 
-    # Copy final and intermediate screenshots for successful and failed steps.
-    # Intermediate captures are review evidence even when a later assertion in
-    # the same workflow fails.
+    # Copy final, intermediate, and partial diagnostic screenshots out.
     for r in results:
         for visual in r.get("visuals", []):
-            machine.copy_from_vm(f"/tmp/screenshots/{visual['name']}.png", "screenshots")
+            if machine.execute(f"test -f /tmp/screenshots/{visual['name']}.png")[0] == 0:
+                machine.copy_from_vm(f"/tmp/screenshots/{visual['name']}.png", "screenshots")
+        if not r.get("ok") and machine.execute(f"test -f /tmp/screenshots/{r['name']}.png")[0] == 0:
+            machine.copy_from_vm(f"/tmp/screenshots/{r['name']}.png", "screenshots")
 
-    for report_file in ["results.json", "visual-report.json", "visual-summary.md"]:
+    for report_file in ["results.json", "verdict.json", "visual-report.json", "visual-summary.md"]:
         try:
             machine.copy_from_vm(f"/tmp/screenshots/{report_file}", "screenshots")
         except Exception as e:
             print(f"warning: could not copy {report_file}: {e}")
+    if machine.execute("test -d /tmp/screenshots/diffs")[0] == 0:
+        machine.copy_from_vm("/tmp/screenshots/diffs", "screenshots")
 
     # === Visual Design-Parity Comparison (NON-BLOCKING) ===
     # Render the tracked design example (offline, shared fixture) for the primary
@@ -742,50 +765,87 @@ in pkgs.testers.runNixOSTest {
     # integration test above. This is the primary visual comparison — the design
     # example IS the baseline. Results are reported as a directional drift gauge
     # and a summary matrix, but the check never fails on visual mismatch alone.
-    print("=== Design-Parity Visual Comparison (design vs Dioxus, non-blocking) ===")
-    try:
-        machine.succeed("mkdir -p /tmp/design-targets /tmp/design-parity")
-        machine.succeed(
-            "${pkgs.nodejs}/bin/node /tmp/web-ui-tests/design-parity/generate-design-targets.js "
-            "/tmp/design-example /tmp/web-ui-tests/design-parity/manifest.json /tmp/design-targets "
-            "> /tmp/web-ui-tests/design-targets.log 2>&1 || true"
-        )
-        print(machine.succeed("cat /tmp/web-ui-tests/design-targets.log || true"))
-        machine.succeed(
-            "${pkgs.nodejs}/bin/node /tmp/web-ui-tests/design-parity/compare-design-parity.js "
-            "/tmp/web-ui-tests/design-parity/manifest.json /tmp/design-targets "
-            "/tmp/screenshots/design-parity /tmp/design-parity "
-            "> /tmp/web-ui-tests/design-parity.log 2>&1 || true"
-        )
-        print(machine.succeed("cat /tmp/web-ui-tests/design-parity.log || true"))
+    ${lib.optionalString runDesignParity ''
+print("=== Design-Parity Visual Comparison (design vs Dioxus, non-blocking) ===")
+design_timing = start_phase()
+try:
+    machine.succeed("mkdir -p /tmp/design-targets /tmp/design-parity")
+    generate_status, _ = machine.execute(
+        "${pkgs.nodejs}/bin/node /tmp/web-ui-tests/design-parity/generate-design-targets.js "
+        "/tmp/design-example /tmp/web-ui-tests/design-parity/manifest.json /tmp/design-targets "
+        "> /tmp/web-ui-tests/design-targets.log 2>&1"
+    )
+    print(machine.succeed("cat /tmp/web-ui-tests/design-targets.log"))
+    compare_status, _ = machine.execute(
+        "${pkgs.nodejs}/bin/node /tmp/web-ui-tests/design-parity/compare-design-parity.js "
+        "/tmp/web-ui-tests/design-parity/manifest.json /tmp/design-targets "
+        "/tmp/screenshots/design-parity /tmp/design-parity "
+        "> /tmp/web-ui-tests/design-parity.log 2>&1"
+    )
+    print(machine.succeed("cat /tmp/web-ui-tests/design-parity.log"))
 
-        # Copy design-parity artifacts out (report, summary, montages, matrix grid, raw sides).
-        for report_file in ["design-drift-report.json", "design-drift-summary.md"]:
-            if machine.execute(f"test -f /tmp/design-parity/{report_file}")[0] == 0:
-                machine.copy_from_vm(f"/tmp/design-parity/{report_file}", "screenshots")
-        if machine.execute("test -d /tmp/design-parity/montages")[0] == 0:
-            machine.copy_from_vm("/tmp/design-parity/montages", "screenshots")
-        for grid_file in ["design-parity-matrix.png"]:
-            if machine.execute(f"test -f /tmp/design-parity/{grid_file}")[0] == 0:
-                machine.copy_from_vm(f"/tmp/design-parity/{grid_file}", "screenshots")
-        if machine.execute("test -d /tmp/design-targets")[0] == 0:
-            machine.copy_from_vm("/tmp/design-targets", "screenshots")
-        if machine.execute("test -d /tmp/screenshots/design-parity")[0] == 0:
-            machine.copy_from_vm("/tmp/screenshots/design-parity", "screenshots")
-    except Exception as e:
-        print(f"warning: design-parity harness error (non-blocking): {e}")
+    expected_design_outputs = {
+        "design-drift-report.json": "/tmp/design-parity/design-drift-report.json",
+        "design-drift-summary.md": "/tmp/design-parity/design-drift-summary.md",
+        "design-parity-matrix.png": "/tmp/design-parity/design-parity-matrix.png",
+        "montages": "/tmp/design-parity/montages",
+        "design-targets": "/tmp/design-targets",
+        "design-parity": "/tmp/screenshots/design-parity",
+    }
+    missing_design_outputs = [
+        output for output, output_path in expected_design_outputs.items()
+        if machine.execute(f"test -e {output_path}")[0] != 0
+    ]
+    design_parity = {
+        "status": (
+            "failed" if generate_status != 0 or compare_status != 0
+            else "missing-output" if missing_design_outputs
+            else "passed"
+        ),
+        "ok": generate_status == 0 and compare_status == 0 and not missing_design_outputs,
+        "commandStatuses": {
+            "generateTargets": generate_status,
+            "compare": compare_status,
+        },
+        "missingOutputs": missing_design_outputs,
+    }
+
+    # Copy design-parity artifacts out (report, summary, montages, matrix grid, raw sides).
+    for report_file in ["design-drift-report.json", "design-drift-summary.md"]:
+        if machine.execute(f"test -f /tmp/design-parity/{report_file}")[0] == 0:
+            machine.copy_from_vm(f"/tmp/design-parity/{report_file}", "screenshots")
+    if machine.execute("test -d /tmp/design-parity/montages")[0] == 0:
+        machine.copy_from_vm("/tmp/design-parity/montages", "screenshots")
+    for grid_file in ["design-parity-matrix.png"]:
+        if machine.execute(f"test -f /tmp/design-parity/{grid_file}")[0] == 0:
+            machine.copy_from_vm(f"/tmp/design-parity/{grid_file}", "screenshots")
+    if machine.execute("test -d /tmp/design-targets")[0] == 0:
+        machine.copy_from_vm("/tmp/design-targets", "screenshots")
+    if machine.execute("test -d /tmp/screenshots/design-parity")[0] == 0:
+        machine.copy_from_vm("/tmp/screenshots/design-parity", "screenshots")
+except Exception as e:
+    design_parity = {
+        "status": "failed",
+        "ok": False,
+        "commandStatuses": design_parity.get("commandStatuses", {}),
+        "missingOutputs": design_parity.get("missingOutputs", []),
+        "error": str(e),
+    }
+    print(f"warning: design-parity harness error (advisory): {e}")
+finish_phase(
+    "designParity",
+    design_timing,
+    status="completed" if design_parity["ok"] else "failed",
+)
+''}
+    ${lib.optionalString (!runDesignParity) ''
+skip_phase("designParity")
+''}
 
     ok_count = sum(1 for r in results if r.get("ok"))
-    intermediate_count = sum(
-        1
-        for result in results
-        for visual in result.get("visuals", [])
-        if visual.get("intermediate")
-    )
 
     print("\n=== Summary ===")
     print(f"  Screenshots: {ok_count}/{len(results)} captured")
-    print(f"  Intermediate workflow artifacts: {intermediate_count} copied")
 
     for r in results:
         status = "OK" if r.get("ok") else "FAIL"
@@ -795,194 +855,175 @@ in pkgs.testers.runNixOSTest {
         else:
             print(f"  [{status}] {r['name']}")
 
-    integration_failures = []
-    if ok_count == 0:
-        integration_failures.append("All screenshots failed")
+    for failure in verdict.get("failedRequiredSteps", verdict.get("failedSteps", [])):
+        print(f"  REQUIRED STEP FAILED: {failure['name']} - {failure['reason']}")
+    for failure in verdict.get("failedAdvisorySteps", []):
+        print(f"  ADVISORY STEP FAILED: {failure['name']} - {failure['reason']}")
+    if verdict.get("processError"):
+        print(f"  PROCESS FAILURE: {verdict['processError']}")
 
-    # Critical workflows must be present and successful. Treating only returned
-    # failures as fatal would let profile or manifest drift silently skip them.
-    critical_tests = [
-      "01-login-page",
-      "02-registration",
-      "05-login-submit",
-      "12-systems",
-      "13-flakes",
-      "15j-builds-latest-per-flake-populated",
-      "15k-builds-latest-combined-filters-empty-clear",
-      "16-cves",
-      "16b-cves-severity-filter",
-      "26c-evaluations-latest-per-flake-populated",
-      "26d-evaluations-latest-combined-filters-empty-clear",
-      "29g-poam-failed-evidence-create",
-      "29h-poam-link-compatible-findings",
-      "29i-poam-detail-edits-milestones-conflicts",
-      "29k-poam-system-rollups-navigation",
-      "29l-poam-bundle-rollups-batching",
-      "29m-poam-assignment-relationship-immutability",
-      "30a-admin-automatic-retries-defaults-reset",
-      "30b-admin-automatic-retries-save-reload",
-      "30c-admin-automatic-retries-failed-save-retains-draft",
-      "30d-evidence-lifecycle",
-      "30e-policy-card-direct-edit-preserves-evidence",
-      "task433-canonical-large-catalog",
-      "20af-policy-catalog-selection-delete-regressions",
-      "19-policies-new-modal-fields",
-      "20-policies-new-modal-rule-builder",
-      "20a-policies-new-modal-pending-mappings",
-      "20ac-stig-import-reconciliation-fixture",
-      "20aa-policies-new-modal-mappings-roundtrip",
-      "task433-canonical-unmapped-nix-policy",
-      "20ac-policy-editor-category-and-imported-provenance",
-      "task433-canonical-imported-stig-refinement",
-      "task433-canonical-multiline-dod",
-      "20ab2-policy-editor-eight-kind-roundtrip",
-      "task433-canonical-mixed-nix-cve-evidence",
-      "20ad-stig-nixos-assertion-roundtrip",
-      "20b-policies-cve-gate-create-roundtrip",
-      "20ab-compliance-bundle-requirement-baseline-roundtrip",
-      "20c-policies-multirule-create-roundtrip",
-      "20d-policies-cve-gate-invalid-rejected",
-      "20e-policies-multirule-rules-only-no-expression-required",
-      "task433-canonical-poam-lifecycle",
-    ]
-    selected_critical_tests = (
-      critical_tests
-      if not test_steps
-      else [name for name in critical_tests if name in {
-        selected.strip() for selected in test_steps.split(",") if selected.strip()
-      }]
-    )
-    returned_names = {r.get('name') for r in results}
-    missing_critical = [name for name in selected_critical_tests if name not in returned_names]
-    if missing_critical:
-        integration_failures.append(
-            f"Required critical web UI checks were absent: {missing_critical}"
+    if exit_code != "0" or not verdict.get("ok"):
+        browser_ok = False
+        failures = [
+            f"{failure['name']}: {failure['reason']}"
+            for failure in verdict.get("failedRequiredSteps", verdict.get("failedSteps", []))
+        ]
+        if verdict.get("processError"):
+            failures.append(verdict["processError"])
+        print(
+            "Selected web UI checks failed "
+            f"(exit code {exit_code}): {failures or ['no failure detail was recorded']}"
         )
-    failed_critical = [r['name'] for r in results if r['name'] in selected_critical_tests and not r.get('ok')]
-    if failed_critical:
-        integration_failures.append(f"Critical web UI checks failed: {failed_critical}")
 
-    # === Phase 4b: Visual Baseline Gate ===
-    # Steps marked "strict" in coverage-manifest.json must match their
-    # approved baseline within the configured threshold; "advisory" steps are
-    # reported (with diff images in screenshots/diffs) but never block.
+    # Strict visual drift is a logical failure. Keep the evidence derivation
+    # successful so the outer gate can reject it after artifacts are retained.
     visual_report_json = machine.succeed("cat /tmp/screenshots/visual-report.json")
     visual_report = json.loads(visual_report_json)
-    counts = visual_report.get("counts")
+    visual_counts = visual_report.get("counts")
     required_visual_counts = {"match", "diff", "new", "skipped", "error"}
-    if not isinstance(counts, dict) or not required_visual_counts.issubset(counts):
+    if not isinstance(visual_counts, dict) or not required_visual_counts.issubset(visual_counts):
         raise Exception("visual-report.json has an invalid counts schema")
-    if any(not isinstance(counts[key], int) or counts[key] < 0 for key in required_visual_counts):
+    if any(
+        not isinstance(visual_counts[key], int) or visual_counts[key] < 0
+        for key in required_visual_counts
+    ):
         raise Exception("visual-report.json contains invalid visual counts")
-    print(
-        f"  Visual baselines: {counts.get('match', 0)} match, "
-        f"{counts.get('diff', 0)} differ, {counts.get('new', 0)} new, "
-        f"{counts.get('skipped', 0)} skipped"
-    )
-    visual_failures = visual_report.get("failures")
-    if not isinstance(visual_failures, list):
+    strict_visual_failures = visual_report.get("failures")
+    if not isinstance(strict_visual_failures, list):
         raise Exception("visual-report.json has an invalid failures schema")
-    if visual_failures:
-        for f in visual_failures:
-            print(f"  STRICT VISUAL FAIL: {f['name']} ({f['status']})")
-        if ${if updateVisualBaselines then "False" else "True"}:
-            integration_failures.append(
-                f"Strict visual baseline failures: {[f['name'] for f in visual_failures]}"
-            )
-        else:
-            print("  Baseline update mode: strict visual failures are exported for review")
+    visual_ok = not strict_visual_failures or ${if updateVisualBaselines then "True" else "False"}
+    for failure in strict_visual_failures:
+        print(f"  STRICT VISUAL FAIL: {failure['name']} ({failure['status']})")
+    if strict_visual_failures and ${if updateVisualBaselines then "True" else "False"}:
+        print("  Baseline update mode: strict visual failures are exported for review")
+    print(f"  Themed screenshot captures: {visual_report.get('themedCaptures', 0)}")
+    finish_phase("browserSemanticExecution", browser_timing)
+''}
+    ${lib.optionalString (!runBrowserSemanticValidation) ''
+    skip_phase("browserSemanticExecution")
+''}
 
-    if exit_code != "0":
-        integration_failures.append(
-            f"integration process exited non-zero after producing results.json ({exit_code})"
-        )
-    if integration_failures:
-        export_failure_artifacts()
-        raise Exception("; ".join(integration_failures))
+    # Export processes always write step-level results for logical failures.
+    ${lib.optionalString runExportValidation ''
+# A missing result remains an infrastructure failure of this VM evidence.
+export_timing = start_phase()
+print("=== Phase 5: OSCAL Export Validation ===")
+oscal_status, _ = machine.execute(
+    f"${pkgs.nodejs}/bin/node /tmp/web-ui-tests/oscal-export-test.js"
+    f" http://127.0.0.1:${toString CF_TEST_SERVER_PORT}"
+    f" /tmp/screenshots ${pkgs.crystal-forge.oscal-1-1-2-schemas}"
+    f" > /tmp/web-ui-tests/oscal-export.log 2>&1"
+)
+print(machine.succeed("cat /tmp/web-ui-tests/oscal-export.log"))
+oscal_results = json.loads(
+    machine.succeed("cat /tmp/screenshots/oscal-export-results.json")
+)
+oscal_ok = oscal_status == 0 and all(result.get("ok") for result in oscal_results)
+for result in oscal_results:
+    if not result.get("ok"):
+        print(f"  FAIL: {result['name']} - {result.get('error', 'unknown error')}")
 
-    if not ${if runExportValidation then "True" else "False"}:
-        print("=== Focused web UI check complete; export validation skipped ===")
-        raise SystemExit(0)
+print("=== Phase 6: SARIF Export Validation ===")
+sarif_schema_file = "${pkgs.crystal-forge.sarif-2-1-0-schema}/sarif-schema-2.1.0.json"
+sarif_status, _ = machine.execute(
+    f"${pkgs.nodejs}/bin/node /tmp/web-ui-tests/sarif-export-test.js"
+    f" http://127.0.0.1:${toString CF_TEST_SERVER_PORT}"
+    f" /tmp/screenshots {sarif_schema_file}"
+    f" > /tmp/web-ui-tests/sarif-export.log 2>&1"
+)
+print(machine.succeed("cat /tmp/web-ui-tests/sarif-export.log"))
+sarif_results = json.loads(
+    machine.succeed("cat /tmp/screenshots/sarif-export-results.json")
+)
+sarif_ok = sarif_status == 0 and all(result.get("ok") for result in sarif_results)
+for result in sarif_results:
+    if not result.get("ok"):
+        print(f"  FAIL: {result['name']} - {result.get('error', 'unknown error')}")
 
-    # === Phase 5: OSCAL Export Validation (end-to-end via web UI) ===
-    print("=== Phase 5: OSCAL Export Validation ===")
+for report_file in [
+    "oscal-export-results.json",
+    "oscal-export-final.png",
+    "sarif-export-results.json",
+    "sarif-export-final.png",
+]:
+    if machine.execute(f"test -f /tmp/screenshots/{report_file}")[0] == 0:
+        machine.copy_from_vm(f"/tmp/screenshots/{report_file}", "screenshots")
+finish_phase("exports", export_timing)
+''}
+    ${lib.optionalString (!runExportValidation) ''
+skip_phase("exports")
+''}
 
-    # Run the OSCAL export test - this routes compliance API data, opens the
-    # export modal in the real web UI, captures the browser-triggered download,
-    # and validates the downloaded file against NIST OSCAL 1.1.2 schemas.
-    #
-    # This exercises the actual production build_oscal() code path in the WASM
-    # bundle — the file a user would download is what gets validated.
+    # Logical failures are data in the evidence derivation. The outer gate
+    # reads this verdict and fails without invoking the VM a second time.
+    finalization_timing = start_phase()
+    check_verdict = {
+        "schemaVersion": 2,
+        "check": "${checkName}",
+        "blocking": ${if blocking then "True" else "False"},
+        "ok": (${if gateBrowserValidation then "browser_ok and visual_ok and " else ""}${if runDesignParity then "design_parity[\"ok\"] and " else ""}oscal_ok and sarif_ok),
+        "components": {
+            "browser": browser_ok,
+            "visualEvidence": visual_ok,
+            "designParity": design_parity["ok"],
+            "oscalExport": oscal_ok,
+            "sarifExport": sarif_ok,
+        },
+        "designParity": design_parity,
+        "strictVisualFailures": strict_visual_failures if ${if runBrowserSemanticValidation then "True" else "False"} else [],
+        "failedRequiredSteps": verdict.get("failedRequiredSteps", verdict.get("failedSteps", [])) if ${if runBrowserSemanticValidation then "True" else "False"} else [],
+        "failedAdvisorySteps": verdict.get("failedAdvisorySteps", []) if ${if runBrowserSemanticValidation then "True" else "False"} else [],
+    }
+    encoded_check_verdict = base64.b64encode(
+        json.dumps(check_verdict, indent=2).encode("utf-8")
+    ).decode("ascii")
     machine.succeed(
-        f"${pkgs.nodejs}/bin/node /tmp/web-ui-tests/oscal-export-test.js"
-        f" http://127.0.0.1:${toString CF_TEST_SERVER_PORT}"
-        f" /tmp/screenshots ${pkgs.crystal-forge.oscal-1-1-2-schemas}"
-        f" > /tmp/web-ui-tests/oscal-export.log 2>&1"
+        "printf %s " + encoded_check_verdict
+        + " | base64 -d > /tmp/screenshots/check-verdict.json"
     )
-
-    oscal_output = machine.succeed("cat /tmp/web-ui-tests/oscal-export.log")
-    print(oscal_output)
-
-    oscal_results_json = machine.succeed("cat /tmp/screenshots/oscal-export-results.json")
-    oscal_results = json.loads(oscal_results_json)
-
-    oscal_ok = all(r.get("ok") for r in oscal_results)
-    if not oscal_ok:
-        failed = [r for r in oscal_results if not r.get("ok")]
-        for r in failed:
-            print(f"  FAIL: {r['name']} - {r.get('error', 'unknown error')}")
-        raise Exception(f"OSCAL export validation failed: {len(failed)}/{len(oscal_results)} steps failed")
-
-    # Copy OSCAL export screenshot if available
-    try:
-        machine.copy_from_vm("/tmp/screenshots/oscal-export-final.png", "screenshots")
-    except:
-        pass
-
-    print("=== OSCAL Export Validation Passed ===")
-    print("The downloaded OSCAL file was validated against NIST 1.1.2 AR + AP + SSP schemas.")
-    print("")
-
-    # === Phase 6: SARIF Export Validation (end-to-end via web UI) ===
-    print("=== Phase 6: SARIF Export Validation ===")
-
-    # Run the SARIF export test — routes deterministic compliance data, selects
-    # SARIF 2.1.0 in the export modal, captures the browser-triggered download,
-    # and validates it against the vendored OASIS Errata 01 schema using
-    # Draft4Validator + FormatChecker (catching empty URI fields) plus semantic
-    # checks (ruleId resolution, host locations, waiver suppressions).
-    sarif_schema_file = "${pkgs.crystal-forge.sarif-2-1-0-schema}/sarif-schema-2.1.0.json"
+    machine.copy_from_vm("/tmp/screenshots/check-verdict.json", "screenshots")
+    finish_phase("evidenceFinalization", finalization_timing)
+    producer_ended_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    timing_result = {
+        "schemaVersion": 1,
+        "check": "${checkName}",
+        "startedAt": producer_started_at,
+        "endedAt": producer_ended_at,
+        "durationSeconds": round(time.monotonic() - producer_started, 3),
+        "phases": phase_timings,
+    }
+    encoded_timings = base64.b64encode(
+        json.dumps(timing_result, indent=2).encode("utf-8")
+    ).decode("ascii")
     machine.succeed(
-        f"${pkgs.nodejs}/bin/node /tmp/web-ui-tests/sarif-export-test.js"
-        f" http://127.0.0.1:${toString CF_TEST_SERVER_PORT}"
-        f" /tmp/screenshots"
-        f" {sarif_schema_file}"
-        f" > /tmp/web-ui-tests/sarif-export.log 2>&1"
+        "printf %s " + encoded_timings
+        + " | base64 -d > /tmp/screenshots/phase-timings.json"
     )
-
-    sarif_output = machine.succeed("cat /tmp/web-ui-tests/sarif-export.log")
-    print(sarif_output)
-
-    sarif_results_json = machine.succeed("cat /tmp/screenshots/sarif-export-results.json")
-    sarif_results = json.loads(sarif_results_json)
-
-    sarif_ok = all(r.get("ok") for r in sarif_results)
-    if not sarif_ok:
-        failed = [r for r in sarif_results if not r.get("ok")]
-        for r in failed:
-            print(f"  FAIL: {r['name']} - {r.get('error', 'unknown error')}")
-        raise Exception(f"SARIF export validation failed: {len(failed)}/{len(sarif_results)} steps failed")
-
-    try:
-        machine.copy_from_vm("/tmp/screenshots/sarif-export-final.png", "screenshots")
-    except:
-        pass
-
-    print("=== SARIF Export Validation Passed ===")
-    print("The downloaded SARIF file was validated against the OASIS 2.1.0 Errata 01 schema.")
-    print("")
-
-    print("\n=== All Mega Integration Tests Passed ===")
-    print("Completed: Cache (Attic+S3), Builder, Web UI, OSCAL Export, SARIF Export")
+    machine.copy_from_vm("/tmp/screenshots/phase-timings.json", "screenshots")
   '';
-}
+  };
+in pkgs.runCommand "crystal-forge-${checkName}-gate"
+  {
+    nativeBuildInputs = [ pkgs.nodejs ];
+    passthru = {
+      inherit evidence;
+      # INVARIANT: Wrappers select behavior only. They must not replace these
+      # shared derivations, or parallel checks lose cross-job cache reuse.
+      sharedInputs = {
+        server = cfServer;
+        agent = cfAgent;
+        builder = cfBuilder;
+        webUi = pkgs.crystal-forge.web-ui;
+        chromium = pkgs.chromium;
+        browserBundle = pkgs.playwright-driver;
+        inherit verifyWebUiAssets;
+      };
+    };
+  }
+  ''
+    mkdir -p $out
+    ln -s ${evidence}/screenshots $out/screenshots
+    ${lib.optionalString blocking ''
+      ${pkgs.nodejs}/bin/node ${gateVerdictChecker} ${evidence}/screenshots/check-verdict.json
+    ''}
+  ''

@@ -185,7 +185,7 @@
     },
     {
       "area": "Real deploy/rollback triggers",
-      "reason": "Deploy and rollback modals are opened and asserted (12f, 12j) but not confirmed, to keep the seeded system state stable for subsequent steps."
+      "reason": "12f confirms an inline deploy request against a mocked endpoint, and 12j opens rollback controls without changing the real seeded system state. Real deploy and rollback triggers are not executed."
     },
     {
       "area": "OIDC auth flows",
@@ -963,10 +963,10 @@
       "baseline": "advisory"
     },
     {
-      "name": "12f-systems-deploy-modal",
-      "description": "Systems deploy modal with commit selector",
-      "route": "/systems",
-      "designRef": "docs/design/CrystalForge/components/DeployGate.jsx",
+      "name": "12f-system-detail-inline-deploy",
+      "description": "System detail inline Deploy tab selection and request workflow",
+      "route": "/systems/:id",
+      "designRef": "docs/design/CrystalForge/components/SystemDetail.jsx",
       "profiles": [
         "ci_fast",
         "full"
@@ -1004,8 +1004,8 @@
       "baseline": "advisory"
     },
     {
-      "name": "12h-system-detail-cves-grouped-justification",
-      "description": "System detail CVEs tab grouped list, filters, details link, and justification save",
+      "name": "12h-system-detail-cves-package-workflow",
+      "description": "System detail CVEs tab package-first detail filtering and justification save",
       "route": "/systems/:id",
       "designRef": "docs/design/CrystalForge/components/SystemDetail.jsx",
       "profiles": [

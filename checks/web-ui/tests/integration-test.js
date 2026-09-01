@@ -25,6 +25,14 @@ const path = require("path");
 const { execSync } = require("child_process");
 const { createHash } = require("crypto");
 const { isDeepStrictEqual } = require("util");
+const { createBrowserVerdict, exitCodeForVerdict } = require("./browser-verdict");
+const {
+  needsAuthenticationPreflight,
+  requiredStepNames,
+  selectProfileSteps,
+  selectRequestedSteps,
+  validateCheckGroups,
+} = require("./check-groups");
 
 const baseUrl = process.argv[2] || "http://127.0.0.1:3000";
 const outputDir = process.argv[3] || "/tmp/screenshots";
@@ -69,6 +77,23 @@ async function settleFatalRuntimeEvents() {
   await new Promise((resolve) => setImmediate(resolve));
 }
 
+const currentStepPath = `${outputDir}/current-step.json`;
+
+function writeJsonAtomically(filePath, value) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  const temporaryPath = `${filePath}.${process.pid}.tmp`;
+  fs.writeFileSync(temporaryPath, JSON.stringify(value, null, 2));
+  fs.renameSync(temporaryPath, filePath);
+}
+
+function readCurrentStep() {
+  try {
+    return JSON.parse(fs.readFileSync(currentStepPath, "utf8"));
+  } catch (_) {
+    return null;
+  }
+}
+
 function firstExistingPath(paths) {
   return paths.find((candidate) => fs.existsSync(candidate));
 }
@@ -81,9 +106,18 @@ if (!coverageManifestPath) {
   throw new Error("coverage-manifest.json not found beside tests or in checks/web-ui");
 }
 const MANIFEST = JSON.parse(fs.readFileSync(coverageManifestPath, "utf8"));
-const MANIFEST_STEPS = new Map(MANIFEST.steps.map((s) => [s.name, s]));
+const checkGroupsPath = firstExistingPath([
+  path.join(__dirname, "check-groups.json"),
+  path.join(__dirname, "..", "check-groups.json"),
+]);
+if (!checkGroupsPath) {
+  throw new Error("check-groups.json not found beside tests or in checks/web-ui");
+}
+const CHECK_GROUPS = JSON.parse(fs.readFileSync(checkGroupsPath, "utf8"));
+const MANIFEST_STEPS = new Map(MANIFEST.steps.map((step) => [step.name, step]));
 const DESIGN_FIXTURE = MANIFEST.settings.designFixture || null;
 const intermediateVisuals = new Map();
+let onboardingCoverageSelected = true;
 
 /**
  * Fail hard on coverage drift, writing a fatal marker the Nix driver can
@@ -92,10 +126,9 @@ const intermediateVisuals = new Map();
 function fatal(message) {
   console.error(`FATAL: ${message}`);
   try {
-    fs.mkdirSync(outputDir, { recursive: true });
-    fs.writeFileSync(
+    writeJsonAtomically(
       `${outputDir}/fatal.json`,
-      JSON.stringify({ error: message }, null, 2),
+      { error: message, currentStep: readCurrentStep() },
     );
   } catch (_) {}
   process.exit(1);
@@ -720,8 +753,11 @@ async function filterPolicyCatalog(page, name) {
   }
 }
 
-async function suppressOnboardingCoach(page) {
-  await page.context().addInitScript(() => {
+async function suppressOnboardingCoach(pageOrContext) {
+  const context = typeof pageOrContext.context === "function"
+    ? pageOrContext.context()
+    : pageOrContext;
+  await context.addInitScript(() => {
     try {
       window.localStorage.setItem("cf.coach.collapsed", "true");
       window.localStorage.setItem("cf.coach.force_show", "false");
@@ -1258,20 +1294,24 @@ function mockDashboardLoadingTimelines() {
 async function routeDashboardLoadingState(page, delayMs = 4000) {
   await page.route("**/api/v1/dashboard/summary*", async (route) => {
     await new Promise((resolve) => setTimeout(resolve, delayMs));
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify(mockFleetHealthDashboardSummary()),
-    });
+    await route
+      .fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(mockFleetHealthDashboardSummary()),
+      })
+      .catch(() => {});
   });
 
   await page.route("**/api/v1/flakes/timelines?view=dashboard*", async (route) => {
     await new Promise((resolve) => setTimeout(resolve, delayMs));
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify(mockDashboardLoadingTimelines()),
-    });
+    await route
+      .fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(mockDashboardLoadingTimelines()),
+      })
+      .catch(() => {});
   });
 }
 
@@ -2353,6 +2393,12 @@ async function routeSystemsWarningData(page) {
 
     // Let dedicated hardening routes handle these endpoints in steps that mock them.
     if (/^\/api\/v1\/systems\/[0-9a-f-]+\/hardening(?:$|\/|-.+)/.test(pathname)) {
+      await route.fallback();
+      return;
+    }
+
+    // Focused workflows own these subresources with step-local fixtures.
+    if (/^\/api\/v1\/systems\/[0-9a-f-]+\/(?:commits|cves|deploy)(?:$|\/)/.test(pathname)) {
       await route.fallback();
       return;
     }
@@ -5696,8 +5742,8 @@ const steps = [
     },
   },
   {
-    name: "12f-systems-deploy-modal",
-    description: "Systems deploy modal with commit selector",
+    name: "12f-system-detail-inline-deploy",
+    description: "System detail inline Deploy tab selection and request workflow",
     action: async (page) => {
       await routeSystemsWarningData(page);
       await page.route(/\/api\/v1\/systems\/[0-9a-f-]+\/commits$/, async (route) => {
@@ -5727,21 +5773,12 @@ const steps = [
       });
 
       try {
-        await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
-        await page.waitForTimeout(2200);
-        await page.getByRole("button", { name: "Table" }).first().click();
-        await page.waitForTimeout(300);
-        await assertVisible(page.locator("[data-testid='systems-table']").first(), "Expected systems table to render", 10000);
-        const systemRow = page.locator("tr").filter({ hasText: "warning-system-01" }).first();
-        await assertVisible(systemRow, "Expected warning-system-01 row to be visible", 15000);
-        const deployButton = systemRow.getByRole("button", { name: "Deploy" }).first();
-        await assertVisible(deployButton, "Expected Deploy action button to be visible");
-
         const detailResponsePromise = page
           .waitForResponse(
             (response) =>
               response.request().method() === "GET" &&
-              response.url().includes("/api/v1/systems/00000000-0000-0000-0000-0000000000a1"),
+              new URL(response.url()).pathname ===
+                "/api/v1/systems/00000000-0000-0000-0000-0000000000a1",
             { timeout: 15000 },
           )
           .catch(() => null);
@@ -5755,58 +5792,108 @@ const steps = [
           )
           .catch(() => null);
 
-        await deployButton.click({ force: true });
+        await page.goto(`${baseUrl}/systems/00000000-0000-0000-0000-0000000000a1`, {
+          timeout: LOAD_TIMEOUT,
+        });
         const detailResponse = await detailResponsePromise;
         const commitsResponse = await commitsResponsePromise;
         if (!detailResponse || !detailResponse.ok()) {
-          throw new Error("Expected system detail request to succeed before opening Deploy modal");
+          throw new Error("Expected system detail request to succeed before opening the Deploy tab");
         }
         if (!commitsResponse || !commitsResponse.ok()) {
-          throw new Error("Expected commits request to succeed before rendering Deploy modal");
+          throw new Error("Expected commits request to succeed before rendering the Deploy tab");
         }
 
-        const deployModal = page.locator(".modal").filter({ hasText: "Deploy to warning-system-01" }).first();
-        const deployModalHeading = page.getByRole("heading", { name: /Deploy to warning-system-01/i }).first();
-        await assertVisible(deployModalHeading, "Expected deploy modal heading to be visible", 20000);
-        await assertVisible(
-          page.getByText("Select Commit to Deploy").first(),
-          "Expected commit selector to be visible in Deploy System modal",
-          15000,
+        const deployTab = page.getByRole("tab", { name: "Deploy" }).first();
+        await assertVisible(deployTab, "Expected the system detail Deploy tab to be visible", 15000);
+        const headerDeployButton = page
+          .locator(".sd-head-actions")
+          .getByRole("button", { name: "Deploy", exact: true });
+        await assertVisible(headerDeployButton, "Expected the system detail Deploy action to be visible");
+        await headerDeployButton.click();
+        await page.waitForFunction(
+          (tab) => tab.getAttribute("aria-selected") === "true",
+          await deployTab.elementHandle(),
+          { timeout: LOAD_TIMEOUT },
         );
-        await assertVisible(
-          deployModal.getByRole("button", { name: "Deploy" }).first(),
-          "Expected Deploy action in Deploy System modal",
-          15000,
-        );
-        await deployModal.locator(".sd-commit-item").first().click({ force: true });
 
-        let capturedDeployPayload = null;
+        await assertVisible(page.getByRole("heading", { name: "Deploy gate" }), "Expected inline deploy gate");
+        await assertVisible(page.getByRole("heading", { name: "Select target" }), "Expected inline target selector");
+        await assertVisible(
+          page.getByText("feat: add deterministic deploy commit").first(),
+          "Expected the Deploy tab to render the current fixture commit",
+          15000,
+        );
+        await assertVisible(
+          page.getByRole("heading", { name: "Deployment plan" }),
+          "Expected the inline deployment plan to be visible",
+          15000,
+        );
+
+        const targetCommit = page.getByRole("button", {
+          name: /fix: stabilize deploy selector/,
+        });
+        await targetCommit.click();
+        const targetCommitHandle = await targetCommit.elementHandle();
+        if (!targetCommitHandle) {
+          throw new Error("Expected selected deploy commit to remain on the Deploy tab");
+        }
+        await page.waitForFunction(
+          (element) => element.classList.contains("selected"),
+          targetCommitHandle,
+          { timeout: LOAD_TIMEOUT },
+        );
+        await assertVisible(
+          page.getByRole("button", { name: "Deploy def456a" }),
+          "Expected the inline Deploy action to follow the selected commit",
+          15000,
+        );
         await page.route("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/deploy", async (route) => {
-          capturedDeployPayload = route.request().postDataJSON();
+          if (route.request().method() !== "POST") {
+            await route.fallback();
+            return;
+          }
           await route.fulfill({
             status: 200,
             contentType: "application/json",
             body: JSON.stringify({ status: "ok", message: "Deployment queued" }),
           });
         });
-        await deployModal.getByRole("button", { name: "Deploy" }).first().click({ force: true });
-        await page.waitForTimeout(800);
-        if (!capturedDeployPayload) {
-          throw new Error("Expected Deploy modal to POST a deploy request");
+
+        const deployRequestPromise = page.waitForRequest(
+          (request) =>
+            request.method() === "POST" &&
+            request.url().endsWith(
+              "/api/v1/systems/00000000-0000-0000-0000-0000000000a1/deploy",
+            ),
+          { timeout: 15000 },
+        );
+        const deployResponsePromise = page.waitForResponse(
+          (response) =>
+            response.request().method() === "POST" &&
+            response.url().endsWith(
+              "/api/v1/systems/00000000-0000-0000-0000-0000000000a1/deploy",
+            ),
+          { timeout: 15000 },
+        );
+        const [deployRequest, deployResponse] = await Promise.all([
+          deployRequestPromise,
+          deployResponsePromise,
+          page.getByRole("button", { name: "Deploy def456a" }).click(),
+        ]);
+        if (!deployResponse.ok()) {
+          throw new Error(`Expected deploy request to succeed, got HTTP ${deployResponse.status()}`);
         }
-        if (!capturedDeployPayload.commit_sha) {
+        const capturedDeployPayload = deployRequest.postDataJSON();
+        if (capturedDeployPayload.commit_sha !== "def456abc123456789012345678901234567890ab") {
           throw new Error(
-            `Expected deploy payload to include commit_sha, got: ${JSON.stringify(capturedDeployPayload)}`,
+            `Expected deploy payload to use the selected commit, got: ${JSON.stringify(capturedDeployPayload)}`,
           );
         }
-        if (
-          capturedDeployPayload.commit_sha !== "abc123def456789012345678901234567890abcd" &&
-          capturedDeployPayload.commit_sha !== "def456abc123456789012345678901234567890ab"
-        ) {
-          throw new Error(
-            `Expected deploy payload commit_sha to match a fixture commit, got: ${capturedDeployPayload.commit_sha}`,
-          );
-        }
+        await assertVisible(
+          page.locator(".sd-deploy-panel").getByText("Deployment queued", { exact: true }),
+          "Expected the Deploy tab to acknowledge the successful request",
+        );
       } finally {
         await page
           .unroute("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/deploy")
@@ -6043,8 +6130,8 @@ const steps = [
     },
   },
   {
-    name: "12h-system-detail-cves-grouped-justification",
-    description: "System detail CVEs tab grouped list, filters, details link, and justification save",
+    name: "12h-system-detail-cves-package-workflow",
+    description: "System detail CVEs tab package-first detail filtering and justification save",
     action: async (page) => {
       await routeSystemsWarningData(page);
 
@@ -6067,8 +6154,32 @@ const steps = [
 
       let justificationSaved = false;
       let capturedJustificationRequest = null;
+      const cvesRoutePattern =
+        /\/api\/v1\/systems\/00000000-0000-0000-0000-0000000000a1\/cves(?:$|\/)/;
 
-      await page.route("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cves*", async (route) => {
+      await page.route(cvesRoutePattern, async (route) => {
+        const request = route.request();
+        const pathname = new URL(request.url()).pathname;
+        if (
+          request.method() === "PUT" &&
+          pathname.endsWith("/cves/CVE-2025-1111/justification")
+        ) {
+          capturedJustificationRequest = request.postDataJSON();
+          justificationSaved = true;
+          await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify({ status: "ok", message: "CVE justification saved" }),
+          });
+          return;
+        }
+        if (
+          request.method() !== "GET" ||
+          !pathname.endsWith("/systems/00000000-0000-0000-0000-0000000000a1/cves")
+        ) {
+          await route.fallback();
+          return;
+        }
         const payload = [
           {
             cve_id: "CVE-2025-1111",
@@ -6128,19 +6239,6 @@ const steps = [
         });
       });
 
-      await page.route(
-        "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cves/CVE-2025-1111/justification",
-        async (route) => {
-          capturedJustificationRequest = route.request().postDataJSON();
-          justificationSaved = true;
-          await route.fulfill({
-            status: 200,
-            contentType: "application/json",
-            body: JSON.stringify({ status: "ok", message: "CVE justification saved" }),
-          });
-        },
-      );
-
       await page.route("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/commits*", async (route) => {
         await route.fulfill({
           status: 200,
@@ -6149,89 +6247,81 @@ const steps = [
         });
       });
 
-      await page.goto(`${baseUrl}/systems/00000000-0000-0000-0000-0000000000a1`, {
-        timeout: LOAD_TIMEOUT,
-      });
-      await page.waitForTimeout(1200);
+      try {
+        const cvesResponsePromise = page.waitForResponse(
+          (response) =>
+            response.request().method() === "GET" &&
+            new URL(response.url()).pathname ===
+              "/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cves",
+          { timeout: 15000 },
+        );
+        await page.goto(`${baseUrl}/systems/00000000-0000-0000-0000-0000000000a1`, {
+          timeout: LOAD_TIMEOUT,
+        });
+        const cvesResponse = await cvesResponsePromise;
+        if (!cvesResponse.ok()) {
+          throw new Error(`Expected CVE fixture request to succeed, got HTTP ${cvesResponse.status()}`);
+        }
 
-      await page.getByRole("button", { name: "CVEs" }).first().click();
+        await page.getByRole("tab", { name: "CVEs" }).first().click();
 
+      try {
+        await assertVisible(
+          page.getByText("3 of 3 shown · 3 packages").first(),
+          "Expected the package-first CVE summary to include all fixture packages",
+          12000,
+        );
+      } catch (error) {
+        const cveSurface = await page
+          .locator("[data-testid='system-detail-tabs']")
+          .locator("xpath=following-sibling::*")
+          .allInnerTexts()
+          .catch(() => []);
+        throw new Error(
+          `${error.message}; CVE surface text: ${JSON.stringify(cveSurface.join(" ").slice(0, 2000))}`,
+        );
+      }
+
+      const kernelPackage = page.getByRole("button", { name: /linuxPackages_6_10\.kernel/ });
+      const diagnosticsPackage = page.getByRole("button", { name: /diag-tools/ });
+      await kernelPackage.click();
       await assertVisible(
-        page.getByText("2 grouped CVEs").first(),
-        "Expected grouped CVE count to collapse duplicate CVE IDs",
-        12000,
+        page.getByText("CVE-2025-1111", { exact: true }),
+        "Expected the selected package to reveal its CVE detail row",
+      );
+      await assertVisible(
+        page.getByText("8.7", { exact: true }),
+        "Expected the package detail row to show the CVSS score",
       );
 
-      await assertVisible(
-        page.getByText("2 packages").first(),
-        "Expected grouped CVE row to show affected package count",
-      );
-
-      await page.locator("button", { hasText: "CVE-2025-1111" }).first().click();
-
-      await assertVisible(
-        page.getByText("Kernel memory corruption under crafted input").first(),
-        "Expected expanded CVE entry to show internal description",
-      );
-      await assertVisible(
-        page.getByText("linuxPackages_6_10.kernel").first(),
-        "Expected expanded grouped CVE to show first affected package",
-      );
-      await assertVisible(
-        page.getByText("linuxPackages_6_1.kernel").first(),
-        "Expected expanded grouped CVE to show second affected package",
-      );
-
-      const nvdHref = await page.locator("a:has-text('View on NVD')").first().getAttribute("href");
+      const nvdHref = await page.getByRole("link", { name: "Open advisory" }).getAttribute("href");
       if (nvdHref !== "https://nvd.nist.gov/vuln/detail/CVE-2025-1111") {
         throw new Error(`Expected CVE details link to point at NVD detail page, got: ${nvdHref}`);
       }
 
-      await page.locator("input[placeholder='Filter package/version']").fill("diag-tools");
+      await diagnosticsPackage.click();
       await assertVisible(
-        page.getByText("CVE-2024-2222").first(),
-        "Expected package filter to keep matching CVE",
-      );
-
-      const cve1111VisibleAfterPackageFilter = await page
-        .getByText("CVE-2025-1111")
-        .first()
-        .isVisible({ timeout: 1500 })
-        .catch(() => false);
-      if (cve1111VisibleAfterPackageFilter) {
-        throw new Error("Expected package filter to hide non-matching grouped CVE row");
-      }
-
-      await page.locator("input[placeholder='Filter package/version']").fill("");
-      await page.locator("select").first().selectOption("high");
-      await assertVisible(
-        page.getByText("CVE-2025-1111").first(),
-        "Expected severity filter to retain High CVE",
+        page.getByText("CVE-2024-2222", { exact: true }),
+        "Expected selecting a different package to reveal its detail row",
       );
       await assertHidden(
-        page.getByText("CVE-2024-2222").first(),
-        "Expected severity filter to hide Low CVE row",
+        page.getByText("CVE-2025-1111", { exact: true }),
+        "Expected package-first expansion to filter out the prior package detail",
       );
 
-      await page.locator("select").first().selectOption("all");
-      const cve1111Toggle = page.locator("button", { hasText: "CVE-2025-1111" }).first();
-      const editJustificationButton = page
-        .getByRole("button", { name: "Edit justification" })
-        .first();
-      const editButtonInitiallyVisible = await editJustificationButton
-        .isVisible({ timeout: 1000 })
-        .catch(() => false);
-      if (!editButtonInitiallyVisible) {
-        await cve1111Toggle.click();
-      }
+      await kernelPackage.click();
+      const editJustificationButton = page.getByRole("button", { name: "Justify" });
       await assertVisible(
         editJustificationButton,
         "Expected CVE row to provide justification edit action",
       );
       await editJustificationButton.click();
 
-      await page.locator("select").nth(1).selectOption("accepted_risk");
-      const reasonInput = page.locator("textarea[placeholder='Document risk acceptance / mitigation rationale']").first();
+      const justificationEditor = page.locator("tr", { hasText: "Justification — CVE-2025-1111" });
+      await justificationEditor.getByRole("combobox").selectOption("accepted_risk");
+      const reasonInput = justificationEditor.getByPlaceholder(
+        "Document risk acceptance / mitigation rationale",
+      );
       const seededReason = await reasonInput.inputValue();
       if (!seededReason.toLowerCase().includes("accepted risk")) {
         throw new Error(`Expected preset selection to auto-populate justification reason, got: ${seededReason}`);
@@ -6250,7 +6340,7 @@ const steps = [
         )
         .catch(() => null);
 
-      await page.getByRole("button", { name: "Save" }).first().click();
+      await justificationEditor.getByRole("button", { name: "Save", exact: true }).click();
 
       const justificationResponse = await justificationResponsePromise;
       if (!justificationResponse || !justificationResponse.ok()) {
@@ -6279,21 +6369,25 @@ const steps = [
         "Expected UI acknowledgement after saving CVE justification",
       );
 
-      await page.locator("button", { hasText: "CVE-2025-1111" }).first().click();
       await assertVisible(
-        page.getByText("Justified").first(),
-        "Expected grouped CVE row to remain visually marked after save + reload",
+        page.getByRole("button", { name: "justified" }),
+        "Expected the package CVE row to remain justified after save and reload",
       );
 
-      await page.unroute(
-        "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cve-scan-eligibility*",
-      );
-      await page.unroute("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cves*");
-      await page.unroute(
-        "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cves/CVE-2025-1111/justification",
-      );
-      await page.unroute("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/commits*");
-      await unrouteSystemsWarningData(page);
+      } finally {
+        await page
+          .unroute(
+            "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cve-scan-eligibility*",
+          )
+          .catch(() => {});
+        await page
+          .unroute(cvesRoutePattern)
+          .catch(() => {});
+        await page
+          .unroute("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/commits*")
+          .catch(() => {});
+        await unrouteSystemsWarningData(page).catch(() => {});
+      }
     },
   },
   {
@@ -13739,9 +13833,6 @@ security.audit.enable = true;</fixtext>
       };
 
       // ── STEP 1: create a policy carrying evidence A ────────────────────
-      // Seed the collapsed flag before the first load so the coach drawer
-      // never covers the policy cards or the editor on any later reload.
-      await suppressOnboardingCoach(page);
       await page.goto(`${baseUrl}/deployment-policies`, { timeout: LOAD_TIMEOUT });
       await collapseOnboardingCoach(page);
       await page.getByRole("button", { name: /New custom policy/i }).first().click();
@@ -14168,26 +14259,31 @@ if (process.env.CF_UI_STATIC_CONTRACTS === "1") {
   if (stepNames.size !== steps.length) {
     fatal("duplicate step names detected in integration-test.js");
   }
+  try {
+    validateCheckGroups(MANIFEST, CHECK_GROUPS);
+  } catch (err) {
+    fatal(`invalid UI check group ownership: ${err.message}`);
+  }
 
   const testProfile = process.env.CF_UI_TEST_PROFILE || "full";
-  const profileSteps =
-    testProfile === "full"
-      ? steps
-      : steps.filter((step) =>
-          MANIFEST_STEPS.get(step.name).profiles.includes(testProfile),
-        );
+  let profileSteps;
+  try {
+    profileSteps = selectProfileSteps(steps, MANIFEST, CHECK_GROUPS, testProfile);
+  } catch (err) {
+    fatal(err.message);
+  }
   const requestedSteps = process.env.CF_UI_TEST_STEPS
     ? new Set(process.env.CF_UI_TEST_STEPS.split(",").map((name) => name.trim()).filter(Boolean))
     : null;
-  const stepsToRun = requestedSteps
-    ? profileSteps.filter((step) => requestedSteps.has(step.name))
-    : profileSteps;
-  if (requestedSteps) {
-    const missingRequestedSteps = [...requestedSteps].filter((name) => !stepNames.has(name));
-    if (missingRequestedSteps.length) {
-      fatal(`unknown requested UI test steps: [${missingRequestedSteps.join(", ")}]`);
-    }
+  let stepsToRun;
+  try {
+    stepsToRun = selectRequestedSteps(steps, profileSteps, requestedSteps, testProfile);
+  } catch (err) {
+    fatal(err.message);
   }
+  onboardingCoverageSelected = stepsToRun.some(
+    (step) => step.name === "06-dashboard" || step.name.includes("onboarding"),
+  );
   if (stepsToRun.length === 0) {
     fatal(
       requestedSteps
@@ -14237,10 +14333,26 @@ if (process.env.CF_UI_STATIC_CONTRACTS === "1") {
   };
   context.on("page", attachFatalPageHandlers);
 
+  // CONTEXT: Failed steps replace their Page. Install suppression on the
+  // BrowserContext so every replacement page receives it before app startup.
+  // Onboarding selections intentionally omit this script and exercise the
+  // coach with clean storage.
+  if (!onboardingCoverageSelected) {
+    await suppressOnboardingCoach(context);
+  }
+
   const createStepPage = async () => {
     const p = await context.newPage();
     const originalWaitForTimeout = p.waitForTimeout.bind(p);
     p.waitForTimeout = (ms) => originalWaitForTimeout(Math.max(50, Math.floor(ms * 0.3)));
+    if (process.env.CF_UI_TEST_STANDALONE === "1") {
+      await routeStandaloneUiBootstrap(p);
+    }
+    if (onboardingCoverageSelected && !stepsToRun.some((step) => step.name === "06-dashboard")) {
+      // A focused onboarding run skips the dashboard step that normally installs
+      // this fixture. Keep the selected onboarding assertion self-contained.
+      await routeSetupCoachData(p);
+    }
     return p;
   };
 
@@ -14249,30 +14361,36 @@ if (process.env.CF_UI_STATIC_CONTRACTS === "1") {
   // Focused runs intentionally skip the ordered auth steps. Establish the
   // same authenticated session those steps would have created before running
   // a post-login step directly.
-  const needsAuthPreflight =
-    requestedSteps &&
-    !requestedSteps.has("03-registration-submit") &&
-    !requestedSteps.has("05-login-submit");
+  const needsAuthPreflight = needsAuthenticationPreflight(stepsToRun);
   if (needsAuthPreflight) {
-    // Focused post-login runs skip the onboarding steps that normally collapse
-    // the coach before policy interactions begin. Do not install the persistent
-    // suppression script when this run must exercise the coach itself.
-    const exercisesSetupCoach = [...requestedSteps].some((name) =>
-      name.startsWith("06a-onboarding-coach-") ||
-      name.startsWith("06g-onboarding-coach-") ||
-      name.startsWith("06h-onboarding-coach-"),
-    );
-    if (!exercisesSetupCoach) await suppressOnboardingCoach(page);
-    if (process.env.CF_UI_TEST_STANDALONE === "1") {
-      await routeStandaloneUiBootstrap(page);
-    }
     await ensureAuthenticated(page);
   }
 
   const results = [];
+  let onboardingStarted = false;
+  let onboardingCleanedUp = false;
 
   for (const step of stepsToRun) {
+    const isOnboardingStep =
+      step.name === "06-dashboard" || step.name.includes("onboarding");
+    onboardingStarted ||= onboardingCoverageSelected && isOnboardingStep;
+    if (onboardingStarted && !isOnboardingStep && !onboardingCleanedUp) {
+      await unrouteSetupCoachData(page).catch(() => {});
+      await page.evaluate(() => {
+        localStorage.removeItem("cf.from_setup");
+        localStorage.setItem("cf.coach.collapsed", "true");
+        localStorage.setItem("cf.coach.force_show", "false");
+      });
+      await collapseOnboardingCoach(page);
+      onboardingCleanedUp = true;
+    }
     console.log(`Step: ${step.name} - ${step.description}`);
+    writeJsonAtomically(currentStepPath, {
+      name: step.name,
+      description: step.description,
+      phase: "action",
+      startedAt: new Date().toISOString(),
+    });
     let ok = true;
     let error = null;
     let visuals = [];
@@ -14310,9 +14428,15 @@ if (process.env.CF_UI_STATIC_CONTRACTS === "1") {
         });
       } catch (_) {}
 
-      // Isolate follow-up steps from lingering page state when a step fails.
+      // CONCURRENCY: Remove failed-step routes without waiting for handlers that
+      // are blocked on a canceled request. Playwright suppresses late route
+      // errors before the page closes, so detached handlers cannot reject into
+      // the replacement page's lifecycle or deadlock shard recovery.
       try {
-        await page.close();
+        await Promise.allSettled([
+          page.unrouteAll({ behavior: "ignoreErrors" }),
+          page.close(),
+        ]);
       } catch (_) {}
       page = await createStepPage();
       if (process.env.CF_UI_TEST_STANDALONE === "1") {
@@ -14534,9 +14658,21 @@ if (process.env.CF_UI_STATIC_CONTRACTS === "1") {
   }
   fs.writeFileSync(`${outputDir}/visual-summary.md`, md.join("\n\n") + "\n");
 
-  // Write results (the Nix driver waits on this file — keep it last so all
-  // reports exist by the time the driver proceeds).
+  // Write the machine-readable result files after every human-readable report.
+  // The Nix driver waits for process completion before reading these files.
   fs.writeFileSync(`${outputDir}/results.json`, JSON.stringify(results, null, 2));
+
+  const processErrors = [
+    ...fatalRuntimeEvents.map((event) => `${event.kind}: ${event.message}`),
+    ...pageRuntimeErrors.map(
+      (event) => `pageerror at ${event.url}: ${event.message}`,
+    ),
+  ];
+  const verdict = createBrowserVerdict(stepsToRun, results, {
+    processError: processErrors.length ? processErrors.join("\n") : null,
+    requiredSteps: requiredStepNames(stepsToRun, CHECK_GROUPS, testProfile),
+  });
+  fs.writeFileSync(`${outputDir}/verdict.json`, JSON.stringify(verdict, null, 2));
 
   console.log("");
   console.log("=== Summary ===");
@@ -14552,12 +14688,11 @@ if (process.env.CF_UI_STATIC_CONTRACTS === "1") {
     for (const r of results.filter((r) => !r.ok)) {
       console.log(`  - ${r.name}: ${r.error}`);
     }
-    // The outer Nix driver enforces the explicit critical-step and strict
-    // visual policies after it reads this report. Noncritical steps remain
-    // diagnostic so an unrelated advisory failure does not override those
-    // release policies. Fatal errors and unhandled rejections still make this
-    // process exit nonzero before the driver evaluates the report.
   }
+  // Required step failures and process-level errors make the browser verdict
+  // fail. Advisory failures remain reported but do not change the process
+  // result. The outer Nix driver separately enforces strict visual baselines.
+  process.exitCode = exitCodeForVerdict(verdict);
 })().catch((err) => {
   console.error(`Fatal error: ${err.message}`);
   console.error(err.stack);
