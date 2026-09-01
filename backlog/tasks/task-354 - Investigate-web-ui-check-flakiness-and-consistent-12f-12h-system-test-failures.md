@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-gpt-5.6-sol
 created_date: '2026-06-13 19:35'
-updated_date: '2026-09-01 13:25'
+updated_date: '2026-09-01 13:54'
 labels:
   - web-ui
   - testing
@@ -79,4 +79,10 @@ Implemented the requested harness fixes in the shared TASK-450 worktree. Non-onb
 Implemented the approved current-product contracts in the shared TASK-450.11 worktree without commit or push. Renamed 12f to `12f-system-detail-inline-deploy`; it now uses accessible header/tab/commit/action locators, verifies selected-tab and selected-commit state, validates the exact deploy POST payload and successful response, and asserts the inline success callout. Renamed 12h to `12h-system-detail-cves-package-workflow`; it retains `role=tab`, verifies package-first expansion as detail filtering, CVSS and NVD detail behavior, justification preset and exact PUT payload, save acknowledgement, resource refresh, and the accessible `justified` state. Updated coverage manifest, real-trigger exclusion text, fleet advisory membership, and the route-cleanup/tab static test. Both remain advisory and exactly-once owned. No docs referenced the old names.
 
 Final verification passed. `nix develop path:. -c node --check checks/web-ui/tests/integration-test.js`; 27/27 Node tests via `nix develop path:. -c node --test checks/web-ui/tests/browser-verdict.test.js checks/web-ui/tests/check-groups.test.js ci/web-ui-ci.test.js`; ownership validator reported 100 ci_fast steps, 17 required and 83 advisory; `git diff --check` passed. Focused real VM command `CF_UI_TEST_STEPS="12f-system-detail-inline-deploy,12h-system-detail-cves-package-workflow" nix build --impure path:.#checks.x86_64-linux.web-ui-fleet.evidence -L --no-link` passed both selected steps and captured four themed screenshots. Evidence `/nix/store/8158xgxj8zcqskxllavw2v5vs8rqczlh-vm-test-run-crystal-forge-web-ui-fleet-evidence/screenshots/verdict.json` records `completed: true`, `ok: true`, each selected step `ok: true` with `reason: null`, no failed required/advisory steps, and `processError: null`. Browser semantic execution was 5.693 seconds; total VM evidence duration was 23.151 seconds.
+
+Full default-timeout fleet verification completed after the route-lifecycle fixes. Root cause: delayed dashboard route handlers could call `route.fulfill()` after route removal, producing `Route is already handled!`; when advisory step `16c-scanning-view` then failed, sequential `page.unrouteAll()` and `page.close()` recovery could wait indefinitely. Delayed fulfills now tolerate canceled or already-handled requests, and failed-page cleanup runs `page.unrouteAll({ behavior: "ignoreErrors" })` and `page.close()` concurrently with `Promise.allSettled`.
+
+`nix build path:.#checks.x86_64-linux.web-ui-fleet -L --no-link` and `nix build path:.#checks.x86_64-linux.web-ui-fleet.evidence --no-link --print-out-paths` passed with the default 900-second process timeout. Evidence: `/nix/store/j3sygsbqlzvy2l6x8l2dymgsq24j7i94-vm-test-run-crystal-forge-web-ui-fleet-evidence`. The browser verdict is complete and `ok: true`; all required steps passed; `12f-system-detail-inline-deploy` and `12h-system-detail-cves-package-workflow` passed; `processError` is null. Six advisory failures remain visible: 12d2, 12e, 12k, 12g, 16c, and 28. Total VM evidence duration was 139.873 seconds; browser semantic execution was 120.822 seconds.
+
+Final static verification passed: Node syntax, 28/28 browser/group/CI tests, `nix-instantiate --parse checks/web-ui/default.nix`, and `git diff --check`. No commit or push was made.
 <!-- SECTION:NOTES:END -->
