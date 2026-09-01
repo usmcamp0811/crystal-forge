@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-gpt-5.6-sol
 created_date: '2026-06-13 19:35'
-updated_date: '2026-09-01 12:34'
+updated_date: '2026-09-01 12:51'
 labels:
   - web-ui
   - testing
@@ -73,4 +73,8 @@ The user selected this task for the focused Web UI latency bundle and explicitly
 LOCK: opencode-gpt-5.6-sol in /home/mcamp/code/crystal-forge/TASK-450-web-ui-parallel-checks on branch TASK-450.11-web-ui-parallel-checks, based on TASK-450-p0-build-graph at 437efd55.
 
 Implemented the requested harness fixes in the shared TASK-450 worktree. Non-onboarding profiles/focused runs now suppress the setup coach, full onboarding keeps its route-backed walkthrough and cleans routes/storage when leaving the onboarding block, and focused onboarding installs its own fixture. Step 12h now selects `role=tab` and cleans every route in `finally`. Step 12f now waits for modal state, selected commit state, POST request, and successful response instead of a delay. OSCAL/SARIF catches now record the interrupted step so prior successes cannot hide partial failure. Targeted Node syntax checks passed; browser/VM execution was not run in this focused harness pass.
+
+Implemented the approved current-product contracts in the shared TASK-450.11 worktree without commit or push. Renamed 12f to `12f-system-detail-inline-deploy`; it now uses accessible header/tab/commit/action locators, verifies selected-tab and selected-commit state, validates the exact deploy POST payload and successful response, and asserts the inline success callout. Renamed 12h to `12h-system-detail-cves-package-workflow`; it retains `role=tab`, verifies package-first expansion as detail filtering, CVSS and NVD detail behavior, justification preset and exact PUT payload, save acknowledgement, resource refresh, and the accessible `justified` state. Updated coverage manifest, real-trigger exclusion text, fleet advisory membership, and the route-cleanup/tab static test. Both remain advisory and exactly-once owned. No docs referenced the old names.
+
+Final verification passed. `nix develop path:. -c node --check checks/web-ui/tests/integration-test.js`; 27/27 Node tests via `nix develop path:. -c node --test checks/web-ui/tests/browser-verdict.test.js checks/web-ui/tests/check-groups.test.js ci/web-ui-ci.test.js`; ownership validator reported 100 ci_fast steps, 17 required and 83 advisory; `git diff --check` passed. Focused real VM command `CF_UI_TEST_STEPS="12f-system-detail-inline-deploy,12h-system-detail-cves-package-workflow" nix build --impure path:.#checks.x86_64-linux.web-ui-fleet.evidence -L --no-link` passed both selected steps and captured four themed screenshots. Evidence `/nix/store/8158xgxj8zcqskxllavw2v5vs8rqczlh-vm-test-run-crystal-forge-web-ui-fleet-evidence/screenshots/verdict.json` records `completed: true`, `ok: true`, each selected step `ok: true` with `reason: null`, no failed required/advisory steps, and `processError: null`. Browser semantic execution was 5.693 seconds; total VM evidence duration was 23.151 seconds.
 <!-- SECTION:NOTES:END -->
