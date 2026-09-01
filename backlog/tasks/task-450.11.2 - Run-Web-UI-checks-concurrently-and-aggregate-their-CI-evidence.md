@@ -1,10 +1,11 @@
 ---
 id: TASK-450.11.2
 title: Run Web UI checks concurrently and aggregate their CI evidence
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - opencode-gpt-5.6-sol
 created_date: '2026-09-01 03:27'
-updated_date: '2026-09-01 03:30'
+updated_date: '2026-09-01 03:31'
 labels:
   - web-ui
   - testing
@@ -55,4 +56,6 @@ The pipeline must remain correct when fewer runners are available: jobs may queu
 
 <!-- SECTION:NOTES:BEGIN -->
 The user selected this task for one focused Web UI optimization MR with TASK-438, TASK-354, TASK-450.11.1, and TASK-450.11.3.
+
+LOCK: opencode-gpt-5.6-sol in /home/mcamp/code/crystal-forge/TASK-450-web-ui-parallel-checks on branch TASK-450.11-web-ui-parallel-checks, based on TASK-450-p0-build-graph at 437efd55.
 <!-- SECTION:NOTES:END -->
