@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:43'
-updated_date: '2026-09-01 13:36'
+updated_date: '2026-09-01 14:02'
 labels:
   - design-parity
   - poam
@@ -23,6 +23,9 @@ references:
 documentation:
   - docs/design/CrystalForge/components/ComplianceView.jsx
   - docs/design/CrystalForge/components/SystemDetail.jsx
+modified_files:
+  - packages/web-ui/src/components/poam/mod.rs
+  - checks/web-ui/tests/integration-test.js
 parent_task_id: TASK-433
 priority: high
 type: feature
@@ -114,4 +117,6 @@ Phase 8 independent artifact review found a P2 dark-theme contrast defect in com
 Phase-8 dark-theme visual remediation completed. The shared POA&M tray now gives Expand an opaque subtle surface and readable primary text, and disabled Reopen uses readable muted text. Focused `task433-canonical-poam-lifecycle` update-mode browser verification passed, the post-fix captures passed independent visual review with no remaining P0-P2 finding, and the normal strict Web UI gate matched all 60 approved TASK-433 baselines. Lifecycle behavior and persistence semantics are unchanged.
 
 Post-candidate review found a P2 interaction defect: `Remediation plan` is a distant section from `Save metadata`, and that mislabeled control is the only persistence path. The current browser tests reproduce the hidden dependency by filling the plan and later clicking `Save metadata`. TASK-433.7 is returned to In Progress for the focused UI and regression fix.
+
+Implemented the post-candidate POA&M save remediation in `/tmp/opencode/TASK-433-publish`. `Save metadata` now sends only title, owner, target date, and risk. The Remediation plan section has an adjacent `Save plan` action that sends only the plan with the current optimistic revision and uses the existing stale/error reconciliation. Browser coverage now proves metadata save does not carry the plan, labeled plan save carries no metadata fields, exact plan text survives reload, the canonical lifecycle uses the explicit action, and Viewers cannot invoke it. Fast verification passed: Web UI rustfmt check; six focused `components::poam::tests`; Node syntax; Web UI static contracts; and `git diff --check`. Per user direction, the local Web UI VM check was not run; exact-head CI must execute the browser regression. Independent focused review found no P0-P2 blockers.
 <!-- SECTION:NOTES:END -->
