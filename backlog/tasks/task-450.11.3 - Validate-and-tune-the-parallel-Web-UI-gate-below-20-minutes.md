@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-gpt-5.6-sol
 created_date: '2026-09-01 03:28'
-updated_date: '2026-09-01 03:46'
+updated_date: '2026-09-01 16:28'
 labels:
   - web-ui
   - testing
@@ -58,6 +58,8 @@ Measurements must distinguish execution time from runner queue time and must ide
 3. Rebalance only explicit step ownership or evidence placement when one check dominates. Do not remove required workflows or shorten waits below reliable observable conditions.
 4. Demonstrate one deliberate blocking failure and one advisory design-parity failure with correct pipeline outcomes and retained evidence.
 5. Record at least three sub-20-minute blocking critical-path runs and update the Web UI check documentation with the final timing envelope and regression-detection procedure.
+
+Before opening the MR, extend producer metadata with pipeline/job timestamps, queue duration, Nix realization cache classification, and realization/artifact timings. Extend aggregation output with each producer duration, queue time, cache state, blocking critical path, per-pipeline median, and maximum. Use the pinned repository Nix environment for the aggregation job. Representative three-run medians and maxima remain a post-push evidence step.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
