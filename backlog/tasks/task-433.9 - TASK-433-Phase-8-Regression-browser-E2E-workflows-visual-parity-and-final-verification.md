@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:43'
-updated_date: '2026-09-01 15:22'
+updated_date: '2026-09-01 16:40'
 labels:
   - design-parity
   - policy
@@ -25,11 +25,13 @@ documentation:
   - checks/web-ui/tests/integration-test.js
   - docs/agent/verification.md
 modified_files:
+  - .gitlab-ci.yml
   - checks/web-ui/default.nix
   - checks/web-ui/design-parity/generate-design-targets-test.js
   - checks/web-ui/design-parity/manifest.json
   - checks/web-ui/tests/integration-test.js
   - docs/task-433-design-parity-review.md
+  - docs/web-ui-check.md
   - packages/web-ui/src/components/poam/mod.rs
   - packages/web-ui/src/views/dashboard.rs
 parent_task_id: TASK-433
@@ -127,6 +129,8 @@ Complete the repository-required Rust documentation pass for TASK-433 public API
 Post-candidate review remediation: after TASK-433.7 fixes explicit remediation-plan persistence, extend the non-blocking design-parity manifest and contracts with deterministic authoritative targets for the common policy editor and POA&M detail tray where production fixture navigation permits. Record a per-surface authoritative design comparison for policy editor, POA&M detail/lifecycle, compliance/evidence, system/bundle rollups, dashboard/watchlist, notifications, Setup Coach, catalog, and responsive themes. Explicitly retain reviewed contract-compatible deviations, including Provenance presentation and production-only server-authoritative plan details/assignment sections. Then freeze a new SHA, run focused and required gates, push, require green exact-head CI, and reconcile TASK-433.1-.9 plus parent AC1-AC40. Pipeline 2809426014 proves only superseded candidate `da7ae7de` once a remediation commit exists.
 
 User verification constraint: do not spend local time on the approximately 20-minute Web UI Nix check. Continue implementation/parity/static work while CI runs. After the remediation is pushed, use the new exact-head GitLab Web UI job for authoritative browser and screenshot evidence; do not treat pipeline 2809426014 at `da7ae7de` as final-head proof.
+
+After exact-head CI proved all critical workflows and failed only the two intentional POA&M strict visual diffs, add an opt-in MR-only baseline-candidate CI job because failed Nix derivations cannot expose their copied VM screenshots. Keep the normal strict job unchanged. Run candidate mode only with CF_UI_UPDATE_BASELINES=1 and --impure, require all semantic and critical workflow gates, publish review artifacts, approve only inspected strict captures, then require a new normal exact-head green pipeline.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -175,4 +179,6 @@ Post-candidate parity remediation implemented but not committed. Added direct au
 Correction to the obsolete remote-mismatch note: the user authorized a force-with-lease update and MR !318 now points to candidate `da7ae7de480c485ee79db676f8d99893bf07c572`, is conflict-free, and pipeline 2809426014 is running. This pipeline does not include the current uncommitted review remediation and cannot be final-head evidence after a new commit.
 
 Review remediation was committed as `09d1b16e` and the exact-candidate workflow-20a correction as `82922c7e5495011a9162a5bc9db852fde4316a5a`. Local and remote branch heads match and the worktree is clean. MR !318 is conflict-free. Exact-head pipeline 2810061607 is pending: https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2810061607. Preceding pipeline 2809426014 at `da7ae7de` failed only critical workflow 20a; all seven TASK-433 strict workflows and POA&M Phase-6 workflows passed there. Do not reconcile acceptance criteria until pipeline 2810061607 finishes and its Web UI artifacts are inspected.
+
+Pipeline 2810061607 at exact head 82922c7e passed every non-Web-UI check and all TASK-433/POA&M critical browser workflows, including corrected workflow 20a. The Web UI job failed only strict visual comparison for task433-canonical-poam-lifecycle--failed-evidence-edited-remediation in dark and light. GitLab uploaded no artifacts because the failed Nix derivation produced no result path. The user authorized adding an opt-in CI baseline-candidate job instead of running the expensive VM check locally.
 <!-- SECTION:NOTES:END -->
