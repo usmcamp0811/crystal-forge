@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - opencode-gpt-5.6-sol
 created_date: '2026-09-01 03:12'
-updated_date: '2026-09-01 18:07'
+updated_date: '2026-09-01 18:20'
 labels:
   - web-ui
   - testing
@@ -114,4 +114,6 @@ CI producer metadata now records bounded GitLab Jobs API runner queue duration, 
 Final static verification passed: 28/28 Node tests; ownership validation (100 ci_fast, 17 required, 83 advisory); JavaScript syntax; `bash -n`; ShellCheck 0.11.0; GitLab YAML parse with yq-go; targeted Rust OSCAL test; rustfmt check; both helper package builds; all six check attribute evaluations; helper package evaluations; and `git diff --check`. The three representative MR pipelines required by acceptance criterion 2 remain pending until the branch is committed, pushed, and an MR exists.
 
 Committed as `5492997f` (`TASK-450.11: parallelize authoritative Web UI checks`), rebased onto current `origin/dev` at `a977a3b9`, pushed, and opened draft MR !325: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/325. Task remains In Progress while the required representative pipelines run.
+
+MR !325 pipeline 2810483644 exposed a CI-only runtime closure defect: all six Web UI producers exited 127 because the flake-pinned `web-ui-producer` wrapper executed `bash`, but `pkgs.bash` was absent from `runtimeInputs` in Alpine jobs. Added `pkgs.bash` to the producer package. `nix build path:.#web-ui-producer --no-link` passed, and a clean package invocation reached the producer script and returned its expected missing `CHECK_NAME` error instead of exit 127. The first pipeline is not representative timing evidence because no Web UI check reached realization.
 <!-- SECTION:NOTES:END -->
