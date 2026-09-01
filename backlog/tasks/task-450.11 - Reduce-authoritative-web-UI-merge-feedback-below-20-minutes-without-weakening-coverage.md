@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - opencode-gpt-5.6-sol
 created_date: '2026-09-01 03:12'
-updated_date: '2026-09-01 19:54'
+updated_date: '2026-09-01 19:57'
 labels:
   - web-ui
   - testing
@@ -120,4 +120,6 @@ MR !325 pipeline 2810483644 exposed a CI-only runtime closure defect: all six We
 MR !325 pipeline 2810519617 reached and completed Web UI gate builds, then all completed producers failed during post-build verdict validation with `env: can't execute 'node': No such file or directory`. The producer runtime included Bash but not Node.js, which is required by `ci/check-web-ui-verdict.js`. Added `pkgs.nodejs` to `web-ui-producer.runtimeInputs`; the helper package build passed. This pipeline is not representative acceptance evidence because producer publication did not complete, although observed blocking job durations remained below 20 minutes (compatibility 846.126s, fleet 1035.032s, pipeline 264.874s) and the jobs retained artifacts.
 
 Rebased the shared branch onto `origin/dev` at `701151f4` after TASK-433 merged. Resolved the Web UI constructor, Playwright harness, GitLab CI, ownership manifest, tests, and runbook conflicts while preserving the parallel five-job blocking gate, advisory design parity, strict TASK-433 baselines, the manual governance baseline-candidate job, fatal browser diagnostics, and runtime closure fixes. The rebased commits are `0504bbd1`, `e7184518`, and `425684d7`. Ownership now validates 116 `ci_fast` steps as 44 required and 72 advisory across fleet (3/32), pipeline (5/28), and governance (36/12). Post-rebase verification passed: 28 Node tests; ownership validation; Bash syntax; GitLab YAML parse; six Web UI Nix parses and evaluations; helper package builds; `git diff --check`; and the targeted OSCAL Rust test after adapting its fixture to TASK-433's expanded `ComplianceControlEvidence` model. The fixture adaptation remains an uncommitted working-tree change pending the next commit/push step. The previously successful pipeline predates this TASK-433 integration, so three representative pipelines must be collected from the rebased MR head.
+
+Committed the post-rebase OSCAL fixture adaptation as `9d1eb180` and force-pushed the rewritten branch with an explicit lease. MR !325 now targets `origin/dev` at `701151f4`, reports `has_conflicts: false`, and started MR pipeline 2810793756 at head `9d1eb180`. The worktree is clean and matches the remote branch. Updated the MR description to replace stale 100/17/83 ownership counts with 116/44/72 and to distinguish earlier VM evidence from verification performed at the TASK-433-integrated head.
 <!-- SECTION:NOTES:END -->
