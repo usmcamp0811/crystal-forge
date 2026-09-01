@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - opencode-gpt-5.6-sol
 created_date: '2026-09-01 03:12'
-updated_date: '2026-09-01 19:57'
+updated_date: '2026-09-01 20:31'
 labels:
   - web-ui
   - testing
@@ -78,6 +78,8 @@ Post-fleet correction: encode required versus advisory ownership for every ci_fa
 User-approved scope expansion: correct the production OSCAL Assessment Results generator so the real browser download passes the vendored NIST OSCAL 1.1.2 schema. Limit the production change to the three observed shape defects, add focused generator regression assertions, rerun the isolated blocking exports VM check, then continue the existing final verification and MR plan.
 
 Final review correction: make generated OSCAL control IDs NCName-safe and stable, cover names with punctuation, keep empty-scope exports schema-valid or explicitly constrained, and correct the documented AP/SSP reference guarantee. Add producer cache-state and queue metadata plus aggregate per-job timing, median, maximum, and blocking critical-path reporting before representative MR runs. Run the aggregate report through a flake-pinned Node/curl package instead of a mutable Alpine image. Correct stale baseline and SARIF fixture prose, remove local result links, then rerun focused Rust/schema and static CI/Nix verification.
+
+Review correction for MR !325 P1 blockers: (1) restore the TASK-433 imported-provenance SQL in the shared fresh-database fixture setup, add a relational fixture-chain assertion, and run the focused required governance workflow plus the full governance shard; (2) make `web-ui-evidence-report` artifact-only by removing persistent token access, curl uploads, MR note writes, related runtime inputs, tests, and runbook claims while preserving the complete exposed aggregate artifact; (3) replace the dangling OSCAL bundle/control references with a self-contained AR → embedded AP → embedded SSP → embedded Catalog chain, derive Catalog controls from real unscoped bundle policies, remove synthetic empty-scope control/component identifiers, add the official OSCAL 1.1.2 Catalog schema, and add recursive schema plus cross-document referential-integrity assertions; (4) rerun targeted static/Rust/browser checks and all blocking shards, then collect three successful representative current-head MR pipelines with required timing, queue, cache, critical-path, median, maximum, and VM phase evidence before review.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -123,3 +125,13 @@ Rebased the shared branch onto `origin/dev` at `701151f4` after TASK-433 merged.
 
 Committed the post-rebase OSCAL fixture adaptation as `9d1eb180` and force-pushed the rewritten branch with an explicit lease. MR !325 now targets `origin/dev` at `701151f4`, reports `has_conflicts: false`, and started MR pipeline 2810793756 at head `9d1eb180`. The worktree is clean and matches the remote branch. Updated the MR description to replace stale 100/17/83 ownership counts with 116/44/72 and to distinguish earlier VM evidence from verification performed at the TASK-433-integrated head.
 <!-- SECTION:NOTES:END -->
+
+## Comments
+
+<!-- COMMENTS:BEGIN -->
+author: review
+created: 2026-09-01 20:31
+---
+Review verdict rejected MR !325 with four P1 blockers: missing required governance provenance fixture, unsafe persistent API token exposure in MR-controlled report code, dangling OSCAL baseline/control references despite schema validity, and missing three-pipeline performance evidence. The correction plan uses shared fixture restoration, artifact-only reporting, a self-contained generated OSCAL Catalog chain with semantic validation, and fresh-head shard/pipeline evidence.
+---
+<!-- COMMENTS:END -->
