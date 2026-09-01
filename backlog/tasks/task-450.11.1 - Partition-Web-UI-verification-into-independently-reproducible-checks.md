@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-gpt-5.6-sol
 created_date: '2026-09-01 03:27'
-updated_date: '2026-09-01 03:46'
+updated_date: '2026-09-01 04:04'
 labels:
   - web-ui
   - testing
@@ -63,11 +63,11 @@ The task must preserve shared derivation identity so separate checks can reuse N
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-1. Inventory the current `ci_fast` and `full` step sets and encode explicit documented ownership for each required step. Keep ordered state chains in one group and reject unknown or partially selected profiles.
-2. Extract the current NixOS VM body into a shared constructor with explicit switches for browser group, embedded-production smoke, exports, and design parity. All checks reuse the same server, Web UI, browser, fixture, and test source derivations.
-3. Keep the compatibility `web-ui` attribute as the production embedded-server smoke/shell check. Add balanced fleet, pipeline, and governance semantic checks, an independent export check, and an advisory design-parity check.
-4. Ensure groups authenticate and initialize deterministic state independently. Keep onboarding state isolated from non-onboarding groups.
-5. Add static ownership validation and build each stable flake attribute independently. Prove a deliberate required-step failure affects its responsible blocking check and retains evidence.
+1. Add an explicit Web UI check-group ownership manifest and a fast Node validator. Partition every `ci_fast` step exactly once into ordered fleet, pipeline, and governance groups; keep state chains together; define separate compatibility and design-parity selections; reject unknown profiles, unknown requested steps, duplicate ownership, omissions, and requested steps excluded by the selected profile.
+2. Refactor `checks/web-ui/default.nix` into the shared parameterized VM/evidence constructor. Keep the `web-ui` wrapper as the production `cf-server-drv` embedded-WASM asset and real-Chromium shell compatibility check. Add stable Snowfall wrappers for fleet, pipeline, governance, blocking browser exports, and advisory design parity while preserving identical shared package derivations.
+3. Make each VM derivation produce evidence independently of its logical gate verdict. Preserve infrastructure failures as evidence failures, copy `results.json`, verdicts, failed-step screenshots, export artifacts, and design reports, and expose the evidence derivation through each blocking check's `.evidence` passthru so CI can build/copy it without rerunning the VM.
+4. Update named-profile authentication preflight and selection validation in `integration-test.js`. Preserve ordered state chains and keep full-only onboarding outside ordinary blocking groups.
+5. Document stable attributes, compatibility guarantees, ownership invariants, evidence/gate behavior, and exact local commands. Run Node tests and syntax checks, the static ownership validator, Nix parsing, check-name evaluation, and cheap derivation evaluations without building the VM checks.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
