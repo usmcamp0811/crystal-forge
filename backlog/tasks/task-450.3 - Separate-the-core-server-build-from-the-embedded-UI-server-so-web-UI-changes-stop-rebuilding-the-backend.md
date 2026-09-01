@@ -6,7 +6,7 @@ title: >-
 status: Review
 assignee: []
 created_date: '2026-08-31 22:39'
-updated_date: '2026-09-01 02:05'
+updated_date: '2026-09-01 02:30'
 labels: []
 dependencies: []
 references:
@@ -24,6 +24,9 @@ modified_files:
   - lib/server-test-node/default.nix
   - packages/dev-env/composition.nix
   - packages/devScripts/default.nix
+  - packages/default/Cargo.lock
+  - packages/default/crates/cf-server/Cargo.toml
+  - packages/default/crates/cf-server/src/bin/server.rs
 parent_task_id: TASK-450
 priority: high
 type: enhancement
@@ -110,6 +113,15 @@ Read doc-23, `Build Invalidation Graph and CI Feedback Latency Analysis`, for th
 - [x] #7 The Nix source documents which server build each consumer uses and why, so a future change does not silently reintroduce the web UI dependency for backend-only checks
 <!-- AC:END -->
 
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Build core and embedded-UI server variants from the same filtered Rust source. Keep the web UI derivation and `embedded-ui` feature exclusive to the embedded variant.
+2. Route backend-only checks and development consumers to the core server. Keep production module defaults and the authoritative browser check on the embedded server.
+3. Document the consumer split and core server UI-route behavior in the Nix and Rust source.
+4. Verify derivation invalidation with a web UI scratch edit. Build the affected checks and add a targeted Rust regression that proves an unmatched root route returns `404 Not Found` without `embedded-ui`.
+<!-- SECTION:PLAN:END -->
+
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
@@ -124,10 +136,14 @@ The core server registers no axum UI fallback and therefore returns the framewor
 Verification passed: core and embedded package builds, integration, oidc-auth, web-ui, and one complete nix flake check --keep-going -L run.
 
 LOCK RELEASED: implementation is pushed and MR !324 is awaiting review.
+
+Review update commit `437efd55` adds an executable regression for acceptance criterion 6. `add_ui_fallback` now centralizes the feature-gated fallback and documents the negative guarantee: without `embedded-ui`, Axum returns `404 Not Found` for unmatched UI routes. The targeted core-server test passed with `SQLX_OFFLINE=true nix develop ../.. -c cargo test --package cf-server --bin server unmatched_root_route_returns_not_found_without_embedded_ui`. Formatting passed with `nix develop ../.. -c cargo fmt --all --check`. The embedded variant compiled with `CRYSTAL_FORGE_UI_DIST=/tmp/opencode/empty-ui SQLX_OFFLINE=true nix develop ../.. -c cargo check --package cf-server --bin server --features embedded-ui`. Existing repository warnings remain; these commands introduced no verification failure.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
 Created shared core and embedded-UI server variants from the same crate source. API-only checks and development paths use the core server with no web UI input. Production and the authoritative browser check retain the embedded server. Web UI changes no longer invalidate integration or OIDC.
+
+Documented and tested the core server contract for unmatched UI routes. Without `embedded-ui`, the server keeps Axum's default fallback and returns `404 Not Found`. The targeted regression, workspace formatting, and embedded-feature compile check pass in the repository Nix development environment.
 <!-- SECTION:FINAL_SUMMARY:END -->
