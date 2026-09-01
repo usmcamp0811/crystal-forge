@@ -4,6 +4,7 @@ title: Fail web-ui Nix check when browser steps report failures
 status: Backlog
 assignee: []
 created_date: '2026-08-24 14:17'
+updated_date: '2026-09-01 03:12'
 labels:
   - web-ui
   - testing
@@ -14,6 +15,8 @@ references:
   - TASK-410
   - checks/web-ui/default.nix
   - checks/web-ui/tests/integration-test.js
+  - TASK-438
+  - TASK-450.11
 modified_files:
   - checks/web-ui/default.nix
   - checks/web-ui/tests/integration-test.js
@@ -43,3 +46,9 @@ Discovered during TASK-410 verification: `nix build .#checks.x86_64-linux.web-ui
 - [ ] #4 Focused CF_UI_TEST_STEPS runs and normal full-profile runs use the same failure propagation
 - [ ] #5 Automated regression coverage proves both failing-step and all-passing outcomes
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+This task overlaps TASK-438, which is the correctness prerequisite referenced by TASK-450.11. Reconcile the duplicate scope before either failure-propagation task starts so two branches do not change the same harness behavior independently. The resulting fix must remain compatible with a later split or parallel web UI check topology.
+<!-- SECTION:NOTES:END -->
