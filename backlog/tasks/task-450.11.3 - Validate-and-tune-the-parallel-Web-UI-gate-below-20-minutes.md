@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-gpt-5.6-sol
 created_date: '2026-09-01 03:28'
-updated_date: '2026-09-01 03:31'
+updated_date: '2026-09-01 03:46'
 labels:
   - web-ui
   - testing
@@ -49,6 +49,16 @@ Measurements must distinguish execution time from runner queue time and must ide
 - [ ] #6 A deliberately failing required workflow demonstrates that the parallel logical gate fails and identifies the responsible check without requiring unrelated successful groups to be rerun locally
 - [ ] #7 Documentation records the final check grouping, expected timing envelope, measurement method, exact local Nix commands, and how maintainers detect a latency regression
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Add phase timestamps for Nix realization, VM startup and fixtures, each browser group, export validation, design parity, artifact transfer, and aggregation.
+2. Run the complete logical gate in representative merge-request pipelines and record job execution, queue, cache state, median, maximum, and critical path.
+3. Rebalance only explicit step ownership or evidence placement when one check dominates. Do not remove required workflows or shorten waits below reliable observable conditions.
+4. Demonstrate one deliberate blocking failure and one advisory design-parity failure with correct pipeline outcomes and retained evidence.
+5. Record at least three sub-20-minute blocking critical-path runs and update the Web UI check documentation with the final timing envelope and regression-detection procedure.
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
