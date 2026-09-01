@@ -26,7 +26,7 @@ pub fn Toast(message: String, is_success: bool, on_dismiss: EventHandler<()>) ->
     rsx! {
         div {
             class: "animate-slide-in",
-            style: "position: fixed; top: 1rem; right: 1rem; z-index: 120;",
+            style: "position: fixed; top: 1rem; right: 1rem; z-index: 220;",
             div {
                 class: "flex items-center gap-3 px-4 py-3 rounded-lg border shadow-lg backdrop-blur-sm {bg_class}",
                 role: if is_success { "status" } else { "alert" },

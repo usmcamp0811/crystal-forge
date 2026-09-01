@@ -2,8 +2,12 @@ use crate::config;
 use crate::derivations::utils::build_flake_reference;
 use crate::flake::credentials::FlakeCredentialEnv;
 use crate::models::commits::Commit;
+use crate::models::evaluate_with_policies::run_nix_command_bounded;
 use crate::queries::attention;
-use crate::queries::commits::{flake_has_commits, insert_commit, insert_commit_with_metadata};
+use crate::queries::commits::{
+    flake_has_commits, insert_commit, insert_commit_with_metadata,
+    set_commit_first_parent_by_repo_url,
+};
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
@@ -16,6 +20,8 @@ use uuid::Uuid;
 const GIT_METADATA_TIMEOUT: Duration = Duration::from_secs(10);
 const GIT_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const NIX_CONFIG_EVAL_TIMEOUT: Duration = Duration::from_secs(60);
+const NIX_CONFIG_STDOUT_MAX_BYTES: usize = 1024 * 1024;
+const NIX_CONFIG_STDERR_MAX_BYTES: usize = 256 * 1024;
 const INIT_COMMIT_RETRY_ATTEMPTS: usize = 5;
 const INIT_COMMIT_RETRY_DELAY: Duration = Duration::from_secs(1);
 const HISTORY_REWRITE_ERROR_MARKER: &str = "history_rewrite_detected";
@@ -65,14 +71,21 @@ pub async fn fetch_and_insert_latest_commit(
     repo_url: &str,
     branch: &str,
 ) -> Result<Option<String>> {
-    let commits = get_commits_with_timestamps(repo_url, branch, Some(1), None).await?;
-
-    let (commit_hash, timestamp) = commits
+    let commit = get_commits_with_full_metadata(repo_url, branch, Some(1), None, None)
+        .await?
         .into_iter()
         .next()
         .context("No commits found in repository")?;
+    let commit_hash = commit.hash;
 
-    insert_commit(pool, &commit_hash, repo_url, timestamp).await?;
+    insert_commit(pool, &commit_hash, repo_url, commit.timestamp).await?;
+    set_commit_first_parent_by_repo_url(
+        pool,
+        repo_url,
+        &commit_hash,
+        commit.first_parent_sha.as_deref(),
+    )
+    .await?;
 
     info!(
         "✅ Inserted latest commit {} for repo {}",
@@ -102,8 +115,18 @@ pub async fn fetch_and_insert_recent_commits(
         )
         .await
         {
-            Ok(n) if n > 0 => inserted.push(commit_data.hash),
-            Ok(_) => {}
+            Ok(n) => {
+                set_commit_first_parent_by_repo_url(
+                    pool,
+                    repo_url,
+                    &commit_data.hash,
+                    commit_data.first_parent_sha.as_deref(),
+                )
+                .await?;
+                if n > 0 {
+                    inserted.push(commit_data.hash);
+                }
+            }
             Err(e) => warn!("Failed to insert commit {}: {}", commit_data.hash, e),
         }
     }
@@ -141,8 +164,18 @@ pub async fn fetch_and_insert_recent_commits_with_creds(
         )
         .await
         {
-            Ok(n) if n > 0 => inserted.push(commit_data.hash),
-            Ok(_) => {}
+            Ok(n) => {
+                set_commit_first_parent_by_repo_url(
+                    pool,
+                    repo_url,
+                    &commit_data.hash,
+                    commit_data.first_parent_sha.as_deref(),
+                )
+                .await?;
+                if n > 0 {
+                    inserted.push(commit_data.hash);
+                }
+            }
             Err(e) => warn!("Failed to insert commit {}: {}", commit_data.hash, e),
         }
     }
@@ -333,7 +366,9 @@ pub async fn sync_flake_recorded(
     repo_url: &str,
     branch: &str,
 ) -> Result<u64> {
-    use crate::queries::commits::{SYNC_LOCK_BASE, insert_commit_by_flake_id_tx};
+    use crate::queries::commits::{
+        SYNC_LOCK_BASE, insert_commit_by_flake_id_tx, set_commit_first_parent_by_flake_id_tx,
+    };
 
     let attempt_id = Uuid::new_v4();
 
@@ -455,30 +490,36 @@ pub async fn sync_flake_recorded(
     // Insert missing commits inside the transaction using flake_id directly.
     let mut inserted_count: u64 = 0;
     for commit_data in &commits {
-        if existing.contains(&commit_data.hash) {
-            continue;
+        if !existing.contains(&commit_data.hash) {
+            match insert_commit_by_flake_id_tx(
+                &mut tx,
+                flake_id,
+                &commit_data.hash,
+                commit_data.timestamp,
+                Some(&commit_data.message),
+                Some(&commit_data.author),
+            )
+            .await
+            {
+                Ok(n) => inserted_count += n,
+                Err(e) => {
+                    error!(
+                        "Insert failed for {} (flake {flake_id}): {e:#}",
+                        commit_data.hash
+                    );
+                    let _ = tx.rollback().await;
+                    record_sync_error(pool, flake_id, attempt_id, repo_url, &e.to_string()).await;
+                    return Err(e);
+                }
+            }
         }
-        match insert_commit_by_flake_id_tx(
+        set_commit_first_parent_by_flake_id_tx(
             &mut tx,
             flake_id,
             &commit_data.hash,
-            commit_data.timestamp,
-            Some(&commit_data.message),
-            Some(&commit_data.author),
+            commit_data.first_parent_sha.as_deref(),
         )
-        .await
-        {
-            Ok(n) => inserted_count += n,
-            Err(e) => {
-                error!(
-                    "Insert failed for {} (flake {flake_id}): {e:#}",
-                    commit_data.hash
-                );
-                let _ = tx.rollback().await;
-                record_sync_error(pool, flake_id, attempt_id, repo_url, &e.to_string()).await;
-                return Err(e);
-            }
-        }
+        .await?;
     }
 
     // Resolve ordered hashes to DB IDs inside the tx (committed rows visible now).
@@ -671,7 +712,9 @@ pub async fn accept_history_rewrite_and_sync(
     repo_url: &str,
     branch: &str,
 ) -> Result<HistoryRewriteOutcome> {
-    use crate::queries::commits::{SYNC_LOCK_BASE, insert_commit_by_flake_id_tx};
+    use crate::queries::commits::{
+        SYNC_LOCK_BASE, insert_commit_by_flake_id_tx, set_commit_first_parent_by_flake_id_tx,
+    };
 
     let attempt_id = Uuid::new_v4();
 
@@ -823,30 +866,36 @@ pub async fn accept_history_rewrite_and_sync(
     // ── Insert only genuinely new hashes ────────────────────────────────
     let mut inserted_count: u64 = 0;
     for commit_data in &commits {
-        if existing.contains(&commit_data.hash) {
-            continue;
+        if !existing.contains(&commit_data.hash) {
+            match insert_commit_by_flake_id_tx(
+                &mut tx,
+                flake_id,
+                &commit_data.hash,
+                commit_data.timestamp,
+                Some(&commit_data.message),
+                Some(&commit_data.author),
+            )
+            .await
+            {
+                Ok(n) => inserted_count += n,
+                Err(e) => {
+                    error!(
+                        "Insert failed for {} during rewrite (flake {flake_id}): {e:#}",
+                        commit_data.hash
+                    );
+                    let _ = tx.rollback().await;
+                    record_sync_error(pool, flake_id, attempt_id, repo_url, &e.to_string()).await;
+                    return Err(e);
+                }
+            }
         }
-        match insert_commit_by_flake_id_tx(
+        set_commit_first_parent_by_flake_id_tx(
             &mut tx,
             flake_id,
             &commit_data.hash,
-            commit_data.timestamp,
-            Some(&commit_data.message),
-            Some(&commit_data.author),
+            commit_data.first_parent_sha.as_deref(),
         )
-        .await
-        {
-            Ok(n) => inserted_count += n,
-            Err(e) => {
-                error!(
-                    "Insert failed for {} during rewrite (flake {flake_id}): {e:#}",
-                    commit_data.hash
-                );
-                let _ = tx.rollback().await;
-                record_sync_error(pool, flake_id, attempt_id, repo_url, &e.to_string()).await;
-                return Err(e);
-            }
-        }
+        .await?;
     }
 
     // ── Resolve ordered IDs and replace snapshot ────────────────────────
@@ -1790,22 +1839,28 @@ async fn sync_commits_for_repo_inner(
 
     let mut inserted_count: u64 = 0;
     for commit_data in &commits {
-        if existing.contains(&commit_data.hash) {
-            continue;
+        if !existing.contains(&commit_data.hash) {
+            match insert_commit_with_metadata(
+                pool,
+                &commit_data.hash,
+                repo_url,
+                commit_data.timestamp,
+                Some(&commit_data.message),
+                Some(&commit_data.author),
+            )
+            .await
+            {
+                Ok(n) => inserted_count += n,
+                Err(e) => warn!("Failed to insert commit {}: {}", commit_data.hash, e),
+            }
         }
-        match insert_commit_with_metadata(
+        set_commit_first_parent_by_repo_url(
             pool,
-            &commit_data.hash,
             repo_url,
-            commit_data.timestamp,
-            Some(&commit_data.message),
-            Some(&commit_data.author),
+            &commit_data.hash,
+            commit_data.first_parent_sha.as_deref(),
         )
-        .await
-        {
-            Ok(n) => inserted_count += n,
-            Err(e) => warn!("Failed to insert commit {}: {}", commit_data.hash, e),
-        }
+        .await?;
     }
 
     if inserted_count > 0 {
@@ -2054,9 +2109,33 @@ fn normalize_https_hosted_git_to_ssh(url: &str) -> Option<String> {
 #[derive(Debug, Clone)]
 struct CommitData {
     hash: String,
+    first_parent_sha: Option<String>,
     timestamp: chrono::DateTime<chrono::Utc>,
     message: String,
     author: String,
+}
+
+fn parse_git_log_line(line: &str) -> Result<CommitData> {
+    let parts: Vec<&str> = line.split('\x1E').collect();
+    if parts.len() != 5 {
+        bail!("Invalid git log format (expected 5 fields): {line}");
+    }
+    let hash = parts[0].trim().to_string();
+    let first_parent_sha = parts[1]
+        .split_whitespace()
+        .next()
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let timestamp = chrono::DateTime::parse_from_rfc3339(parts[2].trim())
+        .context("Failed to parse timestamp")?
+        .with_timezone(&chrono::Utc);
+    Ok(CommitData {
+        hash,
+        first_parent_sha,
+        timestamp,
+        message: parts[3].trim().to_string(),
+        author: parts[4].trim().to_string(),
+    })
 }
 
 /// Like `get_commits_with_full_metadata` but also returns the temporary clone
@@ -2074,7 +2153,10 @@ async fn get_commits_with_full_metadata_and_dir(
     let clone_path = temp_dir.path();
 
     // Clone
-    let depth = limit.unwrap_or(10).to_string();
+    // COMPATIBILITY: Git omits parents for the boundary commit of a shallow
+    // clone. Fetch one extra commit so every returned row has authoritative
+    // `%P` data; a returned row with no parent is then a genuine root.
+    let depth = limit.unwrap_or(10).saturating_add(1).to_string();
     let mut clone_cmd = tokio::process::Command::new("git");
     clone_cmd
         .args(&[
@@ -2096,9 +2178,9 @@ async fn get_commits_with_full_metadata_and_dir(
         bail!("Git clone failed for {}: {}", repo_url, stderr);
     }
 
-    // Build git log args with format: hash|timestamp|subject|author
+    // Build git log args with format: hash|parents|timestamp|subject|author.
     // Using %x1E as field separator (ASCII record separator) to handle multi-line messages
-    let mut args = vec!["log", "--format=%H%x1E%cI%x1E%s%x1E%aN"];
+    let mut args = vec!["log", "--format=%H%x1E%P%x1E%cI%x1E%s%x1E%aN"];
 
     // Add range if since_commit provided
     let range;
@@ -2155,24 +2237,7 @@ async fn get_commits_with_full_metadata_and_dir(
     let commits: Result<Vec<_>> = stdout
         .lines()
         .filter(|line| !line.trim().is_empty())
-        .map(|line| {
-            let parts: Vec<&str> = line.split('\x1E').collect();
-            if parts.len() != 4 {
-                bail!("Invalid git log format (expected 4 fields): {}", line);
-            }
-            let hash = parts[0].trim().to_string();
-            let timestamp = chrono::DateTime::parse_from_rfc3339(parts[1].trim())
-                .context("Failed to parse timestamp")?
-                .with_timezone(&chrono::Utc);
-            let message = parts[2].trim().to_string();
-            let author = parts[3].trim().to_string();
-            Ok(CommitData {
-                hash,
-                timestamp,
-                message,
-                author,
-            })
-        })
+        .map(parse_git_log_line)
         .collect();
 
     Ok((commits?, temp_dir))
@@ -2318,11 +2383,19 @@ pub async fn fetch_and_insert_commits_since_with_creds(
         )
         .await
         {
-            Ok(n) if n > 0 => {
-                debug!("✅ Inserted commit {} for {}", commit_data.hash, repo_url);
-                inserted.push(commit_data.hash);
+            Ok(n) => {
+                set_commit_first_parent_by_repo_url(
+                    pool,
+                    repo_url,
+                    &commit_data.hash,
+                    commit_data.first_parent_sha.as_deref(),
+                )
+                .await?;
+                if n > 0 {
+                    debug!("✅ Inserted commit {} for {}", commit_data.hash, repo_url);
+                    inserted.push(commit_data.hash);
+                }
             }
-            Ok(_) => {}
             Err(e) => warn!("Failed to insert commit {}: {}", commit_data.hash, e),
         }
     }
@@ -2588,11 +2661,6 @@ pub async fn load_commit_nixos_configurations_with_creds(
         flake_target.as_str(),
     ]);
 
-    // Kill the nix process if the future is dropped (timeout or
-    // cancellation).  Without this, a timed-out discovery can orphan
-    // a nix process that continues running indefinitely.
-    cmd.kill_on_drop(true);
-
     // Apply Nix configuration (offline mode, substitute behaviour,
     // timeouts, sandbox settings, etc.) consistently with the main
     // and fallback evaluators.
@@ -2604,17 +2672,32 @@ pub async fn load_commit_nixos_configurations_with_creds(
         c.apply_to_nix_command(&mut cmd);
     }
 
-    let output = timeout(NIX_CONFIG_EVAL_TIMEOUT, cmd.output())
-        .await
-        .with_context(|| format!("Timed out evaluating nixosConfigurations for {commit_hash}"))?
-        .with_context(|| format!("Failed to evaluate nixosConfigurations for {commit_hash}"))?;
+    let output = run_nix_command_bounded(
+        &mut cmd,
+        "nixosConfigurations discovery",
+        NIX_CONFIG_EVAL_TIMEOUT,
+        NIX_CONFIG_STDOUT_MAX_BYTES,
+        NIX_CONFIG_STDERR_MAX_BYTES,
+    )
+    .await
+    .with_context(|| format!("Failed to evaluate nixosConfigurations for {commit_hash}"))?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("nix eval failed for {}: {}", commit_hash, stderr.trim());
+        bail!(
+            "nix eval failed for {}: {}",
+            commit_hash,
+            output.stderr.diagnostic_excerpt(4096).trim()
+        );
+    }
+    if output.stdout.is_truncated() {
+        bail!(
+            "nixosConfigurations output for {} exceeded {} bytes",
+            commit_hash,
+            NIX_CONFIG_STDOUT_MAX_BYTES
+        );
     }
 
-    let mut names: Vec<String> = serde_json::from_slice(&output.stdout)
+    let mut names: Vec<String> = serde_json::from_slice(&output.stdout.bytes)
         .with_context(|| format!("Failed to parse nixosConfigurations JSON for {commit_hash}"))?;
     names.sort();
     names.dedup();
@@ -2877,8 +2960,9 @@ async fn try_get_diff_for_branch(
 #[cfg(test)]
 mod tests {
     use super::{
-        is_history_rewrite_error, is_invalid_revision_range_error, is_remote_head_diverged,
-        redact_sensitive_tokens, redact_url_credentials, sanitize_and_truncate_sync_error,
+        get_commits_with_full_metadata, is_history_rewrite_error, is_invalid_revision_range_error,
+        is_remote_head_diverged, parse_git_log_line, redact_sensitive_tokens,
+        redact_url_credentials, sanitize_and_truncate_sync_error,
     };
     use anyhow::Context;
 
@@ -2920,6 +3004,69 @@ mod tests {
     #[test]
     fn does_not_detect_divergence_when_remote_head_missing() {
         assert!(!is_remote_head_diverged("79e33a9", None));
+    }
+
+    #[test]
+    fn git_log_parser_uses_first_parent_of_merge_commit() {
+        let selected = "a".repeat(40);
+        let first = "b".repeat(40);
+        let second = "c".repeat(40);
+        let line =
+            format!("{selected}\x1e{first} {second}\x1e2026-08-28T12:00:00Z\x1emerge\x1eDeveloper");
+        let parsed = parse_git_log_line(&line).expect("git log row should parse");
+        assert_eq!(parsed.hash, selected);
+        assert_eq!(parsed.first_parent_sha.as_deref(), Some(first.as_str()));
+    }
+
+    #[test]
+    fn git_log_parser_preserves_root_without_parent() {
+        let selected = "a".repeat(40);
+        let line = format!("{selected}\x1e\x1e2026-08-28T12:00:00Z\x1eroot\x1eDeveloper");
+        let parsed = parse_git_log_line(&line).expect("root git log row should parse");
+        assert!(parsed.first_parent_sha.is_none());
+    }
+
+    #[tokio::test]
+    async fn shallow_log_keeps_boundary_parent_and_distinguishes_root() {
+        let repository = tempfile::tempdir().expect("temporary repository should exist");
+        let run = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(repository.path())
+                .output()
+                .expect("git command should start");
+            assert!(
+                output.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        run(&["init", "--initial-branch=main"]);
+        run(&["config", "user.name", "Test"]);
+        run(&["config", "user.email", "test@example.test"]);
+        for index in 0..3 {
+            std::fs::write(repository.path().join("value"), index.to_string())
+                .expect("fixture should write");
+            run(&["add", "value"]);
+            run(&["commit", "-m", &format!("commit-{index}")]);
+        }
+
+        let repo_url = format!("file://{}", repository.path().display());
+        let boundary = get_commits_with_full_metadata(&repo_url, "main", Some(2), None, None)
+            .await
+            .expect("shallow metadata should load");
+        assert_eq!(boundary.len(), 2);
+        assert!(
+            boundary[1].first_parent_sha.is_some(),
+            "the returned shallow boundary is not a root"
+        );
+
+        let complete = get_commits_with_full_metadata(&repo_url, "main", Some(10), None, None)
+            .await
+            .expect("complete metadata should load");
+        assert_eq!(complete.len(), 3);
+        assert!(complete.last().unwrap().first_parent_sha.is_none());
     }
 
     #[test]

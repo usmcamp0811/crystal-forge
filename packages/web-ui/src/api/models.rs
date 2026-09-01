@@ -11,6 +11,7 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_json::Value;
 pub use uuid::Uuid;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -873,6 +874,701 @@ pub struct FlakeRegistryItem {
     pub environments: Vec<String>,
     #[serde(default)]
     pub total_commit_count: i64,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Evaluation and flake-output snapshot DTOs
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Identifies the durable lifecycle of a cached snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotLifecycle {
+    /// Evaluation is waiting for a worker.
+    Queued,
+    /// A worker is extracting the snapshot.
+    Running,
+    /// Evaluation ended with a safe diagnostic.
+    Failed,
+    /// The snapshot is available for database-only reads.
+    Available,
+    /// No reusable snapshot exists for the revision.
+    Unavailable,
+}
+
+/// Selects the baseline semantics for an evaluated-options request.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotRevisionMode {
+    /// Compares with the selected commit's Git first parent.
+    #[default]
+    Commit,
+    /// Compares with the preceding retained generation snapshot.
+    Generation,
+}
+
+impl SnapshotRevisionMode {
+    /// Returns the server query value.
+    pub fn as_query_value(self) -> &'static str {
+        match self {
+            Self::Commit => "commit",
+            Self::Generation => "generation",
+        }
+    }
+}
+
+/// Selects the server-side evaluated-option subset.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvaluatedOptionFilter {
+    /// Returns every matching option.
+    #[default]
+    All,
+    /// Returns options with proven overridden definitions.
+    Overridden,
+    /// Returns options that differ from a valid baseline.
+    Changed,
+}
+
+impl EvaluatedOptionFilter {
+    /// Returns the server query value.
+    pub fn as_query_value(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Overridden => "overridden",
+            Self::Changed => "changed",
+        }
+    }
+}
+
+/// Defines one bounded evaluated-options request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvaluatedOptionsRequest {
+    /// Full immutable revision SHA.
+    pub revision: String,
+    /// Retained generation in generation mode.
+    pub generation: Option<i32>,
+    /// Comparison mode.
+    pub mode: SnapshotRevisionMode,
+    /// Debounced server-side search text.
+    pub search: String,
+    /// Active subset.
+    pub filter: EvaluatedOptionFilter,
+    /// Requested bounded page size.
+    pub limit: i64,
+    /// Requested bounded zero-based offset.
+    pub offset: i64,
+}
+
+/// Reports revision-global option counts.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvaluatedOptionCounts {
+    /// Number of options in the selected snapshot.
+    pub all: i64,
+    /// Number with proven overridden definitions.
+    pub overridden: i64,
+    /// Number changed from a valid baseline, or no count without a baseline.
+    pub changed: Option<i64>,
+}
+
+/// Returns one bounded page of evaluated options.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvaluatedOptionsPage {
+    /// Selected snapshot lifecycle.
+    pub lifecycle: SnapshotLifecycle,
+    /// Full selected revision SHA.
+    pub revision: String,
+    /// Selected local generation identity in generation mode.
+    #[serde(default)]
+    pub generation: Option<i32>,
+    /// Durable retained-generation snapshot identity.
+    #[serde(default)]
+    pub generation_snapshot_id: Option<Uuid>,
+    /// Full baseline SHA when comparison is available.
+    pub baseline_revision: Option<String>,
+    /// Whether Changed has a valid baseline.
+    pub comparison_available: bool,
+    /// Safe evaluation diagnostic for a failed snapshot.
+    pub error: Option<String>,
+    /// Number of distinct `(source_input, source_revision, source_path)` tuples.
+    pub module_count: i64,
+    /// End-to-end evaluator duration in milliseconds.
+    pub evaluation_duration_ms: Option<i64>,
+    /// Revision-global counts independent of search and active filter.
+    pub counts: EvaluatedOptionCounts,
+    /// Number of rows matching the active search and filter.
+    pub total: i64,
+    /// Bounded zero-based offset.
+    pub offset: i64,
+    /// Bounded page size.
+    pub limit: i64,
+    /// Rows in this page.
+    pub options: Vec<EvaluatedOptionRow>,
+}
+
+/// Identifies an active registered flake and one exact active revision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackedFlakeIdentity {
+    /// Registered flake database identity.
+    pub flake_id: i32,
+    /// Registered flake display name.
+    pub flake_name: String,
+    /// Registered repository URL after credential sanitization.
+    pub repo_url: String,
+    /// Full immutable revision.
+    pub revision: String,
+}
+
+/// Aggregates one exact module source across the complete selected snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvaluationModuleSummary {
+    /// Evaluator-provided flake input name.
+    pub source_input: Option<String>,
+    /// Evaluator-provided full source revision.
+    pub source_revision: Option<String>,
+    /// Exact Nix module source path.
+    pub source_path: String,
+    /// Number of definitions emitted by this source.
+    pub defined_count: i64,
+    /// Number of definitions that won the module merge.
+    pub won_count: i64,
+    /// Server-issued navigation identity after visibility checks.
+    pub tracked_flake: Option<TrackedFlakeIdentity>,
+}
+
+/// Classifies selected-versus-running configuration drift by exact store identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvaluationDrift {
+    /// Selected and running store paths are exactly equal.
+    Matches,
+    /// Both exact paths are known and differ.
+    Differs,
+    /// One or both exact paths are unavailable.
+    Unavailable,
+}
+
+/// Classifies the selected configuration against the latest agent observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentFingerprintStatus {
+    /// The selected and latest agent-reported store paths are equal.
+    Matches,
+    /// Both exact store paths are available and differ.
+    Differs,
+    /// Either exact store path is unavailable.
+    Unavailable,
+}
+
+/// Classifies exact running-store observations during the trailing seven days.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SevenDayDriftStatus {
+    /// Complete coverage contains only the selected store path.
+    NoObservedDrift,
+    /// Complete coverage contains another exact store path.
+    ObservedDrift,
+    /// Observation coverage is absent or contains an excessive gap.
+    InsufficientCoverage,
+}
+
+/// Returns complete selected-revision Config summary metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SelectedEvaluationSummary {
+    /// Selected snapshot lifecycle.
+    pub lifecycle: SnapshotLifecycle,
+    /// Full selected revision SHA.
+    pub revision: String,
+    /// Selected retained generation in generation mode.
+    pub generation: Option<i32>,
+    /// Safe lifecycle or integrity diagnostic.
+    pub error: Option<String>,
+    /// Authoritative number of module sources in the complete snapshot.
+    pub module_source_total: i64,
+    /// Snapshot completion timestamp.
+    pub completed_at: Option<DateTime<Utc>>,
+    /// End-to-end evaluator duration in milliseconds.
+    pub evaluation_duration_ms: Option<i64>,
+    /// Authoritative option count for the complete snapshot.
+    pub option_total: i64,
+    /// Exact selected NixOS toplevel store path.
+    pub selected_store_path: Option<String>,
+    /// Existing closure package count, when calculated.
+    pub closure_package_count: Option<i32>,
+    /// Recursive Nix closure size in bytes from a complete local measurement.
+    pub closure_size_bytes: Option<i64>,
+    /// Exact latest running store path.
+    pub running_store_path: Option<String>,
+    /// Agent-reported profile match for the latest running state.
+    pub running_profile_matches: Option<bool>,
+    /// Number of selected option states that differ from the same-commit mode.
+    pub host_delta_count: Option<i64>,
+    /// Exact selected-versus-agent store identity status.
+    pub agent_fingerprint: AgentFingerprintStatus,
+    /// Exact running-store drift during the trailing seven days.
+    pub seven_day_drift: SevenDayDriftStatus,
+    /// Exact-store-identity drift classification.
+    pub drift: EvaluationDrift,
+}
+
+/// Returns one bounded page of module sources for a selected evaluation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvaluationModuleSourcesPage {
+    /// Selected snapshot lifecycle.
+    pub lifecycle: SnapshotLifecycle,
+    /// Full selected revision SHA.
+    pub revision: String,
+    /// Selected retained generation in generation mode.
+    pub generation: Option<i32>,
+    /// Safe lifecycle or integrity diagnostic.
+    pub error: Option<String>,
+    /// Opaque persisted snapshot token that binds continuation pages.
+    pub snapshot_token: Option<String>,
+    /// Authoritative number of sources in the complete snapshot.
+    pub total: i64,
+    /// Applied zero-based offset.
+    pub offset: i64,
+    /// Applied bounded page size.
+    pub limit: i64,
+    /// Sources in deterministic server order.
+    pub sources: Vec<EvaluationModuleSummary>,
+}
+
+/// Adds baseline comparison data to one evaluated option.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvaluatedOptionRow {
+    /// Selected revision value and provenance, or no value when removed.
+    pub option: Option<EvaluatedOption>,
+    /// Baseline value when the option existed there.
+    pub before: Option<EvaluatedOption>,
+    /// Whether selected and baseline payloads differ.
+    pub changed: Option<bool>,
+    /// Type-aware change summary when a comparison is available.
+    pub diff: Option<TypedOptionDiff>,
+}
+
+/// Classifies an option comparison without treating removal as missing data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OptionChangeKind {
+    /// The option exists only in the selected snapshot.
+    Added,
+    /// The option exists only in the baseline snapshot.
+    Removed,
+    /// The option exists in both snapshots with different typed content.
+    Modified,
+    /// The option content is unchanged.
+    Unchanged,
+}
+
+/// Describes typed additions and removals for an option comparison.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TypedOptionDiff {
+    /// Option-level change classification.
+    pub kind: OptionChangeKind,
+    /// Safe value kind used for presentation.
+    pub value_kind: String,
+    /// Added values, package identities, elements, or attributes.
+    pub added: Vec<Value>,
+    /// Removed values, package identities, elements, or attributes.
+    pub removed: Vec<Value>,
+}
+
+/// Represents an evaluated option without fabricating unsupported data.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum SafeOptionValue {
+    /// A JSON scalar.
+    Scalar(Value),
+    /// Package identity and output metadata.
+    Package(SafePackageValue),
+    /// A bounded list of tagged values.
+    List(Vec<SafeOptionValue>),
+    /// A bounded attribute set.
+    AttributeSet(serde_json::Map<String, Value>),
+    /// A bounded submodule value.
+    Submodule(serde_json::Map<String, Value>),
+    /// A function or another value that cannot be serialized safely.
+    Opaque { type_name: String },
+    /// Evaluation did not produce a value.
+    Failed(SafeEvaluationError),
+}
+
+/// Describes a package without depending on a live store path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SafePackageValue {
+    /// Package display name.
+    pub name: Option<String>,
+    /// Package pname.
+    pub pname: Option<String>,
+    /// Package version.
+    pub version: Option<String>,
+    /// Evaluated output path.
+    pub output_path: Option<String>,
+}
+
+/// Describes a failed or deliberately unsupported evaluation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SafeEvaluationError {
+    /// Stable machine-readable failure category.
+    pub code: String,
+    /// Redacted diagnostic suitable for display.
+    pub message: String,
+}
+
+/// Identifies one option definition and its source provenance.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OptionDefinitionProvenance {
+    /// Source path reported by the Nix module system.
+    pub source_path: String,
+    /// Source input when tracked metadata resolved it.
+    pub source_input: Option<String>,
+    /// Full source revision when resolved.
+    pub source_revision: Option<String>,
+    /// Safe definition value.
+    pub value: Option<Value>,
+    /// Whether evaluator metadata identifies this definition as winning.
+    pub winning: bool,
+    /// Module-system priority when available.
+    #[serde(default)]
+    pub priority: Option<i64>,
+    /// Stable evaluator-provided definition status.
+    #[serde(default)]
+    pub status: Option<String>,
+    /// Safe explanation of why this definition won or lost.
+    #[serde(default)]
+    pub winner_note: Option<String>,
+    /// Server-issued navigation identity after visibility checks.
+    #[serde(default)]
+    pub tracked_flake: Option<TrackedFlakeIdentity>,
+}
+
+/// Contains the safe representation of one NixOS option.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvaluatedOption {
+    /// Full option path.
+    pub path: String,
+    /// Declared NixOS option type.
+    pub declared_type: String,
+    /// Tagged evaluated value or explicit failure.
+    pub value: SafeOptionValue,
+    /// Complete provenance emitted by the evaluator.
+    pub definitions: Vec<OptionDefinitionProvenance>,
+    /// Whether lower-priority definitions are proven to exist.
+    pub overridden: bool,
+}
+
+/// Reports the result of an explicit evaluation action.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueueEvaluationResponse {
+    /// Full requested revision SHA.
+    pub revision: String,
+    /// Lifecycle after the idempotent action.
+    pub lifecycle: SnapshotLifecycle,
+    /// Whether this request changed the revision to queued.
+    pub queued: bool,
+}
+
+/// Classifies a declared-to-managed flake system relationship.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReconciledFlakeSystemState {
+    /// The selected revision declares a managed configuration.
+    Managed,
+    /// The selected revision declares an unmanaged configuration.
+    DeclaredUnmanaged,
+    /// A managed system is absent from the selected revision.
+    ManagedUndeclared,
+}
+
+/// Represents one system in authoritative flake reconciliation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReconciledFlakeSystem {
+    /// Declared or managed configuration name.
+    pub configuration_name: String,
+    /// Managed Crystal Forge system.
+    pub system_id: Option<Uuid>,
+    /// Managed hostname.
+    pub hostname: Option<String>,
+    /// Visible managed environment name.
+    pub environment_name: Option<String>,
+    /// Visible managed environment color.
+    pub environment_color: Option<String>,
+    /// Reconciled relationship state.
+    pub state: ReconciledFlakeSystemState,
+    /// Full deployed revision when it differs from the selected revision.
+    pub deployed_revision: Option<String>,
+    /// Whether multiple managed hosts collapse onto this output name.
+    pub output_collapsed: bool,
+}
+
+/// Describes bounded top-level flake output collection paging.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlakeOutputPagination {
+    /// Applied zero-based offset.
+    pub offset: usize,
+    /// Applied per-collection limit.
+    pub limit: usize,
+    /// Number of visible reconciliation rows for the active systems filter.
+    #[serde(default)]
+    pub system_total: i64,
+    /// Whether another reconciliation row exists after this page.
+    #[serde(default)]
+    pub systems_has_more: bool,
+}
+
+/// Describes one resolved input revision change.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlakeInputRevisionBump {
+    /// Stable lock node identity.
+    pub node: String,
+    /// Previous full locked revision.
+    pub before: Option<String>,
+    /// Selected full locked revision.
+    pub after: Option<String>,
+}
+
+/// Summarizes selected flake outputs against the Git first parent.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlakeOutputDelta {
+    /// Exact added-system count before the bounded sample was truncated.
+    pub systems_added_total: usize,
+    /// Exact removed-system count before the bounded sample was truncated.
+    pub systems_removed_total: usize,
+    /// Exact added-module count before the bounded sample was truncated.
+    pub modules_added_total: usize,
+    /// Exact removed-module count before the bounded sample was truncated.
+    pub modules_removed_total: usize,
+    /// Exact added-input count before the bounded sample was truncated.
+    pub inputs_added_total: usize,
+    /// Exact removed-input count before the bounded sample was truncated.
+    pub inputs_removed_total: usize,
+    /// Exact input-revision-change count before the bounded sample was truncated.
+    pub input_revision_bumps_total: usize,
+    /// Declared systems added at the selected revision.
+    pub systems_added: Vec<String>,
+    /// Declared systems removed at the selected revision.
+    pub systems_removed: Vec<String>,
+    /// Exported modules added at the selected revision.
+    pub modules_added: Vec<String>,
+    /// Exported modules removed at the selected revision.
+    pub modules_removed: Vec<String>,
+    /// Lock nodes added at the selected revision.
+    pub inputs_added: Vec<String>,
+    /// Lock nodes removed at the selected revision.
+    pub inputs_removed: Vec<String>,
+    /// Lock inputs whose resolved revision changed.
+    pub input_revision_bumps: Vec<FlakeInputRevisionBump>,
+}
+
+/// One safe option declaration exported by a flake module.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FlakeModuleDeclaration {
+    /// Declared option path.
+    pub path: String,
+    /// Declared Nix option type.
+    pub declared_type: String,
+    /// Whether a safe default is present.
+    pub has_default: bool,
+    /// Safe default value when present.
+    pub default: Option<Value>,
+    /// Complete declaration source paths.
+    pub source_paths: Vec<String>,
+}
+
+/// One exported `nixosModules` output and its cached analysis.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FlakeOutputModule {
+    /// Exported module name.
+    pub name: String,
+    /// Module description when emitted.
+    pub description: Option<String>,
+    /// Flake input that owns the exported module attribute.
+    pub source_input: Option<String>,
+    /// Full source revision when available.
+    pub source_revision: Option<String>,
+    /// Source path relative to the owning input root.
+    pub source_path: Option<String>,
+    /// Bounded declaration details.
+    pub declarations: Vec<FlakeModuleDeclaration>,
+    /// Whether `declarations` contains the authoritative complete declaration set.
+    #[serde(default)]
+    pub declarations_complete: bool,
+    /// Managed configurations that consume the module.
+    pub consumers: Vec<String>,
+    /// Authoritative declaration count.
+    pub declaration_count: i64,
+    /// Authoritative consumer count.
+    pub consumer_count: i64,
+    /// Safe module-analysis diagnostic.
+    pub error: Option<String>,
+}
+
+/// Returns one stable page of declarations for an exported module.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FlakeModuleDeclarationsPage {
+    /// Selected flake-output snapshot lifecycle.
+    pub lifecycle: SnapshotLifecycle,
+    /// Full selected revision SHA.
+    pub revision: String,
+    /// Exact exported module name.
+    pub module_name: String,
+    /// Safe lifecycle or integrity diagnostic.
+    pub error: Option<String>,
+    /// Content digest that binds all continuation pages to one snapshot.
+    pub snapshot_token: Option<String>,
+    /// Authoritative declaration count.
+    pub total: i64,
+    /// Applied zero-based offset.
+    pub offset: usize,
+    /// Applied page limit, at most 100.
+    pub limit: usize,
+    /// Declarations in deterministic stable order.
+    pub declarations: Vec<FlakeModuleDeclaration>,
+}
+
+/// One resolved flake lock input.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FlakeOutputInput {
+    /// Stable lock node identity.
+    pub node: String,
+    /// Root input names that resolve to this node.
+    pub names: Vec<String>,
+    /// Whether the root references this node directly.
+    pub direct: bool,
+    /// Whether this node is reachable only transitively.
+    pub transitive: bool,
+    /// Raw follows paths for root aliases.
+    pub follows: Vec<Value>,
+    /// Original lock metadata after server redaction.
+    pub original: Value,
+    /// Locked metadata after server redaction.
+    pub locked: Value,
+    /// Lock source type.
+    pub source_type: String,
+    /// Safe source URL when emitted.
+    pub source: Option<String>,
+    /// Full locked revision when emitted.
+    pub locked_revision: Option<String>,
+    /// Source update timestamp.
+    pub last_modified: Option<i64>,
+    /// Whether the input uses an indirect channel reference.
+    pub channel: bool,
+    /// Whether the lock source is revision-tracked.
+    pub tracked: bool,
+    /// Number of immediate children for a direct root input.
+    pub direct_descendant_count: Option<i64>,
+    /// Number of unique transitive descendants for a direct root input.
+    pub transitive_descendant_count: Option<i64>,
+}
+
+/// Reports whether exported-module evaluation metadata was available.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FlakeModuleEvaluation {
+    /// Whether a nixpkgs library was available for module evaluation.
+    pub available: bool,
+    /// Library source used for evaluation.
+    pub source: Option<String>,
+    /// Safe diagnostic when evaluation was unavailable.
+    pub error: Option<String>,
+}
+
+/// Typed configuration-independent flake output payload.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FlakeOutputPayload {
+    /// Declared `nixosConfigurations` names.
+    pub declared_systems: Vec<String>,
+    /// Exported module analysis.
+    pub exported_modules: Vec<FlakeOutputModule>,
+    /// Resolved lock inputs.
+    pub inputs: Vec<FlakeOutputInput>,
+    /// Authoritative direct input count.
+    pub direct_input_count: i64,
+    /// Authoritative resolved input count.
+    pub resolved_input_count: i64,
+    /// Safe lock-read diagnostic.
+    pub lock_error: Option<String>,
+    /// Exported-module evaluation state.
+    pub module_evaluation: FlakeModuleEvaluation,
+    /// Distinct full nixpkgs revisions in the lock graph.
+    #[serde(rename = "nixpkgsRevisions")]
+    pub nixpkgs_revisions: Vec<String>,
+    /// Whether multiple nixpkgs revisions are resolved.
+    pub multiple_nixpkgs_revisions: bool,
+}
+
+/// Returns cached revision-scoped flake outputs and reconciliation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FlakeOutputSnapshotResponse {
+    /// Snapshot lifecycle.
+    pub lifecycle: SnapshotLifecycle,
+    /// Full selected revision SHA.
+    pub revision: String,
+    /// Full Git first-parent revision when known.
+    pub first_parent_revision: Option<String>,
+    /// Whether Git authoritatively resolved parent data.
+    pub first_parent_resolved: bool,
+    /// Whether the first-parent output snapshot is available.
+    pub comparison_available: bool,
+    /// Safe failure diagnostic.
+    pub error: Option<String>,
+    /// Digest that binds continuation pages to the selected snapshot version.
+    pub snapshot_token: Option<String>,
+    /// Selected-revision output payload.
+    pub outputs: Option<FlakeOutputPayload>,
+    /// First-parent output payload when available.
+    pub previous_outputs: Option<FlakeOutputPayload>,
+    /// Typed first-parent delta when comparison is available.
+    pub delta: Option<FlakeOutputDelta>,
+    /// Authoritative system reconciliation.
+    pub systems: Vec<ReconciledFlakeSystem>,
+    /// Number of managed systems for the flake.
+    pub managed_system_count: i64,
+    /// Number of declared configurations at the revision.
+    pub declared_system_count: i64,
+    /// Number of declared configurations in the usable Git first parent.
+    pub previous_declared_system_count: Option<i64>,
+    /// Revision-global visible declared-but-unmanaged count.
+    pub declared_unmanaged_count: i64,
+    /// Revision-global visible managed-but-undeclared count.
+    pub managed_undeclared_count: i64,
+    /// Revision-global count of visible managed rows sharing an output name.
+    #[serde(default)]
+    pub output_collapsed_count: i64,
+    /// Revision-global count of visible systems pinned away from this revision.
+    #[serde(default)]
+    pub pinned_revision_count: i64,
+    /// Revision-global count of direct inputs older than 90 days.
+    #[serde(default)]
+    pub stale_direct_input_count: i64,
+    /// Number of exported modules at the revision before pagination.
+    pub exported_module_count: i64,
+    /// Applied collection pagination.
+    pub pagination: FlakeOutputPagination,
+}
+
+/// Selects one flake-system reconciliation subset.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FlakeSystemFilter {
+    /// Returns every visible reconciliation row.
+    #[default]
+    All,
+    /// Returns declarations without a visible managed system.
+    DeclaredUnmanaged,
+    /// Returns visible managed systems absent from the revision.
+    ManagedUndeclared,
+}
+
+impl FlakeSystemFilter {
+    /// Returns the server query representation.
+    pub const fn as_query_value(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::DeclaredUnmanaged => "declared_unmanaged",
+            Self::ManagedUndeclared => "managed_undeclared",
+        }
+    }
 }
 
 fn default_sync_status() -> String {
@@ -3005,9 +3701,80 @@ pub struct SystemRollbackGenerationRequest {
     pub store_path: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Selects how a manual deployment request treats an `auto_latest` policy.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManualDeploymentAction {
+    /// Deploy under the current manual or pinned policy.
+    #[default]
+    Deploy,
+    /// Deploy once and preserve the persisted `auto_latest` policy.
+    ContinueAutoLatest,
+    /// Persist the manual policy before attempting deployment.
+    ConvertToManual,
+}
+
+/// Requests deployment of a specific commit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeploySystemRequest {
+    /// Full 40- or 64-character hexadecimal commit identity to deploy.
     pub commit_sha: String,
+    /// Specifies how the request handles an `auto_latest` system.
+    #[serde(default)]
+    pub action: ManualDeploymentAction,
+    /// Stable identity reused while retrying the same deployment intent.
+    pub request_id: Option<Uuid>,
+}
+
+/// Persisted system policy after a manual deployment request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManualDeploymentPolicyState {
+    /// Automatic latest-commit deployment remains persisted.
+    AutoLatest,
+    /// Manual deployment is persisted.
+    Manual,
+    /// The pinned deployment policy remains persisted.
+    Pinned,
+}
+
+/// Policy conversion result for a manual deployment request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManualDeploymentConversionState {
+    /// The request did not ask to change policy.
+    NotRequested,
+    /// This request persisted the manual policy.
+    Converted,
+    /// An earlier request already persisted the manual policy.
+    AlreadyManual,
+}
+
+/// Pending deployment result for a manual deployment request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManualDeploymentRequestState {
+    /// This request created pending deployment work.
+    Queued,
+    /// Active pending work already exists for this target.
+    AlreadyQueued,
+    /// No deployment work was queued by this attempt.
+    Failed,
+}
+
+/// Reports persisted policy and deployment state independently.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManualDeploymentResponse {
+    /// Persisted policy after the request.
+    pub policy: ManualDeploymentPolicyState,
+    /// Policy conversion result.
+    pub conversion: ManualDeploymentConversionState,
+    /// Pending deployment result.
+    pub deployment: ManualDeploymentRequestState,
+    /// New or reused pending deployment identity.
+    pub deployment_id: Option<Uuid>,
+    /// Human-readable result including partial success.
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

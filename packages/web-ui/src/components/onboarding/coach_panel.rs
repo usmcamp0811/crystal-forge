@@ -166,11 +166,11 @@ fn store_setup_context() {
 
 fn route_for_step(step: CoachStep) -> Route {
     match step.destination {
-        CoachDestination::Environments => Route::EnvironmentsView {},
-        CoachDestination::Flakes => Route::FlakesView {},
+        CoachDestination::Environments => Route::EnvironmentsView { query: String::new() },
+        CoachDestination::Flakes => Route::FlakesView { query: String::new() },
         CoachDestination::Builders => Route::BuildersView {},
         CoachDestination::Caches => Route::CachesView {},
-        CoachDestination::Systems => Route::SystemsView {},
+        CoachDestination::Systems => Route::SystemsView { query: String::new() },
         CoachDestination::Policies => Route::PoliciesView {},
         CoachDestination::Compliance => Route::ComplianceView {
             bundle: String::new(),

@@ -964,7 +964,6 @@ pub fn ComplianceView(
                                 header { class: "fl-tray-head",
                                     div { style: "display:flex;align-items:center;gap:12px;min-width:0;flex:1;", Icon { name: IconName::Shield, size: 18 }, span { id: "compliance-bundle-drawer-title", style: "font-size:11px;color:var(--cf-text-muted);", "Compliance bundle · {bundle.name}" } }
                                     div { style: "display:flex;gap:6px;",
-                                        if is_admin { button { class: "btn btn-ghost focus-ring xs", "data-testid": "compliance-edit-bundle", onclick: move |_| show_edit_bundle.set(true), Icon { name: IconName::Edit, size: 12 }, " Edit bundle" } }
                                         button { class: "btn btn-ghost xs focus-ring", aria_pressed: bundle_drawer_expanded(), onclick: move |_| bundle_drawer_expanded.toggle(), if bundle_drawer_expanded() { "Restore" } else { "Expand" } }
                                         button {
                                             class: "btn-icon focus-ring",

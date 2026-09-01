@@ -2313,10 +2313,93 @@ pub struct SystemRollbackGenerationRequest {
     pub store_path: String,
 }
 
+/// Selects how a manual deployment request treats an `auto_latest` policy.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManualDeploymentAction {
+    /// Preserves the pre-TASK-440 omitted field for manual and pinned systems.
+    /// An `auto_latest` system must select an explicit action.
+    #[default]
+    Legacy,
+    /// Deploys under the system's current manual or pinned policy.
+    Deploy,
+    /// Deploys once without changing the persisted `auto_latest` policy.
+    ContinueAutoLatest,
+    /// Persists the manual policy before it attempts to deploy.
+    ConvertToManual,
+}
+
 /// Request payload for deploying a system with a specific commit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeploySystemRequest {
+    /// Full SHA-1 or SHA-256 commit identity to deploy.
     pub commit_sha: String,
+    /// Specifies how the request handles an `auto_latest` system.
+    #[serde(default)]
+    pub action: ManualDeploymentAction,
+    /// Stable retry identity. New clients must reuse this UUID until completion.
+    ///
+    /// When omitted, the server derives an identity that replays pending and
+    /// terminal results for 24 hours. A request after that window can redeploy
+    /// the same target. Reusing an explicit UUID with another system, commit,
+    /// or action returns a typed conflict before policy conversion.
+    #[serde(default)]
+    pub request_id: Option<Uuid>,
+}
+
+/// Reports the persisted deployment policy after a manual deployment request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManualDeploymentPolicyState {
+    /// The system remains on automatic latest-commit deployment.
+    AutoLatest,
+    /// The system uses manual deployment.
+    Manual,
+    /// The system remains pinned.
+    Pinned,
+}
+
+/// Reports whether an `auto_latest` to manual conversion occurred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManualDeploymentConversionState {
+    /// The request did not ask to change the persisted policy.
+    NotRequested,
+    /// The request changed the persisted policy to manual.
+    Converted,
+    /// A prior request already changed the persisted policy to manual.
+    AlreadyManual,
+}
+
+/// Reports whether the deployment attempt created or reused pending work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManualDeploymentRequestState {
+    /// The request created a pending deployment.
+    Queued,
+    /// The target already had an active pending deployment.
+    AlreadyQueued,
+    /// The deployment could not be queued.
+    Failed,
+    /// The request ID was already bound to a different commit or action.
+    Conflict,
+}
+
+/// Describes the persisted policy and deployment result independently.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManualDeploymentResponse {
+    /// Legacy response status retained for deployed clients.
+    pub status: String,
+    /// Persisted policy after this request.
+    pub policy: ManualDeploymentPolicyState,
+    /// Policy conversion result for this request.
+    pub conversion: ManualDeploymentConversionState,
+    /// Pending deployment result for this request.
+    pub deployment: ManualDeploymentRequestState,
+    /// Existing or newly created pending deployment identity.
+    pub deployment_id: Option<Uuid>,
+    /// Human-readable result that does not hide partial success.
+    pub message: String,
 }
 
 /// Response containing available commits for deployment.

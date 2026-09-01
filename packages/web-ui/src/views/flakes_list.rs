@@ -1,6 +1,8 @@
 //! Flakes list view with table/card toggle.
 
 use std::collections::{HashMap, HashSet};
+#[cfg(target_arch = "wasm32")]
+use std::rc::Rc;
 
 use chrono::{DateTime, Duration, Utc};
 use dioxus::prelude::*;
@@ -25,22 +27,27 @@ use crate::alerts::{
 use crate::api::client::{
     ApiClientError, accept_flake_history_rewrite, create_flake, delete_flake,
     delete_flake_credentials, fetch_commit_diff, fetch_cve_scan_status, fetch_environments,
-    fetch_flake_credentials, fetch_flake_timeline_for_tray, fetch_flakes, put_flake_credentials,
-    request_sync_all_flakes, request_sync_flake, test_flake_credentials,
-    trigger_flake_config_cve_scan, update_flake,
+    fetch_flake_credentials, fetch_flake_module_declarations, fetch_flake_revision_outputs,
+    fetch_flake_timeline_for_tray, fetch_flakes, put_flake_credentials, request_sync_all_flakes,
+    request_sync_flake, test_flake_credentials, trigger_flake_config_cve_scan, update_flake,
 };
 use crate::api::models::{
     BuildStatus as ApiBuildStatus, CreateFlakeCredentialRequest, CreateFlakeRequest,
-    EnvironmentSummary, FlakeCommitSystemPath, FlakeRegistryItem, FlakeSummary, FlakeTimeline,
-    TestFlakeCredentialRequest, UpdateFlakeRequest,
+    EnvironmentSummary, FlakeCommitSystemPath, FlakeModuleDeclarationsPage, FlakeOutputDelta,
+    FlakeOutputInput, FlakeOutputModule, FlakeOutputPayload, FlakeOutputSnapshotResponse,
+    FlakeRegistryItem, FlakeSummary, FlakeSystemFilter, FlakeTimeline, ReconciledFlakeSystem,
+    ReconciledFlakeSystemState, SnapshotLifecycle, TestFlakeCredentialRequest, UpdateFlakeRequest,
 };
 use crate::components::flake::FlakeSyncErrorBanner;
+use crate::components::icon::{Icon, IconName};
 use crate::components::layout::Card;
 use crate::components::notifications::{AlertBanner, AlertSeverity};
 use crate::routes::Route;
 use crate::state::app_state::AppState;
 use crate::state::auth;
-use crate::state::navigation_focus::{FocusTarget, NavigationFocus};
+use crate::state::navigation_focus::{
+    FlakeNavigation, FlakePane, FocusTarget, NavigationFocus, current_query, update_query,
+};
 use crate::theme;
 use crate::views::systems_mock::mock_system_details;
 
@@ -79,6 +86,82 @@ fn truncate_system_label(raw: &str) -> String {
         format!("{short}...")
     } else {
         short
+    }
+}
+
+fn stable_dom_id(prefix: &str, value: &str) -> String {
+    let suffix = value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    format!("{prefix}-{suffix}")
+}
+
+fn focus_element_by_id(id: &str) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        if let Some(element) = web_sys::window()
+            .and_then(|window| window.document())
+            .and_then(|document| document.get_element_by_id(id))
+            .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok())
+        {
+            let _ = element.focus();
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = id;
+    }
+}
+
+fn trap_dialog_focus(event: &KeyboardEvent, root_id: &str) {
+    if event.key() != Key::Tab {
+        return;
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+            return;
+        };
+        let Some(root) = document.get_element_by_id(root_id) else {
+            return;
+        };
+        let Ok(nodes) = root.query_selector_all(
+            "button:not([disabled]),a[href],input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex='-1'])",
+        ) else {
+            return;
+        };
+        let focusable = (0..nodes.length())
+            .filter_map(|index| nodes.item(index))
+            .filter_map(|node| node.dyn_into::<web_sys::HtmlElement>().ok())
+            .collect::<Vec<_>>();
+        let (Some(first), Some(last)) = (focusable.first(), focusable.last()) else {
+            return;
+        };
+        let active = document.active_element();
+        let root_is_active = active.as_ref() == Some(&root);
+        let wraps_backward = event.modifiers().shift()
+            && (root_is_active || active.as_ref() == Some(first.as_ref()));
+        let wraps_forward = !event.modifiers().shift()
+            && (root_is_active || active.as_ref() == Some(last.as_ref()));
+        if wraps_backward || wraps_forward {
+            event.prevent_default();
+            let _ = if wraps_backward {
+                last.focus()
+            } else {
+                first.focus()
+            };
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = root_id;
     }
 }
 
@@ -2754,6 +2837,101 @@ fn escape_html(value: &str) -> String {
 mod tests {
     use super::*;
 
+    fn declaration_page(
+        offset: usize,
+        total: i64,
+        token: &str,
+        paths: &[&str],
+    ) -> FlakeModuleDeclarationsPage {
+        FlakeModuleDeclarationsPage {
+            lifecycle: SnapshotLifecycle::Available,
+            revision: "a".repeat(40),
+            module_name: "large".into(),
+            error: None,
+            snapshot_token: Some(token.into()),
+            total,
+            offset,
+            limit: 100,
+            declarations: paths
+                .iter()
+                .map(|path| crate::api::models::FlakeModuleDeclaration {
+                    path: (*path).into(),
+                    declared_type: "string".into(),
+                    has_default: false,
+                    default: None,
+                    source_paths: Vec::new(),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn module_declaration_pages_append_without_duplicates_or_skips() {
+        let first = declaration_page(0, 3, "digest", &["a", "b"]);
+        let second = declaration_page(2, 3, "digest", &["c"]);
+        let merged = merge_module_declaration_pages(first, second)
+            .expect("contiguous pages from one snapshot should merge");
+        assert_eq!(
+            merged
+                .declarations
+                .iter()
+                .map(|declaration| declaration.path.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "b", "c"]
+        );
+    }
+
+    #[test]
+    fn module_declaration_pages_reject_stale_overlapping_or_skipped_pages() {
+        let first = declaration_page(0, 4, "digest", &["a", "b"]);
+        assert!(
+            merge_module_declaration_pages(
+                first.clone(),
+                declaration_page(2, 4, "replacement", &["c"]),
+            )
+            .is_err()
+        );
+        assert!(
+            merge_module_declaration_pages(
+                first.clone(),
+                declaration_page(3, 4, "digest", &["d"]),
+            )
+            .is_err()
+        );
+        assert!(
+            merge_module_declaration_pages(first, declaration_page(2, 4, "digest", &["b"]))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn module_declaration_page_zero_requires_exact_identity_and_coherent_metadata() {
+        let revision = "a".repeat(40);
+        let page = declaration_page(0, 2, "opaque-token", &["a", "b"]);
+        assert!(validate_module_declaration_page_zero(page.clone(), &revision, "large").is_ok());
+
+        let mut malformed = page.clone();
+        malformed.module_name = "other".into();
+        assert!(validate_module_declaration_page_zero(malformed, &revision, "large").is_err());
+        let mut malformed = page.clone();
+        malformed.snapshot_token = Some("  ".into());
+        assert!(validate_module_declaration_page_zero(malformed, &revision, "large").is_err());
+        let mut malformed = page.clone();
+        malformed.total = 1;
+        assert!(validate_module_declaration_page_zero(malformed, &revision, "large").is_err());
+        let mut malformed = page;
+        malformed.offset = 1;
+        assert!(validate_module_declaration_page_zero(malformed, &revision, "large").is_err());
+    }
+
+    #[test]
+    fn flake_snapshot_poll_backoff_is_bounded() {
+        assert_eq!(flake_snapshot_poll_delay_ms(0), 3_000);
+        assert_eq!(flake_snapshot_poll_delay_ms(1), 6_000);
+        assert_eq!(flake_snapshot_poll_delay_ms(2), 12_000);
+        assert_eq!(flake_snapshot_poll_delay_ms(20), 12_000);
+    }
+
     #[test]
     fn normalize_commit_message_uses_hash_placeholder_when_empty() {
         assert_eq!(normalize_commit_message("   ", "abc1234"), "Commit abc1234");
@@ -2878,6 +3056,54 @@ mod tests {
     }
 
     #[test]
+    fn displayed_sha_prefix_never_aliases_full_commit_identity() {
+        use crate::api::models::FlakeCommit;
+
+        let shared_prefix = "abcdef0";
+        let first_sha = format!("{shared_prefix}111111111111111111111111111111111");
+        let second_sha = format!("{shared_prefix}222222222222222222222222222222222");
+        let committed_at = Utc::now();
+        let commits = vec![
+            FlakeCommit {
+                id: 1,
+                hash: first_sha.clone(),
+                message: "first".to_string(),
+                author: "Alice".to_string(),
+                committed_at,
+                system_count: 0,
+                commits_behind: 0,
+                systems: vec![],
+                system_paths: vec![],
+                build_status: None,
+                evaluation_status: None,
+                evaluation_error_message: None,
+            },
+            FlakeCommit {
+                id: 2,
+                hash: second_sha.clone(),
+                message: "second".to_string(),
+                author: "Bob".to_string(),
+                committed_at,
+                system_count: 0,
+                commits_behind: 0,
+                systems: vec![],
+                system_paths: vec![],
+                build_status: None,
+                evaluation_status: None,
+                evaluation_error_message: None,
+            },
+        ];
+
+        let mapped = map_timeline_commits_to_view(&commits);
+        assert_eq!(mapped[0].sha, shared_prefix);
+        assert_eq!(mapped[1].sha, shared_prefix);
+        assert!(commit_has_full_sha(&mapped[0], &first_sha));
+        assert!(!commit_has_full_sha(&mapped[0], &second_sha));
+        assert!(commit_has_full_sha(&mapped[1], &second_sha));
+        assert!(!commit_has_full_sha(&mapped[1], &first_sha));
+    }
+
+    #[test]
     fn extract_history_rewrite_conflict_matches_genuine_409_marker() {
         let body = "Git history rewrite detected for boterf-config. Review and accept rewrite before sync.".to_string();
         let error = ApiClientError::Status {
@@ -2946,58 +3172,188 @@ mod tests {
         assert_eq!(mapped.environment, "");
         assert_eq!(mapped.description, "Build scope: cf_systems_only");
     }
+
+    #[test]
+    fn output_payload_helpers_keep_authoritative_revision_data() {
+        let snapshot: FlakeOutputSnapshotResponse = serde_json::from_value(serde_json::json!({
+            "lifecycle": "available", "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "first_parent_revision": null, "first_parent_resolved": true,
+            "comparison_available": false, "error": null,
+            "snapshot_token": "1".repeat(64),
+            "outputs": {
+                "declared_systems": ["web", "db"],
+                "exported_modules": [{"name": "default", "description": null, "source_input": "self", "source_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "source_path": "flake.nix", "declarations": [], "consumers": [], "declaration_count": 0, "consumer_count": 0, "error": null}],
+                "inputs": [
+                    {"node": "flake-utils", "names": [], "direct": false, "transitive": true, "follows": [], "original": {}, "locked": {}, "source_type": "github", "source": "github:numtide/flake-utils", "locked_revision": "dddddddddddddddddddddddddddddddddddddddd", "last_modified": 2, "channel": false, "tracked": true, "direct_descendant_count": null, "transitive_descendant_count": null},
+                    {"node": "nixpkgs", "names": ["nixpkgs"], "direct": true, "transitive": false, "follows": [], "original": {}, "locked": {}, "source_type": "github", "source": "github:NixOS/nixpkgs", "locked_revision": "cccccccccccccccccccccccccccccccccccccccc", "last_modified": 1, "channel": false, "tracked": true, "direct_descendant_count": 1, "transitive_descendant_count": 1}
+                ],
+                "direct_input_count": 1, "resolved_input_count": 2, "lock_error": null,
+                "module_evaluation": {"available": true, "source": "nixpkgs", "error": null},
+                "nixpkgsRevisions": ["cccccccccccccccccccccccccccccccccccccccc"],
+                "multiple_nixpkgs_revisions": false
+            },
+            "previous_outputs": null, "delta": null, "systems": [],
+            "managed_system_count": 0, "declared_system_count": 2,
+            "previous_declared_system_count": null,
+            "declared_unmanaged_count": 2, "managed_undeclared_count": 0,
+            "output_collapsed_count": 0, "pinned_revision_count": 0,
+            "stale_direct_input_count": 1,
+            "exported_module_count": 1,
+            "pagination": {"offset": 0, "limit": 100, "system_total": 0, "systems_has_more": false}
+        })).expect("typed output payload");
+
+        assert_eq!(flake_output_modules(&snapshot)[0].name, "default");
+        assert_eq!(
+            flake_output_inputs(&snapshot)[0].locked_revision.as_deref(),
+            Some("cccccccccccccccccccccccccccccccccccccccc")
+        );
+        assert_eq!(authoritative_input_count(Some(&snapshot)), 1);
+        let inputs = flake_output_inputs(&snapshot);
+        assert_eq!(inputs.len(), 2);
+        assert!(inputs[0].direct);
+        assert!(inputs[1].transitive);
+        assert_eq!(authoritative_system_reconciliation_count(&snapshot), 2);
+        assert_eq!(snapshot.exported_module_count, 1);
+    }
+
+    #[test]
+    fn output_collection_pages_merge_without_replacing_authoritative_totals() {
+        let page = |offset, name| {
+            serde_json::from_value::<FlakeOutputSnapshotResponse>(serde_json::json!({
+                "lifecycle": "available", "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "first_parent_revision": null, "first_parent_resolved": true,
+                "comparison_available": false, "error": null,
+                "snapshot_token": "2".repeat(64),
+                "outputs": {
+                    "declared_systems": [name], "exported_modules": [], "inputs": [],
+                    "direct_input_count": 0, "resolved_input_count": 0, "lock_error": null,
+                    "module_evaluation": {"available": true, "source": "nixpkgs", "error": null},
+                    "nixpkgsRevisions": [], "multiple_nixpkgs_revisions": false
+                },
+                "previous_outputs": null, "delta": null,
+                "systems": [{"configuration_name": name, "system_id": null, "hostname": null, "environment_name": null, "environment_color": null, "state": "declared_unmanaged", "deployed_revision": null, "output_collapsed": false}],
+                "managed_system_count": 7, "declared_system_count": 2,
+                "previous_declared_system_count": null,
+                "declared_unmanaged_count": 2, "managed_undeclared_count": 1,
+                "output_collapsed_count": 3, "pinned_revision_count": 4,
+                "stale_direct_input_count": 2,
+                "exported_module_count": 5,
+                "pagination": {"offset": offset, "limit": 1, "system_total": 2, "systems_has_more": offset == 0}
+            }))
+            .expect("output page")
+        };
+        let first = page(0, "web");
+        let second = page(1, "db");
+
+        assert!(flake_output_pane_has_more(FlakePane::Systems, &first));
+        assert!(flake_output_pane_has_more(FlakePane::Modules, &first));
+        assert!(!flake_output_pane_has_more(FlakePane::Inputs, &first));
+        let mut replacement = second.clone();
+        replacement.snapshot_token = Some("3".repeat(64));
+        assert!(merge_flake_output_pages(first.clone(), replacement).is_err());
+        let merged = merge_flake_output_pages(first, second).expect("same snapshot pages");
+        assert_eq!(merged.managed_system_count, 7);
+        assert_eq!(merged.declared_system_count, 2);
+        assert_eq!(merged.exported_module_count, 5);
+        assert_eq!(merged.output_collapsed_count, 3);
+        assert_eq!(merged.systems.len(), 2);
+        assert_eq!(
+            merged.outputs.expect("outputs").declared_systems,
+            ["web", "db"]
+        );
+    }
+
+    #[test]
+    fn output_page_merge_deduplicates_revision_global_collections() {
+        let mut first = serde_json::from_value::<FlakeOutputDelta>(serde_json::json!({
+            "systems_added_total": 1, "systems_removed_total": 0,
+            "modules_added_total": 1, "modules_removed_total": 0,
+            "inputs_added_total": 1, "inputs_removed_total": 0,
+            "input_revision_bumps_total": 1,
+            "systems_added": ["web"], "systems_removed": [],
+            "modules_added": ["base"], "modules_removed": [],
+            "inputs_added": ["nixpkgs"], "inputs_removed": [],
+            "input_revision_bumps": [{"node": "nixpkgs", "before": "a", "after": "b"}]
+        }))
+        .expect("first delta");
+        let second = first.clone();
+        first = merge_flake_output_deltas(Some(first), Some(second)).expect("merged delta");
+        assert_eq!(first.systems_added, ["web"]);
+        assert_eq!(first.modules_added, ["base"]);
+        assert_eq!(first.inputs_added, ["nixpkgs"]);
+        assert_eq!(first.input_revision_bumps.len(), 1);
+    }
+
+    #[test]
+    fn bounded_delta_titles_report_exact_totals_and_omitted_samples() {
+        assert_eq!(
+            delta_sample_title(&["web".into()], 3),
+            "web\n2 more not shown"
+        );
+        let delta: FlakeOutputDelta = serde_json::from_value(serde_json::json!({
+            "systems_added_total": 3, "systems_removed_total": 2,
+            "modules_added_total": 0, "modules_removed_total": 0,
+            "inputs_added_total": 0, "inputs_removed_total": 0,
+            "input_revision_bumps_total": 1,
+            "systems_added": ["web"], "systems_removed": ["old"],
+            "modules_added": [], "modules_removed": [],
+            "inputs_added": [], "inputs_removed": [], "input_revision_bumps": []
+        }))
+        .expect("bounded delta");
+        assert_eq!(flake_delta_total(&delta), 6);
+    }
+
+    #[test]
+    fn declared_output_collapse_requires_a_strict_first_parent_reduction() {
+        assert_eq!(declared_output_collapse(Some(12), 4), Some(12));
+        assert_eq!(declared_output_collapse(Some(12), 12), None);
+        assert_eq!(declared_output_collapse(Some(12), 14), None);
+        assert_eq!(declared_output_collapse(None, 0), None);
+    }
+
+    #[test]
+    fn follows_strings_and_missing_module_bindings_are_truthful() {
+        assert_eq!(
+            render_follows_value(&serde_json::json!("nixpkgs")),
+            "nixpkgs"
+        );
+        assert_eq!(
+            render_follows_value(&serde_json::json!(["foo", "bar"])),
+            "foo/bar"
+        );
+
+        let module: FlakeOutputModule = serde_json::from_value(serde_json::json!({
+            "name": "base", "description": null, "source_input": null,
+            "source_revision": null, "source_path": null, "declarations": [],
+            "declarations_complete": false, "consumers": [], "declaration_count": 0,
+            "consumer_count": 0, "error": null
+        }))
+        .expect("module");
+        assert_eq!(module_binding_label(&module), "Export binding unavailable");
+    }
+
+    #[test]
+    fn rollout_denominator_uses_authoritative_managed_fleet_total() {
+        let mut commits = mock_commits_for_flake(1);
+        apply_managed_rollout_total(&mut commits, 19);
+        assert!(commits.iter().all(|commit| commit.rollout_total == 19));
+    }
+
+    #[test]
+    fn registration_prefill_preserves_configuration_flake_and_branch() {
+        let url = registration_prefill_url("host one", "platform/core", "release 1");
+        assert!(url.contains("hostname=host%20one"));
+        assert!(url.contains("configuration=host%20one"));
+        assert!(url.contains("flake_name=platform%2Fcore"));
+        assert!(url.contains("branch=release%201"));
+    }
 }
 
-// ============================================================================
-// NEW IMPLEMENTATION - Phase 1: PageHeader + FilterBar
-// Matching FlakesView.jsx lines 24-52 EXACTLY
-// ============================================================================
-
-// ============================================================================
-// FlakesListViewNew - Complete UI implementation matching JSX design
-// ============================================================================
-//
-// INTEGRATION STATUS: UI Complete, API Ready
-//
-// This component implements the complete FlakesView JSX design with all visual
-// components functional. To wire to real API data, follow this integration guide:
-//
-// PHASE 7-8 INTEGRATION CHECKLIST:
-//
-// 1. Replace MockFlakeItem with FlakeRegistryItem from api::models
-//    - Add flake resource loading via use_resource + fetch_flakes()
-//    - Handle loading/error states with appropriate UI
-//    - Map system_count from i64 to i32 for display
-//
-// 2. Replace static commit samples with FlakeTimeline API data
-//    - Use fetch_flake_timelines_for_ids([flake.id])
-//    - Map FlakeCommit to commit list structure
-//    - Extract hash (first 7 chars), message, author, committed_at
-//
-// 3. Replace static file samples with fetch_commit_diff()
-//    - Call fetch_commit_diff(flake_id, commit_hash)
-//    - Parse unified diff to extract file list with add/del stats
-//    - Use existing diff parsing logic in DiffModalNew
-//
-// 4. Wire sync actions
-//    - "Sync all" button → request_sync_all_flakes()
-//    - Per-flake sync button → request_sync_flake(id)
-//    - Show mutation response feedback
-//
-// 5. Wire deployment/build status
-//    - Map FlakeCommit.build_status to PipelinePillNew
-//    - Map system deployment counts to RolloutPillNew
-//    - Use FlakeCommit.evaluation_status for eval pill
-//
-// 6. Add real-time updates
-//    - Subscribe to flake sync WebSocket events
-//    - Update commit timeline when new commits arrive
-//    - Refresh flake list on sync completion
-//
-/// FlakesListViewNew - Pixel-perfect rebuild matching JSX design mockup.
-/// Uses live API data for flakes, timelines, and commit diffs.
+/// Renders the flake registry, revision panes, and commit diffs.
+///
+/// `initial_query` preserves tray state parsed by Dioxus during a direct page load.
 #[component]
-pub fn FlakesListViewNew() -> Element {
+pub fn FlakesListViewNew(initial_query: String) -> Element {
     let nav = navigator();
     let mut navigation_focus = use_context::<Signal<Option<NavigationFocus>>>();
     let app_state = use_context::<Signal<AppState>>();
@@ -3031,9 +3387,43 @@ pub fn FlakesListViewNew() -> Element {
     let mut flakes_ack_in_flight = use_signal(|| false);
     let mut flakes_last_ack_attempt_cursor = use_signal(|| None::<String>);
     let mut flakes_local_ack_hidden = use_signal(|| false);
+    let initial_search = if initial_query.is_empty() {
+        current_query()
+    } else {
+        format!("?{initial_query}")
+    };
+    let initial_flake_navigation = FlakeNavigation::from_query(&initial_search);
+    let mut flake_navigation = use_signal(|| initial_flake_navigation.clone());
+    #[cfg(target_arch = "wasm32")]
+    {
+        let popstate_listener = use_hook(|| {
+            let callback = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+                flake_navigation.set(FlakeNavigation::from_query(&current_query()));
+            });
+            if let Some(window) = web_sys::window() {
+                let _ = window.add_event_listener_with_callback(
+                    "popstate",
+                    callback.as_ref().unchecked_ref(),
+                );
+            }
+            Rc::new(callback)
+        });
+        let listener_for_drop = popstate_listener.clone();
+        use_drop(move || {
+            if let Some(window) = web_sys::window() {
+                let _ = window.remove_event_listener_with_callback(
+                    "popstate",
+                    listener_for_drop.as_ref().as_ref().unchecked_ref(),
+                );
+            }
+        });
+    }
     let focus_flake_id = query_param("focus_flake_id").and_then(|value| value.parse::<i32>().ok());
-    let focus_sha = query_param("focus_sha");
-    let focus_meta = if focus_sha.is_some() {
+    let legacy_focus_sha = initial_flake_navigation
+        .revision
+        .clone()
+        .or_else(|| query_param("focus_sha"));
+    let focus_meta = if legacy_focus_sha.is_some() {
         Some(CommitFocusMeta {
             msg: query_param("focus_msg"),
             author: query_param("focus_author"),
@@ -3175,24 +3565,33 @@ pub fn FlakesListViewNew() -> Element {
     {
         let all_flakes = all_flakes.clone();
         let mut selected_flake = selected_flake.clone();
+        let flakes_resource = flakes_resource;
         use_effect(move || {
-            if selected_flake.read().is_some() {
+            let _ = flakes_resource.read();
+            let target = flake_navigation.read().clone();
+            let target_id = target.flake_id.or(focus_flake_id);
+            if target_id.is_none() && target.flake_name.is_none() {
+                if selected_flake.read().is_some() {
+                    selected_flake.set(None);
+                }
                 return;
             }
-            let Some(target_id) = focus_flake_id else {
-                return;
-            };
-            if let Some(flake) = all_flakes.iter().find(|flake| flake.id == target_id) {
-                selected_flake.set(Some(flake.clone()));
-                // Clear all focus params so closing and re-opening the panel stays closed
-                // and browser history does not retain stale metadata details.
-                clear_url_params(&[
-                    "focus_flake_id",
-                    "focus_sha",
-                    "focus_msg",
-                    "focus_author",
-                    "focus_at",
-                ]);
+            let matched = all_flakes.iter().find(|flake| {
+                target_id == Some(flake.id)
+                    || target
+                        .flake_name
+                        .as_ref()
+                        .is_some_and(|name| name.eq_ignore_ascii_case(&flake.name))
+            });
+            if let Some(flake) = matched {
+                if selected_flake.read().as_ref().map(|item| item.id) != Some(flake.id) {
+                    selected_flake.set(Some(flake.clone()));
+                }
+            } else if !all_flakes.is_empty() {
+                let cleared = FlakeNavigation::cleared();
+                update_query(&cleared.to_query(&current_query()), false);
+                flake_navigation.set(cleared);
+                selected_flake.set(None);
             }
         });
     }
@@ -3455,7 +3854,12 @@ pub fn FlakesListViewNew() -> Element {
 
                     if mode == "table" {
                         let all_flakes_for_edit = all_flakes.clone();
-                        rsx! { FlakeTableNew { flakes: filtered_flakes.clone(), selected_id, is_admin: is_admin_user, env_colors: db_environments.clone(), flash_errors: flash_flakes, on_select: move |f| selected_flake.set(Some(f)), on_sync: move |flake_id| {
+                        rsx! { FlakeTableNew { flakes: filtered_flakes.clone(), selected_id, is_admin: is_admin_user, env_colors: db_environments.clone(), flash_errors: flash_flakes, on_select: move |f: MockFlakeItem| {
+                            let next = FlakeNavigation { flake_id: Some(f.id), ..Default::default() };
+                            update_query(&next.to_query(&current_query()), true);
+                            flake_navigation.set(next);
+                            selected_flake.set(Some(f));
+                        }, on_sync: move |flake_id| {
                             let mut reload_nonce = reload_nonce.clone();
                             spawn(async move {
                                 let result = request_sync_flake(flake_id).await;
@@ -3528,7 +3932,12 @@ pub fn FlakesListViewNew() -> Element {
                         } } }
                     } else {
                         let all_flakes_for_edit = all_flakes.clone();
-                        rsx! { FlakeCardsNew { flakes: filtered_flakes.clone(), selected_id, is_admin: is_admin_user, env_colors: db_environments.clone(), flash_errors: flash_flakes, on_select: move |f| selected_flake.set(Some(f)), on_sync: move |flake_id| {
+                        rsx! { FlakeCardsNew { flakes: filtered_flakes.clone(), selected_id, is_admin: is_admin_user, env_colors: db_environments.clone(), flash_errors: flash_flakes, on_select: move |f: MockFlakeItem| {
+                            let next = FlakeNavigation { flake_id: Some(f.id), ..Default::default() };
+                            update_query(&next.to_query(&current_query()), true);
+                            flake_navigation.set(next);
+                            selected_flake.set(Some(f));
+                        }, on_sync: move |flake_id| {
                             let mut reload_nonce = reload_nonce.clone();
                             spawn(async move {
                                 let result = request_sync_flake(flake_id).await;
@@ -3606,7 +4015,7 @@ pub fn FlakesListViewNew() -> Element {
             // Side tray (if flake selected)
             if let Some(flake) = selected_flake_value {
                 {
-                    let selected_direct_commits = match selected_timeline_resource.read().as_ref() {
+                    let mut selected_direct_commits = match selected_timeline_resource.read().as_ref() {
                         Some(Ok(items)) => items
                             .iter()
                             .find(|timeline| timeline.flake_id == flake.id)
@@ -3614,6 +4023,10 @@ pub fn FlakesListViewNew() -> Element {
                             .unwrap_or_default(),
                         _ => Vec::new(),
                     };
+                    apply_managed_rollout_total(
+                        &mut selected_direct_commits,
+                        flake.system_count,
+                    );
                     let selected_direct_loading =
                         matches!(selected_timeline_resource.read().as_ref(), None);
                     let selected_direct_error = match selected_timeline_resource.read().as_ref() {
@@ -3631,13 +4044,15 @@ pub fn FlakesListViewNew() -> Element {
 
                     rsx! {
                         FlakeTrayNew {
+                            key: "{flake.id}",
                             commits: tray_commits,
                             commits_loading: tray_commits_loading,
                             commits_error: tray_commits_error,
                             notice: action_notice.read().clone(),
                             is_admin: is_admin_user,
-                            focus_sha: focus_sha.clone(),
+                            focus_sha: flake_navigation.read().revision.clone().or_else(|| legacy_focus_sha.clone()),
                             focus_meta: focus_meta.clone(),
+                            initial_pane: flake_navigation.read().pane,
                             flake,
                             on_edit: move |flake_id| {
                                 if let Some(current) = all_flakes_for_edit.iter().find(|item| item.id == flake_id) {
@@ -3721,7 +4136,36 @@ pub fn FlakesListViewNew() -> Element {
                                 );
                                 action_notice.set(Some("Sync blocked: git history rewrite detected. Review and accept rewrite to continue.".to_string()));
                             },
-                            on_close: move |_| selected_flake.set(None),
+                            on_navigation_change: move |(pane, revision, push): (FlakePane, Option<String>, bool)| {
+                                let mut next = flake_navigation.read().clone();
+                                next.pane = pane;
+                                next.revision = revision;
+                                update_query(&next.to_query(&current_query()), push);
+                                flake_navigation.set(next);
+                            },
+                            on_close: move |_| {
+                                let return_environment = flake_navigation.read().return_environment.clone();
+                                if let Some(environment) = return_environment {
+                                    // Return directly. Mutating the Flakes query and tray
+                                    // state first can schedule another tray render before
+                                    // the router unmounts this view.
+                                    nav.push(Route::EnvironmentsView {
+                                        query: format!("panel={environment}"),
+                                    });
+                                    return;
+                                }
+                                let opener_id = selected_flake
+                                    .read()
+                                    .as_ref()
+                                    .map(|flake| format!("flake-opener-{}", flake.id));
+                                let cleared = FlakeNavigation::cleared();
+                                update_query(&cleared.to_query(&current_query()), true);
+                                flake_navigation.set(cleared);
+                                selected_flake.set(None);
+                                if let Some(opener_id) = opener_id {
+                                    focus_element_by_id(&opener_id);
+                                }
+                            },
                             on_open_evaluation: move |focus: NavigationFocus| {
                                 navigation_focus.set(Some(focus));
                                 nav.push(Route::EvaluationsView {});
@@ -3732,7 +4176,7 @@ pub fn FlakesListViewNew() -> Element {
                             },
                             on_open_systems: move |focus: NavigationFocus| {
                                 navigation_focus.set(Some(focus));
-                                nav.push(Route::SystemsView {});
+                                nav.push(Route::SystemsView { query: String::new() });
                             },
                         }
                     }
@@ -3886,7 +4330,7 @@ pub fn FlakesListViewNew() -> Element {
 }
 
 // ============================================================================
-// Phase 2: Mock Data Structures for Table/Cards
+// View models for the flake registry and revision tray.
 // ============================================================================
 
 #[derive(Clone, Debug, PartialEq)]
@@ -4069,6 +4513,16 @@ pub(crate) fn map_timeline_commits_to_view(
 
     mapped.sort_by(|a, b| b.committed_at.cmp(&a.committed_at));
     mapped
+}
+
+fn apply_managed_rollout_total(commits: &mut [MockCommitItem], managed_system_count: i32) {
+    for commit in commits {
+        commit.rollout_total = managed_system_count;
+    }
+}
+
+fn commit_has_full_sha(commit: &MockCommitItem, full_sha: &str) -> bool {
+    !full_sha.is_empty() && commit.full_hash == full_sha
 }
 
 fn map_diff_to_file_cards(diff: &str) -> Vec<MockFileItem> {
@@ -4541,7 +4995,7 @@ fn mock_files_for_commit(sha: &str) -> Vec<MockFileItem> {
 }
 
 // ============================================================================
-// Phase 2: FlakeTable Component - Matching JSX lines 451-495
+// Flake table presentation.
 // ============================================================================
 
 #[allow(dead_code)]
@@ -4599,14 +5053,23 @@ fn FlakeTableNew(
                                 is_error && flash_errors,
                             );
                             let flake_for_select = flake.clone();
+                            let flake_for_keyboard = flake.clone();
                             let flake_id_for_sync = flake.id;
                             let flake_id_for_edit = flake.id;
 
                             rsx! {
                                 tr {
                                     key: "{flake.id}",
+                                    id: "flake-opener-{flake.id}",
                                     class: "{row_class}",
                                     style: "cursor: pointer;",
+                                    tabindex: "0",
+                                    onkeydown: move |event| {
+                                        if event.key() == Key::Enter || event.key() == Key::Character(" ".to_string()) {
+                                            event.prevent_default();
+                                            on_select.call(flake_for_keyboard.clone());
+                                        }
+                                    },
                                     onclick: move |_| {
                                         if is_error {
                                             dismiss_attention_item(
@@ -4750,7 +5213,7 @@ fn FlakeSyncChipNew(status: String, error_msg: Option<String>) -> Element {
 }
 
 // ============================================================================
-// Phase 2: FlakeCards Component - Matching JSX lines 498-540
+// Flake card presentation.
 // ============================================================================
 
 #[allow(dead_code)]
@@ -4775,6 +5238,7 @@ fn FlakeCardsNew(
                     let is_selected = selected_id == Some(flake.id);
                     let is_error = flake.status == "error";
                     let flake_for_select = flake.clone();
+                    let flake_for_keyboard = flake.clone();
                     let flake_id_for_sync = flake.id;
                     let flake_id_for_edit = flake.id;
                     // JSX: const statusColor = { synced:"#34d399", ... }
@@ -4807,8 +5271,17 @@ fn FlakeCardsNew(
                     rsx! {
                         div {
                             key: "{flake.id}",
+                            id: "flake-opener-{flake.id}",
                             class: "{card_class}",
                             style: "{border_style}",
+                            role: "button",
+                            tabindex: "0",
+                            onkeydown: move |event| {
+                                if event.key() == Key::Enter || event.key() == Key::Character(" ".to_string()) {
+                                    event.prevent_default();
+                                    on_select.call(flake_for_keyboard.clone());
+                                }
+                            },
                             onclick: move |_| {
                                 if is_error {
                                     dismiss_attention_item(
@@ -5053,9 +5526,20 @@ fn FlakeEnvBadgesNew(
 }
 
 // ============================================================================
-// Phase 3: FlakeTray - Side panel with backdrop and header
-// Matching JSX lines 114-134 (header structure)
+// Revision-scoped flake tray.
 // ============================================================================
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FlakeOutputPollScope {
+    flake_id: i32,
+    revision: String,
+    filter: FlakeSystemFilter,
+    pane: FlakePane,
+}
+
+fn flake_snapshot_poll_delay_ms(attempt: u32) -> u32 {
+    3_000_u32.saturating_mul(1_u32 << attempt.min(2))
+}
 
 #[allow(dead_code)]
 #[component]
@@ -5068,9 +5552,11 @@ pub(crate) fn FlakeTrayNew(
     is_admin: bool,
     focus_sha: Option<String>,
     focus_meta: Option<CommitFocusMeta>,
+    initial_pane: FlakePane,
     on_edit: EventHandler<i32>,
     on_sync: EventHandler<i32>,
     on_history_rewrite_conflict: EventHandler<(i32, String)>,
+    on_navigation_change: EventHandler<(FlakePane, Option<String>, bool)>,
     on_close: EventHandler<()>,
     #[props(default)] on_open_evaluation: Option<EventHandler<NavigationFocus>>,
     #[props(default)] on_open_build: Option<EventHandler<NavigationFocus>>,
@@ -5078,6 +5564,7 @@ pub(crate) fn FlakeTrayNew(
 ) -> Element {
     const INITIAL_VISIBLE_COMMITS: usize = 100;
     const LOAD_MORE_STEP: usize = 100;
+    const OUTPUT_PAGE_SIZE: usize = 50;
 
     // Build effective commit list: prepend synthetic stub for focused SHA not yet in list
     let effective_commits: Vec<MockCommitItem> = {
@@ -5085,7 +5572,7 @@ pub(crate) fn FlakeTrayNew(
             let sha_short = sha.chars().take(7).collect::<String>();
             if !commits
                 .iter()
-                .any(|c| c.sha.starts_with(&sha_short) || sha.starts_with(&c.sha))
+                .any(|commit| commit_has_full_sha(commit, sha))
             {
                 let meta = focus_meta.clone().unwrap_or_default();
                 let mut v = Vec::with_capacity(commits.len() + 1);
@@ -5115,21 +5602,48 @@ pub(crate) fn FlakeTrayNew(
     };
 
     let mut selected_commit = use_signal(|| {
-        // If focus_sha is provided, try to select the matching commit
-        // (either by short sha or full_hash). Fall back to the first
-        // commit only when no match exists.
+        // A displayed SHA prefix is never an identity. Fall back to the first
+        // commit only when the exact full SHA is not present.
         if let Some(ref sha) = focus_sha {
-            let sha_short = sha.chars().take(7).collect::<String>();
             if let Some(matched) = effective_commits
                 .iter()
-                .find(|c| c.sha == sha_short || c.full_hash == *sha)
+                .find(|commit| commit_has_full_sha(commit, sha))
             {
                 return Some(matched.clone());
             }
         }
         effective_commits.first().cloned()
     });
+    if selected_commit.peek().is_none() {
+        let replacement = focus_sha
+            .as_ref()
+            .and_then(|sha| {
+                effective_commits
+                    .iter()
+                    .find(|commit| commit_has_full_sha(commit, sha))
+            })
+            .cloned()
+            .or_else(|| effective_commits.first().cloned());
+        if replacement.is_some() {
+            selected_commit.set(replacement);
+        }
+    }
+    if let Some(focus_sha) = focus_sha.as_ref() {
+        let replacement = effective_commits
+            .iter()
+            .find(|commit| commit_has_full_sha(commit, focus_sha))
+            .cloned()
+            .or_else(|| effective_commits.first().cloned());
+        if selected_commit.peek().as_ref() != replacement.as_ref() {
+            selected_commit.set(replacement.clone());
+        }
+        let replacement_revision = replacement.map(|commit| commit.full_hash);
+        if replacement_revision.as_deref() != Some(focus_sha) {
+            on_navigation_change.call((initial_pane, replacement_revision, false));
+        }
+    }
     let mut unavailable_commit_hashes = use_signal(Vec::<String>::new);
+    let active_pane = initial_pane;
     let mut commit_query = use_signal(String::new);
     let mut visible_limit = use_signal(|| INITIAL_VISIBLE_COMMITS);
     let commits_scroll_id = format!("fl-tray-commits-{}", flake.id);
@@ -5141,6 +5655,7 @@ pub(crate) fn FlakeTrayNew(
             .iter()
             .filter(|commit| {
                 commit.sha.to_lowercase().contains(&query)
+                    || commit.full_hash.to_lowercase().contains(&query)
                     || commit.msg.to_lowercase().contains(&query)
                     || commit.author.to_lowercase().contains(&query)
             })
@@ -5153,50 +5668,193 @@ pub(crate) fn FlakeTrayNew(
         .cloned()
         .collect();
     let has_more_commits = visible_commits.len() < filtered_commits.len();
-    {
-        let mut visible_limit = visible_limit.clone();
-        let commits_scroll_id = commits_scroll_id.clone();
-        let total = filtered_commits.len();
-        use_effect(move || {
-            if total == 0 {
-                return;
-            }
-            let Some(window) = window() else {
-                return;
-            };
-            let Some(document) = window.document() else {
-                return;
-            };
-
-            let commits_scroll_id_for_handler = commits_scroll_id.clone();
-            let handler = Closure::<dyn FnMut()>::new(move || {
-                if *visible_limit.read() >= total {
-                    return;
-                }
-                let Some(element) = document.get_element_by_id(&commits_scroll_id_for_handler)
-                else {
-                    return;
-                };
-                let scroll_top = element.scroll_top();
-                let client_height = element.client_height();
-                let scroll_height = element.scroll_height();
-                if scroll_top + client_height + 96 >= scroll_height {
-                    let next = *visible_limit.read() + LOAD_MORE_STEP;
-                    visible_limit.set(next.min(total));
-                }
-            });
-
-            let _ = window.set_interval_with_callback_and_timeout_and_arguments_0(
-                handler.as_ref().unchecked_ref(),
-                180,
-            );
-            handler.forget();
-        });
-    }
     let selected_hash = selected_commit
         .read()
         .as_ref()
         .map(|commit| commit.full_hash.clone());
+    let mut output_result = use_signal(|| None);
+    let mut output_revision_identity = use_signal(|| None::<FlakeOutputSnapshotResponse>);
+    let mut output_request_sequence = use_signal(|| 0_u64);
+    let mut output_loading_more = use_signal(|| None::<FlakePane>);
+    let mut output_continuation_error = use_signal(|| None::<(FlakePane, String)>);
+    let mut output_reload_nonce = use_signal(|| 0_u64);
+    let mut output_poll_identity = use_signal(|| None::<FlakeOutputPollScope>);
+    let mut output_poll_scope = use_signal(|| None::<FlakeOutputPollScope>);
+    let mut output_poll_attempt = use_signal(|| 0_u32);
+    let mut system_filter = use_signal(FlakeSystemFilter::default);
+    let mut tracked_active_pane = use_signal(|| active_pane);
+    if *tracked_active_pane.peek() != active_pane {
+        tracked_active_pane.set(active_pane);
+    }
+    {
+        let mut request_sequence_on_drop = output_request_sequence;
+        let mut poll_scope_on_drop = output_poll_scope;
+        use_drop(move || {
+            let next_sequence = (*request_sequence_on_drop.peek()).saturating_add(1);
+            request_sequence_on_drop.set(next_sequence);
+            poll_scope_on_drop.set(None);
+        });
+    }
+    use_effect(move || {
+        let _revision = selected_commit
+            .read()
+            .as_ref()
+            .map(|commit| commit.full_hash.clone());
+        if *system_filter.peek() != FlakeSystemFilter::All {
+            system_filter.set(FlakeSystemFilter::All);
+        }
+    });
+    use_effect(move || {
+        let _reload = *output_reload_nonce.read();
+        let revision = selected_commit
+            .read()
+            .as_ref()
+            .map(|commit| commit.full_hash.clone());
+        if output_revision_identity
+            .peek()
+            .as_ref()
+            .is_some_and(|snapshot| Some(snapshot.revision.as_str()) != revision.as_deref())
+        {
+            output_revision_identity.set(None);
+        }
+        output_result.set(None);
+        output_loading_more.set(None);
+        output_continuation_error.set(None);
+        let requested_system_filter = system_filter();
+        let requested_pane = tracked_active_pane();
+        let next_poll_scope = revision.as_ref().map(|revision| FlakeOutputPollScope {
+            flake_id: flake.id,
+            revision: revision.clone(),
+            filter: requested_system_filter,
+            pane: requested_pane,
+        });
+        if output_poll_identity.peek().as_ref() != next_poll_scope.as_ref() {
+            output_poll_identity.set(next_poll_scope);
+            output_poll_scope.set(None);
+            output_poll_attempt.set(0);
+        }
+        let sequence = *output_request_sequence.peek() + 1;
+        output_request_sequence.set(sequence);
+        spawn(async move {
+            let result = match revision.as_deref() {
+                Some(revision) => fetch_flake_revision_outputs(
+                    flake.id,
+                    revision,
+                    requested_system_filter,
+                    OUTPUT_PAGE_SIZE,
+                    0,
+                    None,
+                )
+                .await
+                .and_then(|page| {
+                    validate_flake_output_page_zero(page, revision)
+                        .map_err(ApiClientError::Deserialize)
+                })
+                .map(Some),
+                None => Ok(None),
+            };
+            let still_selected = selected_commit
+                .peek()
+                .as_ref()
+                .map(|commit| commit.full_hash.as_str())
+                == revision.as_deref();
+            if *output_request_sequence.peek() == sequence
+                && still_selected
+                && system_filter.peek().eq(&requested_system_filter)
+            {
+                if let Ok(Some(snapshot)) = &result {
+                    output_revision_identity.set(Some(snapshot.clone()));
+                }
+                output_result.set(Some(result));
+            }
+        });
+    });
+    let output_result_value = output_result.read().clone();
+    let output_snapshot = output_result_value
+        .as_ref()
+        .and_then(|result| result.as_ref().ok())
+        .and_then(Clone::clone);
+    let revision_bar_snapshot = output_revision_identity.read().clone();
+    let output_error = output_result_value
+        .as_ref()
+        .and_then(|result| result.as_ref().err())
+        .map(flake_snapshot_request_error);
+    let output_system_alert = output_snapshot.as_ref().is_some_and(|snapshot| {
+        snapshot.declared_unmanaged_count > 0
+            || snapshot.managed_undeclared_count > 0
+            || snapshot.output_collapsed_count > 0
+            || snapshot.pinned_revision_count > 0
+    });
+    let output_input_alert = output_snapshot
+        .as_ref()
+        .is_some_and(|snapshot| snapshot.stale_direct_input_count > 0);
+    let output_has_more = output_snapshot
+        .as_ref()
+        .is_some_and(|snapshot| flake_output_pane_has_more(active_pane, snapshot));
+    let active_output_continuation_error = output_continuation_error
+        .read()
+        .as_ref()
+        .filter(|(pane, _)| *pane == active_pane)
+        .map(|(_, error)| error.clone());
+    {
+        let poll_revision = selected_hash.clone();
+        use_effect(move || {
+            let output_result_for_poll = output_result.read();
+            let pending_snapshot = output_result_for_poll
+                .as_ref()
+                .and_then(|result| result.as_ref().ok())
+                .and_then(Option::as_ref)
+                .is_some_and(|snapshot| {
+                    matches!(
+                        snapshot.lifecycle,
+                        SnapshotLifecycle::Queued | SnapshotLifecycle::Running
+                    )
+                });
+            let terminal_result = output_result_for_poll.is_some() && !pending_snapshot;
+            if terminal_result {
+                output_poll_scope.set(None);
+                output_poll_attempt.set(0);
+                return;
+            }
+            if !pending_snapshot {
+                return;
+            }
+            let Some(revision) = poll_revision.clone() else {
+                return;
+            };
+            let scope = FlakeOutputPollScope {
+                flake_id: flake.id,
+                revision,
+                filter: system_filter(),
+                pane: tracked_active_pane(),
+            };
+            if output_poll_scope.peek().as_ref() == Some(&scope) {
+                return;
+            }
+            // CONCURRENCY: One scoped timer may refresh the selected pane. A pane,
+            // revision, filter, or drawer change invalidates the timer before fetch.
+            output_poll_scope.set(Some(scope.clone()));
+            let delay = flake_snapshot_poll_delay_ms(*output_poll_attempt.peek());
+            spawn(async move {
+                gloo_timers::future::TimeoutFuture::new(delay).await;
+                if output_poll_scope.peek().as_ref() != Some(&scope)
+                    || selected_commit
+                        .peek()
+                        .as_ref()
+                        .is_none_or(|commit| commit.full_hash != scope.revision)
+                    || *system_filter.peek() != scope.filter
+                    || *tracked_active_pane.peek() != scope.pane
+                {
+                    return;
+                }
+                output_poll_scope.set(None);
+                let next_attempt = (*output_poll_attempt.peek()).saturating_add(1);
+                let next_reload = (*output_reload_nonce.peek()).saturating_add(1);
+                output_poll_attempt.set(next_attempt);
+                output_reload_nonce.set(next_reload);
+            });
+        });
+    }
     let unavailable = unavailable_commit_hashes.read().clone();
     let active_selected_commit = selected_hash
         .as_ref()
@@ -5213,6 +5871,100 @@ pub(crate) fn FlakeTrayNew(
                 .find(|commit| !unavailable.iter().any(|hash| hash == &commit.full_hash))
                 .cloned()
         });
+    let tray_id = format!("flake-tray-{}", flake.id);
+    {
+        let tray_id = tray_id.clone();
+        use_effect(move || focus_element_by_id(&tray_id));
+    }
+    let load_more_outputs = {
+        let requested_pane = active_pane;
+        move |(): ()| {
+            let Some(current) = output_result
+                .peek()
+                .as_ref()
+                .and_then(|result| result.as_ref().ok())
+                .and_then(Clone::clone)
+            else {
+                return;
+            };
+            if !flake_output_pane_has_more(requested_pane, &current) {
+                return;
+            }
+            let revision = current.revision.clone();
+            let next_offset = current
+                .pagination
+                .offset
+                .saturating_add(current.pagination.limit)
+                .min(100_000);
+            // COMPATIBILITY: The server owns the continuation-token format. Replay
+            // the opaque value unchanged and never derive pagination state from it.
+            let snapshot_token = current.snapshot_token.clone();
+            let requested_filter = system_filter();
+            let sequence = (*output_request_sequence.peek()).saturating_add(1);
+            output_request_sequence.set(sequence);
+            output_loading_more.set(Some(requested_pane));
+            output_continuation_error.set(None);
+            spawn(async move {
+                let result = fetch_flake_revision_outputs(
+                    flake.id,
+                    &revision,
+                    requested_filter,
+                    OUTPUT_PAGE_SIZE,
+                    next_offset,
+                    snapshot_token.as_deref(),
+                )
+                .await;
+                let still_selected = selected_commit
+                    .peek()
+                    .as_ref()
+                    .is_some_and(|commit| commit.full_hash == revision);
+                if *output_request_sequence.peek() != sequence || !still_selected {
+                    return;
+                }
+                output_loading_more.set(None);
+                match result {
+                    Ok(page) => match merge_flake_output_pages(current, page) {
+                        Ok(merged) => output_result.set(Some(Ok(Some(merged)))),
+                        Err(error) => output_continuation_error.set(Some((requested_pane, error))),
+                    },
+                    Err(ApiClientError::Status { code: 409, .. }) => {
+                        // CONCURRENCY: The server rejected the immutable page-one
+                        // token. Restart at page zero and never mix snapshot versions.
+                        output_result.set(None);
+                        output_continuation_error.set(None);
+                        let next_reload = (*output_reload_nonce.peek()).saturating_add(1);
+                        output_reload_nonce.set(next_reload);
+                    }
+                    Err(error) => output_continuation_error
+                        .set(Some((requested_pane, flake_snapshot_request_error(&error)))),
+                }
+            });
+        }
+    };
+    {
+        let mut load_more_inputs = load_more_outputs.clone();
+        use_effect(move || {
+            let inputs_have_more = output_result
+                .read()
+                .as_ref()
+                .and_then(|result| result.as_ref().ok())
+                .and_then(Option::as_ref)
+                .is_some_and(|snapshot| flake_output_pane_has_more(FlakePane::Inputs, snapshot));
+            let continuation_failed = output_continuation_error
+                .read()
+                .as_ref()
+                .is_some_and(|(pane, _)| *pane == FlakePane::Inputs);
+            let should_continue = tracked_active_pane() == FlakePane::Inputs
+                && inputs_have_more
+                && output_loading_more() != Some(FlakePane::Inputs)
+                && !continuation_failed;
+            if should_continue {
+                load_more_inputs(());
+            }
+        });
+    }
+    let mut load_more_outputs_button = load_more_outputs.clone();
+    let mut retry_outputs_button = load_more_outputs;
 
     rsx! {
         // JSX: <div className="fl-tray-backdrop" onClick={onClose}/>
@@ -5224,13 +5976,17 @@ pub(crate) fn FlakeTrayNew(
         // JSX: <aside className="fl-tray" role="dialog" aria-label={...}>
         aside {
             class: "fl-tray",
+            id: "{tray_id}",
             role: "dialog",
+            "aria-modal": "true",
             "aria-label": "{flake.name} commits",
             tabindex: "0",
             onkeydown: move |evt| {
                 if evt.key() == Key::Escape {
                     evt.prevent_default();
                     on_close.call(());
+                } else {
+                    trap_dialog_focus(&evt, &tray_id);
                 }
             },
 
@@ -5323,6 +6079,107 @@ pub(crate) fn FlakeTrayNew(
                 }
             }
 
+            div {
+                class: "fx-tabs",
+                role: "tablist",
+                "aria-label": "Flake revision data",
+                onkeydown: move |event| {
+                    let panes = [FlakePane::Commits, FlakePane::Systems, FlakePane::Modules, FlakePane::Inputs];
+                    let current = panes.iter().position(|pane| pane == &active_pane).unwrap_or_default();
+                    let next = match event.key() {
+                        Key::ArrowRight => (current + 1) % panes.len(),
+                        Key::ArrowLeft => (current + panes.len() - 1) % panes.len(),
+                        Key::Home => 0,
+                        Key::End => panes.len() - 1,
+                        _ => return,
+                    };
+                    event.prevent_default();
+                    on_navigation_change.call((panes[next], selected_commit.read().as_ref().map(|commit| commit.full_hash.clone()), true));
+                    focus_element_by_id(&format!("flake-pane-tab-{next}"));
+                },
+                for (pane_index, pane) in [FlakePane::Commits, FlakePane::Systems, FlakePane::Modules, FlakePane::Inputs].into_iter().enumerate() {
+                    button {
+                        class: if active_pane == pane { "fx-tab active focus-ring" } else { "fx-tab focus-ring" },
+                        role: "tab",
+                        "aria-selected": active_pane == pane,
+                        "aria-controls": "flake-pane-content",
+                        id: "flake-pane-tab-{pane_index}",
+                        tabindex: if active_pane == pane { "0" } else { "-1" },
+                        onclick: move |_| {
+                            on_navigation_change.call((pane, selected_commit.read().as_ref().map(|commit| commit.full_hash.clone()), true));
+                        },
+                        span { match pane {
+                            FlakePane::Commits => "Commits",
+                            FlakePane::Systems => "Systems",
+                            FlakePane::Modules => "Modules",
+                            FlakePane::Inputs => "Inputs",
+                        } }
+                        span { class: "fx-tab-n", match pane {
+                            FlakePane::Commits => effective_commits.len().to_string(),
+                            FlakePane::Systems => output_snapshot.as_ref().map(|snapshot| snapshot.declared_system_count).unwrap_or_default().to_string(),
+                            FlakePane::Modules => output_snapshot.as_ref().map(|snapshot| snapshot.exported_module_count).unwrap_or_default().to_string(),
+                            FlakePane::Inputs => authoritative_input_count(output_snapshot.as_ref()).to_string(),
+                        } }
+                        if pane == FlakePane::Systems && output_system_alert { span { class: "fx-tab-dot", title: "System reconciliation needs attention" } }
+                        if pane == FlakePane::Inputs && output_input_alert { span { class: "fx-tab-dot", title: "One or more direct inputs are stale" } }
+                    }
+                }
+            }
+
+            if active_pane != FlakePane::Commits {
+                div { class: "fx-body", id: "flake-pane-content", role: "tabpanel",
+                    if output_result_value.is_none() {
+                        div { class: "fx-pane",
+                            FlakeRevisionBar { commit: active_selected_commit.clone(), snapshot: revision_bar_snapshot.clone() }
+                            div { class: "empty", role: "status", "Loading revision outputs…" }
+                        }
+                    } else if let Some(error) = output_error {
+                        div { class: "fx-pane",
+                            FlakeRevisionBar { commit: active_selected_commit.clone(), snapshot: revision_bar_snapshot.clone() }
+                            div { class: "empty", role: "alert", "Unable to load revision outputs: {error}" }
+                        }
+                    } else if let Some(snapshot) = output_snapshot.clone() {
+                        FlakeOutputPane {
+                            pane: active_pane,
+                            flake: flake.clone(),
+                            commit: selected_commit.read().clone(),
+                            snapshot,
+                            system_filter: system_filter(),
+                            on_system_filter: move |filter| system_filter.set(filter),
+                            on_pick_commit: move |_| on_navigation_change.call((
+                                FlakePane::Commits,
+                                selected_commit.read().as_ref().map(|commit| commit.full_hash.clone()),
+                                true,
+                            )),
+                        }
+                        if output_has_more && active_output_continuation_error.is_none() {
+                            button {
+                                class: "btn btn-ghost focus-ring fx-load-more",
+                                disabled: output_loading_more() == Some(active_pane),
+                                onclick: move |_| load_more_outputs_button(()),
+                                if output_loading_more() == Some(active_pane) { "Loading more…" } else { "Load more revision data" }
+                            }
+                        }
+                        if let Some(error) = active_output_continuation_error {
+                            div { class: "cfg-continuation-error", role: "alert",
+                                span { "Unable to continue loading this pane: {error}" }
+                                button { class: "btn btn-ghost focus-ring xs", disabled: output_loading_more() == Some(active_pane), onclick: move |_| retry_outputs_button(()), "Retry same page" }
+                            }
+                        }
+                    } else {
+                        div { class: "empty", style: "margin:18px;", role: "status", "No revision is selected." }
+                    }
+                }
+            }
+
+            if active_pane == FlakePane::Commits {
+                if let Some(snapshot) = output_snapshot.clone() {
+                    FlakeRevisionBar { commit: active_selected_commit.clone(), snapshot: Some(snapshot) }
+                } else {
+                    FlakeRevisionBar { commit: active_selected_commit.clone(), snapshot: revision_bar_snapshot.clone() }
+                }
+            }
+
             if let Some(msg) = notice {
                 div {
                     style: "margin: 0 12px 10px; padding: 8px 10px; border: 1px solid var(--cf-divider); border-radius: 8px; font-size: 12px; color: var(--cf-text-secondary); background: color-mix(in oklab, var(--cf-page-bg) 35%, var(--cf-card-bg));",
@@ -5352,7 +6209,7 @@ pub(crate) fn FlakeTrayNew(
             }
 
             // Body: Two-pane layout - JSX lines 136-192 (commit list)
-            div { class: "fl-tray-body",
+            div { class: "fl-tray-body", style: if active_pane == FlakePane::Commits { "display:grid;" } else { "display:none;" },
                 // Left pane: Commit list with timeline
                 nav {
                     class: "fl-tray-commits",
@@ -5419,7 +6276,10 @@ pub(crate) fn FlakeTrayNew(
                         CommitsListNew {
                             commits: visible_commits,
                             selected_commit: active_selected_commit.clone(),
-                            on_select: move |commit| selected_commit.set(Some(commit))
+                            on_select: move |commit: MockCommitItem| {
+                                on_navigation_change.call((active_pane, Some(commit.full_hash.clone()), true));
+                                selected_commit.set(Some(commit));
+                            }
                         }
                         if has_more_commits {
                             div {
@@ -5466,6 +6326,11 @@ pub(crate) fn FlakeTrayNew(
                                                         .any(|hash| hash == &candidate.full_hash)
                                             })
                                             .cloned();
+                                        on_navigation_change.call((
+                                            active_pane,
+                                            replacement.as_ref().map(|commit| commit.full_hash.clone()),
+                                            false,
+                                        ));
                                         selected_commit.set(replacement);
                                     },
                                     on_history_rewrite_conflict: on_history_rewrite_conflict,
@@ -5484,6 +6349,992 @@ pub(crate) fn FlakeTrayNew(
             }
         }
 
+    }
+}
+
+#[component]
+fn FlakeOutputPane(
+    pane: FlakePane,
+    flake: MockFlakeItem,
+    commit: Option<MockCommitItem>,
+    snapshot: FlakeOutputSnapshotResponse,
+    system_filter: FlakeSystemFilter,
+    on_system_filter: EventHandler<FlakeSystemFilter>,
+    on_pick_commit: EventHandler<()>,
+) -> Element {
+    if snapshot.lifecycle != SnapshotLifecycle::Available {
+        let label = match snapshot.lifecycle {
+            SnapshotLifecycle::Queued => "Output evaluation is queued.",
+            SnapshotLifecycle::Running => "Output evaluation is running.",
+            SnapshotLifecycle::Failed => snapshot
+                .error
+                .as_deref()
+                .unwrap_or("Output evaluation failed."),
+            SnapshotLifecycle::Unavailable => "No cached output snapshot exists for this revision.",
+            SnapshotLifecycle::Available => "",
+        };
+        let role = if snapshot.lifecycle == SnapshotLifecycle::Failed {
+            "alert"
+        } else {
+            "status"
+        };
+        return rsx! { div { class: "fx-pane",
+            FlakeRevisionBar { commit, snapshot: Some(snapshot.clone()), on_pick_commit: Some(on_pick_commit) }
+            div { class: "cfg-state cfg-state-{snapshot_lifecycle_class(snapshot.lifecycle)}", role, strong { "{snapshot_lifecycle_heading(snapshot.lifecycle)}" } p { "{label}" } }
+        } };
+    }
+
+    rsx! {
+        div { class: "fx-pane",
+            FlakeRevisionBar { commit, snapshot: Some(snapshot.clone()), on_pick_commit: Some(on_pick_commit) }
+            match pane {
+                FlakePane::Systems => rsx! { FlakeSystemsOutput { flake, snapshot, system_filter, on_system_filter } },
+                FlakePane::Modules => rsx! { FlakeModulesOutput { key: "{snapshot.revision}", flake_id: flake.id, snapshot } },
+                FlakePane::Inputs => rsx! { FlakeInputsOutput { snapshot } },
+                FlakePane::Commits => rsx! {},
+            }
+        }
+    }
+}
+
+#[component]
+fn FlakeRevisionBar(
+    commit: Option<MockCommitItem>,
+    snapshot: Option<FlakeOutputSnapshotResponse>,
+    #[props(default)] on_pick_commit: Option<EventHandler<()>>,
+) -> Element {
+    let revision = snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.revision.as_str())
+        .or_else(|| commit.as_ref().map(|commit| commit.full_hash.as_str()))
+        .unwrap_or("revision unavailable");
+    let delta = snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.delta.as_ref());
+    let parent_label = snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.first_parent_revision.as_deref())
+        .map(short_sha);
+    let first_parent_resolved = snapshot
+        .as_ref()
+        .is_some_and(|snapshot| snapshot.first_parent_resolved);
+    let comparison_available = snapshot
+        .as_ref()
+        .is_some_and(|snapshot| snapshot.comparison_available);
+    let parent_label_text = parent_label.clone().unwrap_or_else(|| "previous".into());
+    rsx! {
+        div { class: "fx-revbar",
+            div { class: "fx-revbar-main",
+                span { class: "fx-revbar-label", "Outputs at" }
+                if let Some(on_pick_commit) = on_pick_commit {
+                    button {
+                        class: "fx-revbar-sha focus-ring",
+                        title: "Change commit {revision}",
+                        "aria-label": "Change commit. Selected full revision {revision}",
+                        onclick: move |_| on_pick_commit.call(()),
+                        code { class: "fx-revbar-full", title: "{revision}", "{revision}" }
+                        Icon { name: IconName::ChevronRight, size: 11 }
+                    }
+                } else {
+                    code {
+                        class: "fx-revbar-full",
+                        title: "{revision}",
+                        "aria-label": "Full revision {revision}",
+                        "{revision}"
+                    }
+                }
+                if let Some(commit) = commit { span { class: "fx-revbar-msg", "{commit.msg}" } }
+            }
+            div { class: "fx-delta",
+                if comparison_available {
+                    span { class: "fx-delta-label", "vs {parent_label_text}" }
+                    if let Some(delta) = delta {
+                        if delta.systems_added_total > 0 { span { class: "fx-delta-chip add", title: delta_sample_title(&delta.systems_added, delta.systems_added_total), "+{delta.systems_added_total} systems" } }
+                        if delta.systems_removed_total > 0 { span { class: "fx-delta-chip del", title: delta_sample_title(&delta.systems_removed, delta.systems_removed_total), "-{delta.systems_removed_total} systems" } }
+                        if delta.modules_added_total > 0 { span { class: "fx-delta-chip add", title: delta_sample_title(&delta.modules_added, delta.modules_added_total), "+{delta.modules_added_total} modules" } }
+                        if delta.modules_removed_total > 0 { span { class: "fx-delta-chip del", title: delta_sample_title(&delta.modules_removed, delta.modules_removed_total), "-{delta.modules_removed_total} modules" } }
+                        if delta.inputs_added_total > 0 { span { class: "fx-delta-chip add", title: delta_sample_title(&delta.inputs_added, delta.inputs_added_total), "+{delta.inputs_added_total} inputs" } }
+                        if delta.inputs_removed_total > 0 { span { class: "fx-delta-chip del", title: delta_sample_title(&delta.inputs_removed, delta.inputs_removed_total), "-{delta.inputs_removed_total} inputs" } }
+                        if delta.input_revision_bumps_total > 0 { span { class: "fx-delta-chip bump", title: input_bump_sample_title(&delta.input_revision_bumps, delta.input_revision_bumps_total), "{delta.input_revision_bumps_total} inputs changed" } }
+                        if flake_delta_total(delta) == 0 { span { class: "fx-delta-label", "no output changes" } }
+                    } else {
+                        span { class: "fx-delta-label", "Comparison details unavailable" }
+                    }
+                } else if let Some(parent_label) = parent_label {
+                    span { class: "fx-delta-label", "vs {parent_label} · comparison snapshot unavailable" }
+                } else if first_parent_resolved {
+                    span { class: "fx-delta-label", "Root commit · no previous revision" }
+                } else {
+                    span { class: "fx-delta-label", "First parent unresolved" }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn FlakeSystemsOutput(
+    flake: MockFlakeItem,
+    snapshot: FlakeOutputSnapshotResponse,
+    system_filter: FlakeSystemFilter,
+    on_system_filter: EventHandler<FlakeSystemFilter>,
+) -> Element {
+    let unmanaged = snapshot.declared_unmanaged_count;
+    let undeclared = snapshot.managed_undeclared_count;
+    let all_count = authoritative_system_reconciliation_count(&snapshot);
+    let output_collapse = snapshot.output_collapsed_count;
+    let pinned = snapshot.pinned_revision_count;
+    let declared_output_collapse = declared_output_collapse(
+        snapshot.previous_declared_system_count,
+        snapshot.declared_system_count,
+    );
+    rsx! {
+        if let Some(previous) = declared_output_collapse {
+            div { class: "sd-callout sd-callout-warn fx-callout", Icon { name: IconName::Warn, size: 13 }
+                "This revision declares {snapshot.declared_system_count} system outputs; its first parent declared {previous}. Verify the reduction was intentional before deploying."
+            }
+        }
+        if output_collapse > 0 {
+            div { class: "sd-callout sd-callout-warn fx-callout", Icon { name: IconName::Warn, size: 13 } "{output_collapse} declared output name(s) are shared by multiple visible managed systems. Review the collapsed mapping before deployment." }
+        }
+        div { class: "fx-stats",
+            FlakeStat { value: snapshot.declared_system_count, label: "declared here" }
+            FlakeStat { value: snapshot.managed_system_count, label: "managed by Forge" }
+            FlakeStat { value: unmanaged, label: "declared unmanaged", warning: unmanaged > 0 }
+            FlakeStat { value: undeclared, label: "managed undeclared", critical: undeclared > 0 }
+        }
+        if undeclared > 0 {
+            div { class: "sd-callout sd-callout-warn fx-callout", "{undeclared} managed system(s) are absent from this revision and remain pinned to an older declared output." }
+        }
+        if pinned > 0 {
+            div { class: "sd-callout sd-callout-warn fx-callout", "{pinned} managed system(s) are deployed at a different revision." }
+        }
+        div { class: "fx-toolbar",
+            div { class: "seg", "aria-label": "Filter reconciled systems",
+                for (filter, label, count) in [
+                    (FlakeSystemFilter::All, "All", all_count),
+                    (FlakeSystemFilter::DeclaredUnmanaged, "Unmanaged", unmanaged),
+                    (FlakeSystemFilter::ManagedUndeclared, "Undeclared", undeclared),
+                ] {
+                    button {
+                        class: if system_filter == filter { "active focus-ring" } else { "focus-ring" },
+                        onclick: move |_| on_system_filter.call(filter),
+                        "{label} " span { class: "seg-n", "{count}" }
+                    }
+                }
+            }
+        }
+        table { class: "sys-table compact fx-table fx-systems-table",
+            colgroup { col { style: "width:34%" } col { style: "width:20%" } col { style: "width:24%" } col { style: "width:22%" } }
+            thead { tr { th { "nixosConfiguration" } th { "Environment" } th { "State" } th {} } }
+            tbody {
+                for system in &snapshot.systems {
+                    FlakeSystemRow { key: "{system.configuration_name}-{system.system_id:?}", flake: flake.clone(), revision: snapshot.revision.clone(), system: system.clone() }
+                }
+                if snapshot.systems.is_empty() { tr { td { colspan: "4", div { class: "fx-empty", "Nothing in this category." } } } }
+            }
+        }
+        div { class: "fx-pane-note", "Showing {snapshot.systems.len()} reconciled rows. Authoritative managed total: {snapshot.managed_system_count}." }
+    }
+}
+
+#[component]
+fn FlakeStat(
+    value: i64,
+    label: &'static str,
+    #[props(default)] warning: bool,
+    #[props(default)] critical: bool,
+) -> Element {
+    let class = if critical {
+        "fx-stat crit"
+    } else if warning {
+        "fx-stat warn"
+    } else {
+        "fx-stat"
+    };
+    rsx! { div { class, span { class: "fx-stat-n", "{value}" } span { class: "fx-stat-l", "{label}" } } }
+}
+
+#[component]
+fn FlakeSystemRow(
+    flake: MockFlakeItem,
+    revision: String,
+    system: ReconciledFlakeSystem,
+) -> Element {
+    let state_label = match system.state {
+        ReconciledFlakeSystemState::Managed => "managed",
+        ReconciledFlakeSystemState::DeclaredUnmanaged => "not managed",
+        ReconciledFlakeSystemState::ManagedUndeclared => "undeclared",
+    };
+    let state_class = match system.state {
+        ReconciledFlakeSystemState::Managed => "chip chip-healthy fx-chip",
+        ReconciledFlakeSystemState::DeclaredUnmanaged => "chip chip-warning fx-chip",
+        ReconciledFlakeSystemState::ManagedUndeclared => "chip chip-critical fx-chip",
+    };
+    let hostname_label = system.hostname.as_deref().unwrap_or("-").to_string();
+    let environment_label = system
+        .environment_name
+        .as_deref()
+        .unwrap_or("-")
+        .to_string();
+    let environment_style = system.environment_color.as_deref().map(|color| {
+        format!(
+            "color:{color};border-color:color-mix(in oklab, {color} 45%, var(--cf-card-border));"
+        )
+    });
+    rsx! { tr {
+        td {
+            code { class: "fx-host", title: "{hostname_label}", "{system.configuration_name}" }
+            if system.hostname.as_deref().is_some_and(|hostname| hostname != system.configuration_name) {
+                span { class: "fx-note", "{hostname_label}" }
+            }
+            if system.environment_name.is_some() {
+                span { class: "fx-system-env-narrow", style: environment_style.clone(), "{environment_label}" }
+            }
+        }
+        td {
+            if system.environment_name.is_some() {
+                span {
+                    class: "chip chip-unknown fx-chip",
+                    style: environment_style,
+                    "aria-label": "Environment {environment_label}",
+                    "{environment_label}"
+                }
+            } else {
+                span { class: "fx-dim", "-" }
+            }
+        }
+        td { span { class: "{state_class}", "{state_label}" }
+            if let Some(deployed) = &system.deployed_revision { span { class: "fx-note mono", "pinned at {short_sha(deployed)}" } }
+        }
+        td { class: "fx-right",
+            if let Some(system_id) = system.system_id {
+                button { class: "btn btn-ghost focus-ring xs", onclick: move |_| navigate_href(&format!("/systems/{system_id}?tab=config&config_mode=commit&revision={revision}")), "Open config" }
+            } else {
+                {
+                    let href = registration_prefill_url(&system.configuration_name, &flake.name, &flake.branch);
+                    rsx! { button { class: "btn btn-ghost focus-ring xs", onclick: move |_| navigate_href(&href), "Add to Forge" } }
+                }
+            }
+        }
+    } }
+}
+
+#[component]
+fn FlakeModulesOutput(flake_id: i32, snapshot: FlakeOutputSnapshotResponse) -> Element {
+    const DECLARATION_PAGE_SIZE: usize = 100;
+
+    let mut open = use_signal(|| None::<String>);
+    let mut declaration_page = use_signal(|| None::<FlakeModuleDeclarationsPage>);
+    let mut declaration_error = use_signal(|| None::<String>);
+    let mut declaration_loading = use_signal(|| false);
+    let mut declaration_request_sequence = use_signal(|| 0_u64);
+    let revision = snapshot.revision.clone();
+    let load_declarations = move |module_name: String, append: bool| {
+        let current = append.then(|| declaration_page.peek().clone()).flatten();
+        let offset = current
+            .as_ref()
+            .map(|page| page.offset + page.declarations.len())
+            .unwrap_or(0);
+        let token = current
+            .as_ref()
+            .and_then(|page| page.snapshot_token.clone());
+        // COMPATIBILITY: Declaration continuation tokens are opaque server values.
+        if !append {
+            declaration_page.set(None);
+        }
+        declaration_error.set(None);
+        declaration_loading.set(true);
+        let sequence = *declaration_request_sequence.peek() + 1;
+        declaration_request_sequence.set(sequence);
+        let request_revision = revision.clone();
+        spawn(async move {
+            let result = fetch_flake_module_declarations(
+                flake_id,
+                &request_revision,
+                &module_name,
+                DECLARATION_PAGE_SIZE,
+                offset,
+                token.as_deref(),
+            )
+            .await;
+            let still_selected = open.peek().as_deref() == Some(module_name.as_str());
+            if *declaration_request_sequence.peek() != sequence || !still_selected {
+                return;
+            }
+            declaration_loading.set(false);
+            match result {
+                Ok(page) if page.lifecycle == SnapshotLifecycle::Available => {
+                    if let Some(current) = current {
+                        match merge_module_declaration_pages(current, page) {
+                            Ok(merged) => declaration_page.set(Some(merged)),
+                            Err(error) => declaration_error.set(Some(error)),
+                        }
+                    } else {
+                        match validate_module_declaration_page_zero(
+                            page,
+                            &request_revision,
+                            &module_name,
+                        ) {
+                            Ok(page) => declaration_page.set(Some(page)),
+                            Err(error) => {
+                                declaration_page.set(None);
+                                declaration_error.set(Some(error));
+                            }
+                        }
+                    }
+                }
+                Ok(page) => declaration_error.set(Some(page.error.unwrap_or_else(|| {
+                    format!("Declaration snapshot is {:?}.", page.lifecycle).to_lowercase()
+                }))),
+                Err(error) => {
+                    if matches!(error, ApiClientError::Status { code: 409, .. }) {
+                        declaration_page.set(None);
+                    }
+                    declaration_error.set(Some(flake_snapshot_request_error(&error)));
+                }
+            }
+        });
+    };
+    let modules = flake_output_modules(&snapshot);
+    let max_consumers = modules
+        .iter()
+        .map(|module| module.consumer_count)
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    let module_evaluation_error = snapshot
+        .outputs
+        .as_ref()
+        .filter(|outputs| !outputs.module_evaluation.available)
+        .and_then(|outputs| outputs.module_evaluation.error.clone())
+        .unwrap_or_else(|| "Exported module evaluation is unavailable.".into());
+    rsx! {
+        if let Some(outputs) = snapshot.outputs.as_ref() {
+            if !outputs.module_evaluation.available {
+                div { class: "sd-callout sd-callout-warn fx-callout", role: "alert", "{module_evaluation_error}" }
+            }
+        }
+        div { class: "fx-pane-note",
+            "Modules exported as " code { "nixosModules" } " at this revision, ordered by authoritative consumer count to show the blast radius of a change. Expand a module to inspect its declarations."
+        }
+        table { class: "sys-table compact fx-table fx-modules-table",
+            colgroup { col { style: "width:32%" } col { style: "width:34%" } col { style: "width:10%" } col { style: "width:24%" } }
+            thead { tr { th { "Module" } th { "Sets" } th { class: "fx-right", "Options" } th { "Consumed by" } } }
+            tbody {
+                for (module_index, module) in modules.iter().enumerate() {
+                    {
+                        let is_open = open.read().as_deref() == Some(module.name.as_str());
+                        let module_for_click = module.name.clone();
+                        let detail_id = format!("module-detail-{module_index}");
+                        let mut load_for_click = load_declarations.clone();
+                        let description = module.description.as_deref().unwrap_or("No description");
+                        let consumers = module.consumers.join(", ");
+                        let module_source = module_binding_label(module);
+                        rsx! {
+                            tr {
+                                class: "fx-row",
+                                td { button {
+                                    class: "fx-row-toggle focus-ring",
+                                    "aria-expanded": is_open,
+                                    "aria-controls": "{detail_id}",
+                                    onclick: move |_| if is_open {
+                                        let next_sequence = *declaration_request_sequence.peek() + 1;
+                                        declaration_request_sequence.set(next_sequence);
+                                        declaration_loading.set(false);
+                                        declaration_page.set(None);
+                                        declaration_error.set(None);
+                                        open.set(None);
+                                    } else {
+                                        open.set(Some(module_for_click.clone()));
+                                        load_for_click(module_for_click.clone(), false);
+                                    },
+                                    div { class: "fx-mod-cell",
+                                        span { class: if is_open { "cfg-caret open" } else { "cfg-caret" }, Icon { name: IconName::ChevronRight, size: 11 } }
+                                        code { class: "fx-host", title: module.source_path.clone().unwrap_or_default(), "{module.name}" }
+                                    }
+                                } }
+                                td {
+                                    span { class: "fx-desc", "{description}" }
+                                    span {
+                                        class: "fx-note mono",
+                                        title: module.source_revision.clone().unwrap_or_default(),
+                                        "{module_source}"
+                                    }
+                                    if let Some(error) = &module.error { span { class: "fx-note", "{error}" } }
+                                }
+                                td { class: "fx-right", span { class: "mono fx-dim", "{module.declaration_count}" } }
+                                td {
+                                    div { class: "fx-bar-row",
+                                        div { class: "fx-bar", "aria-hidden": "true",
+                                            div {
+                                                class: "fx-bar-fill",
+                                                style: "width: {module.consumer_count * 100 / max_consumers}%",
+                                            }
+                                        }
+                                        span { class: "mono fx-bar-n", "{module.consumer_count}" }
+                                    }
+                                    if !module.consumers.is_empty() { span { class: "fx-note", "{consumers}" } }
+                                }
+                            }
+                            if is_open { tr { class: "fx-detail-row", id: "{detail_id}", td { colspan: "4", div { class: "fx-detail",
+                                div { class: "fx-detail-head",
+                                    span { class: "fx-detail-label", "Declared options" }
+                                    span {
+                                        class: "mono fx-detail-file",
+                                        title: module.source_revision.clone().unwrap_or_default(),
+                                        "{module_source}"
+                                    }
+                                }
+                                if declaration_loading() && declaration_page.read().is_none() {
+                                    div { class: "fx-dim", role: "status", "Loading declarations…" }
+                                }
+                                if let Some(page) = declaration_page.read().as_ref() {
+                                table { class: "fx-opts",
+                                    thead { tr { th { scope: "col", "Option" } th { scope: "col", "Type" } th { scope: "col", "Default" } } }
+                                    tbody {
+                                        for declaration in &page.declarations {
+                                            {
+                                                let default_label = declaration.default.as_ref().map(render_json_compact).unwrap_or_else(|| "null".into());
+                                                let source_paths = declaration.source_paths.join(", ");
+                                                rsx! { tr {
+                                                    td {
+                                                        code { class: "fx-opt-path", "{declaration.path}" }
+                                                        if !declaration.source_paths.is_empty() {
+                                                            span { class: "fx-declaration-source mono", "Source: {source_paths}" }
+                                                        }
+                                                    }
+                                                    td { span { class: "fx-dim", "{declaration.declared_type}" } }
+                                                    td { code { class: "fx-dim", if declaration.has_default { "{default_label}" } else { "No default" } } }
+                                                } }
+                                            }
+                                        }
+                                    }
+                                }
+                                if page.declarations.is_empty() { span { class: "fx-dim", "No declarations are exported by this module." } }
+                                if page.declarations.len() < usize::try_from(page.total).unwrap_or(usize::MAX) {
+                                    {
+                                        let module_name = module.name.clone();
+                                        let mut load_more = load_declarations.clone();
+                                        rsx! { button {
+                                            class: "btn btn-ghost focus-ring fx-load-more",
+                                            "aria-label": "Load more declarations for {module.name}",
+                                            disabled: declaration_loading(),
+                                            onclick: move |_| load_more(module_name.clone(), true),
+                                            if declaration_loading() { "Loading more declarations…" } else { "Load more declarations" }
+                                        } }
+                                    }
+                                }
+                                div { class: "fx-detail-note", "Declarations come from the evaluation already run for builds, cached per revision; browsing does not evaluate each host." }
+                                }
+                                if let Some(error) = declaration_error.read().as_ref() {
+                                    div { class: "sd-callout sd-callout-warn fx-callout", role: "alert", "Unable to load declarations: {error}" }
+                                    {
+                                        let module_name = module.name.clone();
+                                        let append = declaration_page.read().is_some();
+                                        let mut retry = load_declarations.clone();
+                                        rsx! { button {
+                                            class: "btn btn-ghost focus-ring",
+                                            disabled: declaration_loading(),
+                                            onclick: move |_| retry(module_name.clone(), append),
+                                            "Retry declarations"
+                                        } }
+                                    }
+                                }
+                            } } } }
+                        }
+                    }
+                }
+                if modules.is_empty() { tr { td { colspan: "4", div { class: "fx-empty", "No exported nixosModules at this revision." } } } }
+            }
+        }
+    }
+}
+
+#[component]
+fn FlakeInputsOutput(snapshot: FlakeOutputSnapshotResponse) -> Element {
+    let inputs = flake_output_inputs(&snapshot);
+    let stale = snapshot.stale_direct_input_count;
+    let outputs = snapshot.outputs.as_ref();
+    let direct_count = outputs
+        .map(|outputs| outputs.direct_input_count)
+        .unwrap_or_default();
+    let resolved_count = outputs
+        .map(|outputs| outputs.resolved_input_count)
+        .unwrap_or_default();
+    let nixpkgs_revision_count = outputs
+        .map(|outputs| outputs.nixpkgs_revisions.len())
+        .unwrap_or_default();
+    rsx! {
+        div { class: "fx-stats",
+            FlakeStat { value: direct_count, label: "direct inputs" }
+            FlakeStat { value: resolved_count, label: "resolved total" }
+            FlakeStat { value: nixpkgs_revision_count as i64, label: "nixpkgs revisions", warning: outputs.is_some_and(|outputs| outputs.multiple_nixpkgs_revisions) }
+            FlakeStat { value: stale, label: "stale over 90d", warning: stale > 0 }
+        }
+        if outputs.is_some_and(|outputs| outputs.multiple_nixpkgs_revisions) { div { class: "sd-callout sd-callout-info fx-callout", "This snapshot resolves multiple nixpkgs revisions. Hosts may not share one package set." } }
+        if let Some(error) = outputs.and_then(|outputs| outputs.lock_error.as_deref()) { div { class: "sd-callout sd-callout-warn fx-callout", "{error}" } }
+        table { class: "sys-table compact fx-table fx-inputs-table",
+            colgroup { col { style: "width:27%" } col { style: "width:31%" } col { style: "width:12%" } col { style: "width:14%" } col { style: "width:16%" } }
+            thead { tr { th { "Input" } th { "Source" } th { "Locked" } th { "Updated" } th { "Follows" } } }
+            tbody {
+                for input in &inputs {
+                    {
+                        let age = input_age_days(input.last_modified);
+                        let age_label = age.map(|days| format!("{days}d ago")).unwrap_or_else(|| "unknown".into());
+                        let source_label = input.source.as_deref().unwrap_or("unavailable").to_string();
+                        let revision_label = input.locked_revision.as_deref().map(short_sha).unwrap_or_else(|| "unavailable".into());
+                        let aliases = input.names.join(", ");
+                        let follows = input.follows.iter().map(render_follows_value).collect::<Vec<_>>().join(", ");
+                        let revision_bump = snapshot.delta.as_ref().and_then(|delta| delta.input_revision_bumps.iter().find(|bump| bump.node == input.node));
+                        let bump_before = revision_bump.and_then(|bump| bump.before.as_deref()).map(short_sha).unwrap_or_else(|| "none".into());
+                        let bump_after = revision_bump.and_then(|bump| bump.after.as_deref()).map(short_sha).unwrap_or_else(|| "none".into());
+                        let original = render_json_compact(&input.original);
+                        let locked = render_json_compact(&input.locked);
+                        rsx! { tr {
+                            td {
+                                div { class: "fx-input-cell",
+                                    code { class: "fx-host", title: "{input.node}", "{input.names.first().unwrap_or(&input.node)}" }
+                                    if input.direct { span { class: "chip chip-info fx-chip fx-chip-shrink", "direct" } }
+                                    else if input.transitive { span { class: "chip chip-unknown fx-chip fx-chip-shrink", "transitive" } }
+                                    if input.tracked { span { class: "chip chip-info fx-chip fx-chip-shrink", title: "Revision-tracked input", "tracked" } }
+                                    if input.channel { span { class: "chip chip-unknown fx-chip fx-chip-shrink", title: "Channel input", "channel" } }
+                                }
+                                if input.names.len() > 1 { span { class: "fx-note", "aliases: {aliases}" } }
+                                div { class: "fx-input-source-narrow",
+                                    code { class: "fx-url", title: input.source.clone().unwrap_or_default(), "{source_label}" }
+                                    span { class: "fx-note", "{input.source_type}" }
+                                    details { class: "fx-input-metadata", summary { "Lock metadata" } code { "original: {original}" } code { "locked: {locked}" } }
+                                }
+                            }
+                            td {
+                                code { class: "fx-url", title: input.source.clone().unwrap_or_default(), "{source_label}" }
+                                span { class: "fx-note", "{input.source_type}" }
+                                details { class: "fx-input-metadata", summary { "Lock metadata" } code { "original: {original}" } code { "locked: {locked}" } }
+                            }
+                            td {
+                                code { class: "fx-dim", title: input.locked_revision.clone().unwrap_or_default(), "{revision_label}" }
+                                if revision_bump.is_some() { span { class: "fx-note mono", "{bump_before} -> {bump_after}" } }
+                            }
+                            td { span { class: if age.is_some_and(|days| days > 90) { "fx-stale" } else { "fx-dim" }, "{age_label}" } }
+                            td {
+                                if !input.follows.is_empty() { span { class: "mono fx-dim", "{follows}" } } else { span { class: "fx-dim", "-" } }
+                                if let Some(descendants) = input.transitive_descendant_count {
+                                    span { class: "fx-note", "+{descendants} transitive" }
+                                }
+                            }
+                        } }
+                    }
+                }
+                if inputs.is_empty() { tr { td { colspan: "5", div { class: "fx-empty", "No input metadata is available at this revision." } } } }
+            }
+        }
+    }
+}
+
+fn flake_output_modules(snapshot: &FlakeOutputSnapshotResponse) -> Vec<FlakeOutputModule> {
+    let mut modules = snapshot
+        .outputs
+        .as_ref()
+        .map(|outputs| outputs.exported_modules.clone())
+        .unwrap_or_default();
+    modules.sort_by(|left, right| {
+        right
+            .consumer_count
+            .cmp(&left.consumer_count)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    modules
+}
+
+fn flake_output_inputs(snapshot: &FlakeOutputSnapshotResponse) -> Vec<FlakeOutputInput> {
+    let mut inputs = snapshot
+        .outputs
+        .as_ref()
+        .map(|outputs| outputs.inputs.clone())
+        .unwrap_or_default();
+    inputs.sort_by(|left, right| {
+        right.direct.cmp(&left.direct).then_with(|| {
+            left.names
+                .first()
+                .unwrap_or(&left.node)
+                .cmp(right.names.first().unwrap_or(&right.node))
+        })
+    });
+    inputs
+}
+
+fn authoritative_input_count(snapshot: Option<&FlakeOutputSnapshotResponse>) -> i64 {
+    snapshot
+        .and_then(|snapshot| snapshot.outputs.as_ref())
+        .map(|outputs| outputs.direct_input_count)
+        .unwrap_or_default()
+}
+
+fn authoritative_system_reconciliation_count(snapshot: &FlakeOutputSnapshotResponse) -> i64 {
+    snapshot
+        .managed_system_count
+        .saturating_add(snapshot.declared_unmanaged_count)
+}
+
+fn delta_sample_title(items: &[String], total: usize) -> String {
+    let mut title = items.join(", ");
+    let omitted = total.saturating_sub(items.len());
+    if omitted > 0 {
+        title.push_str(&format!("\n{omitted} more not shown"));
+    }
+    title
+}
+
+fn input_bump_sample_title(
+    bumps: &[crate::api::models::FlakeInputRevisionBump],
+    total: usize,
+) -> String {
+    let mut title = bumps
+        .iter()
+        .map(|bump| {
+            format!(
+                "{}: {} -> {}",
+                bump.node,
+                bump.before
+                    .as_deref()
+                    .map(short_sha)
+                    .unwrap_or_else(|| "none".into()),
+                bump.after
+                    .as_deref()
+                    .map(short_sha)
+                    .unwrap_or_else(|| "none".into()),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let omitted = total.saturating_sub(bumps.len());
+    if omitted > 0 {
+        title.push_str(&format!("\n{omitted} more not shown"));
+    }
+    title
+}
+
+fn flake_delta_total(delta: &FlakeOutputDelta) -> usize {
+    delta
+        .systems_added_total
+        .saturating_add(delta.systems_removed_total)
+        .saturating_add(delta.modules_added_total)
+        .saturating_add(delta.modules_removed_total)
+        .saturating_add(delta.inputs_added_total)
+        .saturating_add(delta.inputs_removed_total)
+        .saturating_add(delta.input_revision_bumps_total)
+}
+
+fn declared_output_collapse(previous: Option<i64>, selected: i64) -> Option<i64> {
+    previous.filter(|previous| selected < *previous)
+}
+
+fn flake_output_pane_has_more(pane: FlakePane, snapshot: &FlakeOutputSnapshotResponse) -> bool {
+    if snapshot.lifecycle != SnapshotLifecycle::Available
+        || snapshot.pagination.offset >= 100_000
+        || snapshot.pagination.limit == 0
+    {
+        return false;
+    }
+    match pane {
+        FlakePane::Commits => false,
+        FlakePane::Systems => snapshot.pagination.systems_has_more,
+        FlakePane::Modules => i64::try_from(flake_output_modules(snapshot).len())
+            .is_ok_and(|loaded| loaded < snapshot.exported_module_count),
+        FlakePane::Inputs => snapshot.outputs.as_ref().is_some_and(|outputs| {
+            i64::try_from(flake_output_inputs(snapshot).len())
+                .is_ok_and(|loaded| loaded < outputs.resolved_input_count)
+        }),
+    }
+}
+
+fn validate_flake_output_page_zero(
+    page: FlakeOutputSnapshotResponse,
+    revision: &str,
+) -> Result<FlakeOutputSnapshotResponse, String> {
+    if page.revision != revision || page.pagination.offset != 0 {
+        return Err("The first revision-output page did not match the selected revision.".into());
+    }
+    if page.lifecycle == SnapshotLifecycle::Available
+        && page
+            .snapshot_token
+            .as_deref()
+            .is_none_or(|token| token.trim().is_empty())
+    {
+        return Err("The revision-output response did not include a snapshot token.".into());
+    }
+    Ok(page)
+}
+
+fn merge_flake_output_pages(
+    mut accumulated: FlakeOutputSnapshotResponse,
+    page: FlakeOutputSnapshotResponse,
+) -> Result<FlakeOutputSnapshotResponse, String> {
+    let expected_offset = accumulated
+        .pagination
+        .offset
+        .saturating_add(accumulated.pagination.limit);
+    if accumulated.lifecycle != SnapshotLifecycle::Available
+        || page.lifecycle != SnapshotLifecycle::Available
+        || accumulated.revision != page.revision
+        || accumulated.first_parent_revision != page.first_parent_revision
+        || accumulated.first_parent_resolved != page.first_parent_resolved
+        || accumulated.comparison_available != page.comparison_available
+        || accumulated.snapshot_token.is_none()
+        || accumulated.snapshot_token != page.snapshot_token
+        || accumulated.managed_system_count != page.managed_system_count
+        || accumulated.declared_system_count != page.declared_system_count
+        || accumulated.previous_declared_system_count != page.previous_declared_system_count
+        || accumulated.declared_unmanaged_count != page.declared_unmanaged_count
+        || accumulated.managed_undeclared_count != page.managed_undeclared_count
+        || accumulated.output_collapsed_count != page.output_collapsed_count
+        || accumulated.pinned_revision_count != page.pinned_revision_count
+        || accumulated.stale_direct_input_count != page.stale_direct_input_count
+        || accumulated.exported_module_count != page.exported_module_count
+        || page.pagination.offset != expected_offset
+    {
+        return Err("The revision-output snapshot changed. Reload this pane to continue.".into());
+    }
+    accumulated.outputs = merge_flake_output_payloads(accumulated.outputs, page.outputs);
+    accumulated.previous_outputs =
+        merge_flake_output_payloads(accumulated.previous_outputs, page.previous_outputs);
+    accumulated.systems.extend(page.systems);
+    let mut system_keys = HashSet::new();
+    accumulated
+        .systems
+        .retain(|system| system_keys.insert((system.configuration_name.clone(), system.system_id)));
+    accumulated.error = page.error;
+    accumulated.pagination = page.pagination;
+    Ok(accumulated)
+}
+
+fn merge_flake_output_payloads(
+    accumulated: Option<FlakeOutputPayload>,
+    page: Option<FlakeOutputPayload>,
+) -> Option<FlakeOutputPayload> {
+    match (accumulated, page) {
+        (Some(mut accumulated), Some(page)) => {
+            accumulated.declared_systems.extend(page.declared_systems);
+            accumulated.exported_modules.extend(page.exported_modules);
+            accumulated.inputs.extend(page.inputs);
+            deduplicate_strings(&mut accumulated.declared_systems);
+            let mut module_names = HashSet::new();
+            accumulated
+                .exported_modules
+                .retain(|module| module_names.insert(module.name.clone()));
+            let mut input_nodes = HashSet::new();
+            accumulated
+                .inputs
+                .retain(|input| input_nodes.insert(input.node.clone()));
+            accumulated.direct_input_count = page.direct_input_count;
+            accumulated.resolved_input_count = page.resolved_input_count;
+            accumulated.lock_error = page.lock_error;
+            accumulated.module_evaluation = page.module_evaluation;
+            accumulated.nixpkgs_revisions = page.nixpkgs_revisions;
+            accumulated.multiple_nixpkgs_revisions = page.multiple_nixpkgs_revisions;
+            Some(accumulated)
+        }
+        (None, page) => page,
+        (accumulated, None) => accumulated,
+    }
+}
+
+fn merge_flake_output_deltas(
+    accumulated: Option<FlakeOutputDelta>,
+    page: Option<FlakeOutputDelta>,
+) -> Option<FlakeOutputDelta> {
+    match (accumulated, page) {
+        (Some(mut accumulated), Some(page)) => {
+            accumulated.systems_added.extend(page.systems_added);
+            accumulated.systems_removed.extend(page.systems_removed);
+            accumulated.modules_added.extend(page.modules_added);
+            accumulated.modules_removed.extend(page.modules_removed);
+            accumulated.inputs_added.extend(page.inputs_added);
+            accumulated.inputs_removed.extend(page.inputs_removed);
+            accumulated
+                .input_revision_bumps
+                .extend(page.input_revision_bumps);
+            deduplicate_strings(&mut accumulated.systems_added);
+            deduplicate_strings(&mut accumulated.systems_removed);
+            deduplicate_strings(&mut accumulated.modules_added);
+            deduplicate_strings(&mut accumulated.modules_removed);
+            deduplicate_strings(&mut accumulated.inputs_added);
+            deduplicate_strings(&mut accumulated.inputs_removed);
+            let mut bump_nodes = HashSet::new();
+            accumulated
+                .input_revision_bumps
+                .retain(|bump| bump_nodes.insert(bump.node.clone()));
+            Some(accumulated)
+        }
+        (None, page) => page,
+        (accumulated, None) => accumulated,
+    }
+}
+
+fn merge_module_declaration_pages(
+    mut accumulated: FlakeModuleDeclarationsPage,
+    page: FlakeModuleDeclarationsPage,
+) -> Result<FlakeModuleDeclarationsPage, String> {
+    let expected_offset = accumulated.offset + accumulated.declarations.len();
+    if accumulated.lifecycle != SnapshotLifecycle::Available
+        || page.lifecycle != SnapshotLifecycle::Available
+        || accumulated.revision != page.revision
+        || accumulated.module_name != page.module_name
+        || accumulated.snapshot_token.is_none()
+        || accumulated.snapshot_token != page.snapshot_token
+        || accumulated.total != page.total
+        || page.offset != expected_offset
+    {
+        return Err("The declaration snapshot changed. Reload this module to continue.".into());
+    }
+    let existing_paths = accumulated
+        .declarations
+        .iter()
+        .map(|declaration| declaration.path.clone())
+        .collect::<HashSet<_>>();
+    if page
+        .declarations
+        .iter()
+        .any(|declaration| existing_paths.contains(&declaration.path))
+    {
+        return Err("The declaration page overlaps previously loaded rows.".into());
+    }
+    accumulated.declarations.extend(page.declarations);
+    accumulated.limit = page.limit;
+    accumulated.error = page.error;
+    Ok(accumulated)
+}
+
+fn validate_module_declaration_page_zero(
+    page: FlakeModuleDeclarationsPage,
+    revision: &str,
+    module_name: &str,
+) -> Result<FlakeModuleDeclarationsPage, String> {
+    let row_count = i64::try_from(page.declarations.len()).unwrap_or(i64::MAX);
+    let token_is_valid = page
+        .snapshot_token
+        .as_deref()
+        .is_some_and(|token| !token.trim().is_empty());
+    if page.lifecycle != SnapshotLifecycle::Available
+        || page.revision != revision
+        || page.module_name != module_name
+        || page.offset != 0
+        || !token_is_valid
+        || page.total < 0
+        || row_count > page.total
+        || page.declarations.len() > page.limit
+        || (page.total > 0 && page.declarations.is_empty())
+        || (page.total > 0 && page.limit == 0)
+    {
+        return Err(
+            "The first declaration page does not match the selected module snapshot. Retry from the first page."
+                .into(),
+        );
+    }
+    Ok(page)
+}
+
+fn input_age_days(last_modified: Option<i64>) -> Option<i64> {
+    last_modified.map(|timestamp| (Utc::now().timestamp() - timestamp).max(0) / 86_400)
+}
+
+fn render_json_compact(value: &serde_json::Value) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "unavailable".into())
+}
+
+fn render_follows_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(value) => value.clone(),
+        serde_json::Value::Array(path) if path.iter().all(serde_json::Value::is_string) => path
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<Vec<_>>()
+            .join("/"),
+        _ => render_json_compact(value),
+    }
+}
+
+fn module_binding_label(module: &FlakeOutputModule) -> String {
+    match (
+        module.source_input.as_deref(),
+        module.source_path.as_deref(),
+    ) {
+        (Some(input), Some(path)) => format!("{input} / {path}"),
+        (None, Some(path)) => format!("untracked / {path}"),
+        (_, None) => "Export binding unavailable".into(),
+    }
+}
+
+fn deduplicate_strings(values: &mut Vec<String>) {
+    let mut seen = HashSet::new();
+    values.retain(|value| seen.insert(value.clone()));
+}
+
+fn snapshot_lifecycle_class(lifecycle: SnapshotLifecycle) -> &'static str {
+    match lifecycle {
+        SnapshotLifecycle::Queued | SnapshotLifecycle::Running => "pending",
+        SnapshotLifecycle::Failed => "failed",
+        SnapshotLifecycle::Available => "available",
+        SnapshotLifecycle::Unavailable => "unavailable",
+    }
+}
+
+fn snapshot_lifecycle_heading(lifecycle: SnapshotLifecycle) -> &'static str {
+    match lifecycle {
+        SnapshotLifecycle::Queued => "Revision outputs queued",
+        SnapshotLifecycle::Running => "Revision outputs running",
+        SnapshotLifecycle::Failed => "Revision outputs failed",
+        SnapshotLifecycle::Available => "Revision outputs available",
+        SnapshotLifecycle::Unavailable => "Revision outputs unavailable",
+    }
+}
+
+fn flake_snapshot_request_error(error: &ApiClientError) -> String {
+    match error {
+        ApiClientError::Status { code: 401, .. } => {
+            "Sign in again to view these revision outputs.".into()
+        }
+        ApiClientError::Status {
+            code: 403 | 404, ..
+        } => "These revision outputs are unavailable or you do not have access.".into(),
+        ApiClientError::Status { code: 409, .. } => {
+            "The snapshot changed. Reload declarations from the first page.".into()
+        }
+        _ => format!("The revision-output request failed: {error}"),
+    }
+}
+
+fn short_sha(revision: &str) -> String {
+    revision.chars().take(7).collect()
+}
+
+fn registration_prefill_url(configuration: &str, flake: &str, branch: &str) -> String {
+    format!(
+        "/systems?add=1&hostname={}&configuration={}&flake_name={}&branch={}",
+        encode_query_component(configuration),
+        encode_query_component(configuration),
+        encode_query_component(flake),
+        encode_query_component(branch)
+    )
+}
+
+fn encode_query_component(value: &str) -> String {
+    value
+        .bytes()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+                (byte as char).to_string()
+            } else {
+                format!("%{byte:02X}")
+            }
+        })
+        .collect()
+}
+
+fn navigate_href(href: &str) {
+    if let Some(window) = web_sys::window() {
+        let _ = window.location().set_href(href);
     }
 }
 
@@ -5582,7 +7433,9 @@ fn CommitBucketNew(
             // Commit items - JSX lines 154-183
             for (i, commit) in commits.iter().enumerate() {
                 {
-                    let is_selected = selected_commit.as_ref().map_or(false, |sel| sel.sha == commit.sha);
+                    let is_selected = selected_commit
+                        .as_ref()
+                        .is_some_and(|selected| selected.full_hash == commit.full_hash);
                     let is_last_in_bucket = i == total_commits - 1;
                     let pipeline_status = MockPipelineStatus {
                         eval: commit.eval_status.clone(),
@@ -5591,6 +7444,7 @@ fn CommitBucketNew(
 
                     rsx! {
                         CommitItemNew {
+                            key: "{commit.full_hash}",
                             commit: commit.clone(),
                             is_selected,
                             is_last: is_last_in_bucket && is_last_bucket,
@@ -5631,11 +7485,15 @@ fn CommitItemNew(
     };
 
     let dot_class = if is_selected { "fl-dot sel" } else { "fl-dot" };
+    let commit_for_select = commit.clone();
 
     rsx! {
-        div {
+        button {
+            r#type: "button",
             class: "{item_class}",
-            onclick: move |_| on_select.call(commit.clone()),
+            "aria-pressed": is_selected,
+            "aria-label": "Commit {commit.full_hash}: {commit.msg}",
+            onclick: move |_| on_select.call(commit_for_select.clone()),
 
             // Timeline rail - JSX lines 165-168
             div { class: "fl-rail",
@@ -5651,6 +7509,7 @@ fn CommitItemNew(
                 div { style: "display: flex; align-items: baseline; gap: 6px;",
                     span {
                         class: "mono",
+                        title: "{commit.full_hash}",
                         style: "font-size: 11px; font-weight: 700; color: {sha_color};",
                         "{commit.sha}"
                     }
@@ -5894,7 +7753,7 @@ fn CommitDetailNew(
                 PipelineArrowNew {}
                 RolloutPillNew {
                     on: commit.rollout_on,
-                    total: commit.rollout_total.max(commit.rollout_on),
+                    total: commit.rollout_total,
                     failed: 0,
                     onclick: move |_| {
                         if let Some(handler) = &on_open_systems {
@@ -5950,9 +7809,11 @@ fn CommitDetailNew(
                         {
                             let mut selected_file_label = selected_file_label.clone();
                             let mut active_modal_file = active_modal_file.clone();
+                            let file_focus_id = stable_dom_id("flake-file", &file.name);
                             rsx! {
                                 FileCardNew {
                                     file: file.clone(),
+                                    focus_id: file_focus_id,
                                     is_selected: selected_file_name.as_ref().is_some_and(|name| name == &file.name),
                                     on_select: move |picked: MockFileItem| {
                                         selected_file_label.set(picked.name.clone());
@@ -5966,11 +7827,19 @@ fn CommitDetailNew(
             }
 
             if let Some(file) = active_modal_file.read().clone() {
+                {
+                    let file_focus_id = stable_dom_id("flake-file", &file.name);
+                    rsx! {
                 DiffModalNew {
                     file,
                     commit: commit.clone(),
                     flake: flake.clone(),
-                    on_close: move |_| active_modal_file.set(None),
+                    on_close: move |_| {
+                        active_modal_file.set(None);
+                        focus_element_by_id(&file_focus_id);
+                    },
+                }
+                    }
                 }
             }
         }
@@ -6101,6 +7970,7 @@ fn RolloutPillNew(
 #[component]
 fn FileCardNew(
     file: MockFileItem,
+    focus_id: String,
     is_selected: bool,
     on_select: EventHandler<MockFileItem>,
 ) -> Element {
@@ -6126,6 +7996,7 @@ fn FileCardNew(
 
     rsx! {
         button {
+            id: "{focus_id}",
             class: "{card_class}",
             onclick: move |_| on_select.call(file_for_click.clone()),
 
@@ -6342,24 +8213,36 @@ fn DiffModalNew(
     let total_lines = annotated.iter().filter(|r| r.line_type != "meta").count();
 
     let mut wrap = use_signal(|| false);
+    let modal_id = stable_dom_id("flake-diff-modal", &file.name);
+    {
+        let modal_id = modal_id.clone();
+        use_effect(move || focus_element_by_id(&modal_id));
+    }
+    let modal_id_for_keydown = modal_id.clone();
 
     rsx! {
         // Backdrop - JSX line 331
         div {
-            class: "modal-backdrop",
+            class: "modal-backdrop modal-backdrop-above-drawer",
             onclick: move |_| on_close.call(()),
-            style: "z-index: 90;",
             tabindex: "0",
             onkeydown: move |evt| {
+                evt.stop_propagation();
                 if evt.key() == Key::Escape {
                     evt.prevent_default();
                     on_close.call(());
+                } else {
+                    trap_dialog_focus(&evt, &modal_id_for_keydown);
                 }
             },
 
             // Modal content - JSX line 332
             div {
                 class: "diff-modal",
+                id: "{modal_id}",
+                role: "dialog",
+                "aria-modal": "true",
+                tabindex: "-1",
                 onclick: move |evt| evt.stop_propagation(),
 
                 // Header - JSX lines 333-368

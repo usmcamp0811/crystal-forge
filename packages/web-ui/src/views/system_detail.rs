@@ -11,31 +11,40 @@ use dioxus::prelude::*;
 #[cfg(target_arch = "wasm32")]
 use js_sys::Object;
 use serde_json::Value as JsonValue;
+use std::collections::HashSet;
 #[cfg(target_arch = "wasm32")]
 use std::rc::Rc;
 use uuid::Uuid;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::closure::Closure;
+use wasm_bindgen::JsCast;
 #[cfg(target_arch = "wasm32")]
-use wasm_bindgen::{JsCast, JsValue};
+use wasm_bindgen::JsValue;
 
 use crate::api::client::{
     ApiClientError, fetch_compliance_system_evidence, fetch_flake_timeline_for_tray,
     fetch_system_assignments, fetch_system_compliance_bundles, fetch_system_cve_scan_eligibility,
-    fetch_system_cves, fetch_system_hardening, fetch_system_hardening_justifications,
+    fetch_system_cves, fetch_system_evaluated_options, fetch_system_evaluation_module_sources,
+    fetch_system_evaluation_summary, fetch_system_hardening, fetch_system_hardening_justifications,
     fetch_system_hardening_scan_eligibility, get_system_deployment_progress,
-    request_system_generation_rollback, request_system_rollback, request_system_sync,
-    save_system_hardening_justification,
+    queue_system_evaluation, request_system_generation_rollback, request_system_rollback,
+    request_system_sync, save_system_hardening_justification,
     verify_generation_closure as verify_generation_closure_request,
 };
 use crate::api::models::{
-    BuildStatus, CommitInfo, ComplianceEvidenceResponse, CveScanEligibilityResponse,
-    DeploymentLogEntry, DeploymentStatus, FlakeSummary, HardeningJustificationResponse,
-    HardeningScanEligibilityResponse, HardeningServiceResultResponse, HealthStatus, LogLevel,
-    SaveHardeningJustificationRequest, SystemAgentEvent, SystemCommitHistory,
+    AgentFingerprintStatus, BuildStatus, CommitInfo, ComplianceEvidenceResponse,
+    CveScanEligibilityResponse, DeploySystemRequest, DeploymentLogEntry, DeploymentStatus,
+    EvaluatedOption, EvaluatedOptionFilter, EvaluatedOptionRow, EvaluatedOptionsPage,
+    EvaluatedOptionsRequest, EvaluationDrift, EvaluationModuleSourcesPage, EvaluationModuleSummary,
+    FlakeSummary, HardeningJustificationResponse, HardeningScanEligibilityResponse,
+    HardeningServiceResultResponse, HealthStatus, LogLevel, ManualDeploymentAction,
+    ManualDeploymentConversionState, ManualDeploymentPolicyState, ManualDeploymentRequestState,
+    OptionChangeKind, OptionDefinitionProvenance, SafeOptionValue,
+    SaveHardeningJustificationRequest, SelectedEvaluationSummary, SevenDayDriftStatus,
+    SnapshotLifecycle, SnapshotRevisionMode, SystemAgentEvent, SystemCommitHistory,
     SystemComplianceBundle, SystemDeploymentProgress, SystemDetail, SystemGeneration,
     SystemHistoryEntry, SystemRollbackGenerationRequest, SystemRollbackRequest,
-    SystemVulnerability, VerifyGenerationClosureRequest,
+    SystemVulnerability, TrackedFlakeIdentity, TypedOptionDiff, VerifyGenerationClosureRequest,
 };
 use crate::components::compliance::EvidenceDrawer;
 use crate::components::cve::CvesTab;
@@ -51,13 +60,18 @@ use crate::components::poam::{
     AssignmentVersionCandidate, FindingPoamEvent, PoamDetailHost, PoamFilter, SystemPoamSection,
 };
 use crate::components::system::{
-    EditSystemModal, PendingDeployBanner, deployment_state_label, environment_style, format_uptime,
+    AutoLatestDeployEvent, AutoLatestDeployPrompt, AutoLatestDeployState, EditSystemModal,
+    PendingDeployBanner, deployment_request_for_target, deployment_state_label, environment_style,
+    format_uptime, reduce_auto_latest_deploy_state,
 };
 use crate::routes::Route;
 use crate::state::{
     app_state::AppState,
     auth,
-    navigation_focus::{FocusTarget, NavigationFocus},
+    navigation_focus::{
+        ConfigRevision, FocusTarget, NavigationFocus, SystemDetailNavigation, SystemDetailTab,
+        current_query, update_query,
+    },
 };
 use crate::systems::adapter::{
     deploy_system_via_api, fetch_system_commits_via_api, load_system_agent_events_with_fallback,
@@ -154,6 +168,49 @@ impl Tab {
             Self::Compliance => "Compliance",
         }
     }
+
+    fn navigation_tab(self) -> SystemDetailTab {
+        match self {
+            Self::Overview => SystemDetailTab::Overview,
+            Self::Deploy => SystemDetailTab::Deploy,
+            Self::History => SystemDetailTab::History,
+            Self::Logs => SystemDetailTab::Logs,
+            Self::Config => SystemDetailTab::Config,
+            Self::Cves => SystemDetailTab::Cves,
+            Self::Hardening => SystemDetailTab::Hardening,
+            Self::Compliance => SystemDetailTab::Compliance,
+        }
+    }
+
+    fn from_navigation(tab: SystemDetailTab) -> Self {
+        match tab {
+            SystemDetailTab::Overview => Self::Overview,
+            SystemDetailTab::Deploy => Self::Deploy,
+            SystemDetailTab::History => Self::History,
+            SystemDetailTab::Logs => Self::Logs,
+            SystemDetailTab::Config => Self::Config,
+            SystemDetailTab::Cves => Self::Cves,
+            SystemDetailTab::Hardening => Self::Hardening,
+            SystemDetailTab::Compliance => Self::Compliance,
+        }
+    }
+}
+
+fn navigate_system_detail_tab(
+    mut active_tab: Signal<Tab>,
+    mut navigation_state: Signal<SystemDetailNavigation>,
+    tab: Tab,
+    push: bool,
+) {
+    let mut next = navigation_state.read().clone();
+    next.tab = tab.navigation_tab();
+    if tab != Tab::Deploy {
+        next.deploy_generation = None;
+    }
+    let query = next.to_query(&current_query());
+    active_tab.set(tab);
+    navigation_state.set(next);
+    update_query(&query, push);
 }
 
 fn derived_fqdn(hostname: &str, environment: Option<&str>) -> String {
@@ -400,7 +457,16 @@ struct FlakeCommitPeekState {
 /// compliance, finding, and remediation identity remain server-authoritative;
 /// the view owns only transient presentation and form state.
 #[component]
-pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
+pub fn SystemDetailView(
+    id: String,
+    tab: String,
+    poam: String,
+    config_mode: String,
+    revision: String,
+    generation: String,
+    deploy_generation: String,
+) -> Element {
+    let _route_owned_config_context = (config_mode, revision, generation, deploy_generation);
     let nav = navigator();
     let mut navigation_focus = use_context::<Signal<Option<NavigationFocus>>>();
     let mut breadcrumb_override = use_context::<Signal<Option<(String, String)>>>();
@@ -414,21 +480,21 @@ pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
     // (and any tab-specific data loading it triggers) would flash briefly before the
     // effect ever fires, and on the WASM target the effect was observed to land too
     // late to reliably override the initial tab.
-    let initial_route_tab = tab_from_route(&tab, &current_system_detail_query());
-    let mut active_tab = use_signal(|| initial_route_tab);
-    let mut observed_route_tab = use_signal(|| tab.clone());
-    // Router prop updates rerender this component but do not recreate signals.
-    // Reconcile only when the route-owned value changes so local tab clicks,
-    // which update browser history directly, are not reverted.
-    if observed_route_tab.peek().as_str() != tab {
-        observed_route_tab.set(tab.clone());
-        active_tab.set(tab_from_route(&tab, &current_system_detail_query()));
+    let mut initial_query = current_query();
+    if initial_query.is_empty() {
+        initial_query = query_with_parameter("", "tab", Some(&tab));
+        initial_query = query_with_parameter(&initial_query, "poam", Some(&poam));
     }
+    let initial_navigation = SystemDetailNavigation::from_query(&initial_query);
+    let mut navigation_state = use_signal(|| initial_navigation.clone());
+    let mut active_tab = use_signal(|| Tab::from_navigation(initial_navigation.tab));
     #[cfg(target_arch = "wasm32")]
     {
         let popstate_listener = use_hook(|| {
             let callback = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
-                active_tab.set(tab_from_query(&current_system_detail_query()));
+                let next = SystemDetailNavigation::from_query(&current_query());
+                active_tab.set(Tab::from_navigation(next.tab));
+                navigation_state.set(next);
             });
             if let Some(window) = web_sys::window() {
                 let _ = window.add_event_listener_with_callback(
@@ -474,6 +540,9 @@ pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
     // Toast notification state
     let mut toast_message: Signal<Option<(String, bool)>> = use_signal(|| None); // (message, is_success)
     let mut deploy_action_notice: Signal<Option<(String, bool)>> = use_signal(|| None);
+    let mut persisted_deploy_policy: Signal<Option<ManualDeploymentPolicyState>> =
+        use_signal(|| None);
+    let mut deploy_retry_request: Signal<Option<DeploySystemRequest>> = use_signal(|| None);
     let mut flake_commit_peek: Signal<Option<FlakeCommitPeekState>> = use_signal(|| None);
     let mut flake_commit_peek_reload = use_signal(|| 0_u64);
     // Reload nonce for system detail — incremented after edit-save to re-fetch the system.
@@ -779,7 +848,7 @@ pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
             div {
                 class: "space-y-4",
                 Link {
-                    to: crate::routes::Route::SystemsView {},
+                    to: crate::routes::Route::SystemsView { query: String::new() },
                     class: "inline-flex items-center gap-1 text-sm {theme::text::SECONDARY} hover:text-white transition-colors",
                     "← Back to Systems"
                 }
@@ -1011,7 +1080,7 @@ pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
                 button {
                     class: "sd-back focus-ring",
                     onclick: move |_| {
-                        nav.push(Route::SystemsView {});
+                        nav.push(Route::SystemsView { query: String::new() });
                     },
                     "aria-label": "Back to systems",
                     Icon { name: IconName::ArrowLeft, size: 14 }
@@ -1056,13 +1125,6 @@ pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
                         class: "sd-head-actions",
                         button {
                             class: "btn btn-ghost focus-ring",
-                            disabled: !can_mutate,
-                            onclick: move |_| show_generation_rollback_modal.set(true),
-                            Icon { name: IconName::Rollback, size: 14 }
-                            "Rollback"
-                        }
-                        button {
-                            class: "btn btn-ghost focus-ring",
                             onclick: move |_| show_ssh_modal.set(true),
                             Icon { name: IconName::Terminal, size: 14 }
                             "SSH"
@@ -1073,13 +1135,6 @@ pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
                             onclick: move |_| edit_modal_open.set(true),
                             Icon { name: IconName::Gear, size: 14 }
                             "Edit"
-                        }
-                        button {
-                            class: "btn btn-primary focus-ring",
-                            disabled: !can_mutate,
-                            onclick: move |_| active_tab.set(Tab::Deploy),
-                            Icon { name: IconName::Deploy, size: 14 }
-                            "Deploy"
                         }
                     }
                 }
@@ -1105,7 +1160,14 @@ pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
                     .unwrap_or(0.0);
                 let uptime_str = format_uptime(system.hardware.uptime_secs.unwrap_or(0));
                 let kernel_str = system.kernel.clone().unwrap_or_else(|| "unknown".to_string());
-                let policy_str = system.deployment_policy.clone();
+                let policy_str = persisted_deploy_policy()
+                    .map(|policy| match policy {
+                        ManualDeploymentPolicyState::AutoLatest => "auto_latest",
+                        ManualDeploymentPolicyState::Manual => "manual",
+                        ManualDeploymentPolicyState::Pinned => "pinned",
+                    })
+                    .unwrap_or(&system.deployment_policy)
+                    .to_string();
                 let env_str = environment.clone();
                 let generation_text = system
                     .generation
@@ -1196,7 +1258,7 @@ pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
                             - now.signed_duration_since(dt).num_seconds() as f64
                     }),
                     on_dismiss: move |_| deployment_progress_poll_tick.set(deployment_progress_poll_tick() + 1),
-                    on_view_logs: move |_| active_tab.set(Tab::Logs),
+                    on_view_logs: move |_| navigate_system_detail_tab(active_tab, navigation_state, Tab::Logs, true),
                 }
             }
 
@@ -1205,7 +1267,24 @@ pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
                 "data-testid": "system-detail-tabs",
                 class: "sd-tabs",
                 role: "tablist",
-                for tab in DETAIL_TAB_ORDER {
+                "aria-label": "System detail sections",
+                onkeydown: move |event| {
+                    let current = DETAIL_TAB_ORDER
+                        .iter()
+                        .position(|tab| tab == &*active_tab.read())
+                        .unwrap_or_default();
+                    let next = match event.key() {
+                        Key::ArrowRight => (current + 1) % DETAIL_TAB_ORDER.len(),
+                        Key::ArrowLeft => (current + DETAIL_TAB_ORDER.len() - 1) % DETAIL_TAB_ORDER.len(),
+                        Key::Home => 0,
+                        Key::End => DETAIL_TAB_ORDER.len() - 1,
+                        _ => return,
+                    };
+                    event.prevent_default();
+                    navigate_system_detail_tab(active_tab, navigation_state, DETAIL_TAB_ORDER[next], true);
+                    focus_dialog_by_id(&format!("system-tab-{next}"));
+                },
+                for (tab_index, tab) in DETAIL_TAB_ORDER.into_iter().enumerate() {
                     {
                         let is_active = *active_tab.read() == tab;
                         let tab_class = if is_active {
@@ -1219,14 +1298,11 @@ pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
                                 class: "{tab_class}",
                                 role: "tab",
                                 "aria-selected": "{is_active}",
+                                "aria-controls": "system-tab-panel",
+                                id: "system-tab-{tab_index}",
+                                tabindex: if is_active { "0" } else { "-1" },
                                 onclick: move |_| {
-                                    active_tab.set(tab);
-                                    let query = query_with_parameter(
-                                        &current_system_detail_query(),
-                                        "tab",
-                                        Some(tab_query_value(tab)),
-                                    );
-                                    sync_system_detail_query(&query, false);
+                                    navigate_system_detail_tab(active_tab, navigation_state, tab, true);
                                 },
                                 // Tab icons use the shared Icon component at size 13,
                                 // matching the CrystalForgelatest design icon contract.
@@ -1256,6 +1332,8 @@ pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
             // Tab content
             div {
                 class: "sd-body",
+                id: "system-tab-panel",
+                role: "tabpanel",
                 match *active_tab.read() {
                     Tab::Overview => rsx! {
                         OverviewTab {
@@ -1264,8 +1342,8 @@ pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
                             current_commit: overview_current_commit.clone(),
                             target_store_path: deployment_progress.as_ref().map(|progress| progress.target_store_path.clone()),
                             history_entries: effective_history_entries.clone(),
-                            on_open_cves: move |_| active_tab.set(Tab::Cves),
-                            on_view_history: move |_| active_tab.set(Tab::History),
+                            on_open_cves: move |_| navigate_system_detail_tab(active_tab, navigation_state, Tab::Cves, true),
+                            on_view_history: move |_| navigate_system_detail_tab(active_tab, navigation_state, Tab::History, true),
                             on_open_flake_commit: on_open_flake_commit,
                         }
                     },
@@ -1275,8 +1353,11 @@ pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
                             commits: deploy_commit_history.clone(),
                             generations: generations_result.generations.clone(),
                             current_generation: generations_result.current_generation,
+                            initial_generation: navigation_state.read().deploy_generation,
                             allow_mutations: can_mutate,
-                            deploy_notice: deploy_action_notice.read().clone(),
+                            deploy_notice: deploy_action_notice,
+                            persisted_policy: persisted_deploy_policy(),
+                            retry_request: deploy_retry_request(),
                             on_clear_deploy_notice: move |_| deploy_action_notice.set(None),
                             on_open_flake_commit: on_open_flake_commit,
                             on_deploy_commit: {
@@ -1284,29 +1365,36 @@ pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
                                 let hostname = system.hostname.clone();
                                 let toast_message = toast_message.clone();
                                 let mut deploy_action_notice = deploy_action_notice.clone();
-                                move |commit_sha: String| {
+                                let mut persisted_deploy_policy = persisted_deploy_policy;
+                                move |request: DeploySystemRequest| {
                                     let hostname = hostname.clone();
                                     let toast_message = toast_message.clone();
                                     let mut deploy_action_notice = deploy_action_notice.clone();
+                                    let mut persisted_deploy_policy = persisted_deploy_policy;
+                                    deploy_retry_request.set(Some(request.clone()));
                                     deploy_action_notice.set(Some((
                                         format!(
                                             "Requesting deployment of {} to {}…",
                                             hostname,
-                                            commit_sha.chars().take(7).collect::<String>()
+                                            request.commit_sha.chars().take(7).collect::<String>()
                                         ),
                                         true,
                                     )));
                                     spawn(async move {
-                                        let (message, success) = match deploy_system_via_api(system_id, commit_sha.clone()).await {
-                                            Ok(response) if !response.trim().is_empty() => (response, true),
-                                            Ok(_) => (
-                                                format!(
-                                                    "Requested deployment of {} to {}",
-                                                    hostname,
-                                                    commit_sha.chars().take(7).collect::<String>()
-                                                ),
-                                                true,
-                                            ),
+                                        let (message, success) = match deploy_system_via_api(system_id, &request).await {
+                                            Ok(response) => {
+                                                persisted_deploy_policy.set(Some(response.policy));
+                                                let success = response.deployment != ManualDeploymentRequestState::Failed;
+                                                let conversion_persisted = matches!(
+                                                    response.conversion,
+                                                    ManualDeploymentConversionState::Converted
+                                                        | ManualDeploymentConversionState::AlreadyManual
+                                                );
+                                                if success || !conversion_persisted {
+                                                    deploy_retry_request.set(None);
+                                                }
+                                                (response.message, success)
+                                            }
                                             Err(error) => (
                                                 format!("Deploy request failed for {}: {}", hostname, error),
                                                 false,
@@ -1368,15 +1456,20 @@ pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
                             current_generation: system.generation,
                             deployment_policy: system.deployment_policy.clone(),
                             allow_mutations: can_mutate,
-                            on_rollback: move |commit| {
-                                rollback_target.set(Some(commit));
-                                show_rollback_dialog.set(true);
+                            on_rollback: move |generation| {
+                                let mut next = navigation_state.read().clone();
+                                next.tab = SystemDetailTab::Deploy;
+                                next.deploy_generation = Some(generation);
+                                let query = next.to_query(&current_query());
+                                navigation_state.set(next);
+                                active_tab.set(Tab::Deploy);
+                                update_query(&query, true);
                             },
                             on_view_logs: move |event_id: String| {
                                 // Record the jump target with a fresh nonce, then switch to Logs.
                                 let nonce = chrono::Utc::now().timestamp_millis() as u64;
                                 log_jump_target.set(Some((event_id, nonce)));
-                                active_tab.set(Tab::Logs);
+                                navigate_system_detail_tab(active_tab, navigation_state, Tab::Logs, true);
                             },
                         }
                     },
@@ -1413,7 +1506,23 @@ pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
                         }
                     },
                     Tab::Config => rsx! {
-                        ConfigTab { system: system.clone() }
+                        ConfigTab {
+                            key: "{navigation_state.read().config_revision:?}-{deploy_commit_history.iter().find(|commit| commit.is_current).map(|commit| commit.hash.as_str()).unwrap_or_default()}",
+                            system: system.clone(),
+                            commits: deploy_commit_history.clone(),
+                            generations: generations_result.generations.clone(),
+                            revision: navigation_state.read().config_revision.clone(),
+                            allow_mutations: can_mutate,
+                            on_open_flake_commit: on_open_flake_commit,
+                            on_revision_change: move |revision: ConfigRevision| {
+                                let mut next = navigation_state.read().clone();
+                                next.tab = SystemDetailTab::Config;
+                                next.config_revision = revision;
+                                let query = next.to_query(&current_query());
+                                navigation_state.set(next);
+                                update_query(&query, true);
+                            },
+                        }
                     },
                     Tab::Compliance => rsx! {
                         ComplianceTab {
@@ -1444,6 +1553,7 @@ pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
                 is_admin: false,
                 focus_sha: Some(peek.focus_sha.clone()),
                 focus_meta: Some(peek.focus_meta.clone()),
+                initial_pane: crate::state::navigation_focus::FlakePane::Commits,
                 flake: peek.flake.clone(),
                 on_edit: move |_| {},
                 on_sync: move |_| flake_commit_peek_reload.set(flake_commit_peek_reload() + 1),
@@ -1453,6 +1563,7 @@ pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
                         false,
                     )));
                 },
+                on_navigation_change: move |_| {},
                 on_close: move |_| flake_commit_peek.set(None),
                 on_open_evaluation: move |focus: NavigationFocus| {
                     navigation_focus.set(Some(focus));
@@ -1470,7 +1581,7 @@ pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
                         status: focus.status,
                         policy_name: None,
                     }));
-                    nav.push(Route::SystemsView {});
+                    nav.push(Route::SystemsView { query: String::new() });
                 },
             }
         }
@@ -1532,7 +1643,7 @@ pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
                                         true,
                                     )));
                                     // Navigate back to systems list
-                                    nav.push(Route::SystemsView {});
+                                    nav.push(Route::SystemsView { query: String::new() });
                                 }
                                 Err(error) => {
                                     remove_in_progress.set(false);
@@ -1586,7 +1697,7 @@ pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
                             };
                             let success = !message.to_ascii_lowercase().contains("failed");
                             if success {
-                                active_tab.set(Tab::Overview);
+                                navigate_system_detail_tab(active_tab, navigation_state, Tab::Overview, true);
                                 deployment_progress_poll_tick.set(deployment_progress_poll_tick() + 1);
                             }
                             let _ = dispatch_sync_notification(message, success, toast_message).await;
@@ -2790,7 +2901,7 @@ fn OverviewTab(
     } else {
         "Server can reach the agent directly (LAN/routable/VPN)"
     };
-    let branch_text = "main".to_string();
+    let branch_text = "unavailable".to_string();
     let generation_text = system
         .generation
         .map(|generation| format!("#{generation}"))
@@ -2920,7 +3031,16 @@ fn OverviewTab(
                         class: "mono",
                         style: "font-size:11px; white-space:normal; word-break:break-all; line-height:1.4;",
                         title: "{store_path_text}",
-                        "{store_path_text}"
+                        button {
+                            class: "tl-commit-link mono focus-ring",
+                            title: "Open the current evaluation",
+                            onclick: move |_| {
+                                if let Some(window) = web_sys::window() {
+                                    let _ = window.location().set_href(&format!("/systems/{}?tab=config", system.id));
+                                }
+                            },
+                            "{store_path_text}"
+                        }
                     }
                     if let Some(target_store_path_text) = target_store_path_text {
                         dt { style: "color:#fbbf24;", "Target" }
@@ -3125,7 +3245,7 @@ fn OverviewTab(
                                         class: "sd-tag-label focus-ring",
                                         title: "Filter fleet by #{tag_for_filter}",
                                         onclick: move |_| {
-                                            nav.push(Route::SystemsView {});
+                                            nav.push(Route::SystemsView { query: String::new() });
                                         },
                                         "#{tag}"
                                     }
@@ -3221,11 +3341,14 @@ fn DeployTab(
     commits: Vec<SystemCommitHistory>,
     generations: Vec<SystemGeneration>,
     current_generation: Option<i32>,
+    initial_generation: Option<i32>,
     allow_mutations: bool,
-    deploy_notice: Option<(String, bool)>,
+    deploy_notice: Signal<Option<(String, bool)>>,
+    persisted_policy: Option<ManualDeploymentPolicyState>,
+    retry_request: Option<DeploySystemRequest>,
     on_clear_deploy_notice: EventHandler<()>,
     on_open_flake_commit: EventHandler<FlakeCommitPeekTarget>,
-    on_deploy_commit: EventHandler<String>,
+    on_deploy_commit: EventHandler<DeploySystemRequest>,
     on_deploy_generation: EventHandler<String>,
 ) -> Element {
     let flake_name = system
@@ -3249,11 +3372,35 @@ fn DeployTab(
         .or_else(|| generations.first())
         .map(|g| g.generation);
 
-    let mut mode = use_signal(|| "commit".to_string());
+    let initial_selected_generation = initial_generation
+        .filter(|target| generations.iter().any(|item| item.generation == *target))
+        .or(default_generation);
+    let mut mode = use_signal(|| {
+        if initial_generation.is_some() {
+            "generation".to_string()
+        } else {
+            "commit".to_string()
+        }
+    });
     let mut selected_commit = use_signal(|| default_commit);
-    let mut selected_generation: Signal<Option<i32>> = use_signal(|| default_generation);
+    let mut selected_generation: Signal<Option<i32>> = use_signal(|| initial_selected_generation);
     let mut show_diff = use_signal(|| false);
     let mut verify_notice = use_signal(|| None::<String>);
+    let mut auto_latest_state = use_signal(|| AutoLatestDeployState::Closed);
+    {
+        use_effect(move || {
+            if matches!(
+                auto_latest_state(),
+                AutoLatestDeployState::Submitting { .. }
+            ) && deploy_notice
+                .read()
+                .as_ref()
+                .is_some_and(|(message, _)| !message.starts_with("Requesting deployment"))
+            {
+                auto_latest_state.set(AutoLatestDeployState::Closed);
+            }
+        });
+    }
 
     let displayed_commits = {
         use std::collections::HashSet;
@@ -3265,6 +3412,7 @@ fn DeployTab(
             .cloned()
             .collect::<Vec<_>>()
     };
+    let deploy_notice_value = deploy_notice.read().clone();
 
     let selected_commit_data = displayed_commits
         .iter()
@@ -3287,7 +3435,17 @@ fn DeployTab(
         .unwrap_or_else(|| "unknown".to_string());
     let from_short = from_commit.chars().take(7).collect::<String>();
 
-    let policy_name = system.deployment_policy.clone();
+    let policy_name = persisted_policy
+        .map(|policy| match policy {
+            ManualDeploymentPolicyState::AutoLatest => "auto_latest",
+            ManualDeploymentPolicyState::Manual => "manual",
+            ManualDeploymentPolicyState::Pinned => "pinned",
+        })
+        .unwrap_or(&system.deployment_policy)
+        .to_string();
+    let is_auto_latest = policy_name == "auto_latest";
+    let retry_request_for_button = retry_request.clone();
+    let retry_request_for_prompt = retry_request.clone();
 
     rsx! {
         div {
@@ -3295,7 +3453,7 @@ fn DeployTab(
 
         // Deploy gate panel — policy evaluation for the selected target.
         DeployGatePanel {
-            deployment_policy: system.deployment_policy.clone(),
+            deployment_policy: policy_name.clone(),
             cve_critical: system.cve_counts.critical,
         }
 
@@ -3332,7 +3490,7 @@ fn DeployTab(
                                 view_box: "0 0 24 24",
                                 path { d: "M7 7h10M7 12h10M7 17h10M4 7h.01M4 12h.01M4 17h.01" }
                             }
-                            " Commit"
+                            " New commit"
                         }
                         button {
                             class: if mode() == "generation" { "active" } else { "" },
@@ -3350,7 +3508,7 @@ fn DeployTab(
                                 view_box: "0 0 24 24",
                                 path { d: "M3 12a9 9 0 1018 0 9 9 0 10-18 0m9-5v5l3 3" }
                             }
-                            " Generation"
+                            " Previous generation"
                         }
                     }
                 }
@@ -3710,7 +3868,7 @@ fn DeployTab(
                                 }
                             }
 
-                            if let Some((message, is_success)) = deploy_notice.as_ref() {
+                            if let Some((message, is_success)) = deploy_notice_value.as_ref() {
                                 div {
                                     class: if *is_success { "sd-callout sd-callout-info" } else { "sd-callout sd-callout-danger" },
                                     span {
@@ -3837,13 +3995,32 @@ fn DeployTab(
                                 button {
                                     class: "btn btn-primary focus-ring",
                                     disabled: !allow_mutations,
-                                    onclick: move |_| on_deploy_commit.call(commit_sha_for_deploy.clone()),
+                                    onclick: move |_| {
+                                        on_clear_deploy_notice.call(());
+                                        if let Some(retry) = retry_request_for_button
+                                            .as_ref()
+                                            .filter(|request| request.commit_sha == commit_sha_for_deploy)
+                                        {
+                                            on_deploy_commit.call(retry.clone());
+                                        } else if is_auto_latest {
+                                            auto_latest_state.set(reduce_auto_latest_deploy_state(
+                                                &auto_latest_state(),
+                                                AutoLatestDeployEvent::Open(commit_sha_for_deploy.clone()),
+                                            ));
+                                        } else {
+                                            on_deploy_commit.call(deployment_request_for_target(
+                                                &commit_sha_for_deploy,
+                                                ManualDeploymentAction::Deploy,
+                                                None,
+                                            ));
+                                        }
+                                    },
                                     Icon { name: IconName::Deploy, size: 13 }
                                     "{deploy_label}"
                                 }
                             }
 
-                            if let Some((message, is_success)) = deploy_notice.as_ref() {
+                            if let Some((message, is_success)) = deploy_notice_value.as_ref() {
                                 div {
                                     class: if *is_success { "sd-callout sd-callout-info" } else { "sd-callout sd-callout-danger" },
                                     span {
@@ -3867,6 +4044,41 @@ fn DeployTab(
                         }
                     }
                 }
+            }
+        }
+        if let AutoLatestDeployState::Confirming { commit_sha }
+        | AutoLatestDeployState::Submitting { commit_sha, .. } = auto_latest_state() {
+            AutoLatestDeployPrompt {
+                commit_sha,
+                submitting: matches!(auto_latest_state(), AutoLatestDeployState::Submitting { .. }),
+                submitting_action: match auto_latest_state() {
+                    AutoLatestDeployState::Submitting { action, .. } => Some(action),
+                    _ => None,
+                },
+                on_cancel: move |_| {
+                    auto_latest_state.set(reduce_auto_latest_deploy_state(
+                        &auto_latest_state(),
+                        AutoLatestDeployEvent::Cancel,
+                    ));
+                },
+                on_submit: move |action| {
+                    let next = reduce_auto_latest_deploy_state(
+                        &auto_latest_state(),
+                        AutoLatestDeployEvent::Submit(action),
+                    );
+                    let AutoLatestDeployState::Submitting { commit_sha, action } = next else {
+                        return;
+                    };
+                    auto_latest_state.set(AutoLatestDeployState::Submitting {
+                        commit_sha: commit_sha.clone(),
+                        action,
+                    });
+                    on_deploy_commit.call(deployment_request_for_target(
+                        &commit_sha,
+                        action,
+                        retry_request_for_prompt.as_ref(),
+                    ));
+                },
             }
         }
         }
@@ -4641,76 +4853,1846 @@ fn download_text_file(content: &str, filename: &str) {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct ConfigSourceTarget {
+    // SECURITY: These fields are evaluator provenance only. The UI must not
+    // infer or reconstruct source text from the safe option value.
+    source_path: String,
+    source_input: Option<String>,
+    source_revision: Option<String>,
+    safe_value: Option<JsonValue>,
+    status_label: String,
+    priority: Option<i64>,
+    winner_note: Option<String>,
+    tracked_flake: Option<TrackedFlakeIdentity>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ModuleSourcesScope {
+    revision: String,
+    mode: SnapshotRevisionMode,
+    generation: Option<i32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ConfigRefreshScope {
+    selection: ModuleSourcesScope,
+    generation: u64,
+}
+
+fn config_selection_is_historical(
+    selection: &ConfigRevision,
+    selected_revision: Option<&str>,
+    current_deployed_revision: Option<&str>,
+    current_generation: Option<i32>,
+) -> bool {
+    match selection {
+        ConfigRevision::Current => false,
+        ConfigRevision::Commit(_) => selected_revision != current_deployed_revision,
+        ConfigRevision::Generation(generation) => Some(*generation) != current_generation,
+    }
+}
+
+const SOURCE_TEXT_UNAVAILABLE_MESSAGE: &str = "Crystal Forge retained the authoritative winning or overridden definition provenance, not arbitrary Nix source text. Source text can contain secrets, so no source code is inferred from the persisted safe value.";
+
+fn refresh_scope_is_current(
+    active_selection: Option<&ModuleSourcesScope>,
+    refresh_generation: u64,
+    request_scope: &ConfigRefreshScope,
+) -> bool {
+    active_selection == Some(&request_scope.selection)
+        && refresh_generation == request_scope.generation
+}
+
+fn bump_refresh_generation(mut refresh_generation: Signal<u64>) {
+    let next = (*refresh_generation.peek()).saturating_add(1);
+    refresh_generation.set(next);
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ModuleSourceCollection {
+    scope: ModuleSourcesScope,
+    snapshot_token: Option<String>,
+    lifecycle: SnapshotLifecycle,
+    error: Option<String>,
+    total: i64,
+    next_offset: i64,
+    limit: i64,
+    sources: Vec<EvaluationModuleSummary>,
+}
+
+fn module_source_key(source: &EvaluationModuleSummary) -> (Option<String>, Option<String>, String) {
+    (
+        source.source_input.clone(),
+        source.source_revision.clone(),
+        source.source_path.clone(),
+    )
+}
+
+fn module_source_collection_from_page(
+    scope: ModuleSourcesScope,
+    mut page: EvaluationModuleSourcesPage,
+) -> Result<ModuleSourceCollection, String> {
+    if page.revision != scope.revision || page.generation != scope.generation || page.offset != 0 {
+        return Err("The module-source response does not match the selected revision.".into());
+    }
+    if page.lifecycle == SnapshotLifecycle::Available && page.snapshot_token.is_none() {
+        return Err("The module-source response did not include a snapshot token.".into());
+    }
+    let raw_len = i64::try_from(page.sources.len()).unwrap_or(i64::MAX);
+    let mut seen = HashSet::new();
+    page.sources
+        .retain(|source| seen.insert(module_source_key(source)));
+    Ok(ModuleSourceCollection {
+        scope,
+        snapshot_token: page.snapshot_token,
+        lifecycle: page.lifecycle,
+        error: page.error,
+        total: page.total,
+        next_offset: page.offset.saturating_add(raw_len),
+        limit: page.limit,
+        sources: page.sources,
+    })
+}
+
+fn merge_module_source_page(
+    mut accumulated: ModuleSourceCollection,
+    page: EvaluationModuleSourcesPage,
+) -> Result<ModuleSourceCollection, String> {
+    if accumulated.lifecycle != SnapshotLifecycle::Available
+        || page.lifecycle != SnapshotLifecycle::Available
+        || page.revision != accumulated.scope.revision
+        || page.generation != accumulated.scope.generation
+        || page.snapshot_token != accumulated.snapshot_token
+        || page.total != accumulated.total
+        || page.offset != accumulated.next_offset
+    {
+        return Err("The module-source snapshot changed. Retry from the current revision.".into());
+    }
+    let raw_len = i64::try_from(page.sources.len()).unwrap_or(i64::MAX);
+    let mut seen = accumulated
+        .sources
+        .iter()
+        .map(module_source_key)
+        .collect::<HashSet<_>>();
+    accumulated.sources.extend(
+        page.sources
+            .into_iter()
+            .filter(|source| seen.insert(module_source_key(source))),
+    );
+    accumulated.next_offset = page.offset.saturating_add(raw_len);
+    accumulated.limit = page.limit;
+    accumulated.error = page.error;
+    Ok(accumulated)
+}
+
+fn source_target_from_definition(definition: OptionDefinitionProvenance) -> ConfigSourceTarget {
+    let status_label = definition.status.clone().unwrap_or_else(|| {
+        if definition.winning {
+            "Winning definition"
+        } else {
+            "Definition"
+        }
+        .into()
+    });
+    ConfigSourceTarget {
+        source_path: definition.source_path,
+        source_input: definition.source_input,
+        source_revision: definition.source_revision,
+        safe_value: definition.value,
+        status_label,
+        priority: definition.priority,
+        winner_note: definition.winner_note,
+        tracked_flake: definition.tracked_flake,
+    }
+}
+
+fn source_target_from_module(module: EvaluationModuleSummary) -> ConfigSourceTarget {
+    ConfigSourceTarget {
+        source_path: module.source_path,
+        source_input: module.source_input,
+        source_revision: module.source_revision,
+        safe_value: None,
+        status_label: format!(
+            "{} winning of {} definitions",
+            module.won_count, module.defined_count
+        ),
+        priority: None,
+        winner_note: None,
+        tracked_flake: module.tracked_flake,
+    }
+}
+
+fn fitted_config_page_size(
+    side_height: f64,
+    table_chrome: f64,
+    header_height: f64,
+    row_height: f64,
+    previous: i64,
+) -> i64 {
+    if !side_height.is_finite()
+        || !table_chrome.is_finite()
+        || !header_height.is_finite()
+        || !row_height.is_finite()
+        || row_height < 18.0
+    {
+        return previous;
+    }
+    let measured = ((side_height - table_chrome - header_height) / row_height).floor() as i64;
+    let next = measured.clamp(10, 80);
+    if (next - previous).abs() <= 1 {
+        previous
+    } else {
+        next
+    }
+}
+
+fn natural_config_side_height(card_bounds: &[(f64, f64)]) -> Option<f64> {
+    let mut height = 0.0;
+    let mut previous_bottom: Option<f64> = None;
+    for &(top, bottom) in card_bounds {
+        if !top.is_finite() || !bottom.is_finite() || bottom < top {
+            return None;
+        }
+        if let Some(previous_bottom) = previous_bottom {
+            height += (top - previous_bottom).max(0.0);
+        }
+        height += bottom - top;
+        previous_bottom = Some(bottom);
+    }
+    (!card_bounds.is_empty()).then_some(height)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn measure_config_page_size(
+    card_id: &str,
+    table_id: &str,
+    side_id: &str,
+    mut page_size: Signal<i64>,
+    mut offset: Signal<i64>,
+) {
+    let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+        return;
+    };
+    let (Some(card), Some(table_wrap), Some(side)) = (
+        document.get_element_by_id(card_id),
+        document.get_element_by_id(table_id),
+        document.get_element_by_id(side_id),
+    ) else {
+        return;
+    };
+    let header_height = table_wrap
+        .query_selector("thead")
+        .ok()
+        .flatten()
+        .map(|element| element.get_bounding_client_rect().height())
+        .unwrap_or(32.0);
+    let row_height = table_wrap
+        .query_selector("tbody tr.cfg-row")
+        .ok()
+        .flatten()
+        .map(|element| element.get_bounding_client_rect().height())
+        .unwrap_or(34.0);
+    let cards = side.query_selector_all(":scope > .sd-card").ok();
+    // INVARIANT: Grid stretch can make the side wrapper as tall as the options
+    // card. Only natural child heights and the rendered gaps between them define
+    // the row budget.
+    let side_height = cards
+        .map(|cards| {
+            (0..cards.length())
+                .filter_map(|index| cards.item(index))
+                .filter_map(|node| node.dyn_into::<web_sys::Element>().ok())
+                .map(|card| {
+                    let bounds = card.get_bounding_client_rect();
+                    (bounds.top(), bounds.bottom())
+                })
+                .collect::<Vec<_>>()
+        })
+        .and_then(|bounds| natural_config_side_height(&bounds));
+    let Some(side_height) = side_height else {
+        return;
+    };
+    let table_chrome =
+        table_wrap.get_bounding_client_rect().top() - card.get_bounding_client_rect().top();
+    let previous = *page_size.peek();
+    let next = fitted_config_page_size(
+        side_height,
+        table_chrome,
+        header_height,
+        row_height,
+        previous,
+    );
+    if next != previous {
+        page_size.set(next);
+        offset.set(0);
+    }
+}
+
 #[component]
-fn ConfigTab(system: SystemDetail) -> Element {
+fn ConfigTab(
+    system: SystemDetail,
+    commits: Vec<SystemCommitHistory>,
+    generations: Vec<SystemGeneration>,
+    revision: ConfigRevision,
+    allow_mutations: bool,
+    on_revision_change: EventHandler<ConfigRevision>,
+    on_open_flake_commit: EventHandler<FlakeCommitPeekTarget>,
+) -> Element {
+    const MODULE_PAGE_SIZE: i64 = 40;
+    let card_id = format!("config-options-card-{}", system.id);
+    let table_id = format!("config-options-table-{}", system.id);
+    let side_id = format!("config-summary-side-{}", system.id);
+    let mut page_size = use_signal(|| 24_i64);
+    let mut search = use_signal(String::new);
+    let mut debounced_search = use_signal(String::new);
+    let mut filter = use_signal(|| EvaluatedOptionFilter::All);
+    let mut offset = use_signal(|| 0_i64);
+    let mut expanded = use_signal(|| None::<String>);
+    let mut source = use_signal(|| None::<ConfigSourceTarget>);
+    let mut options = use_signal(|| None::<Result<EvaluatedOptionsPage, ApiClientError>>);
+    let mut loading_options = use_signal(|| false);
+    let mut request_sequence = use_signal(|| 0_u64);
+    let mut debounce_sequence = use_signal(|| 0_u64);
+    let mut refresh_generation = use_signal(|| 0_u64);
+    let mut active_selection = use_signal(|| None::<ModuleSourcesScope>);
+    let mut queueing_scope = use_signal(|| None::<ConfigRefreshScope>);
+    let mut poll_scheduled_scope = use_signal(|| None::<ConfigRefreshScope>);
+    let mut summary = use_signal(|| None::<Result<SelectedEvaluationSummary, ApiClientError>>);
+    let mut loading_summary = use_signal(|| false);
+    let mut summary_request_sequence = use_signal(|| 0_u64);
+    let mut module_sources = use_signal(|| None::<ModuleSourceCollection>);
+    let mut module_initial_error = use_signal(|| None::<String>);
+    let mut module_continuation_error = use_signal(|| None::<String>);
+    let mut module_loading = use_signal(|| false);
+    let mut module_loading_more = use_signal(|| false);
+    let mut module_request_sequence = use_signal(|| 0_u64);
+    let mut module_scope = use_signal(|| None::<ModuleSourcesScope>);
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        let resize_card_id = card_id.clone();
+        let resize_table_id = table_id.clone();
+        let resize_side_id = side_id.clone();
+        let resize_listener = use_hook(move || {
+            let callback = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+                measure_config_page_size(
+                    &resize_card_id,
+                    &resize_table_id,
+                    &resize_side_id,
+                    page_size,
+                    offset,
+                );
+            });
+            if let Some(window) = web_sys::window() {
+                let _ = window
+                    .add_event_listener_with_callback("resize", callback.as_ref().unchecked_ref());
+            }
+            Rc::new(callback)
+        });
+        let listener_for_drop = resize_listener.clone();
+        use_drop(move || {
+            if let Some(window) = web_sys::window() {
+                let _ = window.remove_event_listener_with_callback(
+                    "resize",
+                    listener_for_drop.as_ref().as_ref().unchecked_ref(),
+                );
+            }
+        });
+    }
+
+    let selected_mode = if matches!(revision, ConfigRevision::Commit(_)) {
+        SnapshotRevisionMode::Commit
+    } else {
+        SnapshotRevisionMode::Generation
+    };
+    let selected_generation = match revision {
+        ConfigRevision::Generation(value) => Some(value),
+        ConfigRevision::Current => system.generation,
+        ConfigRevision::Commit(_) => None,
+    };
+    let selected_revision = match &revision {
+        ConfigRevision::Commit(sha) => Some(sha.clone()),
+        ConfigRevision::Generation(generation) => generations
+            .iter()
+            .find(|item| item.generation == *generation)
+            .and_then(|item| item.commit_hash.clone()),
+        ConfigRevision::Current => generations
+            .iter()
+            .find(|item| item.is_current || Some(item.generation) == system.generation)
+            .and_then(|item| item.commit_hash.clone())
+            .or_else(|| {
+                commits
+                    .iter()
+                    .find(|item| item.is_current)
+                    .map(|item| item.hash.clone())
+            }),
+    };
+    let revision_known = match &revision {
+        ConfigRevision::Current => selected_revision.is_some(),
+        ConfigRevision::Generation(value) => {
+            generations.iter().any(|item| item.generation == *value)
+        }
+        ConfigRevision::Commit(sha) => commits.iter().any(|item| item.hash == *sha),
+    };
+    let current_deployed_revision = generations
+        .iter()
+        .find(|item| item.is_current || Some(item.generation) == system.generation)
+        .and_then(|item| item.commit_hash.clone())
+        .or_else(|| {
+            commits
+                .iter()
+                .find(|item| item.is_current)
+                .map(|item| item.hash.clone())
+        });
+    let current_generation = generations
+        .iter()
+        .find(|item| item.is_current || Some(item.generation) == system.generation)
+        .map(|item| item.generation)
+        .or(system.generation);
+    let is_historical = config_selection_is_historical(
+        &revision,
+        selected_revision.as_deref(),
+        current_deployed_revision.as_deref(),
+        current_generation,
+    );
+    let deployed_here = selected_revision.as_ref().is_some_and(|sha| {
+        generations
+            .iter()
+            .any(|generation| generation.commit_hash.as_ref() == Some(sha))
+    });
+    let selected_commit_message = selected_revision.as_ref().and_then(|sha| {
+        commits
+            .iter()
+            .find(|commit| commit.hash == *sha)
+            .map(|commit| commit.message.clone())
+    });
+    let selected_module_scope = selected_revision
+        .clone()
+        .map(|revision| ModuleSourcesScope {
+            revision,
+            mode: selected_mode,
+            generation: selected_generation,
+        });
+
+    {
+        let next_selection = selected_module_scope.clone();
+        use_effect(move || {
+            if active_selection.peek().as_ref() == next_selection.as_ref() {
+                return;
+            }
+            active_selection.set(next_selection.clone());
+            bump_refresh_generation(refresh_generation);
+            offset.set(0);
+            expanded.set(None);
+            source.set(None);
+            options.set(None);
+            summary.set(None);
+            module_sources.set(None);
+            module_initial_error.set(None);
+            module_continuation_error.set(None);
+            module_loading_more.set(false);
+            queueing_scope.set(None);
+        });
+    }
+
+    {
+        use_effect(move || {
+            let query = search.read().clone();
+            let sequence = *debounce_sequence.peek() + 1;
+            debounce_sequence.set(sequence);
+            spawn(async move {
+                gloo_timers::future::TimeoutFuture::new(220).await;
+                if *debounce_sequence.peek() == sequence {
+                    if debounced_search.peek().as_str() != query {
+                        debounced_search.set(query);
+                        offset.set(0);
+                    }
+                }
+            });
+        });
+    }
+
+    {
+        let request_scope = selected_module_scope.clone();
+        let system_id = system.id;
+        use_effect(move || {
+            let search_text = debounced_search.read().clone();
+            let active_filter = *filter.read();
+            let request_offset = *offset.read();
+            let request_limit = *page_size.read();
+            let request_generation = *refresh_generation.read();
+            let sequence = *request_sequence.peek() + 1;
+            request_sequence.set(sequence);
+            let Some(scope) = request_scope.clone() else {
+                loading_options.set(false);
+                options.set(None);
+                return;
+            };
+            loading_options.set(true);
+            let request_search = search_text.clone();
+            spawn(async move {
+                let result = fetch_system_evaluated_options(
+                    &system_id,
+                    &EvaluatedOptionsRequest {
+                        revision: scope.revision.clone(),
+                        generation: scope.generation,
+                        mode: scope.mode,
+                        search: request_search.clone(),
+                        filter: active_filter,
+                        limit: request_limit,
+                        offset: request_offset,
+                    },
+                )
+                .await;
+                // CONCURRENCY: A slower prior search must not replace newer results.
+                if *request_sequence.peek() == sequence
+                    && *refresh_generation.peek() == request_generation
+                    && active_selection.peek().as_ref() == Some(&scope)
+                    && debounced_search.peek().as_str() == request_search
+                    && search.peek().as_str() == request_search
+                    && *filter.peek() == active_filter
+                    && *offset.peek() == request_offset
+                    && *page_size.peek() == request_limit
+                {
+                    loading_options.set(false);
+                    options.set(Some(result));
+                }
+            });
+        });
+    }
+
+    {
+        let request_scope = selected_module_scope.clone();
+        let system_id = system.id;
+        use_effect(move || {
+            let request_generation = *refresh_generation.read();
+            let sequence = *module_request_sequence.peek() + 1;
+            module_request_sequence.set(sequence);
+            module_scope.set(request_scope.clone());
+            module_sources.set(None);
+            module_initial_error.set(None);
+            module_continuation_error.set(None);
+            module_loading_more.set(false);
+            let Some(scope) = request_scope.clone() else {
+                module_loading.set(false);
+                return;
+            };
+            module_loading.set(true);
+            spawn(async move {
+                let result = fetch_system_evaluation_module_sources(
+                    &system_id,
+                    &scope.revision,
+                    scope.generation,
+                    scope.mode,
+                    MODULE_PAGE_SIZE,
+                    0,
+                    None,
+                )
+                .await;
+                // CONCURRENCY: Only the request for the current exact selection may
+                // clear loading state or install the first page.
+                if *module_request_sequence.peek() != sequence
+                    || *refresh_generation.peek() != request_generation
+                    || active_selection.peek().as_ref() != Some(&scope)
+                    || module_scope.peek().as_ref() != Some(&scope)
+                {
+                    return;
+                }
+                module_loading.set(false);
+                match result {
+                    Ok(page) => match module_source_collection_from_page(scope, page) {
+                        Ok(collection) => module_sources.set(Some(collection)),
+                        Err(error) => module_initial_error.set(Some(error)),
+                    },
+                    Err(error) => module_initial_error.set(Some(snapshot_request_error(&error))),
+                }
+            });
+        });
+    }
+
+    {
+        let request_scope = selected_module_scope.clone();
+        let system_id = system.id;
+        use_effect(move || {
+            let request_generation = *refresh_generation.read();
+            let sequence = *summary_request_sequence.peek() + 1;
+            summary_request_sequence.set(sequence);
+            summary.set(None);
+            let Some(scope) = request_scope.clone() else {
+                loading_summary.set(false);
+                return;
+            };
+            loading_summary.set(true);
+            spawn(async move {
+                let result = fetch_system_evaluation_summary(
+                    &system_id,
+                    &scope.revision,
+                    scope.generation,
+                    scope.mode,
+                )
+                .await;
+                if *summary_request_sequence.peek() == sequence
+                    && *refresh_generation.peek() == request_generation
+                    && active_selection.peek().as_ref() == Some(&scope)
+                {
+                    loading_summary.set(false);
+                    summary.set(Some(result));
+                }
+            });
+        });
+    }
+
+    let loaded_response = options
+        .read()
+        .as_ref()
+        .and_then(|result| result.as_ref().ok())
+        .cloned();
+    let response = visible_config_response(loaded_response.clone(), loading_options());
+    let load_error = (!loading_options())
+        .then(|| {
+            options
+                .read()
+                .as_ref()
+                .and_then(|result| result.as_ref().err())
+                .map(snapshot_request_error)
+        })
+        .flatten();
+    let summary_response = summary
+        .read()
+        .as_ref()
+        .and_then(|result| result.as_ref().ok())
+        .cloned();
+    let summary_error = (!loading_summary())
+        .then(|| {
+            summary
+                .read()
+                .as_ref()
+                .and_then(|result| result.as_ref().err())
+                .map(snapshot_request_error)
+        })
+        .flatten();
+    let counts = response
+        .as_ref()
+        .map(|value| value.counts.clone())
+        .unwrap_or_default();
+    let total = response.as_ref().map(|value| value.total).unwrap_or(0);
+    let page_offset = response
+        .as_ref()
+        .map(|value| value.offset)
+        .unwrap_or(*offset.read());
+    let range_start = if total == 0 { 0 } else { page_offset + 1 };
+    let active_page_size = *page_size.read();
+    let range_end = (page_offset + active_page_size).min(total);
+    let lifecycle = loaded_response.as_ref().map(|value| value.lifecycle);
+    let comparison_available = loaded_response
+        .as_ref()
+        .is_some_and(|value| value.comparison_available);
+    let baseline = response
+        .as_ref()
+        .and_then(|value| value.baseline_revision.clone());
     let flake_name = system
         .flake
         .as_ref()
-        .map(|f| f.name.clone())
-        .unwrap_or_else(|| "unknown".to_string());
-    let nixos_version = system
-        .nixos_version
-        .clone()
-        .unwrap_or_else(|| "unknown".to_string());
-    let kernel = system
-        .kernel
-        .clone()
-        .unwrap_or_else(|| "unknown".to_string());
-    let store_path_text = system
-        .current_store_path
-        .clone()
-        .unwrap_or_else(|| "unknown".to_string());
-    rsx! {
-        div {
-            class: "sd-grid sd-grid-config",
-            section {
-                class: "card sd-card",
-                div {
-                    class: "sd-card-head",
-                    h2 { "Rendered module" }
-                    span { class: "sd-card-meta mono", "{flake_name}#nixosConfigurations.{system.hostname}" }
+        .map(|flake| flake.name.as_str())
+        .unwrap_or("untracked");
+    let config_name = system
+        .system_configuration_name
+        .as_deref()
+        .unwrap_or(&system.hostname);
+    let selected_revision_label = selected_revision
+        .as_deref()
+        .map(short_revision)
+        .unwrap_or_else(|| "no commit".to_string());
+    let evaluation_duration_label = summary_response
+        .as_ref()
+        .and_then(|value| value.evaluation_duration_ms)
+        .map(|duration| format!("{duration} ms"))
+        .unwrap_or_else(|| "unavailable".into());
+    let completed_label = summary_response
+        .as_ref()
+        .and_then(|value| value.completed_at)
+        .map(|completed| completed.format("%Y-%m-%d %H:%M UTC").to_string())
+        .unwrap_or_else(|| "unavailable".into());
+    let selected_store_path = summary_response
+        .as_ref()
+        .and_then(|value| value.selected_store_path.clone());
+    let running_store_path = summary_response
+        .as_ref()
+        .and_then(|value| value.running_store_path.clone());
+    let selected_store_label = selected_store_path.as_deref().unwrap_or("unavailable");
+    let running_store_label = running_store_path.as_deref().unwrap_or("unavailable");
+    let summary_lifecycle = summary_response.as_ref().map(|value| value.lifecycle);
+    let summary_pending =
+        selected_revision.is_some() && (loading_summary() || summary.read().is_none());
+    let summary_available =
+        !loading_summary() && summary_lifecycle == Some(SnapshotLifecycle::Available);
+    let option_total_label = summary_response
+        .as_ref()
+        .filter(|_| summary_available)
+        .map(|value| value.option_total.to_string())
+        .unwrap_or_else(|| "unavailable".into());
+    let closure_package_label = summary_response
+        .as_ref()
+        .and_then(|value| value.closure_package_count)
+        .map(|count| count.to_string())
+        .unwrap_or_else(|| "unavailable".into());
+    let closure_size_label = summary_response
+        .as_ref()
+        .and_then(|value| value.closure_size_bytes)
+        .map(format_byte_count)
+        .unwrap_or_else(|| "unavailable".into());
+    let host_delta_label = summary_response
+        .as_ref()
+        .and_then(|value| value.host_delta_count)
+        .map(|count| format!("{count} rows"))
+        .unwrap_or_else(|| "unavailable".into());
+    let drift = summary_response
+        .as_ref()
+        .map(|value| value.drift)
+        .unwrap_or(EvaluationDrift::Unavailable);
+    let agent_fingerprint_label = match summary_response
+        .as_ref()
+        .map(|value| value.agent_fingerprint)
+        .unwrap_or(AgentFingerprintStatus::Unavailable)
+    {
+        AgentFingerprintStatus::Matches => "matches",
+        AgentFingerprintStatus::Differs => "differs",
+        AgentFingerprintStatus::Unavailable => "unavailable",
+    };
+    let seven_day_drift = summary_response
+        .as_ref()
+        .map(|value| value.seven_day_drift)
+        .unwrap_or(SevenDayDriftStatus::InsufficientCoverage);
+    let module_collection = module_sources.read().clone();
+    let module_loaded = module_collection
+        .as_ref()
+        .map(|collection| collection.sources.len())
+        .unwrap_or_default();
+    let module_total = module_collection
+        .as_ref()
+        .map(|collection| collection.total)
+        .unwrap_or_default();
+    let module_lifecycle = module_collection
+        .as_ref()
+        .map(|collection| collection.lifecycle);
+    let module_has_more = module_collection.as_ref().is_some_and(|collection| {
+        collection.lifecycle == SnapshotLifecycle::Available
+            && collection.next_offset < collection.total
+    });
+    #[cfg(target_arch = "wasm32")]
+    {
+        let measure_card_id = card_id.clone();
+        let measure_table_id = table_id.clone();
+        let measure_side_id = side_id.clone();
+        use_effect(move || {
+            let _content_shape = (
+                loading_summary(),
+                module_loading(),
+                module_loaded,
+                module_total,
+                summary_lifecycle,
+                seven_day_drift,
+            );
+            measure_config_page_size(
+                &measure_card_id,
+                &measure_table_id,
+                &measure_side_id,
+                page_size,
+                offset,
+            );
+            let delayed_card_id = measure_card_id.clone();
+            let delayed_table_id = measure_table_id.clone();
+            let delayed_side_id = measure_side_id.clone();
+            spawn(async move {
+                gloo_timers::future::TimeoutFuture::new(220).await;
+                measure_config_page_size(
+                    &delayed_card_id,
+                    &delayed_table_id,
+                    &delayed_side_id,
+                    page_size,
+                    offset,
+                );
+            });
+        });
+    }
+    {
+        use_effect(move || {
+            let options_pending = options
+                .read()
+                .as_ref()
+                .and_then(|result| result.as_ref().ok())
+                .is_some_and(|page| {
+                    matches!(
+                        page.lifecycle,
+                        SnapshotLifecycle::Queued | SnapshotLifecycle::Running
+                    )
+                });
+            let summary_pending = summary
+                .read()
+                .as_ref()
+                .and_then(|result| result.as_ref().ok())
+                .is_some_and(|value| {
+                    matches!(
+                        value.lifecycle,
+                        SnapshotLifecycle::Queued | SnapshotLifecycle::Running
+                    )
+                });
+            let modules_pending = module_sources.read().as_ref().is_some_and(|value| {
+                matches!(
+                    value.lifecycle,
+                    SnapshotLifecycle::Queued | SnapshotLifecycle::Running
+                )
+            });
+            if !options_pending && !summary_pending && !modules_pending {
+                poll_scheduled_scope.set(None);
+                return;
+            }
+            let Some(selection) = active_selection.read().clone() else {
+                return;
+            };
+            let poll_scope = ConfigRefreshScope {
+                selection,
+                generation: *refresh_generation.read(),
+            };
+            if poll_scheduled_scope.peek().as_ref() == Some(&poll_scope) {
+                return;
+            }
+            poll_scheduled_scope.set(Some(poll_scope.clone()));
+            spawn(async move {
+                gloo_timers::future::TimeoutFuture::new(3_000).await;
+                if poll_scheduled_scope.peek().as_ref() != Some(&poll_scope) {
+                    return;
                 }
-                pre {
-                    class: "sd-nix",
-                    "# host: {system.hostname}\n# flake: {flake_name}\n# deploymentPolicy: {system.deployment_policy}\n\n{{ config, pkgs, ... }}:\n{{\n  networking.hostName = \"{system.hostname}\";\n  system.stateVersion = \"{nixos_version}\";\n  boot.kernelPackages = pkgs.linuxPackages; # {kernel}\n}}"
+                poll_scheduled_scope.set(None);
+                if refresh_scope_is_current(
+                    active_selection.peek().as_ref(),
+                    *refresh_generation.peek(),
+                    &poll_scope,
+                ) {
+                    refresh_generation.set(poll_scope.generation.saturating_add(1));
+                }
+            });
+        });
+    }
+    let load_more_module_sources = {
+        let system_id = system.id;
+        move |_| {
+            let Some(scope) = module_scope.peek().clone() else {
+                return;
+            };
+            let Some(current) = module_sources.peek().clone() else {
+                return;
+            };
+            let request_offset = current.next_offset;
+            let snapshot_token = current.snapshot_token.clone();
+            let request_generation = *refresh_generation.peek();
+            let sequence = *module_request_sequence.peek() + 1;
+            module_request_sequence.set(sequence);
+            module_loading_more.set(true);
+            module_continuation_error.set(None);
+            spawn(async move {
+                let result = fetch_system_evaluation_module_sources(
+                    &system_id,
+                    &scope.revision,
+                    scope.generation,
+                    scope.mode,
+                    MODULE_PAGE_SIZE,
+                    request_offset,
+                    snapshot_token.as_deref(),
+                )
+                .await;
+                // CONCURRENCY: A response cannot mutate a newer selection or clear
+                // that selection's continuation loading state.
+                if *module_request_sequence.peek() != sequence
+                    || *refresh_generation.peek() != request_generation
+                    || active_selection.peek().as_ref() != Some(&scope)
+                    || module_scope.peek().as_ref() != Some(&scope)
+                {
+                    return;
+                }
+                module_loading_more.set(false);
+                match result {
+                    Ok(page) if page.lifecycle != SnapshotLifecycle::Available => {
+                        let message = format!(
+                            "{}: {}",
+                            snapshot_lifecycle_label(page.lifecycle),
+                            snapshot_lifecycle_message(page.lifecycle, page.error.as_deref())
+                        );
+                        module_continuation_error.set(Some(message));
+                    }
+                    Ok(page) => {
+                        let Some(accumulated) = module_sources.peek().clone() else {
+                            return;
+                        };
+                        match merge_module_source_page(accumulated, page) {
+                            Ok(merged) => module_sources.set(Some(merged)),
+                            Err(error) => module_continuation_error.set(Some(error)),
+                        }
+                    }
+                    Err(ApiClientError::Status { code: 409, .. }) => {
+                        // CONCURRENCY: A continuation token identifies one immutable
+                        // snapshot version. Discard that version's rows and restart at
+                        // page zero instead of retrying a token that can never succeed.
+                        module_sources.set(None);
+                        module_continuation_error.set(None);
+                        refresh_generation.set(request_generation.saturating_add(1));
+                    }
+                    Err(error) => {
+                        module_continuation_error.set(Some(snapshot_request_error(&error)))
+                    }
+                }
+            });
+        }
+    };
+
+    rsx! {
+        div { class: "sd-grid sd-grid-config",
+            section { class: "card sd-card cfg-card", id: "{card_id}",
+                div { class: "sd-card-head",
+                    h2 { "Evaluated options" }
+                    span { class: "sd-card-meta mono", "{flake_name}#nixosConfigurations.{config_name}" }
+                }
+                div { class: "cfg-revbar",
+                    div { class: "seg cfg-revseg",
+                        button {
+                            class: if selected_mode == SnapshotRevisionMode::Generation { "active focus-ring" } else { "focus-ring" },
+                            onclick: move |_| on_revision_change.call(ConfigRevision::Current),
+                            "Generations"
+                        }
+                        button {
+                            class: if selected_mode == SnapshotRevisionMode::Commit { "active focus-ring" } else { "focus-ring" },
+                            onclick: move |_| {
+                                if let Some(commit) = commits.first() {
+                                    on_revision_change.call(ConfigRevision::Commit(commit.hash.clone()));
+                                }
+                            },
+                            "Commits"
+                        }
+                    }
+                    if selected_mode == SnapshotRevisionMode::Generation {
+                        select {
+                            class: "cfg-revselect focus-ring",
+                            value: selected_generation.map(|value| value.to_string()).unwrap_or_default(),
+                            onchange: move |event| {
+                                if let Ok(generation) = event.value().parse::<i32>() {
+                                    on_revision_change.call(ConfigRevision::Generation(generation));
+                                }
+                            },
+                            for generation in &generations {
+                                {
+                                    let current_label = if generation.is_current { " (current)" } else { "" };
+                                    let commit_label = generation.commit_hash.as_deref().map(short_revision).unwrap_or_else(|| "no commit".into());
+                                    rsx! { option {
+                                        value: "{generation.generation}",
+                                        "gen #{generation.generation}{current_label} - {commit_label}"
+                                    } }
+                                }
+                            }
+                        }
+                    } else {
+                        select {
+                            class: "cfg-revselect focus-ring",
+                            value: selected_revision.clone().unwrap_or_default(),
+                            onchange: move |event| on_revision_change.call(ConfigRevision::Commit(event.value())),
+                            if let ConfigRevision::Commit(sha) = &revision {
+                                if !revision_known {
+                                    option { value: "{sha}", "{short_revision(sha)} · linked revision" }
+                                }
+                            }
+                            for commit in &commits {
+                                {
+                                    let current_label = if commit.is_current { " (deployed)" } else { "" };
+                                    let revision_label = short_revision(&commit.hash);
+                                    rsx! { option { value: "{commit.hash}", "{revision_label}{current_label} - {commit.message}" } }
+                                }
+                            }
+                        }
+                    }
+                    if let Some(message) = selected_commit_message {
+                        span { class: "cfg-revbar-msg", title: "{message}", "{message}" }
+                    }
+                    if is_historical {
+                        button {
+                            class: "btn btn-ghost focus-ring xs cfg-revback",
+                            onclick: move |_| on_revision_change.call(ConfigRevision::Current),
+                            "Back to current"
+                        }
+                    }
+                }
+                if is_historical {
+                    div { class: "sd-callout sd-callout-warn cfg-hist-note",
+                        Icon { name: IconName::Clock, size: 13 }
+                        if selected_mode == SnapshotRevisionMode::Commit {
+                            div {
+                                "Showing the configuration this host would evaluate to at " span { class: "mono", title: selected_revision.clone().unwrap_or_default(), "{selected_revision_label}" }
+                                if revision_known && !deployed_here { ", a revision never deployed here, not what is running now." } else { ", not what is running now." }
+                            }
+                        } else {
+                            div { "Showing the configuration as evaluated for generation #{selected_generation.unwrap_or_default()}, not what is running now." }
+                        }
+                    }
+                }
+                if selected_revision.is_none() {
+                    if revision_known {
+                        ConfigState { kind: "unavailable", message: "This retained generation is known, but it has no tracked commit. No evaluation snapshot can be selected." }
+                    } else {
+                        ConfigState { kind: "unavailable", message: "This generation is unknown or is no longer retained." }
+                    }
+                } else if let Some(error) = load_error {
+                    div { class: "cfg-state cfg-state-failed", role: "alert",
+                        p { "Unable to load evaluated options: {error}" }
+                        button {
+                            class: "btn btn-ghost focus-ring xs",
+                            "aria-label": "Retry evaluated options",
+                            onclick: move |_| bump_refresh_generation(refresh_generation),
+                            "Retry"
+                        }
+                    }
+                } else if options.read().is_none()
+                    || (loading_options() && lifecycle != Some(SnapshotLifecycle::Available))
+                {
+                    ConfigState { kind: "loading", message: "Loading evaluated options…" }
+                } else if lifecycle != Some(SnapshotLifecycle::Available) {
+                    {
+                        let state = lifecycle.unwrap_or(SnapshotLifecycle::Unavailable);
+                        let message = snapshot_lifecycle_message(state, response.as_ref().and_then(|value| value.error.as_deref()));
+                        let role = if state == SnapshotLifecycle::Failed { "alert" } else { "status" };
+                        let revision_for_queue = selected_revision.clone().unwrap_or_default();
+                        let queue_scope = ConfigRefreshScope {
+                            selection: ModuleSourcesScope {
+                                revision: revision_for_queue.clone(),
+                                mode: selected_mode,
+                                generation: selected_generation,
+                            },
+                            generation: *refresh_generation.read(),
+                        };
+                        let queueing = queueing_scope.read().as_ref() == Some(&queue_scope);
+                        rsx! {
+                            div { class: "cfg-state cfg-state-{snapshot_lifecycle_class(state)}", role,
+                                div {
+                                    strong { "{snapshot_lifecycle_label(state)}" }
+                                    p { "{message}" }
+                                }
+                                if allow_mutations && (state == SnapshotLifecycle::Unavailable || state == SnapshotLifecycle::Failed) {
+                                    button {
+                                        class: "btn btn-primary focus-ring xs",
+                                        disabled: queueing,
+                                        onclick: move |_| {
+                                            queueing_scope.set(Some(queue_scope.clone()));
+                                            let revision_for_queue = revision_for_queue.clone();
+                                            let request_scope = queue_scope.clone();
+                                            spawn(async move {
+                                                let result = queue_system_evaluation(&system.id, &revision_for_queue).await;
+                                                if queueing_scope.peek().as_ref() != Some(&request_scope)
+                                                    || !refresh_scope_is_current(
+                                                        active_selection.peek().as_ref(),
+                                                        *refresh_generation.peek(),
+                                                        &request_scope,
+                                                    )
+                                                {
+                                                    return;
+                                                }
+                                                queueing_scope.set(None);
+                                                match result {
+                                                    Ok(_) => refresh_generation.set(request_scope.generation.saturating_add(1)),
+                                                    Err(error) => options.set(Some(Err(error))),
+                                                }
+                                            });
+                                        },
+                                        if queueing { "Requesting…" } else { "Evaluate this revision" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    div { class: "cfg-toolbar",
+                        div { class: "seg",
+                            for (value, label, count) in [
+                                (EvaluatedOptionFilter::All, "All", (!loading_options()).then_some(counts.all)),
+                                (EvaluatedOptionFilter::Overridden, "Overridden", (!loading_options()).then_some(counts.overridden)),
+                                (EvaluatedOptionFilter::Changed, "Changed", (!loading_options()).then_some(counts.changed).flatten()),
+                            ] {
+                                button {
+                                    class: if *filter.read() == value { "active focus-ring" } else { "focus-ring" },
+                                    disabled: loading_options() || (value == EvaluatedOptionFilter::Changed && !comparison_available),
+                                    title: if value == EvaluatedOptionFilter::Changed && !comparison_available { "No comparison snapshot is available" } else { "" },
+                                    onclick: move |_| { loading_options.set(true); filter.set(value); offset.set(0); expanded.set(None); },
+                                    "{label} " span { class: "seg-n", "{optional_count_label(count)}" }
+                                }
+                            }
+                        }
+                        div { class: "q-search cfg-q",
+                            Icon { name: IconName::Search, size: 13 }
+                            input {
+                                class: "q-search-input focus-ring",
+                                value: "{search}",
+                                placeholder: "Filter options, values, modules…",
+                                oninput: move |event| { loading_options.set(true); search.set(event.value()); },
+                            }
+                            if !search.read().is_empty() {
+                                button {
+                                    class: "btn-icon xs focus-ring",
+                                    title: "Clear",
+                                    "aria-label": "Clear option search",
+                                    onclick: move |_| { loading_options.set(true); search.set(String::new()); },
+                                    Icon { name: IconName::X, size: 13 }
+                                }
+                            }
+                        }
+                        span { class: "cfg-count", if loading_options() { "Querying…" } else { "{range_start}–{range_end} of {total}" } }
+                        if total > active_page_size {
+                        div { class: "cfg-pager",
+                            button {
+                                class: "btn-icon xs focus-ring",
+                                disabled: loading_options() || page_offset == 0,
+                                title: "Previous page",
+                                onclick: move |_| { loading_options.set(true); offset.set((page_offset - active_page_size).max(0)); expanded.set(None); },
+                                Icon { name: IconName::ArrowLeft, size: 13 }
+                            }
+                            button {
+                                class: "btn-icon xs focus-ring",
+                                disabled: loading_options() || range_end >= total,
+                                title: "Next page",
+                                onclick: move |_| { loading_options.set(true); offset.set(page_offset + active_page_size); expanded.set(None); },
+                                Icon { name: IconName::ChevronRight, size: 13 }
+                            }
+                        }
+                        }
+                    }
+                    if !comparison_available {
+                        div { class: "cfg-comparison-note", "No comparison is available for this revision." }
+                    }
+                    div { class: if loading_options() { "cfg-table-wrap loading" } else { "cfg-table-wrap" }, id: "{table_id}",
+                        table { class: "sys-table compact cfg-table",
+                            colgroup { col { style: "width:46%" } col { style: "width:26%" } col { style: "width:28%" } }
+                            thead { tr { th { "Option" } th { "Value" } th { "Set by" } } }
+                            tbody {
+                                for row in response.as_ref().map(|value| value.options.as_slice()).unwrap_or_default() {
+                                    {
+                                        let row_path = option_row_path(row).to_string();
+                                        rsx! { ConfigOptionRows {
+                                            key: "{row_path}",
+                                            row: row.clone(),
+                                            open: expanded.read().as_deref() == Some(row_path.as_str()),
+                                            baseline: baseline.clone(),
+                                            on_toggle: move |path: String| {
+                                                if expanded.read().as_deref() == Some(path.as_str()) { expanded.set(None); } else { expanded.set(Some(path)); }
+                                            },
+                                            on_source: move |definition| source.set(Some(source_target_from_definition(definition))),
+                                        } }
+                                    }
+                                }
+                                if loading_options() && response.as_ref().is_none_or(|value| value.options.is_empty()) {
+                                    tr { td { colspan: "3", div { class: "cfg-empty", "Loading evaluated options…" } } }
+                                } else if response.as_ref().is_none_or(|value| value.options.is_empty()) {
+                                    tr { td { colspan: "3", div { class: "cfg-empty", "No options match this search and filter." } } }
+                                }
+                            }
+                        }
+                    }
                 }
             }
-            section {
-                class: "card sd-card",
-                div {
-                    class: "sd-card-head",
-                    h2 { "Drift" }
-                    span {
-                        class: "chip chip-healthy",
-                        svg {
-                            class: "w-3 h-3",
-                            fill: "none",
-                            stroke: "currentColor",
-                            stroke_width: "2",
-                            view_box: "0 0 24 24",
-                            path { d: "M5 12l5 5L20 7" }
+            div { class: "cfg-side", id: "{side_id}",
+                section { class: "card sd-card",
+                    div { class: "sd-card-head",
+                        h2 { "Modules" }
+                        span { class: "sd-card-meta",
+                            if module_loading() { "loading" }
+                            else if module_initial_error.read().is_some() { "error" }
+                            else if module_lifecycle == Some(SnapshotLifecycle::Available) { "{module_total} modules · won / defined" }
+                            else { "{summary_lifecycle_short(module_lifecycle.unwrap_or(SnapshotLifecycle::Unavailable))}" }
                         }
-                        "in sync"
+                    }
+                    div { class: "cfg-modules",
+                        if module_loading() {
+                            div { class: "cfg-empty", role: "status", "Loading module sources…" }
+                        } else if let Some(error) = module_initial_error.read().as_ref() {
+                            div { class: "cfg-summary-state cfg-summary-error", role: "alert",
+                                strong { "Unable to load module sources" }
+                                p { "{error}" }
+                                button {
+                                    class: "btn btn-ghost focus-ring xs",
+                                    "aria-label": "Retry evaluation module sources",
+                                    onclick: move |_| {
+                                        bump_refresh_generation(refresh_generation);
+                                    },
+                                    "Retry module sources"
+                                }
+                            }
+                        } else if module_lifecycle == Some(SnapshotLifecycle::Available) && module_loaded == 0 {
+                            div { class: "cfg-empty", "No module provenance was emitted for this snapshot." }
+                        } else if module_lifecycle == Some(SnapshotLifecycle::Available) {
+                            for module in module_collection.as_ref().map(|collection| collection.sources.as_slice()).unwrap_or_default() {
+                                {
+                                    let module_for_open = module.clone();
+                                    let input = module.source_input.as_deref().unwrap_or("untracked");
+                                    let input_class = if input == "self" {
+                                        "cfg-module-kind cfg-module-self"
+                                    } else if input == "nixpkgs" {
+                                        "cfg-module-kind cfg-module-nixpkgs"
+                                    } else {
+                                        "cfg-module-kind cfg-module-input"
+                                    };
+                                    rsx! { button {
+                                        class: "cfg-module focus-ring",
+                                        title: "{module.source_path}",
+                                        onclick: move |_| source.set(Some(source_target_from_module(module_for_open.clone()))),
+                                        span { class: "{input_class}", title: module.source_revision.clone().unwrap_or_default(), "{input}" }
+                                        span { class: "mono cfg-module-path", title: "{module.source_path}", "{short_source_path(&module.source_path)}" }
+                                        span { class: "cfg-module-count mono", "{module.won_count}/{module.defined_count}" }
+                                    } }
+                                }
+                            }
+                        } else {
+                            ConfigSummaryLifecycleState {
+                                surface: "Module sources",
+                                lifecycle: module_lifecycle.unwrap_or(SnapshotLifecycle::Unavailable),
+                                error: module_collection.as_ref().and_then(|value| value.error.clone()),
+                            }
+                        }
+                    }
+                    if module_lifecycle == Some(SnapshotLifecycle::Available) && module_loaded > 0 {
+                        div {
+                            class: "cfg-module-footer",
+                            span {
+                                class: "cfg-module-status mono",
+                                role: "status",
+                                "aria-live": "polite",
+                                "Loaded {module_loaded} of {module_total} module sources"
+                            }
+                            if module_has_more && module_continuation_error.read().is_none() {
+                                button {
+                                    class: "btn btn-ghost focus-ring xs",
+                                    "aria-label": "Load more evaluation module sources",
+                                    disabled: module_loading_more(),
+                                    onclick: load_more_module_sources,
+                                    if module_loading_more() { "Loading more…" } else { "Load more" }
+                                }
+                            }
+                        }
+                        if let Some(error) = module_continuation_error.read().as_ref() {
+                            div { class: "cfg-continuation-error", role: "alert",
+                                span { "Unable to continue loading module sources: {error}" }
+                                button {
+                                    class: "btn btn-ghost focus-ring xs",
+                                    "aria-label": "Retry evaluation module sources continuation",
+                                    disabled: module_loading_more(),
+                                    onclick: load_more_module_sources,
+                                    "Retry same page"
+                                }
+                            }
+                        }
                     }
                 }
-                div { class: "sd-drift-row", span { class: "sd-drift-label", "Evaluated config" }, span { class: "sd-drift-val mono", "{store_path_text}" } }
-                div { class: "sd-drift-row", span { class: "sd-drift-label", "Running config" }, span { class: "sd-drift-val mono", "{store_path_text}" } }
-                div { class: "sd-drift-row", span { class: "sd-drift-label", "Agent fingerprint" }, span { class: "sd-drift-val", "matches" } }
-                div {
-                    class: "sd-callout sd-callout-info",
-                    style: "margin-top: 14px;",
-                    svg {
-                        class: "w-3 h-3",
-                        fill: "none",
-                        stroke: "currentColor",
-                        stroke_width: "2",
-                        view_box: "0 0 24 24",
-                        path { d: "M5 12l5 5L20 7" }
+                section { class: "card sd-card",
+                    div { class: "sd-card-head",
+                        h2 { "Evaluation" }
+                        if summary_pending { span { class: "chip chip-info", "resolving" } }
+                        else if summary_error.is_some() { span { class: "chip chip-critical", "error" } }
+                        else if summary_available { span { class: "chip chip-healthy", "cached" } }
+                        else { span { class: "chip chip-{snapshot_lifecycle_chip(summary_lifecycle.unwrap_or(SnapshotLifecycle::Unavailable))}", "{summary_lifecycle_short(summary_lifecycle.unwrap_or(SnapshotLifecycle::Unavailable))}" } }
                     }
-                    div { "No configuration drift detected in the last 7 days." }
+                    if summary_pending {
+                        div { class: "cfg-summary-state", role: "status", "Loading evaluation summary…" }
+                    } else if let Some(error) = &summary_error {
+                        div { class: "cfg-summary-state cfg-summary-error", role: "alert",
+                            strong { "Unable to load evaluation summary" }
+                            p { "{error}" }
+                            button {
+                                class: "btn btn-ghost focus-ring xs",
+                                "aria-label": "Retry evaluation summary",
+                                onclick: move |_| bump_refresh_generation(refresh_generation),
+                                "Retry"
+                            }
+                        }
+                    } else if !summary_available {
+                        ConfigSummaryLifecycleState {
+                            surface: "Evaluation summary",
+                            lifecycle: summary_lifecycle.unwrap_or(SnapshotLifecycle::Unavailable),
+                            error: summary_response.as_ref().and_then(|value| value.error.clone()),
+                        }
+                    } else {
+                        div { class: "sd-drift-row", span { class: "sd-drift-label", "Toplevel" } span { class: "mono sd-drift-val cfg-drv", title: selected_store_path.clone().unwrap_or_default(), "{selected_store_label}" } }
+                        div { class: "sd-drift-row", span { class: "sd-drift-label", "Evaluated options" } span { class: "mono sd-drift-val", "{option_total_label}" } }
+                        div { class: "sd-drift-row", span { class: "sd-drift-label", "Host delta" } span { class: "mono sd-drift-val", title: "Selected option states that differ from the same-commit modal configuration", "{host_delta_label}" } }
+                        div { class: "sd-drift-row", span { class: "sd-drift-label", "Packages" } span { class: "mono sd-drift-val", "{closure_package_label}" } }
+                        div { class: "sd-drift-row", span { class: "sd-drift-label", "Closure size" } span { class: "mono sd-drift-val", "{closure_size_label}" } }
+                        div { class: "sd-drift-row", span { class: "sd-drift-label", "Eval time" } span { class: "mono sd-drift-val", "{evaluation_duration_label} · {completed_label}" } }
+                    }
+                }
+                section { class: "card sd-card",
+                    div { class: "sd-card-head",
+                        h2 { "Drift" }
+                        if summary_pending { span { class: "chip chip-info", "resolving" } }
+                        else if summary_error.is_some() { span { class: "chip chip-critical", "error" } }
+                        else if !summary_available { span { class: "chip chip-{snapshot_lifecycle_chip(summary_lifecycle.unwrap_or(SnapshotLifecycle::Unavailable))}", "{summary_lifecycle_short(summary_lifecycle.unwrap_or(SnapshotLifecycle::Unavailable))}" } }
+                        else if drift == EvaluationDrift::Matches { span { class: "chip chip-healthy", "in sync" } }
+                        else if drift == EvaluationDrift::Differs { span { class: "chip chip-warning", "drift" } }
+                        else { span { class: "chip chip-unknown", "unavailable" } }
+                    }
+                    if summary_pending {
+                        div { class: "cfg-summary-state", role: "status", "Resolving drift from exact store paths…" }
+                    } else if let Some(error) = &summary_error {
+                        div { class: "cfg-summary-state cfg-summary-error", role: "alert", "Unable to resolve drift: {error}" }
+                    } else if !summary_available {
+                        ConfigSummaryLifecycleState {
+                            surface: "Drift",
+                            lifecycle: summary_lifecycle.unwrap_or(SnapshotLifecycle::Unavailable),
+                            error: summary_response.as_ref().and_then(|value| value.error.clone()),
+                        }
+                    } else {
+                        div { class: "sd-drift-row", span { class: "sd-drift-label", "Evaluated config" } span { class: "mono sd-drift-val cfg-drv", title: selected_store_path.clone().unwrap_or_default(), "{selected_store_label}" } }
+                        div { class: "sd-drift-row", span { class: "sd-drift-label", "Running config" } span { class: "mono sd-drift-val cfg-drv", title: running_store_path.clone().unwrap_or_default(), "{running_store_label}" } }
+                        div { class: "sd-drift-row", span { class: "sd-drift-label", "Agent fingerprint" } span { class: "mono sd-drift-val", "{agent_fingerprint_label}" } }
+                        if drift == EvaluationDrift::Matches { div { class: "cfg-drift-explainer", "The selected and running store paths are exactly equal." } }
+                        else if drift == EvaluationDrift::Differs { div { class: "cfg-drift-explainer cfg-drift-warning", "The selected and running store paths are different." } }
+                        else { div { class: "cfg-drift-explainer", "Drift is unavailable until both exact store paths are known." } }
+                        match seven_day_drift {
+                            SevenDayDriftStatus::NoObservedDrift => rsx! { div { class: "sd-callout sd-callout-info cfg-drift-history", Icon { name: IconName::Check, size: 13 } div { "No configuration drift was observed in the last 7 days." } } },
+                            SevenDayDriftStatus::ObservedDrift => rsx! { div { class: "sd-callout sd-callout-warn cfg-drift-history", Icon { name: IconName::Warn, size: 13 } div { "A different running configuration was observed in the last 7 days." } } },
+                            SevenDayDriftStatus::InsufficientCoverage => rsx! { div { class: "cfg-limit-note", "Seven-day drift is unavailable because continuous agent observation coverage is incomplete." } },
+                        }
+                    }
+                }
+            }
+            if let Some(target) = source.read().clone() {
+                ConfigSourceTray {
+                    target,
+                    on_open_flake_commit,
+                    on_close: move |_| source.set(None),
                 }
             }
         }
+    }
+}
+
+fn visible_config_response(
+    response: Option<EvaluatedOptionsPage>,
+    loading: bool,
+) -> Option<EvaluatedOptionsPage> {
+    (!loading).then_some(response).flatten()
+}
+
+#[component]
+fn ConfigState(kind: &'static str, message: String) -> Element {
+    let role = if kind == "failed" { "alert" } else { "status" };
+    rsx! { div { class: "cfg-state cfg-state-{kind}", role, p { "{message}" } } }
+}
+
+#[component]
+fn ConfigSummaryLifecycleState(
+    surface: &'static str,
+    lifecycle: SnapshotLifecycle,
+    error: Option<String>,
+) -> Element {
+    let label = summary_lifecycle_short(lifecycle);
+    let message = snapshot_lifecycle_message(lifecycle, error.as_deref());
+    if lifecycle == SnapshotLifecycle::Failed {
+        rsx! { div { class: "cfg-summary-state cfg-summary-error", role: "alert", strong { "{surface} {label}" } p { "{message}" } } }
+    } else {
+        rsx! { div { class: "cfg-summary-state", role: "status", strong { "{surface} {label}" } p { "{message}" } } }
+    }
+}
+
+#[component]
+fn ConfigOptionRows(
+    row: EvaluatedOptionRow,
+    open: bool,
+    baseline: Option<String>,
+    on_toggle: EventHandler<String>,
+    on_source: EventHandler<OptionDefinitionProvenance>,
+) -> Element {
+    let displayed_option = row.option.as_ref().or(row.before.as_ref());
+    let Some(displayed_option) = displayed_option else {
+        return rsx! {};
+    };
+    let removed = row.option.is_none();
+    let value = if removed {
+        "Removed".to_string()
+    } else {
+        render_safe_option_value(&displayed_option.value)
+    };
+    let winning = displayed_option
+        .definitions
+        .iter()
+        .find(|definition| definition.winning);
+    let source_label = winning
+        .map(|definition| definition.source_path.as_str())
+        .unwrap_or("No provenance");
+    let source_display = short_source_path(source_label);
+    let source_input_label = winning
+        .and_then(|definition| definition.source_input.as_deref())
+        .unwrap_or("untracked");
+    let option_path = displayed_option.path.clone();
+    let option_path_for_key = displayed_option.path.clone();
+    let change_kind = row.diff.as_ref().map(|diff| diff.kind);
+    rsx! {
+        tr {
+            class: if open { "cfg-row open" } else { "cfg-row" },
+            td { button {
+                class: "cfg-opt cfg-row-toggle focus-ring",
+                "aria-expanded": open,
+                onclick: move |_| on_toggle.call(option_path.clone()),
+                onkeydown: move |event| if event.key() == Key::Character(" ".to_string()) { event.prevent_default(); on_toggle.call(option_path_for_key.clone()); },
+                span { class: if open { "cfg-caret open" } else { "cfg-caret" }, Icon { name: IconName::ChevronRight, size: 11 } }
+                span { class: "mono cfg-path", title: "{displayed_option.path}", "{displayed_option.path}" }
+                if change_kind == Some(OptionChangeKind::Added) { span { class: "cfg-tag cfg-tag-added", "added" } }
+                if row.changed == Some(true) && change_kind.is_none_or(|kind| kind == OptionChangeKind::Modified) { span { class: "cfg-tag cfg-tag-changed", "changed" } }
+                if removed { span { class: "cfg-tag cfg-tag-removed", "removed" } }
+            } }
+            td { span { class: if !removed && matches!(displayed_option.value, SafeOptionValue::Failed(_)) { "mono cfg-val cfg-val-err" } else { "mono cfg-val" }, title: "{value}", "{value}" } }
+            td {
+                if let Some(definition) = winning {
+                    button {
+                        class: "cfg-src focus-ring",
+                        title: "{source_label}",
+                        onclick: { let definition = definition.clone(); move |event| { event.stop_propagation(); on_source.call(definition.clone()); } },
+                        span { class: "cfg-input", "{source_input_label}" }
+                        span { class: "mono", title: "{source_label}", "{source_display}" }
+                        if displayed_option.overridden { span { class: "cfg-defcount", "{displayed_option.definitions.len()} defs" } }
+                    }
+                } else { span { class: "fx-dim", "No provenance" } }
+            }
+        }
+        if open {
+            tr { class: "cfg-detail-row", td { colspan: "3",
+                div { class: "cfg-detail",
+                    div { class: "cfg-detail-row", span { class: "cfg-detail-label", "Type" } span { class: "mono cfg-detail-v", "{displayed_option.declared_type}" } }
+                    div { class: "cfg-detail-row",
+                        span { class: "cfg-detail-label", "Comparison" }
+                        ConfigValueDiff { before: row.before.clone(), after: row.option.clone(), changed: row.changed, diff: row.diff.clone(), baseline }
+                    }
+                    div { class: "cfg-detail-row",
+                        span { class: "cfg-detail-label", "Definitions" }
+                        div { class: "cfg-defs",
+                            for definition in &displayed_option.definitions {
+                                {
+                                    let input_label = definition.source_input.as_deref().unwrap_or("untracked");
+                                    let status_label = definition.status.as_deref().unwrap_or(if definition.winning { "winning" } else { "definition" });
+                                    rsx! { button {
+                                        class: if definition.winning { "cfg-def win focus-ring" } else { "cfg-def focus-ring" },
+                                        title: "{definition.source_path}",
+                                        onclick: { let definition = definition.clone(); move |event| { event.stop_propagation(); on_source.call(definition.clone()); } },
+                                        Icon { name: if definition.winning { IconName::Check } else { IconName::X }, size: 11 }
+                                        span { class: "cfg-input", "{input_label}" }
+                                        span { class: "mono cfg-def-file", "{definition.source_path}" }
+                                        if let Some(revision) = &definition.source_revision { span { class: "mono cfg-def-note", "{short_revision(revision)}" } }
+                                        span { class: "cfg-def-note", "{status_label}" }
+                                        if let Some(priority) = definition.priority { span { class: "cfg-def-note mono", "priority {priority}" } }
+                                        if let Some(note) = &definition.winner_note { span { class: "cfg-def-note", "{note}" } }
+                                    } }
+                                }
+                            }
+                            if displayed_option.definitions.is_empty() { span { class: "fx-dim", "No definition provenance was emitted." } }
+                        }
+                    }
+                    if let Some(before) = row.before.as_ref().filter(|_| row.option.is_some() && row.changed == Some(true)) {
+                        div { class: "cfg-detail-row",
+                            span { class: "cfg-detail-label", "Before definitions" }
+                            div { class: "cfg-defs",
+                                for definition in &before.definitions {
+                                    {
+                                        let input_label = definition.source_input.as_deref().unwrap_or("untracked");
+                                        let status_label = definition.status.as_deref().unwrap_or(if definition.winning { "winning" } else { "definition" });
+                                        rsx! { button {
+                                            class: if definition.winning { "cfg-def win focus-ring" } else { "cfg-def focus-ring" },
+                                            title: "{definition.source_path}",
+                                            onclick: { let definition = definition.clone(); move |event| { event.stop_propagation(); on_source.call(definition.clone()); } },
+                                            Icon { name: if definition.winning { IconName::Check } else { IconName::X }, size: 11 }
+                                            span { class: "cfg-input", "{input_label}" }
+                                            span { class: "mono cfg-def-file", "{definition.source_path}" }
+                                            if let Some(revision) = &definition.source_revision { span { class: "mono cfg-def-note", "{short_revision(revision)}" } }
+                                            span { class: "cfg-def-note", "{status_label}" }
+                                            if let Some(priority) = definition.priority { span { class: "cfg-def-note mono", "priority {priority}" } }
+                                            if let Some(note) = &definition.winner_note { span { class: "cfg-def-note", "{note}" } }
+                                        } }
+                                    }
+                                }
+                                if before.definitions.is_empty() { span { class: "fx-dim", "No baseline definition provenance was emitted." } }
+                            }
+                        }
+                    }
+                }
+            } }
+        }
+    }
+}
+
+#[component]
+fn ConfigValueDiff(
+    before: Option<EvaluatedOption>,
+    after: Option<EvaluatedOption>,
+    changed: Option<bool>,
+    diff: Option<TypedOptionDiff>,
+    baseline: Option<String>,
+) -> Element {
+    let before_text = before
+        .as_ref()
+        .map(|value| render_safe_option_value(&value.value));
+    let after_text = after
+        .as_ref()
+        .map(|value| render_safe_option_value(&value.value));
+    let baseline_label = baseline
+        .as_deref()
+        .map(short_revision)
+        .unwrap_or_else(|| "baseline".into());
+    let unchanged_packages = match (before.as_ref(), after.as_ref()) {
+        (Some(before), Some(after)) => {
+            let before = package_identities(&before.value);
+            let after = package_identities(&after.value);
+            before.intersection(&after).count()
+        }
+        _ => 0,
+    };
+    let unchanged_package_label = format!(
+        "{unchanged_packages} package{} unchanged",
+        if unchanged_packages == 1 { "" } else { "s" }
+    );
+    rsx! { div { class: "cfg-diff",
+        if changed.is_none() {
+            div { class: "cfg-diff-line cfg-diff-opaque", "No comparison is available." }
+        } else if changed == Some(false) {
+            div { class: "cfg-diff-line cfg-diff-opaque", "Unchanged vs {baseline_label}." }
+        } else if let Some(diff) = diff {
+            if diff.kind == OptionChangeKind::Removed { div { class: "cfg-diff-line cfg-diff-from", "Option removed" } }
+            else if diff.kind == OptionChangeKind::Added { div { class: "cfg-diff-line cfg-diff-to", "Option added" } }
+            if diff.value_kind == "failed" {
+                div { class: "cfg-diff-line cfg-diff-err", "Evaluation result changed; the safe diagnostic is shown in the value." }
+            } else if diff.value_kind == "opaque" {
+                div { class: "cfg-diff-line cfg-diff-opaque", "Opaque values changed; no unsupported detail was inferred." }
+            } else {
+                for removed in &diff.removed { div { class: "cfg-diff-line cfg-diff-from mono", "- {render_typed_diff_value(removed)}" } }
+                for added in &diff.added { div { class: "cfg-diff-line cfg-diff-to mono", "+ {render_typed_diff_value(added)}" } }
+                if diff.value_kind == "package" && unchanged_packages > 0 { div { class: "cfg-diff-note", "{unchanged_package_label}" } }
+            }
+        } else {
+            if let Some(before_text) = before_text { div { class: "cfg-diff-line cfg-diff-from mono", "- {before_text}" } }
+            if let Some(after_text) = after_text { div { class: "cfg-diff-line cfg-diff-to mono", "+ {after_text}" } }
+        }
+    } }
+}
+
+fn option_row_path(row: &EvaluatedOptionRow) -> &str {
+    row.option
+        .as_ref()
+        .or(row.before.as_ref())
+        .map(|option| option.path.as_str())
+        .unwrap_or("unknown-option")
+}
+
+fn render_typed_diff_value(value: &JsonValue) -> String {
+    serde_json::from_value::<SafeOptionValue>(value.clone())
+        .map(|value| render_safe_option_value(&value))
+        .unwrap_or_else(|_| render_json_value(value))
+}
+
+fn package_identities(value: &SafeOptionValue) -> HashSet<String> {
+    match value {
+        SafeOptionValue::Package(package) => {
+            let identity = package
+                .name
+                .as_ref()
+                .or(package.pname.as_ref())
+                .map(String::as_str)
+                .unwrap_or("package");
+            [package
+                .version
+                .as_ref()
+                .map(|version| format!("{identity}-{version}"))
+                .unwrap_or_else(|| identity.to_string())]
+            .into_iter()
+            .collect()
+        }
+        SafeOptionValue::List(values) => values
+            .iter()
+            .flat_map(package_identities)
+            .collect::<HashSet<_>>(),
+        _ => HashSet::new(),
+    }
+}
+
+#[component]
+fn ConfigSourceTray(
+    target: ConfigSourceTarget,
+    on_open_flake_commit: EventHandler<FlakeCommitPeekTarget>,
+    on_close: EventHandler<()>,
+) -> Element {
+    const SOURCE_TRAY_ID: &str = "config-source-tray";
+    let external_unregistered = target
+        .source_input
+        .as_deref()
+        .is_some_and(|input| input != "self");
+    let input_label = target
+        .source_input
+        .as_deref()
+        .unwrap_or("untracked")
+        .to_string();
+    let revision_label = target
+        .source_revision
+        .as_deref()
+        .unwrap_or("unavailable")
+        .to_string();
+    let safe_value = target
+        .safe_value
+        .as_ref()
+        .map(render_json_value)
+        .unwrap_or_else(|| "unavailable".into());
+    let opener = use_hook(|| {
+        web_sys::window()
+            .and_then(|window| window.document())
+            .and_then(|document| document.active_element())
+            .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok())
+    });
+    let opener_for_drop = opener.clone();
+    use_drop(move || {
+        if let Some(opener) = opener_for_drop.as_ref() {
+            let _ = opener.focus();
+        }
+    });
+    use_effect(move || focus_dialog_by_id(SOURCE_TRAY_ID));
+    rsx! {
+        div { class: "fl-tray-backdrop", onclick: move |_| on_close.call(()) }
+        aside {
+            class: "fl-tray cfg-source-tray",
+            id: SOURCE_TRAY_ID,
+            role: "dialog",
+            "aria-modal": "true",
+            "aria-label": "Module source details",
+            tabindex: "0",
+            onkeydown: move |event| {
+                if event.key() == Key::Escape { event.prevent_default(); on_close.call(()); }
+                else { trap_local_dialog_focus(&event, SOURCE_TRAY_ID); }
+            },
+            header { class: "fl-tray-head",
+                div { style: "min-width:0", div { class: "fl-tray-title mono cfg-tray-title", title: "{target.source_path}", "{target.source_path}" } div { class: "fl-tray-sub", "{input_label} @ {revision_label} · read-only provenance" } }
+                div { style: "display:flex;gap:6px",
+                    if let Some(identity) = target.tracked_flake.clone() {
+                        button {
+                            class: "btn btn-ghost focus-ring xs",
+                            onclick: move |_| on_open_flake_commit.call(FlakeCommitPeekTarget {
+                                flake: FlakeSummary {
+                                    id: identity.flake_id,
+                                    name: identity.flake_name.clone(),
+                                    repo_url: identity.repo_url.clone(),
+                                    latest_commit: Some(identity.revision.clone()),
+                                },
+                                sha: identity.revision.clone(),
+                                meta: CommitFocusMeta::default(),
+                            }),
+                            "Open in Flakes"
+                        }
+                    } else if external_unregistered {
+                        button { class: "btn btn-ghost xs", disabled: true, title: "No visible active registered flake exactly matches this input source and revision", "External source unavailable" }
+                    } else { button { class: "btn btn-ghost xs", disabled: true, "Not tracked" } }
+                    button { class: "btn-icon focus-ring", "aria-label": "Close module source details", onclick: move |_| on_close.call(()), Icon { name: IconName::X, size: 16 } }
+                }
+            }
+            div { class: "fl-tray-body cfg-source-body",
+                div { class: "cfg-tray-col",
+                    div { class: "sd-callout sd-callout-info",
+                        div {
+                            strong { "Locked source provenance" }
+                            div { "This metadata identifies the locked input and revision used by the cached evaluation. Browsing does not reconstruct source for this host." }
+                        }
+                    }
+                    dl { class: "cfg-source-provenance",
+                        div { dt { "Input" } dd { class: "mono", "{input_label}" } }
+                        div { dt { "Locked revision" } dd { class: "mono", "{revision_label}" } }
+                        div { dt { "Binding path / location" } dd { class: "mono", "{target.source_path}" } }
+                        div { dt { "Definition state" } dd { "{target.status_label}" } }
+                        if let Some(priority) = target.priority { div { dt { "Priority" } dd { class: "mono", "{priority}" } } }
+                        if target.safe_value.is_some() { div { dt { "Persisted safe value" } dd { class: "mono", "{safe_value}" } } }
+                    }
+                    div { class: "cfg-source-unavailable", role: "status",
+                        strong { "Source text unavailable (read-only provenance)" }
+                        p { "{SOURCE_TEXT_UNAVAILABLE_MESSAGE}" }
+                    }
+                    if let Some(note) = &target.winner_note { div { class: "cfg-source-note", strong { "Winner note" } p { "{note}" } } }
+                }
+            }
+        }
+    }
+}
+
+fn focus_dialog_by_id(id: &str) {
+    if let Some(element) = web_sys::window()
+        .and_then(|window| window.document())
+        .and_then(|document| document.get_element_by_id(id))
+        .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok())
+    {
+        let _ = element.focus();
+    }
+}
+
+fn trap_local_dialog_focus(event: &KeyboardEvent, id: &str) {
+    if event.key() != Key::Tab {
+        return;
+    }
+    let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+        return;
+    };
+    let Some(dialog) = document.get_element_by_id(id) else {
+        return;
+    };
+    let Ok(nodes) = dialog.query_selector_all(
+        "button:not([disabled]), [href], input, select, [tabindex]:not([tabindex='-1'])",
+    ) else {
+        return;
+    };
+    let focusable = (0..nodes.length())
+        .filter_map(|index| nodes.item(index))
+        .filter_map(|node| node.dyn_into::<web_sys::HtmlElement>().ok())
+        .collect::<Vec<_>>();
+    let (Some(first), Some(last)) = (focusable.first(), focusable.last()) else {
+        return;
+    };
+    let active = document.active_element();
+    if event.modifiers().shift() && active.as_ref() == Some(first.as_ref()) {
+        event.prevent_default();
+        let _ = last.focus();
+    } else if !event.modifiers().shift() && active.as_ref() == Some(last.as_ref()) {
+        event.prevent_default();
+        let _ = first.focus();
+    }
+}
+
+fn short_revision(revision: &str) -> String {
+    revision.chars().take(7).collect()
+}
+
+fn short_source_path(path: &str) -> String {
+    path.strip_suffix("/default.nix")
+        .or_else(|| path.strip_suffix(".nix"))
+        .unwrap_or(path)
+        .to_string()
+}
+
+fn format_byte_count(bytes: i64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0usize;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} {}", UNITS[unit])
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+fn optional_count_label(count: Option<i64>) -> String {
+    count
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "-".into())
+}
+
+fn snapshot_lifecycle_label(lifecycle: SnapshotLifecycle) -> &'static str {
+    match lifecycle {
+        SnapshotLifecycle::Queued => "Evaluation queued",
+        SnapshotLifecycle::Running => "Evaluation running",
+        SnapshotLifecycle::Failed => "Evaluation failed",
+        SnapshotLifecycle::Available => "Available",
+        SnapshotLifecycle::Unavailable => "Snapshot unavailable",
+    }
+}
+
+fn snapshot_lifecycle_class(lifecycle: SnapshotLifecycle) -> &'static str {
+    match lifecycle {
+        SnapshotLifecycle::Queued | SnapshotLifecycle::Running => "pending",
+        SnapshotLifecycle::Failed => "failed",
+        SnapshotLifecycle::Available => "available",
+        SnapshotLifecycle::Unavailable => "unavailable",
+    }
+}
+
+fn summary_lifecycle_short(lifecycle: SnapshotLifecycle) -> &'static str {
+    match lifecycle {
+        SnapshotLifecycle::Queued => "queued",
+        SnapshotLifecycle::Running => "running",
+        SnapshotLifecycle::Failed => "failed",
+        SnapshotLifecycle::Available => "available",
+        SnapshotLifecycle::Unavailable => "unavailable",
+    }
+}
+
+fn snapshot_lifecycle_chip(lifecycle: SnapshotLifecycle) -> &'static str {
+    match lifecycle {
+        SnapshotLifecycle::Queued | SnapshotLifecycle::Running => "info",
+        SnapshotLifecycle::Failed => "critical",
+        SnapshotLifecycle::Available => "healthy",
+        SnapshotLifecycle::Unavailable => "unknown",
+    }
+}
+
+fn snapshot_lifecycle_message(lifecycle: SnapshotLifecycle, error: Option<&str>) -> String {
+    match lifecycle {
+        SnapshotLifecycle::Queued => {
+            "Authorized evaluation work is queued. This read did not start evaluation.".into()
+        }
+        SnapshotLifecycle::Running => {
+            "A worker is extracting this revision's reusable snapshot.".into()
+        }
+        SnapshotLifecycle::Failed => error
+            .unwrap_or("Evaluation failed without a persisted diagnostic.")
+            .into(),
+        SnapshotLifecycle::Available => "The cached snapshot is available.".into(),
+        SnapshotLifecycle::Unavailable => {
+            "No reusable snapshot exists. Use the explicit action to request evaluation.".into()
+        }
+    }
+}
+
+fn snapshot_request_error(error: &ApiClientError) -> String {
+    match error {
+        ApiClientError::Status { code: 401, .. } => {
+            "Sign in again to view this evaluation snapshot.".into()
+        }
+        ApiClientError::Status {
+            code: 403 | 404, ..
+        } => "This evaluation snapshot is unavailable or you do not have access.".into(),
+        _ => format!("The evaluation snapshot request failed: {error}"),
+    }
+}
+
+fn render_safe_option_value(value: &SafeOptionValue) -> String {
+    match value {
+        SafeOptionValue::Scalar(value) => render_json_value(value),
+        SafeOptionValue::Package(package) => {
+            let identity = package
+                .name
+                .as_ref()
+                .or(package.pname.as_ref())
+                .map(String::as_str)
+                .unwrap_or("package");
+            package
+                .version
+                .as_ref()
+                .map(|version| format!("{identity}-{version}"))
+                .unwrap_or_else(|| identity.to_string())
+        }
+        SafeOptionValue::List(values) => format!(
+            "[{}]",
+            values
+                .iter()
+                .map(render_safe_option_value)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        SafeOptionValue::AttributeSet(values) | SafeOptionValue::Submodule(values) => {
+            render_json_value(&JsonValue::Object(values.clone()))
+        }
+        SafeOptionValue::Opaque { type_name } => format!("<{type_name}: opaque>"),
+        SafeOptionValue::Failed(error) => format!("not evaluated: {}", error.message),
+    }
+}
+
+fn render_json_value(value: &JsonValue) -> String {
+    match value {
+        JsonValue::String(value) => format!("\"{value}\""),
+        _ => serde_json::to_string(value).unwrap_or_else(|_| "<unavailable>".into()),
     }
 }
 
@@ -5280,7 +7262,7 @@ fn HistoryTab(
     current_generation: Option<i32>,
     deployment_policy: String,
     allow_mutations: bool,
-    on_rollback: EventHandler<SystemCommitHistory>,
+    on_rollback: EventHandler<i32>,
     on_view_logs: EventHandler<String>,
 ) -> Element {
     let events = build_history_events(&entries, &commits, current_generation);
@@ -5399,10 +7381,10 @@ fn HistoryTab(
                                             event: event.clone(),
                                             allow_mutations,
                                             on_rollback: {
-                                                let commit = event.commit.clone();
+                                                let generation = event.generation;
                                                 move |_| {
-                                                    if let Some(commit) = commit.clone() {
-                                                        on_rollback.call(commit);
+                                                    if let Some(generation) = generation {
+                                                        on_rollback.call(generation);
                                                     }
                                                 }
                                             },
@@ -8367,11 +10349,16 @@ fn map_agent_events_to_logs(events: Vec<SystemAgentEvent>) -> Vec<DeploymentLogE
 #[cfg(test)]
 mod tests {
     use super::{
-        HistoryEventKind, Tab, build_history_events, classify_history_entry,
-        map_agent_events_to_logs, map_history_entries_to_commit_history, query_value,
-        query_with_parameter, tab_from_query, tab_from_route,
+        EvaluatedOptionsPage, HistoryEventKind, SafeOptionValue, SnapshotLifecycle, Tab,
+        build_history_events, classify_history_entry, fitted_config_page_size,
+        map_agent_events_to_logs, map_history_entries_to_commit_history,
+        natural_config_side_height, package_identities, query_value, query_with_parameter,
+        render_safe_option_value, snapshot_lifecycle_message, tab_from_query, tab_from_route,
+        visible_config_response,
     };
-    use crate::api::models::{SystemAgentEvent, SystemHistoryEntry};
+    use crate::api::models::{
+        SafeEvaluationError, SafePackageValue, SystemAgentEvent, SystemHistoryEntry,
+    };
     use chrono::{Duration, Utc};
 
     #[test]
@@ -8669,5 +10656,119 @@ mod tests {
         let entry = history_entry("cf_deployment", "crystal-forge", "cf_deployment");
 
         assert_eq!(classify_history_entry(&entry), HistoryEventKind::Deploy);
+    }
+
+    #[test]
+    fn typed_option_renderer_never_fabricates_failed_or_opaque_values() {
+        assert_eq!(
+            render_safe_option_value(&SafeOptionValue::Scalar(serde_json::json!(true))),
+            "true"
+        );
+        assert_eq!(
+            render_safe_option_value(&SafeOptionValue::Package(SafePackageValue {
+                name: Some("curl".into()),
+                pname: Some("curl".into()),
+                version: Some("8.0".into()),
+                output_path: None,
+            })),
+            "curl-8.0"
+        );
+        assert_eq!(
+            render_safe_option_value(&SafeOptionValue::Opaque {
+                type_name: "lambda".into()
+            }),
+            "<lambda: opaque>"
+        );
+        assert_eq!(
+            render_safe_option_value(&SafeOptionValue::Failed(SafeEvaluationError {
+                code: "not_evaluated".into(),
+                message: "access denied".into(),
+            })),
+            "not evaluated: access denied"
+        );
+    }
+
+    #[test]
+    fn lifecycle_copy_distinguishes_unavailable_running_and_failed() {
+        assert!(
+            snapshot_lifecycle_message(SnapshotLifecycle::Unavailable, None)
+                .contains("No reusable")
+        );
+        assert!(snapshot_lifecycle_message(SnapshotLifecycle::Running, None).contains("worker"));
+        assert_eq!(
+            snapshot_lifecycle_message(SnapshotLifecycle::Failed, Some("safe error")),
+            "safe error"
+        );
+    }
+
+    #[test]
+    fn config_page_sizing_clamps_and_uses_one_row_hysteresis() {
+        assert_eq!(fitted_config_page_size(900.0, 100.0, 32.0, 32.0, 24), 24);
+        assert_eq!(fitted_config_page_size(932.0, 100.0, 32.0, 32.0, 24), 24);
+        assert_eq!(fitted_config_page_size(996.0, 100.0, 32.0, 32.0, 24), 27);
+        assert_eq!(fitted_config_page_size(100.0, 100.0, 32.0, 32.0, 24), 10);
+        assert_eq!(fitted_config_page_size(9_000.0, 0.0, 32.0, 32.0, 24), 80);
+        assert_eq!(fitted_config_page_size(f64::NAN, 0.0, 32.0, 32.0, 24), 24);
+    }
+
+    #[test]
+    fn config_page_sizing_uses_natural_card_heights_and_actual_gaps() {
+        let bounds = [(10.0, 210.0), (224.0, 424.0), (438.0, 638.0)];
+        assert_eq!(natural_config_side_height(&bounds), Some(628.0));
+        assert_eq!(fitted_config_page_size(628.0, 100.0, 32.0, 32.0, 24), 15);
+
+        assert_eq!(natural_config_side_height(&[]), None);
+        assert_eq!(natural_config_side_height(&[(20.0, 10.0)]), None);
+    }
+
+    #[test]
+    fn package_identity_intersection_can_report_unchanged_packages() {
+        let packages = SafeOptionValue::List(vec![
+            SafeOptionValue::Package(SafePackageValue {
+                name: Some("curl".into()),
+                pname: Some("curl".into()),
+                version: Some("8.0".into()),
+                output_path: None,
+            }),
+            SafeOptionValue::Package(SafePackageValue {
+                name: Some("git".into()),
+                pname: Some("git".into()),
+                version: Some("2.0".into()),
+                output_path: None,
+            }),
+        ]);
+        assert_eq!(
+            package_identities(&packages),
+            ["curl-8.0".to_string(), "git-2.0".to_string()]
+                .into_iter()
+                .collect()
+        );
+    }
+
+    #[test]
+    fn config_loading_hides_the_previous_response() {
+        let page: EvaluatedOptionsPage = serde_json::from_value(serde_json::json!({
+            "lifecycle": "available",
+            "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "generation": null,
+            "generation_snapshot_id": null,
+            "baseline_revision": null,
+            "comparison_available": false,
+            "error": null,
+            "module_count": 14,
+            "evaluation_duration_ms": 845,
+            "counts": {"all": 38, "overridden": 1, "changed": null},
+            "total": 38,
+            "offset": 0,
+            "limit": 24,
+            "options": []
+        }))
+        .expect("evaluated options page");
+
+        assert_eq!(
+            visible_config_response(Some(page.clone()), false),
+            Some(page.clone())
+        );
+        assert_eq!(visible_config_response(Some(page), true), None);
     }
 }

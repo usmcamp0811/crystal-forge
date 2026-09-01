@@ -132,6 +132,11 @@ WHERE environment_id IN (
 
 **Exception:** Admins can see all systems regardless of environment.
 
+Snapshot APIs preserve non-disclosure. An unknown resource, a resource in a
+hidden environment, and a revision outside the resource's active source use the
+same not-found response. See [Evaluation and Flake Snapshot
+Architecture](../evaluation-flake-snapshots.md#flake-outputs-and-count-authority).
+
 ---
 
 ## Systems API
@@ -152,6 +157,10 @@ Systems are the NixOS machines CF manages.
 | POST | `/systems/:id/sync` | Operator+ | Sync flake |
 | GET | `/systems/:id/deployments` | Viewer+ | Deployment history |
 | GET | `/systems/:id/logs` | Viewer+ | Deployment logs |
+| GET | `/systems/:id/evaluated-options` | Viewer+ | Read cached revision options |
+| GET | `/systems/:id/evaluation-summary` | Viewer+ | Read cached scalar revision summary |
+| GET | `/systems/:id/evaluation-module-sources` | Viewer+ | Read cached bounded module-source pages |
+| POST | `/systems/:id/evaluations/:revision` | Admin | Queue or reuse evaluation |
 
 ### Query Parameters
 
@@ -203,19 +212,30 @@ GET /api/v1/systems?environment=prod
 ```bash
 POST /api/v1/systems/sys-123/deploy
 {
-  "flake_id": "flake-456",
-  "commit_sha": "def5678"
+  "commit_sha": "def56789abcdef0123456789abcdef0123456789",
+  "action": "convert_to_manual",
+  "request_id": "7ce63e03-935d-4903-ae9f-903f14242cab"
 }
 ```
+
+Manual deployment requests also accept `action` and `request_id`. The action is
+`deploy`, `continue_auto_latest`, or `convert_to_manual`. An `auto_latest`
+system requires one of the latter two explicit outcomes. New clients reuse one
+UUID `request_id` for retries. The UUID is bound immutably to the system, full
+commit SHA, and action. A conflicting reuse returns HTTP 409 before policy
+conversion. If conversion succeeds but queueing fails, the response reports the
+persisted manual policy separately from the failed deployment state. Legacy
+clients that omit `request_id` use a server-derived 24-hour replay window.
 
 **Response:**
 ```json
 {
-  "data": {
-    "deployment_id": "deploy-789",
-    "status": "started",
-    "message": "Deployment queued"
-  }
+  "status": "accepted",
+  "policy": "manual",
+  "conversion": "converted",
+  "deployment": "queued",
+  "deployment_id": "79ea0220-5715-49ce-8e73-74c09a5ea289",
+  "message": "System policy is manual. Deployment requested"
 }
 ```
 
@@ -236,6 +256,8 @@ Flakes are git repositories that contain NixOS configurations.
 | DELETE | `/flakes/:id` | Operator+ | Remove from registry |
 | POST | `/flakes/:id/sync` | Operator+ | Trigger git sync |
 | GET | `/flakes/:id/commits` | Viewer+ | Get commit timeline |
+| GET | `/flakes/:id/revisions/:revision/outputs` | Viewer+ | Read cached revision outputs |
+| GET | `/flakes/:id/revisions/:revision/modules/:module/declarations` | Viewer+ | Read cached exported-module declarations |
 
 ### Example: Get Commit Timeline
 
@@ -259,6 +281,206 @@ GET /api/v1/flakes/flake-456/commits
   ]
 }
 ```
+
+## Evaluation and Flake Snapshot API
+
+These endpoints read persisted snapshots only. GET requests do not evaluate
+Nix, inspect Git, fetch repositories, enqueue work, or perform per-host work.
+All `revision` values are complete 40- or 64-character hexadecimal SHAs.
+
+### GET `/systems/:id/evaluated-options`
+
+Query parameters:
+
+| Parameter | Contract |
+| --- | --- |
+| `revision` | Required full SHA in commit mode. |
+| `mode` | `commit` or `generation`; defaults to `commit`. |
+| `generation` | Required retained generation number in generation mode. |
+| `search` | Case-insensitive redacted search text; truncated to 256 characters. |
+| `filter` | `all`, `overridden`, or `changed`. |
+| `limit` | Clamped to 1-100; defaults to 50. |
+| `offset` | Clamped to 0-100,000; defaults to 0. |
+
+The response lifecycle is `queued`, `running`, `failed`, `available`, or
+`unavailable`. `counts` is revision-global and independent of search/filter.
+`total` is the number of rows for the active search/filter. Changed data and
+`counts.changed` are absent when no valid first-parent or preceding retained
+generation snapshot exists. `module_count` is the exact count of distinct
+`(source_input, source_revision, source_path)` tuples after redaction and
+per-option bounding; it is not derived from the bounded option page.
+
+### GET `/systems/:id/evaluation-summary`
+
+This endpoint uses the same `revision`, `mode`, and `generation` selection and
+non-disclosing system authorization as evaluated-options. The response is
+scalar. It does not contain module-source or definition rows.
+
+The response returns lifecycle, safe error, persisted completion time,
+evaluation duration, option total, `module_source_total`, exact selected NixOS
+toplevel store path, existing closure package count, exact latest running store
+path, agent-reported profile match, and drift. `module_source_total` is the exact
+count of distinct `(source_input, source_revision, source_path)` tuples after
+redaction and per-option bounding. Response-only tracked identities do not
+affect the count. Drift is `matches` only when selected and running store paths
+are exactly equal, `differs` only when both paths exist and differ, and
+`unavailable` otherwise.
+
+`host_delta_count` is materialized from all usable configuration snapshots at
+the selected commit. For each option path, the server selects the most frequent
+complete safe content digest, including definition provenance; missing is also
+a state, and bytewise state identity breaks ties. The count is the selected
+snapshot's differences from that modal corpus. A usable one-configuration
+corpus returns zero. Null means no usable materialized result exists.
+
+`closure_size_bytes` is the sum of `narSize` for every unique store path from
+one successful complete recursive Nix query of the selected toplevel output.
+Null means no complete local measurement was persisted. The server does not
+substitute derivation size, snapshot size, or a partial query.
+
+`agent_fingerprint` compares the exact selected and latest agent-reported store
+paths. It is `matches`, `differs`, or `unavailable` when either path is absent.
+`seven_day_drift` is `no_observed_drift` or `observed_drift` only when persisted
+state and heartbeat observations span the full trailing seven days, every
+boundary or adjacent gap is at most four hours, and all observations have an
+exact store path. The observation before the window establishes coverage but
+does not contribute drift. Otherwise it is `insufficient_coverage`.
+
+Completion time, duration, selected and running paths, closure counts, profile
+match, and other optional facts are null when their named persisted source is
+absent. A non-available lifecycle returns no summary facts and zero totals.
+Clients MUST render unavailable states. They MUST NOT infer one metric from
+another field or replace null, unavailable, failed, or insufficient coverage
+with zero or success.
+
+### GET `/systems/:id/evaluation-module-sources`
+
+This endpoint uses the same selected-revision and non-disclosure contract as
+evaluated-options.
+
+| Parameter | Contract |
+| --- | --- |
+| `revision` | Required full SHA in commit mode. |
+| `mode` | `commit` or `generation`; defaults to `commit`. |
+| `generation` | Required retained generation number in generation mode. |
+| `limit` | Clamped to 1-100; defaults to 50. |
+| `offset` | Clamped to 0-100,000; defaults to 0. |
+| `snapshot_token` | Optional on offset 0; required and a 64-character hexadecimal digest when `offset` is greater than 0. |
+
+The response lifecycle is `queued`, `running`, `failed`, `available`, or
+`unavailable`. Non-available responses contain no token or rows and return a
+zero total. An available response returns one bounded page and a
+snapshot-version token. `total` is the exact complete-snapshot tuple count even
+when `sources` is empty because the offset is past the final row.
+
+Rows are ordered by `won_count` descending, `defined_count` descending, then
+`source_input`, `source_revision`, and `source_path` in ascending bytewise
+order. Null input and revision values sort last. Each row contains the exact
+tuple, snapshot-wide counts for that tuple, and optional server-issued
+`tracked_flake` identity.
+
+The first request omits `snapshot_token`. Every continuation request sends the
+token from the first page. If the persisted snapshot is replaced, the endpoint
+returns HTTP 409 with `snapshot_changed` and no rows. The client discards all
+loaded rows and restarts at offset 0.
+
+`tracked_flake` is response-only and is never persisted in evaluator content.
+For `self`, the source revision must equal the page's exact active context
+revision. For an external input, the context revision's persisted lock snapshot
+must match the exact input name, repository URL, and full locked revision. The
+identity is returned only when this mapping resolves unambiguously to one
+non-deleted registered flake and non-archived commit visible through an active
+managed system. Hidden, stale, unmatched, deleted, archived, and ambiguous
+identities remain absent. Repository URLs are sanitized before serialization.
+
+The same response-only resolver decorates every selected and baseline
+definition returned by `/evaluated-options`, using the selected or baseline
+revision as that definition's context. The browser independently loads summary,
+module-source, and option pages. It MUST NOT infer identities or derive a
+snapshot-wide module count from a bounded page.
+
+This GET is database-only. It does not evaluate Nix, inspect Git, fetch a
+repository, enqueue work, mutate snapshot state, or perform per-host work.
+
+### POST `/systems/:id/evaluations/:revision`
+
+This mutation requires administrator authority because the evaluator processes
+the complete commit. It queues a missing terminal evaluation or reuses
+available, queued, or running work. The `queued` response field is true only
+when this request performed the queue transition.
+
+### GET `/flakes/:id/revisions/:revision/outputs`
+
+Query parameters:
+
+| Parameter | Contract |
+| --- | --- |
+| `system_filter` | `all`, `declared_unmanaged`, or `managed_undeclared`; defaults to `all`. |
+| `limit` | Clamped to 1-100; applies independently to each top-level collection and to filtered reconciliation. |
+| `offset` | Clamped to 0-100,000; applies independently to each top-level collection and to filtered reconciliation. |
+| `snapshot_token` | Optional opaque token returned by the endpoint. When supplied, it binds the request to the selected output and usable first-parent comparison state. |
+
+The server applies `system_filter` before the reconciliation offset and limit.
+`pagination.system_total` is the visible total for the active filter, and
+`pagination.systems_has_more` reports whether that filtered sequence has a next
+row. The aggregate reconciliation counts, collapse count, pinned count, and
+stale-input count remain revision-global. Clients request continuation pages
+and retain these authoritative totals. A response larger than the 2 MiB safe
+response bound is `unavailable` rather than silently truncated.
+
+Token-aware clients send the first page's `snapshot_token` on continuation
+requests. The server returns `409 snapshot_changed` if a supplied token is
+stale or malformed because the selected output, first-parent identity or state,
+or usable first-parent output changed. The client then discards accumulated
+rows and restarts at offset 0. For compatibility with existing clients, a
+positive offset without `snapshot_token` retains the prior bounded offset
+semantics and does not receive this replacement guarantee. HTTP 409 applies
+only when the request supplied a stale or malformed token.
+
+`managed_system_count` is the authoritative visible active fleet count. It can
+exceed the bounded `systems` array. Non-admin responses remove hidden systems,
+configuration names, and module consumers. A caller without a visible active
+managed system for the flake receives not-found.
+
+Exported-module entries in this response are summaries. `declaration_count`
+remains authoritative. `declarations` is empty, and `declarations_complete` is
+false when declaration details exist. Clients use the dedicated declaration
+endpoint instead of treating the summary as a complete nested collection.
+
+An exported module's `source_input`, `source_revision`, and `source_path`
+describe only the location of its `nixosModules` attribute binding. The
+evaluator uses the Nix attribute position and requires one unambiguous longest
+matching input root; `source_path` is relative to that root. Missing positions
+and ambiguous roots produce null. These fields are not module value provenance
+and do not authorize navigation. Declaration `source_paths` are the declaration
+locations.
+
+Input rows expose `direct_descendant_count` for immediate lock-graph children
+and `transitive_descendant_count` for all unique recursive descendants of a
+direct root input. Both counts use the complete lock graph, not the response
+page. They are null for non-direct nodes or unavailable counts. Clients that
+describe transitive reach MUST use `transitive_descendant_count`.
+
+### GET `/flakes/:id/revisions/:revision/modules/:module/declarations`
+
+This endpoint returns declarations for one exact exported module from one
+persisted flake-output JSONB snapshot. `limit` is clamped to 1-100 and `offset`
+to 0-100,000. The response contains the authoritative `total`, applied
+`offset` and `limit`, deterministic declaration rows, explicit snapshot
+`lifecycle` and safe `error`, and a content-digest `snapshot_token`.
+
+The first request omits `snapshot_token`. Every continuation request sends the
+token returned by page one. If re-evaluation replaces the selected snapshot,
+the endpoint returns `409 snapshot_changed`. The client must discard loaded
+rows and restart at offset 0. Unknown active revisions and module names return
+not-found. Unauthorized or hidden flakes use the same non-disclosing behavior
+as the top-level output endpoint. The query is database-only and does not
+mutate evaluation or snapshot state.
+
+See [Evaluation and Flake Snapshot
+Architecture](../evaluation-flake-snapshots.md) for extraction ownership,
+identity, comparison, persistence, retention, redaction, and verification
+requirements.
 
 ---
 

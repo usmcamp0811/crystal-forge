@@ -6,7 +6,8 @@ use crate::views::systems_list::SystemsListView;
 
 /// The systems list page.
 #[component]
-pub fn SystemsView() -> Element {
+pub fn SystemsView(query: String) -> Element {
+    let _ = query;
     rsx! {
         SystemsListView {}
     }

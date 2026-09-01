@@ -15,7 +15,8 @@
  * "ci_fast". Themed screenshots are captured for every theme listed in
  * manifest settings.visualThemes and later compared against the design example
  * targets (generated offline by generate-design-targets.js) to produce a
- * non-blocking design-drift report and visual parity grid for the MR.
+ * design-drift report and visual parity grid for the MR. TASK-440 capture and
+ * semantic contracts are blocking; pixel similarity remains advisory.
  */
 const { chromium } = process.env.CF_UI_STATIC_CONTRACTS === "1"
   ? { chromium: null }
@@ -72,6 +73,13 @@ function runFixtureSql(sql) {
   ).trim();
 }
 
+function runFixtureSql(sql) {
+  const encoded = Buffer.from(sql, "utf8").toString("base64");
+  return execSync(`printf %s ${encoded} | base64 -d | sudo -u postgres psql -d crystal_forge -v ON_ERROR_STOP=1 -A -t -F '|'`, {
+    encoding: "utf8",
+  }).trim();
+}
+
 // ── Node.js 24 safety net ──────────────────────────────────────────────────
 // Preserve diagnostics for detached Playwright failures without allowing an
 // uncaught exception or rejection to produce a successful browser process.
@@ -117,6 +125,13 @@ if (!coverageManifestPath) {
 const MANIFEST = JSON.parse(fs.readFileSync(coverageManifestPath, "utf8"));
 const MANIFEST_STEPS = new Map(MANIFEST.steps.map((s) => [s.name, s]));
 const DESIGN_FIXTURE = MANIFEST.settings.designFixture || null;
+const designFixturePath = firstExistingPath([
+  path.join(__dirname, "design-fixtures.json"),
+  path.join(__dirname, "..", "design-fixtures.json"),
+]);
+if (!designFixturePath) throw new Error("design-fixtures.json is required for TASK-440 semantic contracts");
+const TASK_440_FIXTURE = JSON.parse(fs.readFileSync(designFixturePath, "utf8")).task440;
+const task440SemanticContracts = [];
 const intermediateVisuals = new Map();
 
 /**
@@ -262,25 +277,76 @@ function compareToBaseline(name, step) {
 
 
 async function applyVisualTheme(page, theme) {
-  // A step can finish immediately after navigation. During that window, the
-  // app's preference hydration can overwrite the first direct theme seed.
-  // Reapply after hydration settles so the captured theme is deterministic.
-  for (let attempt = 0; attempt < 5; attempt += 1) {
-    await page.evaluate((themeName) => {
-      localStorage.setItem("cf.ui.theme", themeName);
-      document.documentElement.setAttribute("data-theme", themeName);
-    }, theme);
-    await page.waitForTimeout(100);
-    const actual = await page.locator("html").getAttribute("data-theme");
-    if (actual === theme) {
-      // The shell uses 300 ms color transitions. Capture only after those
-      // transitions settle so computed contrast and pixels are deterministic.
-      await page.waitForTimeout(350);
-      return;
+  const root = page.locator("html");
+  const toggle = page.getByRole("button", { name: "Toggle theme" });
+  if ((await root.getAttribute("data-theme")) !== theme) {
+    if ((await toggle.count()) === 0) {
+      // Authentication pages do not render the application shell. Seed the
+      // preference and reload so UiTheme::load/apply owns the rendered state.
+      const fields = await page.locator("input, textarea, select").evaluateAll((elements) => elements.map((element, index) => ({
+        index,
+        value: element.value,
+        checked: "checked" in element ? element.checked : null,
+      })));
+      await page.evaluate((themeName) => localStorage.setItem("cf.ui.theme", themeName), theme);
+      await page.reload({ timeout: LOAD_TIMEOUT });
+      await page.locator("input, textarea, select").evaluateAll((elements, saved) => {
+        for (const field of saved) {
+          const element = elements[field.index];
+          if (!element) continue;
+          element.value = field.value;
+          if (field.checked !== null) element.checked = field.checked;
+          element.dispatchEvent(new Event("input", { bubbles: true }));
+          element.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+      }, fields);
+    } else {
+      // Drawer and toast layers can cover the topbar. A DOM click still
+      // invokes the real Dioxus control and preference state.
+      await toggle.evaluate((button) => button.click());
     }
   }
-  const actual = await page.locator("html").getAttribute("data-theme");
-  throw new Error(`Expected visual baseline theme ${theme}, got: ${actual}`);
+
+  await page.waitForFunction(
+    (themeName) => document.documentElement.getAttribute("data-theme") === themeName,
+    theme,
+    { timeout: 5000 },
+  );
+  const renderedTheme = await page.evaluate((themeName) => {
+    const parse = (color) => {
+      const match = color.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+      return match ? match.slice(1).map(Number) : null;
+    };
+    const luminance = (rgb) => rgb ? ((rgb[0] * 299 + rgb[1] * 587 + rgb[2] * 114) / 1000) : null;
+    const candidates = [...document.querySelectorAll(".sd-card, .fl-tray, main, body")];
+    const surface = candidates.find((element) => {
+      const color = getComputedStyle(element).backgroundColor;
+      return color !== "transparent" && !/rgba\([^)]*,\s*0(?:\.0+)?\)$/.test(color);
+    }) || document.body;
+    const style = getComputedStyle(surface);
+    return {
+      theme: document.documentElement.getAttribute("data-theme"),
+      surfaceClass: surface.className || surface.tagName,
+      background: style.backgroundColor,
+      foreground: style.color,
+      backgroundLuminance: luminance(parse(style.backgroundColor)),
+      foregroundLuminance: luminance(parse(style.color)),
+      expectedDark: themeName === "dark",
+    };
+  }, theme);
+  if (renderedTheme.theme !== theme || renderedTheme.backgroundLuminance === null || renderedTheme.foregroundLuminance === null) {
+    throw new Error(`Application theme did not settle to ${theme}: ${JSON.stringify(renderedTheme)}`);
+  }
+  if (Math.abs(renderedTheme.backgroundLuminance - renderedTheme.foregroundLuminance) < 35) {
+    throw new Error(`Rendered theme lacks representative foreground/background contrast: ${JSON.stringify(renderedTheme)}`);
+  }
+  if (theme === "dark" && renderedTheme.backgroundLuminance >= renderedTheme.foregroundLuminance) {
+    throw new Error(`Dark theme surface colors are inconsistent: ${JSON.stringify(renderedTheme)}`);
+  }
+  if (theme === "light" && renderedTheme.backgroundLuminance <= renderedTheme.foregroundLuminance) {
+    throw new Error(`Light theme surface colors are inconsistent: ${JSON.stringify(renderedTheme)}`);
+  }
+  await page.waitForTimeout(350);
 }
 
 async function setAccountPreferences(page, preferences) {
@@ -433,20 +499,52 @@ async function mockProfileNotificationAndSessionApis(page) {
 
 async function captureThemedBaselines(page, step, visualThemes) {
   const visuals = [];
+  const canonicalTask440 = step.name.includes("task440") && step.name.includes("canonical");
 
   for (const theme of visualThemes) {
+    let parityTarget = null;
+    let semanticContract = null;
+    let contentSurface = null;
     await applyVisualTheme(page, theme);
+    if (canonicalTask440) {
+      await dismissOnboardingCoachForCapture(page);
+      await prepareTask440CanonicalCapture(page, step);
+      const surfaceSelector = step.name.includes("config-") ? ".sd-grid-config" : ".fl-tray";
+      await assertNoOverlayIntersections(page, surfaceSelector, `${step.name} ${theme} capture`);
+      const parityManifestPath = firstExistingPath([
+        path.join(__dirname, "design-parity", "manifest.json"),
+        path.join(__dirname, "..", "design-parity", "manifest.json"),
+      ]);
+      if (!parityManifestPath) throw new Error("design-parity manifest is required for canonical TASK-440 captures");
+      const parityManifest = JSON.parse(fs.readFileSync(parityManifestPath, "utf8"));
+      const targets = (parityManifest.targets?.task440 || []).filter((target) => target.dioxusStep === step.name);
+      if (targets.length !== 1) throw new Error(`Expected one TASK-440 design-parity target for ${step.name}, found ${targets.length}`);
+      parityTarget = targets[0];
+      semanticContract = TASK_440_FIXTURE.semanticTargets?.[parityTarget.name];
+      await validateTask440SemanticContract(page, parityTarget, semanticContract, theme);
+      contentSurface = await page.locator(parityTarget.contentSelector).boundingBox();
+      if (!contentSurface || contentSurface.width <= 0 || contentSurface.height <= 0) throw new Error(`${parityTarget.name} content surface is not measurable`);
+    }
 
     const captureName = `${step.name}--${theme}`;
     const outputPath = `${outputDir}/${captureName}.png`;
-    // Playwright fast-forwards finite CSS transitions before capture. This
-    // prevents VM compositor timing from freezing an intermediate theme frame.
-    await page.screenshot({ path: outputPath, animations: "disabled" });
+    await page.screenshot({ path: outputPath, animations: "disabled", timeout: 15_000 });
 
     const stats = fs.statSync(outputPath);
     const visual = compareToBaseline(captureName, MANIFEST_STEPS.get(step.name));
     console.log(`  OK: ${captureName}.png (${stats.size} bytes) [baseline: ${visual.status}]`);
-    visuals.push({ name: captureName, theme, ...visual });
+    visuals.push({ name: captureName, theme, ...visual, semanticContract: semanticContract ? { name: parityTarget.name, ok: true } : null });
+    if (canonicalTask440) {
+      const viewport = page.viewportSize();
+      if (!viewport || viewport.width !== parityTarget.viewport.width || viewport.height !== parityTarget.viewport.height) {
+        throw new Error(`Canonical viewport does not match ${parityTarget.name}: expected ${parityTarget.viewport.width}x${parityTarget.viewport.height}, got ${viewport ? `${viewport.width}x${viewport.height}` : "unknown"}`);
+      }
+      const parityDir = path.join(outputDir, "design-parity");
+      fs.mkdirSync(parityDir, { recursive: true });
+      fs.copyFileSync(outputPath, path.join(parityDir, `${parityTarget.name}--${theme}.dioxus.png`));
+      task440SemanticContracts.push({ name: `${parityTarget.name}--${theme}`, target: parityTarget.name, theme, ok: true, contentSurface });
+      console.log(`  OK TASK-440 semantic contract and design-parity capture: ${parityTarget.name}--${theme}`);
+    }
   }
 
   return visuals;
@@ -529,7 +627,9 @@ async function assertVisible(locator, message, timeoutMs = 5000) {
     .then(() => true)
     .catch(() => false);
   if (!visible) {
-    throw new Error(message);
+    const page = locator.page();
+    const body = await page.locator("body").innerText().catch(() => "<body unavailable>");
+    throw new Error(`${message}; URL: ${page.url()}; body: ${body.replace(/\s+/g, " ").slice(0, 1600)}`);
   }
 }
 
@@ -800,6 +900,75 @@ async function collapseOnboardingCoach(page) {
   throw new Error(
     "collapseOnboardingCoach: onboarding coach drawer stayed open and will intercept pointer events",
   );
+}
+
+async function dismissOnboardingCoachForCapture(page) {
+  const panel = page.locator("[data-testid='onboarding-coach-panel']");
+  if ((await panel.count()) === 0) return;
+  const dismiss = page.locator("[data-testid='onboarding-coach-dismiss']");
+  if ((await dismiss.count()) === 0) {
+    await panel.first().click();
+    await dismiss.waitFor({ state: "visible", timeout: 5000 });
+  }
+  await dismiss.click();
+  await panel.waitFor({ state: "hidden", timeout: 10000 });
+}
+
+async function routeTask440DismissedCoach(page) {
+  await page.route("**/api/v1/admin/setup-progress*", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ ...mockSetupCoachProgress(), dismissed: true }),
+    });
+  });
+}
+
+async function assertNoOverlayIntersections(page, surfaceSelector, label) {
+  const result = await page.evaluate((selector) => {
+    const surface = document.querySelector(selector);
+    if (!surface) throw new Error(`Missing tested surface ${selector}`);
+    const visible = (element) => {
+      const style = getComputedStyle(element);
+      const box = element.getBoundingClientRect();
+      return style.display !== "none" && style.visibility !== "hidden" && Number(style.opacity) > 0 && box.width > 0 && box.height > 0;
+    };
+    const paintedAtCenter = (element) => {
+      const box = element.getBoundingClientRect();
+      const x = box.left + box.width / 2;
+      const y = box.top + box.height / 2;
+      for (let ancestor = element.parentElement; ancestor && ancestor !== document.body; ancestor = ancestor.parentElement) {
+        const style = getComputedStyle(ancestor);
+        if (![style.overflow, style.overflowX, style.overflowY].some((overflow) => ["auto", "hidden", "scroll", "clip"].includes(overflow))) continue;
+        const clip = ancestor.getBoundingClientRect();
+        if (x < clip.left || x > clip.right || y < clip.top || y > clip.bottom) return false;
+      }
+      return true;
+    };
+    const overlaps = (left, right) => left.left < right.right && left.right > right.left && left.top < right.bottom && left.bottom > right.top;
+    const surfaceBox = surface.getBoundingClientRect();
+    const controls = [...surface.querySelectorAll("button:not([disabled]), input:not([disabled]), select:not([disabled]), summary, [role='tab']")].filter((element) => visible(element) && paintedAtCenter(element));
+    const coachOverlaps = [...document.querySelectorAll("[data-testid*='onboarding-coach'], [data-testid^='setup-coach-']")]
+      .filter(visible)
+      .filter((element) => overlaps(element.getBoundingClientRect(), surfaceBox) || controls.some((control) => overlaps(element.getBoundingClientRect(), control.getBoundingClientRect())))
+      .map((element) => element.getAttribute("data-testid") || element.className || element.tagName);
+    const occluded = controls.filter((control) => {
+      const box = control.getBoundingClientRect();
+      if (box.bottom <= 0 || box.top >= innerHeight || box.right <= 0 || box.left >= innerWidth) return false;
+      const x = Math.min(innerWidth - 1, Math.max(0, box.left + box.width / 2));
+      const y = Math.min(innerHeight - 1, Math.max(0, box.top + box.height / 2));
+      const top = document.elementsFromPoint(x, y).find((element) => getComputedStyle(element).pointerEvents !== "none");
+      return top && !control.contains(top) && !top.contains(control);
+    }).map((control) => control.getAttribute("aria-label") || control.getAttribute("title") || control.textContent?.trim() || control.tagName);
+    return {
+      expandedCoach: Boolean(document.querySelector("aside[data-testid='onboarding-coach-panel']")),
+      coachOverlaps,
+      occluded,
+    };
+  }, surfaceSelector);
+  if (result.expandedCoach || result.coachOverlaps.length || result.occluded.length) {
+    throw new Error(`${label} has a visible overlay intersecting the tested surface or controls: ${JSON.stringify(result)}`);
+  }
 }
 
 async function waitForAssertionCardCount(page, expected, message) {
@@ -1144,6 +1313,8 @@ function run(cmd, cwd = undefined) {
     cwd,
     stdio: ["ignore", "pipe", "pipe"],
     encoding: "utf8",
+    // A failed test transport must not block the complete Nix check indefinitely.
+    timeout: 60_000,
   }).trim();
 }
 
@@ -2550,6 +2721,15 @@ async function routeEnvironmentWarningData(page) {
       color_hex: "#2563EB",
       is_active: true,
       system_count: 3,
+      rollup: {
+        active_system_count: 3,
+        healthy: 2,
+        warning: 1,
+        critical: 0,
+        offline: 0,
+        cve_critical_high: 0,
+        flakes: ["platform-core"],
+      },
     },
   ];
   const policies = [
@@ -2835,12 +3015,1304 @@ async function unrouteFlakeParityData(page) {
   await page.unroute("**/api/v1/flakes");
 }
 
+const TASK_440_SYSTEM_ID = "00000000-0000-0000-0000-0000000000a1";
+const TASK_440_CURRENT_SHA = "abcdef0123456789abcdef0123456789abcdef01";
+const TASK_440_HISTORICAL_SHA = "abcdef0fedcba9876543210fedcba9876543210f";
+const TASK_440_NEVER_DEPLOYED_SHA = "9999999999999999999999999999999999999999";
+const TASK_440_ROOT_SHA = "1111111111111111111111111111111111111111";
+const TASK_440_EXTERNAL_SHA = "2222222222222222222222222222222222222222";
+// The design defines display prefixes only. These synthetic full identities
+// preserve the production API and navigation contract in the browser fixture.
+const TASK_440_DESIGN_SHA = "a3f8c12000000000000000000000000000000000";
+const TASK_440_DESIGN_PARENT_SHA = "f1d902200000000000000000000000000000000";
+const TASK_440_CONFIG_SHA = TASK_440_FIXTURE.canonicalConfig.revision;
+
+function task440TrackedFlake(sourceInput, revision) {
+  if (sourceInput === "self") {
+    return {
+      flake_id: 41,
+      flake_name: "platform-core",
+      repo_url: "https://gitlab.com/crystal-forge/platform-core.git",
+      revision,
+    };
+  }
+  if (sourceInput === "nixpkgs" && revision === TASK_440_EXTERNAL_SHA) {
+    return {
+      flake_id: 42,
+      flake_name: "nixpkgs-tracked",
+      repo_url: "https://github.com/NixOS/nixpkgs.git",
+      revision,
+    };
+  }
+  return null;
+}
+
+function task440Definition(sourcePath, tracked = true, winning = true, sourceRevision = TASK_440_CURRENT_SHA, sourceInput = "self") {
+  return {
+    source_path: sourcePath,
+    source_input: tracked ? sourceInput : null,
+    source_revision: tracked ? sourceRevision : null,
+    value: tracked ? true : null,
+    winning,
+    priority: winning ? 100 : 1000,
+    status: winning ? "winning" : "overridden",
+    winner_note: winning ? "Selected by deterministic fixture priority" : "Superseded by a higher-priority definition",
+    tracked_flake: tracked ? task440TrackedFlake(sourceInput, sourceRevision) : null,
+  };
+}
+
+function task440Option(path, declaredType, value, overrides = {}) {
+  return {
+    option: {
+      path,
+      declared_type: declaredType,
+      value,
+      definitions: overrides.definitions || [task440Definition("nixos/modules/task-440.nix", true, true, overrides.sourceRevision)],
+      overridden: overrides.overridden || false,
+    },
+    before: overrides.before || null,
+    changed: overrides.changed === undefined ? true : overrides.changed,
+    diff: overrides.diff || {
+      kind: overrides.changed === false ? "unchanged" : "modified",
+      value_kind: value.kind,
+      added: [],
+      removed: [],
+    },
+  };
+}
+
+function task440TypedOptions(revision = TASK_440_CURRENT_SHA) {
+  return [
+    task440Option("services.openssh.enable", "boolean", { kind: "scalar", value: true }, {
+      overridden: true,
+      before: {
+        path: "services.openssh.enable",
+        declared_type: "boolean",
+        value: { kind: "scalar", value: false },
+        definitions: [task440Definition("nixos/modules/base.nix", true, true, revision)],
+        overridden: false,
+      },
+      diff: {
+        kind: "modified",
+        value_kind: "scalar",
+        added: [{ kind: "scalar", value: true }],
+        removed: [{ kind: "scalar", value: false }],
+      },
+      definitions: [
+        task440Definition("nixos/hosts/atlas-01.nix", true, true, revision),
+        task440Definition("nixos/modules/base.nix", true, false, revision),
+      ],
+    }),
+    task440Option("environment.systemPackages", "list of package", {
+      kind: "list",
+      value: [
+        { kind: "package", value: { name: "ripgrep", pname: "ripgrep", version: "14.1.1", output_path: "/nix/store/redacted-ripgrep" } },
+        { kind: "package", value: { name: "jq", pname: "jq", version: "1.7.1", output_path: "/nix/store/redacted-jq" } },
+      ],
+    }, {
+      definitions: [task440Definition("pkgs/tools.nix", true, true, TASK_440_EXTERNAL_SHA, "nixpkgs")],
+    }),
+    task440Option("services.nginx.virtualHosts", "attribute set", {
+      kind: "attribute_set",
+      value: { "forge.example": { enableACME: true } },
+    }),
+    task440Option("services.postgresql.settings", "submodule", {
+      kind: "submodule",
+      value: { shared_buffers: "2GB", max_connections: 200 },
+    }),
+    task440Option("nixpkgs.overlays", "function", {
+      kind: "opaque",
+      value: { type_name: "lambda" },
+    }),
+    task440Option("services.broken.value", "string", {
+      kind: "failed",
+      value: { code: "not_evaluated", message: "not evaluated: fixture dependency failed" },
+    }),
+    task440Option("services.untracked.enable", "boolean", { kind: "scalar", value: true }, {
+      changed: false,
+      definitions: [task440Definition("/etc/nixos/local.nix", false, true)],
+    }),
+  ];
+}
+
+function task440CanonicalOptions(revision = TASK_440_DESIGN_SHA) {
+  const visiblePaths = [
+    'boot.kernel.sysctl."fs.protected_hardlinks"',
+    'boot.kernel.sysctl."kernel.dmesg_restrict"',
+    'boot.kernel.sysctl."kernel.kptr_restrict"',
+    'boot.kernel.sysctl."kernel.yama.ptrace_scope"',
+    'boot.kernel.sysctl."net.core.somaxconn"',
+    'boot.kernel.sysctl."net.ipv4.conf.all.rp_filter"',
+    'boot.kernel.sysctl."net.ipv4.tcp_syncookies"',
+    'boot.kernel.sysctl."net.ipv6.conf.all.accept_ra"',
+    'boot.kernel.sysctl."vm.swappiness"',
+    "boot.loader.systemd-boot.enable",
+  ];
+  const visible = visiblePaths.map((path, index) => task440Option(
+    path,
+    "integer",
+    { kind: "scalar", value: index % 3 },
+    {
+      changed: index >= 2 && index <= 6,
+      overridden: index < 2,
+      sourceRevision: revision,
+      definitions: [task440Definition(
+        "modules/stig/kernel/default.nix",
+        true,
+        true,
+        revision,
+      )],
+    },
+  ));
+  return [
+    ...visible,
+    ...Array.from({ length: TASK_440_FIXTURE.canonicalConfig.optionTotal - visible.length }, (_, index) => task440Option(
+      `services.fixture.option${String(index + 1).padStart(4, "0")}`,
+      "string",
+      { kind: "scalar", value: `fixture-${index + 1}` },
+      { changed: false, sourceRevision: revision },
+    )),
+  ];
+}
+
+function task440ModuleSources(revision = TASK_440_CURRENT_SHA, canonicalDesign = false) {
+  const source = (source_path, source_input, source_revision, defined_count, won_count) => ({
+    source_path,
+    source_input,
+    source_revision,
+    defined_count,
+    won_count,
+    tracked_flake: task440TrackedFlake(source_input, source_revision),
+  });
+  if (canonicalDesign) {
+    const paths = [
+      ["nixos/modules/profiles/qemu-guest.nix", "nixpkgs", "release-26.05"],
+      ["nixos/modules/services/networking/ssh/sshd.nix", "nixpkgs", "release-26.05"],
+      ["nixos/modules/services/monitoring/prometheus/exporters.nix", "nixpkgs", "release-26.05"],
+      ["nixos/modules/security/audit.nix", "nixpkgs", "release-26.05"],
+      ["nixos/modules/config/users-groups.nix", "nixpkgs", "release-26.05"],
+      ["nixos/modules/virtualisation/amazon-image.nix", "unstable", "nixos-unstable"],
+      ["modules/nixos/system/default.nix", "self", revision],
+      ["modules/nixos/system/networking/default.nix", "self", revision],
+      ["modules/nixos/system/zfs/default.nix", "self", revision],
+      ["modules/nixos/user/default.nix", "self", revision],
+      ["modules/nixos/security/gpg/default.nix", "self", revision],
+      ["modules/nixos/services/prometheus/default.nix", "self", revision],
+      ["modules/nixos/services/grafana/default.nix", "self", revision],
+      ["modules/nixos/services/k3s/default.nix", "self", revision],
+      ["modules/nixos/suites/kubernetes/default.nix", "self", revision],
+      ["modules/nixos/router/default.nix", "self", revision],
+      ["modules/crystal-forge/client.nix", "crystal-forge", "e91a774"],
+      ["modules/stig/sshd/default.nix", "crystal-forge", "e91a774"],
+      ["modules/stig/banner/default.nix", "crystal-forge", "e91a774"],
+      ["modules/stig/audit/default.nix", "crystal-forge", "e91a774"],
+      ["modules/stig/kernel/default.nix", "crystal-forge", "e91a774"],
+      ["nixos-modules/home-manager.nix", "home-manager", "release-26.05"],
+      ["modules/impermanence.nix", "impermanence", "a11c4a7"],
+      ["module.nix", "disko", "v1.12.0"],
+      ["modules/stylix.nix", "stylix", "release-25.11"],
+      ["nixos-modules/vault-agent.nix", "vault-service", "0f34b1c"],
+      ["nixos/host.nix", "microvm", "e2fa5d6"],
+    ];
+    return paths.map(([path, input, sourceRevision], index) => source(
+      path,
+      input,
+      sourceRevision,
+      44 - (index % 12),
+      41 - (index % 10),
+    ));
+  }
+  return [
+    source(`nixos/revisions/${revision.slice(0, 12)}.nix`, "self", revision, 20, 18),
+    source("nixos/hosts/atlas-01.nix", "self", revision, 14, 12),
+    source("nixos/modules/base.nix", "self", revision, 12, 10),
+    source("nixos/modules/task-440.nix", "self", revision, 10, 9),
+    source("pkgs/tools.nix", "nixpkgs", TASK_440_EXTERNAL_SHA, 8, 7),
+    source("shared/exact-identity.nix", "self", revision, 7, 6),
+    source("shared/exact-identity.nix", "nixpkgs", TASK_440_EXTERNAL_SHA, 6, 5),
+    source("/etc/nixos/local.nix", null, null, 5, 4),
+    ...Array.from({ length: 78 }, (_, index) => {
+      const number = String(index + 1).padStart(2, "0");
+      if (index % 13 === 0) {
+        return source(`/srv/local/module-${number}.nix`, null, null, 4, 1);
+      }
+      return source(`nixos/modules/fixture-${number}.nix`, "self", revision, 4, index % 4);
+    }),
+  ];
+}
+
+function task440ModuleSnapshotToken(revision, replacement = 0) {
+  return createHash("sha256").update(`task440:${revision}:${replacement}`).digest("hex");
+}
+
+function task440FlakeSnapshotToken(revision) {
+  return createHash("sha256").update(`task440:flake:${revision}`).digest("hex");
+}
+
+async function routeTask440SystemData(page, overrides = {}) {
+  const state = {
+    lifecycle: "available",
+    apiError: false,
+    moduleApiError: false,
+    moduleTransportError: false,
+    deploymentPolicy: "manual",
+    queueLifecycle: "queued",
+    deployResponses: [],
+    deployRequests: [],
+    handledRequests: [],
+    heldSearchResolvers: [],
+    heldSummaryResolvers: [],
+    heldModuleResolvers: new Map(),
+    heldDeployResolvers: [],
+    holdModuleRevisions: new Set(),
+    moduleFailureCounts: new Map(),
+    moduleTransportFailureCounts: new Map(),
+    moduleReplacementConflictCounts: new Map(),
+    moduleReplacement: 0,
+    moduleRequests: [],
+    optionRequests: [],
+    sevenDayDrift: "no_observed_drift",
+    agentFingerprint: null,
+    evaluationDrift: null,
+    ...overrides,
+  };
+  state.holdModuleRevisions = new Set(overrides.holdModuleRevisions || state.holdModuleRevisions);
+  state.moduleFailureCounts = new Map(overrides.moduleFailureCounts || state.moduleFailureCounts);
+  state.moduleTransportFailureCounts = new Map(overrides.moduleTransportFailureCounts || state.moduleTransportFailureCounts);
+  state.moduleReplacementConflictCounts = new Map(overrides.moduleReplacementConflictCounts || state.moduleReplacementConflictCounts);
+  const canonicalDesign = state.canonicalDesign === true;
+  const currentRevision = canonicalDesign ? TASK_440_CONFIG_SHA : TASK_440_CURRENT_SHA;
+  const currentGeneration = canonicalDesign ? 160 : 74;
+  state.releaseHeldSearch = () => {
+    state.holdSearch = null;
+    for (const resolve of state.heldSearchResolvers.splice(0)) resolve();
+  };
+  state.releaseHeldDeploy = () => {
+    state.holdDeploy = false;
+    for (const resolve of state.heldDeployResolvers.splice(0)) resolve();
+  };
+  state.releaseHeldSummary = () => {
+    state.holdSummary = false;
+    for (const resolve of state.heldSummaryResolvers.splice(0)) resolve();
+  };
+  state.releaseHeldModules = (revision) => {
+    state.holdModuleRevisions.delete(revision);
+    for (const resolve of state.heldModuleResolvers.get(revision) || []) resolve();
+    state.heldModuleResolvers.delete(revision);
+  };
+
+  await page.route(new RegExp(`/api/v1/systems/${TASK_440_SYSTEM_ID}$`), async (route) => {
+    if (route.request().method() !== "GET") {
+      await route.fallback();
+      return;
+    }
+    state.handledRequests.push("detail");
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        id: TASK_440_SYSTEM_ID,
+        hostname: canonicalDesign ? "atlas-01" : "warning-system-01",
+        system_configuration_name: "atlas-01",
+        environment: "production",
+        is_active: true,
+        deployment_policy: canonicalDesign ? "pinned" : state.deploymentPolicy,
+        health_status: "healthy",
+        deployment_status: "up_to_date",
+        pipeline_stage: "ready_for_deploy",
+        nixos_version: canonicalDesign ? "26.05" : "25.11",
+        kernel: canonicalDesign ? "6.11.15" : "6.12.42",
+        agent_version: "0.7.0",
+        current_store_path: canonicalDesign ? "/nix/store/design-atlas-01-system" : "/nix/store/task440-current-system",
+        generation: currentGeneration,
+        last_seen: canonicalDesign ? new Date(Date.now() - TASK_440_FIXTURE.canonicalConfig.heartbeatAgeMinutes * 60_000).toISOString() : "2026-08-28T18:00:00Z",
+        cve_counts: canonicalDesign ? { critical: 0, high: 2, medium: 12, low: 19 } : { critical: 0, high: 0, medium: 0, low: 0 },
+        flake: canonicalDesign
+          ? { id: 41, name: "infrastructure", repo_url: "git+ssh://git@gitlab.cf.internal/ops/nixos-infra", latest_commit: currentRevision }
+          : { id: 41, name: "platform-core", repo_url: "https://gitlab.com/crystal-forge/platform-core.git", latest_commit: currentRevision },
+        network: { primary_ip: "10.10.0.10", primary_mac: null, gateway_ip: null, reachability: "direct" },
+        hardware: { cpu_brand: "Fixture CPU", cpu_cores: 8, memory_gb: 32, uptime_secs: canonicalDesign ? 2_844_000 : 3600, board_serial: null, bios_version: null, hardware_changed_24h: false, hardware_ever_changed: false },
+        security: { tpm_present: true, secure_boot_enabled: true, fips_mode: false, selinux_status: null },
+        created_at: "2026-04-01T00:00:00Z",
+        updated_at: "2026-08-28T18:00:00Z",
+      }),
+    });
+  });
+
+  await page.route(new RegExp(`/api/v1/systems/${TASK_440_SYSTEM_ID}/commits$`), async (route) => {
+    state.handledRequests.push("commits");
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+      current_commit: currentRevision,
+      commits: [
+        { sha: currentRevision, short_sha: canonicalDesign ? currentRevision.slice(0, 7) : "abcdef0", message: canonicalDesign ? TASK_440_FIXTURE.canonicalConfig.revisionMessage : "current deployment", author: canonicalDesign ? "mreyes" : "Forge Bot", timestamp: "2026-08-28T18:00:00Z" },
+        { sha: TASK_440_NEVER_DEPLOYED_SHA, short_sha: "9999999", message: "never deployed candidate", author: "Forge Bot", timestamp: "2026-08-27T20:00:00Z" },
+        { sha: TASK_440_HISTORICAL_SHA, short_sha: "abcdef0", message: "retained deployment", author: "Forge Bot", timestamp: "2026-08-27T18:00:00Z" },
+        { sha: TASK_440_ROOT_SHA, short_sha: "1111111", message: "root revision", author: "Forge Bot", timestamp: "2026-08-20T18:00:00Z" },
+      ],
+    }) });
+  });
+
+  await page.route(new RegExp(`/api/v1/systems/${TASK_440_SYSTEM_ID}/generations$`), async (route) => {
+    state.handledRequests.push("generations");
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+      current_generation: currentGeneration,
+      generations: [
+        { generation: currentGeneration, store_path: canonicalDesign ? "/nix/store/design-atlas-01-system" : "/nix/store/task440-current-system", commit_hash: currentRevision, timestamp: "2026-08-28T18:00:00Z", is_current: true },
+        { generation: currentGeneration - 1, store_path: "/nix/store/task440-old-system", commit_hash: canonicalDesign ? TASK_440_DESIGN_PARENT_SHA : TASK_440_HISTORICAL_SHA, timestamp: "2026-08-27T18:00:00Z", is_current: false },
+        { generation: currentGeneration - 2, store_path: "/nix/store/task440-local-system", commit_hash: null, timestamp: "2026-08-26T18:00:00Z", is_current: false },
+      ],
+    }) });
+  });
+
+  await page.route(/\/evaluated-options(?:\?|$)/, async (route) => {
+    state.handledRequests.push("evaluated-options");
+    if (state.apiError) {
+      await route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ message: "deterministic snapshot API failure" }) });
+      return;
+    }
+    const url = new URL(route.request().url());
+    const search = url.searchParams.get("search") || "";
+    const filter = url.searchParams.get("filter") || "all";
+    const offset = Number(url.searchParams.get("offset") || 0);
+    const limit = Number(url.searchParams.get("limit") || 24);
+    const revision = url.searchParams.get("revision") || currentRevision;
+    state.optionRequests.push({ revision, search, filter, offset, limit });
+    const typedOptions = canonicalDesign ? task440CanonicalOptions(revision) : task440TypedOptions(revision);
+    if (state.holdSearch === search) {
+      await new Promise((resolve) => {
+        state.heldSearchResolvers.push(resolve);
+      });
+    }
+    let rows = typedOptions;
+    if (search) rows = rows.filter((row) => `${row.option.path} ${JSON.stringify(row)}`.toLowerCase().includes(search.toLowerCase()));
+    if (filter === "overridden") rows = rows.filter((row) => row.option.overridden);
+    if (filter === "changed") rows = rows.filter((row) => row.changed === true);
+    const expandedRows = Array.from({ length: 31 }, (_, index) => task440Option(
+      `services.fixture.option${String(index + 1).padStart(2, "0")}`,
+      "string",
+      { kind: "scalar", value: `fixture-${index + 1}` },
+      { changed: index % 2 === 0, sourceRevision: revision },
+    ));
+    if (!canonicalDesign && !search && filter === "all") rows = [...typedOptions, ...expandedRows];
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+      lifecycle: state.lifecycle,
+      revision,
+      generation: url.searchParams.get("generation") ? Number(url.searchParams.get("generation")) : null,
+      generation_snapshot_id: null,
+      baseline_revision: state.lifecycle === "available" && revision !== TASK_440_ROOT_SHA ? TASK_440_ROOT_SHA : null,
+      comparison_available: state.lifecycle === "available" && revision !== TASK_440_ROOT_SHA,
+      error: state.lifecycle === "failed" ? "safe deterministic evaluation failure" : null,
+      module_count: canonicalDesign ? 27 : 14,
+      evaluation_duration_ms: canonicalDesign ? TASK_440_FIXTURE.canonicalConfig.evaluationDurationMs : 845,
+      counts: canonicalDesign
+        ? { all: TASK_440_FIXTURE.canonicalConfig.optionTotal, overridden: TASK_440_FIXTURE.canonicalConfig.overriddenTotal, changed: TASK_440_FIXTURE.canonicalConfig.changedTotal }
+        : { all: 38, overridden: 1, changed: revision === TASK_440_ROOT_SHA ? null : 22 },
+      total: rows.length,
+      offset,
+      limit,
+      options: state.lifecycle === "available" ? rows.slice(offset, offset + limit) : [],
+    }) });
+  });
+
+  await page.route(/\/evaluation-summary(?:\?|$)/, async (route) => {
+    state.handledRequests.push("evaluation-summary");
+    if (state.apiError) {
+      await route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ message: "deterministic summary API failure" }) });
+      return;
+    }
+    const url = new URL(route.request().url());
+    const revision = url.searchParams.get("revision") || currentRevision;
+    if (state.holdSummary) {
+      await new Promise((resolve) => state.heldSummaryResolvers.push(resolve));
+    }
+    const selectedStore = revision === currentRevision
+      ? canonicalDesign ? "/nix/store/design-atlas-01-system" : "/nix/store/task440-current-system"
+      : revision === TASK_440_HISTORICAL_SHA
+        ? "/nix/store/task440-old-system"
+        : null;
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+      lifecycle: state.lifecycle,
+      revision,
+      generation: url.searchParams.get("generation") ? Number(url.searchParams.get("generation")) : null,
+      error: state.lifecycle === "failed" ? "safe deterministic evaluation failure" : null,
+      module_source_total: state.lifecycle === "available" ? task440ModuleSources(revision, canonicalDesign).length : 0,
+      completed_at: state.lifecycle === "available" ? "2026-08-28T18:00:00Z" : null,
+       evaluation_duration_ms: state.lifecycle === "available" ? canonicalDesign ? TASK_440_FIXTURE.canonicalConfig.evaluationDurationMs : 845 : null,
+       option_total: state.lifecycle === "available" ? canonicalDesign ? TASK_440_FIXTURE.canonicalConfig.optionTotal : 38 : 0,
+      selected_store_path: state.lifecycle === "available" ? selectedStore : null,
+       closure_package_count: state.lifecycle === "available" ? canonicalDesign ? TASK_440_FIXTURE.canonicalConfig.packageTotal : 731 : null,
+       closure_size_bytes: state.lifecycle === "available" ? canonicalDesign ? TASK_440_FIXTURE.canonicalConfig.closureSizeBytes : 5153960755 : null,
+      running_store_path: canonicalDesign ? "/nix/store/design-atlas-01-system" : "/nix/store/task440-current-system",
+      running_profile_matches: true,
+       host_delta_count: state.lifecycle === "available" ? canonicalDesign ? TASK_440_FIXTURE.canonicalConfig.hostDeltaTotal : 17 : null,
+      agent_fingerprint: state.agentFingerprint || (!selectedStore ? "unavailable" : selectedStore === (canonicalDesign ? "/nix/store/design-atlas-01-system" : "/nix/store/task440-current-system") ? "matches" : "differs"),
+      seven_day_drift: state.lifecycle === "available" ? state.sevenDayDrift : "insufficient_coverage",
+      drift: state.evaluationDrift || (!selectedStore ? "unavailable" : selectedStore === (canonicalDesign ? "/nix/store/design-atlas-01-system" : "/nix/store/task440-current-system") ? "matches" : "differs"),
+    }) });
+  });
+
+  await page.route(/\/evaluation-module-sources(?:\?|$)/, async (route) => {
+    const url = new URL(route.request().url());
+    const revision = url.searchParams.get("revision") || currentRevision;
+    const rawLimit = url.searchParams.get("limit") || "50";
+    const rawOffset = url.searchParams.get("offset") || "0";
+    const generation = url.searchParams.get("generation") ? Number(url.searchParams.get("generation")) : null;
+    const suppliedToken = url.searchParams.get("snapshot_token");
+    if (!/^-?\d+$/.test(rawLimit) || !/^-?\d+$/.test(rawOffset)) {
+      await route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ message: "limit and offset must be integers" }) });
+      return;
+    }
+    const limit = Math.min(100, Math.max(1, Number(rawLimit)));
+    const offset = Math.min(100000, Math.max(0, Number(rawOffset)));
+    if (suppliedToken && !/^[0-9a-fA-F]{64}$/.test(suppliedToken)) {
+      await route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ message: "snapshot_token must be a 64-character hexadecimal digest" }) });
+      return;
+    }
+    if (offset > 0 && !suppliedToken) {
+      await route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ message: "snapshot_token is required when offset is greater than 0" }) });
+      return;
+    }
+    state.moduleRequests.push({ revision, limit, offset, snapshotToken: suppliedToken });
+    if (state.holdModuleRevisions.has(revision)) {
+      await new Promise((resolve) => {
+        const resolvers = state.heldModuleResolvers.get(revision) || [];
+        resolvers.push(resolve);
+        state.heldModuleResolvers.set(revision, resolvers);
+      });
+    }
+    if (state.moduleApiError) {
+      await route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ message: "deterministic module source API failure" }) });
+      return;
+    }
+    if (state.moduleTransportError) {
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "deterministic module source transport failure" }) });
+      return;
+    }
+    const consumeFailure = (failures) => {
+      const remaining = failures.get(offset) || 0;
+      if (remaining > 0) failures.set(offset, remaining - 1);
+      return remaining > 0;
+    };
+    if (consumeFailure(state.moduleTransportFailureCounts)) {
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ message: "deterministic module source transport failure" }) });
+      return;
+    }
+    if (consumeFailure(state.moduleFailureCounts)) {
+      await route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ message: `deterministic module source failure at offset ${offset}` }) });
+      return;
+    }
+    if (consumeFailure(state.moduleReplacementConflictCounts)) {
+      state.moduleReplacement += 1;
+      await route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ error: "snapshot_changed", message: "Evaluation snapshot changed; reload module sources from offset 0" }) });
+      return;
+    }
+    const token = task440ModuleSnapshotToken(revision, state.moduleReplacement);
+    if (offset > 0 && suppliedToken !== token) {
+      await route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ error: "snapshot_changed", message: "Evaluation snapshot changed; reload module sources from offset 0" }) });
+      return;
+    }
+    const lifecycle = state.moduleLifecycle || state.lifecycle;
+    const sources = task440ModuleSources(revision, canonicalDesign);
+    if (state.moduleReplacement > 0) {
+      sources[0] = {
+        ...sources[0],
+        source_path: `nixos/revisions/${revision.slice(0, 12)}-replacement-${state.moduleReplacement}.nix`,
+      };
+    }
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+      lifecycle,
+      revision,
+      generation,
+      error: lifecycle === "failed" ? "safe deterministic module source failure" : null,
+      snapshot_token: lifecycle === "available" ? token : null,
+      total: lifecycle === "available" ? sources.length : 0,
+      offset,
+      limit,
+      sources: lifecycle === "available" ? sources.slice(offset, offset + limit) : [],
+    }) });
+  });
+
+  await page.route(new RegExp(`/api/v1/systems/${TASK_440_SYSTEM_ID}/evaluations/[0-9a-f]+$`), async (route) => {
+    state.lifecycle = state.queueLifecycle;
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ revision: TASK_440_HISTORICAL_SHA, lifecycle: state.lifecycle, queued: true }) });
+  });
+
+  await page.route(new RegExp(`/api/v1/systems/${TASK_440_SYSTEM_ID}/deploy$`), async (route) => {
+    const request = route.request().postDataJSON();
+    state.deployRequests.push(request);
+    if (state.holdDeploy) {
+      await new Promise((resolve) => state.heldDeployResolvers.push(resolve));
+    }
+    const response = state.deployResponses.shift() || {
+      status: 200,
+      body: { policy: state.deploymentPolicy, conversion: "not_requested", deployment: "queued", deployment_id: "44000000-0000-4000-8000-000000000001", message: "Deployment queued" },
+    };
+    if (response.body.policy === "manual") state.deploymentPolicy = "manual";
+    await route.fulfill({ status: response.status, contentType: "application/json", body: JSON.stringify(response.body) });
+  });
+  const provenanceCommits = (flakeId) => flakeId === 42
+    ? [{ id: 4421, hash: TASK_440_EXTERNAL_SHA, message: "tracked external input", author: "Fixture Bot", committed_at: "2026-08-28T18:00:00Z", system_count: 0, commits_behind: 0, systems: [], system_paths: [], build_status: "complete", evaluation_status: "complete", evaluation_error_message: null }]
+    : [{ id: 4411, hash: TASK_440_CURRENT_SHA, message: "tracked self input", author: "Fixture Bot", committed_at: "2026-08-28T18:00:00Z", system_count: 1, commits_behind: 0, systems: ["atlas-01"], system_paths: [], build_status: "complete", evaluation_status: "complete", evaluation_error_message: null }];
+  await page.route("**/api/v1/flakes/timelines*", async (route) => {
+    state.provenanceTimelineRequests = (state.provenanceTimelineRequests || 0) + 1;
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([
+      { flake_id: 41, flake_name: "platform-core", repo_url: "https://gitlab.com/crystal-forge/platform-core.git", commits: provenanceCommits(41) },
+      { flake_id: 42, flake_name: "nixpkgs-tracked", repo_url: "https://github.com/NixOS/nixpkgs.git", commits: provenanceCommits(42) },
+    ]) });
+  });
+  await page.route(new RegExp("/api/v1/flakes/(41|42)/revisions/[^/]+/outputs$"), async (route) => {
+    const match = new URL(route.request().url()).pathname.match(/^\/api\/v1\/flakes\/(41|42)\/revisions\/([^/]+)\/outputs$/);
+    const flakeId = Number(match[1]);
+    const revision = decodeURIComponent(match[2]);
+    state.provenanceOutputRequests = state.provenanceOutputRequests || [];
+    state.provenanceOutputRequests.push({ flakeId, revision });
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(task440FlakeOutput(revision)) });
+  });
+  return state;
+}
+
+function task440CanonicalFlakeOutput(revision, lifecycle, comparisonAvailable, offset, limit, systemFilter) {
+  const module = (name, description, optionCount, consumers) => ({
+    name,
+    description,
+    source_input: "self",
+    source_revision: revision,
+    source_path: `modules/nixos/${name}/default.nix`,
+    declarations: [],
+    declarations_complete: name !== "system",
+    consumers: Array.from({ length: consumers }, (_, index) => `consumer-${index + 1}`),
+    declaration_count: optionCount,
+    consumer_count: consumers,
+    error: null,
+  });
+  const modules = [
+    module("services/grafana", "grafana server, provisioned dashboards", 6, 8),
+    module("system/networking", "hostname, domain, firewall defaults", 6, 7),
+    module("security/gpg", "gpg agent, pinentry, key trust", 4, 6),
+    module("services/k3s", "k3s server/agent role, cluster token", 6, 6),
+    module("system/zfs", "zfs pools, snapshots, scrub timers", 6, 5),
+    module("system", "base system: nix settings, gc, timezone, stateVersion", 6, 2),
+    module("user", "declarative users, immutable /etc/passwd", 5, 2),
+    module("services/prometheus", "node exporter, scrape config", 6, 2),
+  ];
+  modules[5].source_path = "modules/nixos/system/default.nix";
+  const todaySeconds = Math.floor(Date.now() / 86_400_000) * 86_400;
+  const input = (node, source, lockedRevision, ageDays, follows = [], descendants = 0, channel = false, tracked = false) => ({
+    node,
+    names: [node],
+    direct: true,
+    transitive: false,
+    follows,
+    original: { type: source.startsWith("gitlab:") ? "gitlab" : "github" },
+    locked: { rev: lockedRevision },
+    source_type: source.split(":", 1)[0],
+    source,
+    locked_revision: lockedRevision,
+    last_modified: todaySeconds - (ageDays * 86_400),
+    channel,
+    tracked,
+    direct_descendant_count: descendants,
+    transitive_descendant_count: descendants,
+  });
+  const inputs = [
+    input("nixpkgs", "github:NixOS/nixpkgs/release-26.05", "8f2a1c9", 3, [], 0, true),
+    input("unstable", "github:NixOS/nixpkgs/nixos-unstable", "d41e632", 1, [], 0, true),
+    input("old-nixpkgs", "github:NixOS/nixpkgs/release-25.05", "3c9f402", 243, [], 0, true),
+    input("home-manager", "github:nix-community/home-manager/release-26.05", "b7c0916", 5, ["nixpkgs"], 9),
+    input("crystal-forge", "gitlab:crystal-forge/crystal-forge/TASK-440", "e91a774", 0, ["nixpkgs"], 6, false, true),
+    input("impermanence", "github:nix-community/impermanence", "a11c183", 61, ["nixpkgs"], 8),
+    input("disko", "github:nix-community/disko/v1.12.0", "9d1f2b8", 42, ["nixpkgs"], 4),
+    input("stylix", "github:danth/stylix/release-25.11", "77bc019", 21, [], 12),
+  ];
+  const managed = [
+    ["atlas-01", "production"], ["atlas-02", "production"], ["atlas-03", "production"],
+    ["orion-db-01", "production"], ["orion-db-02", "production"],
+    ["stg-atlas-01", "staging"], ["stg-atlas-02", "staging"],
+    ["dev-node-01", "dev"], ["dev-node-02", "dev"],
+  ].map(([configurationName, environmentName], index) => ({
+    configuration_name: configurationName,
+    system_id: index === 0 ? TASK_440_SYSTEM_ID : `00000000-0000-0000-0000-${String(index + 200).padStart(12, "0")}`,
+    hostname: configurationName,
+    environment_name: environmentName,
+    environment_color: environmentName === "production" ? "#dc2626" : environmentName === "staging" ? "#d97706" : "#2563eb",
+    state: "managed",
+    deployed_revision: revision,
+    output_collapsed: false,
+  }));
+  const systems = managed.concat(["vm-test-01", "vm-test-02"].map((configurationName) => ({
+    configuration_name: configurationName,
+    system_id: null,
+    hostname: null,
+    environment_name: null,
+    environment_color: null,
+    state: "declared_unmanaged",
+    deployed_revision: null,
+    output_collapsed: false,
+  })));
+  const filteredSystems = systems.filter((system) => systemFilter === "all" || (systemFilter === "declared_unmanaged" && system.state === "declared_unmanaged") || (systemFilter === "managed_undeclared" && system.state === "managed_undeclared"));
+  const previousOutputs = {
+    declared_systems: managed.slice(0, 6).map((system) => system.configuration_name),
+    exported_modules: modules.slice(3),
+    inputs: inputs.slice(3),
+    direct_input_count: 5,
+    resolved_input_count: 42,
+    lock_error: null,
+    module_evaluation: { available: true, source: "nixpkgs", error: null },
+    nixpkgsRevisions: [TASK_440_DESIGN_PARENT_SHA],
+    multiple_nixpkgs_revisions: false,
+  };
+  return {
+    lifecycle,
+    revision,
+    first_parent_revision: comparisonAvailable ? TASK_440_DESIGN_PARENT_SHA : null,
+    first_parent_resolved: true,
+    comparison_available: comparisonAvailable,
+    error: lifecycle === "failed" ? "safe flake evaluation failure" : null,
+    snapshot_token: lifecycle === "available" ? task440FlakeSnapshotToken(revision) : null,
+    outputs: lifecycle === "available" ? {
+      declared_systems: systems.map((system) => system.configuration_name).slice(offset, offset + limit),
+      exported_modules: modules.slice(offset, offset + limit),
+      inputs: inputs.slice(offset, offset + limit),
+      direct_input_count: 8,
+      resolved_input_count: 47,
+      lock_error: null,
+      module_evaluation: { available: true, source: "nixpkgs", error: null },
+      nixpkgsRevisions: ["8f2a1c9", "d41e632", "3c9f402"],
+      multiple_nixpkgs_revisions: true,
+    } : null,
+    previous_outputs: comparisonAvailable && lifecycle === "available" ? previousOutputs : null,
+    delta: comparisonAvailable && lifecycle === "available" ? {
+      systems_added_total: 5,
+      systems_removed_total: 0,
+      modules_added_total: 3,
+      modules_removed_total: 0,
+      inputs_added_total: 0,
+      inputs_removed_total: 3,
+      input_revision_bumps_total: 5,
+      systems_added: systems.slice(6, 11).map((system) => system.configuration_name),
+      systems_removed: [],
+      modules_added: modules.slice(0, 3).map((item) => item.name),
+      modules_removed: [],
+      inputs_added: [],
+      inputs_removed: ["legacy-overlay", "legacy-tools", "legacy-hardware"],
+      input_revision_bumps: inputs.slice(0, 5).map((item) => ({ node: item.node, before: TASK_440_DESIGN_PARENT_SHA, after: item.locked_revision })),
+    } : null,
+    systems: filteredSystems.slice(offset, offset + limit),
+    managed_system_count: 9,
+    declared_system_count: 11,
+    previous_declared_system_count: comparisonAvailable ? 6 : null,
+    declared_unmanaged_count: 2,
+    managed_undeclared_count: 0,
+    output_collapsed_count: 0,
+    pinned_revision_count: 0,
+    stale_direct_input_count: 1,
+    exported_module_count: 8,
+    pagination: { offset, limit, system_total: filteredSystems.length, systems_has_more: offset + limit < filteredSystems.length },
+  };
+}
+
+function task440FlakeOutput(revision, lifecycle = "available", comparisonAvailable = true, offset = 0, limit = 50, systemFilter = "all", largeCollections = false, canonicalDesign = false) {
+  if (canonicalDesign) return task440CanonicalFlakeOutput(revision, lifecycle, comparisonAvailable, offset, limit, systemFilter);
+  const todaySeconds = Math.floor(Date.now() / 86_400_000) * 86_400;
+  const modules = [
+    {
+      name: "hardening",
+      description: "Fleet hardening module",
+      source_input: "self",
+      source_revision: revision,
+      source_path: "flake.nix",
+      declarations: [],
+      declarations_complete: false,
+      consumers: ["atlas-01", "edge-new"],
+      declaration_count: 125,
+      consumer_count: 2,
+      error: null,
+    },
+    {
+      name: "missing-binding",
+      description: "Module binding unavailable fixture",
+      source_input: null,
+      source_revision: null,
+      source_path: null,
+      declarations: [],
+      declarations_complete: true,
+      consumers: [],
+      consumer_count: 0,
+      declaration_count: 0,
+      error: null,
+    },
+    ...Array.from({ length: 50 }, (_, index) => ({
+      name: `fixture-module-${String(index + 1).padStart(2, "0")}`,
+      description: "Deterministic pagination fixture",
+      source_input: "self",
+      source_revision: revision,
+      source_path: `modules/fixture-${String(index + 1).padStart(2, "0")}.nix`,
+      declarations: [],
+      declarations_complete: true,
+      consumers: [],
+      declaration_count: 0,
+      consumer_count: 0,
+      error: null,
+    })),
+  ];
+  const inputs = [
+    { node: "nixpkgs", names: ["nixpkgs"], direct: true, transitive: false, follows: [], original: { type: "github" }, locked: { rev: "2222222222222222222222222222222222222222" }, source_type: "github", source: "github:NixOS/nixpkgs", locked_revision: "2222222222222222222222222222222222222222", last_modified: todaySeconds - (3 * 86_400), channel: false, tracked: true, direct_descendant_count: 72, transitive_descendant_count: 72 },
+    { node: "home-manager", names: ["home-manager"], direct: true, transitive: false, follows: ["nixpkgs"], original: { type: "github" }, locked: { rev: "4444444444444444444444444444444444444444" }, source_type: "github", source: "github:nix-community/home-manager", locked_revision: "4444444444444444444444444444444444444444", last_modified: todaySeconds - (120 * 86_400), channel: true, tracked: true, direct_descendant_count: 8, transitive_descendant_count: 8 },
+    { node: "nixpkgs-stable", names: ["nixpkgs-stable"], direct: false, transitive: true, follows: ["nixpkgs"], original: { type: "github" }, locked: { rev: "3333333333333333333333333333333333333333" }, source_type: "github", source: "github:NixOS/nixpkgs/nixos-25.05", locked_revision: "3333333333333333333333333333333333333333", last_modified: 1600000000, channel: false, tracked: true, direct_descendant_count: null },
+    ...Array.from({ length: largeCollections ? 51 : 0 }, (_, index) => ({
+      node: `direct-fixture-${String(index + 1).padStart(2, "0")}`,
+      names: [`direct-fixture-${String(index + 1).padStart(2, "0")}`],
+      direct: true,
+      transitive: false,
+      follows: [],
+      original: { type: "path" },
+      locked: {},
+      source_type: "path",
+      source: `/fixtures/input-${index + 1}`,
+      locked_revision: null,
+      last_modified: todaySeconds - ((index + 1) * 86_400),
+      channel: false,
+      tracked: false,
+      direct_descendant_count: 0,
+      transitive_descendant_count: 0,
+    })),
+  ];
+  const systems = [
+    { configuration_name: "atlas-01", system_id: TASK_440_SYSTEM_ID, hostname: "warning-system-01", environment_name: "production", environment_color: "#a78bfa", state: "managed", deployed_revision: TASK_440_ROOT_SHA, output_collapsed: true },
+    { configuration_name: "edge-new", system_id: null, hostname: null, environment_name: null, environment_color: null, state: "declared_unmanaged", deployed_revision: null, output_collapsed: false },
+    { configuration_name: "legacy-01", system_id: "00000000-0000-0000-0000-0000000000b1", hostname: "legacy-01", environment_name: "staging", environment_color: "#f59e0b", state: "managed_undeclared", deployed_revision: TASK_440_ROOT_SHA, output_collapsed: false },
+    ...Array.from({ length: largeCollections ? 51 : 0 }, (_, index) => ({
+      configuration_name: `fleet-${String(index + 1).padStart(2, "0")}`,
+      system_id: `00000000-0000-0000-0000-${String(index + 100).padStart(12, "0")}`,
+      hostname: `fleet-${String(index + 1).padStart(2, "0")}`,
+      environment_name: "production",
+      environment_color: "#a78bfa",
+      state: "managed",
+      deployed_revision: revision,
+      output_collapsed: false,
+    })),
+  ];
+  const filteredSystems = systems.filter((system) => systemFilter === "all" || (systemFilter === "declared_unmanaged" && system.state === "declared_unmanaged") || (systemFilter === "managed_undeclared" && system.state === "managed_undeclared"));
+  const directInputCount = inputs.filter((input) => input.direct).length;
+  const previousOutputs = {
+    declared_systems: ["atlas-01", "legacy-01", "legacy-02", "legacy-03", "legacy-04", "legacy-05"].slice(offset, offset + limit),
+    exported_modules: [],
+    inputs: [],
+    direct_input_count: 1,
+    resolved_input_count: 73,
+    lock_error: null,
+    module_evaluation: { available: true, source: "nixpkgs", error: null },
+    nixpkgsRevisions: [TASK_440_ROOT_SHA],
+    multiple_nixpkgs_revisions: false,
+  };
+  return {
+    lifecycle,
+    revision,
+    first_parent_revision: comparisonAvailable ? TASK_440_ROOT_SHA : null,
+    first_parent_resolved: true,
+    comparison_available: comparisonAvailable,
+    error: lifecycle === "failed" ? "safe flake evaluation failure" : null,
+    snapshot_token: lifecycle === "available" ? task440FlakeSnapshotToken(revision) : null,
+    outputs: lifecycle === "available" ? {
+      declared_systems: ["atlas-01", "edge-new"].slice(offset, offset + limit),
+      exported_modules: modules.slice(offset, offset + limit),
+      inputs: inputs.slice(offset, offset + limit),
+      direct_input_count: directInputCount,
+      // The server derives resolved_input_count from builtins.length of the
+      // same resolved-inputs list it paginates (see deployment_policies.rs),
+      // so the fixture's authoritative total must equal the full `inputs`
+      // array length here. A larger, unreachable declared total previously
+      // caused the product's Inputs-pane auto-continuation effect (which
+      // fetches pages until the full resolved-input set is loaded) to loop
+      // forever because the paginated array could never reach that count.
+      resolved_input_count: inputs.length,
+      lock_error: null,
+      module_evaluation: { available: true, source: "nixpkgs", error: null },
+      nixpkgsRevisions: ["2222222222222222222222222222222222222222", "3333333333333333333333333333333333333333"],
+      multiple_nixpkgs_revisions: true,
+    } : null,
+    previous_outputs: comparisonAvailable && lifecycle === "available" ? previousOutputs : null,
+    delta: comparisonAvailable && lifecycle === "available" ? {
+      systems_added_total: 1,
+      systems_removed_total: 1,
+      modules_added_total: 1,
+      modules_removed_total: 0,
+      inputs_added_total: 1,
+      inputs_removed_total: 1,
+      input_revision_bumps_total: 1,
+      systems_added: ["edge-new"].slice(offset, offset + limit),
+      systems_removed: ["legacy-01"].slice(offset, offset + limit),
+      modules_added: ["hardening"].slice(offset, offset + limit),
+      modules_removed: [],
+      inputs_added: ["home-manager"].slice(offset, offset + limit),
+      inputs_removed: ["legacy-overlay"].slice(offset, offset + limit),
+      input_revision_bumps: [{ node: "nixpkgs", before: TASK_440_ROOT_SHA, after: "2222222222222222222222222222222222222222" }].slice(offset, offset + limit),
+    } : null,
+    systems: filteredSystems.slice(offset, offset + limit),
+    managed_system_count: largeCollections ? 53 : 2,
+    declared_system_count: largeCollections ? 53 : 2,
+    previous_declared_system_count: comparisonAvailable ? 6 : null,
+    declared_unmanaged_count: 1,
+    managed_undeclared_count: 1,
+    output_collapsed_count: largeCollections ? 7 : 1,
+    pinned_revision_count: largeCollections ? 9 : 2,
+    stale_direct_input_count: largeCollections ? 12 : 1,
+    exported_module_count: modules.length,
+    pagination: { offset, limit, system_total: filteredSystems.length, systems_has_more: offset + limit < filteredSystems.length },
+  };
+}
+
+async function routeTask440FlakeOutputs(page, overrides = {}) {
+  const state = { lifecycle: "available", apiError: false, noPrevious: false, emptySystemFilter: null, largeCollections: false, requestedRevisions: [], requestedSystemFilters: [], moduleDeclarationRequests: [], timelineRequests: 0, ...overrides };
+  const canonicalDesign = state.canonicalDesign === true;
+  const currentRevision = canonicalDesign ? TASK_440_DESIGN_SHA : TASK_440_CURRENT_SHA;
+  await page.route(new RegExp("/api/v1/flakes/41/revisions/[^/]+/outputs$"), async (route) => {
+    const revision = decodeURIComponent(new URL(route.request().url()).pathname.split("/revisions/")[1].split("/outputs")[0]);
+    const url = new URL(route.request().url());
+    const offset = Number(url.searchParams.get("offset") || 0);
+    const limit = Number(url.searchParams.get("limit") || 50);
+    const systemFilter = url.searchParams.get("system_filter") || "all";
+    state.requestedSystemFilters.push(systemFilter);
+    state.requestedRevisions.push(revision);
+    if (state.apiError) {
+      await route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ message: "deterministic flake snapshot API failure" }) });
+      return;
+    }
+    const output = task440FlakeOutput(revision, state.lifecycle, !state.noPrevious && revision !== TASK_440_ROOT_SHA, offset, limit, systemFilter, state.largeCollections, canonicalDesign);
+    if (state.emptySystemFilter === systemFilter) output.systems = [];
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(output) });
+  });
+  const commits = [
+    { id: 4401, hash: currentRevision, message: canonicalDesign ? "stig: enforce audit rules for sudo" : "current output snapshot", author: canonicalDesign ? "mreyes" : "Forge Bot", committed_at: "2026-08-28T18:00:00Z", system_count: canonicalDesign ? 11 : 2, commits_behind: 0, systems: canonicalDesign ? ["atlas-01", "atlas-02", "atlas-03", "orion-db-01", "orion-db-02", "stg-atlas-01", "stg-atlas-02", "dev-node-01", "dev-node-02", "vm-test-01", "vm-test-02"] : ["atlas-01", "edge-new"], system_paths: [], build_status: "complete", evaluation_status: "complete", evaluation_error_message: null },
+    { id: 4402, hash: TASK_440_HISTORICAL_SHA, message: "prefix collision snapshot", author: "Forge Bot", committed_at: "2026-08-27T18:00:00Z", system_count: 2, commits_behind: 1, systems: ["atlas-01", "edge-new"], system_paths: [], build_status: "complete", evaluation_status: "complete", evaluation_error_message: null },
+    { id: 4403, hash: TASK_440_ROOT_SHA, message: "root output snapshot", author: "Forge Bot", committed_at: "2026-08-20T18:00:00Z", system_count: 1, commits_behind: 2, systems: ["atlas-01"], system_paths: [], build_status: "complete", evaluation_status: "complete", evaluation_error_message: null },
+  ];
+  await page.route("**/api/v1/flakes/timelines*", async (route) => {
+    state.timelineRequests += 1;
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([{ flake_id: 41, flake_name: canonicalDesign ? "infrastructure" : "platform-core", repo_url: canonicalDesign ? "git+ssh://git@gitlab.cf.internal/ops/nixos-infra" : "https://gitlab.com/crystal-forge/platform-core.git", commits }]) });
+  });
+  await page.route("**/api/v1/flakes", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([{ id: 41, name: canonicalDesign ? "infrastructure" : "platform-core", repo_url: canonicalDesign ? "git+ssh://git@gitlab.cf.internal/ops/nixos-infra" : "https://gitlab.com/crystal-forge/platform-core.git", branch: "main", build_scope: "cf_systems_only", system_count: canonicalDesign ? 9 : 2, sync_status: "synced", last_sync_at: "2026-08-28T18:00:00Z", last_sync_error: null }]) });
+  });
+  await page.route("**/api/v1/flakes/**", async (route) => {
+    const pathname = new URL(route.request().url()).pathname;
+    const match = pathname.match(/^\/api\/v1\/flakes\/41\/revisions\/([^/]+)\/outputs$/);
+    if (!match) {
+      await route.fallback();
+      return;
+    }
+    const revision = decodeURIComponent(match[1]);
+    const url = new URL(route.request().url());
+    const offset = Number(url.searchParams.get("offset") || 0);
+    const limit = Number(url.searchParams.get("limit") || 50);
+    const systemFilter = url.searchParams.get("system_filter") || "all";
+    state.requestedSystemFilters.push(systemFilter);
+    state.requestedRevisions.push(revision);
+    if (state.apiError) {
+      await route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ message: "deterministic flake snapshot API failure" }) });
+      return;
+    }
+    const output = task440FlakeOutput(revision, state.lifecycle, !state.noPrevious && revision !== TASK_440_ROOT_SHA, offset, limit, systemFilter, state.largeCollections, canonicalDesign);
+    if (state.emptySystemFilter === systemFilter) output.systems = [];
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(output) });
+  });
+  await page.route(new RegExp("/api/v1/flakes/41/revisions/[^/]+/modules/(hardening|system)/declarations(?:\\?.*)?$"), async (route) => {
+    const url = new URL(route.request().url());
+    const revision = decodeURIComponent(url.pathname.split("/revisions/")[1].split("/modules/")[0]);
+    const offset = Number(url.searchParams.get("offset") || 0);
+    const limit = Math.min(Number(url.searchParams.get("limit") || 50), 100);
+    const token = state.declarationToken || "f".repeat(64);
+    const declarations = canonicalDesign ? [
+      ["cf.system.enable", "boolean", false],
+      ["cf.system.stateVersion", "string", "26.05"],
+      ["cf.system.gc.automatic", "boolean", true],
+      ["cf.system.gc.olderThan", "string", "30d"],
+      ["cf.system.timeZone", "string", "UTC"],
+      ["cf.system.experimentalFeatures", "list of string", ["nix-command", "flakes"]],
+    ].map(([path, declared_type, defaultValue]) => ({
+      path,
+      declared_type,
+      has_default: true,
+      default: defaultValue,
+      source_paths: ["modules/nixos/system/default.nix"],
+    })) : Array.from({ length: 125 }, (_, index) => ({
+      path: index === 0
+        ? "services.openssh.enable"
+        : index === 1
+          ? `services.snapshot.${token[0]}.marker`
+          : `services.fixture.option${String(index + 1).padStart(3, "0")}`,
+      declared_type: index === 0 ? "boolean" : "string",
+      has_default: true,
+      default: index === 0 ? false : `value-${String(index + 1).padStart(3, "0")}`,
+      source_paths: [index === 0 ? "modules/hardening.nix" : `modules/fixture-${String(index + 1).padStart(3, "0")}.nix`],
+    }));
+    state.moduleDeclarationRequests.push({ revision, offset, limit, token: url.searchParams.get("snapshot_token") });
+    if (state.declarationMode === "initial-error" && offset === 0) {
+      await route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ message: "deterministic initial declaration failure" }) });
+      return;
+    }
+    if (state.declarationMode === "continuation-error" && offset > 0) {
+      await route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ message: "deterministic continuation declaration failure" }) });
+      return;
+    }
+    if (state.declarationMode === "conflict" && offset > 0) {
+      await route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ message: "snapshot changed; request the first page again" }) });
+      return;
+    }
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+      lifecycle: state.declarationMode === "unavailable" ? "unavailable" : "available",
+      revision,
+      module_name: canonicalDesign ? "system" : "hardening",
+      error: state.declarationMode === "unavailable" ? "Declaration snapshot is unavailable" : null,
+      snapshot_token: token,
+      total: declarations.length,
+      offset,
+      limit,
+      declarations: declarations.slice(offset, offset + limit),
+    }) });
+  });
+  return state;
+}
+
 async function gotoFlakesAsAdmin(page) {
   await page.goto(`${baseUrl}/flakes?ui_check_auth=1`, { timeout: LOAD_TIMEOUT });
   await page.evaluate(() => localStorage.setItem("cf.ui_check_admin_controls", "1"));
   // The app shell only installs ui_check mock auth while auth state is empty.
   // A document reload resets in-memory viewer/admin state from prior steps.
   await page.reload({ timeout: LOAD_TIMEOUT });
+}
+
+async function assertExactTextOrder(locator, expected, label) {
+  if (expected.length > 0) await locator.first().waitFor({ state: "visible", timeout: 15000 });
+  const actual = (await locator.allTextContents()).map((text) => text.replace(/\s+/g, " ").trim());
+  if (!isDeepStrictEqual(actual, expected)) {
+    throw new Error(`${label} order changed: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
+  }
+}
+
+async function assertTask440ConfigSemantics(page) {
+  const evaluation = page.locator(".cfg-side > section").nth(1);
+  const drift = page.locator(".cfg-side > section").nth(2);
+  await assertExactTextOrder(
+    evaluation.locator(".sd-drift-row .sd-drift-label"),
+    ["Toplevel", "Evaluated options", "Host delta", "Packages", "Closure size", "Eval time"],
+    "Config Evaluation labels",
+  );
+  await assertExactTextOrder(
+    drift.locator(".sd-drift-row .sd-drift-label"),
+    ["Evaluated config", "Running config", "Agent fingerprint"],
+    "Config Drift labels",
+  );
+  for (const expected of ["/nix/store/task440-current-system", "38", "17 rows", "731", "4.8 GiB", "845 ms · 2026-08-28 18:00 UTC"]) {
+    await assertVisible(evaluation.getByText(expected, { exact: true }), `Missing authoritative Config metric ${expected}`);
+  }
+  await assertVisible(drift.getByText("matches", { exact: true }), "Missing typed matching agent fingerprint");
+  await assertVisible(drift.getByText("No configuration drift was observed in the last 7 days.", { exact: true }), "Incorrect no-observed-drift callout");
+}
+
+async function assertTask440CanonicalConfigState(page, label) {
+  await assertVisible(page.getByRole("heading", { name: "atlas-01" }), `${label} lost the atlas-01 identity`);
+  await assertVisible(page.getByText("#160", { exact: true }), `${label} lost generation 160`);
+  await assertVisible(page.getByRole("tab", { name: "Config", selected: true }), `${label} lost its active Config tab`);
+  const revision = page.locator("select.cfg-revselect");
+  await assertVisible(revision, `${label} lost its generation selector`);
+  await page.waitForFunction(
+    () => document.querySelector("select.cfg-revselect")?.value === "160",
+    undefined,
+    { timeout: 5000 },
+  );
+  await assertVisible(page.locator(".cfg-toolbar .seg button").first(), `${label} did not render available Config results`, 30000);
+  await assertExactTextOrder(page.locator(".cfg-toolbar .seg button"), ["All 1092", "Overridden 204", "Changed 5"], `${label} Config filters`);
+  await assertVisible(page.getByText("Loaded 27 of 27 module sources", { exact: true }), `${label} lost its 27 module sources`);
+  const evaluation = page.locator(".cfg-side > section").nth(1);
+  for (const expected of ["1092", "37 rows", "842", "1.6 GiB"]) {
+    await assertVisible(evaluation.getByText(expected, { exact: true }), `${label} lost authoritative Config metric ${expected}`);
+  }
+  if (await page.getByText(/configuration issues detected/i).count()) throw new Error(`${label} inherited an unrelated global configuration warning`);
+}
+
+function task440ExpectedRows(contract, side, theme) {
+  if (Array.isArray(contract.orderedVisibleRows)) return contract.orderedVisibleRows;
+  const sideRows = contract.orderedVisibleRows?.[side];
+  return Array.isArray(sideRows) ? sideRows : sideRows?.[theme];
+}
+
+async function validateTask440SemanticContract(page, target, contract, theme) {
+  if (!contract) throw new Error(`${target.name} has no semantic fixture contract`);
+  if (contract.kind !== target.designState.kind) throw new Error(`${target.name} semantic kind does not match its manifest state`);
+  if (contract.kind === "system-config") {
+    await assertVisible(page.getByRole("heading", { name: contract.identity.system }), `${target.name} lost its system identity`);
+    await assertVisible(page.getByText(`#${contract.identity.generation}`, { exact: true }), `${target.name} lost its generation identity`);
+    await assertVisible(page.getByText(contract.identity.uptime.dioxus, { exact: true }), `${target.name} lost its uptime`);
+    await assertVisible(page.getByText(`activated · ${contract.identity.heartbeatAgeMinutes}m ago`, { exact: true }), `${target.name} lost its stable heartbeat age`);
+    const selected = page.locator("select.cfg-revselect option:checked");
+    const selectedText = (await selected.textContent() || "").replace(/\s+/g, " ").trim();
+    if (!selectedText.includes(contract.identity.revision.slice(0, 7))) throw new Error(`${target.name} selected generation lost revision ${contract.identity.revision}`);
+    await assertVisible(page.locator(".cfg-revbar-msg").filter({ hasText: contract.identity.revisionMessage }), `${target.name} lost its revision message`);
+    await assertExactTextOrder(page.locator(".cfg-toolbar .seg button"), [
+      `All ${contract.counts.all}`,
+      `Overridden ${contract.counts.overridden}`,
+      `Changed ${contract.counts.changed}`,
+    ], `${target.name} Config counts`);
+    if (contract.searchQuery) {
+      const search = page.getByPlaceholder("Filter options, values, modules…");
+      if ((await search.inputValue()) !== contract.searchQuery) throw new Error(`${target.name} Config search does not match the semantic contract`);
+    }
+    await assertExactTextOrder(page.locator(".cfg-table tbody > tr.cfg-row .cfg-path"), task440ExpectedRows(contract, "dioxus", theme), `${target.name} ordered Config rows`);
+    const evaluation = page.locator(".cfg-side > section").nth(1);
+    for (const expected of [
+      String(contract.counts.all),
+      `${contract.counts.hostDelta} rows`,
+      String(contract.counts.packages),
+      contract.formattedMetrics.dioxusClosure,
+    ]) await assertVisible(evaluation.getByText(expected, { exact: true }), `${target.name} lost Config metric ${expected}`);
+    const evalTime = (await evaluation.locator(".sd-drift-row").filter({ hasText: "Eval time" }).textContent() || "").replace(/\s+/g, " ");
+    if (!evalTime.includes(contract.formattedMetrics.dioxusEvaluationDuration)) throw new Error(`${target.name} evaluation duration mismatch: ${evalTime}`);
+    if (contract.expandedItem) {
+      const row = page.getByText(contract.expandedItem, { exact: true }).locator("xpath=ancestor::tr[1]");
+      if ((await row.locator(".cfg-row-toggle").getAttribute("aria-expanded")) !== "true") throw new Error(`${target.name} lost expanded item ${contract.expandedItem}`);
+    }
+    return;
+  }
+
+  const tray = page.getByRole("dialog", { name: `${contract.identity.flake} commits` });
+  await assertVisible(tray.getByRole("tab", { name: new RegExp(`^${contract.selectedPane}\\b`), selected: true }), `${target.name} lost selected pane ${contract.selectedPane}`);
+  await assertVisible(tray.locator(".fx-revbar-msg").filter({ hasText: contract.identity.revisionMessage }), `${target.name} lost its revision message`);
+  const revisionButton = tray.getByRole("button", { name: /Change commit\. Selected full revision/ });
+  const revisionName = await revisionButton.getAttribute("aria-label");
+  if (!revisionName?.includes(contract.identity.revision)) throw new Error(`${target.name} lost revision ${contract.identity.revision}`);
+  let rows;
+  if (contract.selectedPane === "Systems") rows = tray.locator(".fx-systems-table tbody > tr code.fx-host");
+  else if (contract.selectedPane === "Modules") rows = tray.locator(".fx-modules-table > tbody > tr.fx-row code.fx-host");
+  else rows = tray.locator(".fx-inputs-table tbody > tr .fx-input-cell code.fx-host");
+  await assertExactTextOrder(rows, task440ExpectedRows(contract, "dioxus", theme), `${target.name} ordered ${contract.selectedPane} rows`);
+  if (contract.orderedExpandedRows) await assertExactTextOrder(tray.locator(".fx-detail .fx-opt-path"), contract.orderedExpandedRows, `${target.name} ordered expanded declarations`);
+  if (contract.expandedItem) {
+    const row = tray.getByText(contract.expandedItem, { exact: true }).locator("xpath=ancestor::tr[1]");
+    if ((await row.getByRole("button").getAttribute("aria-expanded")) !== "true") throw new Error(`${target.name} lost expanded item ${contract.expandedItem}`);
+  }
+}
+
+async function assertTask440SelectedConfigRevision(page, label) {
+  const revision = page.locator("select.cfg-revselect");
+  await assertVisible(revision, `${label} lost its revision selector`);
+  await page.waitForFunction(
+    (expected) => document.querySelector("select.cfg-revselect")?.value === expected,
+    TASK_440_CURRENT_SHA,
+    { timeout: 5000 },
+  );
+  if ((await revision.inputValue()) !== TASK_440_CURRENT_SHA) throw new Error(`${label} lost the exact selected full revision`);
+}
+
+async function assertTask440ConfigGeometry(page, viewportName) {
+  const geometry = await page.evaluate(() => {
+    const grid = document.querySelector(".sd-grid-config");
+    const card = grid?.querySelector(".cfg-card");
+    const side = grid?.querySelector(".cfg-side");
+    const tableWrap = grid?.querySelector(".cfg-table-wrap");
+    if (!grid || !card || !side || !tableWrap) throw new Error("Config geometry surfaces are missing");
+    const rect = (element) => {
+      const box = element.getBoundingClientRect();
+      return { top: box.top, right: box.right, bottom: box.bottom, left: box.left, width: box.width };
+    };
+    return {
+      viewportWidth: innerWidth,
+      documentWidth: document.documentElement.scrollWidth,
+      bodyWidth: document.body.scrollWidth,
+      grid: rect(grid),
+      card: rect(card),
+      side: rect(side),
+      sideInlineHeight: side.style.height,
+      sideGap: Number.parseFloat(getComputedStyle(side).rowGap || getComputedStyle(side).gap || "0"),
+      sideChildren: [...side.children].filter((element) => getComputedStyle(element).display !== "none").map(rect),
+      tableOverflowY: getComputedStyle(tableWrap).overflowY,
+      tableOverflowX: getComputedStyle(tableWrap).overflowX,
+      tableClientWidth: tableWrap.clientWidth,
+      tableScrollWidth: tableWrap.scrollWidth,
+      tableClientHeight: tableWrap.clientHeight,
+      tableScrollHeight: tableWrap.scrollHeight,
+      headers: [...tableWrap.querySelectorAll("thead th")].map((header) => header.textContent.replace(/\s+/g, " ").trim()),
+      widths: [...tableWrap.querySelectorAll("thead th")].map((header) => header.getBoundingClientRect().width / tableWrap.querySelector("table").getBoundingClientRect().width),
+    };
+  });
+  if (geometry.documentWidth > geometry.viewportWidth + 1 || geometry.bodyWidth > geometry.viewportWidth + 1) throw new Error(`${viewportName} Config clips horizontally: ${JSON.stringify(geometry)}`);
+  if (!["Option", "Value", "Set by"].every((header, index) => geometry.headers[index] === header)) throw new Error(`${viewportName} Config column order changed: ${JSON.stringify(geometry)}`);
+  [0.46, 0.26, 0.28].forEach((expected, index) => {
+    if (Math.abs(geometry.widths[index] - expected) > 0.025) throw new Error(`${viewportName} Config column ${index + 1} width changed: ${JSON.stringify(geometry)}`);
+  });
+  if (["auto", "scroll"].includes(geometry.tableOverflowY) || geometry.tableScrollHeight > geometry.tableClientHeight + 1) throw new Error(`${viewportName} Config table gained an inner vertical scroller: ${JSON.stringify(geometry)}`);
+  if (["auto", "scroll"].includes(geometry.tableOverflowX) || geometry.tableScrollWidth > geometry.tableClientWidth + 1) throw new Error(`${viewportName} Config table gained an inner horizontal scroller: ${JSON.stringify(geometry)}`);
+  if (geometry.sideInlineHeight) throw new Error(`${viewportName} Config side column uses an explicit test height: ${JSON.stringify(geometry)}`);
+  const naturalSideHeight = geometry.sideChildren.reduce((total, child) => total + (child.bottom - child.top), 0) + geometry.sideGap * Math.max(0, geometry.sideChildren.length - 1);
+  if (naturalSideHeight <= 0 || geometry.sideChildren.length !== 3) throw new Error(`${viewportName} Config natural side-card geometry is incomplete: ${JSON.stringify(geometry)}`);
+  if (viewportName === "wide") {
+    if (Math.abs(geometry.card.top - geometry.side.top) > 1 || geometry.card.right > geometry.side.left + 1) throw new Error(`Wide Config top alignment or separation changed: ${JSON.stringify(geometry)}`);
+    if (Math.abs((geometry.card.width / geometry.side.width) - (7 / 5)) > 0.03) throw new Error(`Wide Config is not a 7:5 split: ${JSON.stringify(geometry)}`);
+    if (Math.abs(geometry.side.bottom - geometry.card.bottom) > 2) throw new Error(`Wide Config card columns are not bottom-aligned: ${JSON.stringify(geometry)}`);
+  } else {
+    if (geometry.side.top < geometry.card.bottom - 1 || Math.abs(geometry.card.width - geometry.side.width) > 1) throw new Error(`Narrow Config did not stack without overlap: ${JSON.stringify(geometry)}`);
+    if (Math.abs(geometry.side.bottom - geometry.grid.bottom) > 2) throw new Error(`Narrow Config stack is clipped: ${JSON.stringify(geometry)}`);
+  }
+}
+
+async function assertTask440FlakeGeometry(page, tray, tableSelector, expectedHeaders, expectedWidths, viewportName) {
+  const geometry = await tray.evaluate((element, args) => {
+    const pane = element.querySelector(".fx-body");
+    const table = element.querySelector(args.tableSelector);
+    if (!pane || !table) throw new Error(`Missing ${args.tableSelector} geometry surface`);
+    pane.scrollTop = 0;
+    const trayBox = element.getBoundingClientRect();
+    const tableBox = table.getBoundingClientRect();
+    const headers = [...table.querySelectorAll(":scope > thead > tr > th")];
+    const scrollAncestors = [];
+    for (let current = table.parentElement; current && current !== element; current = current.parentElement) {
+      const style = getComputedStyle(current);
+      if (["auto", "scroll"].includes(style.overflowY)) scrollAncestors.push(current.className);
+    }
+    return {
+      viewportWidth: innerWidth,
+      viewportHeight: innerHeight,
+      documentWidth: document.documentElement.scrollWidth,
+      bodyWidth: document.body.scrollWidth,
+      tray: { left: trayBox.left, right: trayBox.right, top: trayBox.top, bottom: trayBox.bottom },
+      paneClientWidth: pane.clientWidth,
+      paneScrollWidth: pane.scrollWidth,
+      paneClientHeight: pane.clientHeight,
+      paneScrollHeight: pane.scrollHeight,
+      table: { left: tableBox.left, right: tableBox.right, top: tableBox.top, bottom: tableBox.bottom, width: tableBox.width },
+      headers: headers.map((header) => header.textContent.replace(/\s+/g, " ").trim()),
+      widths: headers.map((header) => header.getBoundingClientRect().width / tableBox.width),
+      scrollAncestors,
+      clippedCells: [...table.querySelectorAll("th, td")].filter((cell) => cell.scrollWidth > cell.clientWidth + 1 && getComputedStyle(cell).textOverflow !== "ellipsis").map((cell) => cell.textContent.replace(/\s+/g, " ").trim().slice(0, 80)),
+    };
+  }, { tableSelector, expectedHeaders });
+  if (!isDeepStrictEqual(geometry.headers, expectedHeaders)) throw new Error(`${viewportName} flake headers changed: ${JSON.stringify(geometry)}`);
+  if (geometry.documentWidth > geometry.viewportWidth + 1 || geometry.bodyWidth > geometry.viewportWidth + 1 || geometry.tray.left < -1 || geometry.tray.right > geometry.viewportWidth + 1 || geometry.tray.top < -1 || geometry.tray.bottom > geometry.viewportHeight + 1) {
+    throw new Error(`${viewportName} flake pane clips the viewport: ${JSON.stringify(geometry)}`);
+  }
+  if (geometry.paneScrollWidth > geometry.paneClientWidth + 1) throw new Error(`${viewportName} flake pane has nested horizontal overflow: ${JSON.stringify(geometry)}`);
+  if (geometry.scrollAncestors.length !== 1 || !String(geometry.scrollAncestors[0]).includes("fx-body")) throw new Error(`${viewportName} flake table gained an unintended nested vertical scroller: ${JSON.stringify(geometry)}`);
+  if (geometry.table.left < geometry.tray.left - 1 || geometry.table.right > geometry.tray.right + 1) throw new Error(`${viewportName} flake table is clipped outside the tray: ${JSON.stringify(geometry)}`);
+  if (geometry.clippedCells.length) throw new Error(`${viewportName} flake cells clip reachable content: ${JSON.stringify(geometry)}`);
+  geometry.widths.forEach((actual, index) => {
+    if (Math.abs(actual - expectedWidths[index]) > 0.025) throw new Error(`${viewportName} flake column ${index + 1} geometry changed: ${JSON.stringify(geometry)}`);
+  });
+}
+
+async function assertReachableControls(locator, label) {
+  const failures = [];
+  for (let index = 0; index < await locator.count(); index += 1) {
+    const control = locator.nth(index);
+    await control.scrollIntoViewIfNeeded();
+    const failure = await control.evaluate((element) => {
+      const style = getComputedStyle(element);
+      const box = element.getBoundingClientRect();
+      if (style.display === "none" || style.visibility === "hidden" || box.width === 0 || box.height === 0) return null;
+      const label = element.getAttribute("aria-label") || element.getAttribute("title") || element.textContent?.trim() || element.tagName;
+      if (box.left < -1 || box.top < -1 || box.right > innerWidth + 1 || box.bottom > innerHeight + 1) return label;
+      const top = document.elementsFromPoint(box.left + box.width / 2, box.top + box.height / 2).find((candidate) => getComputedStyle(candidate).pointerEvents !== "none");
+      return top && !element.contains(top) && !top.contains(element) ? label : null;
+    });
+    if (failure) failures.push(failure);
+  }
+  if (failures.length) throw new Error(`${label} controls are clipped or occluded: ${JSON.stringify(failures)}`);
+}
+
+async function resetTask440CaptureScroll(page) {
+  const positions = await page.evaluate(() => {
+    window.scrollTo(0, 0);
+    document.documentElement.scrollTop = 0;
+    document.body.scrollTop = 0;
+    const selectors = [".content", ".app-main", ".main-content", ".sd-content", ".cfg-table-wrap", ".fl-tray-body", ".fl-tray-commits", ".fx-body"];
+    const reset = [];
+    for (const selector of selectors) {
+      for (const element of document.querySelectorAll(selector)) {
+        const scrollBehavior = element.style.scrollBehavior;
+        element.style.scrollBehavior = "auto";
+        element.scrollTo(0, 0);
+        element.style.scrollBehavior = scrollBehavior;
+        reset.push({ selector, top: element.scrollTop, left: element.scrollLeft });
+      }
+    }
+    for (const element of document.querySelectorAll("*")) {
+      if (element.scrollTop !== 0 || element.scrollLeft !== 0) {
+        const scrollBehavior = element.style.scrollBehavior;
+        element.style.scrollBehavior = "auto";
+        element.scrollTo(0, 0);
+        element.style.scrollBehavior = scrollBehavior;
+        reset.push({ selector: element.className || element.tagName, top: element.scrollTop, left: element.scrollLeft });
+      }
+    }
+    return { windowY: scrollY, windowX: scrollX, reset };
+  });
+  if (positions.windowY !== 0 || positions.windowX !== 0 || positions.reset.some((item) => item.top !== 0 || item.left !== 0)) {
+    throw new Error(`Canonical capture scrollers did not reset: ${JSON.stringify(positions)}`);
+  }
+}
+
+async function prepareTask440CanonicalCapture(page, step) {
+  await resetTask440CaptureScroll(page);
+  if (step.name.includes("config-canonical")) {
+      await assertTask440CanonicalConfigState(page, "Canonical Config capture");
+    const wide = step.name.includes("wide");
+    if (wide) {
+      const row = page.getByText(TASK_440_FIXTURE.canonicalConfig.expandedOption, { exact: true }).locator("xpath=ancestor::tr[1]");
+      if ((await row.locator(".cfg-row-toggle").getAttribute("aria-expanded")) !== "true") throw new Error("Canonical wide Config capture lost its expanded typed option");
+      await assertVisible(page.getByText("modules/stig/kernel/default.nix", { exact: true }), "Canonical wide Config capture lost production provenance");
+    }
+    await assertTask440ConfigGeometry(page, wide ? "wide" : "narrow");
+  } else {
+    const tray = page.getByRole("dialog", { name: "infrastructure commits" });
+    await assertVisible(tray, "Canonical Flake capture lost its tray");
+    await assertVisible(tray.getByRole("button", { name: `Change commit. Selected full revision ${TASK_440_DESIGN_SHA}` }), "Canonical Flake capture lost its selected revision");
+    const revisionMessage = tray.locator(".fx-revbar-msg").filter({ hasText: "stig: enforce audit rules for sudo" });
+    await revisionMessage.scrollIntoViewIfNeeded();
+    await assertVisible(revisionMessage, "Canonical Flake capture lost its selected revision message");
+    for (const expected of ["+5 systems", "+3 modules", "5 inputs changed", "-3 inputs"]) {
+      await assertVisible(tray.getByText(expected, { exact: true }), `Canonical Flake capture lost ${expected}`);
+    }
+    if (await page.getByText(/configuration issues detected/i).count()) throw new Error("Canonical Flake capture inherited an unrelated global configuration warning");
+    if (step.name.includes("systems-canonical")) {
+      await assertVisible(tray.getByRole("tab", { name: /Systems 11/, selected: true }), "Canonical Flake Systems capture lost its active pane");
+      await assertExactTextOrder(tray.locator(".fx-toolbar .seg button"), ["All 11", "Unmanaged 2", "Undeclared 0"], "Canonical Flake Systems filters");
+      await assertVisible(tray.getByRole("button", { name: "Open config" }).first(), "Canonical Flake Systems capture lost its managed action");
+      await assertVisible(tray.getByRole("button", { name: "Add to Forge" }).first(), "Canonical Flake Systems capture lost its unmanaged action");
+    } else if (step.name.includes("modules-canonical")) {
+      await assertVisible(tray.getByRole("tab", { name: /Modules 8/, selected: true }), "Canonical Flake Modules capture lost its active pane/count");
+      const row = tray.getByText("system", { exact: true }).locator("xpath=ancestor::tr[1]");
+      if ((await row.getByRole("button").getAttribute("aria-expanded")) !== "true") throw new Error("Canonical Flake Modules capture lost its expanded module");
+      await assertVisible(tray.getByText("cf.system.enable", { exact: true }), "Canonical Flake Modules capture lost its declaration");
+    } else if (step.name.includes("inputs-canonical")) {
+      await assertVisible(tray.getByRole("tab", { name: /Inputs 47/, selected: true }), "Canonical Flake Inputs capture lost its active pane/count");
+      await assertExactTextOrder(tray.locator(".fx-stat .fx-stat-n"), ["8", "47", "3", "1"], "Canonical Flake Inputs metrics");
+      await assertVisible(tray.getByText("multiple nixpkgs revisions", { exact: false }), "Canonical Flake Inputs capture lost its revision warning");
+    }
+  }
+  if (await page.locator(".diff-modal:visible, .modal-backdrop-above-drawer:visible").count()) throw new Error("Canonical TASK-440 capture has an unintended modal above its surface");
+  await resetTask440CaptureScroll(page);
+}
+
+async function openTask440FlakePane(page, width, paneName) {
+  await page.setViewportSize({ width, height: width === 1920 ? 1080 : 900 });
+  await suppressOnboardingCoach(page);
+  await routeTask440DismissedCoach(page);
+  await routeConfigHealth(page, mockConfigHealthResponse());
+  const state = await routeTask440FlakeOutputs(page, { canonicalDesign: true });
+  await gotoFlakesAsAdmin(page);
+  await dismissOnboardingCoachForCapture(page);
+  await page.getByText("infrastructure", { exact: true }).first().click();
+  const tray = page.getByRole("dialog", { name: "infrastructure commits" });
+  await assertVisible(tray, "Expected canonical TASK-440 flake drawer", 15000);
+  await tray.evaluate(async (element) => {
+    await Promise.all(element.getAnimations().map((animation) => animation.finished.catch(() => {})));
+  });
+  const tab = tray.getByRole("tab", { name: new RegExp(paneName) });
+  await assertVisible(tab, `Expected ${paneName} flake tab`, 15000);
+  await tab.click();
+  const selectedRevision = tray.getByRole("button", { name: `Change commit. Selected full revision ${TASK_440_DESIGN_SHA}` });
+  await assertVisible(selectedRevision, "Canonical flake pane does not expose the selected full SHA through its accessible contract", 15000);
+  if ((await selectedRevision.getAttribute("title")) !== `Change commit ${TASK_440_DESIGN_SHA}`) throw new Error("Canonical flake pane title does not independently retain the selected full SHA");
+  return { state, tray };
 }
 
 async function clickFirstButtonByText(page, text) {
@@ -5714,14 +7186,18 @@ const steps = [
         timeout: LOAD_TIMEOUT,
       });
       await page.waitForTimeout(1200);
-      // Header action cluster matches CrystalForgelatest: Rollback / SSH / Edit / Deploy.
-      // (Per-config CVE/Hardening scans now live on their tab surfaces, not the header.)
-      for (const action of ["Rollback", "SSH", "Edit", "Deploy"]) {
+      // Deploy and rollback live on their tab/history surfaces, not in the header.
+      for (const action of ["SSH", "Edit"]) {
         await assertVisible(
           page.locator(".sd-head-actions button", { hasText: action }).first(),
           `Expected '${action}' header action to be visible on system detail`,
           12000,
         );
+      }
+      for (const duplicate of ["Rollback", "Deploy"]) {
+        if (await page.locator(".sd-head-actions button", { hasText: duplicate }).count()) {
+          throw new Error(`Expected duplicate '${duplicate}' header action to be absent`);
+        }
       }
 
         await page.unroute(
@@ -6063,13 +7539,18 @@ const steps = [
           10000,
         );
 
-        // Header action cluster matches CrystalForgelatest: Rollback / SSH / Edit / Deploy.
-        for (const action of ["Rollback", "SSH", "Edit", "Deploy"]) {
+        // The header keeps host actions only; deployment controls are contextual.
+        for (const action of ["SSH", "Edit"]) {
           await assertVisible(
             page.locator(".sd-head-actions button", { hasText: action }).first(),
             `Expected '${action}' header action to render`,
             10000,
           );
+        }
+        for (const duplicate of ["Rollback", "Deploy"]) {
+          if (await page.locator(".sd-head-actions button", { hasText: duplicate }).count()) {
+            throw new Error(`Expected duplicate '${duplicate}' header action to be absent`);
+          }
         }
 
         // Return to the Overview tab so the captured screenshot shows the
@@ -6796,7 +8277,9 @@ const steps = [
       await page.goto(`${baseUrl}/flakes`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000);
 
-      const syncBtn = page.locator("button:has-text('Sync from Source')").first();
+      const syncBtn = page
+        .getByRole("button", { name: "Sync", exact: true })
+        .first();
       await syncBtn.waitFor({ timeout: 5000 });
       await syncBtn.click();
 
@@ -6819,7 +8302,10 @@ const steps = [
       const flakeCell = page.locator("text=test-flake").first();
       await flakeCell.waitFor({ timeout: 10000 });
       await flakeCell.click();
-      await page.waitForTimeout(1200);
+      const flakeTray = page
+        .getByRole("dialog", { name: /test-flake commits/i })
+        .first();
+      await flakeTray.waitFor({ timeout: 10000 });
 
       const beforeCountText = await page
         .locator(".fl-tray-commits-search span")
@@ -6830,9 +8316,25 @@ const steps = [
       const rewrittenHead = forceRewriteGitServerMain();
       console.log(`Rewrote gitserver main branch to new HEAD: ${rewrittenHead}`);
 
-      const syncButton = page.locator("button:has-text('Sync from Source')").first();
-      await syncButton.waitFor({ timeout: 7000 });
-      await syncButton.click();
+      const rewriteDialog = page
+        .getByRole("heading", { name: "History Rewrite Detected" })
+        .first();
+      const rewriteAlreadyDetected = await rewriteDialog
+        .isVisible({ timeout: 1500 })
+        .catch(() => false);
+      if (!rewriteAlreadyDetected) {
+        const syncButton = flakeTray
+          .getByRole("button", { name: "Sync", exact: true })
+          .first();
+        await syncButton.waitFor({ timeout: 7000 });
+        await syncButton.click();
+      }
+
+      await rewriteDialog.waitFor({ timeout: 10000 });
+      await page
+        .getByRole("button", { name: "Accept rewrite and resync" })
+        .click();
+      await rewriteDialog.waitFor({ state: "hidden", timeout: 10000 });
 
       // Wait for timeline refresh polling to settle.
       await page.waitForTimeout(6000);
@@ -11461,8 +12963,8 @@ security.audit.enable = true;</fixtext>
       });
       await page.waitForTimeout(1600);
 
-      await page.getByRole("button", { name: "Deploy" }).first().click();
-      await page.waitForTimeout(600);
+      await page.getByRole("tab", { name: "Deploy" }).first().click();
+      await page.getByRole("button", { name: "Generation" }).first().waitFor({ state: "visible" });
 
       await assertVisible(
         page.getByRole("button", { name: "Generation" }).first(),
@@ -14173,6 +15675,1066 @@ security.audit.enable = true;</fixtext>
     },
   },
   {
+    name: "12l-task440-config-lifecycle",
+    description: "TASK-440 Config mocked API states (not live integration): current, historical, never-deployed, unavailable, queued, running, failed, API-error, module transport retry, and local generation",
+    action: async (page) => {
+      await routeSystemsWarningData(page);
+      const state = await routeTask440SystemData(page);
+      const configUrl = `${baseUrl}/systems/${TASK_440_SYSTEM_ID}?tab=config&config_mode=commit&revision=${TASK_440_NEVER_DEPLOYED_SHA}`;
+      await page.goto(configUrl, { timeout: LOAD_TIMEOUT });
+      await assertVisible(page.getByRole("heading", { name: "Evaluated options" }), `Expected Config explorer; fixture requests: ${state.handledRequests.join(",")}`, 15000);
+      await assertVisible(page.locator(".cfg-hist-note").filter({ hasText: "revision never deployed here" }), "Expected never-deployed warning");
+      if (!page.url().includes(TASK_440_NEVER_DEPLOYED_SHA)) throw new Error("Expected full revision in Config deep link");
+      await page.reload({ timeout: LOAD_TIMEOUT });
+      await assertVisible(page.locator(".cfg-hist-note").filter({ hasText: "revision never deployed here" }), "Expected revision context after reload", 15000);
+
+      state.lifecycle = "unavailable";
+      await page.reload({ timeout: LOAD_TIMEOUT });
+      const unavailableState = page.getByText("Snapshot unavailable", { exact: true }).locator("xpath=ancestor::*[@role='status'][1]");
+      await assertVisible(unavailableState, "Expected unavailable snapshot status semantics", 15000);
+      for (const text of ["Module sources unavailable", "Evaluation summary unavailable", "Drift unavailable"]) {
+        await assertVisible(page.getByText(text, { exact: true }), `Expected distinct unavailable summary state: ${text}`);
+      }
+      await page.getByRole("button", { name: "Evaluate this revision" }).click();
+      await assertVisible(page.getByText("Evaluation queued", { exact: true }), "Expected queued snapshot state");
+      for (const text of ["Module sources queued", "Evaluation summary queued", "Drift queued"]) {
+        await assertVisible(page.getByText(text, { exact: true }), `Expected distinct queued summary state: ${text}`);
+      }
+
+      state.lifecycle = "running";
+      await page.reload({ timeout: LOAD_TIMEOUT });
+      await assertVisible(page.getByText("Evaluation running", { exact: true }), "Expected running snapshot state", 15000);
+      for (const text of ["Module sources running", "Evaluation summary running", "Drift running"]) {
+        await assertVisible(page.getByText(text, { exact: true }), `Expected distinct running summary state: ${text}`);
+      }
+      state.lifecycle = "failed";
+      await page.reload({ timeout: LOAD_TIMEOUT });
+      await assertVisible(page.getByText("safe deterministic evaluation failure", { exact: true }).first(), "Expected failed evaluation diagnostic", 15000);
+      await assertVisible(page.getByText("Evaluation failed", { exact: true }).locator("xpath=ancestor::*[@role='alert'][1]"), "Expected failed Config alert semantics");
+      for (const text of ["Evaluation summary failed", "Drift failed"]) {
+        const card = page.locator(".sd-card").filter({ hasText: text });
+        await assertVisible(card.getByRole("alert"), `Expected failed ${text} alert semantics`);
+        await assertVisible(card.getByText("safe deterministic evaluation failure", { exact: true }), `Expected safe diagnostic in ${text}`);
+      }
+      const failedModulesCard = page.locator(".sd-card").filter({ hasText: "Module sources failed" });
+      await assertVisible(failedModulesCard.getByRole("alert"), "Expected failed module-source alert semantics");
+      await assertVisible(failedModulesCard.getByText("safe deterministic module source failure", { exact: true }), "Expected independent safe module-source diagnostic");
+
+      state.apiError = true;
+      state.moduleApiError = true;
+      await page.reload({ timeout: LOAD_TIMEOUT });
+      await assertVisible(page.getByRole("alert").filter({ hasText: /Unable to load evaluated options.*deterministic snapshot API failure/i }), "Expected Config API error alert semantics", 15000);
+      for (const heading of ["Evaluation", "Drift"]) {
+        const card = page.locator(".sd-card").filter({ has: page.getByRole("heading", { name: heading }) });
+        await assertVisible(card.getByRole("alert"), `Expected ${heading} transport error alert`);
+        await assertVisible(card.getByText(/deterministic summary API failure/i), `Expected ${heading} transport diagnostic`);
+      }
+      const modulesCard = page.locator(".sd-card").filter({ has: page.getByRole("heading", { name: "Modules" }) });
+      await assertVisible(modulesCard.getByRole("alert"), "Expected Modules transport error alert");
+      await assertVisible(modulesCard.getByText(/deterministic module source API failure/i), "Expected independent module-source transport diagnostic");
+      state.apiError = false;
+      state.moduleApiError = false;
+      state.lifecycle = "available";
+
+      state.moduleTransportError = true;
+      await page.reload({ timeout: LOAD_TIMEOUT });
+      await assertVisible(modulesCard.getByRole("alert"), "Expected initial module-source transport failure", 15000);
+      await assertVisible(page.getByText("38", { exact: true }).first(), "Expected evaluation summary to remain available during module-source transport failure");
+      state.moduleTransportError = false;
+      await modulesCard.getByRole("button", { name: "Retry evaluation module sources" }).click();
+      await assertVisible(modulesCard.getByText("Loaded 40 of 86 module sources", { exact: true }), "Expected initial module-source retry to recover");
+
+      await page.goto(`${baseUrl}/systems/${TASK_440_SYSTEM_ID}?tab=config&config_mode=generation&generation=72`, { timeout: LOAD_TIMEOUT });
+      await assertVisible(page.getByText(/no tracked commit/i), "Expected unavailable local generation state", 15000);
+      for (const text of ["Module sources unavailable", "Evaluation summary unavailable", "Drift unavailable"]) {
+        await assertVisible(page.getByText(text, { exact: true }), `Expected unavailable summary state without a selectable revision: ${text}`);
+      }
+      await page.goto(`${baseUrl}/systems/${TASK_440_SYSTEM_ID}?tab=config&config_mode=generation&generation=999`, { timeout: LOAD_TIMEOUT });
+      await assertVisible(page.getByText(/generation is unknown or is no longer retained/i), "Expected unknown generation to differ from retained untracked generation", 15000);
+      await page.goto(`${baseUrl}/systems/${TASK_440_SYSTEM_ID}?tab=config&config_mode=generation&generation=73`, { timeout: LOAD_TIMEOUT });
+      await assertVisible(page.locator(".cfg-hist-note").filter({ hasText: "generation #73" }), "Expected historical generation warning", 15000);
+      await page.getByRole("button", { name: "Back to current" }).click();
+      await assertVisible(page.getByRole("button", { name: "Generations" }), "Expected current generation Config state");
+      if (page.url().includes("generation=73")) throw new Error("Back to current retained stale generation context");
+      await page.goBack({ waitUntil: "domcontentloaded" });
+      await assertVisible(page.locator(".cfg-hist-note").filter({ hasText: "generation #73" }), "Back navigation did not restore generation 73", 15000);
+      await page.goForward({ waitUntil: "domcontentloaded" });
+      await assertVisible(page.getByRole("button", { name: "Generations" }), "Forward navigation did not restore current Config", 15000);
+      if (page.url().includes("generation=73")) throw new Error("Forward navigation restored stale generation context");
+    },
+  },
+  {
+    name: "12m-task440-config-explorer-keyboard-wide",
+    description: "TASK-440 mocked API explorer (not live integration): scalar summary, deterministic module-source continuation/retry/conflict, revision races, typed options, provenance, wide themes, and keyboard behavior",
+    action: async (page) => {
+      await page.setViewportSize({ width: 1920, height: 1080 });
+      await routeSystemsWarningData(page);
+      const state = await routeTask440SystemData(page, { holdModuleRevisions: [TASK_440_CURRENT_SHA] });
+      state.holdSummary = true;
+      await page.goto(`${baseUrl}/systems/${TASK_440_SYSTEM_ID}?tab=config&config_mode=commit&revision=${TASK_440_CURRENT_SHA}`, { timeout: LOAD_TIMEOUT });
+      await assertVisible(page.getByText("1–24 of 38"), `Expected bounded first page; fixture requests: ${state.handledRequests.join(",")}`, 15000);
+      const unresolvedSource = page.getByText("services.openssh.enable", { exact: true }).locator("xpath=ancestor::tr[1]").locator(".cfg-src");
+      if (await unresolvedSource.isDisabled()) throw new Error("Direct option provenance incorrectly depends on evaluation summary or module-page loading");
+      await unresolvedSource.click();
+      const directSourceDialog = page.getByRole("dialog", { name: "Module source details" });
+      await assertVisible(directSourceDialog.getByRole("button", { name: "Open in Flakes" }), "Expected direct option provenance before module pages resolve");
+      await directSourceDialog.getByRole("button", { name: "Close module source details" }).click();
+      for (const text of ["Loading module sources…", "Loading evaluation summary…", "Resolving drift from exact store paths…"]) {
+        await assertVisible(page.getByRole("status").filter({ hasText: text }), `Expected independent summary loading state: ${text}`);
+      }
+      state.releaseHeldSummary();
+      const evaluationCard = page.locator(".sd-card").filter({ has: page.getByRole("heading", { name: "Evaluation" }) });
+      await assertVisible(evaluationCard.getByText("/nix/store/task440-current-system", { exact: true }), "Expected authoritative selected toplevel after summary resolves", 15000);
+      await assertVisible(page.getByText("Loading module sources…", { exact: true }), "Summary resolution incorrectly completed the independent module-source request");
+      state.releaseHeldModules(TASK_440_CURRENT_SHA);
+      const modulesCard = page.locator(".sd-card").filter({ has: page.getByRole("heading", { name: "Modules" }) });
+      await assertVisible(modulesCard.getByText("Loaded 40 of 86 module sources", { exact: true }), "Expected deterministic first module-source page", 15000);
+      if (await modulesCard.locator("button[title='shared/exact-identity.nix']").count() !== 2) {
+        throw new Error("Expected the same source path under two distinct input/revision tuple identities");
+      }
+
+      state.moduleFailureCounts.set(40, 1);
+      await modulesCard.getByRole("button", { name: "Load more evaluation module sources" }).click();
+      await assertVisible(modulesCard.getByRole("alert").filter({ hasText: /offset 40/i }), "Expected deterministic continuation failure");
+      await assertVisible(modulesCard.getByText("Loaded 40 of 86 module sources", { exact: true }), "Continuation failure discarded existing module rows");
+      await modulesCard.getByRole("button", { name: "Retry evaluation module sources continuation" }).click();
+      await assertVisible(modulesCard.getByText("Loaded 80 of 86 module sources", { exact: true }), "Expected same-offset continuation retry to merge the second page");
+      const offset40Requests = state.moduleRequests.filter((request) => request.revision === TASK_440_CURRENT_SHA && request.offset === 40);
+      if (offset40Requests.length !== 2 || offset40Requests.some((request) => request.limit !== 40 || !request.snapshotToken)) {
+        throw new Error(`Expected two token-bound requests for offset 40, got ${JSON.stringify(offset40Requests)}`);
+      }
+
+      state.moduleReplacementConflictCounts.set(80, 1);
+      const tokenBeforeReplacement = state.moduleRequests.find((request) => request.revision === TASK_440_CURRENT_SHA && request.offset === 40)?.snapshotToken;
+      const replacementRestartResponse = page.waitForResponse((response) => {
+        const url = new URL(response.url());
+        return url.pathname.endsWith("/evaluation-module-sources")
+          && url.searchParams.get("offset") === "0"
+          && !url.searchParams.has("snapshot_token");
+      });
+      await modulesCard.getByRole("button", { name: "Load more evaluation module sources" }).click();
+      await replacementRestartResponse;
+      await assertVisible(modulesCard.getByText("Loaded 40 of 86 module sources", { exact: true }), "Expected replacement conflict to discard stale rows and restart at page zero", 15000);
+      const replacementPageZero = state.moduleRequests.filter((request) => request.revision === TASK_440_CURRENT_SHA && request.offset === 0).at(-1);
+      const offset80Requests = state.moduleRequests.filter((request) => request.revision === TASK_440_CURRENT_SHA && request.offset === 80);
+      if (offset80Requests.length !== 1 || !replacementPageZero || replacementPageZero.snapshotToken !== null) {
+        throw new Error(`Expected one rejected continuation followed by an unbound page-zero restart, got ${JSON.stringify({ offset80Requests, replacementPageZero })}`);
+      }
+      await modulesCard.getByRole("button", { name: "Load more evaluation module sources" }).click();
+      await assertVisible(modulesCard.getByText("Loaded 80 of 86 module sources", { exact: true }), "Expected replacement snapshot second page", 15000);
+      const replacementOffset40 = state.moduleRequests.filter((request) => request.revision === TASK_440_CURRENT_SHA && request.offset === 40).at(-1);
+      if (!replacementOffset40?.snapshotToken || replacementOffset40.snapshotToken === tokenBeforeReplacement) {
+        throw new Error(`Expected continuation to use the replacement snapshot token, got ${JSON.stringify(replacementOffset40)}`);
+      }
+      await modulesCard.getByRole("button", { name: "Load more evaluation module sources" }).click();
+      await assertVisible(modulesCard.getByText("Loaded 86 of 86 module sources", { exact: true }), "Expected replacement snapshot pagination to complete", 15000);
+      state.moduleReplacement = 0;
+
+      const validation = await page.evaluate(async ({ systemId, revision }) => {
+        const root = `/api/v1/systems/${systemId}/evaluation-module-sources?mode=commit&revision=${revision}`;
+        const missingToken = await fetch(`${root}&limit=40&offset=40`);
+        const malformedToken = await fetch(`${root}&limit=40&offset=40&snapshot_token=bad`);
+        const clamped = await fetch(`${root}&limit=500&offset=-5`);
+        return { missingToken: missingToken.status, malformedToken: malformedToken.status, clamped: await clamped.json() };
+      }, { systemId: TASK_440_SYSTEM_ID, revision: TASK_440_CURRENT_SHA });
+      if (validation.missingToken !== 400 || validation.malformedToken !== 400 || validation.clamped.limit !== 100 || validation.clamped.offset !== 0) {
+        throw new Error(`Module-source fixture validation diverged from the server contract: ${JSON.stringify(validation)}`);
+      }
+      const optionPageLimit = state.optionRequests.at(-1)?.limit;
+      if (!Number.isInteger(optionPageLimit)) throw new Error(`Missing current bounded option-page limit: ${JSON.stringify(state.optionRequests)}`);
+      await page.getByTitle("Next page").click();
+      await assertVisible(page.getByText(`${optionPageLimit + 1}–38 of 38`), "Expected bounded second page");
+      await page.getByTitle("Previous page").click();
+      await assertVisible(page.getByText(`1–${optionPageLimit} of 38`), "Expected first page after paging backward");
+
+      await page.getByRole("button", { name: /Overridden 1/ }).click();
+      await assertVisible(page.getByText("1–1 of 1"), "Expected revision-global filter count and filtered result total");
+      await page.getByRole("button", { name: /All 38/ }).click();
+      await assertVisible(page.getByText(`1–${optionPageLimit} of 38`), "Expected all-options page after clearing filter");
+
+      await page.reload({ timeout: LOAD_TIMEOUT });
+      const search = page.getByPlaceholder("Filter options, values, modules…");
+      await assertVisible(search, "Expected Config search after filter refetch");
+      state.holdSearch = "openssh";
+      const oldRequest = page.waitForRequest((request) => request.url().includes("search=openssh"));
+      const mountedSearch = await search.elementHandle();
+      await search.fill("open");
+      await search.pressSequentially("ssh");
+      await oldRequest;
+      await assertVisible(page.locator(".cfg-count").getByText("Querying…", { exact: true }), "Expected exact stale-query status while the replacement request is pending");
+      if (!(await mountedSearch.evaluate((element) => element.isConnected && element.value === "openssh"))) throw new Error("Config search input was replaced or lost continuous typing during the pending query");
+      await assertVisible(modulesCard.getByText("Loaded 40 of 86 module sources", { exact: true }), "Expected the independent first module page to remain stable during option search");
+      const replacementResponse = page.waitForResponse((response) => response.url().includes("search=broken"));
+      await search.press("ControlOrMeta+A");
+      await search.pressSequentially("broken");
+      await replacementResponse;
+      await assertVisible(page.getByText("services.broken.value", { exact: true }), "Expected newer search response", 15000);
+      state.releaseHeldSearch();
+      const optionTable = page.locator(".cfg-table tbody");
+      await optionTable.getByText("services.broken.value", { exact: true }).waitFor({ state: "visible", timeout: 3000 });
+      if (await optionTable.getByText("services.openssh.enable", { exact: true }).isVisible()) throw new Error("Older search response replaced newer results");
+
+      const clearResponse = page.waitForResponse((response) => response.url().includes("/evaluated-options?") && !new URL(response.url()).searchParams.get("search"));
+      await search.fill("");
+      await clearResponse;
+      if (!(await mountedSearch.evaluate((element) => element.isConnected && element.value === ""))) throw new Error("Config search input was replaced instead of remaining mounted through clear");
+      const optionRow = page.getByText("services.openssh.enable", { exact: true }).locator("xpath=ancestor::tr[1]");
+      await optionRow.locator(".cfg-row-toggle").focus();
+      await page.keyboard.press("Enter");
+      await assertVisible(page.getByText("boolean", { exact: true }), "Expected keyboard row expansion with declared type");
+      await assertVisible(page.getByText(/- false/), "Expected typed before value");
+      await assertVisible(page.getByText(/\+ true/), "Expected typed after value");
+      await assertVisible(page.getByText("winning", { exact: true }).first(), "Expected winning provenance");
+      await assertVisible(page.getByText("overridden", { exact: true }).first(), "Expected overridden provenance");
+
+      for (const expected of ["ripgrep-14.1.1", "forge.example", "shared_buffers", "<lambda: opaque>", "not evaluated: fixture dependency failed"]) {
+        await assertVisible(page.getByText(expected, { exact: false }).first(), `Expected typed value ${expected}`);
+      }
+
+      await optionRow.locator(".cfg-src").click();
+      const sourceDialog = page.getByRole("dialog", { name: "Module source details" });
+      await assertVisible(sourceDialog, "Expected tracked source tray");
+      await assertVisible(sourceDialog.getByRole("button", { name: "Open in Flakes" }), "Expected tracked provenance navigation");
+      await sourceDialog.getByRole("button", { name: "Open in Flakes" }).click();
+      const selfTray = page.getByRole("dialog", { name: "platform-core commits" });
+      const selectedSelfCommit = selfTray.getByRole("button", { name: `Commit ${TASK_440_CURRENT_SHA}: tracked self input` });
+      await assertVisible(selectedSelfCommit, "Expected exact full self provenance revision in selected drawer state", 15000);
+      if ((await selectedSelfCommit.getAttribute("aria-pressed")) !== "true") throw new Error("Self provenance did not select the exact server-issued revision");
+      if (new URL(page.url()).searchParams.get("revision") !== TASK_440_CURRENT_SHA) throw new Error(`Self provenance changed the exact Config URL revision: ${page.url()}`);
+      await page.keyboard.press("Escape");
+      await selfTray.waitFor({ state: "hidden" });
+      await sourceDialog.getByRole("button", { name: "Close module source details" }).click();
+
+      const untracked = page.getByText("services.untracked.enable", { exact: true }).locator("xpath=ancestor::tr[1]");
+      await untracked.locator(".cfg-src").click();
+      const untrackedAction = page.getByRole("button", { name: "Not tracked" });
+      await assertVisible(untrackedAction, "Expected untracked provenance to be non-navigable");
+      if (!(await untrackedAction.isDisabled())) throw new Error("Genuinely untracked provenance action was enabled");
+      await page.getByRole("button", { name: "Close module source details" }).click();
+
+      const external = page.getByText("environment.systemPackages", { exact: true }).locator("xpath=ancestor::tr[1]");
+      await external.locator(".cfg-src").click();
+      await assertVisible(page.getByRole("button", { name: "Open in Flakes" }), "Expected visible exact external provenance to be navigable");
+      await page.getByRole("button", { name: "Open in Flakes" }).click();
+      const externalTray = page.getByRole("dialog", { name: "nixpkgs-tracked commits" });
+      const selectedExternalCommit = externalTray.getByRole("button", { name: `Commit ${TASK_440_EXTERNAL_SHA}: tracked external input` });
+      await assertVisible(selectedExternalCommit, "Expected exact full external provenance revision in selected drawer state", 15000);
+      if ((await selectedExternalCommit.getAttribute("aria-pressed")) !== "true") throw new Error("External provenance did not select the exact server-issued revision");
+      if (new URL(page.url()).searchParams.get("revision") !== TASK_440_CURRENT_SHA) throw new Error(`External provenance changed the exact Config URL revision: ${page.url()}`);
+      await page.keyboard.press("Escape");
+      await externalTray.waitFor({ state: "hidden" });
+      await page.getByRole("button", { name: "Close module source details" }).click();
+
+      await assertVisible(page.getByText("731", { exact: true }), "Expected authoritative closure package count");
+      await assertVisible(evaluationCard.getByText("17 rows", { exact: true }), "Expected authoritative same-commit host delta");
+      await assertVisible(evaluationCard.getByText("4.8 GiB", { exact: true }), "Expected authoritative recursive closure size");
+      await assertVisible(page.getByText("in sync", { exact: true }), "Expected exact store-path drift classification");
+      const driftCard = page.locator(".sd-card").filter({ has: page.getByRole("heading", { name: "Drift" }) });
+      const fingerprintRow = driftCard.getByText("Agent fingerprint", { exact: true }).locator("xpath=..");
+      await assertVisible(fingerprintRow.getByText("matches", { exact: true }), "Expected exact agent fingerprint status");
+      await assertVisible(driftCard.getByText("No configuration drift was observed in the last 7 days.", { exact: true }), "Expected authoritative seven-day drift status");
+
+      const tableOverflow = await page.locator(".cfg-table-wrap").evaluate((element) => getComputedStyle(element).overflowY);
+      if (tableOverflow === "auto" || tableOverflow === "scroll") throw new Error(`Unexpected Config inner scroller: ${tableOverflow}`);
+      for (const theme of ["dark", "light"]) {
+        await applyVisualTheme(page, theme);
+        const geometry = await page.evaluate(() => {
+          const card = document.querySelector(".sd-grid-config .cfg-card")?.getBoundingClientRect();
+          const side = document.querySelector(".sd-grid-config .cfg-side")?.getBoundingClientRect();
+          if (!card || !side) throw new Error("Config layout surfaces are missing");
+          return {
+            viewportWidth: innerWidth,
+            viewportHeight: innerHeight,
+            documentWidth: document.documentElement.scrollWidth,
+            card: { top: card.top, right: card.right, bottom: card.bottom, width: card.width },
+            side: { top: side.top, left: side.left, right: side.right, bottom: side.bottom, width: side.width },
+          };
+        });
+        if (geometry.documentWidth > geometry.viewportWidth) throw new Error(`${theme} Config layout clips horizontally: ${JSON.stringify(geometry)}`);
+        if (Math.abs(geometry.card.top - geometry.side.top) > 1 || geometry.card.right > geometry.side.left) {
+          throw new Error(`${theme} Config cards are misaligned or overlapping: ${JSON.stringify(geometry)}`);
+        }
+        if (geometry.side.right > geometry.viewportWidth) throw new Error(`${theme} Config sidebar exceeds the viewport: ${JSON.stringify(geometry)}`);
+        if (Math.abs((geometry.card.width / geometry.side.width) - (7 / 5)) > 0.03) throw new Error(`${theme} Config grid is not the expected 7fr/5fr split: ${JSON.stringify(geometry)}`);
+        if (geometry.side.bottom > geometry.card.bottom + 1) throw new Error(`${theme} Config side cards extend below the options card: ${JSON.stringify(geometry)}`);
+      }
+
+      state.holdModuleRevisions.add(TASK_440_HISTORICAL_SHA);
+      const revisionSelect = page.locator("select.cfg-revselect");
+      const historicalModuleRequest = page.waitForRequest((request) => request.url().includes("evaluation-module-sources") && request.url().includes(TASK_440_HISTORICAL_SHA));
+      await revisionSelect.selectOption(TASK_440_HISTORICAL_SHA);
+      await historicalModuleRequest;
+      const currentModuleRequest = page.waitForResponse((response) => response.url().includes("evaluation-module-sources") && response.url().includes(TASK_440_CURRENT_SHA));
+      await revisionSelect.selectOption(TASK_440_CURRENT_SHA);
+      await currentModuleRequest;
+      await assertVisible(modulesCard.getByText("Loaded 40 of 86 module sources", { exact: true }), "Expected current module page after changing selection", 15000);
+      await page.waitForFunction((title) => Boolean(document.querySelector(`[title='${title}']`)), `nixos/revisions/${TASK_440_CURRENT_SHA.slice(0, 12)}.nix`, { timeout: 15000 });
+      state.releaseHeldModules(TASK_440_HISTORICAL_SHA);
+      await page.getByTitle(`nixos/revisions/${TASK_440_CURRENT_SHA.slice(0, 12)}.nix`).first().waitFor({ state: "visible", timeout: 3000 });
+      if (await page.getByTitle(`nixos/revisions/${TASK_440_HISTORICAL_SHA.slice(0, 12)}.nix`).first().isVisible()) {
+        throw new Error("A delayed historical module-source response replaced the current revision");
+      }
+    },
+  },
+  {
+    name: "12n-task440-config-narrow-keyboard",
+    description: "TASK-440 mocked API Config (not live integration): narrow 900x900 layout, revision controls, and keyboard-accessible module-source continuation failure/retry",
+    action: async (page) => {
+      await page.setViewportSize({ width: 900, height: 900 });
+      await routeSystemsWarningData(page);
+      const state = await routeTask440SystemData(page);
+      state.moduleFailureCounts.set(40, 1);
+      await page.goto(`${baseUrl}/systems/${TASK_440_SYSTEM_ID}?tab=config&config_mode=commit&revision=${TASK_440_CURRENT_SHA}`, { timeout: LOAD_TIMEOUT });
+      await assertVisible(page.getByRole("heading", { name: "Evaluated options" }), "Expected narrow Config explorer", 15000);
+      await assertTask440SelectedConfigRevision(page, "Narrow Config");
+      await page.getByRole("button", { name: "Generations" }).focus();
+      await page.keyboard.press("Tab");
+      const tabTarget = await page.evaluate(() => document.activeElement?.textContent?.trim() || document.activeElement?.getAttribute("aria-label"));
+      if (!tabTarget?.includes("Commits")) throw new Error(`Expected Commits next in revision tab order, got ${tabTarget}`);
+      await page.keyboard.press("Enter");
+      const revisionSelect = page.locator("select.cfg-revselect");
+      await revisionSelect.focus();
+      await page.keyboard.press("ArrowDown");
+      await page.keyboard.press("Enter");
+      const modulesCard = page.locator(".sd-card").filter({ has: page.getByRole("heading", { name: "Modules" }) });
+      const loadMore = modulesCard.getByRole("button", { name: "Load more evaluation module sources" });
+      await assertVisible(loadMore, "Expected narrow module-source continuation control");
+      await loadMore.focus();
+      await page.keyboard.press("Enter");
+      const retry = modulesCard.getByRole("button", { name: "Retry evaluation module sources continuation" });
+      await assertVisible(retry, "Expected keyboard-accessible narrow continuation retry");
+      await assertVisible(modulesCard.getByText("Loaded 40 of 86 module sources", { exact: true }), "Narrow continuation failure discarded module rows");
+      await retry.focus();
+      await page.keyboard.press("Enter");
+      await assertVisible(modulesCard.getByText("Loaded 80 of 86 module sources", { exact: true }), "Expected keyboard retry to load the same narrow page");
+      const dimensions = await page.evaluate(() => {
+        const grid = document.querySelector(".sd-grid-config")?.getBoundingClientRect();
+        const card = document.querySelector(".sd-grid-config .cfg-card")?.getBoundingClientRect();
+        const side = document.querySelector(".sd-grid-config .cfg-side")?.getBoundingClientRect();
+        if (!grid || !card || !side) throw new Error("Narrow Config layout surfaces are missing");
+        return {
+          viewport: innerWidth,
+          document: document.documentElement.scrollWidth,
+          grid: { bottom: grid.bottom },
+          card: { top: card.top, bottom: card.bottom, width: card.width },
+          side: { top: side.top, bottom: side.bottom, width: side.width },
+        };
+      });
+      if (dimensions.document > dimensions.viewport) throw new Error(`Narrow Config clips horizontally: ${JSON.stringify(dimensions)}`);
+      if (dimensions.side.top < dimensions.card.bottom || Math.abs(dimensions.card.width - dimensions.side.width) > 1) throw new Error(`Narrow Config did not stack at equal width: ${JSON.stringify(dimensions)}`);
+      if (Math.abs(dimensions.side.bottom - dimensions.grid.bottom) > 1) throw new Error(`Narrow Config side cards are clipped at the grid bottom: ${JSON.stringify(dimensions)}`);
+    },
+  },
+  {
+    name: "12p-task440-config-canonical-wide-expanded",
+    description: "TASK-440 canonical mocked Config wide expanded state at 1920x1080 with exact metrics, typed drift, measured page limit, coherent paging, and 7:5 geometry",
+    action: async (page) => {
+      await page.setViewportSize({ width: 1920, height: 1080 });
+      await suppressOnboardingCoach(page);
+      await routeTask440DismissedCoach(page);
+      await routeConfigHealth(page, mockConfigHealthResponse());
+      const state = await routeTask440SystemData(page, { canonicalDesign: true });
+      const url = `${baseUrl}/systems/${TASK_440_SYSTEM_ID}?tab=config&config_mode=commit&revision=${TASK_440_CONFIG_SHA}`;
+      const loadCanonicalGeneration = async () => {
+        await page.goto(url, { timeout: LOAD_TIMEOUT });
+        await dismissOnboardingCoachForCapture(page);
+        await assertVisible(page.getByRole("heading", { name: "Evaluated options" }), "Expected canonical wide Config", 15000);
+        await page.getByRole("button", { name: "Generations" }).click();
+        await page.locator("select.cfg-revselect").selectOption("160");
+      };
+      await loadCanonicalGeneration();
+      await assertTask440CanonicalConfigState(page, "Canonical wide Config");
+      state.sevenDayDrift = "observed_drift";
+      state.agentFingerprint = "differs";
+      state.evaluationDrift = "differs";
+      await loadCanonicalGeneration();
+      await assertVisible(page.getByText("A different running configuration was observed in the last 7 days.", { exact: true }), "Observed-drift typed state rendered the wrong callout", 15000);
+      await assertVisible(page.locator(".sd-card").filter({ hasText: "Agent fingerprint" }).getByText("differs", { exact: true }), "Typed differing fingerprint did not render");
+      state.sevenDayDrift = "insufficient_coverage";
+      await loadCanonicalGeneration();
+      await assertVisible(page.getByText("Seven-day drift is unavailable because continuous agent observation coverage is incomplete.", { exact: true }), "Insufficient-coverage typed state rendered the wrong callout", 15000);
+      state.sevenDayDrift = "no_observed_drift";
+      state.agentFingerprint = null;
+      state.evaluationDrift = null;
+      await loadCanonicalGeneration();
+      await assertTask440CanonicalConfigState(page, "Canonical wide Config after drift-state checks");
+
+      const initialLimit = state.optionRequests.at(-1)?.limit;
+      if (!Number.isInteger(initialLimit)) throw new Error(`Missing initial Config page-limit request: ${JSON.stringify(state.optionRequests)}`);
+      const naturalMeasurement = await page.evaluate(() => {
+        const card = document.querySelector(".sd-grid-config .cfg-card");
+        const table = document.querySelector(".cfg-table-wrap");
+        const sideCards = [...document.querySelectorAll(".sd-grid-config .cfg-side > .sd-card")];
+        const row = table?.querySelector("tbody tr.cfg-row");
+        const header = table?.querySelector("thead");
+        if (!card || !table || !row || !header || sideCards.length !== 3) throw new Error("Natural Config page-size geometry is incomplete");
+        const bounds = sideCards.map((element) => element.getBoundingClientRect());
+        const naturalSideHeight = bounds.reduce((total, box, index) => total + box.height + (index ? Math.max(0, box.top - bounds[index - 1].bottom) : 0), 0);
+        const tableChrome = table.getBoundingClientRect().top - card.getBoundingClientRect().top;
+        return {
+          naturalSideHeight,
+          tableChrome,
+          headerHeight: header.getBoundingClientRect().height,
+          rowHeight: row.getBoundingClientRect().height,
+        };
+      });
+      const naturalLimit = Math.max(10, Math.min(80, Math.floor((naturalMeasurement.naturalSideHeight - naturalMeasurement.tableChrome - naturalMeasurement.headerHeight) / naturalMeasurement.rowHeight)));
+      if (Math.abs(initialLimit - naturalLimit) > 1) throw new Error(`Config page limit did not use natural child card heights and rendered gaps: ${JSON.stringify({ initialLimit, naturalLimit, naturalMeasurement })}`);
+      await assertVisible(page.getByText(`1–${Math.min(initialLimit, 1_092)} of 1092`, { exact: true }), "Natural Config page sizing produced an incoherent range", 15000);
+
+      const search = page.getByPlaceholder("Filter options, values, modules…");
+      await search.fill("category-with-no-options");
+      await assertVisible(page.getByText("No options match this search and filter.", { exact: true }), "Config filter-aware empty category state disappeared", 15000);
+      await page.getByRole("button", { name: "Clear option search" }).click();
+      await assertVisible(page.getByText(`1–${Math.min(initialLimit, 1_092)} of 1092`, { exact: true }), "Clearing Config empty state did not restore the revision page", 15000);
+      await page.getByRole("button", { name: /Changed 5/ }).click();
+      const revisionSelect = page.locator("select.cfg-revselect");
+      await revisionSelect.selectOption("159");
+      await assertVisible(page.locator(".cfg-toolbar .seg button.active").filter({ hasText: "All 1092" }), "Config filter selection did not reset on revision change", 15000);
+      await revisionSelect.selectOption("160");
+
+      await search.fill(TASK_440_FIXTURE.canonicalConfig.expandedOption);
+      await assertVisible(page.getByText("1–1 of 1", { exact: true }), "Canonical Config search did not select the design row", 15000);
+      const optionRow = page.getByText(TASK_440_FIXTURE.canonicalConfig.expandedOption, { exact: true }).locator("xpath=ancestor::tr[1]");
+      await optionRow.locator(".cfg-row-toggle").click();
+      await assertVisible(page.getByText("modules/stig/kernel/default.nix", { exact: true }), "Canonical Config row did not retain production provenance", 15000);
+      for (const theme of ["dark", "light"]) {
+        await applyVisualTheme(page, theme);
+        await assertTask440CanonicalConfigState(page, `${theme} canonical wide Config`);
+        await assertTask440ConfigGeometry(page, "wide");
+        await assertReachableControls(page.locator(".sd-grid-config button:not([disabled]), .sd-grid-config input:not([disabled]), .sd-grid-config select:not([disabled])"), `${theme} wide Config`);
+        await assertNoOverlayIntersections(page, ".sd-grid-config", `${theme} wide Config`);
+      }
+    },
+  },
+  {
+    name: "12q-task440-config-canonical-narrow",
+    description: "TASK-440 canonical mocked Config narrow state at 900x900 with exact metrics, controls, stacking, and clipping assertions",
+    action: async (page) => {
+      await page.setViewportSize({ width: 900, height: 900 });
+      await suppressOnboardingCoach(page);
+      await routeTask440DismissedCoach(page);
+      await routeConfigHealth(page, mockConfigHealthResponse());
+      await routeTask440SystemData(page, { canonicalDesign: true });
+      await page.goto(`${baseUrl}/systems/${TASK_440_SYSTEM_ID}?tab=config&config_mode=commit&revision=${TASK_440_CONFIG_SHA}`, { timeout: LOAD_TIMEOUT });
+      await dismissOnboardingCoachForCapture(page);
+      await assertVisible(page.getByRole("heading", { name: "Evaluated options" }), "Expected canonical narrow Config", 15000);
+      await page.getByRole("button", { name: "Generations" }).click();
+      await page.locator("select.cfg-revselect").selectOption("160");
+      await assertTask440CanonicalConfigState(page, "Canonical narrow Config");
+      await page.getByPlaceholder("Filter options, values, modules…").fill(TASK_440_FIXTURE.semanticTargets["task440-config-narrow"].searchQuery);
+      await assertVisible(page.getByText("1–1 of 1", { exact: true }), "Canonical narrow Config search did not settle", 15000);
+      for (const control of [
+        page.getByRole("button", { name: "Generations" }),
+        page.getByRole("button", { name: "Commits" }),
+        page.getByPlaceholder("Filter options, values, modules…"),
+        page.locator("select.cfg-revselect"),
+      ]) await assertVisible(control, "A narrow Config control became unreachable");
+      for (const theme of ["dark", "light"]) {
+        await applyVisualTheme(page, theme);
+        await assertTask440CanonicalConfigState(page, `${theme} canonical narrow Config`);
+        await assertTask440ConfigGeometry(page, "narrow");
+        await assertReachableControls(page.locator(".sd-grid-config button:not([disabled]), .sd-grid-config input:not([disabled]), .sd-grid-config select:not([disabled])"), `${theme} narrow Config`);
+        await assertNoOverlayIntersections(page, ".sd-grid-config", `${theme} narrow Config`);
+      }
+    },
+  },
+  {
+    name: "13j-task440-flake-states-panes-navigation",
+    description: "TASK-440 mocked API flake workflow (not live integration): lifecycle, full-SHA identity, panes, reconciliation, and navigation",
+    action: async (page) => {
+      await page.setViewportSize({ width: 1920, height: 1080 });
+      await suppressOnboardingCoach(page);
+      await routeTask440DismissedCoach(page);
+      const state = await routeTask440FlakeOutputs(page);
+      await gotoFlakesAsAdmin(page);
+      await dismissOnboardingCoachForCapture(page);
+      await page.getByText("platform-core", { exact: true }).first().click();
+      const tray = page.getByRole("dialog", { name: "platform-core commits" });
+      const commitList = tray.locator(".fl-tray-body .fl-tray-commits");
+      await assertVisible(tray, "Expected flake drawer", 15000);
+      await tray.evaluate(async (element) => {
+        await Promise.all(element.getAnimations().map((animation) => animation.finished.catch(() => {})));
+      });
+      for (const theme of ["dark", "light"]) {
+        await applyVisualTheme(page, theme);
+        const geometry = await tray.evaluate((element) => {
+          const bounds = element.getBoundingClientRect();
+          return {
+            viewportWidth: innerWidth,
+            viewportHeight: innerHeight,
+            documentWidth: document.documentElement.scrollWidth,
+            bounds: { top: bounds.top, right: bounds.right, bottom: bounds.bottom, left: bounds.left },
+          };
+        });
+        if (geometry.documentWidth > geometry.viewportWidth) throw new Error(`${theme} flake drawer clips horizontally: ${JSON.stringify(geometry)}`);
+        if (geometry.bounds.top < 0 || geometry.bounds.left < 0 || geometry.bounds.right > geometry.viewportWidth || geometry.bounds.bottom > geometry.viewportHeight) {
+          throw new Error(`${theme} flake drawer exceeds the viewport: ${JSON.stringify(geometry)}`);
+        }
+      }
+      await assertVisible(tray.getByRole("tab", { name: /Systems 2/ }), "Expected authoritative managed-system count", 15000);
+      await assertVisible(tray.getByRole("tab", { name: /Modules 52/ }), "Expected authoritative module count before loading continuation pages");
+      await tray.getByRole("tab", { name: /Systems/ }).click();
+      await assertVisible(page.getByText("managed", { exact: true }), `Expected managed reconciliation; timeline requests: ${state.timelineRequests}; revisions: ${state.requestedRevisions.join(",")}`);
+      await assertVisible(page.getByText("not managed", { exact: true }), "Expected declared-unmanaged reconciliation");
+      await assertVisible(page.getByText("undeclared", { exact: true }), "Expected managed-undeclared reconciliation");
+      const systemsTable = tray.locator(".fx-table tbody");
+      await assertVisible(systemsTable.getByLabel("Environment production", { exact: true }), "Expected visible managed environment metadata");
+      await assertVisible(page.getByText(/collapsed mapping/i), "Expected output-collapse warning");
+      await assertVisible(page.getByText(/Authoritative managed total: 2/), "Expected reconciled managed total");
+      if (await tray.getByRole("button", { name: "Load more revision data" }).isVisible()) throw new Error("Systems exposed load-more solely because Modules had another page");
+      await tray.getByRole("button", { name: /Unmanaged 1/ }).click();
+      await assertVisible(systemsTable.getByText("edge-new", { exact: true }), "Expected server-filtered unmanaged row");
+      if (await systemsTable.getByText("legacy-01", { exact: true }).isVisible()) throw new Error("Unmanaged filter retained a managed-undeclared row");
+      await tray.getByRole("button", { name: /Undeclared 1/ }).click();
+      await assertVisible(systemsTable.getByText("legacy-01", { exact: true }), "Expected server-filtered undeclared row");
+      await tray.getByRole("button", { name: /All 3/ }).click();
+      await assertVisible(systemsTable.getByText("edge-new", { exact: true }), "Expected All reconciliation rows after clearing filter");
+      for (const expectedFilter of ["all", "declared_unmanaged", "managed_undeclared"]) {
+        if (!state.requestedSystemFilters.includes(expectedFilter)) throw new Error(`Missing server-side system filter request: ${expectedFilter}`);
+      }
+
+      await tray.getByRole("button", { name: "Add to Forge" }).click();
+      await page.waitForURL((url) => url.pathname === "/systems" && url.searchParams.get("configuration") === "edge-new");
+      const registrationUrl = new URL(page.url());
+      for (const [key, value] of [["hostname", "edge-new"], ["flake_name", "platform-core"], ["branch", "main"]]) {
+        if (registrationUrl.searchParams.get(key) !== value) throw new Error(`Registration prefill lost ${key}: ${page.url()}`);
+      }
+
+      await gotoFlakesAsAdmin(page);
+      await page.getByText("platform-core", { exact: true }).first().click();
+      await tray.getByRole("tab", { name: /Systems/ }).click();
+
+      const openConfig = tray.getByRole("button", { name: "Open config" }).first();
+      const expectedRevision = state.requestedRevisions.at(-1);
+      await openConfig.click();
+      await page.waitForURL((url) => url.pathname === `/systems/${TASK_440_SYSTEM_ID}` && url.searchParams.get("revision") === expectedRevision);
+      if (new URL(page.url()).searchParams.get("config_mode") !== "commit") throw new Error("Flake-to-Config lost exact commit mode");
+
+      await gotoFlakesAsAdmin(page);
+      await page.getByText("platform-core", { exact: true }).first().click();
+      await tray.getByRole("tab", { name: /Modules/ }).click();
+      if (!(await tray.getByRole("tab", { name: /Modules/ }).evaluate((element) => element === document.activeElement))) throw new Error("Flake pane rerender moved focus away from the selected tab");
+      await assertVisible(page.getByText("hardening", { exact: true }).first(), "Expected modules pane");
+      await assertVisible(page.getByText("self / flake.nix", { exact: true }), "Expected exported-module carrier provenance");
+      await tray.getByRole("button", { name: "Load more revision data" }).click();
+      await assertVisible(tray.getByRole("tab", { name: /Modules 52/ }), "Expected authoritative module count to remain stable after continuation");
+      await assertVisible(page.getByText("fixture-module-50", { exact: true }), "Expected second module collection page");
+      await assertVisible(page.getByText("Export binding unavailable", { exact: true }), "Expected a missing exported-module binding to render unavailable");
+      const moduleRow = page.getByText("hardening", { exact: true }).locator("xpath=ancestor::tr[1]");
+      state.declarationMode = "initial-error";
+      await moduleRow.getByRole("button").focus();
+      await page.keyboard.press("Enter");
+      await assertVisible(tray.getByRole("alert").filter({ hasText: /deterministic initial declaration failure/i }), "Expected initial declaration error alert");
+      state.declarationMode = "available";
+      const initialRetryResponse = page.waitForResponse((response) => (
+        response.url().includes("/modules/hardening/declarations")
+          && response.request().method() === "GET"
+      ));
+      await tray.getByRole("button", { name: "Retry declarations" }).click();
+      const initialRetryStatus = (await initialRetryResponse).status();
+      if (initialRetryStatus !== 200) {
+        throw new Error(`Initial declaration retry returned HTTP ${initialRetryStatus}`);
+      }
+      await assertVisible(page.getByText("services.openssh.enable", { exact: true }), "Expected expandable module declaration detail");
+      await assertVisible(tray.getByRole("columnheader", { name: "Option", exact: true }), "Expected structured declaration Option column");
+      await assertVisible(tray.getByRole("columnheader", { name: "Type", exact: true }), "Expected structured declaration Type column");
+      await assertVisible(tray.getByRole("columnheader", { name: "Default", exact: true }), "Expected structured declaration Default column");
+      await assertVisible(page.getByText("Source: modules/hardening.nix", { exact: true }), "Expected declaration source metadata");
+      await assertVisible(page.getByText(/cached per revision; browsing does not evaluate each host/i), "Expected cached no-per-host explanation");
+      const hardeningRowText = await moduleRow.innerText();
+      if (!/\b2\b/.test(hardeningRowText)) throw new Error(`Expected hardening consumer count, got: ${hardeningRowText}`);
+      const firstModuleName = await tray.locator(".fx-table > tbody > .fx-row").first().locator("code.fx-host").innerText();
+      if (firstModuleName !== "hardening") throw new Error(`Modules were not sorted by descending blast radius: ${firstModuleName}`);
+      const declarationLoadMore = tray.getByRole("button", { name: "Load more declarations for hardening" });
+      state.declarationMode = "continuation-error";
+      await declarationLoadMore.focus();
+      await page.keyboard.press("Enter");
+      await assertVisible(tray.getByRole("alert").filter({ hasText: /deterministic continuation declaration failure/i }), "Expected continuation declaration error alert");
+      await assertVisible(page.getByText("services.openssh.enable", { exact: true }), "Continuation error discarded the successful first declaration page");
+      state.declarationMode = "available";
+      await tray.getByRole("button", { name: "Retry declarations" }).click();
+      await assertVisible(page.getByText("services.fixture.option125", { exact: true }), "Expected a declaration beyond the first 100 rows");
+      const successfulContinuation = state.moduleDeclarationRequests.at(-1);
+      if (successfulContinuation.offset !== 100 || successfulContinuation.token !== "f".repeat(64)) {
+        throw new Error(`Declaration continuation lost offset/token: ${JSON.stringify(state.moduleDeclarationRequests)}`);
+      }
+
+      await moduleRow.getByRole("button").click();
+      state.declarationMode = "unavailable";
+      await moduleRow.getByRole("button").click();
+      await assertVisible(tray.getByRole("alert").filter({ hasText: /Declaration snapshot is unavailable/i }), "Expected declaration unavailable lifecycle alert");
+      state.declarationMode = "available";
+      await tray.getByRole("button", { name: "Retry declarations" }).click();
+      await assertVisible(page.getByText("services.openssh.enable", { exact: true }), "Expected declaration retry after unavailable lifecycle");
+
+      state.declarationMode = "conflict";
+      await tray.getByRole("button", { name: "Load more declarations for hardening" }).click();
+      await assertVisible(tray.getByRole("alert").filter({ hasText: /snapshot changed.*first page/i }), "Expected 409 snapshot-token replacement alert");
+      state.declarationMode = "available";
+      state.declarationToken = "g".repeat(64);
+      await tray.getByRole("button", { name: "Retry declarations" }).click();
+      await assertVisible(page.getByText("services.openssh.enable", { exact: true }), "Expected replacement snapshot first page");
+      await assertVisible(page.getByText("services.snapshot.g.marker", { exact: true }), "Expected replacement declaration snapshot content");
+      if (await page.getByText("services.snapshot.f.marker", { exact: true }).count()) throw new Error("Declaration replacement mixed rows from the prior snapshot token");
+      const replacementRequest = state.moduleDeclarationRequests.at(-1);
+      if (replacementRequest.offset !== 0 || replacementRequest.token !== null) {
+        throw new Error(`409 retry reused the replaced snapshot token: ${JSON.stringify(replacementRequest)}`);
+      }
+      await tray.getByRole("button", { name: "Load more declarations for hardening" }).click();
+      await assertVisible(page.getByText("services.fixture.option125", { exact: true }), "Expected bounded continuation on the replacement snapshot");
+      const replacementContinuation = state.moduleDeclarationRequests.at(-1);
+      if (replacementContinuation.offset !== 100 || replacementContinuation.token !== "g".repeat(64)) {
+        throw new Error(`Replacement snapshot continuation lost its token: ${JSON.stringify(replacementContinuation)}`);
+      }
+      await tray.getByRole("tab", { name: /Inputs/ }).click();
+      await assertVisible(tray.getByRole("tab", { name: /Inputs 2/ }), "Expected authoritative direct-input total instead of loaded-page length");
+      await assertVisible(page.getByText("multiple nixpkgs revisions", { exact: false }), "Expected multiple-nixpkgs warning");
+      await assertVisible(page.getByText("stale over 90d", { exact: true }), "Expected stale input metric");
+      await assertVisible(page.getByText("+72 transitive", { exact: true }), "Expected direct-root descendant count");
+      await assertVisible(page.getByText("+1 inputs", { exact: true }), "Expected added input delta");
+      await assertVisible(page.getByText("-1 inputs", { exact: true }), "Expected removed input delta");
+      await assertVisible(tray.getByTitle("Channel input"), "Expected channel=true input metadata");
+      const homeManagerRow = tray.getByText("home-manager", { exact: true }).locator("xpath=ancestor::tr[1]");
+      await assertVisible(homeManagerRow.locator("td").nth(4).getByText("nixpkgs", { exact: true }), "Expected plain unquoted follows path");
+      if (await tray.getByRole("button", { name: "Load more revision data" }).isVisible()) throw new Error("Inputs exposed load-more solely because Modules had another page");
+
+      state.largeCollections = true;
+      await tray.getByRole("tab", { name: /Commits/ }).click();
+      await commitList.locator(".fl-commit-item").filter({ hasText: "prefix collision snapshot" }).click();
+      await tray.getByRole("tab", { name: /Systems/ }).click();
+      await assertVisible(tray.getByText("7 declared output name(s) are shared by multiple visible managed systems. Review the collapsed mapping before deployment.", { exact: true }), "Expected revision-global collapse warning count beyond the first Systems page");
+      await assertVisible(tray.getByText("9 managed system(s) are deployed at a different revision.", { exact: true }), "Expected revision-global pinned warning count beyond the first Systems page");
+      await assertVisible(tray.getByRole("button", { name: "Load more revision data" }), "Expected >50 Systems continuation");
+      await tray.getByRole("button", { name: "Load more revision data" }).click();
+      await assertVisible(tray.getByText("Showing 54 reconciled rows. Authoritative managed total: 53.", { exact: true }), "Systems continuation did not merge beyond 50 rows");
+      await tray.getByRole("tab", { name: /Commits/ }).click();
+      await commitList.locator(".fl-commit-item").filter({ hasText: "current output snapshot" }).click();
+      await tray.getByRole("tab", { name: /Inputs/ }).click();
+      await assertVisible(tray.locator(".fx-stat").filter({ hasText: "stale over 90d" }).getByText("12", { exact: true }), "Expected revision-global stale warning count beyond the first direct Inputs page");
+      // Unlike Systems/Modules, the Inputs pane auto-continues fetching pages
+      // until the full resolved-input set is loaded (stale/multi-nixpkgs
+      // analysis needs the complete set), so no manual "Load more" click is
+      // needed or offered here; wait for the auto-loaded row beyond the
+      // first 50-item page instead.
+      await assertVisible(tray.getByText("direct-fixture-51", { exact: true }), "Direct Inputs auto-continuation did not merge a row beyond 50");
+      if (await tray.getByRole("button", { name: "Load more revision data" }).isVisible()) throw new Error("Inputs pane exposed a manual Load-more control instead of completing auto-continuation");
+      state.largeCollections = false;
+
+      await tray.getByRole("tab", { name: /Commits/ }).click();
+      await assertVisible(commitList, "Expected visible commit list after pane change");
+      const collisionRows = commitList.getByText("abcdef0", { exact: true });
+      if ((await collisionRows.count()) < 2) throw new Error("Expected two distinct commits sharing the displayed SHA prefix");
+      const collisionCommit = commitList.locator(".fl-commit-item").filter({ hasText: "prefix collision snapshot" });
+      await collisionCommit.click();
+      if (!(await collisionCommit.evaluate((element) => element === document.activeElement))) throw new Error("Flake revision rerender moved focus away from the selected commit");
+      await page.goBack();
+      const currentRevisionContract = tray.getByLabel(`Full revision ${TASK_440_CURRENT_SHA}`, { exact: true });
+      await assertVisible(currentRevisionContract, "Back navigation did not restore the exact full-SHA accessible contract", 15000);
+      if ((await currentRevisionContract.getAttribute("title")) !== TASK_440_CURRENT_SHA) throw new Error("Current flake revision title does not independently retain TASK_440_CURRENT_SHA");
+      await page.goForward();
+      const historicalRevisionContract = tray.getByLabel(`Full revision ${TASK_440_HISTORICAL_SHA}`, { exact: true });
+      await assertVisible(historicalRevisionContract, "Forward navigation did not restore the exact historical full-SHA accessible contract", 15000);
+      if ((await historicalRevisionContract.getAttribute("title")) !== TASK_440_HISTORICAL_SHA) throw new Error("Historical flake revision title lost its full SHA");
+      await tray.getByRole("tab", { name: /Systems/ }).click();
+
+      await tray.getByRole("tab", { name: /Commits/ }).click();
+      await tray.getByText("1111111", { exact: true }).click();
+      await tray.getByRole("tab", { name: /Systems/ }).click();
+      await assertVisible(tray.getByText(/root commit.*no previous revision/i), "Expected root revision no-parent state");
+
+      state.lifecycle = "unavailable";
+      await tray.getByRole("tab", { name: /Commits/ }).click();
+      await commitList.locator(".fl-commit-item").filter({ hasText: "current output snapshot" }).click();
+      await tray.getByRole("tab", { name: /Systems/ }).click();
+      await assertVisible(tray.getByRole("status").filter({ hasText: "Revision outputs unavailable" }), "Expected flake unavailable status semantics");
+      state.apiError = true;
+      await tray.getByRole("tab", { name: /Commits/ }).click();
+      await commitList.locator(".fl-commit-item").filter({ hasText: "prefix collision snapshot" }).click();
+      await tray.getByRole("tab", { name: /Systems/ }).click();
+      await assertVisible(tray.getByRole("alert").filter({ hasText: /Unable to load revision outputs.*deterministic flake snapshot API failure/i }), "Expected flake API error alert semantics");
+
+      state.apiError = false;
+      state.lifecycle = "available";
+      await page.setViewportSize({ width: 900, height: 900 });
+      await tray.getByRole("tab", { name: /Commits/ }).click();
+      await commitList.locator(".fl-commit-item").filter({ hasText: "current output snapshot" }).click();
+      const assertNarrowPaneFits = async (paneName) => {
+        const geometry = await tray.evaluate((element) => {
+          const pane = element.querySelector(".fx-body");
+          const bounds = element.getBoundingClientRect();
+          return {
+            viewportWidth: innerWidth,
+            viewportHeight: innerHeight,
+            documentWidth: document.documentElement.scrollWidth,
+            tray: { left: bounds.left, right: bounds.right, top: bounds.top, bottom: bounds.bottom },
+            paneClientWidth: pane?.clientWidth || 0,
+            paneScrollWidth: pane?.scrollWidth || 0,
+          };
+        });
+        if (geometry.documentWidth > geometry.viewportWidth || geometry.tray.left < 0 || geometry.tray.right > geometry.viewportWidth || geometry.tray.top < 0 || geometry.tray.bottom > geometry.viewportHeight) {
+          throw new Error(`${paneName} clips at 900x900: ${JSON.stringify(geometry)}`);
+        }
+        if (geometry.paneScrollWidth > geometry.paneClientWidth + 1) throw new Error(`${paneName} has inaccessible horizontal content at 900x900: ${JSON.stringify(geometry)}`);
+      };
+      await tray.getByRole("tab", { name: /Systems/ }).click();
+      await assertVisible(tray.getByRole("button", { name: "Open config" }).first(), "Expected accessible Systems control at 900x900");
+      await assertNarrowPaneFits("Systems");
+      await tray.getByRole("tab", { name: /Modules/ }).click();
+      const narrowModuleRow = tray.getByText("hardening", { exact: true }).locator("xpath=ancestor::tr[1]");
+      await narrowModuleRow.getByRole("button").click();
+      await assertVisible(tray.getByRole("button", { name: "Load more declarations for hardening" }), "Expected bounded declaration control at 900x900");
+      await assertNarrowPaneFits("Modules expanded");
+      await tray.getByRole("button", { name: "Load more declarations for hardening" }).click();
+      await assertVisible(tray.getByText("services.fixture.option125", { exact: true }), "Expected declaration continuation at 900x900");
+      await assertNarrowPaneFits("Modules continued");
+      await tray.getByRole("tab", { name: /Inputs/ }).click();
+      await assertVisible(tray.locator("summary:visible").filter({ hasText: "Lock metadata" }).first(), "Expected accessible Inputs metadata control at 900x900");
+      await assertVisible(tray.locator(".fx-url:visible").filter({ hasText: "github:NixOS/nixpkgs" }).first(), "Expected accessible Inputs source at 900x900");
+      await assertNarrowPaneFits("Inputs");
+      await tray.getByRole("tab", { name: /Commits/ }).click();
+      await assertVisible(tray.getByRole("tab", { name: /Commits/ }), "Expected accessible flake tabs at 900x900");
+    },
+  },
+  {
+    name: "13l-task440-flake-systems-canonical-wide",
+    description: "TASK-440 canonical mocked Flake Systems state at 1920x1080 with exact segments, reconciliation totals/order, environment metadata, revision reset, and geometry",
+    action: async (page) => {
+      const { state, tray } = await openTask440FlakePane(page, 1920, "Systems");
+      const table = tray.locator(".fx-systems-table");
+      const canonicalRows = ["atlas-01", "atlas-02", "atlas-03", "orion-db-01", "orion-db-02", "stg-atlas-01", "stg-atlas-02", "dev-node-01", "dev-node-02", "vm-test-01", "vm-test-02"];
+      await assertExactTextOrder(tray.locator(".fx-toolbar .seg button"), ["All 11", "Unmanaged 2", "Undeclared 0"], "Flake Systems segments");
+      await assertExactTextOrder(table.locator("tbody > tr code.fx-host"), canonicalRows, "Flake Systems reconciliation rows");
+      await assertExactTextOrder(tray.locator(".fx-stat .fx-stat-n"), ["11", "9", "2", "0"], "Flake Systems metric values");
+      await assertExactTextOrder(tray.locator(".fx-stat .fx-stat-l"), ["declared here", "managed by Forge", "declared unmanaged", "managed undeclared"], "Flake Systems metric labels");
+      for (const environment of ["production", "staging", "dev"]) {
+        const environmentChip = table.locator(`[aria-label="Environment ${environment}"]`).first();
+        await environmentChip.scrollIntoViewIfNeeded();
+        await assertVisible(environmentChip, `Managed ${environment} environment metadata disappeared`);
+      }
+
+      state.emptySystemFilter = "declared_unmanaged";
+      await tray.getByRole("button", { name: "Unmanaged 2" }).click();
+      await assertVisible(table.getByText("Nothing in this category.", { exact: true }), "Systems category empty state disappeared");
+      state.emptySystemFilter = null;
+      await tray.getByRole("button", { name: "All 11" }).click();
+      await tray.getByRole("button", { name: "Unmanaged 2" }).click();
+      await tray.getByRole("tab", { name: /Commits/ }).click();
+      await tray.locator(".fl-commit-item").filter({ hasText: "prefix collision snapshot" }).click();
+      await tray.getByRole("tab", { name: /Systems/ }).click();
+      await assertVisible(tray.locator(".fx-toolbar .seg button.active").filter({ hasText: "All 11" }), "Systems filter selection did not reset on revision change", 15000);
+      await assertExactTextOrder(table.locator("tbody > tr code.fx-host"), canonicalRows, "Revision-reset Systems rows");
+      await tray.getByRole("tab", { name: /Commits/ }).click();
+      await tray.locator(".fl-commit-item").filter({ hasText: "stig: enforce audit rules for sudo" }).click();
+      await tray.getByRole("tab", { name: /Systems/ }).click();
+      if (!state.requestedSystemFilters.includes("declared_unmanaged") || state.requestedSystemFilters.at(-1) !== "all") throw new Error(`Systems filters were not server-backed/reset: ${JSON.stringify(state.requestedSystemFilters)}`);
+      for (const theme of ["dark", "light"]) {
+        await applyVisualTheme(page, theme);
+        await assertExactTextOrder(table.locator("tbody > tr code.fx-host"), canonicalRows, `${theme} wide Flake Systems rows`);
+        await assertExactTextOrder(tray.locator(".fx-stat .fx-stat-n"), ["11", "9", "2", "0"], `${theme} wide Flake Systems metrics`);
+        await assertTask440FlakeGeometry(page, tray, ".fx-systems-table", ["nixosConfiguration", "Environment", "State", ""], [0.34, 0.20, 0.24, 0.22], `${theme} wide Systems`);
+        await assertReachableControls(tray.locator(".fx-pane button:not([disabled]), .fx-tabs button:not([disabled])"), `${theme} wide Systems`);
+        await assertNoOverlayIntersections(page, ".fl-tray", `${theme} wide Systems`);
+      }
+    },
+  },
+  {
+    name: "13m-task440-flake-systems-canonical-narrow",
+    description: "TASK-440 canonical mocked Flake Systems state at 900x900 with exact rows, controls, columns, and no nested clipping",
+    action: async (page) => {
+      const { tray } = await openTask440FlakePane(page, 900, "Systems");
+      const canonicalRows = ["atlas-01", "atlas-02", "atlas-03", "orion-db-01", "orion-db-02", "stg-atlas-01", "stg-atlas-02", "dev-node-01", "dev-node-02", "vm-test-01", "vm-test-02"];
+      await assertExactTextOrder(tray.locator(".fx-systems-table tbody > tr code.fx-host"), canonicalRows, "Narrow Flake Systems rows");
+      await assertVisible(tray.getByRole("button", { name: "Open config" }).first(), "Narrow Systems action became unreachable");
+      const registration = tray.getByRole("button", { name: "Add to Forge" }).first();
+      await registration.scrollIntoViewIfNeeded();
+      await assertVisible(registration, "Narrow registration action became unreachable");
+      for (const theme of ["dark", "light"]) {
+        await applyVisualTheme(page, theme);
+        await assertExactTextOrder(tray.locator(".fx-systems-table tbody > tr code.fx-host"), canonicalRows, `${theme} narrow Flake Systems rows`);
+        await assertTask440FlakeGeometry(page, tray, ".fx-systems-table", ["nixosConfiguration", "Environment", "State", ""], [0.34, 0.20, 0.24, 0.22], `${theme} narrow Systems`);
+        await assertReachableControls(tray.locator(".fx-pane button:not([disabled]), .fx-tabs button:not([disabled])"), `${theme} narrow Systems`);
+        await assertNoOverlayIntersections(page, ".fl-tray", `${theme} narrow Systems`);
+      }
+    },
+  },
+  {
+    name: "13n-task440-flake-modules-canonical-wide-expanded",
+    description: "TASK-440 canonical mocked Flake Modules expanded state at 1920x1080 with module source path, exact headers, declarations, and geometry",
+    action: async (page) => {
+      const { tray } = await openTask440FlakePane(page, 1920, "Modules");
+      const row = tray.getByText("system", { exact: true }).locator("xpath=ancestor::tr[1]");
+      await row.getByRole("button").click();
+      await assertVisible(tray.getByText("cf.system.enable", { exact: true }), "Wide expanded module declaration missing", 15000);
+      await assertVisible(tray.locator(".fx-detail-head").getByText("self / modules/nixos/system/default.nix", { exact: true }), "Expanded Flake Module header lost its module-level source path");
+      for (const theme of ["dark", "light"]) {
+        await applyVisualTheme(page, theme);
+        await assertVisible(tray.getByText("cf.system.enable", { exact: true }), `${theme} wide expanded module declaration missing`);
+        await assertExactTextOrder(tray.locator(".fx-modules-table > thead th"), ["Module", "Sets", "Options", "Consumed by"], `${theme} Flake Modules headers`);
+        await assertTask440FlakeGeometry(page, tray, ".fx-modules-table", ["Module", "Sets", "Options", "Consumed by"], [0.32, 0.34, 0.10, 0.24], `${theme} wide Modules`);
+        await assertReachableControls(tray.locator(".fx-tabs button:not([disabled]), .fx-modules-table .fx-row-toggle").filter({ hasText: "system" }), `${theme} wide Modules`);
+        await assertNoOverlayIntersections(page, ".fl-tray", `${theme} wide Modules`);
+      }
+    },
+  },
+  {
+    name: "13o-task440-flake-modules-canonical-narrow-expanded",
+    description: "TASK-440 canonical mocked Flake Modules expanded state at 900x900 with source path, declaration control, and unclipped column geometry",
+    action: async (page) => {
+      const { tray } = await openTask440FlakePane(page, 900, "Modules");
+      const row = tray.getByText("system", { exact: true }).locator("xpath=ancestor::tr[1]");
+      await row.getByRole("button").click();
+      await assertVisible(tray.locator(".fx-detail-head").getByText("self / modules/nixos/system/default.nix", { exact: true }), "Narrow expanded module header lost its source path", 15000);
+      await assertVisible(tray.getByText("cf.system.experimentalFeatures", { exact: true }), "Narrow canonical declaration set is incomplete");
+      for (const theme of ["dark", "light"]) {
+        await applyVisualTheme(page, theme);
+        await assertVisible(tray.getByText("cf.system.enable", { exact: true }), `${theme} narrow canonical declaration set became unreachable`);
+        await assertTask440FlakeGeometry(page, tray, ".fx-modules-table", ["Module", "Sets", "Options", "Consumed by"], [0.32, 0.34, 0.10, 0.24], `${theme} narrow Modules`);
+        await assertReachableControls(tray.locator(".fx-tabs button:not([disabled]), .fx-modules-table .fx-row-toggle").filter({ hasText: "system" }), `${theme} narrow Modules`);
+        await assertNoOverlayIntersections(page, ".fl-tray", `${theme} narrow Modules`);
+      }
+    },
+  },
+  {
+    name: "13p-task440-flake-inputs-canonical-wide",
+    description: "TASK-440 canonical mocked Flake Inputs state at 1920x1080 with direct-root hierarchy, exact headers, authoritative totals, transitive counts, deltas, and geometry",
+    action: async (page) => {
+      const { tray } = await openTask440FlakePane(page, 1920, "Inputs");
+      const table = tray.locator(".fx-inputs-table");
+      const canonicalInputs = ["crystal-forge", "disko", "home-manager", "impermanence", "nixpkgs", "old-nixpkgs", "stylix", "unstable"];
+      await assertExactTextOrder(table.locator("thead th"), ["Input", "Source", "Locked", "Updated", "Follows"], "Flake Inputs headers");
+      await assertExactTextOrder(table.locator("tbody > tr .fx-input-cell code.fx-host"), canonicalInputs, "Flake direct-root input hierarchy");
+      await assertExactTextOrder(tray.locator(".fx-stat .fx-stat-n"), ["8", "47", "3", "1"], "Flake Inputs metric values");
+      await assertExactTextOrder(tray.locator(".fx-stat .fx-stat-l"), ["direct inputs", "resolved total", "nixpkgs revisions", "stale over 90d"], "Flake Inputs metric labels");
+      for (const expected of ["+9 transitive", "+6 transitive", "+8 transitive", "+4 transitive", "+12 transitive", "+3 modules", "-3 inputs", "5 inputs changed"]) {
+        await assertVisible(tray.getByText(expected, { exact: true }).first(), `Missing authoritative Inputs metadata ${expected}`);
+      }
+      if (await table.locator("tbody > tr td:first-child details:visible").count()) throw new Error("Lock metadata moved into and dominated the Input column");
+      if (await table.locator("tbody > tr td:nth-child(2) details:visible").count() !== 8) throw new Error("Lock metadata is not retained in the Source column");
+      const channelMarker = table.locator('[title="Channel input"]').first();
+      await channelMarker.scrollIntoViewIfNeeded();
+      await assertVisible(channelMarker, "Wide Inputs channel marker disappeared");
+      await assertVisible(table.getByText("home-manager", { exact: true }).locator("xpath=ancestor::tr[1]").locator("td").nth(4).getByText("nixpkgs", { exact: true }), "Wide Inputs follows value is quoted or missing");
+      for (const theme of ["dark", "light"]) {
+        await applyVisualTheme(page, theme);
+        await assertExactTextOrder(table.locator("tbody > tr .fx-input-cell code.fx-host"), canonicalInputs, `${theme} wide direct Inputs`);
+        await assertTask440FlakeGeometry(page, tray, ".fx-inputs-table", ["Input", "Source", "Locked", "Updated", "Follows"], [0.27, 0.31, 0.12, 0.14, 0.16], `${theme} wide Inputs`);
+        await assertReachableControls(tray.locator(".fx-pane summary:visible, .fx-tabs button:visible:not([disabled])"), `${theme} wide Inputs`);
+        await assertNoOverlayIntersections(page, ".fl-tray", `${theme} wide Inputs`);
+      }
+    },
+  },
+  {
+    name: "13q-task440-flake-inputs-canonical-narrow",
+    description: "TASK-440 canonical mocked Flake Inputs state at 900x900 with direct roots, exact headers, reachable metadata, and unclipped column geometry",
+    action: async (page) => {
+      const { tray } = await openTask440FlakePane(page, 900, "Inputs");
+      const table = tray.locator(".fx-inputs-table");
+      const canonicalInputs = ["crystal-forge", "disko", "home-manager", "impermanence", "nixpkgs", "old-nixpkgs", "stylix", "unstable"];
+      await assertExactTextOrder(table.locator("thead th"), ["Input", "Source", "Locked", "Updated", "Follows"], "Narrow Flake Inputs headers");
+      await assertExactTextOrder(table.locator("tbody > tr .fx-input-cell code.fx-host"), canonicalInputs, "Narrow direct-root input hierarchy");
+      await assertVisible(table.locator("tbody > tr").first().locator("td:nth-child(2) .fx-url"), "Narrow Inputs source became unreachable");
+      await assertVisible(table.getByText("+12 transitive", { exact: true }), "Narrow direct descendant count disappeared");
+      if (await table.locator("tbody > tr td:first-child details:visible").count()) throw new Error("Narrow lock metadata moved into the Input column");
+      for (const theme of ["dark", "light"]) {
+        await applyVisualTheme(page, theme);
+        await assertExactTextOrder(table.locator("tbody > tr .fx-input-cell code.fx-host"), canonicalInputs, `${theme} narrow direct Inputs`);
+        await assertTask440FlakeGeometry(page, tray, ".fx-inputs-table", ["Input", "Source", "Locked", "Updated", "Follows"], [0.27, 0.31, 0.12, 0.14, 0.16], `${theme} narrow Inputs`);
+        await assertReachableControls(tray.locator(".fx-pane summary:visible, .fx-tabs button:visible:not([disabled])"), `${theme} narrow Inputs`);
+        await assertNoOverlayIntersections(page, ".fl-tray", `${theme} narrow Inputs`);
+      }
+    },
+  },
+  {
+    name: "13k-task440-drawer-modal-keyboard-layering",
+    description: "TASK-440 drawer and diff-modal Escape precedence, focus trap, stacking, and focus restoration",
+    action: async (page) => {
+      await routeFlakeParityData(page);
+      await routeTask440FlakeOutputs(page);
+      await gotoFlakesAsAdmin(page);
+      const opener = page.locator("#flake-opener-41");
+      await opener.focus();
+      await opener.click();
+      const tray = page.getByRole("dialog", { name: "platform-core commits" });
+      await assertVisible(tray, "Expected keyboard-test flake drawer", 15000);
+      const diffButton = tray.locator(".fl-file-card").first();
+      await assertVisible(diffButton, "Expected changed-file diff action");
+      await diffButton.click();
+      const modal = page.locator(".diff-modal");
+      await assertVisible(modal, "Expected file diff modal");
+      const layers = await page.evaluate(() => ({
+        tray: Number(getComputedStyle(document.querySelector(".fl-tray")).zIndex),
+        modal: Number(getComputedStyle(document.querySelector(".modal-backdrop-above-drawer")).zIndex),
+      }));
+      if (!(layers.modal > layers.tray)) throw new Error(`Diff modal is not above flake tray: ${JSON.stringify(layers)}`);
+      await page.keyboard.press("Shift+Tab");
+      if (!(await modal.evaluate((element) => element.contains(document.activeElement)))) throw new Error("Diff modal focus escaped on Shift+Tab");
+      await page.keyboard.press("Escape");
+      await modal.waitFor({ state: "hidden" });
+      await assertVisible(tray, "Escape should close modal before drawer");
+      await page.keyboard.press("Escape");
+      await tray.waitFor({ state: "hidden" });
+      if (!(await opener.evaluate((element) => element === document.activeElement))) throw new Error("Drawer close did not restore opener focus");
+    },
+  },
+  {
+    name: "12o-task440-rollback-notification-auto-latest",
+    description: "TASK-440 exact Deploy notification, rollback preselection, selector labels, and all auto_latest outcomes including retry idempotency",
+    action: async (page) => {
+      await suppressOnboardingCoach(page);
+      await routeSystemsWarningData(page);
+      const state = await routeTask440SystemData(page, {
+        deploymentPolicy: "auto_latest",
+        deployResponses: [
+          { status: 409, body: { policy: "auto_latest", conversion: "not_requested", deployment: "failed", deployment_id: null, message: "conversion failed; no deployment queued" } },
+          { status: 500, body: { policy: "manual", conversion: "converted", deployment: "failed", deployment_id: null, message: "Policy is manual; deployment failed" } },
+          { status: 200, body: { policy: "manual", conversion: "already_manual", deployment: "already_queued", deployment_id: "44000000-0000-4000-8000-000000000001", message: "Deployment already queued" } },
+        ],
+      });
+      await page.goto(`${baseUrl}/systems/${TASK_440_SYSTEM_ID}?tab=deploy`, { timeout: LOAD_TIMEOUT });
+      await assertVisible(page.getByText("New commit", { exact: true }), "Expected New commit selector label", 15000);
+      await assertVisible(page.getByText("Previous generation", { exact: true }), "Expected Previous generation selector label");
+      await page.locator(".sd-commit-item").first().click();
+      await page.getByRole("button", { name: /Deploy abcdef0/ }).click();
+      const prompt = page.getByRole("dialog", { name: "Deploy while auto_latest is enabled?" });
+      await assertVisible(prompt, "Expected auto_latest warning");
+      await prompt.getByRole("button", { name: "Cancel" }).click();
+      await prompt.waitFor({ state: "hidden" });
+      if (state.deployRequests.length !== 0) throw new Error("Cancel queued a deployment");
+
+      await page.getByRole("button", { name: /Deploy abcdef0/ }).click();
+      await prompt.getByRole("button", { name: "Continue on auto_latest" }).click();
+      await assertVisible(page.getByText(/conversion failed; no deployment queued/i).first(), "Expected failed no-queue outcome");
+      if (state.deployRequests[0].action !== "continue_auto_latest") throw new Error("Continue sent the wrong typed deployment action");
+
+      await page.getByRole("button", { name: /Deploy abcdef0/ }).click();
+      await prompt.focus();
+      await page.keyboard.press("Tab");
+      await page.keyboard.press("Shift+Tab");
+      if (!(await prompt.evaluate((element) => element.contains(document.activeElement)))) throw new Error("auto_latest dialog focus trap failed");
+      state.holdDeploy = true;
+      await prompt.getByRole("button", { name: "Convert to manual and deploy" }).click();
+      await assertVisible(prompt, "Expected auto_latest dialog to remain mounted during submission");
+      await page.keyboard.press("Tab");
+      if (!(await prompt.evaluate((element) => element.contains(document.activeElement)))) throw new Error("Submitting auto_latest dialog allowed focus to escape");
+      state.releaseHeldDeploy();
+      await assertVisible(page.getByText(/Policy is manual; deployment failed/i).first(), "Expected persisted manual plus failed deployment outcome");
+      if (state.deployRequests[1].action !== "convert_to_manual") throw new Error("Convert sent the wrong typed deployment action");
+      if (!state.deployRequests[1].request_id) throw new Error("Convert request omitted its stable request_id");
+
+      await page.getByRole("button", { name: /Deploy abcdef0/ }).click();
+      await assertVisible(page.getByText(/Deployment already queued/i).first(), "Expected idempotent retry outcome");
+      if (state.deployRequests[2].commit_sha !== state.deployRequests[1].commit_sha) throw new Error("Retry changed the exact deployment target");
+      if (state.deployRequests[2].request_id !== state.deployRequests[1].request_id) throw new Error("Retry changed the deployment request_id");
+      if (state.deployRequests[2].action !== state.deployRequests[1].action) throw new Error("Retry changed the original deployment action after policy conversion");
+
+      await page.getByRole("tab", { name: "History" }).click();
+      const rollback = page.locator(".tl-card").filter({ has: page.locator(".tl-gen strong", { hasText: "#73" }) }).getByTitle("Rollback to this generation");
+      await rollback.click();
+      await assertVisible(page.getByRole("tab", { name: "Deploy", selected: true }), "Expected History rollback to route into Deploy");
+      if (new URL(page.url()).searchParams.get("deploy_generation") !== "73") throw new Error(`Rollback did not preselect generation 73: ${page.url()}`);
+    },
+  },
+  {
+    name: "14d-task440-cross-surface-auth-navigation",
+    description: "TASK-440 environment return, exact deployment notification, hidden environment non-disclosure, and Compliance edit authorization",
+    action: async (page) => {
+      await routeEnvironmentWarningData(page);
+      await routeTask440FlakeOutputs(page);
+      console.log("  [14d] Routes installed; opening Environments");
+      await page.goto(`${baseUrl}/environments`, { timeout: LOAD_TIMEOUT });
+      console.log("  [14d] Environments loaded; opening Production");
+      await page.getByText("Production", { exact: true }).first().click();
+      const environmentPanel = page.locator(".side-panel").filter({ hasText: "Production" });
+      await assertVisible(environmentPanel, "Expected originating environment panel", 15000);
+      console.log("  [14d] Production panel visible; opening flake drawer");
+      await environmentPanel.getByRole("button", { name: "platform-core" }).click();
+      const flakeTray = page.getByRole("dialog", { name: "platform-core commits" });
+      await assertVisible(flakeTray, "Expected environment flake chip to open drawer", 15000);
+      console.log("  [14d] Flake drawer visible; closing it");
+      await Promise.all([
+        page.waitForURL((url) => url.pathname === "/environments" && url.searchParams.has("panel"), { waitUntil: "domcontentloaded" }),
+        flakeTray.getByRole("button", { name: "Close" }).evaluate((button) => button.click()),
+      ]);
+      await page.waitForLoadState("domcontentloaded");
+      const restoredPanel = page.locator(".side-panel").filter({ hasText: "Production" });
+      await assertVisible(restoredPanel, "Expected environment panel restored after drawer close", 15000);
+      console.log("  [14d] Environment panel restored; testing notification navigation");
+
+      await routeSystemsWarningData(page);
+      await routeTask440SystemData(page);
+      await page.unroute("**/api/v1/user/notifications**");
+      const notificationId = "44000000-0000-4000-8000-000000000099";
+      const notificationRequests = await mockAccountNotifications(page, {
+        id: notificationId,
+        category: "deploy_failures",
+        title: "Pending deployment approval",
+        summary: "Review this exact system",
+        route: `/systems/${TASK_440_SYSTEM_ID}?tab=deploy`,
+      });
+      const initialNotificationResponse = page.waitForResponse((response) => {
+        const url = new URL(response.url());
+        return response.request().method() === "GET" &&
+          url.pathname === "/api/v1/user/notifications";
+      }, { timeout: LOAD_TIMEOUT });
+      await Promise.all([
+        initialNotificationResponse,
+        page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT }),
+      ]);
+      await page.locator("[data-testid='topbar-notifications-button']").click();
+      const notification = page.locator(`[data-testid="topbar-notification-item-${notificationId}"]`);
+      await assertVisible(notification, "Expected pending deployment approval notification", 15000);
+      await notification.click();
+      await page.waitForURL((url) => url.pathname === `/systems/${TASK_440_SYSTEM_ID}` && url.searchParams.get("tab") === "deploy");
+      await assertVisible(page.getByRole("tab", { name: "Deploy", selected: true }), "Notification did not open exact Deploy tab");
+      if (notificationRequests.read.length !== 1) throw new Error(`Expected one notification read mutation, got ${notificationRequests.read.length}`);
+      console.log("  [14d] Notification navigation complete; testing non-disclosure");
+
+      const hiddenId = "00000000-0000-0000-0000-0000000000ff";
+      await page.route(new RegExp(`/api/v1/systems/${hiddenId}$`), async (route) => {
+        await route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ message: "not found" }) });
+      });
+      await page.goto(`${baseUrl}/systems/${hiddenId}?tab=config&config_mode=commit&revision=${TASK_440_CURRENT_SHA}`, { timeout: LOAD_TIMEOUT });
+      await assertVisible(page.getByText(/not found|unavailable/i).first(), "Expected non-disclosing hidden-environment state", 15000);
+      if ((await page.getByText("warning-system-01", { exact: true }).count()) > 0) throw new Error("Hidden system response disclosed protected identity");
+      console.log("  [14d] Non-disclosure complete; testing Compliance authorization");
+
+      const bundle = {
+        id: "44000000-0000-4000-8000-000000000010",
+        name: "TASK-440 baseline",
+        framework: "NIST 800-53",
+        version: "1.0",
+        description: "Authorization fixture",
+        layer: "baseline",
+        owner: "Security",
+        last_review: "2026-08-28T18:00:00Z",
+        policy_ids: [], required_envs: [], control_count: 4, environment_count: 1,
+        active_assignment_count: 0, current_draft_version_id: null, current_published_version_id: null,
+        current_draft_version: null, current_published_version: null, versions: [], policy_count: 0,
+        requirement_count: 4, applicable_system_count: 1, aggregate_score: 100,
+      };
+      await page.route("**/api/v1/compliance/bundles*", async (route) => {
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([bundle]) });
+      });
+      await page.goto(`${baseUrl}/compliance`, { timeout: LOAD_TIMEOUT });
+      await page.getByText("TASK-440 baseline", { exact: true }).first().click();
+      const drawer = page.getByRole("dialog").filter({ hasText: "TASK-440 baseline" });
+      await assertVisible(drawer, "Expected Compliance bundle drawer", 15000);
+      const editButtons = drawer.getByRole("button", { name: /Edit bundle/i });
+      if ((await editButtons.count()) !== 1) throw new Error(`Expected exactly one authorized outer Compliance Edit action, found ${await editButtons.count()}`);
+      console.log("  [14d] Admin authorization complete; switching to viewer");
+
+      await page.route("**/api/auth/whoami", async (route) => {
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ is_authenticated: true, auth_mode: "local", user: { id: "task440-viewer", email: "viewer@example.test", display_name: "TASK-440 Viewer" }, roles: ["Viewer"], is_admin: false }) });
+      });
+      await page.reload({ timeout: LOAD_TIMEOUT });
+      const viewerDrawer = page.getByRole("dialog").filter({ hasText: "TASK-440 baseline" });
+      await assertVisible(viewerDrawer, "Expected viewer Compliance drawer", 15000);
+      if (await viewerDrawer.getByRole("button", { name: /Edit bundle/i }).count()) throw new Error("Viewer received unauthorized Compliance Edit action");
+      console.log("  [14d] Viewer authorization complete");
+    },
+  },
+  {
     name: "31-not-found",
     description: "Catch-all 404 page renders for unknown routes inside the app shell",
     action: async (page) => {
@@ -14460,22 +17022,24 @@ if (process.env.CF_UI_STATIC_CONTRACTS === "1") {
   console.log(`  Visual themes: ${visualThemes.join(", ")}`);
   console.log("");
 
-  const browser = await chromium.launch({
+  const browserLaunchOptions = {
     ...(process.env.PLAYWRIGHT_EXECUTABLE_PATH
       ? { executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH }
       : {}),
     ...(process.env.PLAYWRIGHT_DISABLE_WEB_SECURITY === "1"
       ? { args: ["--disable-web-security"] }
       : {}),
-  });
+  };
+  let browser = await chromium.launch(browserLaunchOptions);
   // Use a single browser context to maintain session/cookies across steps.
   // Timezone and locale are pinned by the manifest so rendered timestamps and
   // number formats are reproducible across local Nix and CI runs.
-  const context = await browser.newContext({
+  const contextOptions = {
     viewport: MANIFEST.settings.viewport,
     timezoneId: MANIFEST.settings.timezoneId,
     locale: MANIFEST.settings.locale,
-  });
+  };
+  let context = await browser.newContext(contextOptions);
   const pageRuntimeErrors = [];
   const attachFatalPageHandlers = (runtimePage) => {
     runtimePage.on("pageerror", (error) => {
@@ -14496,8 +17060,43 @@ if (process.env.CF_UI_STATIC_CONTRACTS === "1") {
     p.waitForTimeout = (ms) => originalWaitForTimeout(Math.max(50, Math.floor(ms * 0.3)));
     return p;
   };
+  const closeWithin = async (close, timeoutMs) => {
+    await Promise.race([
+      close().catch(() => {}),
+      new Promise((resolve) => setTimeout(resolve, timeoutMs)),
+    ]);
+  };
 
   let page = await createStepPage();
+  const restartBrowser = async () => {
+    await closeWithin(() => page.close(), 10_000);
+    await closeWithin(() => context.close(), 10_000);
+    await closeWithin(() => browser.close(), 10_000);
+    browser = await chromium.launch(browserLaunchOptions);
+    context = await browser.newContext(contextOptions);
+    context.on("page", attachFatalPageHandlers);
+    page = await createStepPage();
+    if (process.env.CF_UI_TEST_STANDALONE === "1") {
+      await routeStandaloneUiBootstrap(page);
+    }
+    await ensureAuthenticated(page);
+  };
+  const runStepWithin = async (step, timeoutMs) => {
+    let timeout;
+    try {
+      await Promise.race([
+        step.action(page),
+        new Promise((_, reject) => {
+          timeout = setTimeout(
+            () => reject(new Error(`Step exceeded ${timeoutMs} ms`)),
+            timeoutMs,
+          );
+        }),
+      ]);
+    } finally {
+      clearTimeout(timeout);
+    }
+  };
 
   // Focused runs intentionally skip the ordered auth steps. Establish the
   // same authenticated session those steps would have created before running
@@ -14530,20 +17129,29 @@ if (process.env.CF_UI_STATIC_CONTRACTS === "1") {
     let error = null;
     let visuals = [];
 
-    try {
-      // INVARIANT: Each step starts at the manifest viewport. A step may use a
-      // different viewport for its own assertions and captures, but it must not
-      // make later baseline dimensions depend on the selected profile or order.
-      await page.setViewportSize(MANIFEST.settings.viewport);
-      await step.action(page);
+    // The real force-push workflow must not inherit route handlers or renderer
+    // state from the preceding stress-data workflows.
+    if (step.name === "13h-flakes-force-push-rewrite-recovery") {
+      console.log("  Restarting Chromium before force-push recovery");
+      await restartBrowser();
+      console.log("  Chromium restart and authentication complete");
+    }
 
-      // Take one screenshot per required visual theme. Baseline names include
-      // the theme suffix so reviewers can approve dark and light mode
-      // independently: <step>--dark.png and <step>--light.png.
-      visuals = [
-        ...(intermediateVisuals.get(step.name) || []),
-        ...(await captureThemedBaselines(page, step, visualThemes)),
-      ];
+
+    try {
+      // Each step starts at the manifest viewport; focused workflows may
+      // change it explicitly before their own captures.
+      await page.setViewportSize(MANIFEST.settings.viewport);
+      // timeouts. Keep one damaged renderer from consuming the complete VM
+      // check timeout, then replace the browser after any failed step.
+      await runStepWithin(step, 600_000);
+
+      if (step.name !== "13h-flakes-force-push-rewrite-recovery") {
+        visuals = [
+          ...(intermediateVisuals.get(step.name) || []),
+          ...(await captureThemedBaselines(page, step, visualThemes)),
+        ];
+      }
     } catch (err) {
       ok = false;
       error = err.message;
@@ -14563,15 +17171,8 @@ if (process.env.CF_UI_STATIC_CONTRACTS === "1") {
         });
       } catch (_) {}
 
-      // Isolate follow-up steps from lingering page state when a step fails.
-      try {
-        await page.close();
-      } catch (_) {}
-      page = await createStepPage();
-      if (process.env.CF_UI_TEST_STANDALONE === "1") {
-        await routeStandaloneUiBootstrap(page);
-      }
-      await ensureAuthenticated(page);
+      // Replace the browser after a damaged renderer or failed workflow.
+      await restartBrowser();
     }
 
     results.push({
@@ -14583,14 +17184,16 @@ if (process.env.CF_UI_STATIC_CONTRACTS === "1") {
     });
   }
 
-  // ── Design-parity capture pass (non-blocking) ───────────────────────────────
+  // ── Optional primary-view design-parity capture pass ───────────────────────
   // Capture the real Dioxus UI for the primary views in both themes so the
   // design-parity harness can compare them against the design-example targets.
-  // These captures never fail the check; compare-design-parity.js scores drift.
+  // TASK-440 canonical captures are produced by their merge-blocking steps above.
   const designParityDir = `${outputDir}/design-parity`;
-  let designParityCaptured = 0;
+  let designParityCaptured = fs.existsSync(designParityDir)
+    ? fs.readdirSync(designParityDir).filter((name) => name.endsWith(".dioxus.png")).length
+    : 0;
   const dioxusParityResults = [];
-  const captureDesignParity = process.env.CF_UI_SKIP_DESIGN_PARITY !== "1";
+  const captureDesignParity = !requestedSteps && process.env.CF_UI_SKIP_DESIGN_PARITY !== "1";
   if (captureDesignParity) try {
     const parityManifestPath = firstExistingPath([
       path.join(__dirname, "design-parity", "manifest.json"),
@@ -14702,8 +17305,16 @@ if (process.env.CF_UI_STATIC_CONTRACTS === "1") {
   }
   console.log(`Design-parity Dioxus captures: ${designParityCaptured}`);
 
-  await context.close();
-  await browser.close();
+  if (task440SemanticContracts.length) {
+    fs.mkdirSync(designParityDir, { recursive: true });
+    fs.writeFileSync(
+      `${designParityDir}/task440-semantic-contracts.json`,
+      JSON.stringify({ version: 1, results: task440SemanticContracts }, null, 2),
+    );
+  }
+
+  await closeWithin(() => context.close(), 10_000);
+  await closeWithin(() => browser.close(), 10_000);
   await settleFatalRuntimeEvents();
 
   if (fatalRuntimeEvents.length) {
@@ -14728,7 +17339,7 @@ if (process.env.CF_UI_STATIC_CONTRACTS === "1") {
   // ── Visual report ──────────────────────────────────────────────────────────
   const okCount = results.filter((r) => r.ok).length;
   const failCount = results.filter((r) => !r.ok).length;
-  const designReferenced = stepsToRun.filter((s) => s.designRef).length;
+  const designReferenced = stepsToRun.filter((step) => MANIFEST_STEPS.get(step.name)?.designRef).length;
   const themed = results.flatMap((r) => r.visuals || []);
 
   const visualReport = {

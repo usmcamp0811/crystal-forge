@@ -863,7 +863,7 @@ pub fn EvidenceDrawer(props: EvidenceDrawerProps) -> Element {
                         }
                         Link {
                             class: "btn btn-ghost xs focus-ring",
-                            to: Route::SystemDetailView { id: system.system_id.to_string(), tab: String::new(), poam: String::new() },
+                            to: Route::SystemDetailView { id: system.system_id.to_string(), tab: String::new(), poam: String::new(), config_mode: String::new(), revision: String::new(), generation: String::new(), deploy_generation: String::new() },
                             "Open system"
                             Icon { name: IconName::ArrowRight, size: 12 }
                         }

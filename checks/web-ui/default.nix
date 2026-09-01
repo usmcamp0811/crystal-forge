@@ -4,8 +4,8 @@
 # Crystal Forge server (PostgreSQL + gitserver), with:
 # - Explicit build verification (served index.html/JS loader, packaged WASM magic header)
 # - Semantic assertions + screenshots per coverage-manifest.json step
-# - Design-parity visual comparison: Dioxus screenshots vs rendered design
-#   example targets (docs/design/CrystalForge, vendored offline, non-blocking)
+# - Structural/geometry assertions and retained canonical TASK-440 captures
+# - Optional design drift gauge only for views with comparable rendered targets
 # - OSCAL and SARIF export validation against vendored schemas
 #
 # Coverage is defined in ./coverage-manifest.json — the check fails if the
@@ -34,7 +34,7 @@ let
   designParityDir = ./design-parity;
   CF_TEST_SERVER_PORT = 3000;
 
-  # ── Design-parity harness (non-blocking) ────────────────────────────────────
+  # ── Design-evidence harness ─────────────────────────────────────────────────
   # Vendor the design example's CDN dependencies so the tracked design gold
   # standard (docs/design/CrystalForge) renders fully offline inside the check
   # VM. sha256 hashes from nix-prefetch-url.
@@ -50,10 +50,15 @@ let
     url = "https://unpkg.com/@babel/standalone@7.29.0/babel.min.js";
     sha256 = "186f1mfjlcs49p0j0hss1m9cxpbpw9a12imli7kmr48953iaj8r6";
   };
+  jszip = pkgs.fetchurl {
+    url = "https://unpkg.com/jszip@3.10.1/dist/jszip.min.js";
+    hash = "sha256-rMfkFFWoB2W1/Zx+4bgHim0WC7vKRVrq6FTeZclH1Z4=";
+  };
 
   designExampleSrc = inputs.self + "/docs/design/CrystalForge";
+  designTargets = inputs.self.packages.${pkgs.system}.design-targets;
 
-  # Offline copy of the design example with the three CDN <script> tags rewritten
+  # Offline copy of the design example with the CDN <script> tags rewritten
   # to the vendored local files so Playwright can render it with no network.
   designExampleOffline = pkgs.runCommand "cf-design-example-offline" { } ''
     mkdir -p $out/vendor
@@ -62,6 +67,7 @@ let
     cp ${reactUmd} $out/vendor/react.development.js
     cp ${reactDomUmd} $out/vendor/react-dom.development.js
     cp ${babelStandalone} $out/vendor/babel.min.js
+    cp ${jszip} $out/vendor/jszip.min.js
 
     # Rewrite CDN script srcs to vendored paths and drop SRI/crossorigin so the
     # local files load without integrity/CORS checks.
@@ -69,6 +75,7 @@ let
       -e 's#src="https://unpkg.com/react@[^"]*"#src="vendor/react.development.js"#' \
       -e 's#src="https://unpkg.com/react-dom@[^"]*"#src="vendor/react-dom.development.js"#' \
       -e 's#src="https://unpkg.com/@babel/standalone@[^"]*"#src="vendor/babel.min.js"#' \
+      -e 's#src="https://unpkg.com/jszip@[^"]*"#src="vendor/jszip.min.js"#' \
       -e 's# integrity="[^"]*"##g' \
       -e 's# crossorigin="anonymous"##g' \
       $out/crystal-forge.html
@@ -168,6 +175,8 @@ in pkgs.testers.runNixOSTest {
     gitserver = lib.crystal-forge.makeGitServerNode {
       inherit pkgs systemBuildClosure;
       port = 8080;
+      # The force-push recovery workflow rewrites this disposable repository.
+      writableHttp = true;
     };
 
     # Attic binary cache
@@ -592,6 +601,7 @@ in pkgs.testers.runNixOSTest {
     # Copy test files and coverage manifest into the VM
     machine.succeed("cp -r ${testDir}/* /tmp/web-ui-tests/")
     machine.succeed("cp ${coverageManifest} /tmp/web-ui-tests/coverage-manifest.json")
+    machine.succeed("cp ${./design-fixtures.json} /tmp/web-ui-tests/design-fixtures.json")
     machine.succeed("mkdir -p /tmp/web-ui-baselines && cp -r ${baselinesDir}/. /tmp/web-ui-baselines/")
     machine.succeed("cp ${./default.nix} /tmp/web-ui-tests/default.nix")
 
@@ -633,7 +643,6 @@ in pkgs.testers.runNixOSTest {
           toString CF_TEST_SERVER_PORT
         } /tmp/screenshots; status=$?; printf \"%s\\n\" \"$status\" > /tmp/web-ui-tests/integration.exit' > /tmp/web-ui-tests/integration.log 2>&1 </dev/null &"
     )
-
     def export_failure_artifacts():
         # Preserve browser output and server diagnostics before rejecting the
         # derivation. Artifact export errors must not hide the original failure.
@@ -736,44 +745,78 @@ in pkgs.testers.runNixOSTest {
         except Exception as e:
             print(f"warning: could not copy {report_file}: {e}")
 
-    # === Visual Design-Parity Comparison (NON-BLOCKING) ===
+    # === TASK-440 Semantic Contract + Advisory Pixel Comparison ===
     # Render the tracked design example (offline, shared fixture) for the primary
     # views/themes, then compare against the real Dioxus captures produced by the
     # integration test above. This is the primary visual comparison — the design
-    # example IS the baseline. Results are reported as a directional drift gauge
-    # and a summary matrix, but the check never fails on visual mismatch alone.
-    print("=== Design-Parity Visual Comparison (design vs Dioxus, non-blocking) ===")
-    try:
-        machine.succeed("mkdir -p /tmp/design-targets /tmp/design-parity")
-        machine.succeed(
-            "${pkgs.nodejs}/bin/node /tmp/web-ui-tests/design-parity/generate-design-targets.js "
-            "/tmp/design-example /tmp/web-ui-tests/design-parity/manifest.json /tmp/design-targets "
-            "> /tmp/web-ui-tests/design-targets.log 2>&1 || true"
-        )
-        print(machine.succeed("cat /tmp/web-ui-tests/design-targets.log || true"))
-        machine.succeed(
-            "${pkgs.nodejs}/bin/node /tmp/web-ui-tests/design-parity/compare-design-parity.js "
-            "/tmp/web-ui-tests/design-parity/manifest.json /tmp/design-targets "
-            "/tmp/screenshots/design-parity /tmp/design-parity "
-            "> /tmp/web-ui-tests/design-parity.log 2>&1 || true"
-        )
-        print(machine.succeed("cat /tmp/web-ui-tests/design-parity.log || true"))
+    # Semantic contracts and successful comparison execution are blocking. RMSE
+    # values remain advisory and never fail solely because pixels differ.
+    print("=== TASK-440 semantic contract and design comparison ===")
+    parity_manifest = json.loads(machine.succeed("cat /tmp/web-ui-tests/design-parity/manifest.json"))
+    result_names = {result["name"] for result in results}
+    selected_targets = [
+        target for target in parity_manifest.get("targets", {}).get("task440", [])
+        if target.get("dioxusStep") in result_names
+    ]
+    themes = parity_manifest.get("settings", {}).get("themes", [])
+    expected_pairs = len(selected_targets) * len(themes)
+    if expected_pairs == 0:
+        print("No mapped TASK-440 targets selected; skipping mapped semantic/pixel evidence")
+    target_names = ",".join(target["name"] for target in selected_targets) or "__none__"
+    focused_env = f"CF_TASK440_TARGETS={target_names} " if test_steps else ""
 
-        # Copy design-parity artifacts out (report, summary, montages, matrix grid, raw sides).
-        for report_file in ["design-drift-report.json", "design-drift-summary.md"]:
-            if machine.execute(f"test -f /tmp/design-parity/{report_file}")[0] == 0:
-                machine.copy_from_vm(f"/tmp/design-parity/{report_file}", "screenshots")
-        if machine.execute("test -d /tmp/design-parity/montages")[0] == 0:
-            machine.copy_from_vm("/tmp/design-parity/montages", "screenshots")
-        for grid_file in ["design-parity-matrix.png"]:
-            if machine.execute(f"test -f /tmp/design-parity/{grid_file}")[0] == 0:
-                machine.copy_from_vm(f"/tmp/design-parity/{grid_file}", "screenshots")
-        if machine.execute("test -d /tmp/design-targets")[0] == 0:
-            machine.copy_from_vm("/tmp/design-targets", "screenshots")
-        if machine.execute("test -d /tmp/screenshots/design-parity")[0] == 0:
-            machine.copy_from_vm("/tmp/screenshots/design-parity", "screenshots")
-    except Exception as e:
-        print(f"warning: design-parity harness error (non-blocking): {e}")
+    # The design-target package is a blocking derivation dependency. Reuse its
+    # validated output instead of compiling the Babel design a second time in
+    # the busy VM, where unrelated server jobs can starve Chromium.
+    machine.succeed("mkdir -p /tmp/design-targets /tmp/design-parity")
+    machine.succeed("cp -r ${designTargets}/. /tmp/design-targets/")
+
+    generated = json.loads(machine.succeed("cat /tmp/design-targets/design-targets.json"))["results"]
+    selected_target_names = {target["name"] for target in selected_targets}
+    generated_task440 = [
+        result for result in generated
+        if result.get("group") == "task440" and result.get("target") in selected_target_names
+    ]
+    if len(generated_task440) != expected_pairs:
+        raise Exception(f"Expected {expected_pairs} generated TASK-440 pairs, found {len(generated_task440)}")
+    generation_errors = [result for result in generated_task440 if not result.get("ok") or not result.get("semanticContract", {}).get("ok")]
+    if generation_errors:
+        raise Exception(f"TASK-440 design semantic generation failures: {generation_errors}")
+
+    dioxus_contracts = [] if expected_pairs == 0 else json.loads(machine.succeed("cat /tmp/screenshots/design-parity/task440-semantic-contracts.json"))["results"]
+    if len(dioxus_contracts) != expected_pairs or any(not result.get("ok") for result in dioxus_contracts):
+        raise Exception(f"Expected {expected_pairs} successful Dioxus semantic contracts, got {dioxus_contracts}")
+
+    comparison_status, _ = machine.execute(
+        f"{focused_env}${pkgs.nodejs}/bin/node /tmp/web-ui-tests/design-parity/compare-design-parity.js "
+        "/tmp/web-ui-tests/design-parity/manifest.json /tmp/design-targets "
+        "/tmp/screenshots/design-parity /tmp/design-parity "
+        "> /tmp/web-ui-tests/design-parity.log 2>&1"
+    )
+    print(machine.succeed("cat /tmp/web-ui-tests/design-parity.log"))
+    if comparison_status != 0:
+        raise Exception(f"TASK-440 design comparison failed with exit code {comparison_status}")
+
+    parity_report = json.loads(machine.succeed("cat /tmp/design-parity/design-drift-report.json"))
+    task440_rows = [row for row in parity_report["rows"] if row.get("group") == "task440"]
+    if len(task440_rows) != expected_pairs:
+        raise Exception(f"Expected {expected_pairs} reported TASK-440 comparisons, found {len(task440_rows)}")
+    bad_rows = [row for row in task440_rows if row.get("status") != "compared"]
+    if bad_rows or parity_report.get("counts", {}).get("errors") != 0:
+        raise Exception(f"TASK-440 comparison status/errors are not clean: rows={bad_rows}, counts={parity_report.get('counts')}")
+    if parity_report.get("counts", {}).get("task440Compared") != expected_pairs:
+        raise Exception(f"Expected {expected_pairs} successful TASK-440 comparisons, report has {parity_report.get('counts', {}).get('task440Compared')}")
+
+    # Copy the complete retained evidence: report, raw captures, content-surface
+    # montages, and absolute-difference images.
+    for report_file in ["design-drift-report.json", "design-drift-summary.md"]:
+        machine.copy_from_vm(f"/tmp/design-parity/{report_file}", "screenshots")
+    for artifact_dir in ["montages", "diffs"]:
+        machine.copy_from_vm(f"/tmp/design-parity/{artifact_dir}", "screenshots")
+    if machine.execute("test -f /tmp/design-parity/design-parity-matrix.png")[0] == 0:
+        machine.copy_from_vm("/tmp/design-parity/design-parity-matrix.png", "screenshots")
+    machine.copy_from_vm("/tmp/design-targets", "screenshots")
+    machine.copy_from_vm("/tmp/screenshots/design-parity", "screenshots")
 
     ok_count = sum(1 for r in results if r.get("ok"))
     intermediate_count = sum(
@@ -824,6 +867,21 @@ in pkgs.testers.runNixOSTest {
       "30c-admin-automatic-retries-failed-save-retains-draft",
       "30d-evidence-lifecycle",
       "30e-policy-card-direct-edit-preserves-evidence",
+      "12l-task440-config-lifecycle",
+      "12m-task440-config-explorer-keyboard-wide",
+      "12n-task440-config-narrow-keyboard",
+      "12p-task440-config-canonical-wide-expanded",
+      "12q-task440-config-canonical-narrow",
+      "13j-task440-flake-states-panes-navigation",
+      "13l-task440-flake-systems-canonical-wide",
+      "13m-task440-flake-systems-canonical-narrow",
+      "13n-task440-flake-modules-canonical-wide-expanded",
+      "13o-task440-flake-modules-canonical-narrow-expanded",
+      "13p-task440-flake-inputs-canonical-wide",
+      "13q-task440-flake-inputs-canonical-narrow",
+      "13k-task440-drawer-modal-keyboard-layering",
+      "12o-task440-rollback-notification-auto-latest",
+      "14d-task440-cross-surface-auth-navigation",
       "task433-canonical-large-catalog",
       "20af-policy-catalog-selection-delete-regressions",
       "19-policies-new-modal-fields",
@@ -862,10 +920,9 @@ in pkgs.testers.runNixOSTest {
     if failed_critical:
         integration_failures.append(f"Critical web UI checks failed: {failed_critical}")
 
-    # === Phase 4b: Visual Baseline Gate ===
-    # Steps marked "strict" in coverage-manifest.json must match their
-    # approved baseline within the configured threshold; "advisory" steps are
-    # reported (with diff images in screenshots/diffs) but never block.
+    # TASK-440 semantic, lifecycle, geometry, scroll, and stacking assertions
+    # remain merge-blocking through critical_tests above. The mapped React vs
+    # Dioxus pixel comparisons are advisory and retain montages for review.
     visual_report_json = machine.succeed("cat /tmp/screenshots/visual-report.json")
     visual_report = json.loads(visual_report_json)
     counts = visual_report.get("counts")

@@ -36,6 +36,12 @@ enum NotificationKind {
     Evaluation,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+enum NotificationTarget {
+    Route(Route),
+    SystemDeploy(String),
+}
+
 fn set_root_attr(name: &str, value: &str) {
     if let Some(document) = web_sys::window().and_then(|w| w.document()) {
         if let Some(root) = document.document_element() {
@@ -149,31 +155,52 @@ fn notification_color(category: NotificationCategory) -> &'static str {
     }
 }
 
-fn notification_route(route: &str) -> Option<Route> {
+fn notification_target(route: &str) -> Option<NotificationTarget> {
     if let Some(poam_id) = route.strip_prefix("/compliance?poam=") {
         if uuid::Uuid::parse_str(poam_id).is_ok() {
-            return Some(Route::ComplianceView {
+            return Some(NotificationTarget::Route(Route::ComplianceView {
                 bundle: String::new(),
                 version: String::new(),
                 system: String::new(),
                 policy: String::new(),
                 poam: poam_id.to_string(),
                 view: String::new(),
-            });
+            }));
         }
-        None
-    } else if route.starts_with("/systems") {
-        Some(Route::SystemsView {})
-    } else if route.starts_with("/builds") {
-        Some(Route::BuildsView {})
-    } else if route.starts_with("/cves") {
-        Some(Route::CvesView {})
-    } else if route.starts_with("/evaluations") {
-        Some(Route::EvaluationsView {})
-    } else if route.starts_with("/profile") {
-        Some(Route::ProfileView {})
-    } else {
-        None
+        return None;
+    }
+
+    let (path, query) = route.split_once('?').unwrap_or((route, ""));
+    let segments = path
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    if let ["systems", id] = segments.as_slice()
+        && uuid::Uuid::parse_str(id).is_ok()
+        && query
+            .split('&')
+            .filter_map(|part| part.split_once('='))
+            .any(|(key, value)| key == "tab" && value == "deploy")
+    {
+        return Some(NotificationTarget::SystemDeploy((*id).to_string()));
+    }
+    match path {
+        "/systems" => Some(NotificationTarget::Route(Route::SystemsView {
+            query: String::new(),
+        })),
+        "/builds" => Some(NotificationTarget::Route(Route::BuildsView {})),
+        "/cves" => Some(NotificationTarget::Route(Route::CvesView {})),
+        "/evaluations" => Some(NotificationTarget::Route(Route::EvaluationsView {})),
+        "/profile" => Some(NotificationTarget::Route(Route::ProfileView {})),
+        _ => None,
+    }
+}
+
+fn open_system_deploy(id: &str) {
+    if let Some(window) = web_sys::window() {
+        let _ = window
+            .location()
+            .set_href(&format!("/systems/{id}?tab=deploy"));
     }
 }
 
@@ -559,13 +586,18 @@ pub fn TopBar(title: String) -> Element {
                                         },
                                     onclick: {
                                         let nav = nav.clone();
-                                        let route = notification_route(&item.route);
+                                        let target = notification_target(&item.route);
                                         let item_id = item.id;
                                         let requested_generation = auth_generation;
                                         move |_| {
                                             close_notifications(notifications_open);
-                                            if let Some(route) = route.clone() {
-                                                nav.push(route);
+                                            if let Some(target) = target.clone() {
+                                                match target {
+                                                    NotificationTarget::Route(route) => {
+                                                        nav.push(route);
+                                                    }
+                                                    NotificationTarget::SystemDeploy(id) => open_system_deploy(&id),
+                                                }
                                             }
                                             spawn(async move {
                                                 if current_topbar_auth_generation(app_state) == requested_generation
@@ -922,7 +954,10 @@ pub fn TopBar(title: String) -> Element {
 
 #[cfg(test)]
 mod tests {
-    use super::{notification_accessible_label, notification_focus_index, notification_route};
+    use super::{
+        NotificationTarget, notification_accessible_label, notification_focus_index,
+        notification_target,
+    };
     use crate::api::models::{NotificationCategory, UserNotificationDto};
     use crate::routes::Route;
 
@@ -930,36 +965,68 @@ mod tests {
     fn notification_route_accepts_only_exact_poam_query() {
         let poam_id = "0198f3f0-e8cc-7e5d-b53d-0f31840c8712";
         assert_eq!(
-            notification_route(&format!("/compliance?poam={poam_id}")),
-            Some(Route::ComplianceView {
+            notification_target(&format!("/compliance?poam={poam_id}")),
+            Some(NotificationTarget::Route(Route::ComplianceView {
                 bundle: String::new(),
                 version: String::new(),
                 system: String::new(),
                 policy: String::new(),
                 poam: poam_id.to_string(),
                 view: String::new(),
-            })
+            }))
         );
         assert_eq!(
-            notification_route(&format!("/compliance?poam={poam_id}&view=summary")),
+            notification_target(&format!("/compliance?poam={poam_id}&view=summary")),
             None
         );
-        assert_eq!(notification_route("/compliance?poam=not-a-uuid"), None);
+        assert_eq!(notification_target("/compliance?poam=not-a-uuid"), None);
     }
 
     #[test]
     fn notification_route_preserves_existing_destinations() {
         assert_eq!(
-            notification_route("/systems?state=offline"),
-            Some(Route::SystemsView {})
+            notification_target("/systems?state=offline"),
+            Some(NotificationTarget::Route(Route::SystemsView {
+                query: String::new(),
+            }))
         );
-        assert_eq!(notification_route("/builds"), Some(Route::BuildsView {}));
-        assert_eq!(notification_route("/cves"), Some(Route::CvesView {}));
         assert_eq!(
-            notification_route("/evaluations"),
-            Some(Route::EvaluationsView {})
+            notification_target("/builds"),
+            Some(NotificationTarget::Route(Route::BuildsView {}))
         );
-        assert_eq!(notification_route("/profile"), Some(Route::ProfileView {}));
+        assert_eq!(
+            notification_target("/cves"),
+            Some(NotificationTarget::Route(Route::CvesView {}))
+        );
+        assert_eq!(
+            notification_target("/evaluations"),
+            Some(NotificationTarget::Route(Route::EvaluationsView {}))
+        );
+        assert_eq!(
+            notification_target("/profile"),
+            Some(NotificationTarget::Route(Route::ProfileView {}))
+        );
+    }
+
+    #[test]
+    fn deployment_notification_parses_exact_system_and_deploy_tab() {
+        let id = "26ee295d-7f12-48ae-99b5-2ccf07716782";
+        assert_eq!(
+            notification_target(&format!("/systems/{id}?notice=pending&tab=deploy")),
+            Some(NotificationTarget::SystemDeploy(id.to_string()))
+        );
+        assert_eq!(
+            notification_target("/systems"),
+            Some(NotificationTarget::Route(Route::SystemsView {
+                query: String::new(),
+            }))
+        );
+        assert_eq!(notification_target("/systems-not-really"), None);
+        assert_eq!(
+            notification_target(&format!("/systems/{id}?tab=deployment")),
+            None
+        );
+        assert_eq!(notification_target("/systems/not-a-uuid?tab=deploy"), None);
     }
 
     #[test]

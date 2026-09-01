@@ -3,6 +3,7 @@
 //! Components for displaying and interacting with system data,
 //! including info cards, status displays, and system-specific forms.
 
+pub mod auto_latest_deploy_prompt;
 pub mod cards;
 pub mod deploy_system_modal;
 pub mod edit_system_modal;
@@ -13,6 +14,10 @@ pub mod system_card;
 pub mod system_card_v2;
 pub mod tabs;
 
+pub use auto_latest_deploy_prompt::{
+    AutoLatestDeployEvent, AutoLatestDeployPrompt, AutoLatestDeployState,
+    deployment_request_for_target, reduce_auto_latest_deploy_state,
+};
 pub use cards::{AgentCard, HardwareCard, NetworkCard, SecurityCard, SystemInfoCard};
 pub use edit_system_modal::EditSystemModal;
 pub use helpers::{

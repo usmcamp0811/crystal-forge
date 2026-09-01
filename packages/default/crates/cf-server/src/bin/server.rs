@@ -97,6 +97,43 @@ async fn main() -> anyhow::Result<()> {
     let pool = db_pool().await?;
     tokio::spawn(memory_monitor_task(pool.clone()));
     sqlx::migrate!("./migrations").run(&pool).await?;
+    let (option_orphans, flake_orphans) =
+        crystal_forge::queries::evaluation_snapshots::reclaim_orphaned_snapshot_content(&pool)
+            .await?;
+    if option_orphans > 0 || flake_orphans > 0 {
+        info!(
+            option_orphans,
+            flake_orphans, "reclaimed orphaned snapshot content"
+        );
+    }
+    let snapshot_gc_pool = pool.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(15 * 60));
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            // Each pass is bounded in SQL. Loop until both content tables are
+            // drained so a large evaluator retry cannot leave permanent debris.
+            loop {
+                match crystal_forge::queries::evaluation_snapshots::reclaim_orphaned_snapshot_content(
+                    &snapshot_gc_pool,
+                )
+                .await
+                {
+                    Ok((0, 0)) => break,
+                    Ok((option_rows, flake_rows)) => info!(
+                        option_rows,
+                        flake_rows,
+                        "reclaimed orphaned snapshot content"
+                    ),
+                    Err(error) => {
+                        warn!(error = %error, "snapshot content reclamation failed");
+                        break;
+                    }
+                }
+            }
+        }
+    });
     let encrypted_rows = encrypt_plaintext_cache_secrets(&pool).await?;
     if encrypted_rows > 0 {
         info!(
@@ -469,6 +506,22 @@ async fn main() -> anyhow::Result<()> {
             get(systems::get_system_generations),
         )
         .route(
+            "/api/v1/systems/:id/evaluated-options",
+            get(systems::get_system_evaluated_options),
+        )
+        .route(
+            "/api/v1/systems/:id/evaluation-summary",
+            get(systems::get_system_evaluation_summary),
+        )
+        .route(
+            "/api/v1/systems/:id/evaluation-module-sources",
+            get(systems::get_system_evaluation_module_sources),
+        )
+        .route(
+            "/api/v1/systems/:id/evaluations/:revision",
+            post(systems::queue_system_evaluation_snapshot),
+        )
+        .route(
             "/api/v1/systems/:id/verify-generation-closure",
             post(systems::verify_generation_closure),
         )
@@ -751,6 +804,14 @@ async fn main() -> anyhow::Result<()> {
             post(flakes::accept_flake_history_rewrite),
         )
         .route("/api/v1/flakes/timelines", get(flakes::get_flake_timelines))
+        .route(
+            "/api/v1/flakes/:id/revisions/:revision/outputs",
+            get(flakes::get_flake_revision_outputs),
+        )
+        .route(
+            "/api/v1/flakes/:id/revisions/:revision/modules/:module/declarations",
+            get(flakes::get_flake_module_declarations),
+        )
         .route(
             "/api/v1/flakes/:id/commits/:hash/diff",
             get(flakes::get_commit_diff_handler),

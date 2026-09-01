@@ -4,6 +4,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
+use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use sqlx::Row;
 use std::collections::BTreeSet;
@@ -12,13 +13,14 @@ use uuid::Uuid;
 use crate::api::models::{
     ApiError, AuditAction, CommitInfo, CreateSystemRequest, CveScanEligibilityResponse,
     CveScanStatusResponse, CveScanTriggerResponse, CveSummary, DeploySystemRequest,
-    DeploymentStatus, FieldUpdate, PipelineStage, SaveSystemCveJustificationRequest, SortOrder,
-    SystemAgentEvent, SystemCommitsResponse, SystemDeploymentProgress, SystemDetail,
-    SystemGeneration, SystemGenerationsResponse, SystemHardwareInfo, SystemHistoryEntry,
-    SystemMutationResponse, SystemNetworkInfo, SystemRollbackGenerationRequest,
-    SystemRollbackRequest, SystemSecurityInfo, SystemSummary, SystemVulnerability,
-    SystemsListParams, UpdateSystemPublicKeyRequest, UpdateSystemRequest,
-    VerifyGenerationClosureRequest, VerifyGenerationClosureResponse,
+    DeploymentStatus, FieldUpdate, ManualDeploymentAction, ManualDeploymentConversionState,
+    ManualDeploymentPolicyState, ManualDeploymentRequestState, ManualDeploymentResponse,
+    PipelineStage, SaveSystemCveJustificationRequest, SortOrder, SystemAgentEvent,
+    SystemCommitsResponse, SystemDeploymentProgress, SystemDetail, SystemGeneration,
+    SystemGenerationsResponse, SystemHardwareInfo, SystemHistoryEntry, SystemMutationResponse,
+    SystemNetworkInfo, SystemRollbackGenerationRequest, SystemRollbackRequest, SystemSecurityInfo,
+    SystemSummary, SystemVulnerability, SystemsListParams, UpdateSystemPublicKeyRequest,
+    UpdateSystemRequest, VerifyGenerationClosureRequest, VerifyGenerationClosureResponse,
 };
 use crate::auth::models::Role;
 use crate::handlers::agent_request::CFState;
@@ -27,6 +29,12 @@ use crate::handlers::api::rbac::{
     authenticated_user_roles, extract_request_origin, require_viewer_or_above,
 };
 use crate::models::auth_identity::AuthRole;
+use crate::models::evaluation_snapshots::{
+    AgentFingerprintStatus, EvaluatedOptionCounts, EvaluatedOptionsPage, EvaluatedOptionsParams,
+    EvaluationDrift, EvaluationModuleSourcesPage, EvaluationModuleSourcesParams,
+    SelectedEvaluationSummary, SelectedEvaluationSummaryParams, SevenDayDriftStatus,
+    SnapshotLifecycle, SnapshotRevisionMode,
+};
 use crate::queries::build_jobs::enqueue_build_job_for_derivation;
 use crate::queries::cve_scans::{get_scan_by_id, resolve_system_cve_scan_target};
 use crate::queries::derivations::reset_derivation_for_rebuild;
@@ -38,8 +46,8 @@ use crate::queries::system_states::{
     fetch_system_generations, find_generation_store_path_last_seen,
 };
 use crate::queries::systems::{
-    FqdnUpdate, HeartbeatIntervalUpdate, SystemAccessRow, SystemDetailRow, SystemListRow,
-    commit_belongs_to_system_flake, deactivate_system, find_system_access_row,
+    FqdnUpdate, HeartbeatIntervalUpdate, ManualPolicyConversion, SystemAccessRow, SystemDetailRow,
+    SystemListRow, commit_belongs_to_system_flake, deactivate_system, find_system_access_row,
     find_system_deployment_derivation, get_system_detail_by_id,
     get_user_environment_membership_ids, list_recent_commits_for_system, list_system_access_rows,
     list_system_agent_event_rows, list_system_history_rows, touch_system_updated_at,
@@ -111,7 +119,6 @@ pub async fn create_system(
     if !caller_role.can_mutate_systems() {
         return forbidden_mutation();
     }
-
     // Validate required fields
     let hostname = payload.hostname.trim();
     if hostname.is_empty() {
@@ -247,6 +254,476 @@ pub async fn get_system(
     let detail = detail_row_to_api_model(row, state.server_config.heartbeat_interval_secs);
 
     (StatusCode::OK, Json(detail)).into_response()
+}
+
+/// Returns a bounded page of cached evaluated options for one system revision.
+///
+/// This read path is database-only. It never invokes Nix, Git, or network work.
+/// Hidden systems and revisions from another flake return the same 404 response.
+pub async fn get_system_evaluated_options(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(system_id): Path<Uuid>,
+    Query(params): Query<EvaluatedOptionsParams>,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+    let Some(caller_role) = highest_role(&roles) else {
+        return forbidden();
+    };
+    let memberships = match load_membership_environment_ids(&pool, user_id).await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to load environment memberships"),
+    };
+    let access = match find_system_access_row(&pool, system_id).await {
+        Ok(Some(value)) => value,
+        Ok(None) => return not_found(),
+        Err(_) => return internal_error("Failed to load system"),
+    };
+    if !caller_role.can_access_system_environment(access.environment_id, &memberships) {
+        return not_found();
+    }
+
+    if params.mode == SnapshotRevisionMode::Commit && !is_full_commit_sha(&params.revision) {
+        return bad_request("revision must be a full 40- or 64-character commit SHA");
+    }
+    let selected = match params.mode {
+        SnapshotRevisionMode::Commit => {
+            crate::queries::evaluation_snapshots::select_commit_snapshot(
+                &pool,
+                system_id,
+                &params.revision,
+            )
+            .await
+        }
+        SnapshotRevisionMode::Generation => {
+            let Some(generation) = params.generation else {
+                return bad_request("generation is required in generation mode");
+            };
+            crate::queries::evaluation_snapshots::select_generation_snapshot(
+                &pool, system_id, generation,
+            )
+            .await
+        }
+    };
+    let selected = match selected {
+        Ok(Some(value)) => value,
+        Ok(None) if params.mode == SnapshotRevisionMode::Commit => {
+            let lifecycle = match crate::queries::evaluation_snapshots::missing_snapshot_lifecycle(
+                &pool,
+                system_id,
+                &params.revision,
+            )
+            .await
+            {
+                Ok(Some(value)) => value,
+                Ok(None) => return not_found(),
+                Err(_) => return internal_error("Failed to load evaluation lifecycle"),
+            };
+            return (StatusCode::OK, Json(empty_options_page(&params, lifecycle))).into_response();
+        }
+        Ok(None) => {
+            return (
+                StatusCode::OK,
+                Json(empty_options_page(
+                    &params,
+                    (SnapshotLifecycle::Unavailable, None),
+                )),
+            )
+                .into_response();
+        }
+        Err(error) => {
+            tracing::error!(system_id = %system_id, error = %error, "failed to select evaluation snapshot");
+            return internal_error("Failed to load evaluation snapshot");
+        }
+    };
+
+    match crate::queries::evaluation_snapshots::query_options_page(
+        &pool,
+        system_id,
+        &selected,
+        (caller_role != Role::Admin).then_some(user_id),
+        &params.search,
+        params.filter,
+        params.limit.unwrap_or(50),
+        params.offset.unwrap_or(0),
+    )
+    .await
+    {
+        Ok(page) => (StatusCode::OK, Json(page)).into_response(),
+        Err(error) => {
+            tracing::error!(system_id = %system_id, error = %error, "failed to query evaluated options");
+            internal_error("Failed to load evaluated options")
+        }
+    }
+}
+
+/// Returns complete selected-revision module, evaluation, and drift metadata.
+///
+/// This endpoint is database-only and applies system authorization before it
+/// selects a snapshot or resolves any registered provenance identity.
+pub async fn get_system_evaluation_summary(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(system_id): Path<Uuid>,
+    Query(params): Query<SelectedEvaluationSummaryParams>,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+    let Some(caller_role) = highest_role(&roles) else {
+        return forbidden();
+    };
+    let memberships = match load_membership_environment_ids(&pool, user_id).await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to load environment memberships"),
+    };
+    let access = match find_system_access_row(&pool, system_id).await {
+        Ok(Some(value)) => value,
+        Ok(None) => return not_found(),
+        Err(_) => return internal_error("Failed to load system"),
+    };
+    if !caller_role.can_access_system_environment(access.environment_id, &memberships) {
+        return not_found();
+    }
+
+    if params.mode == SnapshotRevisionMode::Commit && !is_full_commit_sha(&params.revision) {
+        return bad_request("revision must be a full 40- or 64-character commit SHA");
+    }
+    let selected = match params.mode {
+        SnapshotRevisionMode::Commit => {
+            crate::queries::evaluation_snapshots::select_commit_snapshot(
+                &pool,
+                system_id,
+                &params.revision,
+            )
+            .await
+        }
+        SnapshotRevisionMode::Generation => {
+            let Some(generation) = params.generation else {
+                return bad_request("generation is required in generation mode");
+            };
+            crate::queries::evaluation_snapshots::select_generation_snapshot(
+                &pool, system_id, generation,
+            )
+            .await
+        }
+    };
+    let selected = match selected {
+        Ok(Some(value)) => value,
+        Ok(None) if params.mode == SnapshotRevisionMode::Commit => {
+            let lifecycle = match crate::queries::evaluation_snapshots::missing_snapshot_lifecycle(
+                &pool,
+                system_id,
+                &params.revision,
+            )
+            .await
+            {
+                Ok(Some(value)) => value,
+                Ok(None) => return not_found(),
+                Err(_) => return internal_error("Failed to load evaluation lifecycle"),
+            };
+            return (
+                StatusCode::OK,
+                Json(empty_evaluation_summary(&params, lifecycle)),
+            )
+                .into_response();
+        }
+        Ok(None) => {
+            return (
+                StatusCode::OK,
+                Json(empty_evaluation_summary(
+                    &params,
+                    (SnapshotLifecycle::Unavailable, None),
+                )),
+            )
+                .into_response();
+        }
+        Err(error) => {
+            tracing::error!(system_id = %system_id, error = %error, "failed to select evaluation summary snapshot");
+            return internal_error("Failed to load evaluation summary");
+        }
+    };
+
+    match crate::queries::evaluation_snapshots::get_selected_evaluation_summary(
+        &pool, system_id, &selected,
+    )
+    .await
+    {
+        Ok(summary) => (StatusCode::OK, Json(summary)).into_response(),
+        Err(error) => {
+            tracing::error!(system_id = %system_id, error = %error, "failed to load evaluation summary");
+            internal_error("Failed to load evaluation summary")
+        }
+    }
+}
+
+/// Returns one bounded page of exact module sources for a selected evaluation.
+///
+/// The endpoint applies non-disclosing system authorization before snapshot
+/// selection. Reads are database-only, and pagination is clamped to the same
+/// bounds as evaluated options.
+pub async fn get_system_evaluation_module_sources(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(system_id): Path<Uuid>,
+    Query(params): Query<EvaluationModuleSourcesParams>,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+    let Some(caller_role) = highest_role(&roles) else {
+        return forbidden();
+    };
+    let memberships = match load_membership_environment_ids(&pool, user_id).await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to load environment memberships"),
+    };
+    let access = match find_system_access_row(&pool, system_id).await {
+        Ok(Some(value)) => value,
+        Ok(None) => return not_found(),
+        Err(_) => return internal_error("Failed to load system"),
+    };
+    if !caller_role.can_access_system_environment(access.environment_id, &memberships) {
+        return not_found();
+    }
+    if params.mode == SnapshotRevisionMode::Commit && !is_full_commit_sha(&params.revision) {
+        return bad_request("revision must be a full 40- or 64-character commit SHA");
+    }
+    if let Err(message) = validate_evaluation_module_sources_params(&params) {
+        return bad_request(message);
+    }
+
+    let selected = match params.mode {
+        SnapshotRevisionMode::Commit => {
+            crate::queries::evaluation_snapshots::select_commit_snapshot(
+                &pool,
+                system_id,
+                &params.revision,
+            )
+            .await
+        }
+        SnapshotRevisionMode::Generation => {
+            let Some(generation) = params.generation else {
+                return bad_request("generation is required in generation mode");
+            };
+            crate::queries::evaluation_snapshots::select_generation_snapshot(
+                &pool, system_id, generation,
+            )
+            .await
+        }
+    };
+    let selected = match selected {
+        Ok(Some(value)) => value,
+        Ok(None) if params.mode == SnapshotRevisionMode::Commit => {
+            let lifecycle = match crate::queries::evaluation_snapshots::missing_snapshot_lifecycle(
+                &pool,
+                system_id,
+                &params.revision,
+            )
+            .await
+            {
+                Ok(Some(value)) => value,
+                Ok(None) => return not_found(),
+                Err(_) => return internal_error("Failed to load evaluation lifecycle"),
+            };
+            return (
+                StatusCode::OK,
+                Json(empty_evaluation_module_sources(&params, lifecycle)),
+            )
+                .into_response();
+        }
+        Ok(None) => {
+            return (
+                StatusCode::OK,
+                Json(empty_evaluation_module_sources(
+                    &params,
+                    (SnapshotLifecycle::Unavailable, None),
+                )),
+            )
+                .into_response();
+        }
+        Err(error) => {
+            tracing::error!(system_id = %system_id, error = %error, "failed to select evaluation module sources snapshot");
+            return internal_error("Failed to load evaluation module sources");
+        }
+    };
+
+    match crate::queries::evaluation_snapshots::get_evaluation_module_sources_page(
+        &pool,
+        system_id,
+        &selected,
+        (caller_role != Role::Admin).then_some(user_id),
+        params.snapshot_token.as_deref(),
+        params.limit.unwrap_or(50),
+        params.offset.unwrap_or(0),
+    )
+    .await
+    {
+        Ok(crate::queries::evaluation_snapshots::EvaluationModuleSourcesQuery::Page(page)) => {
+            (StatusCode::OK, Json(page)).into_response()
+        }
+        Ok(crate::queries::evaluation_snapshots::EvaluationModuleSourcesQuery::SnapshotChanged) => {
+            (
+                StatusCode::CONFLICT,
+                Json(ApiError {
+                    error: "snapshot_changed".to_string(),
+                    message: "Evaluation snapshot changed; reload module sources from offset 0"
+                        .to_string(),
+                    details: None,
+                }),
+            )
+                .into_response()
+        }
+        Err(error) => {
+            tracing::error!(system_id = %system_id, error = %error, "failed to query evaluation module sources");
+            internal_error("Failed to load evaluation module sources")
+        }
+    }
+}
+
+/// Explicitly queues missing revision evaluation or reuses existing work.
+///
+/// The action requires administrator privileges because evaluation processes
+/// the complete commit. It applies non-disclosing system authorization first.
+pub async fn queue_system_evaluation_snapshot(
+    State(state): State<CFState>,
+    headers: HeaderMap,
+    Path((system_id, revision)): Path<(Uuid, String)>,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&state.pool, &headers).await else {
+        return forbidden();
+    };
+    let Some(caller_role) = highest_role(&roles) else {
+        return forbidden();
+    };
+    if !caller_role.can_mutate_systems() {
+        return forbidden_mutation();
+    }
+    // SECURITY: The existing evaluator operates on the complete commit. Until
+    // it has a configuration-scoped worker contract, only an administrator,
+    // who can see every environment, may trigger this whole-commit action.
+    if caller_role != Role::Admin {
+        return forbidden_mutation();
+    }
+    let memberships = match load_membership_environment_ids(&state.pool, user_id).await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to load environment memberships"),
+    };
+    let access = match find_system_access_row(&state.pool, system_id).await {
+        Ok(Some(value)) => value,
+        Ok(None) => return not_found(),
+        Err(_) => return internal_error("Failed to load system"),
+    };
+    if !caller_role.can_access_system_environment(access.environment_id, &memberships) {
+        return not_found();
+    }
+    if !is_full_commit_sha(&revision) {
+        return bad_request("revision must be a full 40- or 64-character commit SHA");
+    }
+
+    match crate::queries::evaluation_snapshots::queue_or_reuse_evaluation(
+        &state.pool,
+        system_id,
+        &revision,
+    )
+    .await
+    {
+        Ok(Some(response)) => {
+            if response.queued {
+                state.queue_notifier.notify_eval_queue();
+            }
+            (StatusCode::OK, Json(response)).into_response()
+        }
+        Ok(None) => not_found(),
+        Err(error) => {
+            tracing::error!(system_id = %system_id, error = %error, "failed to queue evaluation snapshot");
+            internal_error("Failed to queue evaluation")
+        }
+    }
+}
+
+fn empty_options_page(
+    params: &EvaluatedOptionsParams,
+    (lifecycle, error): (SnapshotLifecycle, Option<String>),
+) -> EvaluatedOptionsPage {
+    EvaluatedOptionsPage {
+        lifecycle,
+        revision: params.revision.clone(),
+        generation: params.generation,
+        generation_snapshot_id: None,
+        baseline_revision: None,
+        comparison_available: false,
+        error,
+        module_count: 0,
+        evaluation_duration_ms: None,
+        counts: EvaluatedOptionCounts::default(),
+        total: 0,
+        offset: params.offset.unwrap_or(0).clamp(0, 100_000),
+        limit: params.limit.unwrap_or(50).clamp(1, 100),
+        options: Vec::new(),
+    }
+}
+
+fn empty_evaluation_summary(
+    params: &SelectedEvaluationSummaryParams,
+    (lifecycle, error): (SnapshotLifecycle, Option<String>),
+) -> SelectedEvaluationSummary {
+    SelectedEvaluationSummary {
+        lifecycle,
+        revision: params.revision.clone(),
+        generation: params.generation,
+        error,
+        module_source_total: 0,
+        completed_at: None,
+        evaluation_duration_ms: None,
+        option_total: 0,
+        selected_store_path: None,
+        closure_package_count: None,
+        closure_size_bytes: None,
+        running_store_path: None,
+        running_profile_matches: None,
+        host_delta_count: None,
+        agent_fingerprint: AgentFingerprintStatus::Unavailable,
+        seven_day_drift: SevenDayDriftStatus::InsufficientCoverage,
+        drift: EvaluationDrift::Unavailable,
+    }
+}
+
+fn empty_evaluation_module_sources(
+    params: &EvaluationModuleSourcesParams,
+    (lifecycle, error): (SnapshotLifecycle, Option<String>),
+) -> EvaluationModuleSourcesPage {
+    EvaluationModuleSourcesPage {
+        lifecycle,
+        revision: params.revision.clone(),
+        generation: params.generation,
+        error,
+        snapshot_token: None,
+        total: 0,
+        offset: params.offset.unwrap_or(0).clamp(0, 100_000),
+        limit: params.limit.unwrap_or(50).clamp(1, 100),
+        sources: Vec::new(),
+    }
+}
+
+fn validate_evaluation_module_sources_params(
+    params: &EvaluationModuleSourcesParams,
+) -> Result<(), &'static str> {
+    if params.offset.unwrap_or(0) > 0 && params.snapshot_token.is_none() {
+        return Err("snapshot_token is required when offset is greater than 0");
+    }
+    if params.snapshot_token.as_deref().is_some_and(|token| {
+        token.len() != 64 || !token.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }) {
+        return Err("snapshot_token must be a 64-character hexadecimal digest");
+    }
+    Ok(())
+}
+
+fn is_full_commit_sha(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 pub async fn get_system_cves(
@@ -1651,8 +2128,8 @@ fn validate_target_commit(value: &str) -> Result<(), String> {
         return Err("Target commit is required".to_string());
     }
 
-    if !(7..=64).contains(&value.len()) {
-        return Err("Target commit must be between 7 and 64 hex characters".to_string());
+    if !matches!(value.len(), 40 | 64) {
+        return Err("Target commit must be a full 40- or 64-character SHA".to_string());
     }
 
     if !value.chars().all(|ch| ch.is_ascii_hexdigit()) {
@@ -1660,6 +2137,115 @@ fn validate_target_commit(value: &str) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManualDeploymentPlan {
+    Keep(ManualDeploymentPolicyState),
+    ConvertToManual,
+}
+
+fn plan_manual_deployment(
+    policy: &str,
+    action: ManualDeploymentAction,
+) -> Result<ManualDeploymentPlan, &'static str> {
+    match (policy, action) {
+        ("manual", ManualDeploymentAction::Deploy) => Ok(ManualDeploymentPlan::Keep(
+            ManualDeploymentPolicyState::Manual,
+        )),
+        ("pinned", ManualDeploymentAction::Deploy) => Ok(ManualDeploymentPlan::Keep(
+            ManualDeploymentPolicyState::Pinned,
+        )),
+        ("auto_latest", ManualDeploymentAction::ContinueAutoLatest) => Ok(
+            ManualDeploymentPlan::Keep(ManualDeploymentPolicyState::AutoLatest),
+        ),
+        ("auto_latest" | "manual", ManualDeploymentAction::ConvertToManual) => {
+            Ok(ManualDeploymentPlan::ConvertToManual)
+        }
+        ("auto_latest", ManualDeploymentAction::Deploy) => {
+            Err("Choose Continue on auto_latest or Convert to manual and deploy")
+        }
+        ("auto_latest", ManualDeploymentAction::Legacy) => {
+            Err("Choose Continue on auto_latest or Convert to manual and deploy")
+        }
+        ("manual", ManualDeploymentAction::Legacy) => Ok(ManualDeploymentPlan::Keep(
+            ManualDeploymentPolicyState::Manual,
+        )),
+        ("pinned", ManualDeploymentAction::Legacy) => Ok(ManualDeploymentPlan::Keep(
+            ManualDeploymentPolicyState::Pinned,
+        )),
+        _ => Err("The requested deployment action is not valid for the system policy"),
+    }
+}
+
+fn manual_deployment_response(
+    status: StatusCode,
+    policy: ManualDeploymentPolicyState,
+    conversion: ManualDeploymentConversionState,
+    deployment: ManualDeploymentRequestState,
+    deployment_id: Option<Uuid>,
+    message: String,
+) -> axum::response::Response {
+    (
+        status,
+        Json(ManualDeploymentResponse {
+            status: match deployment {
+                ManualDeploymentRequestState::Queued => "accepted",
+                ManualDeploymentRequestState::AlreadyQueued => "accepted",
+                ManualDeploymentRequestState::Failed => "failed",
+                ManualDeploymentRequestState::Conflict => "conflict",
+            }
+            .to_string(),
+            policy,
+            conversion,
+            deployment,
+            deployment_id,
+            message,
+        }),
+    )
+        .into_response()
+}
+
+fn manual_deployment_failure_message(
+    _policy: ManualDeploymentPolicyState,
+    _conversion: ManualDeploymentConversionState,
+    failure: &str,
+) -> String {
+    format!("Deployment failed: {failure}")
+}
+
+fn deployment_request_identity(
+    request_id: Option<Uuid>,
+    system_id: Uuid,
+    commit_sha: &str,
+    action: ManualDeploymentAction,
+) -> String {
+    request_id.map_or_else(
+        // COMPATIBILITY: Legacy clients omit request_id. Their stable intent is
+        // replay-safe across pending and terminal states for the database's
+        // conservative 24-hour window. After that window the same derived
+        // identity can create an intentional redeployment. Explicit request_id
+        // remains the unambiguous durable contract without a time boundary.
+        || {
+            let mut digest = Sha256::new();
+            digest.update(system_id.as_bytes());
+            digest.update([0]);
+            digest.update(commit_sha.as_bytes());
+            digest.update([0]);
+            digest.update(deployment_request_action(action).as_bytes());
+            format!("legacy:v1:{:x}", digest.finalize())
+        },
+        |id| format!("explicit:{id}"),
+    )
+}
+
+fn deployment_request_action(action: ManualDeploymentAction) -> &'static str {
+    match action {
+        ManualDeploymentAction::Legacy => "legacy",
+        ManualDeploymentAction::Deploy => "deploy",
+        ManualDeploymentAction::ContinueAutoLatest => "continue_auto_latest",
+        ManualDeploymentAction::ConvertToManual => "convert_to_manual",
+    }
 }
 
 pub async fn deploy_system(
@@ -1684,11 +2270,6 @@ pub async fn deploy_system(
         return response;
     }
 
-    let commit_sha = payload.commit_sha.trim();
-    if let Err(message) = validate_target_commit(commit_sha) {
-        return bad_request(&message);
-    }
-
     let environment_memberships = match load_membership_environment_ids(&pool, user_id).await {
         Ok(value) => value,
         Err(_) => return internal_error("Failed to load environment memberships"),
@@ -1704,26 +2285,100 @@ pub async fn deploy_system(
         return not_found();
     }
 
-    // Validate deployment policy - only manual and pinned allow manual deployments
-    if !matches!(row.deployment_policy.as_str(), "manual" | "pinned") {
-        return bad_request("Manual deployment is not allowed for auto_latest systems");
+    // SECURITY: Resolve authorization before validating target details. An
+    // unknown or hidden system must not disclose request-shape information.
+    let commit_sha = payload.commit_sha.trim().to_ascii_lowercase();
+    if let Err(message) = validate_target_commit(&commit_sha) {
+        return bad_request(&message);
     }
 
-    let belongs_to_flake = match commit_belongs_to_system_flake(&pool, system_id, commit_sha).await
+    let request_identity =
+        deployment_request_identity(payload.request_id, system_id, &commit_sha, payload.action);
+    let request_action = deployment_request_action(payload.action);
+    let belongs_to_flake = match commit_belongs_to_system_flake(&pool, system_id, &commit_sha).await
     {
         Ok(value) => value,
         Err(_) => return internal_error("Failed to validate requested commit"),
     };
-
     if !belongs_to_flake {
         return bad_request("Requested commit is not available for this system");
     }
-
-    match crate::services::composite_enforcement::authorize_and_set_system_target(
+    if let Some(request_id) = payload.request_id {
+        match crate::queries::systems::reserve_explicit_deployment_request(
+            &pool,
+            system_id,
+            request_id,
+            &commit_sha,
+            request_action,
+        )
+        .await
+        {
+            Ok(_) => {}
+            Err(error) => {
+                if let Some(conflict) = error
+                    .downcast_ref::<crate::queries::systems::DeploymentRequestIdentityConflict>(
+                ) {
+                    return manual_deployment_response(
+                        StatusCode::CONFLICT,
+                        match row.deployment_policy.as_str() {
+                            "auto_latest" => ManualDeploymentPolicyState::AutoLatest,
+                            "pinned" => ManualDeploymentPolicyState::Pinned,
+                            _ => ManualDeploymentPolicyState::Manual,
+                        },
+                        ManualDeploymentConversionState::NotRequested,
+                        ManualDeploymentRequestState::Conflict,
+                        conflict.deployment_id,
+                        "The request_id is already bound to a different system, commit, or deployment action. Use a new request_id for a new deployment intent.".to_string(),
+                    );
+                }
+                tracing::error!(system_id = %system_id, error = %error, "failed to reserve deployment request identity");
+                return internal_error("Failed to reserve deployment request identity");
+            }
+        }
+    }
+    let plan = match plan_manual_deployment(&row.deployment_policy, payload.action) {
+        Ok(plan) => plan,
+        Err(message) => return bad_request(message),
+    };
+    // TRANSACTION: Conversion commits before deployment resolution. A missing
+    // target therefore cannot roll back the requested policy change.
+    let conversion_result = if matches!(plan, ManualDeploymentPlan::ConvertToManual) {
+        match crate::queries::systems::convert_auto_latest_system_to_manual_for_request(
+            &pool,
+            system_id,
+            payload.request_id,
+        )
+        .await
+        {
+            Ok(conversion) => Some(conversion),
+            Err(error) => {
+                tracing::error!(system_id = %system_id, error = %error, "failed to convert deployment policy");
+                return manual_deployment_response(
+                    StatusCode::CONFLICT,
+                    ManualDeploymentPolicyState::AutoLatest,
+                    ManualDeploymentConversionState::NotRequested,
+                    ManualDeploymentRequestState::Failed,
+                    None,
+                    manual_deployment_failure_message(
+                        ManualDeploymentPolicyState::AutoLatest,
+                        ManualDeploymentConversionState::NotRequested,
+                        "The deployment policy could not be converted to manual.",
+                    ),
+                );
+            }
+        }
+    } else {
+        None
+    };
+    let expected_policy = if conversion_result.is_some() {
+        "manual"
+    } else {
+        row.deployment_policy.as_str()
+    };
+    match crate::services::composite_enforcement::authorize_system_target(
         &pool,
         system_id,
-        commit_sha,
-        "manual_deploy",
+        &commit_sha,
     )
     .await
     {
@@ -1732,7 +2387,7 @@ pub async fn deploy_system(
         Err(error) => {
             if is_uncached_deployment_target_error(&error) {
                 let message =
-                    queue_deployment_target_prerequisite(&state, system_id, commit_sha).await;
+                    queue_deployment_target_prerequisite(&state, system_id, &commit_sha).await;
                 return deployment_target_unavailable(&message);
             }
             tracing::warn!(
@@ -1743,6 +2398,146 @@ pub async fn deploy_system(
             return internal_error("Composite deployment authorization failed");
         }
     }
+    let queue_result = crate::queries::systems::queue_manual_deployment_atomic(
+        &pool,
+        system_id,
+        &commit_sha,
+        "manual_deploy",
+        &request_identity,
+        request_action,
+        expected_policy,
+    )
+    .await;
+    let queue_outcome = match queue_result {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            if let Some(conflict) =
+                error.downcast_ref::<crate::queries::systems::DeploymentRequestIdentityConflict>()
+            {
+                let (policy, conversion) = match conversion_result {
+                    Some(ManualPolicyConversion::Converted) => (
+                        ManualDeploymentPolicyState::Manual,
+                        ManualDeploymentConversionState::Converted,
+                    ),
+                    Some(ManualPolicyConversion::AlreadyManual) => (
+                        ManualDeploymentPolicyState::Manual,
+                        ManualDeploymentConversionState::AlreadyManual,
+                    ),
+                    None => (
+                        match row.deployment_policy.as_str() {
+                            "auto_latest" => ManualDeploymentPolicyState::AutoLatest,
+                            "pinned" => ManualDeploymentPolicyState::Pinned,
+                            _ => ManualDeploymentPolicyState::Manual,
+                        },
+                        ManualDeploymentConversionState::NotRequested,
+                    ),
+                };
+                return manual_deployment_response(
+                    StatusCode::CONFLICT,
+                    policy,
+                    conversion,
+                    ManualDeploymentRequestState::Conflict,
+                    conflict.deployment_id,
+                    "The request_id is already bound to a different commit or deployment action. Use a new request_id for a new deployment intent.".to_string(),
+                );
+            }
+            let (policy, conversion) = match conversion_result {
+                Some(ManualPolicyConversion::Converted) => (
+                    ManualDeploymentPolicyState::Manual,
+                    ManualDeploymentConversionState::Converted,
+                ),
+                Some(ManualPolicyConversion::AlreadyManual) => (
+                    ManualDeploymentPolicyState::Manual,
+                    ManualDeploymentConversionState::AlreadyManual,
+                ),
+                None => match plan {
+                    ManualDeploymentPlan::Keep(policy) => {
+                        (policy, ManualDeploymentConversionState::NotRequested)
+                    }
+                    ManualDeploymentPlan::ConvertToManual => {
+                        unreachable!("conversion result is present")
+                    }
+                },
+            };
+            let message = if is_uncached_deployment_target_error(&error) {
+                queue_deployment_target_prerequisite(&state, system_id, &commit_sha).await
+            } else {
+                tracing::error!(system_id = %system_id, error = %error, "failed to request deployment");
+                "The deployment could not be queued because the server failed to persist the request."
+                    .to_string()
+            };
+            if let Some(request_id) = payload.request_id {
+                if let Err(state_error) =
+                    crate::queries::systems::update_explicit_deployment_request_state(
+                        &pool,
+                        system_id,
+                        request_id,
+                        "deploy_failed",
+                        None,
+                    )
+                    .await
+                {
+                    tracing::error!(system_id = %system_id, error = %state_error, "failed to persist deployment request partial state");
+                }
+            }
+            let message = manual_deployment_failure_message(policy, conversion, &message);
+            if conversion != ManualDeploymentConversionState::NotRequested
+                && record_system_mutation_audit(
+                    &pool,
+                    user_id,
+                    AuditAction::SystemDeployRequested,
+                    format!("{} ({})", row.hostname, row.id),
+                    extract_request_origin(&headers),
+                    serde_json::json!({
+                        "operation": "convert_policy_and_deploy",
+                        "target_commit": &commit_sha,
+                        "persisted_policy": policy,
+                        "policy_conversion": conversion,
+                        "deployment_state": ManualDeploymentRequestState::Failed,
+                    }),
+                )
+                .await
+                .is_err()
+            {
+                tracing::error!(system_id = %system_id, "failed to audit persisted policy conversion after deployment failure");
+            }
+            return manual_deployment_response(
+                if is_uncached_deployment_target_error(&error) {
+                    StatusCode::CONFLICT
+                } else {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                },
+                policy,
+                conversion,
+                ManualDeploymentRequestState::Failed,
+                None,
+                message,
+            );
+        }
+    };
+    let (policy, conversion) = match plan {
+        ManualDeploymentPlan::Keep(policy) => {
+            (policy, ManualDeploymentConversionState::NotRequested)
+        }
+        ManualDeploymentPlan::ConvertToManual => (
+            ManualDeploymentPolicyState::Manual,
+            match conversion_result {
+                Some(ManualPolicyConversion::Converted) => {
+                    ManualDeploymentConversionState::Converted
+                }
+                Some(ManualPolicyConversion::AlreadyManual) => {
+                    ManualDeploymentConversionState::AlreadyManual
+                }
+                None => ManualDeploymentConversionState::NotRequested,
+            },
+        ),
+    };
+
+    let deployment = if queue_outcome.created {
+        ManualDeploymentRequestState::Queued
+    } else {
+        ManualDeploymentRequestState::AlreadyQueued
+    };
 
     if record_system_mutation_audit(
         &pool,
@@ -1750,25 +2545,57 @@ pub async fn deploy_system(
         AuditAction::SystemDeployRequested,
         format!("{} ({})", row.hostname, row.id),
         extract_request_origin(&headers),
-        serde_json::json!({ "operation": "deploy", "target_commit": commit_sha }),
+        serde_json::json!({
+            "operation": "deploy",
+            "target_commit": commit_sha,
+            "requested_action": payload.action,
+            "persisted_policy": policy,
+            "policy_conversion": conversion,
+            "deployment_state": deployment,
+            "deployment_id": queue_outcome.deployment_id,
+        }),
     )
     .await
     .is_err()
     {
-        return internal_error("Failed to write audit event");
+        // Queueing is already durable. Report the truthful accepted state even
+        // when the secondary audit sink is temporarily unavailable.
+        tracing::error!(system_id = %system_id, deployment_id = %queue_outcome.deployment_id, "deployment queued but audit persistence failed");
     }
 
-    (
+    let deployment_message = match deployment {
+        ManualDeploymentRequestState::Queued => format!(
+            "Deployment requested for {} to commit {}",
+            row.hostname, commit_sha
+        ),
+        ManualDeploymentRequestState::AlreadyQueued => format!(
+            "Deployment for {} to commit {} is already queued",
+            row.hostname, commit_sha
+        ),
+        ManualDeploymentRequestState::Failed | ManualDeploymentRequestState::Conflict => {
+            unreachable!("failure and conflict return before audit")
+        }
+    };
+    let message = match (policy, conversion) {
+        (
+            ManualDeploymentPolicyState::Manual,
+            ManualDeploymentConversionState::Converted
+            | ManualDeploymentConversionState::AlreadyManual,
+        ) => format!("System policy is manual. {deployment_message}"),
+        (
+            ManualDeploymentPolicyState::AutoLatest,
+            ManualDeploymentConversionState::NotRequested,
+        ) => format!("System remains on auto_latest. {deployment_message}"),
+        _ => deployment_message,
+    };
+    manual_deployment_response(
         StatusCode::ACCEPTED,
-        Json(SystemMutationResponse {
-            status: "accepted".to_string(),
-            message: format!(
-                "Deployment requested for {} to commit {}",
-                row.hostname, commit_sha
-            ),
-        }),
+        policy,
+        conversion,
+        deployment,
+        Some(queue_outcome.deployment_id),
+        message,
     )
-        .into_response()
 }
 
 pub async fn get_system_commits(
@@ -2445,6 +3272,8 @@ mod tests {
     use crate::models::public_key::PublicKey;
     use crate::models::systems::System;
     use crate::queries::auth_identity::{create_user_session, sync_user_role};
+    use crate::queries::environments::create_environment;
+    use crate::queries::flakes::insert_flake;
     use crate::queries::systems::insert_system;
     use crate::queries::users::insert_user;
     use axum::extract::State;
@@ -2452,6 +3281,19 @@ mod tests {
     use chrono::Utc;
     use ed25519_dalek::SigningKey;
     use sqlx::postgres::PgPoolOptions;
+
+    #[test]
+    fn snapshot_revisions_require_full_immutable_sha_identity() {
+        let shared_prefix = "abcdef0";
+        let first = format!("{shared_prefix}{}", "1".repeat(33));
+        let second = format!("{shared_prefix}{}", "2".repeat(33));
+
+        assert!(is_full_commit_sha(&first));
+        assert!(is_full_commit_sha(&second));
+        assert_ne!(first, second);
+        assert!(!is_full_commit_sha(shared_prefix));
+        assert!(!is_full_commit_sha(&format!("{}z", "a".repeat(39))));
+    }
 
     #[test]
     fn startup_row_with_changed_generation_classifies_as_local_rebuild() {
@@ -2763,6 +3605,293 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn evaluated_options_read_requires_authentication_before_database_access() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
+            .expect("lazy pool should construct");
+        let response = get_system_evaluated_options(
+            State(pool),
+            HeaderMap::new(),
+            Path(Uuid::nil()),
+            Query(EvaluatedOptionsParams {
+                revision: "a".repeat(40),
+                ..EvaluatedOptionsParams::default()
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn evaluation_summary_requires_authentication_before_database_access() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
+            .expect("lazy pool should construct");
+        let response = get_system_evaluation_summary(
+            State(pool),
+            HeaderMap::new(),
+            Path(Uuid::nil()),
+            Query(SelectedEvaluationSummaryParams {
+                revision: "a".repeat(40),
+                ..SelectedEvaluationSummaryParams::default()
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn evaluation_module_sources_require_authentication_before_database_access() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
+            .expect("lazy pool should construct");
+        let response = get_system_evaluation_module_sources(
+            State(pool),
+            HeaderMap::new(),
+            Path(Uuid::nil()),
+            Query(EvaluationModuleSourcesParams {
+                revision: "a".repeat(40),
+                ..EvaluationModuleSourcesParams::default()
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn evaluation_module_source_empty_page_applies_request_bounds() {
+        let page = empty_evaluation_module_sources(
+            &EvaluationModuleSourcesParams {
+                revision: "a".repeat(40),
+                limit: Some(i64::MAX),
+                offset: Some(i64::MAX),
+                ..EvaluationModuleSourcesParams::default()
+            },
+            (SnapshotLifecycle::Unavailable, None),
+        );
+        assert_eq!(page.limit, 100);
+        assert_eq!(page.offset, 100_000);
+        assert_eq!(page.total, 0);
+        assert!(page.sources.is_empty());
+    }
+
+    #[test]
+    fn evaluation_module_source_continuations_require_valid_snapshot_tokens() {
+        let missing = EvaluationModuleSourcesParams {
+            offset: Some(1),
+            ..EvaluationModuleSourcesParams::default()
+        };
+        assert_eq!(
+            validate_evaluation_module_sources_params(&missing),
+            Err("snapshot_token is required when offset is greater than 0")
+        );
+
+        for token in ["", "0", "-1", "not-a-version", &"g".repeat(64)] {
+            let malformed = EvaluationModuleSourcesParams {
+                snapshot_token: Some(token.to_string()),
+                ..EvaluationModuleSourcesParams::default()
+            };
+            assert_eq!(
+                validate_evaluation_module_sources_params(&malformed),
+                Err("snapshot_token must be a 64-character hexadecimal digest")
+            );
+        }
+
+        let valid = EvaluationModuleSourcesParams {
+            offset: Some(100),
+            snapshot_token: Some("a".repeat(64)),
+            ..EvaluationModuleSourcesParams::default()
+        };
+        assert_eq!(validate_evaluation_module_sources_params(&valid), Ok(()));
+    }
+
+    #[tokio::test]
+    async fn queue_snapshot_action_requires_authentication_before_revision_disclosure() {
+        let state = test_cf_state();
+        let response = queue_system_evaluation_snapshot(
+            State(state),
+            HeaderMap::new(),
+            Path((Uuid::nil(), "a".repeat(40))),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires an isolated migrated database"]
+    async fn hidden_environment_snapshot_read_is_non_disclosing() {
+        let pool = test_pool_from_env().await;
+        let suffix = Uuid::new_v4().simple().to_string();
+        let visible = create_environment(
+            &pool,
+            &format!("visible-{suffix}"),
+            None,
+            "#111111",
+            true,
+            "manual",
+            false,
+            false,
+            false,
+        )
+        .await
+        .expect("visible environment should insert");
+        let hidden = create_environment(
+            &pool,
+            &format!("hidden-{suffix}"),
+            None,
+            "#222222",
+            true,
+            "manual",
+            false,
+            false,
+            false,
+        )
+        .await
+        .expect("hidden environment should insert");
+        let user = insert_user(
+            &pool,
+            &format!("snapshot-{suffix}@example.test"),
+            Some("Snapshot Viewer"),
+        )
+        .await
+        .expect("user should insert");
+        sync_user_role(&pool, user.id, AuthRole::Viewer)
+            .await
+            .expect("viewer role should persist");
+        sqlx::query(
+            "INSERT INTO user_environment_memberships (user_id, environment_id) VALUES ($1, $2)",
+        )
+        .bind(user.id)
+        .bind(visible.id)
+        .execute(&pool)
+        .await
+        .expect("membership should persist");
+
+        let key = SigningKey::from_bytes(&[44; 32]);
+        let flake = insert_flake(
+            &pool,
+            &format!("hidden-snapshot-{suffix}"),
+            &format!("https://example.test/hidden-snapshot-{suffix}.git"),
+            "main",
+            "cf_systems_only",
+        )
+        .await
+        .expect("hidden flake should insert");
+        let system = insert_system(
+            &pool,
+            &System {
+                id: Uuid::new_v4(),
+                hostname: format!("hidden-system-{suffix}"),
+                environment_id: Some(hidden.id),
+                is_active: true,
+                public_key: PublicKey::from_verifying_key(key.verifying_key()),
+                flake_id: Some(flake.id),
+                derivation: String::new(),
+                system_configuration_name: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                desired_target: None,
+                deployment_policy: "manual".into(),
+            },
+        )
+        .await
+        .expect("hidden system should insert");
+        let session_token = format!("snapshot-session-{suffix}");
+        create_user_session(
+            &pool,
+            user.id,
+            hash_token(&session_token),
+            Utc::now() + chrono::Duration::hours(1),
+            None,
+            None,
+            "local".into(),
+        )
+        .await
+        .expect("session should persist");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            format!("{}={}", SESSION_COOKIE_NAME, session_token)
+                .parse()
+                .expect("cookie should parse"),
+        );
+
+        let response = get_system_evaluated_options(
+            State(pool.clone()),
+            headers.clone(),
+            Path(system.id),
+            Query(EvaluatedOptionsParams {
+                revision: "a".repeat(40),
+                ..EvaluatedOptionsParams::default()
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        let response = get_system_evaluation_summary(
+            State(pool.clone()),
+            headers.clone(),
+            Path(system.id),
+            Query(SelectedEvaluationSummaryParams {
+                revision: "a".repeat(40),
+                ..SelectedEvaluationSummaryParams::default()
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        let response = get_system_evaluation_module_sources(
+            State(pool.clone()),
+            headers.clone(),
+            Path(system.id),
+            Query(EvaluationModuleSourcesParams {
+                revision: "a".repeat(40),
+                ..EvaluationModuleSourcesParams::default()
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        let response = crate::handlers::api::flakes::get_flake_module_declarations(
+            State(pool.clone()),
+            headers,
+            Path((flake.id, "a".repeat(40), "module".to_string())),
+            Query(crate::models::evaluation_snapshots::FlakeModuleDeclarationsParams::default()),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(user.id)
+            .execute(&pool)
+            .await
+            .expect("user cleanup should succeed");
+        sqlx::query("DELETE FROM systems WHERE id = $1")
+            .bind(system.id)
+            .execute(&pool)
+            .await
+            .expect("system cleanup should succeed");
+        sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake.id)
+            .execute(&pool)
+            .await
+            .expect("flake cleanup should succeed");
+        sqlx::query("DELETE FROM environments WHERE id = ANY($1)")
+            .bind(vec![visible.id, hidden.id])
+            .execute(&pool)
+            .await
+            .expect("environment cleanup should succeed");
+    }
+
+    #[tokio::test]
     async fn rollback_system_requires_authenticated_role() {
         let pool = PgPoolOptions::new()
             .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
@@ -2910,12 +4039,123 @@ mod tests {
             Path(Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("uuid")),
             Json(DeploySystemRequest {
                 commit_sha: "a1b2c3d".to_string(),
+                action: ManualDeploymentAction::Deploy,
+                request_id: None,
             }),
         )
         .await
         .into_response();
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn auto_latest_requires_an_explicit_manual_deployment_choice() {
+        assert_eq!(
+            plan_manual_deployment("auto_latest", ManualDeploymentAction::Deploy),
+            Err("Choose Continue on auto_latest or Convert to manual and deploy")
+        );
+        assert_eq!(
+            plan_manual_deployment("auto_latest", ManualDeploymentAction::Legacy),
+            Err("Choose Continue on auto_latest or Convert to manual and deploy")
+        );
+        assert_eq!(
+            plan_manual_deployment("auto_latest", ManualDeploymentAction::ContinueAutoLatest,),
+            Ok(ManualDeploymentPlan::Keep(
+                ManualDeploymentPolicyState::AutoLatest
+            ))
+        );
+        assert_eq!(
+            plan_manual_deployment("auto_latest", ManualDeploymentAction::ConvertToManual),
+            Ok(ManualDeploymentPlan::ConvertToManual)
+        );
+    }
+
+    #[test]
+    fn legacy_identities_are_stable_intents_while_explicit_ids_are_unambiguous() {
+        let system_id = Uuid::new_v4();
+        let sha = "a".repeat(40);
+        let first =
+            deployment_request_identity(None, system_id, &sha, ManualDeploymentAction::Deploy);
+        let retry =
+            deployment_request_identity(None, system_id, &sha, ManualDeploymentAction::Deploy);
+        let later =
+            deployment_request_identity(None, system_id, &sha, ManualDeploymentAction::Deploy);
+        let explicit_id = Uuid::new_v4();
+        let explicit_first = deployment_request_identity(
+            Some(explicit_id),
+            system_id,
+            &sha,
+            ManualDeploymentAction::Deploy,
+        );
+        let explicit_later = deployment_request_identity(
+            Some(explicit_id),
+            system_id,
+            &sha,
+            ManualDeploymentAction::Deploy,
+        );
+
+        assert_eq!(first, retry);
+        assert_eq!(first, later);
+        assert!(first.starts_with("legacy:v1:"));
+        assert_ne!(
+            first,
+            deployment_request_identity(
+                None,
+                system_id,
+                &sha,
+                ManualDeploymentAction::ConvertToManual,
+            ),
+            "the derived identity includes the action"
+        );
+        assert_eq!(explicit_first, explicit_later);
+        assert!(explicit_first.starts_with("explicit:"));
+        assert_ne!(
+            explicit_first,
+            deployment_request_identity(
+                Some(Uuid::new_v4()),
+                system_id,
+                &sha,
+                ManualDeploymentAction::Deploy,
+            ),
+            "a new explicit ID is the intentional redeployment boundary"
+        );
+    }
+
+    #[test]
+    fn deployment_request_conflict_has_a_stable_typed_wire_value() {
+        assert_eq!(
+            serde_json::to_value(ManualDeploymentRequestState::Conflict).unwrap(),
+            serde_json::json!("conflict")
+        );
+    }
+
+    #[test]
+    fn deployment_targets_require_full_object_format_identity() {
+        assert!(validate_target_commit(&"a".repeat(40)).is_ok());
+        assert!(validate_target_commit(&"b".repeat(64)).is_ok());
+        assert!(validate_target_commit("abcdef0").is_err());
+        assert!(validate_target_commit(&"c".repeat(41)).is_err());
+    }
+
+    #[test]
+    fn converted_manual_retry_remains_valid() {
+        assert_eq!(
+            plan_manual_deployment("manual", ManualDeploymentAction::ConvertToManual),
+            Ok(ManualDeploymentPlan::ConvertToManual)
+        );
+    }
+
+    #[test]
+    fn deployment_failure_does_not_claim_rolled_back_conversion() {
+        assert_eq!(
+            manual_deployment_failure_message(
+                ManualDeploymentPolicyState::Manual,
+                ManualDeploymentConversionState::Converted,
+                "target is unavailable",
+            ),
+            "Deployment failed: target is unavailable"
+        );
     }
 
     #[test]
@@ -3001,7 +4241,8 @@ mod tests {
         assert!(validate_target_commit("").is_err());
         assert!(validate_target_commit("abc").is_err());
         assert!(validate_target_commit("zzzzzzz").is_err());
-        assert!(validate_target_commit("a1b2c3d").is_ok());
+        assert!(validate_target_commit("a1b2c3d").is_err());
+        assert!(validate_target_commit(&"a".repeat(40)).is_ok());
         assert!(validate_target_commit(&"a".repeat(65)).is_err());
     }
 

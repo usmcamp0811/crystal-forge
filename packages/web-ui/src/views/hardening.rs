@@ -293,7 +293,7 @@ pub fn render_environment_posture(rows: &[HardeningSystemPostureResponse]) -> El
                                             if let Some(system_id) = system.system_id {
                                                 Link {
                                                     class: "{theme::deployment::AHEAD_TEXT} hover:underline font-medium",
-                                                    to: Route::SystemDetailView { id: system_id.to_string(), tab: String::new(), poam: String::new() },
+                                                    to: Route::SystemDetailView { id: system_id.to_string(), tab: String::new(), poam: String::new(), config_mode: String::new(), revision: String::new(), generation: String::new(), deploy_generation: String::new() },
                                                     "{display_name(system)}"
                                                 }
                                             } else {
@@ -428,7 +428,7 @@ fn render_compact_environment_row(group: &EnvironmentPostureGroup) -> Element {
                             if let Some(system_id) = system.system_id {
                                 Link {
                                     class: "truncate {theme::deployment::AHEAD_TEXT} hover:underline font-medium",
-                                    to: Route::SystemDetailView { id: system_id.to_string(), tab: String::new(), poam: String::new() },
+                                    to: Route::SystemDetailView { id: system_id.to_string(), tab: String::new(), poam: String::new(), config_mode: String::new(), revision: String::new(), generation: String::new(), deploy_generation: String::new() },
                                     "{display_name(system)}"
                                 }
                             } else {

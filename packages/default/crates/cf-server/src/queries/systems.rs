@@ -1,5 +1,6 @@
 use crate::models::systems::System;
-use anyhow::Result;
+use crate::queries::system_events::set_pending_deployment_target_tx;
+use anyhow::{Context, Result};
 use chrono::Duration as ChronoDuration;
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
@@ -13,6 +14,7 @@ JOIN commits c ON c.flake_id = s.flake_id
 JOIN derivations d ON d.commit_id = c.id
 WHERE s.id = $1
   AND LOWER(c.git_commit_hash) = LOWER($2)
+  AND c.source_archived = false
   AND d.derivation_type = 'nixos'
   AND d.derivation_name = COALESCE(NULLIF(s.system_configuration_name, ''), s.hostname)
   AND d.store_path IS NOT NULL
@@ -64,6 +66,7 @@ JOIN commits c ON c.flake_id = s.flake_id
 JOIN derivations d ON d.commit_id = c.id
 WHERE s.id = $1
   AND LOWER(c.git_commit_hash) = LOWER($2)
+  AND c.source_archived = false
   AND d.derivation_type = 'nixos'
   AND d.derivation_name = COALESCE(NULLIF(s.system_configuration_name, ''), s.hostname)
 ORDER BY d.id DESC
@@ -713,15 +716,304 @@ pub async fn update_system_desired_target(
     system_id: Uuid,
     target: &str,
 ) -> Result<()> {
-    update_system_desired_target_with_source(pool, system_id, target, "api_desired_target").await
+    update_system_desired_target_with_source(pool, system_id, target, "api_desired_target").await?;
+    Ok(())
 }
 
+/// Identifies whether a deployment request created or reused pending work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeploymentQueueOutcome {
+    /// Pending deployment identity returned to the caller.
+    pub deployment_id: Uuid,
+    /// `true` when this request inserted the pending deployment.
+    pub created: bool,
+}
+
+/// Reports reuse of an immutable deployment request ID for another intent.
+#[derive(Debug)]
+pub struct DeploymentRequestIdentityConflict {
+    /// Deployment created by the original request, when queueing was reached.
+    pub deployment_id: Option<Uuid>,
+}
+
+impl std::fmt::Display for DeploymentRequestIdentityConflict {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .write_str("deployment request identity is already bound to another commit or action")
+    }
+}
+
+impl std::error::Error for DeploymentRequestIdentityConflict {}
+
+/// Checks whether an existing request identity belongs to another intent.
+///
+/// Callers use this check before a separate policy-conversion transaction so a
+/// known conflicting request cannot mutate policy. The queue transaction repeats
+/// the check under the system lock to remain authoritative during races.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot inspect the request identity.
+pub async fn conflicting_deployment_request_id(
+    pool: &PgPool,
+    system_id: Uuid,
+    request_identity: &str,
+    target: &str,
+    request_action: &str,
+) -> Result<Option<Uuid>> {
+    let conflict = sqlx::query_scalar::<_, Uuid>(
+        "SELECT pending.id
+         FROM pending_system_deployments pending
+         LEFT JOIN commits commit ON commit.id = pending.requested_commit_id
+         WHERE pending.system_id = $1 AND pending.request_identity = $2
+           AND (commit.git_commit_hash IS DISTINCT FROM $3
+             OR pending.request_action IS DISTINCT FROM $4)
+         ORDER BY pending.issued_at DESC LIMIT 1",
+    )
+    .bind(system_id)
+    .bind(request_identity)
+    .bind(target)
+    .bind(request_action)
+    .fetch_optional(pool)
+    .await?;
+    Ok(conflict)
+}
+
+/// Reports whether this call created an explicit request reservation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeploymentRequestReservation {
+    /// True only for the transaction that first reserved this request ID.
+    pub created: bool,
+    /// Deployment already bound to the request, when queueing was reached.
+    pub deployment_id: Option<Uuid>,
+}
+
+/// Reserves an immutable explicit deployment intent before policy conversion.
+///
+/// PostgreSQL's unique `request_id` constraint serializes concurrent callers.
+/// A matching retry receives the existing partial state. A conflicting caller
+/// receives [`DeploymentRequestIdentityConflict`] before it can mutate policy.
+///
+/// # Errors
+///
+/// Returns an error when the target is not an active commit for the system,
+/// when the request ID is bound to another intent, or when PostgreSQL fails.
+pub async fn reserve_explicit_deployment_request(
+    pool: &PgPool,
+    system_id: Uuid,
+    request_id: Uuid,
+    target: &str,
+    request_action: &str,
+) -> Result<DeploymentRequestReservation> {
+    #[derive(sqlx::FromRow)]
+    struct ReservationRow {
+        system_id: Uuid,
+        commit_sha: String,
+        request_action: String,
+        deployment_id: Option<Uuid>,
+    }
+
+    let mut tx = pool.begin().await?;
+    let inserted = sqlx::query(
+        "INSERT INTO deployment_request_reservations (
+             system_id, request_id, requested_commit_id, request_action
+         )
+         SELECT $1, $2, commit.id, $4
+         FROM systems system
+         JOIN commits commit ON commit.flake_id = system.flake_id
+         WHERE system.id = $1 AND commit.git_commit_hash = $3
+           AND commit.source_archived = false
+         ON CONFLICT (request_id) DO NOTHING",
+    )
+    .bind(system_id)
+    .bind(request_id)
+    .bind(target)
+    .bind(request_action)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected()
+        == 1;
+
+    let reservation = sqlx::query_as::<_, ReservationRow>(
+        "SELECT reservation.system_id, commit.git_commit_hash AS commit_sha,
+                reservation.request_action, reservation.deployment_id
+         FROM deployment_request_reservations reservation
+         JOIN commits commit ON commit.id = reservation.requested_commit_id
+         WHERE reservation.request_id = $1
+         FOR UPDATE OF reservation",
+    )
+    .bind(request_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| anyhow::anyhow!("deployment target is not active for this system"))?;
+
+    if reservation.system_id != system_id
+        || reservation.commit_sha != target
+        || reservation.request_action != request_action
+    {
+        return Err(DeploymentRequestIdentityConflict {
+            deployment_id: reservation.deployment_id,
+        }
+        .into());
+    }
+    tx.commit().await?;
+    Ok(DeploymentRequestReservation {
+        created: inserted,
+        deployment_id: reservation.deployment_id,
+    })
+}
+
+/// Updates the durable partial result of an explicit deployment request.
+///
+/// # Errors
+///
+/// Returns an error when the reservation does not exist or PostgreSQL cannot
+/// persist the state transition.
+pub async fn update_explicit_deployment_request_state(
+    pool: &PgPool,
+    system_id: Uuid,
+    request_id: Uuid,
+    state: &str,
+    deployment_id: Option<Uuid>,
+) -> Result<()> {
+    let result = sqlx::query(
+        "UPDATE deployment_request_reservations
+         SET state = $3, deployment_id = COALESCE($4, deployment_id), updated_at = NOW()
+         WHERE system_id = $1 AND request_id = $2",
+    )
+    .bind(system_id)
+    .bind(request_id)
+    .bind(state)
+    .bind(deployment_id)
+    .execute(pool)
+    .await?;
+    anyhow::ensure!(
+        result.rows_affected() == 1,
+        "deployment request reservation does not exist"
+    );
+    Ok(())
+}
+
+/// Identifies the durable result of converting an automatic system to manual.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManualPolicyConversion {
+    /// This request changed `auto_latest` to `manual`.
+    Converted,
+    /// A prior request already changed the policy to `manual`.
+    AlreadyManual,
+}
+
+/// Converts `auto_latest` to `manual` without queuing deployment work.
+///
+/// The conversion commits independently so a later deployment failure does not
+/// hide or roll back the persisted manual policy.
+///
+/// # Errors
+///
+/// Returns an error when the system does not exist, uses an incompatible policy,
+/// or the database cannot commit the conversion. An error never queues a
+/// deployment.
+pub async fn convert_auto_latest_system_to_manual(
+    pool: &PgPool,
+    system_id: Uuid,
+) -> Result<ManualPolicyConversion> {
+    convert_auto_latest_system_to_manual_for_request(pool, system_id, None).await
+}
+
+/// Converts a system to manual and records explicit-request partial success.
+///
+/// The policy and reservation state commit in one transaction. A retry can
+/// therefore distinguish a persisted conversion from deployment queueing.
+///
+/// # Errors
+///
+/// Returns an error under the same conditions as
+/// [`convert_auto_latest_system_to_manual`] or when the reservation is absent.
+pub async fn convert_auto_latest_system_to_manual_for_request(
+    pool: &PgPool,
+    system_id: Uuid,
+    request_id: Option<Uuid>,
+) -> Result<ManualPolicyConversion> {
+    let mut tx = pool.begin().await?;
+    let policy = sqlx::query_scalar::<_, String>(
+        "SELECT deployment_policy FROM systems WHERE id = $1 FOR UPDATE",
+    )
+    .bind(system_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| anyhow::anyhow!("System {system_id} does not exist"))?;
+
+    let conversion = match policy.as_str() {
+        "auto_latest" => {
+            sqlx::query(
+                "UPDATE systems SET deployment_policy = 'manual', updated_at = NOW() WHERE id = $1",
+            )
+            .bind(system_id)
+            .execute(&mut *tx)
+            .await?;
+            ManualPolicyConversion::Converted
+        }
+        "manual" => ManualPolicyConversion::AlreadyManual,
+        other => anyhow::bail!("Cannot convert deployment policy {other} to manual"),
+    };
+
+    if let Some(request_id) = request_id {
+        let updated = sqlx::query(
+            "UPDATE deployment_request_reservations
+             SET state = 'conversion_persisted', updated_at = NOW()
+             WHERE system_id = $1 AND request_id = $2",
+        )
+        .bind(system_id)
+        .bind(request_id)
+        .execute(&mut *tx)
+        .await?;
+        anyhow::ensure!(
+            updated.rows_affected() == 1,
+            "deployment request reservation does not exist"
+        );
+    }
+
+    tx.commit().await?;
+    Ok(conversion)
+}
+
+/// Resolves and queues a deployment target without duplicating pending work.
+///
+/// Requests for one system serialize on the system row. A retry for the same
+/// active target returns the existing pending deployment identity.
+///
+/// # Errors
+///
+/// Returns an error when the commit has no deployable cached target or when the
+/// database transaction fails.
 pub async fn update_system_desired_target_with_source(
     pool: &PgPool,
     system_id: Uuid,
     target: &str,
     source: &str,
-) -> Result<()> {
+) -> Result<DeploymentQueueOutcome> {
+    update_system_desired_target_with_identity(pool, system_id, target, source, "").await
+}
+
+/// Resolves and queues a deployment with durable request and commit identity.
+///
+/// Explicit request identity deduplicates without a time limit. A stable legacy
+/// identity deduplicates pending and terminal work issued during the preceding
+/// 24 hours. After that conservative replay window, an omitted-request-ID
+/// client can intentionally redeploy. Commit identity remains authoritative
+/// when two commits produce the same Nix store path.
+///
+/// # Errors
+///
+/// Returns an error when the target has no cached deployable derivation or when
+/// PostgreSQL cannot resolve or persist the deployment request.
+pub async fn update_system_desired_target_with_identity(
+    pool: &PgPool,
+    system_id: Uuid,
+    target: &str,
+    source: &str,
+    request_identity: &str,
+) -> Result<DeploymentQueueOutcome> {
     let authorization = crate::services::composite_enforcement::authorize_and_set_system_target(
         pool, system_id, target, source,
     )
@@ -729,7 +1021,271 @@ pub async fn update_system_desired_target_with_source(
     if !authorization.allowed() {
         anyhow::bail!(authorization.detail);
     }
-    Ok(())
+
+    let desired_target = resolve_system_deployment_target(pool, system_id, target)
+        .await?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "No cached NixOS store path is available for deployment target {target} on system {system_id}"
+            )
+        })?;
+
+    set_resolved_system_deployment_target_with_source(
+        pool,
+        system_id,
+        &desired_target,
+        source,
+        (!target.starts_with("/nix/store/")).then_some(target),
+        (!request_identity.is_empty()).then_some(request_identity),
+    )
+    .await
+}
+
+/// Atomically queues deployment work after revalidating the persisted policy.
+///
+/// Planning state is revalidated under the system-row lock. Policy conversion
+/// is deliberately separate so a deployment failure cannot roll it back.
+///
+/// # Errors
+///
+/// Returns an error when the policy changed, the request identity conflicts,
+/// the target has no cached deployable derivation, or PostgreSQL cannot commit
+/// the queue transaction.
+pub async fn queue_manual_deployment_atomic(
+    pool: &PgPool,
+    system_id: Uuid,
+    target: &str,
+    source: &str,
+    request_identity: &str,
+    request_action: &str,
+    expected_policy: &str,
+) -> Result<DeploymentQueueOutcome> {
+    let mut tx = pool.begin().await?;
+    let policy = sqlx::query_scalar::<_, String>(
+        "SELECT deployment_policy FROM systems WHERE id = $1 FOR UPDATE",
+    )
+    .bind(system_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    anyhow::ensure!(
+        policy == expected_policy,
+        "deployment policy changed while the request was being planned"
+    );
+    #[derive(sqlx::FromRow)]
+    struct ExistingRequest {
+        id: Uuid,
+        commit_sha: Option<String>,
+        request_action: Option<String>,
+    }
+    let durable_retry = sqlx::query_as::<_, ExistingRequest>(
+        "SELECT pending.id, commit.git_commit_hash AS commit_sha, pending.request_action
+         FROM pending_system_deployments pending
+         LEFT JOIN commits commit ON commit.id = pending.requested_commit_id
+         WHERE pending.system_id = $1 AND pending.request_identity = $2
+           AND ($2 NOT LIKE 'legacy:v1:%'
+             OR pending.issued_at >= NOW() - INTERVAL '24 hours')
+         ORDER BY pending.issued_at DESC LIMIT 1",
+    )
+    .bind(system_id)
+    .bind(request_identity)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some(existing) = durable_retry {
+        if existing.commit_sha.as_deref() != Some(target)
+            || existing.request_action.as_deref() != Some(request_action)
+        {
+            return Err(DeploymentRequestIdentityConflict {
+                deployment_id: Some(existing.id),
+            }
+            .into());
+        }
+        sqlx::query(
+            "UPDATE deployment_request_reservations
+             SET state = 'queued', deployment_id = $3, updated_at = NOW()
+             WHERE system_id = $1 AND ('explicit:' || request_id::text) = $2",
+        )
+        .bind(system_id)
+        .bind(request_identity)
+        .bind(existing.id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        return Ok(DeploymentQueueOutcome {
+            deployment_id: existing.id,
+            created: false,
+        });
+    }
+    let desired_target = resolve_system_deployment_target(pool, system_id, target)
+        .await?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "No cached NixOS store path is available for deployment target {target} on system {system_id}"
+            )
+        })?;
+    let requested_commit_id = sqlx::query_scalar::<_, i32>(
+        "SELECT c.id FROM systems s
+         JOIN commits c ON c.flake_id = s.flake_id
+         WHERE s.id = $1 AND c.git_commit_hash = $2 AND c.source_archived = false",
+    )
+    .bind(system_id)
+    .bind(target)
+    .fetch_one(&mut *tx)
+    .await?;
+    let existing_id = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM pending_system_deployments
+         WHERE system_id = $1 AND (
+              (request_identity = $2 AND (
+                  $2 NOT LIKE 'legacy:v1:%'
+                  OR issued_at >= NOW() - INTERVAL '24 hours'
+              )) OR (
+                  $2 LIKE 'legacy:%'
+                 AND requested_commit_id = $3
+                 AND status = 'pending'
+                 AND expires_at > NOW()
+             )
+         )
+         ORDER BY issued_at DESC LIMIT 1",
+    )
+    .bind(system_id)
+    .bind(request_identity)
+    .bind(requested_commit_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some(deployment_id) = existing_id {
+        tx.commit().await?;
+        return Ok(DeploymentQueueOutcome {
+            deployment_id,
+            created: false,
+        });
+    }
+    // IDENTITY: A distinct request can resolve to an existing store path. End
+    // the prior lifecycle instead of reusing and rewriting its immutable row.
+    sqlx::query(
+        "UPDATE pending_system_deployments
+         SET status = 'superseded', completed_at = NOW()
+         WHERE system_id = $1 AND status = 'pending'",
+    )
+    .bind(system_id)
+    .execute(&mut *tx)
+    .await?;
+    let deployment_id =
+        set_pending_deployment_target_tx(&mut tx, system_id, Some(&desired_target), source)
+            .await?
+            .context("resolved deployment target was not accepted")?;
+    sqlx::query(
+        "UPDATE systems SET desired_target = $1, desired_target_set_at = NOW(), updated_at = NOW()
+         WHERE id = $2",
+    )
+    .bind(&desired_target)
+    .bind(system_id)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "UPDATE pending_system_deployments
+         SET requested_commit_id = $2, request_identity = $3, request_action = $4
+         WHERE id = $1 AND requested_commit_id IS NULL AND request_identity IS NULL",
+    )
+    .bind(deployment_id)
+    .bind(requested_commit_id)
+    .bind(request_identity)
+    .bind(request_action)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "UPDATE deployment_request_reservations
+         SET state = 'queued', deployment_id = $3, updated_at = NOW()
+         WHERE system_id = $1 AND ('explicit:' || request_id::text) = $2",
+    )
+    .bind(system_id)
+    .bind(request_identity)
+    .bind(deployment_id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(DeploymentQueueOutcome {
+        deployment_id,
+        created: true,
+    })
+}
+
+async fn set_resolved_system_deployment_target_with_source(
+    pool: &PgPool,
+    system_id: Uuid,
+    desired_target: &str,
+    source: &str,
+    requested_commit: Option<&str>,
+    request_identity: Option<&str>,
+) -> Result<DeploymentQueueOutcome> {
+    let mut tx = pool.begin().await?;
+
+    // CONCURRENCY: The row lock serializes retries before the pending-row
+    // existence check because the schema has no partial unique constraint.
+    sqlx::query_scalar::<_, Uuid>("SELECT id FROM systems WHERE id = $1 FOR UPDATE")
+        .bind(system_id)
+        .fetch_one(&mut *tx)
+        .await?;
+
+    let existing_id = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id
+         FROM pending_system_deployments
+         WHERE system_id = $1
+            AND (($3::text IS NOT NULL AND request_identity = $3
+                  AND ($3 NOT LIKE 'legacy:v1:%'
+                    OR issued_at >= NOW() - INTERVAL '24 hours'))
+             OR ($3::text IS NULL AND target_store_path = $2
+               AND status = 'pending' AND expires_at > NOW()))
+         ORDER BY issued_at DESC
+         LIMIT 1",
+    )
+    .bind(system_id)
+    .bind(desired_target)
+    .bind(request_identity)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "UPDATE systems
+         SET desired_target = $1, desired_target_set_at = NOW(), updated_at = NOW()
+         WHERE id = $2",
+    )
+    .bind(desired_target)
+    .bind(system_id)
+    .execute(&mut *tx)
+    .await?;
+
+    let deployment_id = if let Some(existing_id) = existing_id {
+        existing_id
+    } else {
+        set_pending_deployment_target_tx(&mut tx, system_id, Some(desired_target), source)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Resolved deployment target was not a Nix store path"))?
+    };
+    if existing_id.is_none() {
+        sqlx::query(
+            "UPDATE pending_system_deployments pending
+             SET requested_commit_id = commit.id, request_identity = $4
+             FROM systems system
+             LEFT JOIN commits commit
+               ON commit.flake_id = system.flake_id
+              AND commit.git_commit_hash = $3
+              AND commit.source_archived = false
+             WHERE pending.id = $1 AND system.id = $2
+               AND pending.requested_commit_id IS NULL
+               AND pending.request_identity IS NULL",
+        )
+        .bind(deployment_id)
+        .bind(system_id)
+        .bind(requested_commit)
+        .bind(request_identity)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
+    Ok(DeploymentQueueOutcome {
+        deployment_id,
+        created: existing_id.is_none(),
+    })
 }
 
 pub async fn deactivate_system(pool: &PgPool, system_id: Uuid) -> Result<()> {
@@ -774,7 +1330,7 @@ pub async fn list_recent_commits_for_system(
                 c.commit_timestamp AS timestamp
          FROM systems s
          JOIN commits c ON c.flake_id = s.flake_id
-         WHERE s.id = $1
+         WHERE s.id = $1 AND c.source_archived = false
          ORDER BY c.commit_timestamp DESC
          LIMIT $2",
     )
@@ -920,8 +1476,9 @@ pub async fn commit_belongs_to_system_flake(
              SELECT 1
              FROM systems s
              JOIN commits c ON c.flake_id = s.flake_id
-             WHERE s.id = $1
-               AND LOWER(c.git_commit_hash) = LOWER($2)
+              WHERE s.id = $1
+                AND LOWER(c.git_commit_hash) = LOWER($2)
+                AND c.source_archived = false
          )",
     )
     .bind(system_id)
@@ -2648,5 +3205,296 @@ mod tests {
             .execute(&pool)
             .await
             .ok();
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn manual_conversion_persists_across_failure_and_retry_reuses_deployment(pool: PgPool) {
+        let hostname = format!("task440-auto-latest-{}", Uuid::new_v4());
+        let system = make_test_system(&pool, &hostname).await;
+        sqlx::query("UPDATE systems SET deployment_policy = 'auto_latest' WHERE id = $1")
+            .bind(system.id)
+            .execute(&pool)
+            .await
+            .expect("set auto_latest policy");
+
+        assert_eq!(
+            convert_auto_latest_system_to_manual(&pool, system.id)
+                .await
+                .expect("convert policy"),
+            ManualPolicyConversion::Converted
+        );
+        assert!(
+            update_system_desired_target_with_source(
+                &pool,
+                system.id,
+                "abcdef0123456789",
+                "manual_deploy",
+            )
+            .await
+            .is_err(),
+            "missing deployment target must fail after conversion"
+        );
+        let policy =
+            sqlx::query_scalar::<_, String>("SELECT deployment_policy FROM systems WHERE id = $1")
+                .bind(system.id)
+                .fetch_one(&pool)
+                .await
+                .expect("load persisted policy");
+        assert_eq!(policy, "manual");
+
+        let store_path = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-task440-system";
+        let legacy_identity = format!("legacy:v1:{}", Uuid::new_v4().simple());
+        let first = set_resolved_system_deployment_target_with_source(
+            &pool,
+            system.id,
+            store_path,
+            "manual_deploy",
+            Some(&legacy_identity),
+            Some(&legacy_identity),
+        )
+        .await
+        .expect("queue first deployment");
+        let retry = set_resolved_system_deployment_target_with_source(
+            &pool,
+            system.id,
+            store_path,
+            "manual_deploy",
+            None,
+            None,
+        )
+        .await
+        .expect("retry deployment");
+        assert!(first.created);
+        assert!(!retry.created);
+        assert_eq!(first.deployment_id, retry.deployment_id);
+
+        sqlx::query(
+            "UPDATE pending_system_deployments
+             SET status = 'succeeded', completed_at = NOW()
+             WHERE id = $1",
+        )
+        .bind(first.deployment_id)
+        .execute(&pool)
+        .await
+        .expect("complete legacy deployment");
+        sqlx::query(
+            "UPDATE pending_system_deployments
+             SET issued_at = NOW() - INTERVAL '23 hours'
+             WHERE id = $1",
+        )
+        .bind(first.deployment_id)
+        .execute(&pool)
+        .await
+        .expect("age terminal deployment within replay window");
+        let delayed_terminal_retry = set_resolved_system_deployment_target_with_source(
+            &pool,
+            system.id,
+            store_path,
+            "manual_deploy",
+            None,
+            Some(&legacy_identity),
+        )
+        .await
+        .expect("delayed terminal retry should resolve durably");
+        assert!(!delayed_terminal_retry.created);
+        assert_eq!(delayed_terminal_retry.deployment_id, first.deployment_id);
+
+        sqlx::query(
+            "UPDATE pending_system_deployments
+             SET issued_at = NOW() - INTERVAL '25 hours'
+             WHERE id = $1",
+        )
+        .bind(first.deployment_id)
+        .execute(&pool)
+        .await
+        .expect("age terminal deployment beyond replay window");
+        let intentional_redeploy = set_resolved_system_deployment_target_with_source(
+            &pool,
+            system.id,
+            store_path,
+            "manual_deploy",
+            Some(&legacy_identity),
+            None,
+        )
+        .await
+        .expect("legacy terminal target may redeploy");
+        assert!(intentional_redeploy.created);
+        assert_ne!(intentional_redeploy.deployment_id, first.deployment_id);
+
+        let pending_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM pending_system_deployments
+             WHERE system_id = $1 AND target_store_path = $2 AND status = 'pending'",
+        )
+        .bind(system.id)
+        .bind(store_path)
+        .fetch_one(&pool)
+        .await
+        .expect("count pending deployments");
+        assert_eq!(pending_count, 1);
+
+        sqlx::query("DELETE FROM systems WHERE id = $1")
+            .bind(system.id)
+            .execute(&pool)
+            .await
+            .expect("remove test system");
+    }
+
+    #[ignore = "requires a migrated PostgreSQL database"]
+    #[tokio::test]
+    async fn failed_manual_conversion_queues_no_deployment() {
+        let pool = test_pool_from_env().await;
+        let hostname = format!("task440-pinned-{}", Uuid::new_v4());
+        let system = make_test_system(&pool, &hostname).await;
+        sqlx::query("UPDATE systems SET deployment_policy = 'pinned' WHERE id = $1")
+            .bind(system.id)
+            .execute(&pool)
+            .await
+            .expect("set pinned policy");
+
+        assert!(
+            convert_auto_latest_system_to_manual(&pool, system.id)
+                .await
+                .is_err()
+        );
+        let pending_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM pending_system_deployments WHERE system_id = $1",
+        )
+        .bind(system.id)
+        .fetch_one(&pool)
+        .await
+        .expect("count pending deployments");
+        assert_eq!(pending_count, 0);
+
+        sqlx::query("DELETE FROM systems WHERE id = $1")
+            .bind(system.id)
+            .execute(&pool)
+            .await
+            .expect("remove test system");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn concurrent_explicit_request_conflicts_before_policy_conversion(pool: PgPool) {
+        let suffix = Uuid::new_v4();
+        let system = make_test_system(&pool, &format!("task440-reservation-{suffix}")).await;
+        let flake_id = sqlx::query_scalar::<_, i32>(
+            "INSERT INTO flakes (name, repo_url) VALUES ($1, $2) RETURNING id",
+        )
+        .bind(format!("task440-reservation-{suffix}"))
+        .bind(format!("https://example.test/task440-reservation-{suffix}"))
+        .fetch_one(&pool)
+        .await
+        .expect("insert flake");
+        sqlx::query(
+            "UPDATE systems SET flake_id = $2, deployment_policy = 'auto_latest' WHERE id = $1",
+        )
+        .bind(system.id)
+        .bind(flake_id)
+        .execute(&pool)
+        .await
+        .expect("bind system flake");
+        let first_sha = "a".repeat(40);
+        let second_sha = "b".repeat(40);
+        for sha in [&first_sha, &second_sha] {
+            sqlx::query(
+                "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp)
+                 VALUES ($1, $2, NOW())",
+            )
+            .bind(flake_id)
+            .bind(sha)
+            .execute(&pool)
+            .await
+            .expect("insert commit");
+        }
+        let request_id = Uuid::new_v4();
+        let first = reserve_explicit_deployment_request(
+            &pool,
+            system.id,
+            request_id,
+            &first_sha,
+            "convert_to_manual",
+        );
+        let second = reserve_explicit_deployment_request(
+            &pool,
+            system.id,
+            request_id,
+            &second_sha,
+            "convert_to_manual",
+        );
+        let (first, second) = tokio::join!(first, second);
+        let first_won = first.is_ok();
+        assert_eq!(
+            usize::from(first_won) + usize::from(second.is_ok()),
+            1,
+            "exactly one immutable intent must win"
+        );
+        let conflict =
+            if first.is_err() { first } else { second }.expect_err("losing intent must conflict");
+        assert!(
+            conflict
+                .downcast_ref::<DeploymentRequestIdentityConflict>()
+                .is_some()
+        );
+        let policy =
+            sqlx::query_scalar::<_, String>("SELECT deployment_policy FROM systems WHERE id = $1")
+                .bind(system.id)
+                .fetch_one(&pool)
+                .await
+                .expect("load policy");
+        assert_eq!(
+            policy, "auto_latest",
+            "reservation conflict precedes conversion"
+        );
+
+        let winning_sha = if first_won { &first_sha } else { &second_sha };
+        assert_eq!(
+            convert_auto_latest_system_to_manual_for_request(&pool, system.id, Some(request_id),)
+                .await
+                .expect("winning request should convert policy"),
+            ManualPolicyConversion::Converted
+        );
+        update_explicit_deployment_request_state(
+            &pool,
+            system.id,
+            request_id,
+            "deploy_failed",
+            None,
+        )
+        .await
+        .expect("failed deployment partial state should persist");
+        let retry = reserve_explicit_deployment_request(
+            &pool,
+            system.id,
+            request_id,
+            winning_sha,
+            "convert_to_manual",
+        )
+        .await
+        .expect("matching explicit retry should reuse reservation");
+        assert!(!retry.created);
+        let (state, persisted_policy) = sqlx::query_as::<_, (String, String)>(
+            "SELECT reservation.state, system.deployment_policy
+             FROM deployment_request_reservations reservation
+             JOIN systems system ON system.id = reservation.system_id
+             WHERE reservation.request_id = $1",
+        )
+        .bind(request_id)
+        .fetch_one(&pool)
+        .await
+        .expect("partial request state should load");
+        assert_eq!(state, "deploy_failed");
+        assert_eq!(persisted_policy, "manual");
+
+        sqlx::query("DELETE FROM systems WHERE id = $1")
+            .bind(system.id)
+            .execute(&pool)
+            .await
+            .expect("remove system");
+        sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await
+            .expect("remove flake");
     }
 }

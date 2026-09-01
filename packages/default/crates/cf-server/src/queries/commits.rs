@@ -119,6 +119,69 @@ pub async fn insert_commit_by_flake_id_tx(
     Ok(if result.is_some() { 1 } else { 0 })
 }
 
+/// Persists the full Git first-parent identity found during an authoritative sync.
+///
+/// A `None` parent identifies a root commit. The sync transaction updates both
+/// new and existing rows so commits first learned from webhooks gain ancestry
+/// metadata without requiring a duplicate evaluation.
+///
+/// # Errors
+///
+/// Returns an error when the commit is absent or PostgreSQL cannot persist the
+/// parent identity in the caller's transaction.
+pub async fn set_commit_first_parent_by_flake_id_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    flake_id: i32,
+    commit_hash: &str,
+    first_parent_sha: Option<&str>,
+) -> Result<()> {
+    let updated = sqlx::query(
+        "UPDATE commits
+         SET first_parent_sha = $3, first_parent_resolved = true, source_archived = false
+         WHERE flake_id = $1 AND git_commit_hash = $2",
+    )
+    .bind(flake_id)
+    .bind(commit_hash)
+    .bind(first_parent_sha)
+    .execute(&mut **tx)
+    .await?;
+    if updated.rows_affected() != 1 {
+        bail!("commit {commit_hash} was not present for flake {flake_id}");
+    }
+    Ok(())
+}
+
+/// Persists first-parent identity for a commit inserted outside a sync transaction.
+///
+/// # Errors
+///
+/// Returns an error when the commit is absent or PostgreSQL cannot persist the
+/// parent identity.
+pub async fn set_commit_first_parent_by_repo_url(
+    pool: &PgPool,
+    repo_url: &str,
+    commit_hash: &str,
+    first_parent_sha: Option<&str>,
+) -> Result<()> {
+    let updated = sqlx::query(
+        r#"
+        UPDATE commits c
+        SET first_parent_sha = $3, first_parent_resolved = true, source_archived = false
+        FROM flakes f
+        WHERE f.id = c.flake_id AND f.repo_url = $1 AND c.git_commit_hash = $2
+        "#,
+    )
+    .bind(repo_url)
+    .bind(commit_hash)
+    .bind(first_parent_sha)
+    .execute(pool)
+    .await?;
+    if updated.rows_affected() != 1 {
+        bail!("commit {commit_hash} was not present for repository {repo_url}");
+    }
+    Ok(())
+}
+
 pub async fn get_commit_by_hash(pool: &PgPool, commit_hash: &str) -> Result<Commit> {
     let commit = sqlx::query_as::<_, Commit>("SELECT * FROM commits WHERE git_commit_hash = $1")
         .bind(commit_hash)
@@ -150,6 +213,7 @@ pub async fn get_commits_pending_evaluation(pool: &PgPool) -> Result<Vec<Commit>
         FROM commits c
         JOIN evaluation_attempts ea ON ea.commit_id = c.id AND ea.status = 'queued'
         WHERE c.evaluation_status = 'pending'
+        AND c.source_archived = false
         AND ea.available_at <= NOW()
         ORDER BY
             COALESCE(c.eval_queue_position, 0) DESC,
@@ -170,8 +234,9 @@ pub async fn next_evaluation_available_at(
         SELECT MIN(ea.available_at)
         FROM evaluation_attempts ea
         JOIN commits c ON c.id = ea.commit_id
-        WHERE ea.status = 'queued'
-          AND COALESCE(c.evaluation_status, 'pending') = 'pending'
+         WHERE ea.status = 'queued'
+           AND COALESCE(c.evaluation_status, 'pending') = 'pending'
+           AND c.source_archived = false
         "#,
     )
     .fetch_one(pool)
@@ -198,7 +263,7 @@ pub async fn flake_has_commits(pool: &PgPool, repo_url: &str) -> Result<bool> {
     let count: (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM commits c 
          JOIN flakes f ON c.flake_id = f.id 
-         WHERE f.repo_url = $1",
+         WHERE f.repo_url = $1 AND c.source_archived = false",
     )
     .bind(repo_url)
     .fetch_one(pool)
@@ -210,7 +275,7 @@ pub async fn flake_last_commit(pool: &PgPool, repo_url: &str) -> Result<Commit> 
     let commit = sqlx::query_as::<_, Commit>(
         "SELECT * FROM COMMITS c 
          JOIN flakes f ON c.flake_id = f.id 
-         WHERE repo_url = $1 
+         WHERE repo_url = $1 AND c.source_archived = false
          ORDER BY commit_timestamp DESC 
          LIMIT 1;",
     )
@@ -226,35 +291,36 @@ pub async fn get_commit_distance_from_head(
     commit: &Commit,
 ) -> Result<i32> {
     // Get the latest commit for this flake
-    let latest_commit = sqlx::query!(
+    let latest_commit = sqlx::query_as::<_, (i32, String)>(
         r#"
         SELECT id, git_commit_hash
         FROM commits
-        WHERE flake_id = $1
+         WHERE flake_id = $1 AND source_archived = false
         ORDER BY commit_timestamp DESC
         LIMIT 1
         "#,
-        flake.id
     )
+    .bind(flake.id)
     .fetch_one(pool)
     .await?;
 
     // If this is the latest commit, distance is 0
-    if latest_commit.id == commit.id {
+    if latest_commit.0 == commit.id {
         return Ok(0);
     }
 
     // Count commits between this one and HEAD
-    let distance = sqlx::query_scalar!(
+    let distance = sqlx::query_scalar::<_, i32>(
         r#"
         SELECT COUNT(*)::int as "count!"
         FROM commits
-        WHERE flake_id = $1
-        AND commit_timestamp > $2
+         WHERE flake_id = $1
+         AND commit_timestamp > $2
+         AND source_archived = false
         "#,
-        flake.id,
-        commit.commit_timestamp
     )
+    .bind(flake.id)
+    .bind(commit.commit_timestamp)
     .fetch_one(pool)
     .await?;
 
@@ -595,6 +661,9 @@ pub async fn mark_commit_evaluation_failed(
     expected_attempt: i32,
     failure_class: RetryFailureClass,
 ) -> Result<EvalFailureOutcome> {
+    // SECURITY: Commit and attempt errors are API-visible and persisted. Raw
+    // evaluator diagnostics must not cross this boundary.
+    let error = crate::security::snapshot_redaction::redact_evaluation_error(error);
     let mut tx = pool.begin().await?;
     #[derive(sqlx::FromRow)]
     struct FailedAttempt {
@@ -622,7 +691,7 @@ pub async fn mark_commit_evaluation_failed(
         "#,
     )
     .bind(commit_id)
-    .bind(error)
+    .bind(&error)
     .bind(class_name)
     .bind(expected_attempt)
     .fetch_optional(&mut *tx)
@@ -633,7 +702,7 @@ pub async fn mark_commit_evaluation_failed(
     };
 
     crate::services::composite_enforcement::fail_eval_passed_attempt_in_tx(
-        &mut tx, failed.id, error, class_name,
+        &mut tx, failed.id, &error, class_name,
     )
     .await?;
 
@@ -694,6 +763,7 @@ pub async fn mark_commit_evaluation_failed(
         .bind(EVAL_QUEUE_ADVISORY_LOCK_KEY)
         .execute(&mut *tx)
         .await?;
+        crate::queries::evaluation_snapshots::recompute_host_deltas_tx(&mut tx, commit_id).await?;
     }
 
     let row = sqlx::query(
@@ -710,7 +780,7 @@ pub async fn mark_commit_evaluation_failed(
     )
     .bind(commit_id)
     .bind(if retry_scheduled { "pending" } else { "failed" })
-    .bind(error)
+    .bind(&error)
     .bind(expected_attempt)
     .fetch_optional(&mut *tx)
     .await?;
@@ -718,6 +788,40 @@ pub async fn mark_commit_evaluation_failed(
         tx.rollback().await?;
         return Ok(EvalFailureOutcome::SupersededOrCancelled);
     };
+
+    if !retry_scheduled {
+        // PERSISTENCE: A terminal commit failure records an explicit lifecycle
+        // for each known configuration instead of collapsing every Config read
+        // into one commit-global error.
+        sqlx::query(
+            r#"
+            WITH configuration_names AS (
+                SELECT DISTINCT unnest(cac.nixos_configurations) AS name
+                FROM commit_artifacts_cache cac WHERE cac.commit_id = $1
+                UNION
+                SELECT DISTINCT d.derivation_name
+                FROM derivations d
+                WHERE d.commit_id = $1 AND d.derivation_type = 'nixos'
+            )
+            INSERT INTO evaluation_snapshots (
+                commit_id, configuration_name, lifecycle, first_parent_sha,
+                error, completed_at
+            )
+            SELECT $1, names.name, 'failed', c.first_parent_sha, $2, now()
+            FROM configuration_names names
+            JOIN commits c ON c.id = $1
+            WHERE btrim(names.name) <> ''
+            ON CONFLICT (commit_id, configuration_name) DO UPDATE
+            SET lifecycle = 'failed', error = EXCLUDED.error,
+                option_count = 0, module_count = 0, content_bytes = 0,
+                completed_at = now()
+            "#,
+        )
+        .bind(commit_id)
+        .bind(&error)
+        .execute(&mut *tx)
+        .await?;
+    }
 
     let completed_at: Option<chrono::DateTime<chrono::Utc>> =
         row.try_get("evaluation_completed_at")?;
@@ -1019,6 +1123,7 @@ pub async fn list_eval_queue_for_user(
             JOIN flakes f ON f.id = c.flake_id
             LEFT JOIN commit_artifacts_cache cac ON cac.commit_id = c.id
             WHERE COALESCE(c.evaluation_status, 'pending') IN ('pending', 'in_progress', 'cancelling', 'complete', 'failed', 'cancelled')
+              AND c.source_archived = false
               AND ($5::uuid IS NULL OR EXISTS (
                 SELECT 1 FROM systems s JOIN user_environment_memberships uem ON uem.environment_id = s.environment_id
                 WHERE s.flake_id = c.flake_id AND uem.user_id = $5
@@ -1112,6 +1217,7 @@ pub async fn list_eval_queue_for_user(
             LIMIT 1
         ) ea ON TRUE
         WHERE COALESCE(c.evaluation_status, 'pending') IN ('pending', 'in_progress', 'cancelling', 'complete', 'failed', 'cancelled')
+          AND c.source_archived = false
           AND ($5::uuid IS NULL OR EXISTS (
             SELECT 1 FROM systems s JOIN user_environment_memberships uem ON uem.environment_id = s.environment_id
             WHERE s.flake_id = c.flake_id AND uem.user_id = $5
@@ -1174,6 +1280,7 @@ pub async fn reorder_eval_queue(pool: &PgPool, ordered_commit_ids: &[i32]) -> Re
         SELECT c.id
         FROM commits c
         WHERE COALESCE(c.evaluation_status, 'pending') IN ('pending', 'in_progress')
+          AND c.source_archived = false
         ORDER BY
             CASE
                 WHEN c.evaluation_status = 'in_progress' THEN 0

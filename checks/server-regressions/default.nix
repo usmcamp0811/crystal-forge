@@ -288,6 +288,50 @@ SQL
       bundle_summary_aggregate_query_count_is_bounded_across_versions \
       -- --ignored --test-threads=1
 
+    echo "=== Evaluation comparison baseline failure isolation ==="
+    cargo test --offline --package cf-server --lib \
+      comparison_baseline_failures_are_isolated_for_commits_and_generations \
+      -- --ignored --test-threads=1
+    cargo test --offline --package cf-server --lib \
+      bounded_comparison_page_handles_multi_thousand_option_snapshots \
+      -- --ignored --test-threads=1
+
+    echo "=== Exported-module declaration pagination ==="
+    cargo test --offline --package cf-server --lib \
+      exported_module_declaration_pagination_is_stable_bounded_and_read_only \
+      -- --ignored --test-threads=1
+
+    echo "=== Selected evaluation summary and provenance visibility ==="
+    cargo test --offline --package cf-server --lib \
+      selected_evaluation_summary_is_authoritative_and_visibility_filtered \
+      -- --ignored --test-threads=1
+    cargo test --offline --package cf-server --lib \
+      evaluation_module_sources_page_is_complete_stable_bounded_and_read_only \
+      -- --ignored --test-threads=1
+    cargo test --offline --package cf-server --lib \
+      evaluation_module_source_count_and_continuation_follow_bounded_replacements \
+      -- --ignored --test-threads=1
+    cargo test --offline --package cf-server --lib \
+      ac24_metrics_and_filtered_reconciliation_are_authoritative \
+      -- --ignored --test-threads=1
+    cargo test --offline --package cf-server --lib \
+      materialized_host_delta_scales_across_large_multi_configuration_corpus \
+      -- --ignored --test-threads=1
+    cargo test --offline --package cf-server --lib \
+      finalization_populates_host_metrics_for_complete_configuration_corpus \
+      -- --ignored --test-threads=1
+
+    echo "=== TASK-440 manual and auto-latest deployment contracts ==="
+    cargo test --offline --package cf-server --lib \
+      manual_conversion_persists_across_failure_and_retry_reuses_deployment \
+      -- --ignored --test-threads=1
+    cargo test --offline --package cf-server --lib \
+      failed_manual_conversion_queues_no_deployment \
+      -- --ignored --test-threads=1
+    cargo test --offline --package cf-server --lib \
+      concurrent_explicit_request_conflicts_before_policy_conversion \
+      -- --ignored --test-threads=1
+
     runHook postCheck
   '';
 

@@ -1,18 +1,19 @@
 {
-  "version": 2,
-  "$schema_note": "Design-parity manifest for the web-ui check. Each target navigates the authoritative design example through its real UI, validates the expected surface marker, and maps it to the Dioxus route and optional interaction path. Drift remains non-blocking, but a missing or wrong surface is reported and is never saved as a valid target.",
+  "version": 3,
+  "$schema_note": "Design-parity manifest for the web-ui check. Primary views use real sidebar controls. TASK-440 targets use explicit nested interaction states and map to canonical Dioxus workflow steps. The metric is advisory; reviewers must inspect the retained montages.",
   "settings": {
     "viewport": {
       "width": 1920,
       "height": 1080
     },
     "themes": ["dark", "light"],
+    "semanticFixture": "../design-fixtures.json",
     "blocking": false,
-    "note": "Design drift is reported as a directional gauge only; React (design example) and Dioxus (real UI) are not expected to be pixel-identical. Target navigation and identity validation are required even though visual drift is non-blocking.",
+    "note": "The eight TASK-440 targets produce 16 actual React-vs-Dioxus pixel comparisons. Design drift is a directional advisory gauge only; similarity does not establish visual parity, and reviewers must inspect every montage.",
     "compare": {
       "method": "imagemagick-rmse-normalized",
       "resizeWidth": 960,
-      "note": "Both screenshots are normalized (resized to a common width, flattened on an opaque background) before ImageMagick `compare -metric RMSE` so the score is a stable perceptual-ish similarity gauge rather than a strict pixel diff."
+      "note": "Each full source capture must match its target viewport. TASK-440 comparisons crop the recorded content surface before normalization so shared shell pixels do not dominate RMSE."
     }
   },
   "views": [
@@ -193,5 +194,75 @@
       "dioxusMarker": { "selector": "[data-testid='poam-detail']", "text": "Remediation plan" },
       "designRef": "docs/design/CrystalForge/components/PoamViews.jsx"
     }
-  ]
+  ],
+  "targets": {
+    "task440": [
+      {
+        "name": "task440-config-wide-expanded",
+        "viewport": { "width": 1920, "height": 1080 },
+        "designRef": "docs/design/CrystalForge/components/SystemDetail.jsx",
+        "dioxusStep": "12p-task440-config-canonical-wide-expanded",
+        "comparisonNote": "Production provenance remains visible, but source text is intentionally unavailable because the production DTO does not expose source code.",
+        "contentSelector": ".sd-grid-config",
+        "designState": { "kind": "system-config", "hostname": "atlas-01", "tab": "config", "search": "boot.kernel.sysctl.\"fs.protected_hardlinks\"", "expandOption": "boot.kernel.sysctl.\"fs.protected_hardlinks\"", "expectedText": ["Evaluated options", "boot.kernel.sysctl.\"fs.protected_hardlinks\""] }
+      },
+      {
+        "name": "task440-config-narrow",
+        "viewport": { "width": 900, "height": 900 },
+        "designRef": "docs/design/CrystalForge/components/SystemDetail.jsx",
+        "dioxusStep": "12q-task440-config-canonical-narrow",
+        "comparisonNote": "Production provenance remains visible, but source text is intentionally unavailable because the production DTO does not expose source code.",
+        "contentSelector": ".sd-grid-config",
+        "designState": { "kind": "system-config", "hostname": "atlas-01", "tab": "config", "search": "boot.kernel.sysctl.\"fs.protected_hardlinks\"", "expectedText": ["Evaluated options", "atlas-01", "boot.kernel.sysctl.\"fs.protected_hardlinks\""] }
+      },
+      {
+        "name": "task440-flake-systems-wide",
+        "viewport": { "width": 1920, "height": 1080 },
+        "designRef": "docs/design/CrystalForge/components/FlakeExplorer.jsx",
+        "dioxusStep": "13l-task440-flake-systems-canonical-wide",
+        "contentSelector": ".fl-tray",
+        "designState": { "kind": "flake-pane", "flake": "infrastructure", "pane": "Systems", "expectedText": ["nixosConfiguration", "atlas-01"] }
+      },
+      {
+        "name": "task440-flake-systems-narrow",
+        "viewport": { "width": 900, "height": 900 },
+        "designRef": "docs/design/CrystalForge/components/FlakeExplorer.jsx",
+        "dioxusStep": "13m-task440-flake-systems-canonical-narrow",
+        "contentSelector": ".fl-tray",
+        "designState": { "kind": "flake-pane", "flake": "infrastructure", "pane": "Systems", "expectedText": ["nixosConfiguration", "atlas-01"] }
+      },
+      {
+        "name": "task440-flake-modules-wide-expanded",
+        "viewport": { "width": 1920, "height": 1080 },
+        "designRef": "docs/design/CrystalForge/components/FlakeExplorer.jsx",
+        "dioxusStep": "13n-task440-flake-modules-canonical-wide-expanded",
+        "contentSelector": ".fl-tray",
+        "designState": { "kind": "flake-pane", "flake": "infrastructure", "pane": "Modules", "expandModule": "system", "expectedText": ["Declared options", "cf.system.enable"] }
+      },
+      {
+        "name": "task440-flake-modules-narrow-expanded",
+        "viewport": { "width": 900, "height": 900 },
+        "designRef": "docs/design/CrystalForge/components/FlakeExplorer.jsx",
+        "dioxusStep": "13o-task440-flake-modules-canonical-narrow-expanded",
+        "contentSelector": ".fl-tray",
+        "designState": { "kind": "flake-pane", "flake": "infrastructure", "pane": "Modules", "expandModule": "system", "expectedText": ["Declared options", "cf.system.enable"] }
+      },
+      {
+        "name": "task440-flake-inputs-wide",
+        "viewport": { "width": 1920, "height": 1080 },
+        "designRef": "docs/design/CrystalForge/components/FlakeExplorer.jsx",
+        "dioxusStep": "13p-task440-flake-inputs-canonical-wide",
+        "contentSelector": ".fl-tray",
+        "designState": { "kind": "flake-pane", "flake": "infrastructure", "pane": "Inputs", "expectedText": ["Input", "nixpkgs"] }
+      },
+      {
+        "name": "task440-flake-inputs-narrow",
+        "viewport": { "width": 900, "height": 900 },
+        "designRef": "docs/design/CrystalForge/components/FlakeExplorer.jsx",
+        "dioxusStep": "13q-task440-flake-inputs-canonical-narrow",
+        "contentSelector": ".fl-tray",
+        "designState": { "kind": "flake-pane", "flake": "infrastructure", "pane": "Inputs", "expectedText": ["Input", "nixpkgs"] }
+      }
+    ]
+  }
 }

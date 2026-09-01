@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "$schema_note": "Canonical visual fixture data for aligning docs/design/CrystalForge mocked examples with checks/web-ui Playwright states. This is intentionally product-shaped, stable, and non-secret. Use it when refactoring design examples so non-blocking design-parity comparisons are based on the same representative data as the web-ui check.",
+  "$schema_note": "Canonical semantic fixture data enforced by both the React target generator and the Dioxus Playwright integration before TASK-440 captures are published. This data is stable, non-secret, and limited to fields supported by both rendered surfaces.",
   "themeCoverage": ["dark", "light"],
   "fleet": {
     "systems": [
@@ -53,6 +53,146 @@
       "latestEvaluation": "warning"
     }
   ],
+  "task440": {
+    "systemId": "00000000-0000-0000-0000-0000000000a1",
+    "currentRevision": "abcdef0123456789abcdef0123456789abcdef01",
+    "historicalRevisionWithSameDisplayPrefix": "abcdef0fedcba9876543210fedcba9876543210f",
+    "rootRevision": "1111111111111111111111111111111111111111",
+    "configStates": ["unavailable", "queued", "running", "failed", "available"],
+    "flakePanes": ["Commits", "Systems", "Modules", "Inputs"],
+    "canonicalConfig": {
+      "system": "atlas-01",
+      "flake": "infrastructure",
+      "mode": "generation",
+      "generation": 160,
+      "revision": "84274a8a",
+      "revisionMessage": "bump nixpkgs to 24.11",
+      "uptime": { "react": "32d 22h", "dioxus": "32d 22h 0m" },
+      "heartbeatAgeMinutes": 4,
+      "optionTotal": 1092,
+      "overriddenTotal": 204,
+      "changedTotal": 5,
+      "moduleSourceTotal": 27,
+      "hostDeltaTotal": 37,
+      "packageTotal": 842,
+      "closureSizeBytes": 1760936591,
+      "evaluationDurationMs": 3400,
+      "expandedOption": "boot.kernel.sysctl.\"fs.protected_hardlinks\"",
+      "volatileExclusions": {
+        "heartbeatCountdown": "The design spinner advances continuously and is not a persisted production value. The contract checks the stable four-minute heartbeat age instead.",
+        "evaluationAge": "The design presents a relative mock age while production presents the persisted completion timestamp. The contract checks evaluation duration and excludes only the age presentation."
+      }
+    },
+    "canonicalFlake": {
+      "name": "infrastructure",
+      "selectedRevision": "a3f8c12",
+      "parentRevision": "f1d9022",
+      "selectedDeclaredSystems": 11,
+      "parentDeclaredSystems": 6,
+      "managedSystems": 9,
+      "declaredUnmanagedSystems": 2,
+      "managedUndeclaredSystems": 0,
+      "exportedModules": 8,
+      "directInputs": 8,
+      "resolvedInputs": 47,
+      "nixpkgsChannels": 3,
+      "staleInputs": 1,
+      "expandedModule": "system",
+      "deltaTotals": {
+        "systemsAdded": 5,
+        "systemsRemoved": 0,
+        "modulesAdded": 3,
+        "modulesRemoved": 0,
+        "inputsAdded": 0,
+        "inputsRemoved": 3,
+        "inputRevisionBumps": 5
+      }
+    },
+    "semanticTargets": {
+      "task440-config-wide-expanded": {
+        "kind": "system-config",
+        "identity": { "system": "atlas-01", "flake": "infrastructure", "generation": 160, "revision": "84274a8a", "revisionMessage": "bump nixpkgs to 24.11", "uptime": { "react": "32d 22h", "dioxus": "32d 22h 0m" }, "heartbeatAgeMinutes": 4 },
+        "counts": { "all": 1092, "overridden": 204, "changed": 5, "moduleSources": 27, "hostDelta": 37, "packages": 842 },
+        "formattedMetrics": { "reactClosure": "1.64 GiB", "dioxusClosure": "1.6 GiB", "reactEvaluationDuration": "3.4s", "dioxusEvaluationDuration": "3400 ms" },
+        "orderedVisibleRows": ["boot.kernel.sysctl.\"fs.protected_hardlinks\""],
+        "selectedPane": "Config",
+        "selectedFilter": "All",
+        "expandedItem": "boot.kernel.sysctl.\"fs.protected_hardlinks\""
+      },
+      "task440-config-narrow": {
+        "kind": "system-config",
+        "identity": { "system": "atlas-01", "flake": "infrastructure", "generation": 160, "revision": "84274a8a", "revisionMessage": "bump nixpkgs to 24.11", "uptime": { "react": "32d 22h", "dioxus": "32d 22h 0m" }, "heartbeatAgeMinutes": 4 },
+        "counts": { "all": 1092, "overridden": 204, "changed": 5, "moduleSources": 27, "hostDelta": 37, "packages": 842 },
+        "formattedMetrics": { "reactClosure": "1.64 GiB", "dioxusClosure": "1.6 GiB", "reactEvaluationDuration": "3.4s", "dioxusEvaluationDuration": "3400 ms" },
+        "orderedVisibleRows": ["boot.kernel.sysctl.\"fs.protected_hardlinks\""],
+        "searchQuery": "boot.kernel.sysctl.\"fs.protected_hardlinks\"",
+        "selectedPane": "Config",
+        "selectedFilter": "All",
+        "expandedItem": null
+      },
+      "task440-flake-systems-wide": {
+        "kind": "flake-pane",
+        "identity": { "flake": "infrastructure", "revision": "a3f8c12", "revisionMessage": "stig: enforce audit rules for sudo" },
+        "counts": { "declared": 11, "managed": 9, "declaredUnmanaged": 2, "managedUndeclared": 0 },
+        "orderedVisibleRows": ["atlas-01", "atlas-02", "atlas-03", "orion-db-01", "orion-db-02", "stg-atlas-01", "stg-atlas-02", "dev-node-01", "dev-node-02", "vm-test-01", "vm-test-02"],
+        "selectedPane": "Systems",
+        "selectedFilter": "All",
+        "expandedItem": null
+      },
+      "task440-flake-systems-narrow": {
+        "kind": "flake-pane",
+        "identity": { "flake": "infrastructure", "revision": "a3f8c12", "revisionMessage": "stig: enforce audit rules for sudo" },
+        "counts": { "declared": 11, "managed": 9, "declaredUnmanaged": 2, "managedUndeclared": 0 },
+        "orderedVisibleRows": ["atlas-01", "atlas-02", "atlas-03", "orion-db-01", "orion-db-02", "stg-atlas-01", "stg-atlas-02", "dev-node-01", "dev-node-02", "vm-test-01", "vm-test-02"],
+        "selectedPane": "Systems",
+        "selectedFilter": "All",
+        "expandedItem": null
+      },
+      "task440-flake-modules-wide-expanded": {
+        "kind": "flake-pane",
+        "identity": { "flake": "infrastructure", "revision": "a3f8c12", "revisionMessage": "stig: enforce audit rules for sudo" },
+        "counts": { "exportedModules": 8 },
+        "orderedVisibleRows": { "react": ["services/grafana", "system/networking", "security/gpg", "services/k3s", "system/zfs", "system", "user", "services/prometheus"], "dioxus": ["services/grafana", "system/networking", "security/gpg", "services/k3s", "system/zfs", "services/prometheus", "system", "user"] },
+        "orderingNote": "The design preserves source order for equal consumer counts. Production applies its deterministic equal-count ordering. Both exact orders are enforced.",
+        "orderedExpandedRows": ["cf.system.enable", "cf.system.stateVersion", "cf.system.gc.automatic", "cf.system.gc.olderThan", "cf.system.timeZone", "cf.system.experimentalFeatures"],
+        "selectedPane": "Modules",
+        "selectedFilter": null,
+        "expandedItem": "system"
+      },
+      "task440-flake-modules-narrow-expanded": {
+        "kind": "flake-pane",
+        "identity": { "flake": "infrastructure", "revision": "a3f8c12", "revisionMessage": "stig: enforce audit rules for sudo" },
+        "counts": { "exportedModules": 8 },
+        "orderedVisibleRows": { "react": ["services/grafana", "system/networking", "security/gpg", "services/k3s", "system/zfs", "system", "user", "services/prometheus"], "dioxus": ["services/grafana", "system/networking", "security/gpg", "services/k3s", "system/zfs", "services/prometheus", "system", "user"] },
+        "orderingNote": "The design preserves source order for equal consumer counts. Production applies its deterministic equal-count ordering. Both exact orders are enforced.",
+        "orderedExpandedRows": ["cf.system.enable", "cf.system.stateVersion", "cf.system.gc.automatic", "cf.system.gc.olderThan", "cf.system.timeZone", "cf.system.experimentalFeatures"],
+        "selectedPane": "Modules",
+        "selectedFilter": null,
+        "expandedItem": "system"
+      },
+      "task440-flake-inputs-wide": {
+        "kind": "flake-pane",
+        "identity": { "flake": "infrastructure", "revision": "a3f8c12", "revisionMessage": "stig: enforce audit rules for sudo" },
+        "counts": { "directInputs": 8, "resolvedInputs": 47, "nixpkgsChannels": 3, "staleInputs": 1 },
+        "orderedVisibleRows": { "react": ["nixpkgs", "unstable", "old-nixpkgs", "home-manager", "crystal-forge", "impermanence", "disko", "stylix"], "dioxus": ["crystal-forge", "disko", "home-manager", "impermanence", "nixpkgs", "old-nixpkgs", "stylix", "unstable"] },
+        "orderingNote": "The design preserves lock-file source order. The production table sorts direct inputs by name. Both exact orders are enforced because order is presentation policy, not input identity.",
+        "selectedPane": "Inputs",
+        "selectedFilter": null,
+        "expandedItem": null
+      },
+      "task440-flake-inputs-narrow": {
+        "kind": "flake-pane",
+        "identity": { "flake": "infrastructure", "revision": "a3f8c12", "revisionMessage": "stig: enforce audit rules for sudo" },
+        "counts": { "directInputs": 8, "resolvedInputs": 47, "nixpkgsChannels": 3, "staleInputs": 1 },
+        "orderedVisibleRows": { "react": ["nixpkgs", "unstable", "old-nixpkgs", "home-manager", "crystal-forge", "impermanence", "disko", "stylix"], "dioxus": ["crystal-forge", "disko", "home-manager", "impermanence", "nixpkgs", "old-nixpkgs", "stylix", "unstable"] },
+        "orderingNote": "The design preserves lock-file source order. The production table sorts direct inputs by name. Both exact orders are enforced because order is presentation policy, not input identity.",
+        "selectedPane": "Inputs",
+        "selectedFilter": null,
+        "expandedItem": null
+      }
+    },
+    "viewports": [{ "width": 1920, "height": 1080 }, { "width": 900, "height": 900 }]
+  },
   "builds": [
     {
       "system": "builder-primary",

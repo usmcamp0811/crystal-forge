@@ -8,6 +8,7 @@ pub mod cves;
 pub mod deployment_policies;
 pub mod environments;
 pub mod evaluate_with_policies;
+pub mod evaluation_snapshots;
 pub mod flake_credentials;
 pub mod flakes;
 pub mod hardening_scans;

@@ -11,7 +11,9 @@
     "devStackWorkflows": {
       "$note": "Workflows the host-side web-ui-test runner may execute against the persistent run-ui-dev stack, keyed by name. category 'mock' workflows read only page.route()-intercepted data and/or set their own account-preference precondition before asserting; they never touch persistent server state and need no reset. category 'fixture' workflows create new rows through runFixtureSql/the real REST API using fresh randomUUID identity on every invocation, so repeated runs never collide; the runner verifies a non-destructive precondition (base fixture data present) before each run instead of deleting rows, because several fixture tables use ON DELETE RESTRICT foreign keys as a deliberate compliance/audit-trail invariant that a generic delete-based reset would violate. Every other workflow remains VM-only.",
       "12-systems": { "category": "mock" },
-      "12a-systems-empty-state": { "category": "mock" }
+      "12a-systems-empty-state": { "category": "mock" },
+      "13j-task440-flake-states-panes-navigation": { "category": "mock" },
+      "14d-task440-cross-surface-auth-navigation": { "category": "mock" }
     },
     "visualThemes": [
       "dark",
@@ -55,8 +57,8 @@
     ],
     "designFixture": {
       "path": "checks/web-ui/design-fixtures.json",
-      "policy": "non-blocking-gauge",
-      "note": "Canonical fixture data for aligning docs/design/CrystalForge mocked JSX examples with representative Playwright states. The web-ui check reports designRef + fixture coverage as a non-blocking visual parity gauge; pixel comparison against rendered design examples is intentionally not a hard gate in TASK-139."
+      "policy": "advisory-react-vs-dioxus-pixel-comparisons",
+      "note": "TASK-440 produces 16 actual React-design-vs-Dioxus comparisons across eight canonical targets and two themes. Pixel similarity is advisory and is not a parity verdict; reviewers must inspect every retained montage. Config intentionally retains production provenance and source-text-unavailable behavior because the production DTO does not expose source code."
     },
     "visualDiff": {
       "fuzzPercent": 3,
@@ -2242,6 +2244,186 @@
       "interactions": true,
       "mockedData": false,
       "baseline": "advisory"
+    },
+    {
+      "name": "12l-task440-config-lifecycle",
+      "description": "TASK-440 mocked API Config lifecycle, revision context, unavailable local generation, independent module-source unavailable/transport retry, and API error states; not live integration",
+      "route": "/systems/:id",
+      "designRef": "docs/design/CrystalForge/components/SystemDetail.jsx",
+      "profiles": ["ci_fast", "full"],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "critical": true,
+      "baseline": "none"
+    },
+    {
+      "name": "12m-task440-config-explorer-keyboard-wide",
+      "description": "TASK-440 mocked API Config explorer at 1920x1080 with scalar summary metadata, deterministic 40-of-N module-source pagination, same-offset failure/conflict retries, in-flight revision isolation, option provenance, stale option responses, and keyboard coverage; not live integration",
+      "route": "/systems/:id",
+      "designRef": "docs/design/CrystalForge/components/SystemDetail.jsx",
+      "profiles": ["ci_fast", "full"],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "critical": true,
+      "baseline": "none"
+    },
+    {
+      "name": "12n-task440-config-narrow-keyboard",
+      "description": "TASK-440 mocked API Config narrow 900x900 layout, revision controls, and keyboard-accessible module-source load-more/failure retry; not live integration",
+      "route": "/systems/:id",
+      "designRef": "docs/design/CrystalForge/components/SystemDetail.jsx",
+      "profiles": ["ci_fast", "full"],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "critical": true,
+      "baseline": "none"
+    },
+    {
+      "name": "12p-task440-config-canonical-wide-expanded",
+      "description": "TASK-440 canonical atlas-01 generation 160 Config state at 1920x1080 aligned to the authoritative design fixture, with exact metrics, typed drift, measured pagination, and objective 7:5 geometry; not live integration",
+      "route": "/systems/:id",
+      "designRef": "docs/design/CrystalForge/components/SystemDetail.jsx",
+      "profiles": ["ci_fast", "full"],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "critical": true,
+      "baseline": "none"
+    },
+    {
+      "name": "12q-task440-config-canonical-narrow",
+      "description": "TASK-440 canonical atlas-01 generation 160 Config state at 900x900 aligned to the authoritative design fixture, with exact metrics, reachable controls, stacking, and clipping assertions; not live integration",
+      "route": "/systems/:id",
+      "designRef": "docs/design/CrystalForge/components/SystemDetail.jsx",
+      "profiles": ["ci_fast", "full"],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "critical": true,
+      "baseline": "none"
+    },
+    {
+      "name": "13j-task440-flake-states-panes-navigation",
+      "description": "TASK-440 mocked API flake lifecycle, declaration errors/retry/409 replacement, full-SHA identity, all output panes at 900x900, reconciliation, and exact navigation; not live integration",
+      "route": "/flakes",
+      "designRef": "docs/design/CrystalForge/components/FlakeExplorer.jsx",
+      "profiles": ["ci_fast", "full"],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "critical": true,
+      "baseline": "none"
+    },
+    {
+      "name": "13l-task440-flake-systems-canonical-wide",
+      "description": "TASK-440 canonical mocked API Flake Systems state at 1920x1080 with exact reconciliation segments, rows, totals, environment metadata, revision reset, and geometry; not live integration",
+      "route": "/flakes",
+      "designRef": "docs/design/CrystalForge/components/FlakeExplorer.jsx",
+      "profiles": ["ci_fast", "full"],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "critical": true,
+      "baseline": "none"
+    },
+    {
+      "name": "13m-task440-flake-systems-canonical-narrow",
+      "description": "TASK-440 canonical mocked API Flake Systems state at 900x900 with exact direct controls, rows, columns, and no nested clipping; not live integration",
+      "route": "/flakes",
+      "designRef": "docs/design/CrystalForge/components/FlakeExplorer.jsx",
+      "profiles": ["ci_fast", "full"],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "critical": true,
+      "baseline": "none"
+    },
+    {
+      "name": "13n-task440-flake-modules-canonical-wide-expanded",
+      "description": "TASK-440 canonical mocked API Flake Modules expanded state at 1920x1080 with module-level source path, declarations, and exact geometry; not live integration",
+      "route": "/flakes",
+      "designRef": "docs/design/CrystalForge/components/FlakeExplorer.jsx",
+      "profiles": ["ci_fast", "full"],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "critical": true,
+      "baseline": "none"
+    },
+    {
+      "name": "13o-task440-flake-modules-canonical-narrow-expanded",
+      "description": "TASK-440 canonical mocked API Flake Modules expanded state at 900x900 with module-level source path, reachable continuation, and unclipped geometry; not live integration",
+      "route": "/flakes",
+      "designRef": "docs/design/CrystalForge/components/FlakeExplorer.jsx",
+      "profiles": ["ci_fast", "full"],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "critical": true,
+      "baseline": "none"
+    },
+    {
+      "name": "13p-task440-flake-inputs-canonical-wide",
+      "description": "TASK-440 canonical mocked API Flake Inputs state at 1920x1080 with direct-root hierarchy, exact headers, totals, transitive counts, deltas, metadata placement, and geometry; not live integration",
+      "route": "/flakes",
+      "designRef": "docs/design/CrystalForge/components/FlakeExplorer.jsx",
+      "profiles": ["ci_fast", "full"],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "critical": true,
+      "baseline": "none"
+    },
+    {
+      "name": "13q-task440-flake-inputs-canonical-narrow",
+      "description": "TASK-440 canonical mocked API Flake Inputs state at 900x900 with direct roots, exact headers, reachable metadata, and unclipped column geometry; not live integration",
+      "route": "/flakes",
+      "designRef": "docs/design/CrystalForge/components/FlakeExplorer.jsx",
+      "profiles": ["ci_fast", "full"],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "critical": true,
+      "baseline": "none"
+    },
+    {
+      "name": "13k-task440-drawer-modal-keyboard-layering",
+      "description": "TASK-440 flake drawer and diff-modal layering, Escape, focus trap, and restoration",
+      "route": "/flakes",
+      "designRef": "docs/design/CrystalForge/components/FlakeExplorer.jsx",
+      "profiles": ["ci_fast", "full"],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "critical": true,
+      "baseline": "none"
+    },
+    {
+      "name": "12o-task440-rollback-notification-auto-latest",
+      "description": "TASK-440 rollback preselection, selector labels, and typed auto_latest outcomes with idempotent retry",
+      "route": "/systems/:id",
+      "designRef": "docs/design/CrystalForge/components/SystemDetail.jsx",
+      "profiles": ["ci_fast", "full"],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "critical": true,
+      "baseline": "none"
+    },
+    {
+      "name": "14d-task440-cross-surface-auth-navigation",
+      "description": "TASK-440 environment return, exact approval navigation, non-disclosure, and Compliance edit authorization",
+      "route": "/environments",
+      "designRef": "docs/design/CrystalForge/components/EnvironmentsView.jsx",
+      "profiles": ["ci_fast", "full"],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "critical": true,
+      "baseline": "none"
     },
     {
       "name": "31-not-found",

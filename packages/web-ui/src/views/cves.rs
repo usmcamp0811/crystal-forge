@@ -2417,7 +2417,7 @@ fn AffectedSystemsList(
                                         td {
                                             style: "text-align: right;",
                                             Link {
-                                                to: Route::SystemDetailView { id: sys.system_id.to_string(), tab: String::new(), poam: String::new() },
+                                                to: Route::SystemDetailView { id: sys.system_id.to_string(), tab: String::new(), poam: String::new(), config_mode: String::new(), revision: String::new(), generation: String::new(), deploy_generation: String::new() },
                                                 class: "btn-icon focus-ring",
                                                 title: "Open {sys.hostname}",
                                                 // Arrow-right icon

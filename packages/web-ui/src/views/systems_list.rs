@@ -275,6 +275,18 @@ pub fn SystemsListView() -> Element {
     let mut generated_keys = use_signal(|| None::<GeneratedKeyPair>);
     let mut update_key_error = use_signal(|| None::<String>);
     let mut onboarding_agent_reminder = use_signal(|| None::<String>);
+    let registration_prefill = system_registration_prefill();
+    use_effect(move || {
+        if let Some((hostname, configuration, flake_name, branch)) = registration_prefill.clone() {
+            let mut next = NewSystemDraft::new();
+            next.hostname = hostname;
+            next.system_configuration_name = configuration;
+            next.flake_name = flake_name;
+            next.flake_branch = branch;
+            draft.set(next);
+            show_add_form.set(true);
+        }
+    });
 
     // New modal state for edit
     let mut edit_modal_system = use_signal(|| None::<SystemDetail>);
@@ -973,7 +985,7 @@ pub fn SystemsListView() -> Element {
                             },
                             on_open_detail: move |_| {
                                 preview_system.set(None);
-                                nav.push(Route::SystemDetailView { id: detail_for_open_detail.id.to_string(), tab: String::new(), poam: String::new() });
+                                nav.push(Route::SystemDetailView { id: detail_for_open_detail.id.to_string(), tab: String::new(), poam: String::new(), config_mode: String::new(), revision: String::new(), generation: String::new(), deploy_generation: String::new() });
                             },
                             on_deploy: move |_| {
                                 #[cfg(target_arch = "wasm32")]
@@ -1116,6 +1128,32 @@ pub fn SystemsListView() -> Element {
 
         }
     }
+}
+
+fn system_registration_prefill() -> Option<(String, String, String, String)> {
+    let search = web_sys::window()?.location().search().ok()?;
+    let values = search
+        .trim_start_matches('?')
+        .split('&')
+        .filter_map(|part| part.split_once('='))
+        .map(|(key, value)| {
+            let decoded: String = js_sys::decode_uri_component(value)
+                .unwrap_or_else(|_| value.into())
+                .into();
+            (key, decoded)
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    if values.get("add").map(String::as_str) != Some("1") {
+        return None;
+    }
+    let hostname = values.get("hostname")?.clone();
+    let configuration = values
+        .get("configuration")
+        .cloned()
+        .unwrap_or_else(|| hostname.clone());
+    let flake_name = values.get("flake_name")?.clone();
+    let branch = values.get("branch").cloned().unwrap_or_default();
+    Some((hostname, configuration, flake_name, branch))
 }
 
 #[component]

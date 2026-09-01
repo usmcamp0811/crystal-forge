@@ -23,10 +23,10 @@ use crate::api::client::{
 };
 use crate::api::models::{
     CreateSystemRequest, CveSummary, DeploySystemRequest, DeploymentStatus, FlakeRegistryItem,
-    HealthStatus, PaginatedResponse, PipelineStage, SystemAgentEvent, SystemCommitsResponse,
-    SystemDeploymentProgress, SystemDetail, SystemGeneration, SystemHardwareInfo,
-    SystemHistoryEntry, SystemNetworkInfo, SystemSecurityInfo, SystemSummary, SystemsListParams,
-    UpdateSystemPublicKeyRequest, UpdateSystemRequest,
+    HealthStatus, ManualDeploymentResponse, PaginatedResponse, PipelineStage, SystemAgentEvent,
+    SystemCommitsResponse, SystemDeploymentProgress, SystemDetail, SystemGeneration,
+    SystemHardwareInfo, SystemHistoryEntry, SystemNetworkInfo, SystemSecurityInfo, SystemSummary,
+    SystemsListParams, UpdateSystemPublicKeyRequest, UpdateSystemRequest,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -298,12 +298,18 @@ pub async fn update_system_public_key_via_api(
     }
 }
 
-/// Deploy a system to a specific commit via the backend API.
-pub async fn deploy_system_via_api(system_id: Uuid, commit_sha: String) -> Result<String, String> {
-    let request = DeploySystemRequest { commit_sha };
-
-    match deploy_system(&system_id, &request).await {
-        Ok(response) => Ok(response.message),
+/// Deploys a system using an explicit policy-handling action.
+///
+/// # Errors
+///
+/// Returns display-safe text when authorization, transport, deployment
+/// validation, queueing, or response decoding fails.
+pub async fn deploy_system_via_api(
+    system_id: Uuid,
+    request: &DeploySystemRequest,
+) -> Result<ManualDeploymentResponse, String> {
+    match deploy_system(&system_id, request).await {
+        Ok(response) => Ok(response),
         Err(ApiClientError::Status {
             code: 401 | 403, ..
         }) => Err("Authentication required. Please log in.".to_string()),
