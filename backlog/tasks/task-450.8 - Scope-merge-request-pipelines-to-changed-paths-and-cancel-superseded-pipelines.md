@@ -4,10 +4,12 @@ title: Scope merge request pipelines to changed paths and cancel superseded pipe
 status: Backlog
 assignee: []
 created_date: '2026-08-31 22:40'
+updated_date: '2026-09-01 03:12'
 labels: []
 dependencies: []
 references:
   - 'https://nix-gitlab-ci.projects.tf/caching/'
+  - TASK-450.11
 documentation:
   - >-
     backlog/docs/build/build-invalidation-graph/doc-23 -
@@ -61,3 +63,9 @@ Read doc-23, `Build Invalidation Graph and CI Feedback Latency Analysis`, for th
 - [ ] #7 The mapping from changed path to selected check is documented where a future maintainer will find it
 - [ ] #8 The fan-out default when a path is unmatched is explicit and conservative
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Coordinate path-based pipeline selection with TASK-450.11. If the authoritative web UI responsibility is divided among multiple jobs, the changed-path mapping must select the complete required UI gate as one logical unit and must preserve the conservative full fan-out for cross-cutting inputs. Superseded-pipeline cancellation should apply to every safe long-running UI shard or evidence job.
+<!-- SECTION:NOTES:END -->
