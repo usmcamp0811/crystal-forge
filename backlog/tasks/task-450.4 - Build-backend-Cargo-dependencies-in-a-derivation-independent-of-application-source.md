@@ -3,10 +3,10 @@ id: TASK-450.4
 title: >-
   Build backend Cargo dependencies in a derivation independent of application
   source
-status: Review
+status: Done
 assignee: []
 created_date: '2026-08-31 22:39'
-updated_date: '2026-09-01 02:05'
+updated_date: '2026-09-01 03:44'
 labels: []
 dependencies:
   - TASK-450.1
@@ -116,6 +116,8 @@ Both server variants built, ran the existing test scope (over 1,500 tests includ
 Verification passed: server package, test-agent/core package, all affected checks, test-agent NixOS system, and one complete nix flake check --keep-going -L run.
 
 LOCK RELEASED: implementation is pushed and MR !324 is awaiting review.
+
+MR !324 merged. LOCK RELEASED and the dedicated P0 worktree was removed.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
