@@ -3,10 +3,10 @@ id: TASK-450.11
 title: >-
   Reduce authoritative web UI merge feedback below 20 minutes without weakening
   coverage
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-09-01 03:12'
-updated_date: '2026-09-01 03:26'
+updated_date: '2026-09-01 03:30'
 labels:
   - web-ui
   - testing
@@ -65,4 +65,6 @@ TASK-438 is the correctness prerequisite because runtime measurements are not me
 
 <!-- SECTION:NOTES:BEGIN -->
 The user approved a multiple-check topology so GitLab can schedule Web UI work concurrently across available runners. Treat the complete blocking set as one logical merge gate. The intended responsibility split is: a small production smoke check for the embedded server and production WASM in a real browser; independently reproducible required E2E shards with isolated deterministic state; separate OSCAL/SARIF browser export validation; and separate advisory design-parity evidence. Start with a small shard count and measure VM startup and runner overhead before adding more. Shared Nix inputs must retain identical derivation paths so parallel checks reuse build outputs rather than recompile them. CI artifacts must use collision-free per-check paths and one aggregate reviewer-facing report.
+
+The user selected the umbrella and its three subtasks for one shared branch, worktree, and MR together with prerequisite TASK-438 and flakiness task TASK-354. TASK-430, TASK-450.8, and TASK-450.10 remain outside this focused MR.
 <!-- SECTION:NOTES:END -->
