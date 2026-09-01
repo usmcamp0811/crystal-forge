@@ -3,16 +3,31 @@ id: TASK-450.2
 title: >-
   Depend on exact component derivations instead of aggregate packages in
   modules, checks, and lib helpers
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-08-31 22:39'
-updated_date: '2026-08-31 22:45'
+updated_date: '2026-09-01 02:04'
 labels: []
 dependencies: []
+references:
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/324'
 documentation:
   - >-
     backlog/docs/build/build-invalidation-graph/doc-23 -
     Build-Invalidation-Graph-and-CI-Feedback-Latency-Analysis.md
+modified_files:
+  - modules/nixos/crystal-forge/default.nix
+  - checks/integration/default.nix
+  - checks/oidc-auth/default.nix
+  - checks/web-ui/default.nix
+  - checks/xccdf-schema/default.nix
+  - lib/default.nix
+  - lib/server-test-node/default.nix
+  - packages/dev-env/composition.nix
+  - packages/devScripts/default.nix
+  - packages/run-postgres-jobs/default.nix
+  - systems/x86_64-linux/cf-test-sys/default.nix
+  - systems/x86_64-linux/test-agent/default.nix
 parent_task_id: TASK-450
 priority: high
 type: enhancement
@@ -82,13 +97,13 @@ Read doc-23, `Build Invalidation Graph and CI Feedback Latency Analysis`, for th
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 The NixOS module references the exact component derivation for each service and helper script it defines, rather than an aggregate package
-- [ ] #2 Every check and lib test helper references only the component derivations the corresponding VM actually executes
-- [ ] #3 A repository search shows no remaining internal use of the aggregate packages outside the package definition itself and the public flake outputs
-- [ ] #4 Aggregate flake outputs still exist and still evaluate, and external consumers such as the test-agent system configuration still build
-- [ ] #5 Each narrowed closure records, in the Nix source, which binaries the consumer runs and therefore why that component set is sufficient
-- [ ] #6 The integration, oidc-auth, web-ui, and xccdf-schema checks still pass
-- [ ] #7 A recorded closure-size comparison shows the reduction for at least the server service and the integration check
+- [x] #1 The NixOS module references the exact component derivation for each service and helper script it defines, rather than an aggregate package
+- [x] #2 Every check and lib test helper references only the component derivations the corresponding VM actually executes
+- [x] #3 A repository search shows no remaining internal use of the aggregate packages outside the package definition itself and the public flake outputs
+- [x] #4 Aggregate flake outputs still exist and still evaluate, and external consumers such as the test-agent system configuration still build
+- [x] #5 Each narrowed closure records, in the Nix source, which binaries the consumer runs and therefore why that component set is sufficient
+- [x] #6 The integration, oidc-auth, web-ui, and xccdf-schema checks still pass
+- [x] #7 A recorded closure-size comparison shows the reduction for at least the server service and the integration check
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -97,4 +112,18 @@ Read doc-23, `Build Invalidation Graph and CI Feedback Latency Analysis`, for th
 LOCK: opencode-claude-opus-5 on gray in /home/mcamp/code/crystal-forge/TASK-450-p0-build-graph
 
 Implemented together with TASK-450.1, TASK-450.3, and TASK-450.4 in a single MR at the user's explicit direction.
+
+Closure measurements: production server dependency closure 136.0 MiB to 125.7 MiB (-7.6%); integration derivation closure 705.2 MiB to 605.6 MiB (-14.1%).
+
+Final invalidation probes: web UI edits leave cf-test-sys, integration, and oidc-auth derivations unchanged; builder edits leave integration and oidc-auth unchanged while correctly changing web-ui, which runs a builder.
+
+Verification passed: integration, oidc-auth, xccdf-schema, web-ui, test-agent NixOS system build, and one complete nix flake check --keep-going -L run.
+
+LOCK RELEASED: implementation is pushed and MR !324 is awaiting review.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Added exact package options for server, builder, and agent services and changed internal modules, checks, helpers, development tooling, and systems to use only the component derivations they execute. Preserved public aggregate outputs. Removed residual whole-flake invalidation from cf-test-sys and run-postgres-jobs.
+<!-- SECTION:FINAL_SUMMARY:END -->
