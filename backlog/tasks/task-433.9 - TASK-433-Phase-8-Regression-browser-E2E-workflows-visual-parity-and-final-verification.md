@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:43'
-updated_date: '2026-09-01 16:40'
+updated_date: '2026-09-01 16:55'
 labels:
   - design-parity
   - policy
@@ -181,4 +181,6 @@ Correction to the obsolete remote-mismatch note: the user authorized a force-wit
 Review remediation was committed as `09d1b16e` and the exact-candidate workflow-20a correction as `82922c7e5495011a9162a5bc9db852fde4316a5a`. Local and remote branch heads match and the worktree is clean. MR !318 is conflict-free. Exact-head pipeline 2810061607 is pending: https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2810061607. Preceding pipeline 2809426014 at `da7ae7de` failed only critical workflow 20a; all seven TASK-433 strict workflows and POA&M Phase-6 workflows passed there. Do not reconcile acceptance criteria until pipeline 2810061607 finishes and its Web UI artifacts are inspected.
 
 Pipeline 2810061607 at exact head 82922c7e passed every non-Web-UI check and all TASK-433/POA&M critical browser workflows, including corrected workflow 20a. The Web UI job failed only strict visual comparison for task433-canonical-poam-lifecycle--failed-evidence-edited-remediation in dark and light. GitLab uploaded no artifacts because the failed Nix derivation produced no result path. The user authorized adding an opt-in CI baseline-candidate job instead of running the expensive VM check locally.
+
+Recovered pipeline 2810061607 screenshots directly from the retained failed Nix output on the GitLab runner. The visual report proves 58 strict matches and exactly two POA&M plan-save diffs; all owning semantic assertions passed. Review of old/new dark and light captures accepted the visible Save plan control but rejected an incidental tray scroll offset that clipped the Remediation status heading. Reset the POA&M tray scroll position immediately before the strict failed-evidence-edited-remediation capture; static harness and Node syntax checks pass. New CI evidence and baselines remain required.
 <!-- SECTION:NOTES:END -->
