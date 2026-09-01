@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:43'
-updated_date: '2026-09-01 13:35'
+updated_date: '2026-09-01 13:36'
 labels:
   - design-parity
   - poam
@@ -90,6 +90,8 @@ Implement this as a focused additive contract: shared canonical legacy-observati
 Phase-8 visual remediation: correct dark-theme contrast for the shared POA&M detail tray's Expand and Reopen actions. Keep behavior and lifecycle semantics unchanged. Verify with focused TASK-433 POA&M browser captures before returning the owner to Review.
 
 Review remediation at candidate `da7ae7de`: separate metadata and remediation-plan persistence in `PoamDetailTray`. Keep `Save metadata` scoped to title, owner, target date, and risk. Add an adjacent `Save plan` action to the Remediation plan section that PATCHes only the plan with the current optimistic revision, uses existing stale/error reconciliation, and remains disabled for viewers or active mutations. Update the existing server-backed POA&M detail and canonical lifecycle browser workflows so plan persistence uses the labeled local action and survives reload. Run Web UI formatting, Node syntax/static contracts, targeted Rust tests, and focused POA&M browser verification through Nix before returning this owner to Review.
+
+User verification constraint: do not run the local `checks.x86_64-linux.web-ui` derivation because it takes about 20 minutes. Complete the focused implementation and browser regression source changes, run only fast formatting, Node syntax/static contracts, targeted Rust tests, and diff checks locally, then use the new exact-head GitLab CI Web UI job as authoritative browser verification.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
