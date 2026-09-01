@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - opencode-gpt-5.6-sol
 created_date: '2026-09-01 03:12'
-updated_date: '2026-09-01 17:34'
+updated_date: '2026-09-01 18:07'
 labels:
   - web-ui
   - testing
@@ -20,6 +20,7 @@ references:
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2807718751'
   - TASK-354
   - TASK-438
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/325'
 parent_task_id: TASK-450
 priority: high
 type: enhancement
@@ -111,4 +112,6 @@ Final `nix build path:.#checks.x86_64-linux.web-ui-exports -L --no-link` passed.
 CI producer metadata now records bounded GitLab Jobs API runner queue duration, local/substituted/built/mixed cache state, Nix realization time, evidence lookup, and evidence copy. Aggregation reports every job duration and only computes median, maximum, and blocking critical path when all five blocking producer timings are present. Producer and aggregate scripts run through flake-pinned Nix packages; the mutable Alpine report image was removed.
 
 Final static verification passed: 28/28 Node tests; ownership validation (100 ci_fast, 17 required, 83 advisory); JavaScript syntax; `bash -n`; ShellCheck 0.11.0; GitLab YAML parse with yq-go; targeted Rust OSCAL test; rustfmt check; both helper package builds; all six check attribute evaluations; helper package evaluations; and `git diff --check`. The three representative MR pipelines required by acceptance criterion 2 remain pending until the branch is committed, pushed, and an MR exists.
+
+Committed as `5492997f` (`TASK-450.11: parallelize authoritative Web UI checks`), rebased onto current `origin/dev` at `a977a3b9`, pushed, and opened draft MR !325: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/325. Task remains In Progress while the required representative pipelines run.
 <!-- SECTION:NOTES:END -->
