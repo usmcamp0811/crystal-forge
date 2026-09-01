@@ -1,10 +1,11 @@
 ---
 id: TASK-354
 title: Investigate web-ui check flakiness and consistent 12f/12h system test failures
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - opencode-gpt-5.6-sol
 created_date: '2026-06-13 19:35'
-updated_date: '2026-09-01 03:30'
+updated_date: '2026-09-01 03:31'
 labels:
   - web-ui
   - testing
@@ -53,4 +54,6 @@ Note: The web-ui VM derivation currently exits 0 even when individual Playwright
 TASK-450.11 sets a less-than-20-minute blocking web UI feedback target. Resolve or characterize the fixture, selector, overlay, resource-contention, and timeout failures here so later sharding or concurrency does not amplify flakiness. Record whether each failure is product behavior, deterministic harness drift, or CI resource sensitivity. Runtime improvements must not rely on suppressing these failures or reducing timeouts below reliable bounds.
 
 The user selected this task for the focused Web UI latency bundle and explicitly requested one shared branch, worktree, and MR with TASK-438 and TASK-450.11.1 through TASK-450.11.3.
+
+LOCK: opencode-gpt-5.6-sol in /home/mcamp/code/crystal-forge/TASK-450-web-ui-parallel-checks on branch TASK-450.11-web-ui-parallel-checks, based on TASK-450-p0-build-graph at 437efd55.
 <!-- SECTION:NOTES:END -->
