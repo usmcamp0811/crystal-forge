@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - opencode-gpt-5.6-sol
 created_date: '2026-09-01 03:12'
-updated_date: '2026-09-01 03:31'
+updated_date: '2026-09-01 03:46'
 labels:
   - web-ui
   - testing
@@ -61,6 +61,16 @@ TASK-438 is the correctness prerequisite because runtime measurements are not me
 - [ ] #6 Runtime reduction does not depend on suppressing failures, unbounded retries, or shorter timeouts that make supported CI runners unreliable
 - [ ] #7 The repository documents the authoritative web UI checks, their responsibilities, and the local Nix commands used to reproduce each check
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Land browser-result correctness and deterministic focused workflows first.
+2. Refactor the existing Web UI NixOS test into one shared parameterized evidence constructor and a blocking verdict wrapper.
+3. Expose a small check set: production embedded-server smoke/shell coverage, balanced required semantic groups, independent browser export validation, and advisory design-parity evidence.
+4. Schedule blocking checks concurrently in GitLab. Preserve unique evidence paths and aggregate all statuses and artifacts into one reviewer-facing report.
+5. Document the logical gate and exact local commands. Run local focused checks, then use representative MR pipelines to balance groups and demonstrate a blocking critical path below 20 minutes without reducing coverage.
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
