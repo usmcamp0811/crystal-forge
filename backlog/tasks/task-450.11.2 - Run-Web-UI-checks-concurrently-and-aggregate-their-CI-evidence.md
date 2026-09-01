@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-gpt-5.6-sol
 created_date: '2026-09-01 03:27'
-updated_date: '2026-09-01 04:46'
+updated_date: '2026-09-01 18:07'
 labels:
   - web-ui
   - testing
@@ -19,6 +19,7 @@ references:
   - TASK-430
   - TASK-450.8
   - .gitlab-ci.yml
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/325'
 modified_files:
   - .gitlab-ci.yml
   - ci/web-ui-producer.sh
