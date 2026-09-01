@@ -164,11 +164,84 @@ pub async fn count_users_by_email(pool: &PgPool, email: &str) -> Result<i64> {
 }
 
 pub async fn update_user_active(pool: &PgPool, user_id: Uuid, enabled: bool) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    let was_active: Option<bool> =
+        sqlx::query_scalar("SELECT is_active FROM users WHERE id = $1 FOR UPDATE")
+            .bind(user_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+
     sqlx::query("UPDATE users SET is_active = $1 WHERE id = $2")
         .bind(enabled)
         .bind(user_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
+
+    if was_active == Some(false) && enabled {
+        // SECURITY: A reactivated account starts a new notification eligibility
+        // interval. Events created while the account was inactive must not enter
+        // its inbox or external-email queue.
+        sqlx::query(
+            "INSERT INTO user_notification_preferences (
+                 user_id, deploy_failures_in_app_enabled_at,
+                 build_failures_in_app_enabled_at,
+                 critical_cves_in_app_enabled_at,
+                 policy_violations_in_app_enabled_at, initialized_at
+             ) VALUES ($1, NOW(), NOW(), NOW(), NOW(), NOW())
+             ON CONFLICT (user_id) DO UPDATE SET
+                 deploy_failures_email_enabled_at = CASE
+                     WHEN user_notification_preferences.deploy_failures
+                      AND user_notification_preferences.delivery_channel IN ('email', 'both') THEN NOW()
+                 END,
+                 build_failures_email_enabled_at = CASE
+                     WHEN user_notification_preferences.build_failures
+                      AND user_notification_preferences.delivery_channel IN ('email', 'both') THEN NOW()
+                 END,
+                 critical_cves_email_enabled_at = CASE
+                     WHEN user_notification_preferences.critical_cves
+                      AND user_notification_preferences.delivery_channel IN ('email', 'both') THEN NOW()
+                 END,
+                 policy_violations_email_enabled_at = CASE
+                     WHEN user_notification_preferences.policy_violations
+                      AND user_notification_preferences.delivery_channel IN ('email', 'both') THEN NOW()
+                 END,
+                 heartbeat_lost_email_enabled_at = CASE
+                     WHEN user_notification_preferences.heartbeat_lost
+                      AND user_notification_preferences.delivery_channel IN ('email', 'both') THEN NOW()
+                 END,
+                 deploy_failures_in_app_enabled_at = CASE
+                     WHEN user_notification_preferences.deploy_failures
+                      AND user_notification_preferences.delivery_channel IN ('in_app', 'both') THEN NOW()
+                 END,
+                 build_failures_in_app_enabled_at = CASE
+                     WHEN user_notification_preferences.build_failures
+                      AND user_notification_preferences.delivery_channel IN ('in_app', 'both') THEN NOW()
+                 END,
+                 critical_cves_in_app_enabled_at = CASE
+                     WHEN user_notification_preferences.critical_cves
+                      AND user_notification_preferences.delivery_channel IN ('in_app', 'both') THEN NOW()
+                 END,
+                 policy_violations_in_app_enabled_at = CASE
+                     WHEN user_notification_preferences.policy_violations
+                      AND user_notification_preferences.delivery_channel IN ('in_app', 'both') THEN NOW()
+                 END,
+                 heartbeat_lost_in_app_enabled_at = CASE
+                     WHEN user_notification_preferences.heartbeat_lost
+                      AND user_notification_preferences.delivery_channel IN ('in_app', 'both') THEN NOW()
+                 END,
+                 weekly_digest_enabled_at = CASE
+                     WHEN user_notification_preferences.weekly_digest
+                      AND user_notification_preferences.delivery_channel IN ('email', 'both') THEN NOW()
+                 END,
+                 initialized_at = NOW(),
+                 updated_at = NOW()",
+        )
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
     Ok(())
 }
 

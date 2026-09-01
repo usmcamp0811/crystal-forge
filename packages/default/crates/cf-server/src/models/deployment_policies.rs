@@ -1,8 +1,624 @@
+//! Defines deployment-policy configuration, validation, and evaluator
+//! metadata.
+//!
+//! Composite policy versions are immutable typed rule sets. Validation
+//! protects persistence boundaries. Evaluation preserves each rule's phase and
+//! outcome so an error or missing observation cannot become a pass.
+
 use serde::{Deserialize, Serialize};
 use sqlx::types::chrono::{DateTime, Utc};
 use std::collections::{BTreeMap, HashMap};
+use std::fmt::Write;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 use tracing::warn;
 use uuid::Uuid;
+
+/// Identifies the typed heterogeneous deployment-policy format.
+pub const COMPOSITE_POLICY_TYPE: &str = "composite";
+
+/// Maximum number of rules accepted in one composite policy version.
+///
+/// This limit bounds validation, generated Nix expressions, persisted outcome
+/// rows, and authorization work for each immutable policy version.
+pub const MAX_COMPOSITE_RULES: usize = 64;
+
+/// Defines one immutable composite policy version.
+///
+/// Valid configurations use schema version 1, `all` mode, unique non-nil rule
+/// IDs, and between 1 and [`MAX_COMPOSITE_RULES`] rules.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompositePolicyConfig {
+    /// Selects the serialized composite schema; the only valid value is 1.
+    pub schema_version: u8,
+    /// Selects how constituent outcomes form the aggregate outcome.
+    pub mode: CompositeRuleMode,
+    /// Preserves the ordered immutable rules in this policy version.
+    pub rules: Vec<CompositeRule>,
+}
+
+/// Selects the aggregate semantics for a composite policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompositeRuleMode {
+    /// Requires every constituent rule to pass.
+    All,
+}
+
+/// Associates a stable rule identity with one typed rule configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompositeRule {
+    /// Identifies the rule within every assessment of this policy version.
+    pub id: Uuid,
+    /// Defines the rule's evidence source and comparison semantics.
+    #[serde(flatten)]
+    pub rule: CompositeRuleKind,
+}
+
+/// Defines the supported evidence and enforcement rule kinds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "config", rename_all = "snake_case")]
+pub enum CompositeRuleKind {
+    /// Compares one evaluated NixOS option with a typed expected value.
+    NixosOption(NixosOptionRuleConfig),
+    /// Requires each named package in direct `environment.systemPackages` entries.
+    PackagesInstalled(PackagesInstalledRuleConfig),
+    /// Prohibits each named package in direct `environment.systemPackages` entries.
+    PackagesAbsent(PackagesAbsentRuleConfig),
+    /// Evaluates a bounded custom Nix Boolean expression.
+    CustomEval(CustomEvalRuleConfig),
+    /// Limits CVEs at or above a configured severity.
+    CveBlock(CveBlockRuleConfig),
+    /// Requires the configuration evaluation to finish successfully.
+    EvalPassed(EmptyRuleConfig),
+    /// Requires Nix to resolve the exact requested immutable revision.
+    PinRequired(EmptyRuleConfig),
+    /// Restricts deployment to a validated local-time window.
+    TimeWindow(TimeWindowRuleConfig),
+}
+
+impl CompositeRuleKind {
+    /// Returns the stable snake-case kind used in persistence and evidence.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::NixosOption(_) => "nixos_option",
+            Self::PackagesInstalled(_) => "packages_installed",
+            Self::PackagesAbsent(_) => "packages_absent",
+            Self::CustomEval(_) => "custom_eval",
+            Self::CveBlock(_) => "cve_block",
+            Self::EvalPassed(_) => "eval_passed",
+            Self::PinRequired(_) => "pin_required",
+            Self::TimeWindow(_) => "time_window",
+        }
+    }
+}
+
+/// Classifies the expected JSON and Nix value for an option comparison.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NixosOptionValueType {
+    /// Requires a Boolean value.
+    Boolean,
+    /// Requires a string selected from an option enum.
+    Enum,
+    /// Requires a signed integer value.
+    Integer,
+    /// Requires a string value.
+    String,
+    /// Requires a string whose line boundaries are significant.
+    Lines,
+    /// Requires a string when metadata cannot infer a safer type.
+    Unknown,
+}
+
+/// Configures a typed comparison against one NixOS option.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NixosOptionRuleConfig {
+    /// Gives a dotted Nix attribute path with optional JSON-quoted segments.
+    pub path: String,
+    /// Gives the comparison operator allowed by `value_type`.
+    pub operator: String,
+    /// Determines the accepted operators and JSON value shape.
+    pub value_type: NixosOptionValueType,
+    /// Gives the expected value and must match `value_type`.
+    pub value: serde_json::Value,
+}
+
+/// Configures package identities that must be directly installed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackagesInstalledRuleConfig {
+    /// Lists unique package `pname` values to require.
+    pub packages: Vec<String>,
+}
+
+/// Configures package identities that must be absent from direct installation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackagesAbsentRuleConfig {
+    /// Lists package `pname` values to prohibit.
+    pub packages: Vec<String>,
+}
+
+/// Represents a rule kind that has no additional configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct EmptyRuleConfig {}
+
+/// Configures one contained custom Nix evaluation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CustomEvalRuleConfig {
+    /// Gives a Nix expression evaluated with `config` in scope.
+    pub expression: String,
+    /// Gives operator-facing detail when the expression fails.
+    pub message: String,
+}
+
+/// Selects the minimum CVE severity counted by a CVE block rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CveBlockSeverity {
+    /// Counts critical CVEs.
+    Critical,
+    /// Counts high and critical CVEs.
+    High,
+    /// Counts medium, high, and critical CVEs.
+    Medium,
+    /// Counts all known severity levels.
+    Low,
+}
+
+/// Configures a maximum CVE count at or above one severity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CveBlockRuleConfig {
+    /// Selects the minimum counted severity.
+    pub severity: CveBlockSeverity,
+    /// Gives the largest count that still passes.
+    pub max_allowed: u32,
+}
+
+/// Configures an allowed deployment window in one IANA timezone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TimeWindowRuleConfig {
+    /// Lists normalized weekdays on which the window applies.
+    pub days: Vec<String>,
+    /// Gives the inclusive local start time in `HH:MM` form.
+    pub from: String,
+    /// Gives the local end time in `HH:MM` form.
+    pub to: String,
+    /// Gives the IANA timezone used to interpret local times.
+    pub tz: String,
+}
+
+/// Identifies the lifecycle phase that produced a rule outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EnforcementPhase {
+    /// Indicates configuration evaluation evidence.
+    Evaluation,
+    /// Indicates vulnerability-scan evidence.
+    Scan,
+    /// Indicates deployment-time evidence.
+    Deployment,
+}
+
+/// Represents a normalized constituent rule result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EnforcementOutcome {
+    /// Indicates authoritative evidence satisfied the rule.
+    Pass,
+    /// Indicates authoritative evidence violated the rule.
+    Fail,
+    /// Indicates the rule could not evaluate its available evidence.
+    Error,
+    /// Indicates that the required phase or evidence has not completed.
+    NotChecked,
+}
+
+/// Preserves one rule's normalized result and source-specific evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompositeRuleOutcome {
+    /// Identifies the immutable rule within its policy version.
+    pub rule_id: Uuid,
+    /// Gives the stable serialized rule kind.
+    pub kind: String,
+    /// Identifies the phase that produced this outcome.
+    pub phase: EnforcementPhase,
+    /// Gives the normalized outcome without collapsing errors into failures.
+    pub outcome: EnforcementOutcome,
+    /// Indicates whether this outcome prevents enforcement from proceeding.
+    pub blocking: bool,
+    /// Explains the outcome for operators and audit records.
+    pub detail: String,
+    /// Preserves phase-specific facts used to derive the outcome.
+    pub evidence: serde_json::Value,
+}
+
+/// Returns the conservative aggregate of constituent composite outcomes.
+///
+/// Precedence is error, fail, not checked, then pass. An empty input is not
+/// checked, so absent evidence never produces a pass.
+pub fn aggregate_composite_outcomes(outcomes: &[CompositeRuleOutcome]) -> EnforcementOutcome {
+    if outcomes
+        .iter()
+        .any(|result| result.outcome == EnforcementOutcome::Error)
+    {
+        EnforcementOutcome::Error
+    } else if outcomes
+        .iter()
+        .any(|result| result.outcome == EnforcementOutcome::Fail)
+    {
+        EnforcementOutcome::Fail
+    } else if outcomes
+        .iter()
+        .any(|result| result.outcome == EnforcementOutcome::NotChecked)
+    {
+        EnforcementOutcome::NotChecked
+    } else if !outcomes.is_empty()
+        && outcomes
+            .iter()
+            .all(|result| result.outcome == EnforcementOutcome::Pass)
+    {
+        EnforcementOutcome::Pass
+    } else {
+        EnforcementOutcome::NotChecked
+    }
+}
+
+/// Returns the canonical semantic digest for a composite configuration.
+pub fn composite_config_digest(config: &CompositePolicyConfig) -> String {
+    let value = serde_json::to_value(config).unwrap_or_else(|_| serde_json::Value::Null);
+    crate::compliance::canonical::semantic_digest(&value)
+}
+
+const MAX_CUSTOM_EVAL_EXPRESSION_BYTES: usize = 16 * 1024;
+
+fn parse_nixos_option_path(path: &str) -> Result<Vec<String>, String> {
+    let path = path.trim();
+    if path.is_empty() {
+        return Err("path must not be empty".to_string());
+    }
+
+    let bytes = path.as_bytes();
+    let mut offset = 0;
+    let mut segments = Vec::new();
+    while offset < bytes.len() {
+        if bytes[offset] == b'"' {
+            let start = offset;
+            offset += 1;
+            let mut escaped = false;
+            while offset < bytes.len() {
+                let byte = bytes[offset];
+                offset += 1;
+                if escaped {
+                    escaped = false;
+                } else if byte == b'\\' {
+                    escaped = true;
+                } else if byte == b'"' {
+                    break;
+                }
+            }
+            if offset > bytes.len() || bytes.get(offset - 1) != Some(&b'"') {
+                return Err("quoted segment is not terminated".to_string());
+            }
+            let segment: String = serde_json::from_str(&path[start..offset])
+                .map_err(|error| format!("invalid quoted segment: {error}"))?;
+            if segment.is_empty() {
+                return Err("segments must not be empty".to_string());
+            }
+            segments.push(segment);
+        } else {
+            let start = offset;
+            while offset < bytes.len() && bytes[offset] != b'.' {
+                let byte = bytes[offset];
+                if byte == b'"'
+                    || byte == b'\\'
+                    || byte.is_ascii_whitespace()
+                    || byte.is_ascii_control()
+                {
+                    return Err("bare segments cannot contain quotes, escapes, whitespace, or control characters".to_string());
+                }
+                offset += 1;
+            }
+            if start == offset {
+                return Err("segments must not be empty".to_string());
+            }
+            segments.push(path[start..offset].to_string());
+        }
+
+        if offset == bytes.len() {
+            break;
+        }
+        if bytes[offset] != b'.' {
+            return Err("quoted segments must be separated by dots".to_string());
+        }
+        offset += 1;
+        if offset == bytes.len() {
+            return Err("segments must not be empty".to_string());
+        }
+    }
+    Ok(segments)
+}
+
+fn validate_package_pname(pname: &str) -> Result<(), String> {
+    if pname.is_empty() || pname.len() > 255 {
+        return Err("must be between 1 and 255 bytes".to_string());
+    }
+    if !pname
+        .bytes()
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        || !pname
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.' | b'_'))
+    {
+        return Err(
+            "must be a package pname (ASCII letters, digits, '+', '-', '.', or '_')".to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_custom_eval_syntax(expressions: &[&str]) -> Result<(), String> {
+    // Parse every custom expression in one bounded subprocess. This keeps the
+    // synchronous persistence API while avoiding one blocking process and
+    // timeout for every rule on an async request path.
+    let wrapped = format!(
+        "config: [ {} ]",
+        expressions
+            .iter()
+            .map(|expression| format!("({expression})"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    let mut child = Command::new("nix-instantiate")
+        // Parsing needs no store. The dummy store also avoids initializing
+        // local Nix state in restricted package-build and service sandboxes.
+        .args(["--store", "dummy://", "--parse", "--expr", &wrapped])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("could not run the Nix parser: {error}"))?;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if child
+            .try_wait()
+            .map_err(|error| format!("could not wait for the Nix parser: {error}"))?
+            .is_some()
+        {
+            break;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("Nix syntax validation timed out after 2 seconds".to_string());
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("could not collect Nix parser output: {error}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let diagnostic = String::from_utf8_lossy(&output.stderr);
+    let diagnostic = diagnostic.trim().chars().take(500).collect::<String>();
+    Err(format!("invalid Nix expression syntax: {diagnostic}"))
+}
+
+/// Validates the exact policy type and config at each persistence boundary.
+/// Non-composite policy validation remains on its legacy paths.
+fn decode_policy_type_config(
+    policy_type: &str,
+    config: &serde_json::Value,
+    validate_nix_syntax: bool,
+) -> Result<Option<CompositePolicyConfig>, String> {
+    if policy_type != COMPOSITE_POLICY_TYPE {
+        return Ok(None);
+    }
+
+    let composite: CompositePolicyConfig = serde_json::from_value(config.clone())
+        .map_err(|error| format!("invalid composite policy config: {error}"))?;
+    if composite.schema_version != 1 {
+        return Err("composite config.schema_version must be 1".to_string());
+    }
+    if composite.rules.is_empty() {
+        return Err("composite config.rules must not be empty".to_string());
+    }
+    if composite.rules.len() > MAX_COMPOSITE_RULES {
+        return Err(format!(
+            "composite config.rules must contain at most {MAX_COMPOSITE_RULES} rules"
+        ));
+    }
+
+    let mut ids = std::collections::HashSet::with_capacity(composite.rules.len());
+    let mut custom_eval_expressions = Vec::new();
+    for (index, rule) in composite.rules.iter().enumerate() {
+        if rule.id.is_nil() {
+            return Err(format!(
+                "composite config.rules[{index}].id must not be nil"
+            ));
+        }
+        if !ids.insert(rule.id) {
+            return Err(format!(
+                "composite config.rules[{index}].id {} is duplicated",
+                rule.id
+            ));
+        }
+
+        match &rule.rule {
+            CompositeRuleKind::NixosOption(option) => {
+                parse_nixos_option_path(&option.path).map_err(|error| {
+                    format!("composite config.rules[{index}].config.path is invalid: {error}")
+                })?;
+                let valid_operator = match option.value_type {
+                    NixosOptionValueType::Boolean
+                    | NixosOptionValueType::Enum
+                    | NixosOptionValueType::String
+                    | NixosOptionValueType::Lines
+                    | NixosOptionValueType::Unknown => {
+                        matches!(option.operator.as_str(), "==" | "!=")
+                    }
+                    NixosOptionValueType::Integer => {
+                        matches!(option.operator.as_str(), "==" | "!=" | ">=" | "<=")
+                    }
+                };
+                if !valid_operator {
+                    return Err(format!(
+                        "composite config.rules[{index}].config.operator is invalid for {:?}",
+                        option.value_type
+                    ));
+                }
+                let valid_value = match option.value_type {
+                    NixosOptionValueType::Boolean => option.value.is_boolean(),
+                    NixosOptionValueType::Integer => option.value.as_i64().is_some(),
+                    NixosOptionValueType::Enum
+                    | NixosOptionValueType::String
+                    | NixosOptionValueType::Lines
+                    | NixosOptionValueType::Unknown => option.value.is_string(),
+                };
+                if !valid_value {
+                    return Err(format!(
+                        "composite config.rules[{index}].config.value does not match value_type"
+                    ));
+                }
+            }
+            CompositeRuleKind::PackagesInstalled(packages) => {
+                if packages.packages.is_empty()
+                    || packages
+                        .packages
+                        .iter()
+                        .any(|package| package.trim().is_empty())
+                {
+                    return Err(format!(
+                        "composite config.rules[{index}].config.packages must contain non-empty strings"
+                    ));
+                }
+                for package in &packages.packages {
+                    validate_package_pname(package).map_err(|error| {
+                        format!(
+                            "composite config.rules[{index}].config.packages contains invalid pname {package:?}: {error}"
+                        )
+                    })?;
+                }
+            }
+            CompositeRuleKind::PackagesAbsent(packages) => {
+                if packages.packages.is_empty()
+                    || packages
+                        .packages
+                        .iter()
+                        .any(|package| package.trim().is_empty())
+                {
+                    return Err(format!(
+                        "composite config.rules[{index}].config.packages must contain non-empty strings"
+                    ));
+                }
+                for package in &packages.packages {
+                    validate_package_pname(package).map_err(|error| {
+                        format!(
+                            "composite config.rules[{index}].config.packages contains invalid pname {package:?}: {error}"
+                        )
+                    })?;
+                }
+            }
+            CompositeRuleKind::CustomEval(custom) => {
+                if custom.expression.trim().is_empty() {
+                    return Err(format!(
+                        "composite config.rules[{index}].config.expression must not be empty"
+                    ));
+                }
+                if custom.expression.len() > MAX_CUSTOM_EVAL_EXPRESSION_BYTES {
+                    return Err(format!(
+                        "composite config.rules[{index}].config.expression exceeds the {} byte limit",
+                        MAX_CUSTOM_EVAL_EXPRESSION_BYTES
+                    ));
+                }
+                if validate_nix_syntax {
+                    custom_eval_expressions.push(custom.expression.as_str());
+                }
+            }
+            CompositeRuleKind::CveBlock(_) => {}
+            CompositeRuleKind::EvalPassed(_) | CompositeRuleKind::PinRequired(_) => {}
+            CompositeRuleKind::TimeWindow(window) => {
+                crate::services::time_window_policy::validate_window_parts(
+                    &window.days,
+                    &window.from,
+                    &window.to,
+                    &window.tz,
+                )
+                .map_err(|error| format!("composite config.rules[{index}].config: {error}"))?;
+            }
+        }
+    }
+    if !custom_eval_expressions.is_empty() {
+        validate_custom_eval_syntax(&custom_eval_expressions)
+            .map_err(|error| format!("composite custom_eval expression is invalid: {error}"))?;
+    }
+
+    Ok(Some(composite))
+}
+
+/// Decodes and structurally validates persisted policy data without a parser.
+///
+/// Runtime authorization, scanning, and evaluation paths must use this
+/// function. Immutable write and import boundaries use the full validator.
+///
+/// # Errors
+///
+/// Returns an error when a composite configuration violates its schema, rule
+/// identity, type, operator, value, package-name, or time-window constraints.
+pub fn deserialize_policy_type_config(
+    policy_type: &str,
+    config: &serde_json::Value,
+) -> Result<Option<CompositePolicyConfig>, String> {
+    decode_policy_type_config(policy_type, config, false)
+}
+
+/// Fully validates policy input at immutable persistence boundaries.
+///
+/// Custom expressions are parsed in one bounded Nix subprocess in addition to
+/// the structural checks performed by [`deserialize_policy_type_config`].
+///
+/// # Errors
+///
+/// Returns a structural validation error, a Nix syntax error, an error starting
+/// or collecting the parser, or a parser timeout.
+pub fn validate_policy_type_config(
+    policy_type: &str,
+    config: &serde_json::Value,
+) -> Result<Option<CompositePolicyConfig>, String> {
+    decode_policy_type_config(policy_type, config, true)
+}
+
+/// Validates policy input without blocking the async executor.
+///
+/// This function preserves the contract of [`validate_policy_type_config`] but
+/// runs its bounded synchronous Nix parser invocation on Tokio's blocking pool.
+/// Async request, query, and import paths must use this function. Offline tools
+/// and unit tests may use [`validate_policy_type_config`] directly.
+///
+/// # Errors
+///
+/// Returns the same validation errors as [`validate_policy_type_config`]. Also
+/// returns an error if Tokio cannot join the blocking validation task, including
+/// when the task panics.
+pub async fn validate_policy_type_config_async(
+    policy_type: &str,
+    config: &serde_json::Value,
+) -> Result<Option<CompositePolicyConfig>, String> {
+    let policy_type = policy_type.to_owned();
+    let config = config.clone();
+    tokio::task::spawn_blocking(move || validate_policy_type_config(&policy_type, &config))
+        .await
+        .map_err(|error| format!("policy validation task failed: {error}"))?
+}
 
 // ============================================================================
 // CVE Check Config
@@ -279,9 +895,16 @@ pub enum DeploymentPolicy {
     /// More flexible than RequireCveCheck.
     /// NOT Nix-evaluated; checked at deployment time.
     CveThreshold { config: CveThresholdConfig },
+    /// Typed heterogeneous policy executed by the phase-specific composite
+    /// evaluator. Legacy single-expression helpers cannot represent this variant.
+    Composite {
+        /// Defines the immutable typed rules evaluated by their owning phases.
+        config: CompositePolicyConfig,
+    },
 }
 
 impl DeploymentPolicy {
+    /// Returns whether a failed policy blocks deployment.
     pub fn is_strict(&self) -> bool {
         match self {
             DeploymentPolicy::RequireCrystalForgeAgent { strict }
@@ -293,9 +916,11 @@ impl DeploymentPolicy {
             DeploymentPolicy::RequireApprovals { .. } => true,
             DeploymentPolicy::CanaryRollout { .. } => true,
             DeploymentPolicy::CveThreshold { .. } => true,
+            DeploymentPolicy::Composite { .. } => true,
         }
     }
 
+    /// Returns an operator-facing summary of the configured policy behavior.
     pub fn description(&self) -> String {
         match self {
             DeploymentPolicy::RequireCrystalForgeAgent { .. } => {
@@ -328,27 +953,43 @@ impl DeploymentPolicy {
             DeploymentPolicy::RequireApprovals { config } => config.description.clone(),
             DeploymentPolicy::CanaryRollout { config } => config.description.clone(),
             DeploymentPolicy::CveThreshold { config } => config.description.clone(),
+            DeploymentPolicy::Composite { config } => {
+                format!("Composite policy ({} rules, all mode)", config.rules.len())
+            }
         }
     }
 
     /// Returns true if this policy is evaluated via Nix (nix-eval-jobs path).
     /// RequireCveCheck and new policy types are DB/deployment-time evaluated.
     pub fn is_nix_evaluated(&self) -> bool {
-        !matches!(
-            self,
+        match self {
             DeploymentPolicy::RequireCveCheck { .. }
-                | DeploymentPolicy::TimeWindow { .. }
-                | DeploymentPolicy::RequireApprovals { .. }
-                | DeploymentPolicy::CanaryRollout { .. }
-                | DeploymentPolicy::CveThreshold { .. }
-        )
+            | DeploymentPolicy::TimeWindow { .. }
+            | DeploymentPolicy::RequireApprovals { .. }
+            | DeploymentPolicy::CanaryRollout { .. }
+            | DeploymentPolicy::CveThreshold { .. } => false,
+            DeploymentPolicy::Composite { config } => config.rules.iter().any(|rule| {
+                !matches!(
+                    &rule.rule,
+                    CompositeRuleKind::CveBlock(_) | CompositeRuleKind::TimeWindow(_)
+                )
+            }),
+            _ => true,
+        }
     }
 
-    /// Generate the Nix expression fragment for this policy.
-    /// Returns (field_name, nix_expression).
-    /// Panics if called on RequireCveCheck (use is_nix_evaluated() to guard).
-    pub fn to_nix_expression_with_index(&self, index: usize) -> (String, String) {
-        match self {
+    /// Returns the legacy Nix expression fragment for one single-expression policy.
+    ///
+    /// Composite policies use stable per-rule fields generated by
+    /// [`build_policy_fields_for_config_standalone`] and cannot be flattened to
+    /// one field without losing constituent outcomes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for policies that are not represented by one Nix
+    /// expression, including composite and deployment-phase policies.
+    pub fn to_nix_expression_with_index(&self, index: usize) -> Result<(String, String), String> {
+        let expression = match self {
             DeploymentPolicy::RequireCrystalForgeAgent { .. } => (
                 "cfAgentEnabled".to_string(),
                 "(config.systemd.services.crystal-forge-agent.enable or false) || \
@@ -358,7 +999,7 @@ impl DeploymentPolicy {
             ),
             DeploymentPolicy::RequirePackages { packages, .. } => {
                 if packages.is_empty() {
-                    return (format!("hasRequiredPackages_{index}"), "false".to_string());
+                    return Ok((format!("hasRequiredPackages_{index}"), "false".to_string()));
                 }
                 let package_list = packages
                     .iter()
@@ -368,9 +1009,11 @@ impl DeploymentPolicy {
                 (
                     format!("hasRequiredPackages_{index}"),
                     format!(
+                        // This contract intentionally checks direct systemPackages
+                        // entries by pname; it does not claim closure membership.
                         "builtins.all \
                           (required: builtins.any \
-                            (pkg: (pkg.pname or (pkg.name or \"\")) == required) \
+                            (pkg: (pkg.pname or \"\") == required) \
                             config.environment.systemPackages) \
                          [ {} ]",
                         package_list
@@ -391,31 +1034,40 @@ impl DeploymentPolicy {
                     (rules[0].field_name.clone(), rules[0].expression.clone())
                 }
             }
-            DeploymentPolicy::RequireCveCheck { .. } => {
-                panic!("RequireCveCheck is not a Nix-evaluated policy")
+            DeploymentPolicy::RequireCveCheck { .. }
+            | DeploymentPolicy::TimeWindow { .. }
+            | DeploymentPolicy::RequireApprovals { .. }
+            | DeploymentPolicy::CanaryRollout { .. }
+            | DeploymentPolicy::CveThreshold { .. } => {
+                return Err("policy is not evaluated by Nix".to_string());
             }
-            DeploymentPolicy::TimeWindow { .. } => {
-                panic!("TimeWindow is not a Nix-evaluated policy")
+            DeploymentPolicy::Composite { .. } => {
+                return Err(
+                    "composite policies require phase-specific per-rule evaluation".to_string(),
+                );
             }
-            DeploymentPolicy::RequireApprovals { .. } => {
-                panic!("RequireApprovals is not a Nix-evaluated policy")
-            }
-            DeploymentPolicy::CanaryRollout { .. } => {
-                panic!("CanaryRollout is not a Nix-evaluated policy")
-            }
-            DeploymentPolicy::CveThreshold { .. } => {
-                panic!("CveThreshold is not a Nix-evaluated policy")
-            }
-        }
+        };
+        Ok(expression)
     }
 
-    pub fn to_nix_expression(&self) -> (String, String) {
+    /// Returns the legacy Nix expression fragment at index zero.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when [`Self::to_nix_expression_with_index`] cannot
+    /// represent the policy as one Nix expression.
+    pub fn to_nix_expression(&self) -> Result<(String, String), String> {
         self.to_nix_expression_with_index(0)
     }
 
-    /// Get the field name this policy uses in JSON output
-    pub fn field_name_with_index(&self, index: usize) -> String {
-        match self {
+    /// Returns the legacy JSON field name for one single-expression policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for composite policies because each evaluation-phase
+    /// rule has its own stable policy-version/rule field key.
+    pub fn field_name_with_index(&self, index: usize) -> Result<String, String> {
+        let field_name = match self {
             DeploymentPolicy::RequireCrystalForgeAgent { .. } => "cfAgentEnabled".to_string(),
             DeploymentPolicy::RequirePackages { .. } => format!("hasRequiredPackages_{index}"),
             DeploymentPolicy::CustomCheck {
@@ -433,10 +1085,20 @@ impl DeploymentPolicy {
             DeploymentPolicy::RequireApprovals { .. } => "requireApprovals".to_string(),
             DeploymentPolicy::CanaryRollout { .. } => "canaryRollout".to_string(),
             DeploymentPolicy::CveThreshold { .. } => "cveThreshold".to_string(),
-        }
+            DeploymentPolicy::Composite { .. } => {
+                return Err("composite policies use stable per-rule field keys".to_string());
+            }
+        };
+        Ok(field_name)
     }
 
-    pub fn field_name(&self) -> String {
+    /// Returns the legacy JSON field name at index zero.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when [`Self::field_name_with_index`] cannot represent
+    /// the policy with one field name.
+    pub fn field_name(&self) -> Result<String, String> {
         self.field_name_with_index(0)
     }
 }
@@ -476,7 +1138,11 @@ pub type PoliciesByConfiguration = BTreeMap<String, Vec<AssignedPolicy>>;
 /// Nix result keys that are reserved for built-in evaluator metadata and may
 /// not be used as custom-check `field_name` values. Overriding these from a
 /// user-defined policy would let a policy spoof system-level safety signals.
-pub const RESERVED_POLICY_RESULT_FIELDS: &[&str] = &["cfAgentEnabled"];
+pub const RESERVED_POLICY_RESULT_FIELDS: &[&str] = &[
+    "cfAgentEnabled",
+    "requestedSourceRevision",
+    "resolvedSourceRevision",
+];
 
 /// Returns true if `field_name` is reserved for built-in evaluator metadata.
 pub fn is_reserved_policy_result_field(field_name: &str) -> bool {
@@ -495,6 +1161,7 @@ fn policy_kind(policy: &DeploymentPolicy) -> &'static str {
         DeploymentPolicy::RequireApprovals { .. } => "require_approvals",
         DeploymentPolicy::CanaryRollout { .. } => "canary_rollout",
         DeploymentPolicy::CveThreshold { .. } => "cve_threshold",
+        DeploymentPolicy::Composite { .. } => COMPOSITE_POLICY_TYPE,
     }
 }
 
@@ -583,23 +1250,40 @@ pub fn policy_results_json(
 ) -> serde_json::Value {
     let mut assigned_results = serde_json::Map::new();
 
-    for assigned_policy in assigned.iter().filter(|ap| ap.policy.is_nix_evaluated()) {
+    for assigned_policy in assigned.iter().filter(|ap| {
+        ap.policy.is_nix_evaluated() || matches!(ap.policy, DeploymentPolicy::Composite { .. })
+    }) {
         let passed = resolve_assigned_policy_passed(assigned_policy, check);
-        assigned_results.insert(
-            assigned_policy.policy_id.to_string(),
-            serde_json::json!({
-                // The real database name (`deployment_policies.name`) — this
-                // is what the matrix column header and "View policy
-                // definition" navigation must use, since the Policies page
-                // looks up definitions by DB name, not by description.
-                "name": assigned_policy.policy_name,
-                "description": assigned_policy.policy.description(),
-                "type": policy_kind(&assigned_policy.policy),
-                "strict": assigned_policy.policy.is_strict(),
-                "passed": passed,
-                "details": policy_result_detail(&assigned_policy.policy, passed),
-            }),
-        );
+        let mut persisted = serde_json::json!({
+            // The real database name (`deployment_policies.name`) is used by
+            // matrix navigation and must remain distinct from description.
+            "name": assigned_policy.policy_name,
+            "description": assigned_policy.policy.description(),
+            "type": policy_kind(&assigned_policy.policy),
+            "strict": assigned_policy.policy.is_strict(),
+            "passed": passed,
+            "details": policy_result_detail(&assigned_policy.policy, passed),
+        });
+        if let DeploymentPolicy::Composite { config } = &assigned_policy.policy {
+            if let Some(object) = persisted.as_object_mut() {
+                object.insert(
+                    "config_digest".to_string(),
+                    serde_json::Value::String(composite_config_digest(config)),
+                );
+                object.insert(
+                    "rule_outcomes".to_string(),
+                    serde_json::to_value(
+                        check
+                            .assigned_results
+                            .get(&assigned_policy.policy_id)
+                            .map(|result| result.composite_outcomes.as_slice())
+                            .unwrap_or(&[]),
+                    )
+                    .unwrap_or_else(|_| serde_json::Value::Array(Vec::new())),
+                );
+            }
+        }
+        assigned_results.insert(assigned_policy.policy_id.to_string(), persisted);
     }
 
     serde_json::json!({
@@ -655,6 +1339,8 @@ pub struct CveCheckOutcome {
 #[derive(Debug, Clone)]
 pub struct AssignedPolicyCheckResult {
     pub passed: Option<bool>,
+    /// Preserves each constituent result for composite policies.
+    pub composite_outcomes: Vec<CompositeRuleOutcome>,
 }
 
 /// Results from checking deployment policies for a single system
@@ -680,17 +1366,124 @@ pub struct PolicyCheckResult {
     pub cve_checks: Vec<CveCheckOutcome>,
 }
 
+/// Classifies a configuration evaluation that did not produce normal metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvaluationTerminalOutcome {
+    /// Indicates that evaluation completed with a confirmed policy failure.
+    ConfirmedFailure,
+    /// Indicates that infrastructure or evaluation execution failed.
+    Error,
+    /// Indicates that evaluation has not reached a terminal outcome.
+    Pending,
+}
+
+impl EvaluationTerminalOutcome {
+    fn enforcement_outcome(self) -> EnforcementOutcome {
+        match self {
+            Self::ConfirmedFailure => EnforcementOutcome::Fail,
+            Self::Error => EnforcementOutcome::Error,
+            Self::Pending => EnforcementOutcome::NotChecked,
+        }
+    }
+}
+
 impl PolicyCheckResult {
-    /// Create a `PolicyCheckResult` from Nix-output JSON using the per-configuration
-    /// `AssignedPolicy` list (stable-key path).
+    /// Creates composite rule evidence for an abnormal evaluation state.
+    ///
+    /// Evaluation-dependent rules become error or not checked as appropriate;
+    /// scan and deployment rules remain absent until their owning phase runs.
+    pub fn for_evaluation_terminal(
+        system_name: String,
+        assigned: &[AssignedPolicy],
+        terminal: EvaluationTerminalOutcome,
+        detail: &str,
+    ) -> Self {
+        let terminal_outcome = terminal.enforcement_outcome();
+        let mut assigned_results = BTreeMap::new();
+        let mut failed_policies = Vec::new();
+
+        for assigned_policy in assigned {
+            let DeploymentPolicy::Composite { config } = &assigned_policy.policy else {
+                continue;
+            };
+            let outcomes = config
+                .rules
+                .iter()
+                .filter_map(|rule| {
+                    let outcome = if matches!(rule.rule, CompositeRuleKind::EvalPassed(_)) {
+                        terminal_outcome
+                    } else if matches!(
+                        rule.rule,
+                        CompositeRuleKind::NixosOption(_)
+                            | CompositeRuleKind::PackagesInstalled(_)
+                            | CompositeRuleKind::PackagesAbsent(_)
+                            | CompositeRuleKind::CustomEval(_)
+                            | CompositeRuleKind::PinRequired(_)
+                    ) {
+                        match terminal {
+                            EvaluationTerminalOutcome::Error => EnforcementOutcome::Error,
+                            _ => EnforcementOutcome::NotChecked,
+                        }
+                    } else {
+                        return None;
+                    };
+                    Some(CompositeRuleOutcome {
+                        rule_id: rule.id,
+                        kind: rule.rule.kind().to_string(),
+                        phase: EnforcementPhase::Evaluation,
+                        outcome,
+                        blocking: outcome != EnforcementOutcome::Pass,
+                        detail: detail.to_string(),
+                        evidence: serde_json::json!({
+                            "configuration": system_name,
+                            "terminal_outcome": match terminal {
+                                EvaluationTerminalOutcome::ConfirmedFailure => "confirmed_failure",
+                                EvaluationTerminalOutcome::Error => "error",
+                                EvaluationTerminalOutcome::Pending => "pending",
+                            },
+                        }),
+                    })
+                })
+                .collect::<Vec<_>>();
+            let passed = match terminal {
+                EvaluationTerminalOutcome::Pending => None,
+                _ => Some(false),
+            };
+            if passed == Some(false) {
+                failed_policies.push((assigned_policy.policy.description(), true));
+            }
+            assigned_results.insert(
+                assigned_policy.policy_id,
+                AssignedPolicyCheckResult {
+                    passed,
+                    composite_outcomes: outcomes,
+                },
+            );
+        }
+
+        Self {
+            system_name,
+            cf_agent_enabled: None,
+            assigned_results,
+            has_required_packages: None,
+            custom_checks: HashMap::new(),
+            meets_requirements: false,
+            warnings: vec![detail.to_string()],
+            failed_policies,
+            cve_checks: Vec::new(),
+        }
+    }
+
+    /// Creates a policy result from Nix JSON and stable assigned-policy identities.
     ///
     /// Uses `policy_result_key(policy_id)` for CF-agent and package checks, and
     /// `rule.field_name` for multi-rule custom checks (existing convention).
     ///
-    /// Returns `None` when a Nix-evaluated policy's expected key is absent from
-    /// the JSON (indicating an expression-generation/parser mismatch rather than
-    /// a normal policy failure).  The caller should treat `None` as an
-    /// infrastructure error for that configuration.
+    /// # Errors
+    ///
+    /// Returns an error when required evaluator metadata is absent, has the
+    /// wrong type, or contradicts the unconditional agent result. Constituent
+    /// composite evaluation errors remain contained rule outcomes.
     pub fn from_assigned(
         system_name: String,
         policies_json: &serde_json::Value,
@@ -779,6 +1572,7 @@ impl PolicyCheckResult {
                         ap.policy_id,
                         AssignedPolicyCheckResult {
                             passed: Some(value),
+                            composite_outcomes: Vec::new(),
                         },
                     );
                     if !value {
@@ -816,6 +1610,7 @@ impl PolicyCheckResult {
                         ap.policy_id,
                         AssignedPolicyCheckResult {
                             passed: Some(value),
+                            composite_outcomes: Vec::new(),
                         },
                     );
                     if !value {
@@ -849,7 +1644,10 @@ impl PolicyCheckResult {
                                 custom_checks.insert(field_name.clone(), v);
                                 assigned_results.insert(
                                     ap.policy_id,
-                                    AssignedPolicyCheckResult { passed: Some(v) },
+                                    AssignedPolicyCheckResult {
+                                        passed: Some(v),
+                                        composite_outcomes: Vec::new(),
+                                    },
                                 );
                                 if !v {
                                     warnings.push(format!("{}: {}", system_name, description));
@@ -903,6 +1701,7 @@ impl PolicyCheckResult {
                             ap.policy_id,
                             AssignedPolicyCheckResult {
                                 passed: Some(overall_passed),
+                                composite_outcomes: Vec::new(),
                             },
                         );
                         for (passed, rule) in &rule_results {
@@ -930,6 +1729,151 @@ impl PolicyCheckResult {
                 | DeploymentPolicy::CveThreshold { .. } => {
                     // Not Nix-evaluated; already filtered by is_nix_evaluated().
                     let _ = (idx, key);
+                }
+                DeploymentPolicy::Composite { config } => {
+                    let mut outcomes = Vec::new();
+                    for rule in &config.rules {
+                        if matches!(rule.rule, CompositeRuleKind::EvalPassed(_)) {
+                            outcomes.push(CompositeRuleOutcome {
+                                rule_id: rule.id,
+                                kind: rule.rule.kind().to_string(),
+                                phase: EnforcementPhase::Evaluation,
+                                outcome: EnforcementOutcome::Pass,
+                                blocking: false,
+                                detail: "Configuration evaluation completed".to_string(),
+                                evidence: serde_json::json!({ "configuration": system_name }),
+                            });
+                            continue;
+                        }
+                        if matches!(rule.rule, CompositeRuleKind::PinRequired(_)) {
+                            let expected = policies_json
+                                .get("requestedSourceRevision")
+                                .and_then(|value| value.as_str())
+                                .filter(|value| !value.trim().is_empty());
+                            let resolved = policies_json
+                                .get("resolvedSourceRevision")
+                                .and_then(|value| value.as_str())
+                                .filter(|value| !value.trim().is_empty());
+                            let immutable = |revision: &str| {
+                                matches!(revision.len(), 40 | 64)
+                                    && revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+                            };
+                            let (outcome, detail) = match (expected, resolved) {
+                                (None, _) => (
+                                    EnforcementOutcome::Error,
+                                    "Evaluator did not preserve the requested source revision",
+                                ),
+                                (Some(expected), _) if !immutable(expected) => (
+                                    EnforcementOutcome::Error,
+                                    "Requested source revision is not a full immutable Git revision",
+                                ),
+                                (Some(_), None) => (
+                                    EnforcementOutcome::Fail,
+                                    "Nix resolved a mutable source without an immutable revision",
+                                ),
+                                (Some(expected), Some(resolved)) if expected != resolved => (
+                                    EnforcementOutcome::Fail,
+                                    "Nix resolved a different source revision than requested",
+                                ),
+                                (Some(_), Some(resolved)) if !immutable(resolved) => (
+                                    EnforcementOutcome::Fail,
+                                    "Nix resolved a non-immutable source revision",
+                                ),
+                                (Some(_), Some(_)) => (
+                                    EnforcementOutcome::Pass,
+                                    "Nix resolved the exact requested immutable source revision",
+                                ),
+                            };
+                            outcomes.push(CompositeRuleOutcome {
+                                rule_id: rule.id,
+                                kind: rule.rule.kind().to_string(),
+                                phase: EnforcementPhase::Evaluation,
+                                outcome,
+                                blocking: outcome != EnforcementOutcome::Pass,
+                                detail: detail.to_string(),
+                                evidence: serde_json::json!({
+                                    "expected_revision": expected,
+                                    "resolved_revision": resolved,
+                                }),
+                            });
+                            continue;
+                        }
+                        if !matches!(
+                            rule.rule,
+                            CompositeRuleKind::NixosOption(_)
+                                | CompositeRuleKind::PackagesInstalled(_)
+                                | CompositeRuleKind::PackagesAbsent(_)
+                                | CompositeRuleKind::CustomEval(_)
+                        ) {
+                            continue;
+                        }
+                        let result_key = composite_rule_result_key(&ap.policy_id, &rule.id);
+                        let (outcome, detail) = match policies_json.get(&result_key) {
+                            Some(value) => {
+                                let success =
+                                    value.get("success").and_then(|value| value.as_bool());
+                                let result = value.get("value").and_then(|value| value.as_bool());
+                                match (success, result) {
+                                    (Some(true), Some(true)) => (
+                                        EnforcementOutcome::Pass,
+                                        "Rule evaluated to true".to_string(),
+                                    ),
+                                    (Some(true), Some(false)) => (
+                                        EnforcementOutcome::Fail,
+                                        "Rule evaluated to false".to_string(),
+                                    ),
+                                    (Some(false), _) => (
+                                        EnforcementOutcome::Error,
+                                        "Rule evaluation was contained by builtins.tryEval"
+                                            .to_string(),
+                                    ),
+                                    _ => (
+                                        EnforcementOutcome::Error,
+                                        "Evaluator emitted malformed rule metadata".to_string(),
+                                    ),
+                                }
+                            }
+                            None => (
+                                EnforcementOutcome::Error,
+                                "Evaluator did not emit this rule result".to_string(),
+                            ),
+                        };
+                        outcomes.push(CompositeRuleOutcome {
+                            rule_id: rule.id,
+                            kind: rule.rule.kind().to_string(),
+                            phase: EnforcementPhase::Evaluation,
+                            outcome,
+                            blocking: outcome != EnforcementOutcome::Pass,
+                            detail,
+                            evidence: serde_json::json!({ "metadata_key": result_key }),
+                        });
+                    }
+                    let aggregate = aggregate_composite_outcomes(&outcomes);
+                    let passed = aggregate == EnforcementOutcome::Pass
+                        || (outcomes.is_empty()
+                            && config.rules.iter().all(|rule| {
+                                !matches!(
+                                    rule.rule,
+                                    CompositeRuleKind::NixosOption(_)
+                                        | CompositeRuleKind::PackagesInstalled(_)
+                                        | CompositeRuleKind::PackagesAbsent(_)
+                                        | CompositeRuleKind::CustomEval(_)
+                                )
+                            }));
+                    assigned_results.insert(
+                        ap.policy_id,
+                        AssignedPolicyCheckResult {
+                            passed: Some(passed),
+                            composite_outcomes: outcomes,
+                        },
+                    );
+                    if !passed {
+                        warnings.push(format!(
+                            "Composite policy {} failed during evaluation",
+                            ap.policy_name
+                        ));
+                        failed_policies.push((ap.policy.description(), true));
+                    }
                 }
             }
         }
@@ -968,8 +1912,10 @@ impl PolicyCheckResult {
         })
     }
 
-    /// Create a new PolicyCheckResult from parsed JSON and policies (Nix-evaluated path).
-    /// Legacy flat-policies path; kept for existing tests.
+    /// Creates a policy result through the legacy flat-policy compatibility path.
+    ///
+    /// Composite policies cannot retain stable identities through this path and
+    /// therefore produce a blocking compatibility failure.
     pub fn from_json(
         system_name: String,
         policies_json: &serde_json::Value,
@@ -989,6 +1935,17 @@ impl PolicyCheckResult {
 
         let mut nix_policy_idx = 0usize;
         for policy in policies {
+            if matches!(policy, DeploymentPolicy::Composite { .. }) {
+                warnings.push(format!(
+                    "{}: legacy flat policy parser cannot evaluate composite policy",
+                    system_name
+                ));
+                failed_policies.push((
+                    "Legacy flat policy parser cannot evaluate composite policy".to_string(),
+                    true,
+                ));
+                continue;
+            }
             // CVE policies are not Nix-evaluated; skip here.
             if !policy.is_nix_evaluated() {
                 continue;
@@ -1001,8 +1958,8 @@ impl PolicyCheckResult {
 
             match policy {
                 DeploymentPolicy::RequireCrystalForgeAgent { .. } => {
-                    let field_name = policy.field_name_with_index(policy_idx);
-                    let value = policies_json.get(&field_name).and_then(|v| v.as_bool());
+                    let field_name = "cfAgentEnabled";
+                    let value = policies_json.get(field_name).and_then(|v| v.as_bool());
                     cf_agent_enabled = value;
                     if value != Some(true) {
                         let desc = policy.description();
@@ -1014,7 +1971,7 @@ impl PolicyCheckResult {
                     }
                 }
                 DeploymentPolicy::RequirePackages { packages, .. } => {
-                    let field_name = policy.field_name_with_index(policy_idx);
+                    let field_name = format!("hasRequiredPackages_{policy_idx}");
                     let value = policies_json.get(&field_name).and_then(|v| v.as_bool());
                     has_required_packages = value;
                     if value != Some(true) {
@@ -1120,6 +2077,9 @@ impl PolicyCheckResult {
                 DeploymentPolicy::CveThreshold { .. } => {
                     // Deployment-time policy, not Nix-evaluated
                 }
+                DeploymentPolicy::Composite { .. } => {
+                    unreachable!("handled before phase filtering")
+                }
             }
         }
 
@@ -1146,16 +2106,42 @@ impl PolicyCheckResult {
 // Nix expression builder
 // ============================================================================
 
-/// Safely produce a quoted Nix string literal from a Rust string.
-/// JSON string encoding is a strict superset of Nix quoted-string encoding
-/// for ordinary Unicode text, so this produces a correct Nix literal.
+/// Returns a Nix double-quoted string without permitting interpolation.
+///
+/// A NUL byte produces a Nix `throw` expression because Nix strings cannot
+/// represent NUL.
 pub fn nix_string_pub(value: &str) -> String {
     nix_string(value)
 }
 
 fn nix_string(value: &str) -> String {
-    // serde_json::to_string always succeeds for strings.
-    serde_json::to_string(value).unwrap_or_else(|_| format!("\"{}\"", value.replace('"', "\\\"")))
+    if value.contains('\0') {
+        return "throw \"Nix strings cannot represent NUL bytes\"".to_string();
+    }
+    let mut encoded = String::with_capacity(value.len() + 2);
+    encoded.push('"');
+    let mut chars = value.chars().peekable();
+    while let Some(character) = chars.next() {
+        match character {
+            '"' => encoded.push_str("\\\""),
+            '\\' => encoded.push_str("\\\\"),
+            '\n' => encoded.push_str("\\n"),
+            '\r' => encoded.push_str("\\r"),
+            '\t' => encoded.push_str("\\t"),
+            '$' if chars.peek() == Some(&'{') => encoded.push_str("\\$"),
+            character if character.is_control() => {
+                write!(
+                    encoded,
+                    "${{builtins.fromJSON \"\\\"\\\\u{:04x}\\\"\"}}",
+                    character as u32
+                )
+                .expect("writing to a String cannot fail");
+            }
+            character => encoded.push(character),
+        }
+    }
+    encoded.push('"');
+    encoded
 }
 
 /// Return the stable metadata key used in the Nix expression and parsed in
@@ -1165,8 +2151,72 @@ pub fn policy_result_key(policy_id: &Uuid) -> String {
     format!("policy_{}", policy_id.to_string().replace('-', ""))
 }
 
-/// Build the Nix field lines for one configuration's assigned policies (standalone path).
-/// Returns a vec of `"  key = expr;"` strings (2-space indent for standalone expression).
+/// Returns the stable evaluator metadata key for one composite rule.
+pub fn composite_rule_result_key(policy_id: &Uuid, rule_id: &Uuid) -> String {
+    format!("composite_{}_{}", policy_id.simple(), rule_id.simple())
+}
+
+fn semantic_nix_literal(value: &serde_json::Value) -> Result<String, String> {
+    match value {
+        serde_json::Value::Bool(value) => Ok(value.to_string()),
+        serde_json::Value::Number(value) if value.as_i64().is_some() => Ok(value.to_string()),
+        serde_json::Value::String(value) => Ok(nix_string(value)),
+        _ => Err("semantic value cannot be represented as a typed Nix literal".to_string()),
+    }
+}
+
+fn package_identity_expression(packages: &[String], absent: bool) -> String {
+    let names = packages
+        .iter()
+        .map(|package| nix_string(package))
+        .collect::<Vec<_>>()
+        .join(" ");
+    if absent {
+        format!(
+            "builtins.all (prohibited: builtins.all (pkg: (pkg.pname or \"\") != prohibited) config.environment.systemPackages) [ {names} ]"
+        )
+    } else {
+        format!(
+            "builtins.all (required: builtins.any (pkg: (pkg.pname or \"\") == required) config.environment.systemPackages) [ {names} ]"
+        )
+    }
+}
+
+fn composite_evaluation_expression(rule: &CompositeRuleKind) -> Option<String> {
+    let expression = match rule {
+        CompositeRuleKind::NixosOption(option) => {
+            let path = parse_nixos_option_path(&option.path)
+                .ok()?
+                .iter()
+                .map(|segment| nix_string(segment))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let expected = semantic_nix_literal(&option.value).ok()?;
+            format!(
+                "(builtins.foldl' (current: segment: builtins.getAttr segment current) config [ {path} ]) {} {expected}",
+                option.operator
+            )
+        }
+        CompositeRuleKind::PackagesInstalled(packages) => {
+            package_identity_expression(&packages.packages, false)
+        }
+        CompositeRuleKind::PackagesAbsent(packages) => {
+            package_identity_expression(&packages.packages, true)
+        }
+        CompositeRuleKind::CustomEval(custom) => {
+            format!("({})", custom.expression)
+        }
+        _ => return None,
+    };
+    Some(format!(
+        "let attempt = builtins.tryEval ({expression}); isBoolean = attempt.success && builtins.isBool attempt.value; in {{ success = isBoolean; value = if isBoolean then attempt.value else false; }}"
+    ))
+}
+
+/// Builds standalone Nix field lines for one configuration's assigned policies.
+///
+/// Each line uses two-space indentation. Composite rules use stable policy and
+/// rule IDs so results cannot collide across policies.
 pub fn build_policy_fields_for_config_standalone(assigned: &[AssignedPolicy]) -> Vec<String> {
     build_policy_fields_for_config_indented(assigned, "  ")
 }
@@ -1189,6 +2239,18 @@ fn build_policy_fields_for_config_indented(
         }
         let key = policy_result_key(&ap.policy_id);
         match &ap.policy {
+            DeploymentPolicy::Composite { config } => {
+                for rule in &config.rules {
+                    if let Some(expression) = composite_evaluation_expression(&rule.rule) {
+                        lines.push(format!(
+                            "{}{} = {};",
+                            indent,
+                            composite_rule_result_key(&ap.policy_id, &rule.id),
+                            expression
+                        ));
+                    }
+                }
+            }
             DeploymentPolicy::CustomCheck {
                 expression,
                 field_name,
@@ -1239,8 +2301,9 @@ fn build_policy_fields_for_config_indented(
                 // All built-in Nix-evaluated policies (require_cf_agent,
                 // require_packages) use `config.*` in their expression fragments
                 // because the checker function receives the configuration object.
-                let (_, expr) = ap.policy.to_nix_expression_with_index(idx);
-                lines.push(format!("{}{} = {};", indent, key, expr));
+                if let Ok((_, expr)) = ap.policy.to_nix_expression_with_index(idx) {
+                    lines.push(format!("{}{} = {};", indent, key, expr));
+                }
             }
         }
     }
@@ -1285,7 +2348,7 @@ pub fn build_nix_eval_expression(
             } else {
                 format!("{{\n{}\n          }}", field_lines.join("\n"))
             };
-            format!("        {} = cfg: {};", nix_string(config_name), body)
+            format!("        {} = config: {};", nix_string(config_name), body)
         })
         .collect();
 
@@ -1312,13 +2375,20 @@ in
     in
       drv // {{
         meta = (drv.meta or {{}}) // {{
-          policies = (checker cfg.config) // {{ cfAgentEnabled = cfAgentEnabledExpr cfg.config; }};
+          policies = (checker cfg.config) // {{
+            cfAgentEnabled = cfAgentEnabledExpr cfg.config;
+            requestedSourceRevision = {requested_revision};
+            resolvedSourceRevision = flake.sourceInfo.rev or null;
+          }};
         }};
       }}
   ) flake.nixosConfigurations
 "#,
         flake_ref = nix_string(flake_ref),
         checkers = checkers_block,
+        requested_revision = nix_string(
+            crate::derivations::utils::flake_reference_revision(flake_ref).unwrap_or("")
+        ),
     )
 }
 
@@ -1427,24 +2497,30 @@ pub struct UpdateDeploymentPolicyRequest {
     /// When `Some`, replace the category; `None` preserves existing.
     #[serde(default)]
     pub category: Option<String>,
-    /// When `Some`, replace the framework; `None` preserves existing.
+    /// When `Some(Some(_))`, replaces the framework. `Some(None)` clears it.
+    /// `None` preserves the existing value.
     #[serde(default)]
-    pub framework: Option<String>,
-    /// When `Some`, replace the severity; `None` preserves existing.
+    pub framework: Option<Option<String>>,
+    /// When `Some(Some(_))`, replaces the severity. `Some(None)` clears it.
+    /// `None` preserves the existing value.
     #[serde(default)]
-    pub severity: Option<String>,
-    /// When `Some`, replace the control_family; `None` preserves existing.
+    pub severity: Option<Option<String>>,
+    /// When `Some(Some(_))`, replaces the control family. `Some(None)` clears it.
+    /// `None` preserves the existing value.
     #[serde(default)]
-    pub control_family: Option<String>,
-    /// When `Some`, replace the cmmc_level; `None` preserves existing.
+    pub control_family: Option<Option<String>>,
+    /// When `Some(Some(_))`, replaces the CMMC level. `Some(None)` clears it.
+    /// `None` preserves the existing value.
     #[serde(default)]
-    pub cmmc_level: Option<i32>,
-    /// When `Some`, replace the cis_section; `None` preserves existing.
+    pub cmmc_level: Option<Option<i32>>,
+    /// When `Some(Some(_))`, replaces the CIS section. `Some(None)` clears it.
+    /// `None` preserves the existing value.
     #[serde(default)]
-    pub cis_section: Option<String>,
-    /// When `Some`, replace the rationale; `None` preserves existing.
+    pub cis_section: Option<Option<String>>,
+    /// When `Some(Some(_))`, replaces the rationale. `Some(None)` clears it.
+    /// `None` preserves the existing value.
     #[serde(default)]
-    pub rationale: Option<String>,
+    pub rationale: Option<Option<String>>,
     /// When `Some`, replace evidence specs; `Some([])` clears them.
     /// When `None`, the existing value is preserved.
     #[serde(default)]
@@ -1458,6 +2534,979 @@ pub struct UpdateDeploymentPolicyRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn nix_eval_json(expression: &str) -> serde_json::Value {
+        let output = std::process::Command::new("nix")
+            .args([
+                "--extra-experimental-features",
+                "nix-command",
+                "--store",
+                "dummy://",
+                "eval",
+                "--json",
+                "--expr",
+                expression,
+            ])
+            .output()
+            .expect("failed to spawn nix eval");
+        assert!(
+            output.status.success(),
+            "nix eval failed:\n{}\nExpression:\n{}",
+            String::from_utf8_lossy(&output.stderr),
+            expression
+        );
+        serde_json::from_slice(&output.stdout).expect("nix eval output must be JSON")
+    }
+
+    fn composite_config() -> serde_json::Value {
+        serde_json::json!({
+            "schema_version": 1,
+            "mode": "all",
+            "rules": [
+                {
+                    "id": "10000000-0000-0000-0000-000000000001",
+                    "kind": "nixos_option",
+                    "config": {
+                        "path": "networking.firewall.enable",
+                        "operator": "==",
+                        "value_type": "boolean",
+                        "value": true
+                    }
+                },
+                {
+                    "id": "10000000-0000-0000-0000-000000000002",
+                    "kind": "packages_installed",
+                    "config": { "packages": ["openssh"] }
+                },
+                {
+                    "id": "10000000-0000-0000-0000-000000000003",
+                    "kind": "custom_eval",
+                    "config": { "expression": "config.security.audit.enable", "message": "audit" }
+                },
+                {
+                    "id": "10000000-0000-0000-0000-000000000004",
+                    "kind": "cve_block",
+                    "config": { "severity": "critical", "max_allowed": 0 }
+                },
+                {
+                    "id": "10000000-0000-0000-0000-000000000005",
+                    "kind": "packages_absent",
+                    "config": { "packages": ["telnet"] }
+                },
+                {
+                    "id": "10000000-0000-0000-0000-000000000006",
+                    "kind": "eval_passed",
+                    "config": {}
+                },
+                {
+                    "id": "10000000-0000-0000-0000-000000000007",
+                    "kind": "pin_required",
+                    "config": {}
+                },
+                {
+                    "id": "10000000-0000-0000-0000-000000000008",
+                    "kind": "time_window",
+                    "config": {
+                        "days": ["mon", "tue"],
+                        "from": "09:00",
+                        "to": "17:00",
+                        "tz": "America/New_York"
+                    }
+                }
+            ]
+        })
+    }
+
+    fn single_composite_rule(kind: &str, config: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "schema_version": 1,
+            "mode": "all",
+            "rules": [{
+                "id": "11000000-0000-0000-0000-000000000001",
+                "kind": kind,
+                "config": config
+            }]
+        })
+    }
+
+    #[test]
+    fn composite_round_trip_preserves_ids_order_kinds_and_semantic_values() {
+        let parsed = validate_policy_type_config(COMPOSITE_POLICY_TYPE, &composite_config())
+            .unwrap()
+            .unwrap();
+        let serialized = serde_json::to_value(&parsed).unwrap();
+
+        assert_eq!(serialized, composite_config());
+        assert_eq!(parsed.rules.len(), 8);
+        assert!(matches!(
+            parsed.rules[0].rule,
+            CompositeRuleKind::NixosOption(NixosOptionRuleConfig {
+                value: serde_json::Value::Bool(true),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn nixos_option_path_parser_preserves_quoted_dots_and_escapes() {
+        assert_eq!(
+            parse_nixos_option_path(r#"boot.kernel.sysctl."kernel.randomize_va_space""#).unwrap(),
+            ["boot", "kernel", "sysctl", "kernel.randomize_va_space"]
+        );
+        assert_eq!(
+            parse_nixos_option_path(r#"environment.etc."issue".text"#).unwrap(),
+            ["environment", "etc", "issue", "text"]
+        );
+        assert_eq!(
+            parse_nixos_option_path(r#"services."quoted\"name\\suffix".enable"#).unwrap(),
+            ["services", "quoted\"name\\suffix", "enable"]
+        );
+        for invalid in [
+            "",
+            "a..b",
+            ".a",
+            "a.",
+            "a.\"unterminated",
+            "a.\"\".b",
+            "a. b",
+        ] {
+            assert!(parse_nixos_option_path(invalid).is_err(), "{invalid:?}");
+        }
+    }
+
+    #[test]
+    fn composite_validation_rejects_non_pname_package_contract_and_bad_custom_syntax() {
+        let mut invalid_package = composite_config();
+        invalid_package["rules"][1]["config"]["packages"] = serde_json::json!(["nixpkgs#openssh"]);
+        assert!(
+            validate_policy_type_config(COMPOSITE_POLICY_TYPE, &invalid_package)
+                .unwrap_err()
+                .contains("invalid pname")
+        );
+
+        let mut malformed = composite_config();
+        malformed["rules"][2]["config"]["expression"] =
+            serde_json::json!("true); injected = true; (");
+        assert!(
+            validate_policy_type_config(COMPOSITE_POLICY_TYPE, &malformed)
+                .unwrap_err()
+                .contains("invalid Nix expression syntax")
+        );
+    }
+
+    #[tokio::test]
+    async fn async_policy_validation_matches_sync_semantics_without_panicking() {
+        let valid = composite_config();
+        let mut malformed = composite_config();
+        malformed["rules"][2]["config"]["expression"] =
+            serde_json::json!("true); injected = true; (");
+
+        for (policy_type, config) in [
+            (COMPOSITE_POLICY_TYPE, &valid),
+            (COMPOSITE_POLICY_TYPE, &malformed),
+            (
+                "require_packages",
+                &serde_json::json!({"packages": ["curl"]}),
+            ),
+        ] {
+            let synchronous = validate_policy_type_config(policy_type, config);
+            let asynchronous = validate_policy_type_config_async(policy_type, config).await;
+            assert_eq!(asynchronous, synchronous);
+        }
+    }
+
+    #[test]
+    fn runtime_composite_deserialization_never_requires_nix_parser_syntax_validation() {
+        let config = serde_json::json!({
+            "schema_version": 1,
+            "mode": "all",
+            "rules": [{
+                "id": "30000000-0000-0000-0000-000000000099",
+                "kind": "custom_eval",
+                "config": {"expression": "config: (", "message": "malformed"}
+            }]
+        });
+
+        assert!(deserialize_policy_type_config(COMPOSITE_POLICY_TYPE, &config).is_ok());
+        assert!(validate_policy_type_config(COMPOSITE_POLICY_TYPE, &config).is_err());
+
+        let mut oversized = config;
+        oversized["rules"][0]["config"]["expression"] =
+            serde_json::Value::String("x".repeat(MAX_CUSTOM_EVAL_EXPRESSION_BYTES + 1));
+        assert!(deserialize_policy_type_config(COMPOSITE_POLICY_TYPE, &oversized).is_err());
+    }
+
+    #[test]
+    #[ignore = "requires Nix evaluator in PATH"]
+    fn quoted_option_paths_and_safe_strings_evaluate_authoritatively_in_nix() {
+        let policy_id = Uuid::from_u128(50);
+        let randomize_id = Uuid::from_u128(51);
+        let issue_id = Uuid::from_u128(52);
+        let assigned = AssignedPolicy {
+            policy_id,
+            policy_name: "quoted paths".to_string(),
+            policy: DeploymentPolicy::Composite {
+                config: CompositePolicyConfig {
+                    schema_version: 1,
+                    mode: CompositeRuleMode::All,
+                    rules: vec![
+                        CompositeRule {
+                            id: randomize_id,
+                            rule: CompositeRuleKind::NixosOption(NixosOptionRuleConfig {
+                                path: r#"boot.kernel.sysctl."kernel.randomize_va_space""#
+                                    .to_string(),
+                                operator: "==".to_string(),
+                                value_type: NixosOptionValueType::Integer,
+                                value: serde_json::json!(2),
+                            }),
+                        },
+                        CompositeRule {
+                            id: issue_id,
+                            rule: CompositeRuleKind::NixosOption(NixosOptionRuleConfig {
+                                path: r#"environment.etc."issue".text"#.to_string(),
+                                operator: "==".to_string(),
+                                value_type: NixosOptionValueType::Lines,
+                                value: serde_json::json!(
+                                    "Authorized ${literal}\nLine\r\t\\\"\u{1}"
+                                ),
+                            }),
+                        },
+                    ],
+                },
+            },
+        };
+        let fields = build_policy_fields_for_config_standalone(&[assigned]).join("\n");
+        let encoded_issue = nix_string("Authorized ${literal}\nLine\r\t\\\"\u{1}");
+        let expression = format!(
+            r#"let
+  config = {{
+    boot.kernel.sysctl."kernel.randomize_va_space" = 2;
+    environment.etc."issue".text = {encoded_issue};
+  }};
+in {{ {fields} }}"#
+        );
+        let evaluated = nix_eval_json(&expression);
+        for rule_id in [randomize_id, issue_id] {
+            let result = &evaluated[composite_rule_result_key(&policy_id, &rule_id)];
+            assert_eq!(result["success"], true);
+            assert_eq!(result["value"], true);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires Nix evaluator in PATH"]
+    fn nix_string_encoder_round_trips_interpolation_and_controls() {
+        let values = [
+            "quote \" slash \\",
+            "literal ${builtins.abort \"injected\"}",
+            "line\ncarriage\rtab\t",
+            "controls \u{1}\u{8}\u{1f}",
+        ];
+        let expression = format!(
+            "[ {} ]",
+            values
+                .iter()
+                .map(|value| nix_string(value))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        assert_eq!(nix_eval_json(&expression), serde_json::json!(values));
+
+        let nul = nix_string("contains\0nul");
+        let output = std::process::Command::new("nix")
+            .args(["eval", "--json", "--expr", &nul])
+            .output()
+            .expect("failed to spawn nix eval");
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("cannot represent NUL"));
+    }
+
+    #[test]
+    #[ignore = "requires Nix evaluator in PATH"]
+    fn malformed_custom_eval_cannot_break_or_inject_generated_expression() {
+        let policy_id = Uuid::from_u128(60);
+        let rules = [
+            (Uuid::from_u128(61), "true"),
+            (Uuid::from_u128(62), "throw \"runtime\""),
+            (Uuid::from_u128(63), "42"),
+            (Uuid::from_u128(64), "true); injected = true; ("),
+        ];
+        let assigned = AssignedPolicy {
+            policy_id,
+            policy_name: "isolated custom expressions".to_string(),
+            policy: DeploymentPolicy::Composite {
+                config: CompositePolicyConfig {
+                    schema_version: 1,
+                    mode: CompositeRuleMode::All,
+                    rules: rules
+                        .iter()
+                        .map(|(id, expression)| CompositeRule {
+                            id: *id,
+                            rule: CompositeRuleKind::CustomEval(CustomEvalRuleConfig {
+                                expression: expression.to_string(),
+                                message: "test".to_string(),
+                            }),
+                        })
+                        .collect(),
+                },
+            },
+        };
+        let fields = build_policy_fields_for_config_standalone(&[assigned]).join("\n");
+        assert!(!fields.contains("injected"));
+        let evaluated = nix_eval_json(&format!("let config = {{}}; in {{ {fields} }}"));
+        assert_eq!(
+            evaluated[composite_rule_result_key(&policy_id, &rules[0].0)]["success"],
+            true
+        );
+        for (id, _) in &rules[1..] {
+            assert_eq!(
+                evaluated[composite_rule_result_key(&policy_id, id)]["success"],
+                false
+            );
+        }
+    }
+
+    #[test]
+    fn composite_validation_rejects_empty_nil_duplicate_unknown_and_type_mismatches() {
+        let mut cases = Vec::new();
+
+        let mut wrong_schema = composite_config();
+        wrong_schema["schema_version"] = serde_json::json!(2);
+        cases.push(wrong_schema);
+
+        let mut unsupported_mode = composite_config();
+        unsupported_mode["mode"] = serde_json::json!("any");
+        cases.push(unsupported_mode);
+
+        let mut malformed_id = composite_config();
+        malformed_id["rules"][0]["id"] = serde_json::json!("not-a-uuid");
+        cases.push(malformed_id);
+
+        let mut empty = composite_config();
+        empty["rules"] = serde_json::json!([]);
+        cases.push(empty);
+
+        let mut nil = composite_config();
+        nil["rules"][0]["id"] = serde_json::json!(Uuid::nil());
+        cases.push(nil);
+
+        let mut duplicate = composite_config();
+        duplicate["rules"][1]["id"] = duplicate["rules"][0]["id"].clone();
+        cases.push(duplicate);
+
+        let mut unknown = composite_config();
+        unknown["rules"][0]["kind"] = serde_json::json!("approval_required");
+        cases.push(unknown);
+
+        let mut wrong_value = composite_config();
+        wrong_value["rules"][0]["config"]["value"] = serde_json::json!("true");
+        cases.push(wrong_value);
+
+        let mut wrong_operator = composite_config();
+        wrong_operator["rules"][0]["config"]["operator"] = serde_json::json!(">=");
+        cases.push(wrong_operator);
+
+        for config in cases {
+            assert!(validate_policy_type_config(COMPOSITE_POLICY_TYPE, &config).is_err());
+        }
+    }
+
+    #[test]
+    fn composite_validation_enforces_conservative_rule_limit() {
+        let rule = single_composite_rule("eval_passed", serde_json::json!({}))["rules"][0].clone();
+        let mut at_limit = single_composite_rule("eval_passed", serde_json::json!({}));
+        at_limit["rules"] = serde_json::Value::Array(
+            (0..MAX_COMPOSITE_RULES)
+                .map(|index| {
+                    let mut rule = rule.clone();
+                    rule["id"] = serde_json::json!(Uuid::from_u128(index as u128 + 1));
+                    rule
+                })
+                .collect(),
+        );
+        assert!(validate_policy_type_config(COMPOSITE_POLICY_TYPE, &at_limit).is_ok());
+
+        at_limit["rules"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "id": Uuid::from_u128(MAX_COMPOSITE_RULES as u128 + 1),
+                "kind": "eval_passed",
+                "config": {}
+            }));
+        let error = validate_policy_type_config(COMPOSITE_POLICY_TYPE, &at_limit).unwrap_err();
+        assert!(error.contains("at most 64 rules"), "{error}");
+    }
+
+    #[test]
+    fn composite_single_expression_helper_returns_explicit_error() {
+        let config = validate_policy_type_config(COMPOSITE_POLICY_TYPE, &composite_config())
+            .unwrap()
+            .unwrap();
+        let policy = DeploymentPolicy::Composite { config };
+
+        assert!(policy.is_nix_evaluated());
+        assert_eq!(
+            policy.to_nix_expression().unwrap_err(),
+            "composite policies require phase-specific per-rule evaluation"
+        );
+        assert_eq!(
+            policy.field_name().unwrap_err(),
+            "composite policies use stable per-rule field keys"
+        );
+    }
+
+    #[test]
+    fn ac3_validation_matrix_accepts_and_rejects_each_exposed_kind_discriminately() {
+        let cases = [
+            (
+                "nixos_option",
+                serde_json::json!({"path": "networking.firewall.enable", "operator": "==", "value_type": "boolean", "value": true}),
+                serde_json::json!({"path": "networking.firewall.enable", "operator": ">", "value_type": "boolean", "value": true}),
+            ),
+            (
+                "packages_installed",
+                serde_json::json!({"packages": ["openssh"]}),
+                serde_json::json!({"packages": []}),
+            ),
+            (
+                "packages_absent",
+                serde_json::json!({"packages": ["telnet"]}),
+                serde_json::json!({"packages": ["nixpkgs#telnet"]}),
+            ),
+            (
+                "custom_eval",
+                serde_json::json!({"expression": "config.networking.firewall.enable", "message": "firewall"}),
+                serde_json::json!({"expression": "true); injected = true; (", "message": "invalid"}),
+            ),
+            (
+                "cve_block",
+                serde_json::json!({"severity": "critical", "max_allowed": 0}),
+                serde_json::json!({"severity": "catastrophic", "max_allowed": 0}),
+            ),
+            (
+                "eval_passed",
+                serde_json::json!({}),
+                serde_json::json!({"unexpected": true}),
+            ),
+            (
+                "pin_required",
+                serde_json::json!({}),
+                serde_json::json!({"revision": "main"}),
+            ),
+            (
+                "time_window",
+                serde_json::json!({"days": ["mon"], "from": "09:00", "to": "17:00", "tz": "UTC"}),
+                serde_json::json!({"days": ["funday"], "from": "09:00", "to": "17:00", "tz": "UTC"}),
+            ),
+        ];
+
+        for (kind, valid, invalid) in cases {
+            let parsed = validate_policy_type_config(
+                COMPOSITE_POLICY_TYPE,
+                &single_composite_rule(kind, valid),
+            )
+            .unwrap_or_else(|error| panic!("AC3 validate/pass [{kind}]: {error}"));
+            assert_eq!(parsed.unwrap().rules[0].rule.kind(), kind);
+            assert!(
+                validate_policy_type_config(
+                    COMPOSITE_POLICY_TYPE,
+                    &single_composite_rule(kind, invalid),
+                )
+                .is_err(),
+                "AC3 validate/reject [{kind}]"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "requires Nix evaluator in PATH"]
+    fn ac3_actual_nix_executor_matrix_distinguishes_pass_fail_error_and_evidence() {
+        let policy_id = Uuid::from_u128(0x1200);
+        let cases = vec![
+            (
+                "nixos_option",
+                serde_json::json!({"path": "networking.firewall.enable", "operator": "==", "value_type": "boolean", "value": true}),
+                EnforcementOutcome::Pass,
+            ),
+            (
+                "nixos_option",
+                serde_json::json!({"path": "networking.firewall.enable", "operator": "==", "value_type": "boolean", "value": false}),
+                EnforcementOutcome::Fail,
+            ),
+            (
+                "packages_installed",
+                serde_json::json!({"packages": ["openssh"]}),
+                EnforcementOutcome::Pass,
+            ),
+            (
+                "packages_installed",
+                serde_json::json!({"packages": ["telnet"]}),
+                EnforcementOutcome::Fail,
+            ),
+            (
+                "packages_absent",
+                serde_json::json!({"packages": ["telnet"]}),
+                EnforcementOutcome::Pass,
+            ),
+            (
+                "packages_absent",
+                serde_json::json!({"packages": ["openssh"]}),
+                EnforcementOutcome::Fail,
+            ),
+            (
+                "custom_eval",
+                serde_json::json!({"expression": "config.networking.firewall.enable", "message": "pass"}),
+                EnforcementOutcome::Pass,
+            ),
+            (
+                "custom_eval",
+                serde_json::json!({"expression": "!config.networking.firewall.enable", "message": "fail"}),
+                EnforcementOutcome::Fail,
+            ),
+            (
+                "custom_eval",
+                serde_json::json!({"expression": "42", "message": "non-boolean error"}),
+                EnforcementOutcome::Error,
+            ),
+        ];
+        let mut rules = Vec::new();
+        let mut expected = Vec::new();
+        for (index, (kind, config, outcome)) in cases.into_iter().enumerate() {
+            let id = Uuid::from_u128(0x1300 + index as u128);
+            let parsed = validate_policy_type_config(
+                COMPOSITE_POLICY_TYPE,
+                &single_composite_rule(kind, config),
+            )
+            .unwrap()
+            .unwrap();
+            rules.push(CompositeRule {
+                id,
+                rule: parsed.rules.into_iter().next().unwrap().rule,
+            });
+            expected.push((kind, id, outcome));
+        }
+        let assigned = AssignedPolicy {
+            policy_id,
+            policy_name: "AC3 actual executor matrix".to_string(),
+            policy: DeploymentPolicy::Composite {
+                config: CompositePolicyConfig {
+                    schema_version: 1,
+                    mode: CompositeRuleMode::All,
+                    rules,
+                },
+            },
+        };
+        let fields = build_policy_fields_for_config_standalone(std::slice::from_ref(&assigned));
+        let metadata = nix_eval_json(&format!(
+            r#"let config = {{ networking.firewall.enable = true; environment.systemPackages = [ {{ pname = "openssh"; }} ]; }}; in {{ cfAgentEnabled = true; {} }}"#,
+            fields.join("\n")
+        ));
+        let check = PolicyCheckResult::from_assigned(
+            "matrix-host".to_string(),
+            &metadata,
+            std::slice::from_ref(&assigned),
+        )
+        .expect("actual Nix metadata must parse");
+        let persisted = policy_results_json(&check, std::slice::from_ref(&assigned));
+        let outcomes = &check.assigned_results[&policy_id].composite_outcomes;
+        for (kind, id, expected_outcome) in &expected {
+            let actual = outcomes
+                .iter()
+                .find(|outcome| outcome.rule_id == *id)
+                .unwrap();
+            assert_eq!(actual.kind, *kind, "AC3 actual executor/kind [{kind}]");
+            assert_eq!(
+                actual.outcome, *expected_outcome,
+                "AC3 actual executor/{expected_outcome:?} [{kind}]"
+            );
+            assert_eq!(actual.phase, EnforcementPhase::Evaluation);
+            assert!(actual.evidence["metadata_key"].as_str().is_some());
+            assert_eq!(
+                actual.blocking,
+                *expected_outcome != EnforcementOutcome::Pass
+            );
+        }
+        assert_eq!(
+            persisted["assigned"][policy_id.to_string()]["rule_outcomes"]
+                .as_array()
+                .unwrap()
+                .len(),
+            expected.len(),
+            "AC3 normalized evaluator evidence"
+        );
+
+        for kind in [
+            "nixos_option",
+            "packages_installed",
+            "packages_absent",
+            "custom_eval",
+        ] {
+            let (_, id, _) = expected
+                .iter()
+                .find(|(candidate, _, _)| *candidate == kind)
+                .unwrap();
+            let mut missing = metadata.clone();
+            missing
+                .as_object_mut()
+                .unwrap()
+                .remove(&composite_rule_result_key(&policy_id, id));
+            let missing_check = PolicyCheckResult::from_assigned(
+                "matrix-host".to_string(),
+                &missing,
+                std::slice::from_ref(&assigned),
+            )
+            .expect("missing rule evidence is a contained per-rule Error");
+            let missing_outcome = missing_check.assigned_results[&policy_id]
+                .composite_outcomes
+                .iter()
+                .find(|outcome| outcome.rule_id == *id)
+                .unwrap();
+            assert_eq!(
+                missing_outcome.outcome,
+                EnforcementOutcome::Error,
+                "AC3 error/missing evidence [{kind}]"
+            );
+            assert_eq!(missing_outcome.phase, EnforcementPhase::Evaluation);
+            assert!(missing_outcome.blocking);
+            assert_eq!(
+                missing_outcome.evidence["metadata_key"],
+                composite_rule_result_key(&policy_id, id),
+                "AC3 missing-evidence identity [{kind}]"
+            );
+        }
+    }
+
+    #[test]
+    fn nixos_option_semantic_types_and_operators_are_typed() {
+        let cases = [
+            ("boolean", serde_json::json!(false), "!="),
+            ("enum", serde_json::json!("nftables"), "=="),
+            ("integer", serde_json::json!(-9), ">="),
+            ("string", serde_json::json!("short"), "=="),
+            ("lines", serde_json::json!("line one\n\nline three\n"), "!="),
+            ("unknown", serde_json::json!("${config.foo}\\n"), "=="),
+        ];
+        for (value_type, value, operator) in cases {
+            let config = serde_json::json!({
+                "schema_version": 1,
+                "mode": "all",
+                "rules": [{
+                    "id": "10000000-0000-0000-0000-000000000001",
+                    "kind": "nixos_option",
+                    "config": {
+                        "path": "services.example.option",
+                        "operator": operator,
+                        "value_type": value_type,
+                        "value": value
+                    }
+                }]
+            });
+            let parsed = validate_policy_type_config(COMPOSITE_POLICY_TYPE, &config)
+                .unwrap()
+                .unwrap();
+            assert_eq!(serde_json::to_value(parsed).unwrap(), config);
+        }
+    }
+
+    #[test]
+    fn composite_aggregation_never_promotes_error_or_not_checked_to_pass() {
+        let result = |outcome| CompositeRuleOutcome {
+            rule_id: Uuid::new_v4(),
+            kind: "custom_eval".to_string(),
+            phase: EnforcementPhase::Evaluation,
+            outcome,
+            blocking: outcome != EnforcementOutcome::Pass,
+            detail: String::new(),
+            evidence: serde_json::json!({}),
+        };
+        assert_eq!(
+            aggregate_composite_outcomes(&[result(EnforcementOutcome::Pass)]),
+            EnforcementOutcome::Pass
+        );
+        assert_eq!(
+            aggregate_composite_outcomes(&[
+                result(EnforcementOutcome::Pass),
+                result(EnforcementOutcome::NotChecked),
+            ]),
+            EnforcementOutcome::NotChecked
+        );
+        assert_eq!(
+            aggregate_composite_outcomes(&[
+                result(EnforcementOutcome::Fail),
+                result(EnforcementOutcome::Error),
+            ]),
+            EnforcementOutcome::Error
+        );
+    }
+
+    #[test]
+    fn composite_nix_literals_preserve_interpolation_backslashes_quotes_and_lines() {
+        let policy_id = Uuid::from_u128(9);
+        let config = CompositePolicyConfig {
+            schema_version: 1,
+            mode: CompositeRuleMode::All,
+            rules: vec![CompositeRule {
+                id: Uuid::from_u128(10),
+                rule: CompositeRuleKind::NixosOption(NixosOptionRuleConfig {
+                    path: "services.example.text".to_string(),
+                    operator: "==".to_string(),
+                    value_type: NixosOptionValueType::Lines,
+                    value: serde_json::json!("literal ${value} \\\"quoted\\\"\nnext"),
+                }),
+            }],
+        };
+        let fields = build_policy_fields_for_config_standalone(&[AssignedPolicy {
+            policy_id,
+            policy_name: "semantic literals".to_string(),
+            policy: DeploymentPolicy::Composite { config },
+        }]);
+        let expression = fields.join("\n");
+        assert!(expression.contains("builtins.foldl'"));
+        assert!(expression.contains("\\${value}"));
+        assert!(expression.contains("\\\\\\\"quoted\\\\\\\""));
+        assert!(expression.contains("\\nnext"));
+        assert!(expression.contains("builtins.tryEval"));
+    }
+
+    #[test]
+    fn legacy_empty_custom_check_remains_outside_composite_validation() {
+        assert_eq!(
+            validate_policy_type_config(
+                "custom_check",
+                &serde_json::json!({"mode": "all", "rules": []})
+            )
+            .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn composite_missing_evaluator_evidence_is_error_and_reporting_is_not_checked() {
+        let config = validate_policy_type_config(COMPOSITE_POLICY_TYPE, &composite_config())
+            .unwrap()
+            .unwrap();
+        let assigned = AssignedPolicy {
+            policy_id: Uuid::from_u128(99),
+            policy_name: "composite".into(),
+            policy: DeploymentPolicy::Composite { config },
+        };
+        let evaluated = PolicyCheckResult::from_assigned(
+            "host".into(),
+            &serde_json::json!({"cfAgentEnabled": true}),
+            std::slice::from_ref(&assigned),
+        )
+        .unwrap();
+        assert!(!evaluated.meets_requirements);
+        let result = evaluated.assigned_results.get(&assigned.policy_id).unwrap();
+        assert_eq!(result.passed, Some(false));
+        assert!(
+            result
+                .composite_outcomes
+                .iter()
+                .any(|outcome| outcome.outcome == EnforcementOutcome::Error)
+        );
+
+        let check = PolicyCheckResult {
+            system_name: "host".into(),
+            cf_agent_enabled: Some(true),
+            assigned_results: BTreeMap::new(),
+            has_required_packages: None,
+            custom_checks: HashMap::new(),
+            meets_requirements: true,
+            warnings: Vec::new(),
+            failed_policies: Vec::new(),
+            cve_checks: Vec::new(),
+        };
+        assert_eq!(
+            policy_results_json(&check, &[assigned])["assigned"][Uuid::from_u128(99).to_string()]["passed"],
+            serde_json::Value::Null
+        );
+    }
+
+    #[test]
+    fn composite_parser_preserves_pass_fail_error_and_pin_evidence() {
+        let policy_id = Uuid::from_u128(200);
+        let pass_id = Uuid::from_u128(201);
+        let fail_id = Uuid::from_u128(202);
+        let error_id = Uuid::from_u128(203);
+        let pin_id = Uuid::from_u128(204);
+        let config = CompositePolicyConfig {
+            schema_version: 1,
+            mode: CompositeRuleMode::All,
+            rules: vec![
+                CompositeRule {
+                    id: pass_id,
+                    rule: CompositeRuleKind::CustomEval(CustomEvalRuleConfig {
+                        expression: "true".to_string(),
+                        message: "pass".to_string(),
+                    }),
+                },
+                CompositeRule {
+                    id: fail_id,
+                    rule: CompositeRuleKind::CustomEval(CustomEvalRuleConfig {
+                        expression: "false".to_string(),
+                        message: "fail".to_string(),
+                    }),
+                },
+                CompositeRule {
+                    id: error_id,
+                    rule: CompositeRuleKind::CustomEval(CustomEvalRuleConfig {
+                        expression: "throw \"contained\"".to_string(),
+                        message: "error".to_string(),
+                    }),
+                },
+                CompositeRule {
+                    id: pin_id,
+                    rule: CompositeRuleKind::PinRequired(EmptyRuleConfig {}),
+                },
+            ],
+        };
+        let assigned = AssignedPolicy {
+            policy_id,
+            policy_name: "mixed outcomes".to_string(),
+            policy: DeploymentPolicy::Composite { config },
+        };
+        let metadata = serde_json::json!({
+            "cfAgentEnabled": true,
+            "requestedSourceRevision": "0123456789abcdef0123456789abcdef01234567",
+            "resolvedSourceRevision": "0123456789abcdef0123456789abcdef01234567",
+            composite_rule_result_key(&policy_id, &pass_id): {"success": true, "value": true},
+            composite_rule_result_key(&policy_id, &fail_id): {"success": true, "value": false},
+            composite_rule_result_key(&policy_id, &error_id): {"success": false, "value": false}
+        });
+        let check =
+            PolicyCheckResult::from_assigned("host".to_string(), &metadata, &[assigned]).unwrap();
+        let outcomes = &check.assigned_results[&policy_id].composite_outcomes;
+        assert_eq!(outcomes[0].outcome, EnforcementOutcome::Pass);
+        assert_eq!(outcomes[1].outcome, EnforcementOutcome::Fail);
+        assert_eq!(outcomes[2].outcome, EnforcementOutcome::Error);
+        assert_eq!(outcomes[3].outcome, EnforcementOutcome::Pass);
+        assert_eq!(
+            outcomes[3].evidence["resolved_revision"],
+            "0123456789abcdef0123456789abcdef01234567"
+        );
+    }
+
+    #[test]
+    fn pin_required_requires_exact_full_immutable_requested_revision() {
+        let policy_id = Uuid::from_u128(210);
+        let pin_id = Uuid::from_u128(211);
+        let assigned = AssignedPolicy {
+            policy_id,
+            policy_name: "pin".to_string(),
+            policy: DeploymentPolicy::Composite {
+                config: CompositePolicyConfig {
+                    schema_version: 1,
+                    mode: CompositeRuleMode::All,
+                    rules: vec![CompositeRule {
+                        id: pin_id,
+                        rule: CompositeRuleKind::PinRequired(EmptyRuleConfig {}),
+                    }],
+                },
+            },
+        };
+        let revision = "0123456789abcdef0123456789abcdef01234567";
+        let mismatch = "1123456789abcdef0123456789abcdef01234567";
+        for (expected, resolved, outcome) in [
+            (Some(revision), Some(revision), EnforcementOutcome::Pass),
+            (Some(revision), Some(mismatch), EnforcementOutcome::Fail),
+            (Some(revision), None, EnforcementOutcome::Fail),
+            (Some("main"), Some(revision), EnforcementOutcome::Error),
+            (None, Some(revision), EnforcementOutcome::Error),
+        ] {
+            let metadata = serde_json::json!({
+                "cfAgentEnabled": true,
+                "requestedSourceRevision": expected,
+                "resolvedSourceRevision": resolved,
+            });
+            let check = PolicyCheckResult::from_assigned(
+                "host".to_string(),
+                &metadata,
+                std::slice::from_ref(&assigned),
+            )
+            .unwrap();
+            let result = &check.assigned_results[&policy_id].composite_outcomes[0];
+            assert_eq!(result.outcome, outcome, "{metadata}");
+            assert_eq!(result.phase, EnforcementPhase::Evaluation);
+            assert_eq!(result.blocking, outcome != EnforcementOutcome::Pass);
+            assert_eq!(
+                result.evidence["expected_revision"],
+                serde_json::json!(expected)
+            );
+            assert_eq!(
+                result.evidence["resolved_revision"],
+                serde_json::json!(resolved)
+            );
+        }
+    }
+
+    #[test]
+    fn eval_passed_uses_terminal_outcome_and_preserves_policy_version_identity() {
+        let policy_id = Uuid::from_u128(220);
+        let rule_id = Uuid::from_u128(221);
+        let assigned = AssignedPolicy {
+            policy_id,
+            policy_name: "evaluation terminal".to_string(),
+            policy: DeploymentPolicy::Composite {
+                config: CompositePolicyConfig {
+                    schema_version: 1,
+                    mode: CompositeRuleMode::All,
+                    rules: vec![CompositeRule {
+                        id: rule_id,
+                        rule: CompositeRuleKind::EvalPassed(EmptyRuleConfig {}),
+                    }],
+                },
+            },
+        };
+        let passed = PolicyCheckResult::from_assigned(
+            "host".to_string(),
+            &serde_json::json!({"cfAgentEnabled": true}),
+            std::slice::from_ref(&assigned),
+        )
+        .expect("successful evaluator metadata must produce eval_passed evidence");
+        let passed = &passed.assigned_results[&policy_id].composite_outcomes[0];
+        assert_eq!(passed.rule_id, rule_id);
+        assert_eq!(passed.phase, EnforcementPhase::Evaluation);
+        assert_eq!(passed.outcome, EnforcementOutcome::Pass);
+        assert!(!passed.blocking);
+        assert_eq!(passed.evidence["configuration"], "host");
+
+        for (terminal, expected) in [
+            (
+                EvaluationTerminalOutcome::ConfirmedFailure,
+                EnforcementOutcome::Fail,
+            ),
+            (EvaluationTerminalOutcome::Error, EnforcementOutcome::Error),
+            (
+                EvaluationTerminalOutcome::Pending,
+                EnforcementOutcome::NotChecked,
+            ),
+        ] {
+            let check = PolicyCheckResult::for_evaluation_terminal(
+                "host".to_string(),
+                std::slice::from_ref(&assigned),
+                terminal,
+                "terminal detail",
+            );
+            let result = check
+                .assigned_results
+                .get(&policy_id)
+                .expect("exact policy version ID must be retained");
+            assert_eq!(result.composite_outcomes[0].rule_id, rule_id);
+            assert_eq!(result.composite_outcomes[0].outcome, expected);
+            assert_eq!(
+                result.composite_outcomes[0].phase,
+                EnforcementPhase::Evaluation
+            );
+            assert!(result.composite_outcomes[0].blocking);
+            assert!(
+                result.composite_outcomes[0].evidence["terminal_outcome"]
+                    .as_str()
+                    .is_some()
+            );
+        }
+    }
 
     /// Test helper: wrap a flat `Vec<DeploymentPolicy>` into a `PoliciesByConfiguration`
     /// under the key `"test-config"` with sequential UUIDs.
@@ -1481,7 +3530,7 @@ mod tests {
     #[test]
     fn test_cf_agent_policy_expression() {
         let policy = DeploymentPolicy::RequireCrystalForgeAgent { strict: false };
-        let (field_name, expr) = policy.to_nix_expression();
+        let (field_name, expr) = policy.to_nix_expression().unwrap();
         assert_eq!(field_name, "cfAgentEnabled");
         assert!(expr.contains("systemd.services.crystal-forge-agent.enable"));
         assert!(expr.contains("services.crystal-forge.enable"));
@@ -1491,7 +3540,7 @@ mod tests {
     #[test]
     fn crystal_forge_agent_policy_expression_checks_systemd_service() {
         let policy = DeploymentPolicy::RequireCrystalForgeAgent { strict: true };
-        let (_, expr) = policy.to_nix_expression();
+        let (_, expr) = policy.to_nix_expression().unwrap();
 
         assert!(
             expr.starts_with("(config.systemd.services.crystal-forge-agent.enable or false)"),
@@ -1509,7 +3558,7 @@ mod tests {
             packages: vec!["vim".to_string(), "git".to_string()],
             strict: false,
         };
-        let (field_name, expr) = policy.to_nix_expression_with_index(2);
+        let (field_name, expr) = policy.to_nix_expression_with_index(2).unwrap();
         assert_eq!(field_name, "hasRequiredPackages_2");
         assert!(expr.contains("\"vim\""));
         assert!(expr.contains("\"git\""));
@@ -1821,10 +3870,10 @@ mod tests {
 
         let expr = build_nix_eval_expression("github:user/repo", &map);
 
-        // Checker must bind the full nixosConfiguration object as `cfg`.
+        // Checker receives the canonical config object as `config`.
         assert!(
-            expr.contains("\"gray\" = cfg:"),
-            "bulk checker must bind full cfg object, got:\n{expr}"
+            expr.contains("\"gray\" = config:"),
+            "bulk checker must bind canonical config, got:\n{expr}"
         );
         // The checker receives the full cfg object while policy expressions use
         // the canonical public `config` binding.
@@ -1838,11 +3887,7 @@ mod tests {
             expr.contains("checker cfg.config"),
             "checker must receive cfg.config as its public config binding, got:\n{expr}"
         );
-        // Sanity: the checker lambda itself remains bound to cfg.
-        assert!(
-            expr.contains("\"gray\" = cfg:"),
-            "checker must bind the full nixosConfiguration object as cfg, got:\n{expr}"
-        );
+        assert!(!expr.contains("\"gray\" = cfg:"));
     }
 
     #[test]
@@ -1869,7 +3914,7 @@ mod tests {
     }
 
     #[test]
-    fn bulk_custom_check_preserves_documented_cfg_scope() {
+    fn bulk_custom_check_uses_canonical_config_scope() {
         let mut map = PoliciesByConfiguration::new();
         map.insert(
             "gray".to_string(),
@@ -1877,7 +3922,7 @@ mod tests {
                 policy_id: uuid::Uuid::from_u128(1),
                 policy_name: "firewall-enabled".to_string(),
                 policy: DeploymentPolicy::CustomCheck {
-                    expression: "cfg.config.networking.firewall.enable".to_string(),
+                    expression: "config.networking.firewall.enable".to_string(),
                     description: "firewall".to_string(),
                     field_name: "firewallEnabled".to_string(),
                     strict: true,
@@ -1890,12 +3935,12 @@ mod tests {
         let expr = build_nix_eval_expression("github:user/repo", &map);
 
         assert!(
-            expr.contains("\"gray\" = cfg:"),
-            "bulk checker must bind full cfg object, got:\n{expr}"
+            expr.contains("\"gray\" = config:"),
+            "bulk checker must bind canonical config, got:\n{expr}"
         );
         assert!(
-            expr.contains("cfg.config.networking.firewall.enable"),
-            "custom check expression must be emitted verbatim with cfg scope, got:\n{expr}"
+            expr.contains("config.networking.firewall.enable"),
+            "custom check expression must use canonical config scope, got:\n{expr}"
         );
     }
 
@@ -1914,13 +3959,13 @@ mod tests {
                     strict: true,
                     rules: vec![
                         PolicyRule {
-                            expression: "cfg.config.services.openssh.enable".to_string(),
+                            expression: "config.services.openssh.enable".to_string(),
                             description: "ssh".to_string(),
                             field_name: "sshEnabled".to_string(),
                             strict: true,
                         },
                         PolicyRule {
-                            expression: "cfg.config.networking.firewall.enable".to_string(),
+                            expression: "config.networking.firewall.enable".to_string(),
                             description: "firewall".to_string(),
                             field_name: "firewallEnabled".to_string(),
                             strict: true,
@@ -1934,16 +3979,16 @@ mod tests {
         let expr = build_nix_eval_expression("github:user/repo", &map);
 
         assert!(
-            expr.contains("\"gray\" = cfg:"),
-            "bulk checker must bind full cfg object, got:\n{expr}"
+            expr.contains("\"gray\" = config:"),
+            "bulk checker must bind canonical config, got:\n{expr}"
         );
         assert!(
-            expr.contains("cfg.config.services.openssh.enable"),
-            "multi-rule expression must be emitted with cfg scope, got:\n{expr}"
+            expr.contains("config.services.openssh.enable"),
+            "multi-rule expression must be emitted with config scope, got:\n{expr}"
         );
         assert!(
-            expr.contains("cfg.config.networking.firewall.enable"),
-            "multi-rule expression must be emitted with cfg scope, got:\n{expr}"
+            expr.contains("config.networking.firewall.enable"),
+            "multi-rule expression must be emitted with config scope, got:\n{expr}"
         );
     }
 
@@ -1980,13 +4025,13 @@ mod tests {
                     strict: true,
                     rules: vec![
                         PolicyRule {
-                            expression: "cfg.config.services.openssh.enable".to_string(),
+                            expression: "config.services.openssh.enable".to_string(),
                             description: "ssh".to_string(),
                             field_name: "sshEnabled".to_string(),
                             strict: true,
                         },
                         PolicyRule {
-                            expression: "cfg.config.networking.firewall.enable".to_string(),
+                            expression: "config.networking.firewall.enable".to_string(),
                             description: "firewall".to_string(),
                             field_name: "firewallEnabled".to_string(),
                             strict: true,
@@ -2007,8 +4052,7 @@ mod tests {
         let expr = format!(
             r#"
 let
-  cfg = {{
-    config = {{
+  config = {{
       systemd.services.crystal-forge-agent.enable = true;
       services.crystal-forge.enable = true;
       services.crystal-forge.client.enable = true;
@@ -2017,7 +4061,6 @@ let
         {{ pname = "grafana"; name = "grafana"; }}
       ];
       networking.firewall.enable = true;
-    }};
   }};
 in {{
   {fields}
@@ -2071,7 +4114,8 @@ in {{
             packages: vec!["openssh".into(), "auditd".into(), "aide".into()],
             strict: true,
         }
-        .to_nix_expression_with_index(0);
+        .to_nix_expression_with_index(0)
+        .unwrap();
 
         for (installed, expected) in [
             (vec!["openssh", "auditd", "aide"], true),
@@ -2083,9 +4127,8 @@ in {{
                 .map(|name| format!("{{ pname = \"{name}\"; name = \"{name}\"; }}"))
                 .collect::<Vec<_>>()
                 .join(" ");
-            let nix_expression = format!(
-                "let cfg = {{ config.environment.systemPackages = [ {packages} ]; }}; in {expression}"
-            );
+            let nix_expression =
+                format!("let config.environment.systemPackages = [ {packages} ]; in {expression}");
             let output = std::process::Command::new("nix")
                 .args(["eval", "--json", "--expr", &nix_expression])
                 .output()

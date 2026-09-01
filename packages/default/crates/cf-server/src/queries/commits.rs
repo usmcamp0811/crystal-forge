@@ -352,7 +352,7 @@ pub async fn mark_commit_evaluation_started(
     commit_id: i32,
 ) -> Result<EvalStartOutcome> {
     let mut tx = pool.begin().await?;
-    let attempt = sqlx::query_as::<_, (i32,)>(
+    let attempt = sqlx::query_as::<_, (uuid::Uuid, i32)>(
         r#"
         WITH next_attempt AS (
             SELECT id
@@ -366,13 +366,13 @@ pub async fn mark_commit_evaluation_started(
         SET status = 'in_progress', started_at = NOW(), updated_at = NOW()
         FROM next_attempt
         WHERE ea.id = next_attempt.id
-        RETURNING ea.attempt_number
+        RETURNING ea.id, ea.attempt_number
         "#,
     )
     .bind(commit_id)
     .fetch_optional(&mut *tx)
     .await?;
-    let Some((attempt,)) = attempt else {
+    let Some((attempt_id, attempt)) = attempt else {
         tx.rollback().await?;
         return Ok(EvalStartOutcome::NoLongerPending);
     };
@@ -411,6 +411,11 @@ pub async fn mark_commit_evaluation_started(
         tx.rollback().await?;
         return Ok(EvalStartOutcome::NoLongerPending);
     }
+
+    crate::services::composite_enforcement::reset_eval_passed_assessments_for_started_attempt_in_tx(
+        &mut tx, commit_id, attempt_id, attempt,
+    )
+    .await?;
 
     tx.commit().await?;
     Ok(EvalStartOutcome::Started { attempt })
@@ -627,6 +632,11 @@ pub async fn mark_commit_evaluation_failed(
         return Ok(EvalFailureOutcome::SupersededOrCancelled);
     };
 
+    crate::services::composite_enforcement::fail_eval_passed_attempt_in_tx(
+        &mut tx, failed.id, error, class_name,
+    )
+    .await?;
+
     let policy = sqlx::query_as::<_, AutomaticRetryPolicy>(
         "SELECT max_build_retries, max_evaluation_retries, backoff_seconds, transient_only FROM automatic_retry_policy WHERE id = 1",
     )
@@ -825,6 +835,7 @@ async fn open_eval_attention_if_current(
 /// - evaluation_attempt_count → 0
 /// - evaluation_error_message → NULL
 /// - cancellation_requested → FALSE (so stale finalizer cannot cancel the reset evaluation)
+/// - stale active attempt rows on terminal commits → `cancelled`
 ///
 /// Use this for manual re-evaluation after fixing issues.
 pub async fn reset_commit_evaluation(pool: &PgPool, commit_id: i32) -> Result<()> {
@@ -835,6 +846,27 @@ pub async fn reset_commit_evaluation(pool: &PgPool, commit_id: i32) -> Result<()
     }
 
     let mut tx = pool.begin().await?;
+    // CONCURRENCY: A worker can fail the commit after it claims an attempt but
+    // before it marks that attempt terminal. Retire only these orphaned rows.
+    // An active attempt on a non-terminal commit remains authoritative.
+    sqlx::query(
+        r#"
+        UPDATE evaluation_attempts attempt
+        SET status = 'cancelled',
+            completed_at = COALESCE(completed_at, NOW()),
+            error_message = COALESCE(error_message, 'Superseded by manual re-evaluation'),
+            failure_class = COALESCE(failure_class, 'cancelled'),
+            updated_at = NOW()
+        FROM commits commit_row
+        WHERE attempt.commit_id = commit_row.id
+          AND commit_row.id = $1
+          AND commit_row.evaluation_status IN ('complete', 'failed', 'cancelled')
+          AND attempt.status IN ('queued', 'in_progress')
+        "#,
+    )
+    .bind(commit_id)
+    .execute(&mut *tx)
+    .await?;
     let result = sqlx::query_as::<_, ResetResult>(
         r#"
         UPDATE commits

@@ -168,21 +168,37 @@ pub fn validate_cf_native_document(
                 format!("rule {} is missing typed configuration", rule.id),
             )
         })?;
+        crate::models::deployment_policies::validate_policy_type_config(&policy_type, &config)
+            .map_err(|message| {
+                ImportPlanError::cf_native_invalid("CF_NATIVE_PAYLOAD_INVALID", message)
+            })?;
         let dependencies = meta
             .dependencies
             .clone()
             .unwrap_or_else(|| serde_json::json!([]));
+        let execution_phase = meta.execution_phase.clone().ok_or_else(|| {
+            ImportPlanError::cf_native_invalid(
+                "CF_NATIVE_PAYLOAD_INVALID",
+                format!("rule {} is missing execution phase", rule.id),
+            )
+        })?;
+        if policy_type == crate::models::deployment_policies::COMPOSITE_POLICY_TYPE
+            && execution_phase != "multi-phase"
+        {
+            return Err(ImportPlanError::cf_native_invalid(
+                "CF_NATIVE_PAYLOAD_INVALID",
+                format!(
+                    "rule {} composite policy must use execution phase multi-phase",
+                    rule.id
+                ),
+            ));
+        }
         let canonical = PolicyVersionCanonical {
             name: rule.title.clone().unwrap_or_else(|| rule.id.clone()),
             description: rule.description.clone(),
             policy_type: policy_type.clone(),
             implementation_state: implementation_state.clone(),
-            execution_phase: meta.execution_phase.clone().ok_or_else(|| {
-                ImportPlanError::cf_native_invalid(
-                    "CF_NATIVE_PAYLOAD_INVALID",
-                    format!("rule {} is missing execution phase", rule.id),
-                )
-            })?,
+            execution_phase,
             config: config.clone(),
             compliance_metadata: compliance_metadata.clone(),
             dependencies: dependencies.clone(),
@@ -291,6 +307,30 @@ pub fn validate_cf_native_document(
         shared_group_decisions: Vec::new(),
     };
     Ok((validated, records))
+}
+
+/// Validates a CF-native document without blocking the async executor.
+///
+/// The synchronous validator remains available for offline callers and tests.
+/// Production async import paths must use this wrapper because composite policy
+/// validation can invoke the bounded Nix parser.
+///
+/// # Errors
+///
+/// Returns the synchronous validator's error. Returns `CF_NATIVE_PAYLOAD_INVALID`
+/// if Tokio cannot join the blocking validation task, including after a panic.
+pub async fn validate_cf_native_document_async(
+    parsed: &ParsedXccdf,
+) -> Result<(ValidatedImportPlan, Vec<ImportedPolicyRecord>), ImportPlanError> {
+    let parsed = parsed.clone();
+    tokio::task::spawn_blocking(move || validate_cf_native_document(&parsed))
+        .await
+        .map_err(|error| {
+            ImportPlanError::cf_native_invalid(
+                "CF_NATIVE_PAYLOAD_INVALID",
+                format!("CF-native validation task failed: {error}"),
+            )
+        })?
 }
 
 // ── SHA-256 validation helpers ────────────────────────────────────────────────

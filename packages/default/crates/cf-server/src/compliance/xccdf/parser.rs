@@ -633,6 +633,7 @@ impl ParserState {
                     b"require-crystal-forge-agent"
                         | b"require-packages"
                         | b"custom-check"
+                        | b"composite"
                         | b"require-cve-check"
                         | b"time-window"
                         | b"require-approvals"

@@ -48,6 +48,36 @@ pub struct UserNotificationPreferences {
     pub updated_at: DateTime<Utc>,
 }
 
+impl UserNotificationPreferences {
+    /// Returns the effective preferences for a user without a persisted row.
+    pub(crate) fn defaults_for_user(user_id: Uuid) -> Self {
+        let now = Utc::now();
+        Self {
+            user_id,
+            deploy_failures: true,
+            build_failures: true,
+            critical_cves: true,
+            policy_violations: true,
+            heartbeat_lost: false,
+            weekly_digest: false,
+            delivery_channel: NotificationDeliveryChannel::InApp,
+            deploy_failures_email_enabled_at: None,
+            build_failures_email_enabled_at: None,
+            critical_cves_email_enabled_at: None,
+            policy_violations_email_enabled_at: None,
+            heartbeat_lost_email_enabled_at: None,
+            deploy_failures_in_app_enabled_at: Some(now),
+            build_failures_in_app_enabled_at: Some(now),
+            critical_cves_in_app_enabled_at: Some(now),
+            policy_violations_in_app_enabled_at: Some(now),
+            heartbeat_lost_in_app_enabled_at: None,
+            weekly_digest_enabled_at: None,
+            initialized_at: now,
+            updated_at: now,
+        }
+    }
+}
+
 #[derive(Debug, Clone, FromRow)]
 pub struct UserNotification {
     pub id: Uuid,

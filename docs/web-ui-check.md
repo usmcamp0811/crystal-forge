@@ -28,6 +28,10 @@ ls result/screenshots/diffs/     # visual diff images for changed steps (if any)
 The VM needs KVM and ~20GB RAM. The check runs the `ci_fast` profile (steps
 whose manifest `profiles` include `ci_fast`).
 
+The Nix check copies `checks/web-ui/baselines/` into the VM and sets
+`CF_UI_BASELINES_DIR` automatically. A normal pure build always enforces every
+`strict` manifest entry.
+
 Legacy cache/builder "mega" phases only run interactively with
 `CF_WEB_UI_RUN_MEGA_PHASES=1` (the env var cannot cross the Nix build
 sandbox); their VMs are not booted otherwise.
@@ -39,9 +43,11 @@ sandbox); their VMs are not booted otherwise.
 2. **Build verification** — index.html served, JS loader referenced and served,
    packaged WASM output present with a valid `\0asm` magic header. Hard gate.
 3. **Playwright steps** — coverage gate first (steps ⇄ manifest must agree
-   exactly), then each step runs its semantic assertions, captures dark and
-   light screenshots, and compares each themed screenshot to its baseline.
-4. **Critical gate** — the `critical_tests` list in `default.nix` must pass.
+   exactly), then each step runs its semantic assertions and captures dark and
+   light screenshots. Any failed step gives the integration process a nonzero
+   exit after it writes diagnostic artifacts.
+4. **Critical gate** — the `critical_tests` list in `default.nix` additionally
+   prevents focused profiles from omitting required workflows.
 5. **Visual gate** — steps with baseline policy `strict` must match within
    threshold. `advisory` steps only report.
 6. **OSCAL / SARIF export validation** — downloads validated against vendored
@@ -54,7 +60,8 @@ Policies (per step, in the manifest):
 - `none` — no comparison.
 - `advisory` (default) — compared when a baseline exists; differences are
   reported in `visual-report.json` and the MR comment, with a diff image in
-  `screenshots/diffs/`, but never fail the check.
+  `screenshots/diffs/`, but never fail the check. A missing baseline reports
+  `new`.
 - `strict` — baseline must exist and match within threshold; otherwise the
   check fails.
 
@@ -63,11 +70,12 @@ differs when `diffPixels / totalPixels > maxDiffPixelRatio`. Defaults live in
 `settings.visualDiff` in the manifest; override per step with
 `maxDiffPixelRatio`.
 
-Every covered step captures one baseline per configured visual theme. The
-default themes are listed in `settings.visualThemes` and currently require both
-`dark` and `light`, producing `checks/web-ui/baselines/<step>--dark.png` and
-`checks/web-ui/baselines/<step>--light.png`. Review and approve both files so
-theme-specific regressions are visible in CI/MR artifacts.
+Set `CF_UI_BASELINES_DIR` when invoking `integration-test.js` directly. The Nix
+check discovers the repository baselines without extra configuration. TASK-433
+canonical workflows and the critical catalog-deletion workflow are strict.
+Their final, intermediate, narrow, and mobile captures must all have committed
+baselines. The rendered design example remains a separate non-blocking visual
+reference.
 
 ## Design parity gauge
 
@@ -94,18 +102,21 @@ so a difference indicates real UI/design drift rather than data differences.
 
 | Path | Purpose |
 | --- | --- |
-| `checks/web-ui/design-parity/manifest.json` | Maps each primary view to the design example's `view` name and the real Dioxus route; lists themes and the compare method |
-| `checks/web-ui/design-parity/generate-design-targets.js` | Playwright renders the offline design example per `view`+`theme` → `<view>--<theme>.design.png` |
+| `checks/web-ui/design-parity/manifest.json` | Maps each named surface to its Dioxus route, design and Dioxus interaction paths, identity markers, themes, and compare method |
+| `checks/web-ui/design-parity/generate-design-targets.js` | Playwright uses the real design navigation and identity marker per surface and theme → `<view>--<theme>.design.png` |
 | `checks/web-ui/design-parity/compare-design-parity.js` | Normalizes both sides and scores drift (ImageMagick RMSE) → report, summary, montages |
 
 Flow inside the check (Phase 4c):
 
-1. `integration-test.js` captures the real Dioxus views (`<view>--<theme>.dioxus.png`)
-   by seeding `cf.ui.theme` and loading each route so the app applies its own
-   theme through the real CF theme path.
+1. `integration-test.js` loads each real Dioxus route, performs optional
+   `dioxusActions`, validates `dioxusMarker`, and captures
+   `<view>--<theme>.dioxus.png`. The app applies each seeded theme through the
+   real CF theme path.
 2. The design example is vendored offline (React/ReactDOM/Babel are pinned via
-   `fetchurl` and its CDN `<script>` tags rewritten to local files), then rendered
-   headlessly for each `view`+`theme` using the `?view=&theme=` hook in `app.jsx`.
+   `fetchurl` and its CDN `<script>` tags rewritten to local files). Playwright
+   starts from the design app shell, selects the theme through the real control,
+   performs optional `designActions`, and saves a target only after
+   `designMarker` identifies the expected surface.
 3. Each pair is normalized (resized to a common width, flattened) and scored with
    `compare -metric RMSE`. Lower drift = closer to the design.
 
@@ -121,33 +132,71 @@ React and Dioxus will never be pixel-identical, so treat the number as "how far
 from the design" and inspect the montages for real drift.
 
 To add a view to the parity harness, add an entry to
-`checks/web-ui/design-parity/manifest.json` (`designView` must be a valid design
-example view name; `route` must be a real Dioxus route).
+`checks/web-ui/design-parity/manifest.json`. Set the design `route` and, when
+the production route differs, set `dioxusRoute`. Add required `designMarker`
+and `dioxusMarker` selectors and the `designActions` or `dioxusActions` needed
+to reach nested surfaces. A design action can set `force: true` only when a
+known design overlay obscures the intended control; normal actions retain
+Playwright actionability checks.
 
 ### Approving baselines
 
-1. Get fresh screenshots: `result/screenshots/` from a local build, or
-   download the `web-ui-screenshots` artifact from the `flake-check: [web-ui]`
-   CI job.
-2. Approve (all, or specific steps):
+1. Generate fresh captures without disabling semantic, critical-workflow, or
+   process-exit gates. Baseline update mode bypasses only strict pixel rejection:
+
+   ```bash
+   CF_UI_UPDATE_BASELINES=1 nix build --impure path:.#checks.x86_64-linux.web-ui -L
+   ```
+
+2. Inspect `result/screenshots/visual-report.json`, every TASK-433 PNG, and any
+   files under `result/screenshots/diffs/`. Do not approve a failed semantic
+   run or an unexpected layout.
+3. Approve all strict captures listed by the generated visual report:
 
    ```bash
    ./checks/web-ui/approve-baselines.sh result/screenshots
-   ./checks/web-ui/approve-baselines.sh result/screenshots 06-dashboard--dark 06-dashboard--light
    ```
 
-3. Review `git diff --stat -- checks/web-ui/baselines`, commit, and note the
-   approval in the MR.
+4. Review the PNG diff and commit all approved strict baselines:
 
-Only manifest step/theme captures are approved; reports, diffs, and export
-screenshots are skipped.
+   ```bash
+   git diff --stat -- checks/web-ui/baselines
+   git status --short -- checks/web-ui/baselines
+   ```
+
+5. Run the normal strict gate. Do not use `--impure` or
+   `CF_UI_UPDATE_BASELINES` for final verification:
+
+   ```bash
+   nix build path:.#checks.x86_64-linux.web-ui -L
+   ```
+
+   The `path:.` form includes newly generated baseline PNGs before they are
+   committed. After the baseline commit, the normal `.#checks...` form is
+   equivalent.
+
+If a strict failure occurs only in GitLab CI and the failed Nix derivation has
+no review artifact, start the manual MR job `web-ui-baseline-candidates`. The
+job runs the same check with baseline update mode enabled and publishes the
+`web-ui-baseline-candidates/` artifact. Download the artifact, inspect its
+`visual-report.json`, strict PNGs, and diffs, and pass the artifact directory to
+`approve-baselines.sh`. The manual job is not final verification. After an
+approved baseline commit, the normal `flake-check: [web-ui]` job must pass at
+the exact MR head.
+
+The approval utility copies only captures whose generated visual record has
+policy `strict`. It skips failed-step diagnostics, reports, diffs, and export
+screenshots. It rejects empty strict sets, failed owning semantic steps,
+duplicate or unsafe capture names, and source or destination paths that resolve
+outside their canonical roots.
 
 ### Promoting a step to strict
 
-Once a step's screenshot is stable across runs (deterministic mocked data, no
-live timestamps), set `"baseline": "strict"` for it in the manifest. Steps
-rendering real backend data (auth flow, roundtrip steps) should stay
-`advisory` until their rendering is made time-independent.
+Set `"baseline": "strict"` only when the workflow controls rendered values and
+ordering. A strict workflow must avoid visible random identifiers and live
+timestamps, or normalize them before capture. After promotion, generate,
+review, approve, and commit every final and intermediate themed capture before
+the normal gate can pass.
 
 ## Adding a route/state to coverage
 
@@ -180,6 +229,17 @@ documented in the manifest's `exclusions`.
   broken; check the server unit log in the VM output.
 - **Everything failing/timeout** — check `integration.log` output in the job
   log; a `fatal.json` marker means the run aborted before steps executed.
+- **Failed derivation diagnostics** — when the VM remains reachable, the test
+  driver exports `browser-failure-artifacts/` with `integration.log`,
+  `server-journal.log`, `integration.exit`, and all available browser reports
+  and screenshots before it rejects the derivation. The driver also prints
+  `integration.log` and the server journal before it rethrows a browser timeout.
+  A failed Nix derivation has no `result` output, so exported files are not a
+  durable artifact unless the caller or CI captures the test-driver workdir.
+  `--keep-failed` preserves the failed sandbox when the local Nix builder
+  supports it, but it does not keep a running VM and cannot recover files when
+  the VM or test driver became unreachable. Treat the printed logs as the
+  reliable fallback.
 
 ## CI integration
 
@@ -190,6 +250,9 @@ documented in the manifest's `exclusions`.
 artifacts. The `web-ui-screenshots-mr-comment` job posts/updates an MR comment
 with the coverage + visual + non-blocking design-parity summary, all themed step
 screenshots, up to 20 diff images, and up to 26 design-parity montages.
+The opt-in `web-ui-baseline-candidates` job publishes equivalent candidate
+artifacts after semantic and critical-workflow gates pass in baseline update
+mode. It does not replace or weaken `flake-check: [web-ui]`.
 
 ## Known issues
 

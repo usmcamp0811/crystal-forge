@@ -98,7 +98,7 @@ impl std::fmt::Display for XccdfWriterError {
                     f,
                     "policy version {policy_version_id} has invalid execution phase {phase:?}; \
                      must be one of: nix-evaluation, post-build, pre-deployment, \
-                     deployment-orchestration, continuous-assessment"
+                     deployment-orchestration, continuous-assessment, multi-phase"
                 )
             }
             Self::Io(e) => write!(f, "XML I/O error: {e}"),
@@ -159,6 +159,7 @@ const VALID_EXECUTION_PHASES: &[&str] = &[
     "pre-deployment",
     "deployment-orchestration",
     "continuous-assessment",
+    "multi-phase",
 ];
 
 fn validate_execution_phase(
@@ -423,6 +424,21 @@ fn write_implementation(
         }
         "custom_check" => {
             write_custom_check(writer, pv)?;
+        }
+        // Phase 3 serializes the typed composite envelope only. The complete
+        // ordered rule set remains authoritative in `config-json`; this marker
+        // prevents XCCDF round-trips from downgrading the policy type without
+        // introducing Phase-4 execution semantics.
+        "composite" => {
+            crate::models::deployment_policies::deserialize_policy_type_config(
+                &pv.policy_type,
+                &pv.config,
+            )
+            .map_err(|_| XccdfWriterError::MissingConfig {
+                policy_type: pv.policy_type.clone(),
+                field: "valid composite config",
+            })?;
+            cf_empty(writer, "composite")?;
         }
         "require_cve_check" => {
             let max_crit = pv
@@ -3176,6 +3192,37 @@ mod tests {
             .expect("matching policy in snapshot");
         assert_eq!(meta.policy_id, expected_policy.policy_id);
         assert_eq!(meta.policy_version_id, expected_policy.policy_version_id);
+    }
+
+    #[test]
+    fn composite_marker_phase_and_typed_config_round_trip() {
+        let config = json!({
+            "schema_version": 1,
+            "mode": "all",
+            "rules": [{
+                "id": "10000000-0000-0000-0000-000000000001",
+                "kind": "nixos_option",
+                "config": {
+                    "path": "networking.extraHosts",
+                    "operator": "==",
+                    "value_type": "lines",
+                    "value": "first line\n\nlast line\n"
+                }
+            }]
+        });
+        let mut policy = test_policy("composite", ImplementationState::Native, config.clone());
+        policy.execution_phase = "multi-phase".into();
+        let snapshot = make_single_policy_snapshot(vec![policy]);
+
+        let xml = write_bundle_xccdf_export(&snapshot).unwrap();
+        assert!(xml.contains("<cf:composite/>") || xml.contains("<cf:composite />"));
+        assert!(xml.contains("phase=\"multi-phase\""));
+
+        let parsed = parse_xccdf(xml.as_bytes(), None, &InterchangeLimits::default()).unwrap();
+        let meta = parsed.rules[0].cf_policy_meta.as_ref().unwrap();
+        assert_eq!(meta.policy_type.as_deref(), Some("composite"));
+        assert_eq!(meta.execution_phase.as_deref(), Some("multi-phase"));
+        assert_eq!(meta.config.as_ref(), Some(&config));
     }
 
     #[test]

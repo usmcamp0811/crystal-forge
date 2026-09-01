@@ -38,7 +38,7 @@ pub fn SystemCard(
 
             // Header section with environment tab
             Link {
-                to: Route::SystemDetailView { id: system.id.to_string() },
+                to: Route::SystemDetailView { id: system.id.to_string(), tab: String::new(), poam: String::new() },
                 class: "block",
                 div {
                     class: "flex items-center justify-between px-6 py-4 border-b border-gray-800 hover:bg-gray-800/30 transition",
