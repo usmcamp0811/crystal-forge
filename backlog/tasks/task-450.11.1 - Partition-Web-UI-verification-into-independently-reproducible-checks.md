@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-gpt-5.6-sol
 created_date: '2026-09-01 03:27'
-updated_date: '2026-09-01 03:31'
+updated_date: '2026-09-01 03:46'
 labels:
   - web-ui
   - testing
@@ -59,6 +59,16 @@ The task must preserve shared derivation identity so separate checks can reuse N
 - [ ] #8 A deliberately failing required browser step fails only its responsible check and preserves its step name, reason, and available artifacts
 - [ ] #9 The existing `web-ui` flake attribute has an explicitly documented compatibility role and does not silently weaken the complete merge gate
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Inventory the current `ci_fast` and `full` step sets and encode explicit documented ownership for each required step. Keep ordered state chains in one group and reject unknown or partially selected profiles.
+2. Extract the current NixOS VM body into a shared constructor with explicit switches for browser group, embedded-production smoke, exports, and design parity. All checks reuse the same server, Web UI, browser, fixture, and test source derivations.
+3. Keep the compatibility `web-ui` attribute as the production embedded-server smoke/shell check. Add balanced fleet, pipeline, and governance semantic checks, an independent export check, and an advisory design-parity check.
+4. Ensure groups authenticate and initialize deterministic state independently. Keep onboarding state isolated from non-onboarding groups.
+5. Add static ownership validation and build each stable flake attribute independently. Prove a deliberate required-step failure affects its responsible blocking check and retains evidence.
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
