@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:43'
-updated_date: '2026-09-01 13:36'
+updated_date: '2026-09-01 14:02'
 labels:
   - design-parity
   - policy
@@ -24,6 +24,14 @@ documentation:
   - docs/design/CrystalForge/
   - checks/web-ui/tests/integration-test.js
   - docs/agent/verification.md
+modified_files:
+  - checks/web-ui/default.nix
+  - checks/web-ui/design-parity/generate-design-targets-test.js
+  - checks/web-ui/design-parity/manifest.json
+  - checks/web-ui/tests/integration-test.js
+  - docs/task-433-design-parity-review.md
+  - packages/web-ui/src/components/poam/mod.rs
+  - packages/web-ui/src/views/dashboard.rs
 parent_task_id: TASK-433
 priority: high
 type: feature
@@ -161,4 +169,8 @@ Completed the TASK-433 Rust documentation pass across new and materially changed
 Exact candidate SHA is `da7ae7de480c485ee79db676f8d99893bf07c572` (`Finalize TASK-433 verification candidate`). The worktree is clean after the commit. Exact source checks: the task-listed default-workspace `cargo fmt` command fails mechanically with `Failed to find targets`; the equivalent `--all` command passes. Web UI formatting, Node syntax, harness static contracts, approval-script fixtures, and `git diff --check` pass. `nix build .#packages.x86_64-linux.server --no-link -L` passes and includes 1,242 cf-server tests with 0 failures. The direct task-listed `cargo test` command failed during SQLx macro expansion because the ambient `DATABASE_URL` user lacks table permissions; this is an environment failure, not a test assertion failure. Per user direction, stop the remaining exhaustive local matrix and use CI for it after pushing the candidate.
 
 Remote verification after the user's push found MR !318 at `3fd41e264f0ec41ff20e94aa791c0f040ad30649`, not candidate `da7ae7de480c485ee79db676f8d99893bf07c572`. `da7ae7de` is not an ancestor of the remote head. The remote tree omits the final remediation commit, migrations 0243-0244, approval tooling, and all 60 strict baselines; GitLab reports `has_conflicts: true`. Pipeline 2809402843 is pending for `3fd41e26` and is not valid exact-candidate evidence. Do not use that pipeline for TASK-433 closure. The likely cause is that the original TASK-433 worktree/branch was pushed instead of `/tmp/opencode/TASK-433-publish` branch `TASK-433-publish-temp`.
+
+Post-candidate parity remediation implemented but not committed. Added direct authoritative design/Dioxus targets for `PolicyEditor.jsx` and `PoamViews.jsx`; exact manifest contract assertions now run in the Web UI VM static gate. The POA&M target arranges one stable-visible, server-backed overdue POA&M immediately before the final parity target, uses an exact title, clears only dashboard layout state for that target, and cannot contaminate earlier surface captures. Added `data-poam-id` to dashboard watchlist rows. Added `docs/task-433-design-parity-review.md` with the complete affected-surface source/contract inventory, retained production deviations, demo-only classification, artifact names, and explicit pending exact-head visual status. Fast verification passed: Web UI rustfmt; Node syntax; manifest contracts; harness static contracts; Nix parse; `git diff --check`; independent review found no P0-P2 blockers. No local browser/VM check was run per user direction.
+
+Correction to the obsolete remote-mismatch note: the user authorized a force-with-lease update and MR !318 now points to candidate `da7ae7de480c485ee79db676f8d99893bf07c572`, is conflict-free, and pipeline 2809426014 is running. This pipeline does not include the current uncommitted review remediation and cannot be final-head evidence after a new commit.
 <!-- SECTION:NOTES:END -->
