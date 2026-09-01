@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - opencode-gpt-5.6-sol
 created_date: '2026-09-01 03:12'
-updated_date: '2026-09-01 05:40'
+updated_date: '2026-09-01 06:03'
 labels:
   - web-ui
   - testing
@@ -86,4 +86,10 @@ LOCK: opencode-gpt-5.6-sol in /home/mcamp/code/crystal-forge/TASK-450-web-ui-par
 Applied focused post-audit fixes in the existing TASK-450.11 worktree. Browser coach suppression now uses BrowserContext init scripts for non-onboarding selections; compatibility smoke retains ordered auth, dashboard, embedded assets, and Chromium with duplicated shell steps removed. Advisory design commands no longer swallow statuses and record command failures/missing outputs in check-verdict.json; producer metadata classifies false advisory verdicts, evidence lookup failures, and evidence copy failures. Added VM phase timings, producer gate/transfer timings, aggregate timing metadata, producer-specific required evidence, bounded inline uploads, aggregate evidence retention, masked GITLAB_TOKEN PRIVATE-TOKEN publication behavior, exact reusable gate checker regression fixtures, export-only semantic skip, and corrected runbook baseline/CI claims.
 
 Verification completed without VM execution: Nix dev-shell Node syntax and 20 Node tests passed; ownership validator reported 100 ci_fast steps partitioned across fleet/pipeline/governance; bash -n and nixpkgs shellcheck passed; all six Nix files parsed and all six path:. check names evaluated; .gitlab-ci.yml parsed with nixpkgs yq-go; git diff --check passed. No commit or push was made.
+
+Post-fleet correction implemented without commit/push. `check-groups.json` now classifies all 100 ci_fast steps exactly once as 17 required and 83 advisory; the historical 15-step required set is preserved and registration-submit/post-register-login are required auth prerequisites. Browser schema v2, Nix check verdicts, the exact gate checker, and the CI aggregate report expose required versus advisory failures; missing advisory results remain reported but do not block. Failed-page teardown now waits for route handlers before page recreation and reinstalls page-scoped standalone/onboarding fixtures while setup-coach suppression remains BrowserContext-scoped.
+
+Focused VM evidence command `CF_UI_TEST_STEPS="12f-systems-deploy-modal,12h-system-detail-cves-grouped-justification" nix build --impure path:.#checks.x86_64-linux.web-ui-fleet.evidence -L --no-link` completed successfully in 59.26 seconds. It produced schema-v2 browser/check verdicts with `ok: true`, no required failures, both selected failures under `failedAdvisorySteps`, and `processError: null`; the prior detached `Route is already handled` rejection did not recur. 12f and 12h remain product-contract blockers rather than test flakiness: current System Detail Deploy only selects an inline Deploy tab and never opens `DeploySystemModal`; current CVE component explicitly groups package-first and omits the asserted CVE-first filters. 12h retained `role=tab` and now records decisive surface text diagnostics. Assertions were not weakened.
+
+Final verification passed: 27/27 Node tests; static ownership validator (`100 ci_fast`, `17 required`, `83 advisory`); JSON parse; Node syntax for all 14 Web UI/CI JS files; Nix parse for six Web UI check files; all six check names evaluated earlier; final generated NixOS test driver built and its Python `test-script` compiled; `bash -n`; ShellCheck 0.11.0; `.gitlab-ci.yml` yq parse; exact checker against focused advisory evidence exited 0 while printing both advisory failures; `git diff --check`. Full fleet was not rerun. Historical remaining advisory failures are 12d2, 12e, 12f, 12k, 12h, 12g, 16c, and 28; only 12f/12h were focused browser-verified in this pass.
 <!-- SECTION:NOTES:END -->
