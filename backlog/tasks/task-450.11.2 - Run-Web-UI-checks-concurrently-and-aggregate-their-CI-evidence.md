@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-gpt-5.6-sol
 created_date: '2026-09-01 03:27'
-updated_date: '2026-09-01 04:33'
+updated_date: '2026-09-01 04:45'
 labels:
   - web-ui
   - testing
@@ -19,6 +19,12 @@ references:
   - TASK-430
   - TASK-450.8
   - .gitlab-ci.yml
+modified_files:
+  - .gitlab-ci.yml
+  - ci/web-ui-producer.sh
+  - ci/web-ui-aggregate.js
+  - ci/web-ui-ci.test.js
+  - docs/web-ui-check.md
 parent_task_id: TASK-450.11
 priority: high
 type: enhancement
@@ -67,4 +73,8 @@ The pipeline must remain correct when fewer runners are available: jobs may queu
 The user selected this task for one focused Web UI optimization MR with TASK-438, TASK-354, TASK-450.11.1, and TASK-450.11.3.
 
 LOCK: opencode-gpt-5.6-sol in /home/mcamp/code/crystal-forge/TASK-450-web-ui-parallel-checks on branch TASK-450.11-web-ui-parallel-checks, based on TASK-450-p0-build-graph at 437efd55.
+
+Implemented the CI partition on top of the existing uncommitted Nix work. The generic matrix retains integration, oidc-auth, and server-regressions. A required five-check Web UI matrix and advisory design-parity producer publish collision-free evidence. The producer performs one gate build, resolves the already-realized `.evidence` store path without a second build, records status metadata, and preserves gate failure status. One `when: always` advisory aggregator uses `needs`, reports all expected producers and detailed evidence, owns pipeline-specific MR uploads/comments, and preserves its report on API failure.
+
+Verification passed: `nix develop -c node --test ci/web-ui-ci.test.js checks/web-ui/tests/browser-verdict.test.js checks/web-ui/tests/check-groups.test.js` (14/14); `nix develop -c node checks/web-ui/tests/validate-check-groups.js` (100 steps valid); `nix run nixpkgs#shellcheck -- ci/web-ui-producer.sh`; `nix run nixpkgs#yq-go -- eval 'true' .gitlab-ci.yml`; `nix eval --json 'path:.#checks.x86_64-linux' --apply builtins.attrNames` (all six Web UI attributes present); and `git diff --check`. VM checks were not executed because this CI-only task verifies orchestration around the existing partition and running all six would require the target CI/KVM runner capacity. No commit, push, or MR was created as requested.
 <!-- SECTION:NOTES:END -->
