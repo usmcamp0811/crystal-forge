@@ -132,9 +132,12 @@ React and Dioxus will never be pixel-identical, so treat the number as "how far
 from the design" and inspect the montages for real drift.
 
 To add a view to the parity harness, add an entry to
-`checks/web-ui/design-parity/manifest.json`. Set a real Dioxus `route`, required
-`designMarker` and `dioxusMarker` selectors, and the `designActions` or
-`dioxusActions` needed to reach nested surfaces.
+`checks/web-ui/design-parity/manifest.json`. Set the design `route` and, when
+the production route differs, set `dioxusRoute`. Add required `designMarker`
+and `dioxusMarker` selectors and the `designActions` or `dioxusActions` needed
+to reach nested surfaces. A design action can set `force: true` only when a
+known design overlay obscures the intended control; normal actions retain
+Playwright actionability checks.
 
 ### Approving baselines
 

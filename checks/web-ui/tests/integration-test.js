@@ -14351,10 +14351,12 @@ if (process.env.CF_UI_STATIC_CONTRACTS === "1") {
         : null;
       const parityViews = selectedRoutes
         ? parityManifest.views.filter((view) => {
-            const targetRoute = view.route.split("?")[0];
-            return selectedRoutes.some(
+            const targetRoutes = [view.route, view.dioxusRoute]
+              .filter(Boolean)
+              .map((route) => route.split("?")[0]);
+            return targetRoutes.some((targetRoute) => selectedRoutes.some(
               (stepRoute) => stepRoute === targetRoute || (targetRoute !== "/" && stepRoute.startsWith(`${targetRoute}/`)),
-            );
+            ));
           })
         : parityManifest.views;
       const orderedParityViews = [
@@ -14362,6 +14364,7 @@ if (process.env.CF_UI_STATIC_CONTRACTS === "1") {
         ...parityViews.filter((view) => view.name === "poam-detail"),
       ];
       let poamParityPreparationError = null;
+      let poamParityRoute = null;
       fs.mkdirSync(designParityDir, { recursive: true });
       for (const view of orderedParityViews) {
         if (view.name === "poam-detail") {
@@ -14370,10 +14373,11 @@ if (process.env.CF_UI_STATIC_CONTRACTS === "1") {
             const fixture = await createPhase6PoamFixture(preparationPage, "design-parity-detail", 1, {
               visibleName: "TASK-433 parity finding",
             });
-            await createFixturePoam(preparationPage, fixture.systems[0].assessmentId, {
+            const poam = await createFixturePoam(preparationPage, fixture.systems[0].assessmentId, {
               title: "TASK-433 parity POA&M detail",
               targetDate: "2026-01-15",
             });
+            poamParityRoute = `/compliance?bundle=${fixture.bundle.id}&version=${fixture.bundleVersionId}&view=poam&poam=${poam.id}`;
           } catch (err) {
             poamParityPreparationError = err.message;
           } finally {
@@ -14394,8 +14398,10 @@ if (process.env.CF_UI_STATIC_CONTRACTS === "1") {
               }
               await parityPage.evaluate(() => localStorage.removeItem("cf-dashboard-layout"));
             }
-            const separator = view.route.includes("?") ? "&" : "?";
-            await parityPage.goto(`${baseUrl}${view.route}${separator}ui_check_auth=1`, { timeout: LOAD_TIMEOUT });
+            const captureRoute = view.name === "poam-detail" ? poamParityRoute : (view.dioxusRoute || view.route);
+            if (!captureRoute) throw new Error("deterministic POA&M parity route was not prepared");
+            const separator = captureRoute.includes("?") ? "&" : "?";
+            await parityPage.goto(`${baseUrl}${captureRoute}${separator}ui_check_auth=1`, { timeout: LOAD_TIMEOUT });
             await parityPage.waitForTimeout(2000);
             await applyVisualTheme(parityPage, theme);
             const renderedTheme = await parityPage.locator("html").getAttribute("data-theme");

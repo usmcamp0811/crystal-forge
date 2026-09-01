@@ -37,6 +37,9 @@ function validateManifest(manifest) {
       if (names.has(view?.name)) errors.push(`views contains duplicate name ${view.name}`);
       names.add(view?.name);
       if (typeof view?.route !== "string") errors.push(`${label}.route must be a string`);
+      if (view?.dioxusRoute !== undefined && typeof view.dioxusRoute !== "string") {
+        errors.push(`${label}.dioxusRoute must be a string`);
+      }
       if (!view?.designMarker || typeof view.designMarker.selector !== "string") {
         errors.push(`${label}.designMarker.selector must be a string`);
       }
@@ -47,6 +50,9 @@ function validateManifest(manifest) {
         for (const [actionIndex, action] of (view?.[actionField] || []).entries()) {
           if (action?.type !== "click" || typeof action.selector !== "string") {
             errors.push(`${label}.${actionField}[${actionIndex}] must be a click action with a selector`);
+          }
+          if (action?.force !== undefined && typeof action.force !== "boolean") {
+            errors.push(`${label}.${actionField}[${actionIndex}].force must be a boolean`);
           }
         }
       }
@@ -65,7 +71,7 @@ async function runActions(page, actions = []) {
   for (const action of actions) {
     const locator = actionLocator(page, action);
     await locator.waitFor({ state: "visible", timeout: action.timeout || 15000 });
-    await locator.click();
+    await locator.click({ force: action.force === true });
     if (action.waitFor) {
       await page.locator(action.waitFor).first().waitFor({ state: "visible", timeout: action.timeout || 15000 });
     }

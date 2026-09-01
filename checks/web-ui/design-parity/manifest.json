@@ -108,7 +108,7 @@
       "route": "/deployment-policies",
       "designActions": [
         { "type": "click", "selector": ".nav-item", "text": "Policies", "waitFor": ".content[data-screen-label='policies']" },
-        { "type": "click", "selector": "[data-coach-target='policy']", "text": "New custom policy", "waitFor": ".pe-shell" }
+        { "type": "click", "selector": "[data-coach-target='policy']", "text": "New custom policy", "waitFor": ".pe-shell", "force": true }
       ],
       "designMarker": { "selector": ".pe-shell", "text": "New policy" },
       "dioxusActions": [
@@ -184,13 +184,12 @@
     {
       "name": "poam-detail",
       "route": "/",
+      "dioxusRoute": "/compliance",
       "designActions": [
         { "type": "click", "selector": ".dash-widget:has(.dash-w-title:has-text('POA&M Watchlist')) .dash-w-body > div", "text": "POAM-", "waitFor": ".poam-tray" }
       ],
       "designMarker": { "selector": ".poam-tray", "text": "Remediation plan" },
-      "dioxusActions": [
-        { "type": "click", "selector": ".poam-watchlist-row", "text": "TASK-433 parity POA&M detail", "waitFor": "[data-testid='poam-detail']" }
-      ],
+      "dioxusActions": [],
       "dioxusMarker": { "selector": "[data-testid='poam-detail']", "text": "Remediation plan" },
       "designRef": "docs/design/CrystalForge/components/PoamViews.jsx"
     }
