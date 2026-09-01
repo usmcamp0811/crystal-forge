@@ -59,16 +59,35 @@ pub async fn create_reservation(
     derivation_id: i32,
     nixos_derivation_id: Option<i32>,
 ) -> Result<i32> {
-    let reservation_id = sqlx::query_scalar!(
+    let reservation_id = sqlx::query_scalar::<_, i32>(
         r#"
         INSERT INTO build_reservations (worker_id, derivation_id, nixos_derivation_id)
-        VALUES ($1, $2, $3)
+        SELECT $1, d.id, $3
+        FROM derivations d
+        WHERE d.id = $2
+          AND (
+              d.commit_id IS NULL
+              OR EXISTS (
+                  SELECT 1
+                  FROM commits c
+                  JOIN evaluation_attempts ea
+                    ON ea.commit_id = c.id
+                   AND ea.attempt_number = c.evaluation_attempt_count
+                  WHERE c.id = d.commit_id
+                    AND c.evaluation_status = 'complete'
+                    AND ea.status = 'complete'
+                    AND (
+                        ea.dependency_plan_barrier = 'legacy_released'
+                        OR (ea.dependency_plan_barrier = 'ready' AND d.evaluation_attempt_id = ea.id)
+                    )
+              )
+          )
         RETURNING id
         "#,
-        worker_id,
-        derivation_id,
-        nixos_derivation_id
     )
+    .bind(worker_id)
+    .bind(derivation_id)
+    .bind(nixos_derivation_id)
     .fetch_one(pool)
     .await?;
 
@@ -182,15 +201,14 @@ pub async fn claim_next_derivation(pool: &PgPool, worker_id: &str) -> Result<Opt
     let mut tx = pool.begin().await?;
 
     // 1) Use the view query directly within the transaction to get correct ordering
-    let buildable = sqlx::query_as!(
-        BuildableDerivation,
+    let buildable = sqlx::query_as::<_, BuildableDerivation>(
         r#"
         SELECT 
-            v.id as "id!",
-            v.derivation_name as "derivation_name!",
-            v.derivation_type as "derivation_type!",
+            v.id,
+            v.derivation_name,
+            v.derivation_type,
             v.derivation_path,
-            v.status_id as "status_id!",
+            v.status_id,
             v.nixos_id,
             v.nixos_commit_ts,
             v.active_workers,
@@ -198,6 +216,23 @@ pub async fn claim_next_derivation(pool: &PgPool, worker_id: &str) -> Result<Opt
         FROM view_buildable_derivations v
         JOIN derivations d ON d.id = v.id
         WHERE d.dependency_build_plan_status IN ('complete', 'failed')
+          AND (
+              d.commit_id IS NULL
+              OR EXISTS (
+                  SELECT 1
+                  FROM commits c
+                  JOIN evaluation_attempts ea
+                    ON ea.commit_id = c.id
+                   AND ea.attempt_number = c.evaluation_attempt_count
+                  WHERE c.id = d.commit_id
+                    AND c.evaluation_status = 'complete'
+                    AND ea.status = 'complete'
+                    AND (
+                        ea.dependency_plan_barrier = 'legacy_released'
+                        OR (ea.dependency_plan_barrier = 'ready' AND d.evaluation_attempt_id = ea.id)
+                    )
+              )
+          )
         ORDER BY queue_position
         LIMIT 1
         "#
@@ -211,17 +246,20 @@ pub async fn claim_next_derivation(pool: &PgPool, worker_id: &str) -> Result<Opt
     };
 
     // 2) Atomically try to reserve it
-    let reserved = sqlx::query!(
+    let reserved = sqlx::query_scalar::<_, i32>(
         r#"
         INSERT INTO build_reservations (worker_id, derivation_id, nixos_derivation_id)
-        VALUES ($1, $2, $3)
+        SELECT $1, d.id, $3
+        FROM derivations d
+        WHERE d.id = $2
+          AND derivation_evaluation_barrier_released(d.id)
         ON CONFLICT (derivation_id) DO NOTHING
         RETURNING derivation_id
         "#,
-        worker_id,
-        buildable.id,
-        buildable.nixos_id,
     )
+    .bind(worker_id)
+    .bind(buildable.id)
+    .bind(buildable.nixos_id)
     .fetch_optional(&mut *tx)
     .await?;
 
@@ -231,7 +269,7 @@ pub async fn claim_next_derivation(pool: &PgPool, worker_id: &str) -> Result<Opt
     }
 
     // 3) Update status to BuildInProgress
-    let updated = sqlx::query!(
+    let updated = sqlx::query(
         r#"
         UPDATE derivations
         SET 
@@ -241,12 +279,13 @@ pub async fn claim_next_derivation(pool: &PgPool, worker_id: &str) -> Result<Opt
         WHERE id = $2
           AND status_id IN ($3, $4)
           AND dependency_build_plan_status IN ('complete', 'failed')
+          AND derivation_evaluation_barrier_released(id)
         "#,
-        EvaluationStatus::BuildInProgress.as_id(),
-        buildable.id,
-        EvaluationStatus::DryRunComplete.as_id(),
-        EvaluationStatus::BuildPending.as_id(),
     )
+    .bind(EvaluationStatus::BuildInProgress.as_id())
+    .bind(buildable.id)
+    .bind(EvaluationStatus::DryRunComplete.as_id())
+    .bind(EvaluationStatus::BuildPending.as_id())
     .execute(&mut *tx)
     .await?;
 

@@ -8,11 +8,6 @@ use sqlx::{PgPool, Postgres, Transaction};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-use crate::config::BuildConfig;
-use crate::models::evaluate_with_policies::{
-    FinalizedDerivation, calculate_and_persist_dependency_build_plan,
-};
-
 /// Advisory lock serializing all build-queue-position allocations.
 /// Using the ASCII encoding of 'CFBQ' as a 64-bit integer (0x43464251).
 pub const BUILD_QUEUE_ORDER_LOCK_KEY: i64 = 0x4346_4251;
@@ -30,10 +25,14 @@ pub async fn lock_build_queue_order(tx: &mut Transaction<'_, Postgres>) -> Resul
     Ok(())
 }
 
+/// Identifies a queued build that became visible at attempt barrier release.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct QueuedBuild {
+    /// Identifies the durable build job.
     pub build_job_id: Uuid,
+    /// Identifies the derivation that the job builds.
     pub derivation_id: i32,
+    /// Names the evaluated NixOS system for queue broadcasts.
     pub system_name: String,
 }
 
@@ -110,7 +109,23 @@ pub async fn create_build_jobs_for_commit(pool: &PgPool, commit_id: i32) -> Resu
             AND d.status_id = 5
             AND d.cf_agent_enabled = TRUE
             AND d.policy_requirements_met = TRUE
+            AND d.build_preparation_state = 'pending'
             AND d.dependency_build_plan_status IN ('complete', 'failed')
+            AND c.evaluation_status = 'complete'
+            AND EXISTS (
+                SELECT 1
+                FROM evaluation_attempts ea
+                WHERE ea.commit_id = c.id
+                  AND ea.attempt_number = c.evaluation_attempt_count
+                  AND ea.status = 'complete'
+                  AND (
+                      ea.dependency_plan_barrier = 'legacy_released'
+                      OR (
+                          ea.dependency_plan_barrier = 'ready'
+                          AND d.evaluation_attempt_id = ea.id
+                      )
+                  )
+            )
             AND NOT EXISTS (
                 SELECT 1 FROM build_jobs bj
                 WHERE bj.derivation_id = d.id
@@ -141,6 +156,21 @@ pub async fn create_build_jobs_for_commit(pool: &PgPool, commit_id: i32) -> Resu
     Ok(count)
 }
 
+/// Reconciles eligible build jobs inside an evaluation-finalization transaction.
+///
+/// The transaction must belong to the current attempt finalizer. The function
+/// acquires the build-queue advisory lock before reading queue positions. The
+/// caller must acquire that same advisory lock before locking the commit row to
+/// preserve the global queue-lock then commit-lock order. Jobs remain invisible
+/// until the caller commits the released barrier and completed commit state.
+///
+/// Returns all queued jobs tagged to the released attempt, including jobs held
+/// from an earlier attempt, so the caller can notify workers after commit.
+///
+/// # Errors
+///
+/// Returns an error if the advisory lock, queue reconciliation, or queued-job
+/// query fails. The caller must roll back the finalization transaction.
 pub async fn create_build_jobs_for_commit_tx(
     tx: &mut Transaction<'_, Postgres>,
     commit_id: i32,
@@ -154,7 +184,7 @@ pub async fn create_build_jobs_for_commit_tx(
     .await
     .context("Failed to read max queue_position")?;
 
-    let rows = sqlx::query_as::<_, QueuedBuild>(
+    sqlx::query(
         r#"
         INSERT INTO build_jobs (
             derivation_id,
@@ -187,21 +217,65 @@ pub async fn create_build_jobs_for_commit_tx(
             AND d.status_id = 5
             AND d.cf_agent_enabled = TRUE
             AND d.policy_requirements_met = TRUE
+            AND d.build_preparation_state = 'pending'
             AND d.dependency_build_plan_status IN ('complete', 'failed')
+            AND c.evaluation_status = 'complete'
+            AND EXISTS (
+                SELECT 1
+                FROM evaluation_attempts ea
+                WHERE ea.commit_id = c.id
+                  AND ea.attempt_number = c.evaluation_attempt_count
+                  AND ea.status = 'complete'
+                  AND (
+                      ea.dependency_plan_barrier = 'legacy_released'
+                      OR (
+                          ea.dependency_plan_barrier = 'ready'
+                          AND d.evaluation_attempt_id = ea.id
+                      )
+                  )
+            )
             AND NOT EXISTS (
                 SELECT 1 FROM build_jobs bj
                 WHERE bj.derivation_id = d.id
             )
-        RETURNING id AS build_job_id, derivation_id, (
-            SELECT derivation_name FROM derivations WHERE derivations.id = build_jobs.derivation_id
-        ) AS system_name
         "#,
     )
     .bind(commit_id)
     .bind(max_pos)
-    .fetch_all(&mut **tx)
+    .execute(&mut **tx)
     .await
     .context("Failed to create build jobs for commit")?;
+
+    // Return both newly inserted and previously held queued jobs. The caller
+    // notifies only after commit, which reopens old jobs from the same attempt
+    // without exposing a partially released population.
+    let rows = sqlx::query_as::<_, QueuedBuild>(
+        r#"
+        SELECT bj.id AS build_job_id,
+               bj.derivation_id,
+               d.derivation_name AS system_name
+        FROM build_jobs bj
+        JOIN derivations d ON d.id = bj.derivation_id
+        WHERE d.commit_id = $1
+          AND bj.status = 'queued'
+          AND d.evaluation_attempt_id = (
+              SELECT ea.id
+              FROM commits c
+              JOIN evaluation_attempts ea
+                ON ea.commit_id = c.id
+               AND ea.attempt_number = c.evaluation_attempt_count
+              WHERE c.id = $1
+                AND c.evaluation_status = 'complete'
+                AND ea.status = 'complete'
+                AND ea.dependency_plan_barrier = 'ready'
+          )
+        ORDER BY bj.queue_position DESC NULLS LAST, bj.created_at ASC
+        "#,
+    )
+    .bind(commit_id)
+    .fetch_all(&mut **tx)
+    .await
+    .context("Failed to reconcile queued build jobs for commit")?;
 
     Ok(rows)
 }
@@ -255,6 +329,17 @@ pub async fn create_build_job_for_derivation_tx(
             AND d.policy_requirements_met = TRUE
             AND d.dependency_build_plan_status IN ('complete', 'failed')
             AND d.dependency_build_plan_generation = $3
+            AND c.evaluation_status = 'complete'
+            AND EXISTS (
+                SELECT 1 FROM evaluation_attempts ea
+                WHERE ea.commit_id = c.id
+                  AND ea.attempt_number = c.evaluation_attempt_count
+                  AND ea.status = 'complete'
+                  AND (
+                      ea.dependency_plan_barrier = 'legacy_released'
+                      OR (ea.dependency_plan_barrier = 'ready' AND d.evaluation_attempt_id = ea.id)
+                  )
+            )
         ON CONFLICT (derivation_id) DO NOTHING
         RETURNING id
         "#,
@@ -292,17 +377,19 @@ pub async fn create_build_job_for_derivation_tx(
     ))
 }
 
-/// Incrementally enqueue a single derivation as a build job.
-///
-/// Called immediately after a derivation reaches `DryRunComplete` during evaluation,
-/// so builders can start work without waiting for the full commit to finish evaluating.
+/// Enqueues one derivation only after its evaluation-wide barrier is released.
 ///
 /// Idempotency: uses `ON CONFLICT (derivation_id) DO NOTHING` to guarantee at most
 /// one `build_jobs` row per derivation. Concurrent callers are safe — the constraint
 /// absorbs races without returning an error, unlike a `NOT EXISTS` subquery which
 /// is non-atomic between the check and the insert.
 ///
-/// Returns `true` if a new job was created, `false` if one already existed.
+/// Commitless derivations preserve their existing behavior. Commit-backed
+/// derivations require a completed current attempt, matching derivation attempt
+/// tag, and `ready` (or rolling-upgrade `legacy_released`) barrier.
+///
+/// Returns `true` if a new job was created, `false` if one already existed or
+/// the evaluation barrier is not released.
 pub async fn enqueue_build_job_for_derivation(pool: &PgPool, derivation_id: i32) -> Result<bool> {
     let mut tx = pool
         .begin()
@@ -351,6 +438,17 @@ pub async fn enqueue_build_job_for_derivation(pool: &PgPool, derivation_id: i32)
           AND d.cf_agent_enabled = TRUE
           AND d.policy_requirements_met = TRUE
           AND d.dependency_build_plan_status IN ('complete', 'failed')
+          AND c.evaluation_status = 'complete'
+          AND EXISTS (
+              SELECT 1 FROM evaluation_attempts ea
+              WHERE ea.commit_id = c.id
+                AND ea.attempt_number = c.evaluation_attempt_count
+                AND ea.status = 'complete'
+                AND (
+                    ea.dependency_plan_barrier = 'legacy_released'
+                    OR (ea.dependency_plan_barrier = 'ready' AND d.evaluation_attempt_id = ea.id)
+                )
+          )
         ON CONFLICT (derivation_id) DO NOTHING
         "#,
     )
@@ -408,6 +506,23 @@ pub async fn get_next_job_for_builder(pool: &PgPool, builder_id: Uuid) -> Result
                 AND d.cf_agent_enabled IS TRUE
                 AND d.policy_requirements_met IS TRUE
                 AND d.dependency_build_plan_status IN ('complete', 'failed')
+                AND (
+                    d.commit_id IS NULL
+                    OR EXISTS (
+                        SELECT 1
+                        FROM commits c
+                        JOIN evaluation_attempts ea
+                          ON ea.commit_id = c.id
+                         AND ea.attempt_number = c.evaluation_attempt_count
+                        WHERE c.id = d.commit_id
+                          AND c.evaluation_status = 'complete'
+                          AND ea.status = 'complete'
+                          AND (
+                              ea.dependency_plan_barrier = 'legacy_released'
+                              OR (ea.dependency_plan_barrier = 'ready' AND d.evaluation_attempt_id = ea.id)
+                          )
+                    )
+                )
                 AND bj.available_at <= NOW()
                 AND (
                     -- No environment restrictions (wildcard builder)
@@ -448,7 +563,6 @@ pub async fn get_next_job_for_builder(pool: &PgPool, builder_id: Uuid) -> Result
 struct RecoveryCandidate {
     derivation_id: i32,
     derivation_path: Option<String>,
-    derivation_target: Option<String>,
     commit_id: Option<i32>,
     evaluation_attempt_count: Option<i32>,
 }
@@ -565,11 +679,10 @@ pub async fn fail_expired_dependency_plans_without_recovery(pool: &PgPool) -> Re
 /// `NULL` (rows pre-dating this state machine) are never recovered.
 /// Failed rows are subject to exponential backoff via `next_attempt_at`.
 ///
-/// For each candidate:
-/// 1. Creates or verifies the derivation GC root (prevents GC of the drv).
-/// 2. Revalidates the candidate state inside a transaction with `FOR UPDATE`.
-/// 3. Inserts the build job under the advisory lock (only after rooting).
-/// 4. Sets `build_preparation_state = 'queued'` on success or `'failed'` on error.
+/// Recovery does not recalculate dependency plans. The released attempt owns an
+/// immutable terminal plan snapshot. For each candidate, recovery creates the
+/// derivation GC root, revalidates the released snapshot under row locks, and
+/// inserts the missing build job.
 ///
 /// Idempotent: `ON CONFLICT (derivation_id) DO NOTHING` prevents duplicate jobs.
 ///
@@ -578,10 +691,21 @@ pub async fn fail_expired_dependency_plans_without_recovery(pool: &PgPool) -> Re
 /// # Errors
 ///
 /// Returns an error when PostgreSQL cannot reconcile plan or build state.
-pub async fn recover_orphaned_derivation_build_jobs(
+pub async fn recover_orphaned_derivation_build_jobs(pool: &PgPool) -> Result<usize> {
+    recover_orphaned_derivation_build_jobs_with(pool, |drv_path, derivation_id| async move {
+        crate::builder::create_drv_gc_root(&drv_path, derivation_id).await
+    })
+    .await
+}
+
+async fn recover_orphaned_derivation_build_jobs_with<R, RFut>(
     pool: &PgPool,
-    build_config: &BuildConfig,
-) -> Result<usize> {
+    rooter: R,
+) -> Result<usize>
+where
+    R: Fn(String, i32) -> RFut + Clone,
+    RFut: std::future::Future<Output = Result<bool>>,
+{
     // A graph-only system has no build-preparation recovery path. If its
     // planner disappears, terminate the expired generation explicitly so the
     // API does not advertise perpetual work and the UI does not poll forever.
@@ -595,7 +719,6 @@ pub async fn recover_orphaned_derivation_build_jobs(
         SELECT
             d.id AS derivation_id,
             d.derivation_path,
-            d.derivation_target,
             d.commit_id,
             c.evaluation_attempt_count
         FROM derivations d
@@ -605,10 +728,8 @@ pub async fn recover_orphaned_derivation_build_jobs(
           AND d.cf_agent_enabled = TRUE
           AND d.policy_requirements_met = TRUE
           AND c.evaluation_status = 'complete'      -- commit fully evaluated
-          AND (
-              d.dependency_build_plan_status <> 'calculating'
-              OR d.dependency_build_plan_lease_expires_at <= NOW()
-          )
+          AND derivation_evaluation_barrier_released(d.id)
+          AND d.dependency_build_plan_status IN ('complete', 'failed')
           AND (d.build_preparation_next_attempt_at IS NULL
                OR d.build_preparation_next_attempt_at <= NOW())  -- backoff gate
           AND NOT EXISTS (
@@ -654,48 +775,70 @@ pub async fn recover_orphaned_derivation_build_jobs(
             }
         };
 
-        let finalized = FinalizedDerivation {
-            derivation_id,
-            drv_path: drv_path.clone(),
-            system_name: candidate
-                .derivation_target
-                .clone()
-                .unwrap_or_else(|| format!("derivation-{derivation_id}")),
-            cf_agent_enabled: Some(true),
-        };
-        match calculate_and_persist_dependency_build_plan(
-            pool,
-            commit_id,
-            expected_attempt,
-            &finalized,
-            build_config,
-        )
-        .await
-        {
-            Ok(Some(_)) => {}
-            Ok(None) => continue,
+        // Phase 1: Revalidate and hold the released attempt across the external
+        // root. A replacement evaluation needs an exclusive commit lock, so it
+        // cannot close the barrier after this check but before root creation.
+        let mut root_tx = match pool.begin().await {
+            Ok(tx) => tx,
             Err(err) => {
-                let msg = format!(
-                    "Recovery: dependency build-plan calculation failed for derivation {derivation_id}: {err:#}"
-                );
-                warn!("{msg}");
-                record_recovery_failure(
-                    pool,
+                let msg = format!("Recovery: failed to begin root transaction: {err:#}");
+                warn!(derivation_id, "{msg}");
+                continue;
+            }
+        };
+        let current = sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT TRUE
+            FROM commits c
+            JOIN evaluation_attempts ea
+              ON ea.commit_id = c.id
+             AND ea.attempt_number = c.evaluation_attempt_count
+            JOIN derivations d ON d.id = $3
+            WHERE c.id = $1
+              AND c.evaluation_status = 'complete'
+              AND c.evaluation_attempt_count = $2
+              AND ea.status = 'complete'
+              AND (
+                  ea.dependency_plan_barrier = 'legacy_released'
+                  OR (
+                      ea.dependency_plan_barrier = 'ready'
+                      AND d.evaluation_attempt_id = ea.id
+                  )
+              )
+              AND d.derivation_path = $4
+              AND d.build_preparation_state IN ('pending', 'failed')
+              AND d.dependency_build_plan_status IN ('complete', 'failed')
+            FOR SHARE OF c, ea, d
+            "#,
+        )
+        .bind(commit_id)
+        .bind(expected_attempt)
+        .bind(derivation_id)
+        .bind(&drv_path)
+        .fetch_optional(&mut *root_tx)
+        .await;
+        match current {
+            Ok(Some(true)) => {}
+            Ok(_) => {
+                let _ = root_tx.rollback().await;
+                warn!(
                     derivation_id,
-                    commit_id,
-                    expected_attempt,
-                    Some(drv_path.as_str()),
-                    &msg,
-                )
-                .await;
+                    "Recovery: released attempt became stale before rooting"
+                );
+                continue;
+            }
+            Err(err) => {
+                let _ = root_tx.rollback().await;
+                let msg = format!("Recovery: root revalidation failed: {err:#}");
+                warn!(derivation_id, "{msg}");
                 continue;
             }
         }
 
-        // Phase 1: create / verify GC root before inserting any claimable job.
-        let rooted = match crate::builder::create_drv_gc_root(&drv_path, derivation_id).await {
+        let rooted = match rooter.clone()(drv_path.clone(), derivation_id).await {
             Ok(r) => r,
             Err(err) => {
+                let _ = root_tx.rollback().await;
                 let msg =
                     format!("Recovery: GC root failed for derivation {derivation_id}: {err:#}");
                 warn!("{msg}");
@@ -713,6 +856,7 @@ pub async fn recover_orphaned_derivation_build_jobs(
         };
 
         if !rooted {
+            let _ = root_tx.rollback().await;
             let msg = format!(
                 "Recovery: derivation {derivation_id} drv path {drv_path} not valid in store"
             );
@@ -728,12 +872,17 @@ pub async fn recover_orphaned_derivation_build_jobs(
             .await;
             continue;
         }
+        if let Err(err) = root_tx.commit().await {
+            let msg = format!("Recovery: failed to commit root revalidation: {err:#}");
+            warn!(derivation_id, "{msg}");
+            continue;
+        }
 
         // Phase 2: Validated lock-stage activation in correct lock order.
         //
         // Lock order (must match normal activation to prevent deadlock):
-        //   1. Commit row FOR UPDATE (verify still complete)
-        //   2. Advisory queue-position lock
+        //   1. Advisory queue-position lock
+        //   2. Commit row FOR UPDATE (verify still complete)
         //   3. Derivation row FOR UPDATE (revalidate path/state/eligible)
         //   4. Read MAX(queue_position), insert, update state
         let mut tx = match pool.begin().await {
@@ -754,7 +903,24 @@ pub async fn recover_orphaned_derivation_build_jobs(
             }
         };
 
-        // Step 1: lock and validate the commit row.
+        // Step 1: acquire the build queue position lock.
+        if let Err(err) = lock_build_queue_order(&mut tx).await {
+            let msg = format!("Recovery: failed to acquire queue lock: {err:#}");
+            warn!(derivation_id, "{msg}");
+            let _ = tx.rollback().await;
+            record_recovery_failure(
+                pool,
+                derivation_id,
+                commit_id,
+                expected_attempt,
+                Some(drv_path.as_str()),
+                &msg,
+            )
+            .await;
+            continue;
+        }
+
+        // Step 2: lock and validate the commit row.
         match sqlx::query_scalar::<_, bool>(
             r#"
             SELECT TRUE FROM commits c
@@ -793,23 +959,6 @@ pub async fn recover_orphaned_derivation_build_jobs(
             }
         };
 
-        // Step 2: acquire build queue position lock.
-        if let Err(err) = lock_build_queue_order(&mut tx).await {
-            let msg = format!("Recovery: failed to acquire queue lock: {err:#}");
-            warn!(derivation_id, "{msg}");
-            let _ = tx.rollback().await;
-            record_recovery_failure(
-                pool,
-                derivation_id,
-                commit_id,
-                expected_attempt,
-                Some(drv_path.as_str()),
-                &msg,
-            )
-            .await;
-            continue;
-        }
-
         // Step 3: lock and revalidate the derivation row.
         let revalidated: Option<()> = match sqlx::query_scalar::<_, bool>(
             r#"
@@ -822,6 +971,7 @@ pub async fn recover_orphaned_derivation_build_jobs(
               AND d.cf_agent_enabled = TRUE
               AND d.policy_requirements_met = TRUE
               AND d.dependency_build_plan_status IN ('complete', 'failed')
+              AND derivation_evaluation_barrier_released(d.id)
             FOR UPDATE OF d
             "#,
         )
@@ -902,6 +1052,7 @@ pub async fn recover_orphaned_derivation_build_jobs(
               AND d.cf_agent_enabled = TRUE
               AND d.policy_requirements_met = TRUE
               AND d.dependency_build_plan_status IN ('complete', 'failed')
+              AND derivation_evaluation_barrier_released(d.id)
             ON CONFLICT (derivation_id) DO NOTHING
             RETURNING TRUE
             "#,
@@ -1072,7 +1223,136 @@ pub async fn mark_job_success(pool: &PgPool, job_id: Uuid, logs: Option<&str>) -
 
 #[cfg(test)]
 mod tests {
+    use super::recover_orphaned_derivation_build_jobs_with;
     use crate::queue::QueueNotifier;
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires a PostgreSQL test database"]
+    async fn recovery_ignores_planning_attempt_and_uses_released_terminal_plan(pool: sqlx::PgPool) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let repo_url = format!("https://example.com/recovery-barrier-{suffix}.git");
+        crate::queries::flakes::insert_flake(
+            &pool,
+            &format!("recovery-barrier-{suffix}"),
+            &repo_url,
+            "main",
+            "all_configs",
+        )
+        .await
+        .expect("insert flake");
+        crate::queries::commits::insert_commit_with_metadata(
+            &pool,
+            &suffix,
+            &repo_url,
+            chrono::Utc::now(),
+            Some("recovery barrier"),
+            Some("test"),
+        )
+        .await
+        .expect("insert commit");
+        let commit = crate::queries::commits::get_commit_by_hash(&pool, &suffix)
+            .await
+            .expect("load commit");
+        let attempt_id: uuid::Uuid = sqlx::query_scalar(
+            r#"
+            UPDATE evaluation_attempts
+            SET status = 'in_progress',
+                dependency_plan_barrier = 'planning',
+                dependency_plan_expected_count = 1,
+                dependency_plan_terminal_count = 0
+            WHERE commit_id = $1 AND attempt_number = 1
+            RETURNING id
+            "#,
+        )
+        .bind(commit.id)
+        .fetch_one(&pool)
+        .await
+        .expect("start planning barrier");
+        sqlx::query(
+            "UPDATE commits SET evaluation_status = 'in_progress', evaluation_attempt_count = 1 WHERE id = $1",
+        )
+        .bind(commit.id)
+        .execute(&pool)
+        .await
+        .expect("start commit attempt");
+        let derivation_id: i32 = sqlx::query_scalar(
+            r#"
+            INSERT INTO derivations (
+                commit_id, derivation_type, derivation_name, derivation_path,
+                status_id, cf_agent_enabled, policy_requirements_met,
+                build_preparation_state, evaluation_attempt_id,
+                dependency_build_plan_status, dependency_build_plan_generation,
+                dependency_derivation_count, dependency_build_count
+            )
+            VALUES ($1, 'nixos', 'recovery-system', $2, 5, TRUE, TRUE,
+                    'pending', $3, 'complete', 1, 1, 0)
+            RETURNING id
+            "#,
+        )
+        .bind(commit.id)
+        .bind(format!("/nix/store/{suffix}-recovery-system.drv"))
+        .bind(attempt_id)
+        .fetch_one(&pool)
+        .await
+        .expect("insert terminal recovery candidate");
+
+        let roots = std::sync::Arc::new(AtomicUsize::new(0));
+        let planning_recovered = recover_orphaned_derivation_build_jobs_with(&pool, {
+            let roots = roots.clone();
+            move |_drv_path, _derivation_id| {
+                let roots = roots.clone();
+                async move {
+                    roots.fetch_add(1, Ordering::SeqCst);
+                    Ok(true)
+                }
+            }
+        })
+        .await
+        .expect("scan planning attempt");
+        assert_eq!(planning_recovered, 0);
+        assert_eq!(roots.load(Ordering::SeqCst), 0);
+
+        let mut tx = pool.begin().await.expect("begin attempt release");
+        sqlx::query(
+            "UPDATE evaluation_attempts SET status = 'complete', dependency_plan_barrier = 'ready', dependency_plan_terminal_count = 1 WHERE id = $1",
+        )
+        .bind(attempt_id)
+        .execute(&mut *tx)
+        .await
+        .expect("release barrier");
+        sqlx::query("UPDATE commits SET evaluation_status = 'complete' WHERE id = $1")
+            .bind(commit.id)
+            .execute(&mut *tx)
+            .await
+            .expect("complete commit");
+        tx.commit().await.expect("commit release");
+
+        let ready_recovered = recover_orphaned_derivation_build_jobs_with(&pool, {
+            let roots = roots.clone();
+            move |_drv_path, observed_id| {
+                let roots = roots.clone();
+                async move {
+                    assert_eq!(observed_id, derivation_id);
+                    roots.fetch_add(1, Ordering::SeqCst);
+                    Ok(true)
+                }
+            }
+        })
+        .await
+        .expect("recover released attempt");
+        assert_eq!(ready_recovered, 1);
+        assert_eq!(roots.load(Ordering::SeqCst), 1);
+        let state: (String, i64, i64) = sqlx::query_as(
+            "SELECT build_preparation_state, dependency_build_plan_generation, (SELECT COUNT(*) FROM build_jobs WHERE derivation_id = d.id)::BIGINT FROM derivations d WHERE id = $1",
+        )
+        .bind(derivation_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load recovered state");
+        assert_eq!(state, ("queued".to_string(), 1, 1));
+    }
 
     /// Verify that a QueueNotifier notification issued after incremental enqueue
     /// is observable by a waiting consumer.

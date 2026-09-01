@@ -8,7 +8,6 @@ use std::sync::{Arc, OnceLock};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::Semaphore;
-use tokio::task::JoinSet;
 use tokio::time::{Duration, Instant};
 
 const MOCK_EVAL_TOTAL_DURATION_MS: u64 = 30_000;
@@ -335,15 +334,14 @@ use crate::models::deployment_policies::{
 };
 use crate::models::flakes::Flake;
 use crate::models::retry_policy::RetryFailureClass;
-use crate::queries::build_jobs::{
-    BuildJobInsertOutcome, QueuedBuild, create_build_job_for_derivation_tx,
-};
+use crate::queries::build_jobs::QueuedBuild;
+#[cfg(test)]
+use crate::queries::build_jobs::{BuildJobInsertOutcome, create_build_job_for_derivation_tx};
 use crate::queries::commits_artifacts::CachedSystemsState;
 use crate::queries::derivations::{
-    DependencyBuildPlanGeneration, DependencyBuildPlanWriteOutcome, complete_dependency_build_plan,
-    fail_dependency_build_plan, insert_derivation_with_target,
-    mark_dependency_build_plan_calculating, mark_derivation_dry_run_complete,
-    set_expected_store_path,
+    DependencyBuildPlanGeneration, DependencyBuildPlanWriteOutcome, EvaluationStatus,
+    complete_dependency_build_plan, fail_dependency_build_plan,
+    mark_dependency_build_plan_calculating,
 };
 use crate::queries::systems::list_configuration_names_for_flake;
 use crate::queue::QueueNotifier;
@@ -596,52 +594,6 @@ where
         DependencyBuildPlanWriteOutcome::Applied => Some(generation),
         DependencyBuildPlanWriteOutcome::Stale => None,
     })
-}
-
-pub(crate) async fn calculate_and_persist_dependency_build_plan(
-    pool: &PgPool,
-    commit_id: i32,
-    expected_attempt: i32,
-    finalized: &FinalizedDerivation,
-    build_config: &BuildConfig,
-) -> Result<Option<DependencyBuildPlanGeneration>> {
-    calculate_and_persist_dependency_build_plan_with(
-        pool,
-        commit_id,
-        expected_attempt,
-        finalized,
-        build_config,
-        |drv_path, build_config| async move {
-            calculate_dependency_build_plan(&drv_path, &build_config).await
-        },
-    )
-    .await
-}
-
-/// Spawns graph-only planning for a system that cannot activate a build job.
-fn spawn_dependency_build_plan_calculation(
-    pool: PgPool,
-    commit_id: i32,
-    expected_attempt: i32,
-    finalized: FinalizedDerivation,
-    build_config: BuildConfig,
-) {
-    tokio::spawn(async move {
-        if let Err(err) = calculate_and_persist_dependency_build_plan(
-            &pool,
-            commit_id,
-            expected_attempt,
-            &finalized,
-            &build_config,
-        )
-        .await
-        {
-            warn!(
-                derivation_id = finalized.derivation_id,
-                "Dependency build-plan task failed: {err:#}"
-            );
-        }
-    });
 }
 
 /// Helper function to broadcast eval log via WebSocket AND persist to database.
@@ -1275,8 +1227,13 @@ pub struct FinalizedDerivation {
     pub cf_agent_enabled: Option<bool>,
 }
 
-/// In-memory evaluation plan produced by `evaluate_with_nix_eval_jobs`.
-/// Contains no DB state — all writes are deferred to `finalize_evaluation_attempt`.
+/// Contains the validated discovery and fallback outcomes for one evaluation.
+///
+/// The discovery phase constructs this value before dependency-plan work.
+/// [`prepare_evaluation_dependency_plans`] persists and tags successful systems,
+/// calculates terminal plans, and establishes required GC roots.
+/// [`finalize_evaluation_attempt`] then releases the attempt-wide barrier and
+/// reconciles build jobs atomically.
 #[derive(Debug)]
 pub struct EvaluationPlan {
     /// Raw nix-eval-jobs results (for broadcasting / summary).
@@ -1308,6 +1265,7 @@ pub enum EvaluationFinalizeOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(test)]
 pub enum SystemFinalizeOutcome {
     Queued {
         derivation_id: i32,
@@ -1336,21 +1294,20 @@ pub enum SystemFinalizeOutcome {
     Superseded,
 }
 
-/// Outcome of Phase 1 (persist evaluated system without inserting a build job).
+/// Outcome of persisting one evaluated system before attempt-wide planning.
 ///
-/// The caller must follow up with a GC root and build activation for
-/// `NeedsBuildPreparation`.  Other variants do not need build activation.
+/// [`prepare_evaluation_dependency_plans`] plans every persisted variant. It
+/// roots build-eligible variants only after all plans become terminal, and
+/// [`finalize_evaluation_attempt`] performs atomic attempt-wide activation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SystemPersistenceOutcome {
     /// A new derivation was recorded and is build-eligible.
-    /// The caller must create a GC root, then call
-    /// `activate_evaluated_system_build`.
     NeedsBuildPreparation {
         derivation_id: i32,
         drv_path: String,
     },
-    /// A build job already exists for this derivation (from a prior call).
-    /// Create a GC root (best-effort) and re-notify if still queued.
+    /// A build job already exists for this derivation from an earlier attempt.
+    /// The current attempt replans and roots it before the barrier can reopen.
     ExistingBuildJob {
         derivation_id: i32,
         build_job_id: uuid::Uuid,
@@ -1362,14 +1319,162 @@ pub enum SystemPersistenceOutcome {
         derivation_id: i32,
         reason: SystemNotQueuedReason,
     },
+    /// Release A retained a path owned by another commit for old-process
+    /// compatibility. This system has a terminal failed plan and cannot build.
+    LegacyPathConflict { derivation_id: i32 },
     /// Evaluation was cancelled; caller should stop.
     Cancelled,
     /// Evaluation was superseded; caller should bail.
     Superseded,
 }
 
+const LEGACY_DERIVATION_PATH_CONFLICT_REASON: &str = "Dependency plan unavailable during release-A compatibility: the derivation path is owned by another commit under the legacy global path constraint";
+
+fn is_legacy_derivation_path_conflict(error: &anyhow::Error) -> bool {
+    error.chain().any(|source| {
+        let Some(sqlx::Error::Database(database_error)) = source.downcast_ref::<sqlx::Error>()
+        else {
+            return false;
+        };
+        database_error.code().as_deref() == Some("23505")
+            && database_error.constraint() == Some("derivations_derivation_path_unique")
+    })
+}
+
+async fn persist_legacy_derivation_path_conflict(
+    pool: &PgPool,
+    commit_id: i32,
+    expected_attempt: i32,
+    result: &SuccessfulSystemResult,
+    policy_check: &PolicyCheckResult,
+    assigned_policies: &[AssignedPolicy],
+) -> Result<SystemPersistenceOutcome> {
+    let mut tx = pool.begin().await?;
+    let state: Option<(String, bool, uuid::Uuid)> = sqlx::query_as(
+        r#"
+        SELECT c.evaluation_status, COALESCE(c.cancellation_requested, FALSE), ea.id
+        FROM commits c
+        JOIN evaluation_attempts ea
+          ON ea.commit_id = c.id
+         AND ea.attempt_number = c.evaluation_attempt_count
+        WHERE c.id = $1
+          AND c.evaluation_attempt_count = $2
+        FOR UPDATE OF c, ea
+        "#,
+    )
+    .bind(commit_id)
+    .bind(expected_attempt)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((status, cancellation_requested, attempt_id)) = state else {
+        tx.rollback().await?;
+        return Ok(SystemPersistenceOutcome::Superseded);
+    };
+    if cancellation_requested || status == "cancelling" {
+        tx.rollback().await?;
+        return Ok(SystemPersistenceOutcome::Cancelled);
+    }
+    if status != "in_progress" {
+        tx.rollback().await?;
+        return Ok(SystemPersistenceOutcome::Superseded);
+    }
+
+    let policy_results = policy_results_json(policy_check, assigned_policies);
+    let derivation_id: i32 = sqlx::query_scalar(
+        r#"
+        INSERT INTO derivations (
+            commit_id, derivation_type, derivation_name, derivation_target,
+            status_id, attempt_count, expected_store_path, cf_agent_enabled,
+            policy_requirements_met, policy_results, error_message,
+            completed_at, scheduled_at, evaluation_attempt_id,
+            dependency_build_plan_status, dependency_build_plan_generation,
+            build_preparation_state
+        )
+        VALUES (
+            $1, 'nixos', $2, $3, $4, 0, $5, $6, $7, $8, $9,
+            NOW(), NOW(), $10, 'unavailable', 0, 'not_required'
+        )
+        ON CONFLICT (COALESCE(commit_id, -1), derivation_name, derivation_type)
+        DO UPDATE SET
+            status_id = EXCLUDED.status_id,
+            derivation_path = NULL,
+            derivation_target = COALESCE(EXCLUDED.derivation_target, derivations.derivation_target),
+            expected_store_path = EXCLUDED.expected_store_path,
+            cf_agent_enabled = EXCLUDED.cf_agent_enabled,
+            policy_requirements_met = EXCLUDED.policy_requirements_met,
+            policy_results = EXCLUDED.policy_results,
+            error_message = EXCLUDED.error_message,
+            completed_at = NOW(),
+            evaluation_attempt_id = EXCLUDED.evaluation_attempt_id,
+            dependency_derivation_count = NULL,
+            dependency_build_count = NULL,
+            dependency_build_plan_status = 'unavailable',
+            dependency_build_plan_generation = 0,
+            dependency_build_plan_lease_expires_at = NULL,
+            dependency_build_plan_legacy_generation = NULL,
+            build_preparation_state = 'not_required'
+        RETURNING id
+        "#,
+    )
+    .bind(commit_id)
+    .bind(&result.system_name)
+    .bind(&result.derivation_target)
+    .bind(EvaluationStatus::DryRunComplete.as_id())
+    .bind(result.expected_store_path.as_deref())
+    .bind(result.cf_agent_enabled)
+    .bind(policy_requirements_met(policy_check))
+    .bind(&policy_results)
+    .bind(LEGACY_DERIVATION_PATH_CONFLICT_REASON)
+    .bind(attempt_id)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    // COMPATIBILITY: Release A cannot attach the shared path to this commit's
+    // row while old processes depend on global path uniqueness. Advance through
+    // calculating so the 0245/0246 compatibility trigger recognizes this as a
+    // new-writer terminal failure. Counts stay null and recovery cannot build it.
+    sqlx::query(
+        r#"
+        UPDATE derivations
+        SET dependency_build_plan_status = 'calculating',
+            dependency_build_plan_generation = 1,
+            dependency_build_plan_lease_expires_at = NOW() + INTERVAL '10 minutes',
+            dependency_build_plan_legacy_generation = NULL
+        WHERE id = $1
+        "#,
+    )
+    .bind(derivation_id)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE derivations
+        SET dependency_build_plan_status = 'failed',
+            dependency_derivation_count = NULL,
+            dependency_build_count = NULL,
+            dependency_build_plan_lease_expires_at = NULL,
+            dependency_build_plan_legacy_generation = NULL,
+            build_preparation_state = 'not_required'
+        WHERE id = $1
+        "#,
+    )
+    .bind(derivation_id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    warn!(
+        commit_id,
+        system_name = %result.system_name,
+        derivation_path = %result.drv_path,
+        "recorded a failed dependency plan for a legacy cross-commit path conflict"
+    );
+    Ok(SystemPersistenceOutcome::LegacyPathConflict { derivation_id })
+}
+
 /// Outcome of Phase 3 (activate a build job after GC root is established).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(test)]
 pub enum SystemBuildActivationOutcome {
     /// A new build job was inserted and queued.
     Queued { build_job_id: uuid::Uuid },
@@ -1436,13 +1541,10 @@ fn system_not_queued_reason(
     None
 }
 
-/// Phase 1: persist an evaluated system's derivation without inserting a
-/// build job.  The build job is created later by `activate_evaluated_system_build`,
-/// after the GC root has been established.
+/// Persists an evaluated system without inserting or notifying a build job.
 ///
-/// Returns [`SystemPersistenceOutcome`] which tells the caller whether build
-/// activation is needed, or if the system was recorded without a build, or
-/// if the evaluation was cancelled/superseded.
+/// Returns [`SystemPersistenceOutcome`] so the attempt-wide coordinator can
+/// select GC-root candidates after every tagged plan is terminal.
 pub async fn persist_evaluated_system(
     pool: &PgPool,
     commit_id: i32,
@@ -1461,14 +1563,21 @@ pub async fn persist_evaluated_system(
         evaluation_status: Option<String>,
         evaluation_attempt_count: Option<i32>,
         cancellation_requested: Option<bool>,
+        evaluation_attempt_id: uuid::Uuid,
     }
 
     let state = sqlx::query_as::<_, CommitState>(
         r#"
-        SELECT evaluation_status, evaluation_attempt_count, cancellation_requested
-        FROM commits
-        WHERE id = $1
-        FOR UPDATE
+        SELECT c.evaluation_status,
+               c.evaluation_attempt_count,
+               c.cancellation_requested,
+               ea.id AS evaluation_attempt_id
+        FROM commits c
+        JOIN evaluation_attempts ea
+          ON ea.commit_id = c.id
+         AND ea.attempt_number = c.evaluation_attempt_count
+        WHERE c.id = $1
+        FOR UPDATE OF c, ea
         "#,
     )
     .bind(commit_id)
@@ -1533,7 +1642,40 @@ pub async fn persist_evaluated_system(
     let drv_path = result.drv_path.clone();
     let policy_requirements_met = policy_requirements_met(policy_check);
     let policy_results = policy_results_json(policy_check, assigned_policies);
-    let write = record_successful_eval_result_in_tx(
+
+    // INVARIANT: A queued or historical build owns the derivation path that it
+    // was created from even while the derivation status remains DryRunComplete.
+    // Lock and reject a changed path before the generic successful-eval upsert
+    // can overwrite that shared row.
+    let job_backed_path: Option<(i32, Option<String>)> = sqlx::query_as(
+        r#"
+        SELECT d.id, d.derivation_path
+        FROM derivations d
+        WHERE COALESCE(d.commit_id, -1) = $1
+          AND d.derivation_name = $2
+          AND d.derivation_type = 'nixos'
+          AND EXISTS (
+              SELECT 1 FROM build_jobs bj WHERE bj.derivation_id = d.id
+          )
+        FOR UPDATE OF d
+        "#,
+    )
+    .bind(commit_id)
+    .bind(&result.system_name)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some((derivation_id, stored_path)) = job_backed_path
+        && stored_path.as_deref() != Some(result.drv_path.as_str())
+    {
+        bail!(
+            "Refusing to reuse job-backed derivation {} for changed path: stored={:?}, evaluated={}",
+            derivation_id,
+            stored_path,
+            result.drv_path,
+        );
+    }
+
+    let write = match record_successful_eval_result_in_tx(
         &mut tx,
         Some(commit_id),
         &result.system_name,
@@ -1546,7 +1688,25 @@ pub async fn persist_evaluated_system(
         &policy_results,
     )
     .await
-    .with_context(|| format!("Failed to write derivation for {}", result.system_name))?;
+    {
+        Ok(write) => write,
+        Err(error) if is_legacy_derivation_path_conflict(&error) => {
+            tx.rollback().await?;
+            return persist_legacy_derivation_path_conflict(
+                pool,
+                commit_id,
+                expected_attempt,
+                result,
+                policy_check,
+                assigned_policies,
+            )
+            .await;
+        }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("Failed to write derivation for {}", result.system_name));
+        }
+    };
 
     let assessment_derivation_id = match &write {
         SuccessfulEvalWrite::Inserted { derivation_id }
@@ -1592,14 +1752,9 @@ pub async fn persist_evaluated_system(
             derivation_id: existing_deriv_id,
             status_id: _,
         } => {
-            // Derivation is already in a build-active state.  Lock the
-            // build job row immediately (FOR UPDATE) so a concurrent
-            // builder claim cannot slip in between this SELECT and the
-            // cancellation UPDATE below — without the lock, a builder
-            // could claim (queued -> building) the job in the window
-            // between our read and our unconditional write, and this
-            // transaction would then overwrite an in-progress build's
-            // status with 'cancelled'/'failed'.
+            // CONCURRENCY: Lock the existing job before changing policy state.
+            // Reset rejects active builds, and the barrier trigger prevents a
+            // held queued job from becoming active during this transaction.
             let existing: Option<(uuid::Uuid, String)> = sqlx::query_as(
                 "SELECT id, status FROM build_jobs WHERE derivation_id = $1 \
                  ORDER BY created_at ASC LIMIT 1 FOR UPDATE",
@@ -1609,16 +1764,14 @@ pub async fn persist_evaluated_system(
             .await?;
 
             if let Some((build_job_id, build_job_status)) = existing {
-                if policy_requirements_met {
-                    // Policy still passes — existing build job is fine.
-                    tx.commit().await?;
-                    return Ok(SystemPersistenceOutcome::ExistingBuildJob {
-                        derivation_id: existing_deriv_id,
-                        build_job_id,
+                if matches!(build_job_status.as_str(), "building" | "cancelling") {
+                    bail!(
+                        "Cannot persist replacement evaluation for derivation {}: active build job is {}",
+                        existing_deriv_id,
                         build_job_status,
-                        drv_path,
-                    });
-                } else {
+                    );
+                }
+                if !policy_requirements_met {
                     // Policy now fails. Derive the specific reason (agent
                     // vs. strict policy) instead of always reporting
                     // StrictPolicyFailure.
@@ -1651,29 +1804,54 @@ pub async fn persist_evaluated_system(
                         .execute(&mut *tx)
                         .await?;
                     }
-                    // For already-building (or any other non-queued)
-                    // jobs, leave them in place but do NOT return
-                    // ExistingBuildJob (which would re-notify the queue
-                    // and treat the job as still valid). Instead fall
-                    // through to RecordedWithoutBuild so the system is
-                    // recorded but the deployment-selection queries
-                    // (which now also gate on cf_agent_enabled AND
-                    // policy_requirements_met) will exclude this
-                    // derivation regardless of whether the in-flight
-                    // build eventually completes.
-                    tx.commit().await?;
-                    return Ok(SystemPersistenceOutcome::RecordedWithoutBuild {
-                        derivation_id: existing_deriv_id,
-                        reason,
-                    });
+                    debug!(
+                        derivation_id = existing_deriv_id,
+                        ?reason,
+                        "existing build excluded by replacement policy"
+                    );
                 }
             }
 
-            // No build job exists — fall through to the normal eligibility
-            // check, which may produce NeedsBuildPreparation.
+            // Fall through to the common attempt tag and plan reset. Existing
+            // queued and terminal jobs are part of the replacement snapshot.
             existing_deriv_id
         }
     };
+
+    let persisted_path: Option<String> =
+        sqlx::query_scalar("SELECT derivation_path FROM derivations WHERE id = $1 FOR UPDATE")
+            .bind(derivation_id)
+            .fetch_one(&mut *tx)
+            .await?;
+    if persisted_path.as_deref() != Some(result.drv_path.as_str()) {
+        bail!(
+            "Refusing to reuse derivation {} for changed path: stored={:?}, evaluated={}",
+            derivation_id,
+            persisted_path,
+            result.drv_path,
+        );
+    }
+
+    // INVARIANT: Persistence and attempt tagging are one transaction. Reset the
+    // plan generation even for an unchanged path so finalization can prove that
+    // every tagged derivation was planned by this attempt.
+    sqlx::query(
+        r#"
+        UPDATE derivations
+        SET evaluation_attempt_id = $2,
+            dependency_derivation_count = NULL,
+            dependency_build_count = NULL,
+            dependency_build_plan_status = 'unavailable',
+            dependency_build_plan_generation = 0,
+            dependency_build_plan_lease_expires_at = NULL,
+            dependency_build_plan_legacy_generation = NULL
+        WHERE id = $1
+        "#,
+    )
+    .bind(derivation_id)
+    .bind(state.evaluation_attempt_id)
+    .execute(&mut *tx)
+    .await?;
 
     if let Some(reason) = system_not_queued_reason(policy_check, build_eligible) {
         // Mark the derivation as not requiring build preparation so the recovery
@@ -1761,13 +1939,12 @@ pub async fn persist_evaluated_system(
     })
 }
 
-/// Phase 3: activate a build job for a previously-persisted derivation,
-/// after the GC root has been established.
+/// Activates one previously persisted derivation for legacy regression tests.
 ///
-/// Runs in its own transaction so that the build job only becomes visible
-/// (claimable) after this function commits.  Re-validates attempt number
-/// and cancellation under `FOR UPDATE` to handle races with cancellation
-/// or supersession.
+/// Production activation uses [`finalize_evaluation_attempt`] so one system
+/// cannot bypass the evaluation-wide barrier. This helper preserves coverage
+/// for the superseded transaction guards and is not compiled into the server.
+#[cfg(test)]
 pub async fn activate_evaluated_system_build(
     pool: &PgPool,
     commit_id: i32,
@@ -1939,11 +2116,8 @@ pub async fn activate_evaluated_system_build(
     Ok(outcome)
 }
 
-/// Handle build activation result: notify queue and broadcast via WebSocket.
-///
-/// This function is called from bounded preparation tasks (streaming path)
-/// and from the sequential fallback path.  When `log_sequence` is `Some`,
-/// eval-log persistence is also performed.
+/// Handles a legacy per-system activation result in regression tests.
+#[cfg(test)]
 async fn handle_system_build_activation(
     pool: &PgPool,
     cf_state: Option<&crate::handlers::agent_request::CFState>,
@@ -2070,6 +2244,7 @@ async fn handle_system_build_activation(
 /// If the row does not match all predicates, the update does nothing and no
 /// error is returned. This prevents a stale failure from overwriting a newer
 /// `queued`, `not_required`, or re-evaluated state.
+#[cfg(test)]
 pub(crate) async fn record_preparation_failure(
     pool: &PgPool,
     derivation_id: i32,
@@ -2125,12 +2300,11 @@ pub(crate) async fn record_preparation_failure(
     }
 }
 
-/// Full combined helper that persists, roots, activates, and notifies.
+/// Preserves the superseded per-system finalization flow for regression tests.
 ///
-/// Used by the fallback evaluation path and tests.  The bulk streaming
-/// path uses the split `persist_evaluated_system` → GC root →
-/// `activate_evaluated_system_build` flow instead, to avoid blocking
-/// the stdout reader.
+/// Production evaluation uses [`prepare_evaluation_dependency_plans`] and
+/// [`finalize_evaluation_attempt`] to release all systems atomically.
+#[cfg(test)]
 async fn finalize_evaluated_system_with_calculator<F, Fut>(
     pool: &PgPool,
     commit_id: i32,
@@ -2359,20 +2533,27 @@ where
             reason,
         }),
 
+        SystemPersistenceOutcome::LegacyPathConflict { derivation_id } => {
+            Ok(SystemFinalizeOutcome::PreparationFailed {
+                derivation_id,
+                error: LEGACY_DERIVATION_PATH_CONFLICT_REASON.to_string(),
+            })
+        }
+
         SystemPersistenceOutcome::Cancelled => Ok(SystemFinalizeOutcome::Cancelled),
         SystemPersistenceOutcome::Superseded => Ok(SystemFinalizeOutcome::Superseded),
     }
 }
 
-/// Persists, plans, roots, and activates one evaluated system in order.
+/// Persists, plans, roots, and activates one system in legacy regression tests.
 ///
-/// The dependency plan reaches `complete` or `failed` before a build job can
-/// become claimable. A failed plan remains distinct from a valid zero count but
-/// does not prevent the real build from proceeding.
+/// Production evaluation does not use this per-system flow. It remains as a
+/// test-only comparison for transaction and compatibility behavior.
 ///
 /// # Errors
 ///
 /// Returns an error when persistence, planning state, or activation fails.
+#[cfg(test)]
 pub async fn finalize_evaluated_system(
     pool: &PgPool,
     commit_id: i32,
@@ -2397,28 +2578,311 @@ pub async fn finalize_evaluated_system(
     .await
 }
 
+/// Persists, tags, plans, and roots every successful system in an attempt.
+///
+/// Discovery and fallback must finish before this phase starts. Persistence
+/// tags each derivation in the same transaction as its successful result. The
+/// process-wide planner limiter permits at most two calculators. GC roots are
+/// attempted only after every plan is terminal, and no build job is inserted or
+/// notified by this phase.
+///
+/// # Errors
+///
+/// Returns an error if persistence fails, an attempt is cancelled or
+/// superseded, a plan cannot reach a terminal state, or an eligible derivation
+/// cannot be rooted. Plan calculation errors themselves persist `failed` with
+/// null counts and do not fail the phase.
+pub async fn prepare_evaluation_dependency_plans(
+    pool: &PgPool,
+    commit_id: i32,
+    expected_attempt: i32,
+    plan: &EvaluationPlan,
+    policies_by_configuration: &PoliciesByConfiguration,
+    build_config: &BuildConfig,
+) -> Result<Vec<FinalizedDerivation>> {
+    prepare_evaluation_dependency_plans_with(
+        pool,
+        commit_id,
+        expected_attempt,
+        plan,
+        policies_by_configuration,
+        build_config,
+        |drv_path, config| async move { calculate_dependency_build_plan(&drv_path, &config).await },
+        |drv_path, derivation_id| async move {
+            crate::builder::create_drv_gc_root(&drv_path, derivation_id).await
+        },
+    )
+    .await
+}
+
+/// Prepares deterministic dependency plans for mock evaluations.
+///
+/// Uses the production persistence, tagging, concurrency, and rooting phases,
+/// but does not invoke Nix or validate synthetic mock store paths. Each mock
+/// system receives a valid zero-work plan.
+///
+/// # Errors
+///
+/// Returns an error if persistence or durable plan-state updates fail, or if
+/// the evaluation attempt is cancelled or superseded.
+pub async fn prepare_mock_evaluation_dependency_plans(
+    pool: &PgPool,
+    commit_id: i32,
+    expected_attempt: i32,
+    plan: &EvaluationPlan,
+    policies_by_configuration: &PoliciesByConfiguration,
+    build_config: &BuildConfig,
+) -> Result<Vec<FinalizedDerivation>> {
+    prepare_evaluation_dependency_plans_with(
+        pool,
+        commit_id,
+        expected_attempt,
+        plan,
+        policies_by_configuration,
+        build_config,
+        |_drv_path, _config| async move {
+            Ok(DependencyBuildPlan {
+                dependency_derivation_count: 0,
+                dependency_build_count: 0,
+            })
+        },
+        |_drv_path, _derivation_id| async move { Ok(true) },
+    )
+    .await
+}
+
+async fn prepare_evaluation_dependency_plans_with<C, CFut, R, RFut>(
+    pool: &PgPool,
+    commit_id: i32,
+    expected_attempt: i32,
+    plan: &EvaluationPlan,
+    policies_by_configuration: &PoliciesByConfiguration,
+    build_config: &BuildConfig,
+    calculator: C,
+    rooter: R,
+) -> Result<Vec<FinalizedDerivation>>
+where
+    C: Fn(String, BuildConfig) -> CFut + Clone,
+    CFut: std::future::Future<Output = Result<DependencyBuildPlan>>,
+    R: Fn(String, i32) -> RFut + Clone,
+    RFut: std::future::Future<Output = Result<bool>>,
+{
+    let expected_count = i32::try_from(plan.successful_systems.len())?;
+    let expected_set = sqlx::query(
+        r#"
+        UPDATE evaluation_attempts ea
+        SET dependency_plan_expected_count = $3,
+            dependency_plan_terminal_count = 0,
+            updated_at = NOW()
+        FROM commits c
+        WHERE c.id = $1
+          AND c.evaluation_status = 'in_progress'
+          AND c.evaluation_attempt_count = $2
+          AND ea.commit_id = c.id
+          AND ea.attempt_number = $2
+          AND ea.status = 'in_progress'
+          AND ea.dependency_plan_barrier = 'planning'
+        "#,
+    )
+    .bind(commit_id)
+    .bind(expected_attempt)
+    .bind(expected_count)
+    .execute(pool)
+    .await?;
+    if expected_set.rows_affected() != 1 {
+        bail!("evaluation attempt was cancelled or superseded before planning");
+    }
+
+    let mut finalized = Vec::with_capacity(plan.successful_systems.len());
+    let mut root_candidates = HashSet::new();
+    let mut terminal_compatibility_failures = HashSet::new();
+
+    for result in &plan.successful_systems {
+        let policy_check = plan
+            .policy_checks
+            .iter()
+            .find(|check| check.system_name == result.system_name)
+            .with_context(|| format!("Missing policy result for {}", result.system_name))?;
+        let assigned = policies_for_config(policies_by_configuration, &result.system_name);
+        let outcome = persist_evaluated_system(
+            pool,
+            commit_id,
+            expected_attempt,
+            result,
+            policy_check,
+            assigned,
+        )
+        .await?;
+
+        let derivation_id = match outcome {
+            SystemPersistenceOutcome::NeedsBuildPreparation { derivation_id, .. } => {
+                root_candidates.insert(derivation_id);
+                derivation_id
+            }
+            SystemPersistenceOutcome::ExistingBuildJob {
+                derivation_id,
+                build_job_status,
+                ..
+            } => {
+                // INVARIANT: Only a queued job can execute after this attempt
+                // releases. Terminal history does not require the old drv path
+                // to remain present during re-evaluation.
+                if build_job_status == "queued" {
+                    root_candidates.insert(derivation_id);
+                }
+                derivation_id
+            }
+            SystemPersistenceOutcome::RecordedWithoutBuild { derivation_id, .. } => derivation_id,
+            SystemPersistenceOutcome::LegacyPathConflict { derivation_id } => {
+                terminal_compatibility_failures.insert(derivation_id);
+                derivation_id
+            }
+            SystemPersistenceOutcome::Cancelled => return Err(EvaluationCancelled.into()),
+            SystemPersistenceOutcome::Superseded => {
+                bail!(
+                    "evaluation attempt was superseded while persisting {}",
+                    result.system_name
+                )
+            }
+        };
+        finalized.push(FinalizedDerivation {
+            derivation_id,
+            drv_path: result.drv_path.clone(),
+            system_name: result.system_name.clone(),
+            cf_agent_enabled: result.cf_agent_enabled,
+        });
+    }
+
+    let plannable = finalized
+        .iter()
+        .filter_map(|derivation| {
+            (!terminal_compatibility_failures.contains(&derivation.derivation_id))
+                .then(|| derivation.clone())
+        })
+        .collect::<Vec<_>>();
+    let planning_results = stream::iter(plannable)
+        .map(|derivation| {
+            let calculator = calculator.clone();
+            async move {
+                calculate_and_persist_dependency_build_plan_with(
+                    pool,
+                    commit_id,
+                    expected_attempt,
+                    &derivation,
+                    build_config,
+                    calculator,
+                )
+                .await
+                .map(|outcome| (derivation, outcome))
+            }
+        })
+        .buffer_unordered(DEPENDENCY_BUILD_PLAN_MAX_CONCURRENT)
+        .collect::<Vec<_>>()
+        .await;
+
+    for planning_result in planning_results {
+        let (derivation, outcome) = planning_result?;
+        if outcome.is_none() {
+            bail!(
+                "evaluation attempt was superseded while planning {}",
+                derivation.system_name
+            );
+        }
+    }
+
+    // INVARIANT: Rooting starts only after the complete tagged population has
+    // reached complete|failed. A share lock keeps cancellation or replacement
+    // from closing the exact attempt between revalidation and the external root.
+    for derivation in &finalized {
+        if !root_candidates.contains(&derivation.derivation_id) {
+            continue;
+        }
+
+        let mut root_tx = pool.begin().await?;
+        let current: bool = sqlx::query_scalar(
+            r#"
+            SELECT TRUE
+            FROM commits c
+            JOIN evaluation_attempts ea
+              ON ea.commit_id = c.id
+             AND ea.attempt_number = c.evaluation_attempt_count
+            JOIN derivations d ON d.evaluation_attempt_id = ea.id
+            WHERE c.id = $1
+              AND c.evaluation_status = 'in_progress'
+              AND COALESCE(c.cancellation_requested, FALSE) = FALSE
+              AND c.evaluation_attempt_count = $2
+              AND ea.status = 'in_progress'
+              AND ea.dependency_plan_barrier = 'planning'
+              AND d.id = $3
+              AND d.derivation_path = $4
+              AND d.dependency_build_plan_status IN ('complete', 'failed')
+            FOR SHARE OF c, ea, d
+            "#,
+        )
+        .bind(commit_id)
+        .bind(expected_attempt)
+        .bind(derivation.derivation_id)
+        .bind(&derivation.drv_path)
+        .fetch_optional(&mut *root_tx)
+        .await?
+        .unwrap_or(false);
+        if !current {
+            root_tx.rollback().await?;
+            bail!(
+                "evaluation attempt was cancelled or superseded before rooting {}",
+                derivation.system_name
+            );
+        }
+
+        let rooted = rooter.clone()(derivation.drv_path.clone(), derivation.derivation_id)
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to create GC root for derivation {}",
+                    derivation.derivation_id
+                )
+            })?;
+        if !rooted && !cfg!(test) {
+            bail!(
+                "Derivation {} ({}) is not valid in the server store",
+                derivation.derivation_id,
+                derivation.drv_path
+            );
+        }
+        root_tx.commit().await?;
+    }
+
+    Ok(finalized)
+}
+
 /// Atomically finalize a validated evaluation attempt.
 ///
-/// Acquires a `FOR UPDATE` lock on the commit row, checks the attempt number
-/// and cancellation flag, writes all successful derivations and synthetic
-/// failures under that lock, and marks the commit complete — all in a single
-/// PostgreSQL transaction.
+/// Acquires locks on the commit and current attempt, verifies that the exact
+/// tagged successful-system population is terminal, writes synthetic failures,
+/// releases the barrier, reconciles build jobs, and marks the attempt and commit
+/// complete in one PostgreSQL transaction.
 ///
 /// Because the commit row is locked for the duration:
 /// - A concurrent cancellation API call blocks until this transaction commits
 ///   or rolls back. If cancellation already won the lock, this returns
 ///   `EvaluationFinalizeOutcome::Cancelled`.
-/// - If any derivation write fails the entire transaction is rolled back, the
-///   commit remains `in_progress`, and the ordinary failure-CAS path retries.
+/// - If validation, metadata, synthetic failure, or job reconciliation fails,
+///   the entire transaction rolls back and no barrier or build job is visible.
 pub async fn finalize_evaluation_attempt(
     pool: &PgPool,
     commit_id: i32,
     expected_attempt: i32,
     plan: &EvaluationPlan,
 ) -> Result<EvaluationFinalizeOutcome> {
+    use crate::queries::build_jobs::{create_build_jobs_for_commit_tx, lock_build_queue_order};
     use crate::queries::derivations::record_synthetic_eval_failure_in_tx;
 
     let mut tx = pool.begin().await?;
+
+    // CONCURRENCY: Queue writers and finalization serialize queue positions with
+    // the advisory lock. Finalization then locks the commit, attempt, and
+    // derivation rows before inserting jobs against its own committed snapshot.
+    lock_build_queue_order(&mut tx).await?;
 
     // Lock the commit row for the duration of this transaction.  This
     // serialises finalization against the cancellation API: whichever
@@ -2428,14 +2892,25 @@ pub async fn finalize_evaluation_attempt(
         evaluation_status: Option<String>,
         evaluation_attempt_count: Option<i32>,
         cancellation_requested: Option<bool>,
+        evaluation_attempt_id: uuid::Uuid,
+        dependency_plan_barrier: String,
+        dependency_plan_expected_count: i32,
     }
 
     let state = sqlx::query_as::<_, CommitState>(
         r#"
-        SELECT evaluation_status, evaluation_attempt_count, cancellation_requested
-        FROM commits
-        WHERE id = $1
-        FOR UPDATE
+        SELECT c.evaluation_status,
+               c.evaluation_attempt_count,
+               c.cancellation_requested,
+               ea.id AS evaluation_attempt_id,
+               ea.dependency_plan_barrier,
+               ea.dependency_plan_expected_count
+        FROM commits c
+        JOIN evaluation_attempts ea
+          ON ea.commit_id = c.id
+         AND ea.attempt_number = c.evaluation_attempt_count
+        WHERE c.id = $1
+        FOR UPDATE OF c, ea
         "#,
     )
     .bind(commit_id)
@@ -2461,6 +2936,28 @@ pub async fn finalize_evaluation_attempt(
     if cancellation || status == "cancelling" {
         sqlx::query(
             r#"
+            UPDATE evaluation_attempts
+            SET status = 'cancelled',
+                dependency_plan_barrier = 'cancelled',
+                dependency_plan_terminal_count = LEAST(
+                    dependency_plan_expected_count,
+                    (
+                        SELECT COUNT(*)::integer
+                        FROM derivations d
+                        WHERE d.evaluation_attempt_id = evaluation_attempts.id
+                          AND d.dependency_build_plan_status IN ('complete', 'failed')
+                    )
+                ),
+                completed_at = COALESCE(completed_at, NOW()),
+                updated_at = NOW()
+            WHERE id = $1 AND status = 'in_progress'
+            "#,
+        )
+        .bind(state.evaluation_attempt_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            r#"
             UPDATE commits
             SET evaluation_status = 'cancelled',
                 cancellation_requested = FALSE,
@@ -2476,9 +2973,64 @@ pub async fn finalize_evaluation_attempt(
         return Ok(EvaluationFinalizeOutcome::Cancelled);
     }
 
-    // Successful systems were finalized incrementally as soon as each one
-    // evaluated. This commit-level finalizer only records confirmed synthetic
-    // failures and transitions the attempt state.
+    if state.dependency_plan_barrier != "planning" {
+        bail!(
+            "Evaluation attempt {} has unexpected dependency-plan barrier {}",
+            state.evaluation_attempt_id,
+            state.dependency_plan_barrier,
+        );
+    }
+
+    let expected_names = plan
+        .successful_systems
+        .iter()
+        .map(|result| result.system_name.as_str())
+        .collect::<Vec<_>>();
+    let unique_names = expected_names.iter().copied().collect::<HashSet<_>>();
+    if unique_names.len() != expected_names.len() {
+        bail!("Evaluation plan contains duplicate successful systems");
+    }
+
+    let population: (i64, i64, i64) = sqlx::query_as(
+        r#"
+        SELECT
+            COUNT(*)::BIGINT,
+            COUNT(*) FILTER (
+                WHERE d.dependency_build_plan_status IN ('complete', 'failed')
+            )::BIGINT,
+            COUNT(*) FILTER (WHERE d.derivation_name = ANY($2))::BIGINT
+        FROM derivations d
+        WHERE d.commit_id = $1
+          AND d.evaluation_attempt_id = $3
+        "#,
+    )
+    .bind(commit_id)
+    .bind(&expected_names)
+    .bind(state.evaluation_attempt_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    let expected_count = i64::try_from(expected_names.len())?;
+    if i64::from(state.dependency_plan_expected_count) != expected_count {
+        bail!(
+            "Dependency-plan expected count changed for attempt {}: stored {}, plan {}",
+            state.evaluation_attempt_id,
+            state.dependency_plan_expected_count,
+            expected_count,
+        );
+    }
+    if population != (expected_count, expected_count, expected_count) {
+        bail!(
+            "Dependency-plan population mismatch for attempt {}: expected {}, tagged {}, terminal {}, named {}",
+            state.evaluation_attempt_id,
+            expected_count,
+            population.0,
+            population.1,
+            population.2,
+        );
+    }
+
+    // Synthetic failures join the already persisted and planned success
+    // population in this transaction before the attempt-wide release.
     let mut sorted_failures = plan.confirmed_failures.clone();
     sorted_failures.sort_by(|a, b| a.system_name.cmp(&b.system_name));
 
@@ -2555,7 +3107,33 @@ pub async fn finalize_evaluation_attempt(
     .await
     .context("Failed to persist terminal eval_passed outcomes")?;
 
-    // Mark the commit complete inside the same transaction.
+    let attempt_rows = sqlx::query(
+        r#"
+        UPDATE evaluation_attempts
+        SET dependency_plan_barrier = 'ready',
+            dependency_plan_terminal_count = $2,
+            status = 'complete',
+            completed_at = NOW(),
+            error_message = NULL,
+            updated_at = NOW()
+        WHERE id = $1
+          AND status = 'in_progress'
+          AND dependency_plan_barrier = 'planning'
+          AND dependency_plan_expected_count = $2
+        "#,
+    )
+    .bind(state.evaluation_attempt_id)
+    .bind(i32::try_from(expected_count)?)
+    .execute(&mut *tx)
+    .await?;
+    if attempt_rows.rows_affected() != 1 {
+        tx.rollback().await?;
+        return Ok(EvaluationFinalizeOutcome::Superseded);
+    }
+
+    // Mark the commit complete before staging jobs. The transaction remains
+    // invisible until all jobs are reconciled, so builders observe the commit,
+    // released barrier, and queue population atomically.
     let rows = sqlx::query(
         r#"
         UPDATE commits
@@ -2582,20 +3160,49 @@ pub async fn finalize_evaluation_attempt(
         return Ok(EvaluationFinalizeOutcome::Superseded);
     }
 
+    let queued_builds = create_build_jobs_for_commit_tx(&mut tx, commit_id).await?;
+    let derivations = sqlx::query_as::<_, (i32, Option<String>, String, Option<bool>)>(
+        r#"
+        SELECT id, derivation_path, derivation_name, cf_agent_enabled
+        FROM derivations
+        WHERE evaluation_attempt_id = $1
+        ORDER BY id
+        "#,
+    )
+    .bind(state.evaluation_attempt_id)
+    .fetch_all(&mut *tx)
+    .await?
+    .into_iter()
+    .map(|(derivation_id, drv_path, system_name, cf_agent_enabled)| {
+        let drv_path = match drv_path {
+            Some(drv_path) => drv_path,
+            None => plan
+                .successful_systems
+                .iter()
+                .find(|result| result.system_name == system_name)
+                .map(|result| result.drv_path.clone())
+                .with_context(|| {
+                    format!("Missing evaluated path for compatibility-failed system {system_name}")
+                })?,
+        };
+        Ok(FinalizedDerivation {
+            derivation_id,
+            drv_path,
+            system_name,
+            cf_agent_enabled,
+        })
+    })
+    .collect::<Result<Vec<_>>>()?;
+
     tx.commit().await?;
     Ok(EvaluationFinalizeOutcome::Completed {
-        derivations: Vec::new(),
-        queued_builds: Vec::new(),
+        derivations,
+        queued_builds,
     })
 }
 
-/// Handle a `SystemFinalizeOutcome` after a system has been finalized.
-///
-/// Centralizes queue notification, WebSocket broadcast, log persistence,
-/// so the bulk stdout path and the standalone fallback path cannot diverge.
-/// Returns an action telling the caller whether to continue, cancel, or
-/// bail (superseded).  The caller is responsible for pushing the successful
-/// result to its tracking list and spawning background side effects.
+/// Handles a legacy per-system finalization outcome in regression tests.
+#[cfg(test)]
 async fn handle_system_finalize_outcome(
     pool: &PgPool,
     cf_state: Option<&crate::handlers::agent_request::CFState>,
@@ -2726,6 +3333,7 @@ async fn handle_system_finalize_outcome(
 
 /// Internal outcome from `handle_system_finalize_outcome` telling the
 /// caller how to proceed and what data to pass to background side effects.
+#[cfg(test)]
 enum SystemFinalizeAction {
     /// New build job was inserted and queued.
     Queued {
@@ -2792,7 +3400,7 @@ async fn evaluate_with_nix_eval_jobs_inner(
     server_config: &ServerConfig,
     policies_by_configuration: &Arc<PoliciesByConfiguration>,
     cf_state: Option<&crate::handlers::agent_request::CFState>,
-    queue_notifier: Option<&QueueNotifier>,
+    _queue_notifier: Option<&QueueNotifier>,
 ) -> Result<EvaluationPlan> {
     // Re-evaluation safety: clear previous persisted logs for this commit so
     // (commit_id, log_sequence) uniqueness cannot collide on subsequent runs.
@@ -2800,17 +3408,6 @@ async fn evaluate_with_nix_eval_jobs_inner(
 
     // Sequence counter for log persistence (1-indexed)
     let mut log_sequence = 1i32;
-
-    // Bounded preparation pipeline: GC root + build activation for each
-    // streaming system.  A semaphore limits concurrent nix-store subprocess
-    // work; the JoinSet collects errors before commit-level completion.
-    const BUILD_PREPARATION_CONCURRENCY: usize = 4;
-    let build_preparation_limit = Arc::new(Semaphore::new(BUILD_PREPARATION_CONCURRENCY));
-    let mut build_preparations: JoinSet<anyhow::Result<()>> = JoinSet::new();
-    // Count derivations that need actual build-queue activation (NeedsBuildPreparation
-    // outcome). Other outcomes (ExistingBuildJob, RecordedWithoutBuild) are not
-    // queued for build preparation and must not be included in this count.
-    let mut build_prep_count: usize = 0;
 
     let flake_ref = build_flake_reference(repo_url, commit_hash);
     let allowed_systems = load_allowed_systems(pool, flake, target_system).await?;
@@ -3381,9 +3978,9 @@ async fn evaluate_with_nix_eval_jobs_inner(
                                     }
                                 }
 
-                                // ── Incrementally persist successful systems ──────────
-                                // A healthy system must be queued as soon as its own eval,
-                                // policy check, derivation write, and build-job insertion commit.
+                                // Register successful bulk results in memory. Discovery and
+                                // fallback must finish before the coordinator persists or plans
+                                // any system.
                                 if let Some(system_name) = result.attr_path.last() {
                                     if !has_error && drv_path.is_some() && policy_metadata_error.is_none() {
                                         let drv = drv_path.clone().unwrap();
@@ -3392,365 +3989,14 @@ async fn evaluate_with_nix_eval_jobs_inner(
                                             &commit.git_commit_hash,
                                             system_name,
                                         );
-                                        let successful = SuccessfulSystemResult {
+                                        successful_results.push(SuccessfulSystemResult {
                                             system_name: system_name.clone(),
                                             derivation_target,
                                             drv_path: drv,
                                             expected_store_path: expected_store_path.clone(),
                                             cf_agent_enabled,
                                             build_eligible,
-                                        };
-
-                                        let default_check;
-                                        let policy_check = match policy_check_for_system.as_ref() {
-                                            Some(check) => check,
-                                            None => {
-                                                default_check = PolicyCheckResult {
-                                                    system_name: system_name.clone(),
-                                                    cf_agent_enabled,
-                                                    assigned_results: BTreeMap::new(),
-                                                    has_required_packages: None,
-                                                    custom_checks: HashMap::new(),
-                                                    meets_requirements: cf_agent_enabled != Some(false),
-                                                    warnings: Vec::new(),
-                                                    failed_policies: Vec::new(),
-                                                    cve_checks: Vec::new(),
-                                                };
-                                                &default_check
-                                            }
-                                        };
-
-                                        // ── Phase 1: persist derivation (no build job) ──
-                                        let persisted = persist_evaluated_system(
-                                            pool,
-                                            commit.id,
-                                            expected_attempt,
-                                            &successful,
-                                            policy_check,
-                                            assigned_policies,
-                                        )
-                                        .await?;
-
-                                        match persisted {
-                                            SystemPersistenceOutcome::NeedsBuildPreparation {
-                                                derivation_id,
-                                                drv_path,
-                                            } => {
-                                                build_prep_count += 1;
-                                                // Spawn bounded preparation: GC root → activate → notify.
-                                                // This keeps the stdout pipe unblocked while the
-                                                // nix-store subprocess and second transaction run.
-                                                let build_preparation_limit =
-                                                    build_preparation_limit.clone();
-                                                 let pool = pool.clone();
-                                                 let build_config = build_config.clone();
-                                                 let commit_id = commit.id;
-                                                let attempt = expected_attempt;
-                                                let system_name = system_name.clone();
-                                                let finalized = FinalizedDerivation {
-                                                    derivation_id,
-                                                    drv_path: drv_path.clone(),
-                                                    system_name: system_name.clone(),
-                                                    cf_agent_enabled: successful.cf_agent_enabled,
-                                                };
-                                                let successful = successful.clone();
-                                                let cf_state_owned = cf_state.cloned();
-                                                let queue_notifier_owned = queue_notifier.cloned();
-
-                                                 info!(
-                                                    commit_id,
-                                                    expected_attempt,
-                                                    derivation_id,
-                                                    system = %system_name,
-                                                    "build_preparation_spawned"
-                                                );
-
-                                                build_preparations.spawn(async move {
-                                                    let _permit = build_preparation_limit
-                                                        .acquire_owned()
-                                                        .await
-                                                        .context(
-                                                            "Build preparation semaphore closed",
-                                                        )?;
-
-                                                     info!(
-                                                        commit_id,
-                                                        expected_attempt = attempt,
-                                                        derivation_id,
-                                                        system = %system_name,
-                                                         "build_preparation_started"
-                                                     );
-
-                                                     // INVARIANT: Planning reaches a generation-bound
-                                                     // terminal state before the job can become claimable.
-                                                     let Some(plan_generation) =
-                                                         calculate_and_persist_dependency_build_plan(
-                                                             &pool,
-                                                             commit_id,
-                                                             attempt,
-                                                             &finalized,
-                                                             &build_config,
-                                                         )
-                                                         .await?
-                                                     else {
-                                                         return Ok(());
-                                                     };
-
-                                                     // Phase 2: GC root (required — bail on failure)
-                                                    let gc_root_result = crate::builder::create_drv_gc_root(
-                                                        &drv_path,
-                                                        derivation_id,
-                                                    )
-                                                    .await
-                                                    .with_context(|| {
-                                                        format!(
-                                                            "Failed to create GC root for derivation {}",
-                                                            derivation_id,
-                                                        )
-                                                    });
-                                                    let rooted = match gc_root_result {
-                                                        Ok(r) => r,
-                                                        Err(err) => {
-                                                            let msg = format!(
-                                                                "build_prep_gc_root_error derivation_id={}: {err:#}",
-                                                                derivation_id,
-                                                            );
-                                                            record_preparation_failure(
-                                                                &pool, derivation_id, commit_id, attempt, &drv_path, &msg,
-                                                            )
-                                                            .await;
-                                                            return Err(err);
-                                                        }
-                                                    };
-                                                    if !rooted {
-                                                        #[cfg(not(test))]
-                                                        {
-                                                            let msg = format!(
-                                                                "build_prep_not_valid derivation_id={} drv_path={}",
-                                                                derivation_id, drv_path,
-                                                            );
-                                                            record_preparation_failure(
-                                                                &pool, derivation_id, commit_id, attempt, &drv_path, &msg,
-                                                            )
-                                                            .await;
-                                                            bail!(
-                                                                "Derivation {} (drv={}) is not valid \
-                                                                 in the server store; build activation aborted",
-                                                                derivation_id,
-                                                                drv_path,
-                                                            );
-                                                        }
-                                                        #[cfg(test)]
-                                                        warn!(
-                                                            "⚠️  Skipping GC-root requirement for \
-                                                             derivation {} (drv={}) in test mode",
-                                                            derivation_id, drv_path,
-                                                        );
-                                                    }
-
-                                                    info!(
-                                                        commit_id,
-                                                        expected_attempt = attempt,
-                                                        derivation_id,
-                                                        system = %system_name,
-                                                        "build_gc_root_created"
-                                                    );
-
-                                                    // Phase 3: activate build job (second transaction)
-                                                    let activation = match
-                                                        activate_evaluated_system_build(
-                                                            &pool,
-                                                            commit_id,
-                                                             attempt,
-                                                             derivation_id,
-                                                             plan_generation,
-                                                         )
-                                                        .await
-                                                    {
-                                                        Ok(a) => a,
-                                                        Err(err) => {
-                                                            let msg = format!(
-                                                                "build_prep_activation_error derivation_id={derivation_id}: {err:#}",
-                                                            );
-                                                            record_preparation_failure(
-                                                                &pool, derivation_id, commit_id, attempt, &drv_path, &msg,
-                                                            )
-                                                            .await;
-                                                            return Err(err);
-                                                        }
-                                                    };
-
-                                                    match &activation {
-                                                        SystemBuildActivationOutcome::Queued { .. }
-                                                        | SystemBuildActivationOutcome::AlreadyExists { .. } => {
-                                                            handle_system_build_activation(
-                                                                &pool,
-                                                                cf_state_owned.as_ref(),
-                                                                queue_notifier_owned.as_ref(),
-                                                                commit_id,
-                                                                &system_name,
-                                                                &activation,
-                                                                None, // skip eval-log persistence from tasks
-                                                            )
-                                                            .await?;
-
-                                                        }
-                                                        SystemBuildActivationOutcome::Cancelled => {
-                                                            // Task completed after cancellation —
-                                                            // nothing further to do.
-                                                        }
-                                                        SystemBuildActivationOutcome::Superseded => {
-                                                            // Build activation was superseded
-                                                            // (attempt changed or commit no longer
-                                                            // in_progress).
-                                                        }
-                                                    }
-
-                                                    info!(
-                                                        commit_id,
-                                                        expected_attempt = attempt,
-                                                        derivation_id,
-                                                        system = %system_name,
-                                                        "build_preparation_completed"
-                                                    );
-
-                                                    Ok(())
-                                                });
-
-                                                // Track in main results immediately so the
-                                                // plan is correct even if preparation is pending.
-                                                successful_results.push(successful);
-                                            }
-
-                                            SystemPersistenceOutcome::ExistingBuildJob {
-                                                derivation_id,
-                                                build_job_id,
-                                                build_job_status,
-                                                drv_path,
-                                            } => {
-                                                 // Existing queued jobs can predate the planning
-                                                 // gate. Make their current path terminal before
-                                                 // notification; claim queries enforce the same gate.
-                                                 if build_job_status == "queued" {
-                                                     let finalized = FinalizedDerivation {
-                                                         derivation_id,
-                                                         drv_path: drv_path.clone(),
-                                                         system_name: system_name.clone(),
-                                                         cf_agent_enabled: successful.cf_agent_enabled,
-                                                     };
-                                                     if calculate_and_persist_dependency_build_plan(
-                                                         pool,
-                                                         commit.id,
-                                                         expected_attempt,
-                                                         &finalized,
-                                                         build_config,
-                                                     )
-                                                     .await?
-                                                     .is_none()
-                                                     {
-                                                         successful_results.push(successful.clone());
-                                                         continue;
-                                                     }
-                                                 }
-
-                                                 // Best-effort GC root for existing build.
-                                                match crate::builder::create_drv_gc_root(
-                                                    &drv_path,
-                                                    derivation_id,
-                                                )
-                                                .await
-                                                {
-                                                    Ok(true) => debug!(
-                                                        "📌 Rooted existing drv (id={}, drv={})",
-                                                        derivation_id, drv_path
-                                                    ),
-                                                    Ok(false) => warn!(
-                                                        "⚠️  Existing drv (id={}, drv={}) not valid \
-                                                         in the server store",
-                                                        derivation_id, drv_path
-                                                    ),
-                                                    Err(err) => warn!(
-                                                        "⚠️  Failed to create GC root for existing \
-                                                         drv {} (id={}): {}",
-                                                        drv_path, derivation_id, err
-                                                    ),
-                                                }
-
-                                                // Re-notify queue if the existing job is still queued.
-                                                if build_job_status == "queued" {
-                                                    if let Some(notifier) = queue_notifier {
-                                                        notifier.notify_build_queue();
-                                                    }
-                                                    if let Some(state) = cf_state {
-                                                        crate::handlers::api::commits::broadcast_system_status(
-                                                            state,
-                                                            commit.id,
-                                                            system_name.to_string(),
-                                                            crate::handlers::api::commits::SystemEvalStatus::QueuedForBuild,
-                                                            None,
-                                                        )
-                                                        .await;
-                                                        broadcast_and_persist_eval_log(
-                                                            pool,
-                                                            Some(state),
-                                                            commit.id,
-                                                            &mut log_sequence,
-                                                            format!(
-                                                                "🚀 {}: build job already queued ({})",
-                                                                system_name, build_job_id
-                                                            ),
-                                                        )
-                                                        .await;
-                                                    }
-                                                } else {
-                                                    if let Some(state) = cf_state {
-                                                        broadcast_and_persist_eval_log(
-                                                            pool,
-                                                            Some(state),
-                                                            commit.id,
-                                                            &mut log_sequence,
-                                                            format!(
-                                                                "ℹ️  {}: build job exists (status={})",
-                                                                system_name, build_job_status
-                                                            ),
-                                                        )
-                                                        .await;
-                                                    }
-                                                }
-
-                                                 successful_results.push(successful.clone());
-                                            }
-
-                                            SystemPersistenceOutcome::RecordedWithoutBuild {
-                                                derivation_id,
-                                                ..
-                                            } => {
-                                                 spawn_dependency_build_plan_calculation(
-                                                     pool.clone(),
-                                                     commit.id,
-                                                     expected_attempt,
-                                                     FinalizedDerivation {
-                                                        derivation_id,
-                                                        drv_path: successful.drv_path.clone(),
-                                                        system_name: system_name.clone(),
-                                                        cf_agent_enabled: successful.cf_agent_enabled,
-                                                    },
-                                                    build_config.clone(),
-                                                );
-                                                successful_results.push(successful);
-                                            }
-
-                                            SystemPersistenceOutcome::Cancelled => {
-                                                return Err(EvaluationCancelled.into());
-                                            }
-
-                                            SystemPersistenceOutcome::Superseded => {
-                                                bail!(
-                                                    "evaluation attempt was superseded while finalizing {}",
-                                                    system_name
-                                                );
-                                            }
-                                        }
+                                        });
                                     } else if let Some(metadata_error) = policy_metadata_error.as_ref() {
                                         let derivation_target = build_agent_target(
                                             &flake.repo_url,
@@ -3783,7 +4029,8 @@ async fn evaluate_with_nix_eval_jobs_inner(
                                             .await?
                                             {
                                                 SystemPersistenceOutcome::RecordedWithoutBuild { .. }
-                                                | SystemPersistenceOutcome::ExistingBuildJob { .. } => {}
+                                                | SystemPersistenceOutcome::ExistingBuildJob { .. }
+                                                | SystemPersistenceOutcome::LegacyPathConflict { .. } => {}
                                                 SystemPersistenceOutcome::Cancelled => {
                                                     return Err(EvaluationCancelled.into());
                                                 }
@@ -4132,10 +4379,9 @@ async fn evaluate_with_nix_eval_jobs_inner(
 
         tokio::pin!(cancellation);
 
-        // Process fallback outcomes incrementally as each one completes,
-        // rather than collecting the entire batch first.  This means a
-        // fast-evaluating system's build job is committed and notified
-        // immediately, even if another fallback is still running.
+        // Process fallback outcomes as each one completes, but only collect
+        // successful systems here. Attempt-wide planning and activation start
+        // after the complete fallback population is known.
         let deadline = tokio::time::Instant::now() + FALLBACK_PHASE_TIMEOUT;
         let deadline_sleep = tokio::time::sleep_until(deadline);
         tokio::pin!(deadline_sleep);
@@ -4143,8 +4389,7 @@ async fn evaluate_with_nix_eval_jobs_inner(
         let outcome_stream = stream::iter(fallback_futures).buffer_unordered(FALLBACK_CONCURRENCY);
         tokio::pin!(outcome_stream);
 
-        // ── Classify fallback outcomes. Successful recovered systems are
-        // finalized immediately just like streaming bulk successes.
+        // Classify fallback outcomes into the shared in-memory evaluation plan.
         loop {
             tokio::select! {
                 biased;
@@ -4187,80 +4432,14 @@ async fn evaluate_with_nix_eval_jobs_inner(
                                 "⚠️  System {} was expected but never appeared; standalone policy eval succeeded and will be recorded.",
                                 result.system_name
                             );
-                            let nix_result = NixEvalJobResult {
-                                attr: result.system_name.clone(),
-                                attr_path: vec![result.system_name.clone()],
-                                name: Some(result.system_name.clone()),
-                                drv_path: Some(result.drv_path.clone()),
-                                error: None,
-                                cache_status: None,
-                                outputs: None,
-                                meta: None,
-                            };
-                            // Re-resolve this configuration's assigned policies so the
-                            // persisted policy_results JSON and matrix column set match
-                            // the bulk-evaluation path exactly (fallback and bulk must
-                            // be equivalent from the UI's point of view).
-                            let fallback_assigned: Vec<AssignedPolicy> =
-                                policies_for_config(policies_by_configuration, &result.system_name)
-                                    .to_vec();
-                            let finalize_outcome = finalize_evaluated_system(
-                                pool,
-                                commit.id,
-                                expected_attempt,
-                                &result,
-                                &policy_check,
-                                &fallback_assigned,
-                                build_config,
-                            )
-                            .await?;
-
-                            // finalize_evaluated_system already performs:
-                            //   Phase 1: persist derivation (transaction)
-                            //   Phase 2: GC root (required — bails on failure)
-                            //   Phase 3: activate build job (second transaction)
-                            //
-                            // Here we only need to notify the queue, broadcast
-                            // via WebSocket, and spawn background side effects.
-                            match handle_system_finalize_outcome(
-                                pool,
-                                cf_state,
-                                queue_notifier,
-                                commit.id,
-                                &result.system_name,
-                                finalize_outcome,
-                                &mut log_sequence,
-                            )
-                            .await?
-                            {
-                                SystemFinalizeAction::Queued { .. }
-                                | SystemFinalizeAction::AlreadyExists { .. } => {}
-                                SystemFinalizeAction::Recorded { derivation_id } => {
-                                    spawn_dependency_build_plan_calculation(
-                                        pool.clone(),
-                                        commit.id,
-                                        expected_attempt,
-                                        FinalizedDerivation {
-                                            derivation_id,
-                                            drv_path: result.drv_path.clone(),
-                                            system_name: result.system_name.clone(),
-                                            cf_agent_enabled: result.cf_agent_enabled,
-                                        },
-                                        build_config.clone(),
-                                    );
-                                }
-                                SystemFinalizeAction::Cancelled => {
-                                    return Err(EvaluationCancelled.into());
-                                }
-                                SystemFinalizeAction::Superseded => {
-                                    bail!(
-                                        "evaluation attempt was superseded while finalizing fallback system"
-                                    );
-                                }
-                            }
-                            successful_results.push(result);
-                            policy_checks.push(policy_check);
-                            results.push(nix_result);
+                            register_successful_fallback_system(
+                                &mut successful_results,
+                                &mut policy_checks,
+                                &mut results,
+                                result,
+                                policy_check,
+                                &allowed_systems,
+                            );
                         }
                         StandaloneSystemOutcome::InfrastructureFailure { system_name, error } => {
                             warn!(
@@ -4585,29 +4764,6 @@ async fn evaluate_with_nix_eval_jobs_inner(
             .await;
         }
 
-        if build_prep_count > 0 {
-            broadcast_and_persist_eval_log(
-                pool,
-                Some(state),
-                commit.id,
-                &mut log_sequence,
-                "".to_string(),
-            )
-            .await;
-
-            broadcast_and_persist_eval_log(
-                pool,
-                Some(state),
-                commit.id,
-                &mut log_sequence,
-                format!(
-                    "🚀 {} derivations eligible for build queue preparation",
-                    build_prep_count
-                ),
-            )
-            .await;
-        }
-
         broadcast_and_persist_eval_log(
             pool,
             Some(state),
@@ -4618,55 +4774,8 @@ async fn evaluate_with_nix_eval_jobs_inner(
         .await;
     }
 
-    info!(
-        commit_id = commit.id,
-        expected_attempt, "build_preparation_drain_started"
-    );
-    // Drain all pending build preparations before returning. Build
-    // preparation is downstream of evaluation: a GC-root or build-queue
-    // activation problem must be visible in logs, but it must not rewrite a
-    // partially successful evaluation as a failed attempt after individual
-    // system results have already been persisted. The finalizer below records
-    // actual Nix eval failures separately.
-    while let Some(result) = build_preparations.join_next().await {
-        match result {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => {
-                let message = format!("⚠️  Build queue preparation failed: {err:#}");
-                warn!(commit_id = commit.id, expected_attempt, "{}", message);
-                if let Some(state) = cf_state {
-                    broadcast_and_persist_eval_log(
-                        pool,
-                        Some(state),
-                        commit.id,
-                        &mut log_sequence,
-                        message,
-                    )
-                    .await;
-                }
-            }
-            Err(err) => {
-                let message = format!("⚠️  Build queue preparation task panicked: {err:#}");
-                warn!(commit_id = commit.id, expected_attempt, "{}", message);
-                if let Some(state) = cf_state {
-                    broadcast_and_persist_eval_log(
-                        pool,
-                        Some(state),
-                        commit.id,
-                        &mut log_sequence,
-                        message,
-                    )
-                    .await;
-                }
-            }
-        }
-    }
-    info!(
-        commit_id = commit.id,
-        expected_attempt, "build_preparation_drain_completed"
-    );
-    // Release the cross-process advisory lock now that all build preparations
-    // are drained.  Committing the transaction releases the lock atomically.
+    // Discovery and fallback are complete. Release the heavy-Nix lock before
+    // the evaluation-owned dependency-plan coordinator starts.
     // The hardening worker can begin its next scan only after this commit.
     heavy_nix_db_lock.commit().await?;
 
@@ -4963,6 +5072,32 @@ fn should_skip_system(allowed_systems: &Option<Vec<String>>, system_name: &str) 
     }
 }
 
+fn register_successful_fallback_system(
+    successful_results: &mut Vec<SuccessfulSystemResult>,
+    policy_checks: &mut Vec<PolicyCheckResult>,
+    results: &mut Vec<NixEvalJobResult>,
+    mut result: SuccessfulSystemResult,
+    policy_check: PolicyCheckResult,
+    allowed_systems: &Option<Vec<String>>,
+) {
+    let nix_result = NixEvalJobResult {
+        attr: result.system_name.clone(),
+        attr_path: vec![result.system_name.clone()],
+        name: Some(result.system_name.clone()),
+        drv_path: Some(result.drv_path.clone()),
+        error: None,
+        cache_status: None,
+        outputs: None,
+        meta: None,
+    };
+    // The standalone evaluator cannot infer the flake build scope. Apply the
+    // same configured-system filter as the bulk evaluator before planning.
+    result.build_eligible = !should_skip_system(allowed_systems, &result.system_name);
+    successful_results.push(result);
+    policy_checks.push(policy_check);
+    results.push(nix_result);
+}
+
 fn resolve_mock_systems(
     flake_name: &str,
     target_system: &str,
@@ -5168,24 +5303,29 @@ mod tests {
 
     use super::{
         CappedOutput, ConfirmedSystemFailure, EvaluationFinalizeOutcome, EvaluationPlan,
-        NixEvalJobResult, NixEvalProcessGuard, SuccessfulSystemResult,
+        FinalizedDerivation, NixEvalJobResult, NixEvalProcessGuard, SuccessfulSystemResult,
         SystemBuildActivationOutcome, SystemFinalizeOutcome, SystemNotQueuedReason,
         SystemPersistenceOutcome, activate_evaluated_system_build,
+        calculate_and_persist_dependency_build_plan_with,
         finalize_evaluated_system_with_calculator, finalize_evaluation_attempt,
-        mock_eval_stage_delay, persist_evaluated_system, read_capped, resolve_mock_systems,
+        handle_system_build_activation, mock_eval_stage_delay, persist_evaluated_system,
+        prepare_evaluation_dependency_plans_with, prepare_mock_evaluation_dependency_plans,
+        read_capped, register_successful_fallback_system, resolve_mock_systems,
         should_mock_policy_fail, summarize_commit_metadata,
     };
     use crate::api::models::CancelEvalOutcome;
     use crate::models::deployment_policies::{
-        AssignedPolicy, DeploymentPolicy, PolicyCheckResult, policy_result_key, policy_results_json,
+        AssignedPolicy, DeploymentPolicy, PoliciesByConfiguration, PolicyCheckResult,
+        policy_result_key, policy_results_json,
     };
     use crate::queries::commits::{
         EvalFailureOutcome, EvalStartOutcome, cancel_commit_evaluation,
-        mark_commit_evaluation_failed, mark_commit_evaluation_started,
+        mark_commit_evaluation_failed, mark_commit_evaluation_started, reset_commit_evaluation,
     };
     use sqlx::PgPool;
     use std::collections::BTreeMap;
     use std::process::Stdio;
+    use std::time::Duration;
     use tokio::process::Command;
 
     async fn finalize_evaluated_system(
@@ -6895,79 +7035,612 @@ mod tests {
 
     // ── Build-job claimability only after activation ─────────────────
 
+    fn spawn_blocked_dependency_plan_coordinator(
+        pool: PgPool,
+        commit_id: i32,
+        attempt: i32,
+    ) -> (
+        tokio::task::JoinHandle<anyhow::Result<(EvaluationPlan, Vec<FinalizedDerivation>)>>,
+        std::sync::Arc<tokio::sync::Notify>,
+        tokio::sync::mpsc::UnboundedReceiver<()>,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let plan = plan(vec![successful_system("blocked")], vec![]);
+        let release = std::sync::Arc::new(tokio::sync::Notify::new());
+        let (started_tx, started_rx) = tokio::sync::mpsc::unbounded_channel();
+        let root_count = std::sync::Arc::new(AtomicUsize::new(0));
+        let task = tokio::spawn({
+            let release = release.clone();
+            let root_count = root_count.clone();
+            async move {
+                let prepared = prepare_evaluation_dependency_plans_with(
+                    &pool,
+                    commit_id,
+                    attempt,
+                    &plan,
+                    &PoliciesByConfiguration::new(),
+                    &crate::config::BuildConfig::default(),
+                    move |_drv_path, _config| {
+                        let release = release.clone();
+                        let started_tx = started_tx.clone();
+                        async move {
+                            started_tx.send(()).expect("record blocked planner start");
+                            tokio::time::timeout(Duration::from_secs(5), release.notified())
+                                .await
+                                .expect("blocked planner release notification");
+                            Ok(crate::derivations::utils::DependencyBuildPlan {
+                                dependency_derivation_count: 1,
+                                dependency_build_count: 0,
+                            })
+                        }
+                    },
+                    move |_drv_path, _derivation_id| {
+                        let root_count = root_count.clone();
+                        async move {
+                            root_count.fetch_add(1, Ordering::SeqCst);
+                            Ok(true)
+                        }
+                    },
+                )
+                .await?;
+                Ok((plan, prepared))
+            }
+        });
+        (task, release, started_rx, root_count)
+    }
+
     #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires a PostgreSQL test database"]
-    async fn dependency_plan_reaches_terminal_state_before_build_activation(pool: PgPool) {
+    async fn cancellation_while_dependency_plan_is_blocked_never_activates(pool: PgPool) {
+        use std::sync::atomic::Ordering;
+
         let flake_id = insert_throwaway_flake(&pool).await;
         let commit_id = insert_throwaway_commit(&pool, flake_id).await;
         let attempt = start_eval(&pool, commit_id).await;
-        let system = successful_system("plan-gated");
-        let check = passing_policy_check("plan-gated");
-        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
-        let release = std::sync::Arc::new(tokio::sync::Notify::new());
-        let release_for_calculator = release.clone();
-        let pool_for_task = pool.clone();
+        let (planning, release, mut started, root_count) =
+            spawn_blocked_dependency_plan_coordinator(pool.clone(), commit_id, attempt);
+        tokio::time::timeout(Duration::from_secs(5), started.recv())
+            .await
+            .expect("planner start notification timeout")
+            .expect("planner starts");
 
-        let task = tokio::spawn(async move {
-            finalize_evaluated_system_with_calculator(
-                &pool_for_task,
+        assert_eq!(
+            cancel_commit_evaluation(&pool, commit_id).await.unwrap(),
+            CancelEvalOutcome::CancellingInProgress
+        );
+        assert_eq!(build_job_count(&pool, commit_id).await, 0);
+        release.notify_one();
+        let planning = tokio::time::timeout(Duration::from_secs(5), planning)
+            .await
+            .expect("coordinator join timeout")
+            .expect("coordinator task joins");
+        assert!(
+            planning.is_err(),
+            "cancelled planner must fail before external rooting"
+        );
+        assert_eq!(root_count.load(Ordering::SeqCst), 0);
+
+        let cancelled_plan = plan(vec![successful_system("blocked")], vec![]);
+        let outcome = finalize_evaluation_attempt(&pool, commit_id, attempt, &cancelled_plan)
+            .await
+            .expect("finalize cancellation");
+        assert!(matches!(outcome, EvaluationFinalizeOutcome::Cancelled));
+        assert_eq!(build_job_count(&pool, commit_id).await, 0);
+        let state: (String, i32, i32) = sqlx::query_as(
+            "SELECT dependency_plan_barrier, dependency_plan_expected_count, dependency_plan_terminal_count FROM evaluation_attempts WHERE commit_id = $1 AND attempt_number = $2",
+        )
+        .bind(commit_id)
+        .bind(attempt)
+        .fetch_one(&pool)
+        .await
+        .expect("read cancelled barrier");
+        assert_eq!(state, ("cancelled".to_string(), 1, 1));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires a PostgreSQL test database"]
+    async fn terminal_existing_jobs_do_not_require_missing_drv_paths_during_re_evaluation(
+        pool: PgPool,
+    ) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+        let mut attempt = start_eval(&pool, commit_id).await;
+        let current_plan = plan(vec![successful_system("terminal-history")], vec![]);
+        prepare_mock_evaluation_dependency_plans(
+            &pool,
+            commit_id,
+            attempt,
+            &current_plan,
+            &PoliciesByConfiguration::new(),
+            &crate::config::BuildConfig::default(),
+        )
+        .await
+        .expect("prepare initial job");
+        assert!(matches!(
+            finalize_evaluation_attempt(&pool, commit_id, attempt, &current_plan)
+                .await
+                .expect("finalize initial job"),
+            EvaluationFinalizeOutcome::Completed { .. }
+        ));
+
+        for terminal_status in ["success", "failed"] {
+            sqlx::query(
+                "UPDATE build_jobs bj SET status = $2, completed_at = NOW() FROM derivations d WHERE bj.derivation_id = d.id AND d.commit_id = $1",
+            )
+            .bind(commit_id)
+            .bind(terminal_status)
+            .execute(&pool)
+            .await
+            .expect("make existing job terminal");
+            reset_commit_evaluation(&pool, commit_id)
+                .await
+                .expect("reset terminal build evaluation");
+            attempt = start_eval(&pool, commit_id).await;
+
+            let root_calls = std::sync::Arc::new(AtomicUsize::new(0));
+            let prepared = prepare_evaluation_dependency_plans_with(
+                &pool,
                 commit_id,
                 attempt,
-                &system,
-                &check,
-                &[],
+                &current_plan,
+                &PoliciesByConfiguration::new(),
                 &crate::config::BuildConfig::default(),
-                move |_drv_path, _build_config| async move {
-                    let _ = started_tx.send(());
-                    release_for_calculator.notified().await;
+                |_drv_path, _config| async move {
                     Ok(crate::derivations::utils::DependencyBuildPlan {
-                        dependency_derivation_count: 8,
+                        dependency_derivation_count: 1,
                         dependency_build_count: 0,
                     })
                 },
+                {
+                    let root_calls = root_calls.clone();
+                    move |_missing_drv_path, _derivation_id| {
+                        let root_calls = root_calls.clone();
+                        async move {
+                            root_calls.fetch_add(1, Ordering::SeqCst);
+                            anyhow::bail!("terminal history path is absent")
+                        }
+                    }
+                },
             )
             .await
+            .unwrap_or_else(|err| {
+                panic!("{terminal_status} history incorrectly required a GC root: {err:#}")
+            });
+            assert_eq!(prepared.len(), 1);
+            assert_eq!(root_calls.load(Ordering::SeqCst), 0);
+            assert!(matches!(
+                finalize_evaluation_attempt(&pool, commit_id, attempt, &current_plan)
+                    .await
+                    .expect("finalize replacement with terminal history"),
+                EvaluationFinalizeOutcome::Completed { .. }
+            ));
+        }
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires a PostgreSQL test database"]
+    async fn replacement_attempt_supersedes_blocked_dependency_plan(pool: PgPool) {
+        use std::sync::atomic::Ordering;
+
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+        let attempt = start_eval(&pool, commit_id).await;
+        let (planning, release, mut started, root_count) =
+            spawn_blocked_dependency_plan_coordinator(pool.clone(), commit_id, attempt);
+        tokio::time::timeout(Duration::from_secs(5), started.recv())
+            .await
+            .expect("planner start notification timeout")
+            .expect("planner starts");
+
+        reset_commit_evaluation(&pool, commit_id)
+            .await
+            .expect("create replacement attempt");
+        let replacement_attempt = start_eval(&pool, commit_id).await;
+        assert_ne!(replacement_attempt, attempt);
+        release.notify_one();
+        let planning = tokio::time::timeout(Duration::from_secs(5), planning)
+            .await
+            .expect("coordinator join timeout")
+            .expect("coordinator task joins");
+        assert!(
+            planning.is_err(),
+            "the stale planner must fail its generation CAS"
+        );
+        assert_eq!(root_count.load(Ordering::SeqCst), 0);
+        assert_eq!(build_job_count(&pool, commit_id).await, 0);
+
+        let states: Vec<(i32, String)> = sqlx::query_as(
+            "SELECT attempt_number, dependency_plan_barrier FROM evaluation_attempts WHERE commit_id = $1 ORDER BY attempt_number",
+        )
+        .bind(commit_id)
+        .fetch_all(&pool)
+        .await
+        .expect("read attempt barriers");
+        assert_eq!(
+            states,
+            vec![
+                (attempt, "cancelled".to_string()),
+                (replacement_attempt, "planning".to_string()),
+            ]
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires a PostgreSQL test database"]
+    async fn per_system_activation_rejects_partial_three_system_plan(pool: PgPool) {
+        use crate::queries::derivations::{
+            complete_dependency_build_plan, mark_dependency_build_plan_calculating,
+        };
+
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+        let attempt = start_eval(&pool, commit_id).await;
+        let mut persisted = Vec::new();
+
+        for name in ["A-terminal", "B-calculating", "C-not-terminal"] {
+            let system = successful_system(name);
+            let outcome = persist_evaluated_system(
+                &pool,
+                commit_id,
+                attempt,
+                &system,
+                &passing_policy_check(name),
+                &[],
+            )
+            .await
+            .expect("persist system in shared attempt");
+            let SystemPersistenceOutcome::NeedsBuildPreparation {
+                derivation_id,
+                drv_path,
+            } = outcome
+            else {
+                panic!("new system must require build preparation: {outcome:?}");
+            };
+            persisted.push((name, derivation_id, drv_path));
+        }
+
+        let (_, a_id, a_path) = &persisted[0];
+        let a_generation =
+            mark_dependency_build_plan_calculating(&pool, *a_id, a_path, commit_id, attempt)
+                .await
+                .expect("start A plan")
+                .expect("A generation remains current");
+        complete_dependency_build_plan(
+            &pool,
+            *a_id,
+            a_path,
+            commit_id,
+            attempt,
+            a_generation,
+            1,
+            0,
+        )
+        .await
+        .expect("make A terminal");
+
+        let (_, b_id, b_path) = &persisted[1];
+        mark_dependency_build_plan_calculating(&pool, *b_id, b_path, commit_id, attempt)
+            .await
+            .expect("start B plan")
+            .expect("B generation remains current");
+        let states: Vec<(String, String)> = sqlx::query_as(
+            r#"
+            SELECT derivation_name, dependency_build_plan_status
+            FROM derivations
+            WHERE commit_id = $1
+            ORDER BY derivation_name
+            "#,
+        )
+        .bind(commit_id)
+        .fetch_all(&pool)
+        .await
+        .expect("read partial three-system population");
+        assert_eq!(
+            states,
+            vec![
+                ("A-terminal".to_string(), "complete".to_string()),
+                ("B-calculating".to_string(), "calculating".to_string()),
+                ("C-not-terminal".to_string(), "unavailable".to_string()),
+            ]
+        );
+
+        let notifier = crate::queue::QueueNotifier::new();
+        let activation =
+            activate_evaluated_system_build(&pool, commit_id, attempt, *a_id, a_generation).await;
+        if let Ok(outcome) = &activation {
+            handle_system_build_activation(
+                &pool,
+                None,
+                Some(&notifier),
+                commit_id,
+                "A-terminal",
+                outcome,
+                None,
+            )
+            .await
+            .expect("handle legacy activation outcome");
+        }
+
+        assert!(
+            activation.is_err(),
+            "per-system activation must reject A while B and C are non-terminal"
+        );
+        assert_eq!(build_job_count(&pool, commit_id).await, 0);
+        assert!(
+            !notifier.take_pending_build_notification().await,
+            "rejected partial activation must not notify build workers"
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires a PostgreSQL test database"]
+    async fn coordinator_holds_activation_until_all_dependency_plans_finish(pool: PgPool) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        const SYNC_TIMEOUT: Duration = Duration::from_secs(10);
+
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+        let attempt = start_eval(&pool, commit_id).await;
+
+        let mut systems = vec![successful_system("A-buildable")];
+        let mut graph_only = successful_system("B-graph-only");
+        graph_only.build_eligible = false;
+        systems.push(graph_only);
+        let mut checks = systems
+            .iter()
+            .map(|system| passing_policy_check(&system.system_name))
+            .collect::<Vec<_>>();
+        let mut raw_results = Vec::new();
+        register_successful_fallback_system(
+            &mut systems,
+            &mut checks,
+            &mut raw_results,
+            successful_system("C-fallback"),
+            passing_policy_check("C-fallback"),
+            &None,
+        );
+        let plan = EvaluationPlan {
+            results: raw_results,
+            policy_checks: checks,
+            successful_systems: systems,
+            confirmed_failures: Vec::new(),
+            had_system_eval_errors: false,
+            force_build_job_insert_failure: false,
+        };
+
+        let a_release = std::sync::Arc::new(tokio::sync::Notify::new());
+        let b_release = std::sync::Arc::new(tokio::sync::Notify::new());
+        let c_release = std::sync::Arc::new(tokio::sync::Notify::new());
+        // Simulates store mutation by a real build after queue activation. Every
+        // planner must observe the original version. The test changes the value
+        // only after finalization exposes the complete queue population.
+        let shared_store_version = std::sync::Arc::new(AtomicUsize::new(0));
+        let terminal_count = std::sync::Arc::new(AtomicUsize::new(0));
+        let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (rooted_tx, mut rooted_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let planning_pool = pool.clone();
+        let observation_pool = pool.clone();
+        let planning = tokio::spawn({
+            let a_release = a_release.clone();
+            let b_release = b_release.clone();
+            let c_release = c_release.clone();
+            let shared_store_version = shared_store_version.clone();
+            let terminal_count = terminal_count.clone();
+            async move {
+                let calculator_terminal_count = terminal_count.clone();
+                let root_terminal_count = terminal_count.clone();
+                let calculator_store_version = shared_store_version.clone();
+                let root_store_version = shared_store_version.clone();
+                let prepared = prepare_evaluation_dependency_plans_with(
+                    &planning_pool,
+                    commit_id,
+                    attempt,
+                    &plan,
+                    &PoliciesByConfiguration::new(),
+                    &crate::config::BuildConfig::default(),
+                    move |drv_path, _config| {
+                        let started_tx = started_tx.clone();
+                        let observation_pool = observation_pool.clone();
+                        let a_release = a_release.clone();
+                        let b_release = b_release.clone();
+                        let c_release = c_release.clone();
+                        let shared_store_version = calculator_store_version.clone();
+                        let terminal_count = calculator_terminal_count.clone();
+                        async move {
+                            let system_name = if drv_path.contains("A-buildable") {
+                                "A-buildable"
+                            } else if drv_path.contains("B-graph-only") {
+                                "B-graph-only"
+                            } else {
+                                "C-fallback"
+                            };
+                            let visible_jobs: i64 = sqlx::query_scalar(
+                                "SELECT COUNT(*) FROM build_jobs bj JOIN derivations d ON d.id = bj.derivation_id WHERE d.commit_id = $1",
+                            )
+                            .bind(commit_id)
+                            .fetch_one(&observation_pool)
+                            .await?;
+                            assert_eq!(visible_jobs, 0, "planning must not expose build jobs");
+                            started_tx.send(system_name).expect("record planner start");
+
+                            match system_name {
+                                "A-buildable" => tokio::time::timeout(
+                                    SYNC_TIMEOUT,
+                                    a_release.notified(),
+                                )
+                                .await
+                                .expect("A planner release timed out"),
+                                "B-graph-only" => {
+                                    tokio::time::timeout(SYNC_TIMEOUT, b_release.notified())
+                                        .await
+                                        .expect("B planner release timed out");
+                                    assert_eq!(
+                                        shared_store_version.load(Ordering::SeqCst),
+                                        0,
+                                        "graph-only planning must precede build activation"
+                                    );
+                                    terminal_count.fetch_add(1, Ordering::SeqCst);
+                                    anyhow::bail!("deterministic planner failure");
+                                }
+                                _ => {
+                                    tokio::time::timeout(SYNC_TIMEOUT, c_release.notified())
+                                        .await
+                                        .expect("C planner release timed out");
+                                    assert_eq!(
+                                        shared_store_version.load(Ordering::SeqCst),
+                                        0,
+                                        "fallback planning must precede build activation"
+                                    );
+                                }
+                            }
+                            assert_eq!(
+                                shared_store_version.load(Ordering::SeqCst),
+                                0,
+                                "every plan must capture the same pre-build store snapshot"
+                            );
+                            terminal_count.fetch_add(1, Ordering::SeqCst);
+                            Ok(crate::derivations::utils::DependencyBuildPlan {
+                                dependency_derivation_count: 8,
+                                dependency_build_count: 0,
+                            })
+                        }
+                    },
+                    move |drv_path, _derivation_id| {
+                        let rooted_tx = rooted_tx.clone();
+                        let terminal_count = root_terminal_count.clone();
+                        let shared_store_version = root_store_version.clone();
+                        async move {
+                            assert_eq!(
+                                terminal_count.load(Ordering::SeqCst),
+                                3,
+                                "rooting must wait for all terminal plans"
+                            );
+                            assert_eq!(
+                                shared_store_version.load(Ordering::SeqCst),
+                                0,
+                                "rooting must not simulate build-store mutation"
+                            );
+                            rooted_tx.send(drv_path).expect("record rooted derivation");
+                            Ok(true)
+                        }
+                    },
+                )
+                .await?;
+                Ok::<_, anyhow::Error>((plan, prepared))
+            }
         });
 
-        started_rx.await.expect("calculator should start");
-        let state: (String, i64) = sqlx::query_as(
-            r#"
-            SELECT d.dependency_build_plan_status,
-                   COUNT(bj.id)::BIGINT
-            FROM derivations d
-            LEFT JOIN build_jobs bj ON bj.derivation_id = d.id
-            WHERE d.commit_id = $1 AND d.derivation_name = 'plan-gated'
-            GROUP BY d.id, d.dependency_build_plan_status
-            "#,
-        )
-        .bind(commit_id)
-        .fetch_one(&pool)
-        .await
-        .expect("load gated preparation state");
-        assert_eq!(state, ("calculating".to_string(), 0));
+        let mut first_two = vec![
+            tokio::time::timeout(SYNC_TIMEOUT, started_rx.recv())
+                .await
+                .expect("first planner start timed out")
+                .expect("first planner starts"),
+            tokio::time::timeout(SYNC_TIMEOUT, started_rx.recv())
+                .await
+                .expect("second planner start timed out")
+                .expect("second planner starts"),
+        ];
+        first_two.sort_unstable();
+        assert_eq!(first_two, ["A-buildable", "B-graph-only"]);
+        assert!(
+            matches!(
+                started_rx.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ),
+            "C must wait for one of the two coordinator permits"
+        );
+        assert!(
+            matches!(
+                rooted_rx.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ),
+            "rooting must not begin while any plan is blocked"
+        );
 
-        release.notify_one();
-        let outcome = task
+        a_release.notify_one();
+        assert_eq!(
+            tokio::time::timeout(SYNC_TIMEOUT, started_rx.recv())
+                .await
+                .expect("fallback planner start timed out"),
+            Some("C-fallback")
+        );
+        assert!(
+            matches!(
+                rooted_rx.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ),
+            "rooting must remain blocked by the graph-only plan"
+        );
+        b_release.notify_one();
+        c_release.notify_one();
+
+        let (plan, prepared) = tokio::time::timeout(SYNC_TIMEOUT, planning)
             .await
-            .expect("preparation task should join")
-            .expect("preparation should succeed");
-        assert!(matches!(outcome, SystemFinalizeOutcome::Queued { .. }));
+            .expect("coordinator join timed out")
+            .expect("coordinator task joins")
+            .expect("coordinator prepares every plan");
+        assert_eq!(prepared.len(), 3);
+        let mut rooted = vec![
+            tokio::time::timeout(SYNC_TIMEOUT, rooted_rx.recv())
+                .await
+                .expect("first root wait timed out")
+                .expect("first eligible root"),
+            tokio::time::timeout(SYNC_TIMEOUT, rooted_rx.recv())
+                .await
+                .expect("second root wait timed out")
+                .expect("second eligible root"),
+        ];
+        rooted.sort_unstable();
+        assert!(rooted[0].contains("A-buildable"));
+        assert!(rooted[1].contains("C-fallback"));
+        assert!(
+            rooted_rx.try_recv().is_err(),
+            "graph-only systems must be planned but not rooted"
+        );
+        assert_eq!(build_job_count(&pool, commit_id).await, 0);
 
-        let terminal: (String, i64) = sqlx::query_as(
-            r#"
-            SELECT d.dependency_build_plan_status,
-                   COUNT(bj.id)::BIGINT
-            FROM derivations d
-            LEFT JOIN build_jobs bj ON bj.derivation_id = d.id
-            WHERE d.commit_id = $1 AND d.derivation_name = 'plan-gated'
-            GROUP BY d.id, d.dependency_build_plan_status
-            "#,
+        let notifier = crate::queue::QueueNotifier::new();
+        assert!(
+            !notifier.take_pending_build_notification().await,
+            "planning must not notify build workers"
+        );
+        let outcome = finalize_evaluation_attempt(&pool, commit_id, attempt, &plan)
+            .await
+            .expect("atomic barrier release");
+        let EvaluationFinalizeOutcome::Completed { queued_builds, .. } = outcome else {
+            panic!("attempt did not complete");
+        };
+        assert_eq!(queued_builds.len(), 2, "graph-only system must not queue");
+        shared_store_version.store(1, Ordering::SeqCst);
+        notifier.notify_build_queue();
+        assert!(
+            notifier.take_pending_build_notification().await,
+            "post-commit notification must wake build workers"
+        );
+
+        let barrier: (String, i32, i32) = sqlx::query_as(
+            "SELECT dependency_plan_barrier, dependency_plan_expected_count, dependency_plan_terminal_count FROM evaluation_attempts WHERE commit_id = $1 AND attempt_number = $2",
+        )
+        .bind(commit_id)
+        .bind(attempt)
+        .fetch_one(&pool)
+        .await
+        .expect("read released barrier counts");
+        assert_eq!(barrier, ("ready".to_string(), 3, 3));
+        let failed_counts: (Option<i32>, Option<i32>) = sqlx::query_as(
+            "SELECT dependency_derivation_count, dependency_build_count FROM derivations WHERE commit_id = $1 AND derivation_name = 'B-graph-only'",
         )
         .bind(commit_id)
         .fetch_one(&pool)
         .await
-        .expect("load terminal preparation state");
-        assert_eq!(terminal, ("complete".to_string(), 1));
+        .expect("read failed graph-only plan");
+        assert_eq!(failed_counts, (None, None));
     }
 
     #[tokio::test]

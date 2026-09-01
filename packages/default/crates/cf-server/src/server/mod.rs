@@ -5,15 +5,16 @@ use crate::compliance::canonical::semantic_digest;
 use crate::compliance::resolver::{
     AssignmentMode, ResolutionOutcome, resolve_systems_effective_policies_for_evaluation_batch,
 };
-use crate::config::{BuildConfig, CrystalForgeConfig, FlakeConfig};
+use crate::config::{CrystalForgeConfig, FlakeConfig};
 use crate::deployment::spawn_deployment_policy_manager;
 use crate::flake::commits::sync_all_watched_flakes_commits_with_ids;
 use crate::log::log_builder_worker_status;
 use crate::models::commits::Commit;
 use crate::models::deployment_policies::DeploymentPolicy;
 use crate::models::evaluate_with_policies::{
-    EvaluationFinalizeOutcome, FinalizedDerivation, evaluate_with_mock_eval_jobs,
-    evaluate_with_nix_eval_jobs, finalize_evaluation_attempt, update_commit_metadata_cache,
+    EvaluationFinalizeOutcome, evaluate_with_mock_eval_jobs, evaluate_with_nix_eval_jobs,
+    finalize_evaluation_attempt, prepare_evaluation_dependency_plans,
+    prepare_mock_evaluation_dependency_plans, update_commit_metadata_cache,
 };
 use crate::models::flakes::Flake;
 use crate::queue::QueueNotifier;
@@ -387,32 +388,6 @@ enum LexicalState {
 
 fn is_nix_identifier_char(character: char) -> bool {
     character.is_ascii_alphanumeric() || matches!(character, '_' | '-')
-}
-
-async fn run_post_finalize_derivation_side_effects(
-    _pool: &PgPool,
-    derivations: &[FinalizedDerivation],
-    _build_config: &BuildConfig,
-) {
-    for derivation in derivations {
-        match crate::builder::create_drv_gc_root(&derivation.drv_path, derivation.derivation_id)
-            .await
-        {
-            Ok(true) => debug!(
-                "📌 Rooted evaluated drv (id={}, drv={})",
-                derivation.derivation_id, derivation.drv_path
-            ),
-            Ok(false) => warn!(
-                "⚠️  Evaluated drv (id={}, drv={}) is not valid in the server store; \
-                 remote builders may not be able to import it",
-                derivation.derivation_id, derivation.drv_path
-            ),
-            Err(err) => warn!(
-                "⚠️  Failed to create GC root for evaluated drv {} (id={}): {}",
-                derivation.drv_path, derivation.derivation_id, err
-            ),
-        }
-    }
 }
 
 async fn broadcast_queued_builds(
@@ -1355,8 +1330,6 @@ pub fn spawn_background_tasks(
 
     // Get the flake config with a fallback
     let flake_config = cfg.flakes.clone();
-    let recovery_build_config = cfg.get_build_config().clone();
-
     tokio::spawn(run_flake_polling_loop(
         flake_pool,
         flake_config.clone(),
@@ -1367,13 +1340,11 @@ pub fn spawn_background_tasks(
         flake_config.commit_evaluation_interval,
         cf_state,
         queue_notifier.clone(),
-        recovery_build_config.clone(),
     ));
     tokio::spawn(run_builder_recovery_loop(
         target_pool,
         cfg.builder.heartbeat_interval,
         queue_notifier,
-        recovery_build_config,
     ));
     tokio::spawn(run_commit_artifact_hydration_loop(artifact_pool));
     tokio::spawn(run_build_log_retention_loop(
@@ -1586,7 +1557,6 @@ pub async fn run_commit_evaluation_loop(
     interval: Duration,
     cf_state: Arc<crate::handlers::agent_request::CFState>,
     queue_notifier: Arc<QueueNotifier>,
-    build_config: BuildConfig,
 ) {
     info!(
         "🔁 Starting event-driven commit evaluation loop (fallback every {:?})...",
@@ -1609,7 +1579,7 @@ pub async fn run_commit_evaluation_loop(
     // Recover any DryRunComplete derivations that have no build job, which can
     // happen when the build-preparation task failed or the server restarted
     // between derivation persistence and build-job activation.
-    match recover_orphaned_derivation_build_jobs(&pool, &build_config).await {
+    match recover_orphaned_derivation_build_jobs(&pool).await {
         Ok(count) if count > 0 => {
             info!(
                 "🔄 Startup: queued {} orphaned build-eligible derivations",
@@ -1705,7 +1675,6 @@ async fn run_builder_recovery_loop(
     pool: PgPool,
     heartbeat_interval: Duration,
     queue_notifier: Arc<QueueNotifier>,
-    build_config: BuildConfig,
 ) {
     let tick_secs = heartbeat_interval.as_secs().max(15);
     let stale_timeout_secs = builder_stale_timeout_secs(heartbeat_interval);
@@ -1741,7 +1710,7 @@ async fn run_builder_recovery_loop(
         // Periodically recover derivations whose build-preparation task failed.
         // This runs regardless of service restarts so a build job is eventually
         // created without requiring manual intervention or a service restart.
-        match recover_orphaned_derivation_build_jobs(&pool, &build_config).await {
+        match recover_orphaned_derivation_build_jobs(&pool).await {
             Ok(count) if count > 0 => {
                 info!(
                     "🔄 Periodic recovery: queued {} orphaned build-eligible derivations",
@@ -2006,6 +1975,42 @@ async fn process_pending_commits(
                     expected_attempt = attempt,
                     "commit_evaluation_finalization_started"
                 );
+                let preparation = if server_config.execution_mode.is_mock() {
+                    prepare_mock_evaluation_dependency_plans(
+                        pool,
+                        commit.id,
+                        attempt,
+                        &plan,
+                        &policies_by_configuration,
+                        &build_config,
+                    )
+                    .await
+                } else {
+                    prepare_evaluation_dependency_plans(
+                        pool,
+                        commit.id,
+                        attempt,
+                        &plan,
+                        &policies_by_configuration,
+                        &build_config,
+                    )
+                    .await
+                };
+                if let Err(e) = preparation {
+                    let error = e.context(format!(
+                        "Failed dependency-plan phase for commit {} evaluation (attempt {})",
+                        commit.git_commit_hash, attempt
+                    ));
+                    return handle_evaluation_attempt_failure(
+                        pool,
+                        &cf_state,
+                        &commit,
+                        attempt,
+                        &error.to_string(),
+                        crate::models::retry_policy::RetryFailureClass::Unknown,
+                    )
+                    .await;
+                }
                 match finalize_evaluation_attempt(pool, commit.id, attempt, &plan).await {
                     Err(e) => {
                         let error = e.context(format!(
@@ -2062,7 +2067,7 @@ async fn process_pending_commits(
                         return Ok(());
                     }
                     Ok(EvaluationFinalizeOutcome::Completed {
-                        derivations,
+                        derivations: _,
                         queued_builds,
                     }) => {
                         // Atomic DB finalization succeeded — now safe to run all
@@ -2082,13 +2087,6 @@ async fn process_pending_commits(
                                 commit.git_commit_hash
                             );
                         }
-
-                        run_post_finalize_derivation_side_effects(
-                            pool,
-                            &derivations,
-                            &build_config,
-                        )
-                        .await;
 
                         if server_config.auto_hardening_scans {
                             match trigger_commit_hardening_scans(

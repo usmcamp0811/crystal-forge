@@ -16,8 +16,8 @@ use crate::api::{
         re_evaluate_commit, reorder_eval_queue,
     },
     models::{
-        EvalBuildPlanStatus, EvalDependencySystemRow, EvalDependencySystemStatus, EvalHistoryItem,
-        EvalHistoryPage, EvalQueueItem,
+        EvalBuildPlanStatus, EvalDependencyGraphResponse, EvalDependencySystemRow,
+        EvalDependencySystemStatus, EvalHistoryItem, EvalHistoryPage, EvalQueueItem,
     },
 };
 use crate::components::{Icon, IconName};
@@ -91,6 +91,13 @@ fn dependency_graph_requires_poll(systems: &[EvalDependencySystemRow]) -> bool {
         system.system_status == EvalDependencySystemStatus::Evaluated
             && system.build_plan_status == EvalBuildPlanStatus::Calculating
     })
+}
+
+fn dependency_graph_requires_poll_for_evaluation(
+    systems: &[EvalDependencySystemRow],
+    evaluation_active: bool,
+) -> bool {
+    dependency_graph_requires_poll(systems) || (evaluation_active && systems.is_empty())
 }
 
 fn dependency_graph_error_is_retryable(error: &ApiClientError) -> bool {
@@ -1042,6 +1049,7 @@ fn EvaluationsPage() -> Element {
                     EvalDrawer {
                         target: target,
                         refresh: active_refresh,
+                        queue_items: queue_items,
                         on_close: move |_| drawer_target.set(None),
                         toast_msg: toast_msg,
                         on_open_policy: move |policy_name: String| {
@@ -1773,11 +1781,13 @@ fn EvalHistory(
 fn EvalDrawer(
     target: EvalDrawerTarget,
     mut refresh: Signal<u64>,
+    queue_items: Signal<Vec<EvalQueueItem>>,
     on_close: EventHandler<MouseEvent>,
     mut toast_msg: Signal<Option<String>>,
     on_open_policy: EventHandler<String>,
 ) -> Element {
     let mut drawer_tab = use_signal(|| String::from("log"));
+    let mut confirm_force_cancel = use_signal(|| false);
 
     match target {
         EvalDrawerTarget::Queue(ev) => {
@@ -1850,18 +1860,7 @@ fn EvalDrawer(
                                 button {
                                     class: "btn btn-ghost focus-ring xs",
                                     style: "color: #f87171;",
-                                    onclick: move |_| {
-                                        let mut refresh_sig = refresh.clone();
-                                        let mut toast = toast_msg.clone();
-                                        let commit_id = ev.commit_id;
-                                        spawn(async move {
-                                            if let Err(e) = force_cancel_commit_evaluation(commit_id).await {
-                                                toast.set(Some(format!("Force cancel failed: {}", e)));
-                                            } else {
-                                                refresh_sig.set(refresh_sig() + 1);
-                                            }
-                                        });
-                                    },
+                                    onclick: move |_| confirm_force_cancel.set(true),
                                     "Force-cancel"
                                 }
                             }
@@ -1892,7 +1891,6 @@ fn EvalDrawer(
                                 }
                             }
                         }
-                        div { class: "ed-stat", div { class: "ed-stat-label", "Derivations" } div { class: "ed-stat-val", "{ev.system_count * 18}" } }
                     }
                     div {
                         class: "sd-tabs",
@@ -1930,6 +1928,74 @@ fn EvalDrawer(
                             EvalDrawerGraphTab {
                                 key: "{ev.commit_id}",
                                 commit_id: ev.commit_id,
+                                evaluation_active: is_live,
+                                queue_items: queue_items,
+                            }
+                        }
+                    }
+                    if confirm_force_cancel() {
+                        div {
+                            class: "modal-backdrop",
+                            "data-testid": "force-cancel-backdrop",
+                            onclick: move |event| {
+                                event.stop_propagation();
+                                confirm_force_cancel.set(false);
+                            },
+                            div {
+                                class: "modal",
+                                role: "alertdialog",
+                                aria_modal: "true",
+                                aria_labelledby: "force-cancel-title",
+                                aria_describedby: "force-cancel-description",
+                                tabindex: "-1",
+                                style: "max-width: 440px;",
+                                onclick: |event| event.stop_propagation(),
+                                onkeydown: move |event| {
+                                    if event.key() == Key::Escape {
+                                        event.stop_propagation();
+                                        confirm_force_cancel.set(false);
+                                    }
+                                },
+                                div { class: "modal-head",
+                                    h2 { id: "force-cancel-title", style: "display: flex; gap: 8px; align-items: center;",
+                                        Icon { name: IconName::Warn, size: 18 }
+                                        "Force-cancel evaluation?"
+                                    }
+                                    p { id: "force-cancel-description",
+                                        "This terminates commit #{ev.commit_id} immediately. In-flight builds may leave partial state in the Nix store. This action cannot be undone."
+                                    }
+                                }
+                                div { class: "modal-body", style: "padding-top: 0;",
+                                    div { class: "sd-callout sd-callout-danger",
+                                        Icon { name: IconName::Warn, size: 14 }
+                                        div { style: "font-size: 12px;", "Prefer normal cancel. It lets in-flight derivations finish cleanly." }
+                                    }
+                                }
+                                div { class: "modal-foot",
+                                    button {
+                                        class: "btn btn-ghost focus-ring",
+                                        autofocus: true,
+                                        onclick: move |_| confirm_force_cancel.set(false),
+                                        "Keep running"
+                                    }
+                                    button {
+                                        class: "btn btn-danger focus-ring",
+                                        onclick: move |_| {
+                                            confirm_force_cancel.set(false);
+                                            let mut refresh_sig = refresh.clone();
+                                            let mut toast = toast_msg.clone();
+                                            let commit_id = ev.commit_id;
+                                            spawn(async move {
+                                                if let Err(e) = force_cancel_commit_evaluation(commit_id).await {
+                                                    toast.set(Some(format!("Force cancel failed: {}", e)));
+                                                } else {
+                                                    refresh_sig.set(refresh_sig() + 1);
+                                                }
+                                            });
+                                        },
+                                        "Force-cancel"
+                                    }
+                                }
                             }
                         }
                     }
@@ -2009,7 +2075,6 @@ fn EvalDrawer(
                                 }
                             }
                         }
-                        div { class: "ed-stat", div { class: "ed-stat-label", "Derivations" } div { class: "ed-stat-val", "{ev.system_count * 18}" } }
                     }
                     div {
                         class: "sd-tabs",
@@ -2047,6 +2112,8 @@ fn EvalDrawer(
                             EvalDrawerGraphTab {
                                 key: "{ev.commit_id}",
                                 commit_id: ev.commit_id,
+                                evaluation_active: is_live,
+                                queue_items: queue_items,
                             }
                         }
                     }
@@ -2853,15 +2920,42 @@ fn EvalDrawerPolicyTab(commit_id: i32, on_open_policy: EventHandler<String>) -> 
 }
 
 #[component]
-fn EvalDrawerGraphTab(commit_id: i32) -> Element {
-    let mut graph_snapshot = use_signal(|| None);
+fn EvalDrawerGraphTab(
+    commit_id: i32,
+    evaluation_active: bool,
+    queue_items: Signal<Vec<EvalQueueItem>>,
+) -> Element {
+    let mut graph_snapshot: Signal<Option<Result<EvalDependencyGraphResponse, ApiClientError>>> =
+        use_signal(|| None);
     use_future(move || async move {
         let mut consecutive_errors = 0;
         loop {
+            if let Some(Ok(data)) = graph_snapshot.peek().as_ref() {
+                let evaluation_active = queue_items
+                    .read()
+                    .iter()
+                    .find(|item| item.commit_id == commit_id)
+                    .map(|item| is_active_eval_status(&item.evaluation_status))
+                    .unwrap_or(evaluation_active);
+                if !dependency_graph_requires_poll_for_evaluation(&data.systems, evaluation_active)
+                {
+                    break;
+                }
+            }
+
             match fetch_eval_dependency_graph(commit_id).await {
                 Ok(data) => {
                     consecutive_errors = 0;
-                    let should_poll = dependency_graph_requires_poll(&data.systems);
+                    let evaluation_active = queue_items
+                        .read()
+                        .iter()
+                        .find(|item| item.commit_id == commit_id)
+                        .map(|item| is_active_eval_status(&item.evaluation_status))
+                        .unwrap_or(evaluation_active);
+                    let should_poll = dependency_graph_requires_poll_for_evaluation(
+                        &data.systems,
+                        evaluation_active,
+                    );
                     graph_snapshot.set(Some(Ok(data)));
                     if !should_poll {
                         break;
@@ -2896,7 +2990,9 @@ fn EvalDrawerGraphTab(commit_id: i32) -> Element {
     let graph_snapshot = graph_snapshot.read();
 
     rsx! {
-        div { style: "flex: 1; overflow: auto; padding: 18px;",
+        div {
+            "data-testid": "dependency-graph-content",
+            style: "flex: 1; overflow: auto; padding: 18px;",
             match &*graph_snapshot {
                 None => rsx! {
                     div { style: "color: var(--cf-text-muted); font-size: 12px;", "Loading dependency graph..." }
@@ -2909,12 +3005,20 @@ fn EvalDrawerGraphTab(commit_id: i32) -> Element {
                     let dependency_derivation_total: i64 = data
                         .systems
                         .iter()
+                        .filter(|system| {
+                            system.system_status == EvalDependencySystemStatus::Evaluated
+                                && system.build_plan_status == EvalBuildPlanStatus::Complete
+                        })
                         .filter_map(|system| system.dependency_derivation_count)
                         .sum();
                     let has_dependency_counts = data
                         .systems
                         .iter()
-                        .any(|system| system.dependency_derivation_count.is_some());
+                        .any(|system| {
+                            system.system_status == EvalDependencySystemStatus::Evaluated
+                                && system.build_plan_status == EvalBuildPlanStatus::Complete
+                                && system.dependency_derivation_count.is_some()
+                        });
                     let build_work_total: i64 = data
                         .systems
                         .iter()
@@ -2951,13 +3055,13 @@ fn EvalDrawerGraphTab(commit_id: i32) -> Element {
                             if has_dependency_counts {
                                 span { style: "color: var(--cf-text-muted);", "→" }
                                 div { class: "ed-graph-node ed-graph-fan",
-                                    span { style: "font-weight: 700; color: #34d399;", "{dependency_derivation_total}" }
+                                    span { "data-testid": "dependency-derivation-total", style: "font-weight: 700; color: #34d399;", "{dependency_derivation_total}" }
                                     span { style: "font-size: 10px; color: var(--cf-text-muted);", "dependency derivations" }
                                 }
                             }
                             if has_complete_plans {
                                 div { class: "ed-graph-node ed-graph-fan",
-                                    span { style: "font-weight: 700; color: #60a5fa;", "{build_work_total}" }
+                                    span { "data-testid": "dependency-build-total", style: "font-weight: 700; color: #60a5fa;", "{build_work_total}" }
                                     span { style: "font-size: 10px; color: var(--cf-text-muted);", "estimated build work" }
                                 }
                             }
@@ -3008,6 +3112,7 @@ fn EvalDrawerGraphTab(commit_id: i32) -> Element {
                                                     span { style: "font-size: 10px; color: {color};", "{detail}" }
                                                 }
                                                 div { class: "ed-graph-bar",
+                                                    "data-testid": "dependency-build-work-track",
                                                     if matches!(row_state, DependencyGraphRowState::Complete { .. }) {
                                                         div {
                                                             class: "ed-graph-bar-build",
@@ -3016,7 +3121,7 @@ fn EvalDrawerGraphTab(commit_id: i32) -> Element {
                                                         }
                                                     }
                                                 }
-                                                div { style: "display: flex; justify-content: flex-end; font-size: 11px; color: {color}; font-weight: 600;", "{value}" }
+                                                div { class: "ed-graph-value", style: "color: {color};", "{value}" }
                                             }
                                         }
                                     }
@@ -3513,6 +3618,12 @@ mod policy_matrix_status_tests {
         assert!(dependency_graph_requires_poll(&[calculating]));
         assert!(!dependency_graph_requires_poll(&[complete]));
         assert!(!dependency_graph_requires_poll(&[failed]));
+    }
+
+    #[test]
+    fn dependency_graph_keeps_polling_an_active_empty_evaluation() {
+        assert!(dependency_graph_requires_poll_for_evaluation(&[], true));
+        assert!(!dependency_graph_requires_poll_for_evaluation(&[], false));
     }
 
     #[test]

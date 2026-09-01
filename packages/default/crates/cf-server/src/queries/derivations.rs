@@ -789,6 +789,14 @@ pub async fn record_successful_eval_result_in_tx(
 /// Operates through a caller-owned transaction for atomic multi-system writes.
 /// The caller holds the POA&M finding locks until it commits or rolls back the
 /// transaction.
+/// If a build job retains the derivation, the failure preserves its path, store
+/// path, dependency plan, and evaluation-attempt tag. A later successful
+/// same-path evaluation can then retag and release that job-owned snapshot.
+///
+/// # Errors
+///
+/// Returns an error if PostgreSQL cannot insert, lock, or update the derivation
+/// in the caller-owned transaction.
 pub async fn record_synthetic_eval_failure_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     commit_id: Option<i32>,
@@ -830,13 +838,15 @@ pub async fn record_synthetic_eval_failure_in_tx(
             Ok::<_, anyhow::Error>(SyntheticFailureWrite::Inserted { derivation_id: id })
         }
         None => {
-            let existing = sqlx::query_as::<_, (i32, i32)>(
+            let existing = sqlx::query_as::<_, (i32, i32, bool)>(
                 r#"
-                SELECT id, status_id
-                FROM derivations
-                WHERE COALESCE(commit_id, -1) = COALESCE($1, -1)
-                  AND derivation_name = $2
-                  AND derivation_type = $3
+                SELECT d.id,
+                       d.status_id,
+                       EXISTS (SELECT 1 FROM build_jobs bj WHERE bj.derivation_id = d.id)
+                FROM derivations d
+                WHERE COALESCE(d.commit_id, -1) = COALESCE($1, -1)
+                  AND d.derivation_name = $2
+                  AND d.derivation_type = $3
                 FOR UPDATE
                 "#,
             )
@@ -847,7 +857,7 @@ pub async fn record_synthetic_eval_failure_in_tx(
             .await?;
 
             match existing {
-                Some((id, status_id)) => {
+                Some((id, status_id, has_build_job)) => {
                     crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx(
                         tx, id,
                     )
@@ -860,31 +870,55 @@ pub async fn record_synthetic_eval_failure_in_tx(
                     .await?;
                     match status_id {
                         3 | 4 | 5 | 6 => {
-                            sqlx::query(
-                                r#"
-                            UPDATE derivations
-                            SET status_id = $1,
-                                error_message = $2,
-                                completed_at = NOW(),
-                                derivation_path = NULL,
-                                store_path = NULL,
-                                expected_store_path = NULL,
-                                cf_agent_enabled = NULL,
-                                policy_requirements_met = FALSE,
-                                policy_results = '{}'::jsonb,
-                                dependency_derivation_count = NULL,
-                                dependency_build_count = NULL,
-                                dependency_build_plan_status = 'unavailable',
-                                dependency_build_plan_generation = 0,
-                                dependency_build_plan_lease_expires_at = NULL
-                            WHERE id = $3
+                            if has_build_job {
+                                // INVARIANT: A retained job owns its derivation
+                                // and plan snapshot. The failed replacement
+                                // changes the system result but must leave that
+                                // snapshot intact for a later same-path
+                                // evaluation to retag.
+                                sqlx::query(
+                                    r#"
+                                    UPDATE derivations
+                                    SET status_id = $1,
+                                        error_message = $2,
+                                        completed_at = NOW(),
+                                        policy_requirements_met = FALSE,
+                                        policy_results = '{}'::jsonb
+                                    WHERE id = $3
+                                    "#,
+                                )
+                                .bind(EvaluationStatus::DryRunFailed.as_id())
+                                .bind(error_message)
+                                .bind(id)
+                                .execute(&mut **tx)
+                                .await?;
+                            } else {
+                                sqlx::query(
+                                    r#"
+                                UPDATE derivations
+                                SET status_id = $1,
+                                    error_message = $2,
+                                    completed_at = NOW(),
+                                    derivation_path = NULL,
+                                    store_path = NULL,
+                                    expected_store_path = NULL,
+                                    cf_agent_enabled = NULL,
+                                    policy_requirements_met = FALSE,
+                                    policy_results = '{}'::jsonb,
+                                    dependency_derivation_count = NULL,
+                                    dependency_build_count = NULL,
+                                    dependency_build_plan_status = 'unavailable',
+                                    dependency_build_plan_generation = 0,
+                                    dependency_build_plan_lease_expires_at = NULL
+                                WHERE id = $3
                                 "#,
-                            )
-                            .bind(EvaluationStatus::DryRunFailed.as_id())
-                            .bind(error_message)
-                            .bind(id)
-                            .execute(&mut **tx)
-                            .await?;
+                                )
+                                .bind(EvaluationStatus::DryRunFailed.as_id())
+                                .bind(error_message)
+                                .bind(id)
+                                .execute(&mut **tx)
+                                .await?;
+                            }
                             Ok(SyntheticFailureWrite::UpdatedPendingEvaluation {
                                 derivation_id: id,
                             })
@@ -939,8 +973,7 @@ pub async fn insert_package_derivation(
     pname: Option<&str>,
     version: Option<&str>,
 ) -> Result<Derivation> {
-    let inserted = sqlx::query_as!(
-        Derivation,
+    let inserted = sqlx::query_as::<_, Derivation>(
         r#"
         INSERT INTO derivations (
             commit_id,
@@ -952,7 +985,7 @@ pub async fn insert_package_derivation(
             attempt_count
         )
         VALUES ($1, $2, $3, $4, $5, $6, 0)
-        ON CONFLICT (derivation_path) DO UPDATE SET
+        ON CONFLICT (COALESCE(commit_id, -1), derivation_name, derivation_type) DO UPDATE SET
             derivation_name = EXCLUDED.derivation_name,
             pname = EXCLUDED.pname,
             version = EXCLUDED.version
@@ -979,15 +1012,13 @@ pub async fn insert_package_derivation(
             cf_agent_enabled,
             store_path
         "#,
-        None::<i32>, // commit_id is NULL for standalone packages
-        "package",
-        package_name,
-        pname,
-        version,
-        // Previously: EvaluationStatus::Complete
-        // Use DryRunComplete to reflect “discovered/ready after dry-run”
-        EvaluationStatus::DryRunComplete.as_id()
     )
+    .bind(None::<i32>)
+    .bind("package")
+    .bind(package_name)
+    .bind(pname)
+    .bind(version)
+    .bind(EvaluationStatus::DryRunComplete.as_id())
     .fetch_one(pool)
     .await?;
 
@@ -2430,7 +2461,7 @@ pub async fn discover_and_insert_packages(
     let mut tx = pool.begin().await?;
 
     for (drv_path, derivation_name, package_info) in packages_to_insert {
-        let result = sqlx::query!(
+        let result = sqlx::query(
             r#"
             WITH inserted AS (
                 INSERT INTO derivations (
@@ -2444,7 +2475,7 @@ pub async fn discover_and_insert_packages(
                     attempt_count
                 )
                 VALUES ($1, $2, $3, $4, $5, $6, $7, 0)
-                ON CONFLICT (derivation_path) DO UPDATE SET
+                ON CONFLICT (COALESCE(commit_id, -1), derivation_name, derivation_type) DO UPDATE SET
                     derivation_name = EXCLUDED.derivation_name,
                     pname = EXCLUDED.pname,
                     version = EXCLUDED.version
@@ -2454,15 +2485,15 @@ pub async fn discover_and_insert_packages(
             SELECT $8, id FROM inserted
             ON CONFLICT (derivation_id, depends_on_id) DO NOTHING
             "#,
-            None::<i32>,
-            "package",
-            derivation_name,
-            drv_path,
-            package_info.pname.as_deref(),
-            package_info.version.as_deref(),
-            EvaluationStatus::DryRunComplete.as_id(),
-            parent_derivation_id
         )
+        .bind(None::<i32>)
+        .bind("package")
+        .bind(derivation_name)
+        .bind(drv_path)
+        .bind(package_info.pname.as_deref())
+        .bind(package_info.version.as_deref())
+        .bind(EvaluationStatus::DryRunComplete.as_id())
+        .bind(parent_derivation_id)
         .execute(&mut *tx)
         .await;
 

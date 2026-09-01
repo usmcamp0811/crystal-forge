@@ -120,6 +120,16 @@ impl QueueNotifier {
         let mut rx = self.build_rx.lock().await;
         let _ = rx.recv().await;
     }
+
+    /// Takes one pending build notification without waiting.
+    ///
+    /// Tests use this method to prove notification ordering without elapsed-time
+    /// assumptions. Production consumers use [`Self::wait_for_build_work`].
+    #[cfg(test)]
+    pub async fn take_pending_build_notification(&self) -> bool {
+        let mut rx = self.build_rx.lock().await;
+        rx.try_recv().is_ok()
+    }
 }
 
 impl Default for QueueNotifier {

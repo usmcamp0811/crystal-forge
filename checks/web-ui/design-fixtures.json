@@ -107,10 +107,14 @@
       { "name": "equal-alpha", "dependencyDerivations": 220, "buildWork": 40, "planStatus": "complete", "systemStatus": "evaluated" },
       { "name": "equal-beta", "dependencyDerivations": 220, "buildWork": 40, "planStatus": "complete", "systemStatus": "evaluated" },
       { "name": "zero-work", "dependencyDerivations": 95, "buildWork": 0, "planStatus": "complete", "systemStatus": "evaluated" },
-      { "name": "plan-unavailable", "dependencyDerivations": null, "buildWork": null, "planStatus": "unavailable", "systemStatus": "evaluated" },
-      { "name": "plan-calculating", "dependencyDerivations": null, "buildWork": null, "planStatus": "calculating", "systemStatus": "evaluated" },
-      { "name": "plan-failed", "dependencyDerivations": null, "buildWork": null, "planStatus": "failed", "systemStatus": "evaluated" },
-      { "name": "system-failed", "dependencyDerivations": null, "buildWork": null, "planStatus": "unavailable", "systemStatus": "failed" }
+      { "name": "plan-unavailable", "dependencyDerivations": 901, "buildWork": 91, "planStatus": "unavailable", "systemStatus": "evaluated" },
+      { "name": "plan-calculating", "dependencyDerivations": 902, "buildWork": 92, "planStatus": "calculating", "systemStatus": "evaluated" },
+      { "name": "plan-failed", "dependencyDerivations": 903, "buildWork": 93, "planStatus": "failed", "systemStatus": "evaluated" },
+      { "name": "system-failed", "dependencyDerivations": 904, "buildWork": 94, "planStatus": "complete", "systemStatus": "failed" }
+    ],
+    "allZeroSystems": [
+      { "name": "zero-alpha", "dependencyDerivations": 12, "buildWork": 0, "planStatus": "complete", "systemStatus": "evaluated" },
+      { "name": "zero-beta", "dependencyDerivations": 18, "buildWork": 0, "planStatus": "complete", "systemStatus": "evaluated" }
     ]
   },
   "automaticRetries": {
