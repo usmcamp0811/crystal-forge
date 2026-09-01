@@ -104,6 +104,20 @@
       "designRef": "docs/design/CrystalForge/components/PoliciesView.jsx"
     },
     {
+      "name": "policy-editor",
+      "route": "/deployment-policies",
+      "designActions": [
+        { "type": "click", "selector": ".nav-item", "text": "Policies", "waitFor": ".content[data-screen-label='policies']" },
+        { "type": "click", "selector": "[data-coach-target='policy']", "text": "New custom policy", "waitFor": ".pe-shell" }
+      ],
+      "designMarker": { "selector": ".pe-shell", "text": "New policy" },
+      "dioxusActions": [
+        { "type": "click", "selector": "button", "text": "New custom policy", "waitFor": "[data-testid='policy-editor-modal']" }
+      ],
+      "dioxusMarker": { "selector": "[data-testid='policy-editor-modal']", "text": "New custom policy" },
+      "designRef": "docs/design/CrystalForge/components/PolicyEditor.jsx"
+    },
+    {
       "name": "compliance",
       "route": "/compliance",
       "designActions": [{ "type": "click", "selector": ".nav-item", "text": "Compliance" }],
@@ -166,6 +180,19 @@
       "designMarker": { "selector": ".coach[aria-label='Setup Coach']", "text": "Track a POA&M" },
       "dioxusMarker": { "selector": "[data-testid='onboarding-coach-panel']" },
       "designRef": "docs/design/CrystalForge/components/SetupCoach.jsx"
+    },
+    {
+      "name": "poam-detail",
+      "route": "/",
+      "designActions": [
+        { "type": "click", "selector": ".dash-widget:has(.dash-w-title:has-text('POA&M Watchlist')) .dash-w-body > div", "text": "POAM-", "waitFor": ".poam-tray" }
+      ],
+      "designMarker": { "selector": ".poam-tray", "text": "Remediation plan" },
+      "dioxusActions": [
+        { "type": "click", "selector": ".poam-watchlist-row", "text": "TASK-433 parity POA&M detail", "waitFor": "[data-testid='poam-detail']" }
+      ],
+      "dioxusMarker": { "selector": "[data-testid='poam-detail']", "text": "Remediation plan" },
+      "designRef": "docs/design/CrystalForge/components/PoamViews.jsx"
     }
   ]
 }

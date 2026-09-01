@@ -594,17 +594,18 @@ in pkgs.testers.runNixOSTest {
     machine.succeed("cp ${coverageManifest} /tmp/web-ui-tests/coverage-manifest.json")
     machine.succeed("mkdir -p /tmp/web-ui-baselines && cp -r ${baselinesDir}/. /tmp/web-ui-baselines/")
     machine.succeed("cp ${./default.nix} /tmp/web-ui-tests/default.nix")
+
+    # Design-parity harness inputs must be present before static contracts run.
+    machine.succeed("mkdir -p /tmp/web-ui-tests/design-parity")
+    machine.succeed("cp -r ${designParityDir}/. /tmp/web-ui-tests/design-parity/")
+    machine.succeed("mkdir -p /tmp/design-example && cp -r ${designExampleOffline}/. /tmp/design-example/")
+    machine.succeed(
+        "${pkgs.nodejs}/bin/node /tmp/web-ui-tests/design-parity/generate-design-targets-test.js"
+    )
     machine.succeed(
         "env CF_WEB_UI_SOURCE_DIR=/tmp/web-ui-tests CF_UI_STATIC_CONTRACTS=1 "
         "${pkgs.nodejs}/bin/node /tmp/web-ui-tests/integration-test.js"
     )
-
-    # Design-parity harness inputs: scripts + manifest (read by integration-test.js
-    # at /tmp/web-ui-tests/design-parity/manifest.json) and the offline design
-    # example bundle.
-    machine.succeed("mkdir -p /tmp/web-ui-tests/design-parity")
-    machine.succeed("cp -r ${designParityDir}/. /tmp/web-ui-tests/design-parity/")
-    machine.succeed("mkdir -p /tmp/design-example && cp -r ${designExampleOffline}/. /tmp/design-example/")
 
     test_profile = "${testProfile}"
     test_steps = ${if testSteps == null then "None" else "\"${testSteps}\""}

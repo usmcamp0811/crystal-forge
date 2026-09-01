@@ -919,6 +919,7 @@ pub fn DashboardView() -> Element {
                                     button {
                                         key: "{poam.id}",
                                         class: "poam-watchlist-row focus-ring",
+                                        "data-poam-id": "{poam.id}",
                                         title: "Open {poam.human_id}: {poam.title}",
                                         aria_label: "{accessible_label}",
                                         onclick: move |_| {

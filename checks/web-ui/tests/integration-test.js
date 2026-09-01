@@ -3076,7 +3076,7 @@ async function createPhase6PoamFixture(page, label, systemCount = 1, options = {
   await page.unrouteAll({ behavior: "wait" });
   await ensureAuthenticated(page);
   const suffix = crypto.randomUUID();
-  const name = `UI POAM ${label} ${suffix}`;
+  const name = options.visibleName || `UI POAM ${label} ${suffix}`;
   const ruleId = crypto.randomUUID();
   const config = options.legacy ? {
     expression: "cfg.config.services.openssh.enable",
@@ -12666,8 +12666,25 @@ security.audit.enable = true;</fixtext>
       await detail.getByLabel("Target completion").fill("2026-11-12");
       await detail.getByLabel("Risk").selectOption("Low");
       await detail.getByPlaceholder("What will change, where, and how it will be verified").fill("Persist this exact remediation plan.");
+      const metadataResponsePromise = page.waitForResponse(
+        (response) => response.url().endsWith(`/api/v1/poams/${poam.id}`) && response.request().method() === "PATCH",
+      );
       await detail.getByRole("button", { name: "Save metadata", exact: true }).click();
+      const metadataResponse = await metadataResponsePromise;
+      const metadataRequest = metadataResponse.request().postDataJSON();
+      if (metadataResponse.status() !== 200 || metadataRequest.plan != null) {
+        throw new Error(`Metadata save must not implicitly persist the remediation plan: ${JSON.stringify(metadataRequest)}`);
+      }
       await assertVisible(detail.getByText("Security Engineering", { exact: true }).first(), "Saved owner must reconcile from server response");
+      const planResponsePromise = page.waitForResponse(
+        (response) => response.url().endsWith(`/api/v1/poams/${poam.id}`) && response.request().method() === "PATCH",
+      );
+      await detail.getByRole("button", { name: "Save plan", exact: true }).click();
+      const planResponse = await planResponsePromise;
+      const planRequest = planResponse.request().postDataJSON();
+      if (planResponse.status() !== 200 || planRequest.plan !== "Persist this exact remediation plan." || planRequest.title != null || planRequest.owner != null || planRequest.target_date != null || planRequest.risk != null) {
+        throw new Error(`Plan save must persist only the labeled remediation-plan field: ${JSON.stringify(planRequest)}`);
+      }
       const progressResponsePromise = page.waitForResponse(
         (response) => response.url().endsWith(`/api/v1/poams/${poam.id}/transition`) && response.request().method() === "POST",
       );
@@ -12949,6 +12966,16 @@ security.audit.enable = true;</fixtext>
       await detail.getByLabel("Owner").fill("Platform Security");
       await detail.getByPlaceholder("What will change, where, and how it will be verified").fill("Deploy the correction, rerun evaluation, and retain the exact PASS evidence.");
       await detail.getByRole("button", { name: "Save metadata", exact: true }).click();
+      await assertVisible(detail.getByText("Platform Security", { exact: true }).first(), "Canonical metadata edit must reconcile before the plan save");
+      const planResponsePromise = page.waitForResponse(
+        (response) => response.url().endsWith(`/api/v1/poams/${poam.id}`) && response.request().method() === "PATCH",
+      );
+      await detail.getByRole("button", { name: "Save plan", exact: true }).click();
+      const planResponse = await planResponsePromise;
+      const planRequest = planResponse.request().postDataJSON();
+      if (planResponse.status() !== 200 || planRequest.plan !== "Deploy the correction, rerun evaluation, and retain the exact PASS evidence.") {
+        throw new Error(`Canonical labeled plan save did not persist the exact draft: ${JSON.stringify(planRequest)}`);
+      }
       await detail.getByPlaceholder("Add milestone").fill("Authoritative reevaluation");
       await detail.locator('.poam-milestone-add input[type="date"]').fill("2026-10-01");
       const addMilestoneResponsePromise = page.waitForResponse(
@@ -13344,6 +13371,7 @@ security.audit.enable = true;</fixtext>
       const viewerDetail = page.getByTestId("poam-detail");
       await viewerDetail.waitFor({ state: "visible", timeout: 15000 });
       if (!(await viewerDetail.getByRole("button", { name: "Save metadata", exact: true }).isDisabled())) throw new Error("Viewer must not mutate POA&M metadata");
+      if (!(await viewerDetail.getByRole("button", { name: "Save plan", exact: true }).isDisabled())) throw new Error("Viewer must not mutate the POA&M remediation plan");
       if (!(await viewerDetail.getByRole("button", { name: "Link finding", exact: true }).isDisabled())) throw new Error("Viewer must not mutate POA&M findings");
       await page.unroute("**/api/auth/whoami");
       page.off("request", onRequest);
@@ -14327,8 +14355,29 @@ if (process.env.CF_UI_STATIC_CONTRACTS === "1") {
             );
           })
         : parityManifest.views;
+      const orderedParityViews = [
+        ...parityViews.filter((view) => view.name !== "poam-detail"),
+        ...parityViews.filter((view) => view.name === "poam-detail"),
+      ];
+      let poamParityPreparationError = null;
       fs.mkdirSync(designParityDir, { recursive: true });
-      for (const view of parityViews) {
+      for (const view of orderedParityViews) {
+        if (view.name === "poam-detail") {
+          const preparationPage = await context.newPage();
+          try {
+            const fixture = await createPhase6PoamFixture(preparationPage, "design-parity-detail", 1, {
+              visibleName: "TASK-433 parity finding",
+            });
+            await createFixturePoam(preparationPage, fixture.systems[0].assessmentId, {
+              title: "TASK-433 parity POA&M detail",
+              targetDate: "2026-01-15",
+            });
+          } catch (err) {
+            poamParityPreparationError = err.message;
+          } finally {
+            await preparationPage.close();
+          }
+        }
         for (const theme of parityThemes) {
           const name = `${view.name}--${theme}`;
           const parityPage = await context.newPage();
@@ -14337,6 +14386,12 @@ if (process.env.CF_UI_STATIC_CONTRACTS === "1") {
             // theme through the real cf.ui.theme path (not a forced attribute).
             await parityPage.goto(`${baseUrl}/?ui_check_auth=1`, { timeout: LOAD_TIMEOUT });
             await parityPage.evaluate((t) => localStorage.setItem("cf.ui.theme", t), theme);
+            if (view.name === "poam-detail") {
+              if (poamParityPreparationError) {
+                throw new Error(`could not arrange deterministic POA&M parity state: ${poamParityPreparationError}`);
+              }
+              await parityPage.evaluate(() => localStorage.removeItem("cf-dashboard-layout"));
+            }
             const separator = view.route.includes("?") ? "&" : "?";
             await parityPage.goto(`${baseUrl}${view.route}${separator}ui_check_auth=1`, { timeout: LOAD_TIMEOUT });
             await parityPage.waitForTimeout(2000);
