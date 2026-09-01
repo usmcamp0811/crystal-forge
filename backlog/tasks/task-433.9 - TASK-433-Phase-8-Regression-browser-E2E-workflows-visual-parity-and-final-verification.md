@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:43'
-updated_date: '2026-09-01 17:02'
+updated_date: '2026-09-01 18:14'
 labels:
   - design-parity
   - policy
@@ -185,4 +185,6 @@ Pipeline 2810061607 at exact head 82922c7e passed every non-Web-UI check and all
 Recovered pipeline 2810061607 screenshots directly from the retained failed Nix output on the GitLab runner. The visual report proves 58 strict matches and exactly two POA&M plan-save diffs; all owning semantic assertions passed. Review of old/new dark and light captures accepted the visible Save plan control but rejected an incidental tray scroll offset that clipped the Remediation status heading. Reset the POA&M tray scroll position immediately before the strict failed-evidence-edited-remediation capture; static harness and Node syntax checks pass. New CI evidence and baselines remain required.
 
 Tray-scroll stabilization committed as 69b697a789e94fa7f35d7de8906aa07e47204ecb and pushed to MR !318. Pipeline 2810321465 is running at that exact head. The normal strict Web UI job is 16238090492 and the opt-in baseline-candidate job is 16238090493; both were running at the last check. Recovered pipeline-2810061607 evidence is preserved outside the worktree at /tmp/opencode/task433-artifacts/pipeline-2810061607-screenshots.
+
+Pipeline 2810321465 at 69b697a7 passed every non-Web-UI check and the opt-in web-ui-baseline-candidates job. The normal Web UI job failed only the two expected POA&M strict baselines. Downloaded candidate artifacts from job 16238090493 and reviewed the full anchored dark/light captures; both correctly show the summary, complete status section, and explicit Save plan action with no clipping. Approved only the two report-declared failures; 47 sub-threshold match refreshes were intentionally not retained. The artifact also showed that policy-editor design capture was blocked by the design Setup Coach and POA&M Dioxus capture could not find a dashboard row. Added explicit forced design action support with validation for the obscured policy-editor control and changed the already-special-cased deterministic POA&M preparation to navigate directly through the production compliance/POA&M route. Node syntax, design manifest contracts, harness static contracts, Nix parse, GitLab CI lint, and git diff checks pass. A new exact-head pipeline and parity artifact review remain required.
 <!-- SECTION:NOTES:END -->
