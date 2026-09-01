@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:43'
-updated_date: '2026-09-01 18:20'
+updated_date: '2026-09-01 18:21'
 labels:
   - design-parity
   - policy
@@ -194,4 +194,6 @@ Tray-scroll stabilization committed as 69b697a789e94fa7f35d7de8906aa07e47204ecb 
 Pipeline 2810321465 at 69b697a7 passed every non-Web-UI check and the opt-in web-ui-baseline-candidates job. The normal Web UI job failed only the two expected POA&M strict baselines. Downloaded candidate artifacts from job 16238090493 and reviewed the full anchored dark/light captures; both correctly show the summary, complete status section, and explicit Save plan action with no clipping. Approved only the two report-declared failures; 47 sub-threshold match refreshes were intentionally not retained. The artifact also showed that policy-editor design capture was blocked by the design Setup Coach and POA&M Dioxus capture could not find a dashboard row. Added explicit forced design action support with validation for the obscured policy-editor control and changed the already-special-cased deterministic POA&M preparation to navigate directly through the production compliance/POA&M route. Node syntax, design manifest contracts, harness static contracts, Nix parse, GitLab CI lint, and git diff checks pass. A new exact-head pipeline and parity artifact review remain required.
 
 Independent review of the approved baseline/parity diff found two P2 harness gaps: focused compliance selection omitted poam-detail because only the design route was considered, and static contracts did not prove force forwarding into Playwright. Added optional dioxusRoute validation/selection with poam-detail mapped to /compliance and a mocked runActions assertion for click({ force: true }). Re-review found no remaining P0-P2 issue.
+
+Approved baseline/parity remediation committed as 207bafad93f413ada037de6a2a1167ef8701ab59 and pushed. Local and remote heads match; worktree is clean and MR !318 is conflict-free. New exact-head pipeline 2810520883 is pending: https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2810520883. This normal pipeline must pass and its policy-editor/POA&M parity artifacts must be inspected before reconciliation.
 <!-- SECTION:NOTES:END -->
