@@ -213,7 +213,7 @@ pub fn PolicyInterchangeModal(on_close: EventHandler<()>, on_success: EventHandl
                             }
                         },
                     }
-                    div { class: "text-xs text-gray-400", "{file_label} · {file_size} bytes · maximum 50 MiB" }
+                    div { class: "text-xs", style: "color:var(--cf-text-secondary);", "{file_label} · {file_size} bytes · maximum 50 MiB" }
                     if let Some(ref err) = *error.read() {
                         div { class: "sd-callout sd-callout-danger", role: "alert", "{err}" }
                     }
@@ -314,14 +314,14 @@ pub fn PolicyInterchangeModal(on_close: EventHandler<()>, on_success: EventHandl
                     }
                     if let Some(response) = preview.read().clone() {
                         div { class: "cf-policy-interchange-preview",
-                            div { class: "text-xs text-gray-400", "Source SHA-256: " span { class: "mono", "{response.source_sha256}" } }
-                            div { class: "text-xs text-gray-400", "{response.policy_count} policies · proposed draft · disabled · untrusted" }
+                            div { class: "text-xs", style: "color:var(--cf-text-secondary);", "Source SHA-256: " span { class: "mono", "{response.source_sha256}" } }
+                            div { class: "text-xs", style: "color:var(--cf-text-secondary);", "{response.policy_count} policies · proposed draft · disabled · untrusted" }
                             div { class: "flex flex-col gap-2",
                                 for policy in response.policies {
                                     div { class: "rounded border border-gray-700 px-3 py-2",
                                         div { class: "font-medium", "{policy.name}" }
-                                        div { class: "text-xs text-gray-400", "{policy.policy_type} · {policy.implementation_state}" }
-                                        div { class: "text-[11px] text-gray-500 mono", "lineage {policy.lineage_id} · version {policy.version_id}" }
+                                        div { class: "text-xs", style: "color:var(--cf-text-secondary);", "{policy.policy_type} · {policy.implementation_state}" }
+                                        div { class: "text-[11px] mono", style: "color:var(--cf-text-muted);", "lineage {policy.lineage_id} · version {policy.version_id}" }
                                     }
                                 }
                             }

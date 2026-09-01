@@ -11,14 +11,18 @@ use dioxus::prelude::*;
 #[cfg(target_arch = "wasm32")]
 use js_sys::Object;
 use serde_json::Value as JsonValue;
+#[cfg(target_arch = "wasm32")]
+use std::rc::Rc;
 use uuid::Uuid;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::closure::Closure;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::{JsCast, JsValue};
 
 use crate::api::client::{
     ApiClientError, fetch_compliance_system_evidence, fetch_flake_timeline_for_tray,
-    fetch_system_compliance_bundles, fetch_system_cve_scan_eligibility, fetch_system_cves,
-    fetch_system_hardening, fetch_system_hardening_justifications,
+    fetch_system_assignments, fetch_system_compliance_bundles, fetch_system_cve_scan_eligibility,
+    fetch_system_cves, fetch_system_hardening, fetch_system_hardening_justifications,
     fetch_system_hardening_scan_eligibility, get_system_deployment_progress,
     request_system_generation_rollback, request_system_rollback, request_system_sync,
     save_system_hardening_justification,
@@ -35,11 +39,17 @@ use crate::api::models::{
 };
 use crate::components::compliance::EvidenceDrawer;
 use crate::components::cve::CvesTab;
+use crate::components::dialog_focus::{
+    DialogFocusBoundary, DialogFocusRestore, DialogFocusSentinel,
+};
 use crate::components::diff::DiffViewer;
 use crate::components::icon::{Icon, IconName};
 use crate::components::layout::Card;
 use crate::components::modals::{RollbackConfirmDialog, SyncConfirmDialog};
 use crate::components::notifications::Toast;
+use crate::components::poam::{
+    AssignmentVersionCandidate, FindingPoamEvent, PoamDetailHost, PoamFilter, SystemPoamSection,
+};
 use crate::components::system::{
     EditSystemModal, PendingDeployBanner, deployment_state_label, environment_style, format_uptime,
 };
@@ -60,6 +70,7 @@ use crate::views::flakes_list::{
     CommitFocusMeta, FlakeTrayNew, MockCommitItem, MockFlakeItem, map_flake_summary_to_tray_item,
     map_timeline_commits_to_view,
 };
+use crate::views::poam_api::{self, FindingView, PoamListQuery, PoamSummary, Rollup};
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_futures::JsFuture;
 #[cfg(target_arch = "wasm32")]
@@ -260,20 +271,108 @@ const DETAIL_TAB_ORDER: [Tab; 8] = [
     Tab::Compliance,
 ];
 
-/// Reads `?tab=deploy` from the current browser URL synchronously, so callers
-/// can use it as a `use_signal` initial value. Matches the systems list
-/// "Deploy" button, which navigates to `/systems/:id?tab=deploy`.
-fn system_detail_wants_deploy_tab() -> bool {
+fn query_value(search: &str, name: &str) -> Option<String> {
+    search
+        .trim_start_matches('?')
+        .split('&')
+        .filter(|part| !part.is_empty())
+        .find_map(|part| {
+            let (key, value) = part.split_once('=').unwrap_or((part, ""));
+            (key == name).then(|| value.to_string())
+        })
+}
+
+fn tab_from_query(search: &str) -> Tab {
+    match query_value(search, "tab").as_deref() {
+        Some("deploy") => Tab::Deploy,
+        Some("history") => Tab::History,
+        Some("hardening") => Tab::Hardening,
+        Some("logs") => Tab::Logs,
+        Some("config") => Tab::Config,
+        Some("cves") => Tab::Cves,
+        Some("compliance") => Tab::Compliance,
+        _ => Tab::Overview,
+    }
+}
+
+fn tab_from_route(tab: &str, search: &str) -> Tab {
+    match tab {
+        "deploy" => Tab::Deploy,
+        "history" => Tab::History,
+        "hardening" => Tab::Hardening,
+        "logs" => Tab::Logs,
+        "config" => Tab::Config,
+        "cves" => Tab::Cves,
+        "compliance" => Tab::Compliance,
+        "overview" => Tab::Overview,
+        _ => tab_from_query(search),
+    }
+}
+
+fn query_with_parameter(search: &str, name: &str, value: Option<&str>) -> String {
+    let mut parts = search
+        .trim_start_matches('?')
+        .split('&')
+        .filter(|part| !part.is_empty())
+        .filter(|part| {
+            part.split_once('=')
+                .map_or(*part != name, |(key, _)| key != name)
+        })
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if let Some(value) = value.filter(|value| !value.is_empty()) {
+        parts.push(format!("{name}={value}"));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("?{}", parts.join("&"))
+    }
+}
+
+fn current_system_detail_query() -> String {
     #[cfg(target_arch = "wasm32")]
     {
         web_sys::window()
             .and_then(|window| window.location().search().ok())
-            .map(|search| search.contains("tab=deploy"))
-            .unwrap_or(false)
+            .unwrap_or_default()
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        false
+        String::new()
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn sync_system_detail_query(search: &str, push: bool) {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let pathname = window.location().pathname().ok().unwrap_or_default();
+    let hash = window.location().hash().ok().unwrap_or_default();
+    if let Ok(history) = window.history() {
+        let url = format!("{pathname}{search}{hash}");
+        if push {
+            let _ = history.push_state_with_url(&JsValue::NULL, "", Some(&url));
+        } else {
+            let _ = history.replace_state_with_url(&JsValue::NULL, "", Some(&url));
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn sync_system_detail_query(_search: &str, _push: bool) {}
+
+fn tab_query_value(tab: Tab) -> &'static str {
+    match tab {
+        Tab::Overview => "overview",
+        Tab::Deploy => "deploy",
+        Tab::History => "history",
+        Tab::Hardening => "hardening",
+        Tab::Logs => "logs",
+        Tab::Config => "config",
+        Tab::Cves => "cves",
+        Tab::Compliance => "compliance",
     }
 }
 
@@ -295,16 +394,19 @@ struct FlakeCommitPeekState {
 // Main Component
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// The system detail page, reached via `/systems/:id`.
+/// Renders the server-backed system detail page reached via `/systems/:id`.
+///
+/// Route parameters select tabs and an optional POA&M drawer. System,
+/// compliance, finding, and remediation identity remain server-authoritative;
+/// the view owns only transient presentation and form state.
 #[component]
-pub fn SystemDetailView(id: String) -> Element {
+pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
     let nav = navigator();
     let mut navigation_focus = use_context::<Signal<Option<NavigationFocus>>>();
     let mut breadcrumb_override = use_context::<Signal<Option<(String, String)>>>();
     let app_state = use_context::<Signal<AppState>>();
 
-    // Current tab state — defaults to Overview but honours a ?tab=deploy query param
-    // so that the systems list "Deploy" button can deep-link straight to the Deploy tab.
+    // Read the initial tab synchronously so deep links do not flash Overview first.
     //
     // NOTE: this must be read synchronously into the signal's initial value (matching
     // the query_param() pattern used by views::cves), not inside a use_effect. A
@@ -312,13 +414,40 @@ pub fn SystemDetailView(id: String) -> Element {
     // (and any tab-specific data loading it triggers) would flash briefly before the
     // effect ever fires, and on the WASM target the effect was observed to land too
     // late to reliably override the initial tab.
-    let mut active_tab = use_signal(|| {
-        if system_detail_wants_deploy_tab() {
-            Tab::Deploy
-        } else {
-            Tab::Overview
-        }
-    });
+    let initial_route_tab = tab_from_route(&tab, &current_system_detail_query());
+    let mut active_tab = use_signal(|| initial_route_tab);
+    let mut observed_route_tab = use_signal(|| tab.clone());
+    // Router prop updates rerender this component but do not recreate signals.
+    // Reconcile only when the route-owned value changes so local tab clicks,
+    // which update browser history directly, are not reverted.
+    if observed_route_tab.peek().as_str() != tab {
+        observed_route_tab.set(tab.clone());
+        active_tab.set(tab_from_route(&tab, &current_system_detail_query()));
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let popstate_listener = use_hook(|| {
+            let callback = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+                active_tab.set(tab_from_query(&current_system_detail_query()));
+            });
+            if let Some(window) = web_sys::window() {
+                let _ = window.add_event_listener_with_callback(
+                    "popstate",
+                    callback.as_ref().unchecked_ref(),
+                );
+            }
+            Rc::new(callback)
+        });
+        let listener_for_drop = popstate_listener.clone();
+        use_drop(move || {
+            if let Some(window) = web_sys::window() {
+                let _ = window.remove_event_listener_with_callback(
+                    "popstate",
+                    listener_for_drop.as_ref().as_ref().unchecked_ref(),
+                );
+            }
+        });
+    }
     let mut edit_modal_open = use_signal(|| false);
     let mut remove_in_progress = use_signal(|| false);
     let mut remove_error_message: Signal<Option<String>> = use_signal(|| None);
@@ -1090,7 +1219,15 @@ pub fn SystemDetailView(id: String) -> Element {
                                 class: "{tab_class}",
                                 role: "tab",
                                 "aria-selected": "{is_active}",
-                                onclick: move |_| active_tab.set(tab),
+                                onclick: move |_| {
+                                    active_tab.set(tab);
+                                    let query = query_with_parameter(
+                                        &current_system_detail_query(),
+                                        "tab",
+                                        Some(tab_query_value(tab)),
+                                    );
+                                    sync_system_detail_query(&query, false);
+                                },
                                 // Tab icons use the shared Icon component at size 13,
                                 // matching the CrystalForgelatest design icon contract.
                                 match tab {
@@ -1279,7 +1416,11 @@ pub fn SystemDetailView(id: String) -> Element {
                         ConfigTab { system: system.clone() }
                     },
                     Tab::Compliance => rsx! {
-                        ComplianceTab { system: system.clone() }
+                        ComplianceTab {
+                            system: system.clone(),
+                            viewer: !auth::is_operator_or_above(&auth_context),
+                            initial_poam: poam.clone(),
+                        }
                     },
                 }
             }
@@ -1564,6 +1705,97 @@ struct SystemComplianceData {
     error: Option<String>,
 }
 
+#[derive(Clone, PartialEq, Debug)]
+enum SystemPoamData {
+    Loaded {
+        rollup: Rollup,
+        items: Vec<PoamSummary>,
+    },
+    Unauthorized,
+    Failed(String),
+}
+
+#[derive(Clone, PartialEq, Debug)]
+struct FindingEvidenceTarget {
+    bundle_id: Uuid,
+    bundle_version_id: Uuid,
+    bundle_name: String,
+    bundle_version: String,
+    policy_id: Uuid,
+}
+
+fn finding_evidence_targets(
+    finding: &FindingView,
+    bundles: &[SystemComplianceBundle],
+) -> Vec<FindingEvidenceTarget> {
+    let mut targets = bundles
+        .iter()
+        .filter(|bundle| finding.bundle_ids.contains(&bundle.bundle.id))
+        .flat_map(|bundle| {
+            let mut versions = bundle
+                .bundle
+                .versions
+                .iter()
+                .filter(|version| finding.bundle_version_ids.contains(&version.id))
+                .map(|version| (version.id, version.version.clone()))
+                .collect::<Vec<_>>();
+            for (version_id, version) in [
+                (
+                    bundle.bundle.current_published_version_id,
+                    bundle.bundle.current_published_version.clone(),
+                ),
+                (
+                    bundle.bundle.current_draft_version_id,
+                    bundle.bundle.current_draft_version.clone(),
+                ),
+            ] {
+                if let (Some(version_id), Some(version)) = (version_id, version)
+                    && finding.bundle_version_ids.contains(&version_id)
+                {
+                    versions.push((version_id, version));
+                }
+            }
+            versions
+                .into_iter()
+                .map(|(version_id, version)| FindingEvidenceTarget {
+                    bundle_id: bundle.bundle.id,
+                    bundle_version_id: version_id,
+                    bundle_name: bundle.bundle.name.clone(),
+                    bundle_version: version,
+                    policy_id: finding.policy_lineage_id,
+                })
+        })
+        .collect::<Vec<_>>();
+    targets.sort_by(|left, right| {
+        (
+            &left.bundle_name,
+            &left.bundle_version,
+            left.bundle_version_id,
+        )
+            .cmp(&(
+                &right.bundle_name,
+                &right.bundle_version,
+                right.bundle_version_id,
+            ))
+    });
+    targets.dedup_by_key(|target| (target.bundle_id, target.bundle_version_id));
+    targets
+}
+
+fn focus_evidence_policy(
+    mut response: ComplianceEvidenceResponse,
+    policy_id: Uuid,
+) -> ComplianceEvidenceResponse {
+    if let Some(index) = response
+        .controls
+        .iter()
+        .position(|control| control.policy_id == policy_id)
+    {
+        response.controls.swap(0, index);
+    }
+    response
+}
+
 fn compliance_score_color(score: i64) -> &'static str {
     if score >= 90 {
         "#34d399"
@@ -1575,7 +1807,7 @@ fn compliance_score_color(score: i64) -> &'static str {
 }
 
 #[component]
-fn ComplianceTab(system: SystemDetail) -> Element {
+fn ComplianceTab(system: SystemDetail, viewer: bool, initial_poam: String) -> Element {
     let system_id = system.id;
 
     // Fetch applicable bundles for this system using the optimized system-scoped endpoint.
@@ -1596,11 +1828,85 @@ fn ComplianceTab(system: SystemDetail) -> Element {
         }
     });
 
-    // Evidence drawer state
-    let mut evidence_open: Signal<Option<(Uuid, Uuid)>> = use_signal(|| None); // (bundle_id, system_id)
+    let mut poam_resource = use_resource(move || async move {
+        let rollups = match poam_api::system_rollups(&[system_id]).await {
+            Ok(rollups) => rollups,
+            Err(error) if error.is_unauthorized() => return SystemPoamData::Unauthorized,
+            Err(error) => {
+                return SystemPoamData::Failed(format!(
+                    "Failed to load authoritative POA&M counts: {error}"
+                ));
+            }
+        };
+        let Some(rollup) = rollups
+            .into_iter()
+            .find(|rollup| rollup.scope_id == system_id)
+        else {
+            return SystemPoamData::Failed(
+                "The POA&M rollup response did not include this system.".to_string(),
+            );
+        };
+        let query = PoamListQuery {
+            system_id: Some(system_id),
+            ..Default::default()
+        };
+        match poam_api::fetch_all_poams(&query).await {
+            Ok(items) => SystemPoamData::Loaded { rollup, items },
+            Err(error) if error.is_unauthorized() => SystemPoamData::Unauthorized,
+            Err(error) => {
+                SystemPoamData::Failed(format!("Failed to load system POA&M items: {error}"))
+            }
+        }
+    });
+    let assignment_resource = use_resource(move || async move {
+        fetch_system_assignments(&system_id)
+            .await
+            .map_err(|error| error.to_string())
+    });
+
+    let mut poam_filter = use_signal(PoamFilter::default);
+    let mut selected_poam = use_signal(|| {
+        Uuid::parse_str(&initial_poam).ok().or_else(|| {
+            query_value(&current_system_detail_query(), "poam")
+                .and_then(|value| Uuid::parse_str(&value).ok())
+        })
+    });
+    #[cfg(target_arch = "wasm32")]
+    {
+        let popstate_listener = use_hook(|| {
+            let callback = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+                selected_poam.set(
+                    query_value(&current_system_detail_query(), "poam")
+                        .and_then(|value| Uuid::parse_str(&value).ok()),
+                );
+            });
+            if let Some(window) = web_sys::window() {
+                let _ = window.add_event_listener_with_callback(
+                    "popstate",
+                    callback.as_ref().unchecked_ref(),
+                );
+            }
+            Rc::new(callback)
+        });
+        let listener_for_drop = popstate_listener.clone();
+        use_drop(move || {
+            if let Some(window) = web_sys::window() {
+                let _ = window.remove_event_listener_with_callback(
+                    "popstate",
+                    listener_for_drop.as_ref().as_ref().unchecked_ref(),
+                );
+            }
+        });
+    }
+
+    // Evidence requests use a generation guard because choosing a second exact
+    // context must invalidate any slower response from the first choice.
+    let mut evidence_open = use_signal(|| false);
     let mut evidence_data: Signal<Option<Result<ComplianceEvidenceResponse, String>>> =
         use_signal(|| None);
     let mut evidence_bundle_name: Signal<Option<String>> = use_signal(|| None);
+    let mut evidence_generation = use_signal(|| 0_u64);
+    let mut evidence_choices: Signal<Vec<FindingEvidenceTarget>> = use_signal(Vec::new);
 
     let loading = compliance_resource.read_unchecked().is_none();
     let data = compliance_resource
@@ -1610,14 +1916,65 @@ fn ComplianceTab(system: SystemDetail) -> Element {
             bundles: Vec::new(),
             error: None,
         });
+    let assignment_state = assignment_resource.read_unchecked().clone();
 
     rsx! {
         div {
             style: "display:flex;flex-direction:column;gap:14px;",
 
+            // Remediation is the primary compliance action and precedes bundle summaries.
+            match poam_resource.read_unchecked().clone() {
+                None => rsx! {
+                    section { class: "card poam-system-section",
+                        div { role: "status", aria_live: "polite", class: "poam-tray-state", "Loading authoritative POA&M rollup and items..." }
+                    }
+                },
+                Some(SystemPoamData::Unauthorized) => rsx! {
+                    section { class: "card poam-system-section",
+                        div { role: "alert", class: "sd-callout sd-callout-warn",
+                            Icon { name: IconName::Key, size: 13 }
+                            div { "POA&M data is not available to your role for this system. Compliance results remain visible below." }
+                        }
+                    }
+                },
+                Some(SystemPoamData::Failed(error)) => rsx! {
+                    section { class: "card poam-system-section",
+                        div { role: "alert", class: "sd-callout sd-callout-danger",
+                            Icon { name: IconName::Warn, size: 13 }
+                            div { "{error}" }
+                        }
+                        button { class: "btn btn-ghost focus-ring", onclick: move |_| poam_resource.restart(), "Retry POA&M" }
+                    }
+                },
+                Some(SystemPoamData::Loaded { rollup, items }) => rsx! {
+                    SystemPoamSection {
+                        hostname: system.hostname.clone(),
+                        rollup,
+                        items,
+                        filter: poam_filter(),
+                        on_filter: move |filter| poam_filter.set(filter),
+                        on_open: move |poam_id| {
+                            selected_poam.set(Some(poam_id));
+                            let query = query_with_parameter(
+                                &query_with_parameter(
+                                    &current_system_detail_query(),
+                                    "tab",
+                                    Some("compliance"),
+                                ),
+                                "poam",
+                                Some(&poam_id.to_string()),
+                            );
+                            sync_system_detail_query(&query, true);
+                        },
+                    }
+                },
+            }
+
             // Loading state
             if loading {
                 div {
+                    role: "status",
+                    aria_live: "polite",
                     class: "flex items-center justify-center py-8",
                     crate::components::loading::DashboardLoadingSpinner {
                         label: "Loading compliance data…".to_string(),
@@ -1628,6 +1985,7 @@ fn ComplianceTab(system: SystemDetail) -> Element {
             // Error state (only if no bundles loaded at all)
             else if data.bundles.is_empty() && data.error.is_some() {
                 div {
+                    role: "alert",
                     class: "sd-callout sd-callout-danger",
                     Icon { name: IconName::Warn, size: 13 }
                     div { style: "font-size:12px;", "{data.error.as_ref().unwrap()}" }
@@ -1644,7 +2002,7 @@ fn ComplianceTab(system: SystemDetail) -> Element {
                             "This system is not covered by any compliance bundle."
                         }
                         Link {
-                            to: crate::routes::Route::ComplianceView {},
+                            to: crate::routes::Route::ComplianceView { bundle: String::new(), version: String::new(), system: String::new(), policy: String::new(), poam: String::new(), view: String::new() },
                             class: "btn btn-primary focus-ring",
                             style: "margin-top:14px;",
                             "Go to Compliance"
@@ -1709,16 +2067,20 @@ fn ComplianceTab(system: SystemDetail) -> Element {
                                         class: "btn btn-primary focus-ring",
                                         onclick: move |_| {
                                             let bn = bundle_name.clone();
-                                            evidence_open.set(Some((bundle_id, system_id)));
+                                            evidence_generation += 1;
+                                            let requested = evidence_generation();
+                                            evidence_open.set(true);
                                             evidence_bundle_name.set(Some(bn));
                                             evidence_data.set(None);
                                             spawn({
                                                 let bid = bundle_id;
                                                 let sid = system_id;
                                                 async move {
-                                                    match fetch_compliance_system_evidence(&bid, &sid, None).await {
-                                                        Ok(resp) => evidence_data.set(Some(Ok(resp))),
-                                                        Err(e) => evidence_data.set(Some(Err(e.to_string()))),
+                                                    let result = fetch_compliance_system_evidence(&bid, &sid, None)
+                                                        .await
+                                                        .map_err(|error| error.to_string());
+                                                    if evidence_generation() == requested {
+                                                        evidence_data.set(Some(result));
                                                     }
                                                 }
                                             });
@@ -1757,15 +2119,81 @@ fn ComplianceTab(system: SystemDetail) -> Element {
             }
 
             // Evidence drawer — shown when evidence is loading, loaded, or errored
-            if evidence_open.read().is_some() {
+            if evidence_open() {
                 match &*evidence_data.read() {
                     Some(Ok(evidence_response)) => {
+                        let assignment_versions = assignment_state
+                            .as_ref()
+                            .and_then(|result| result.as_ref().ok())
+                            .into_iter()
+                            .flatten()
+                            .map(|assignment| {
+                                let bundle = data
+                                    .bundles
+                                    .iter()
+                                    .find(|bundle| bundle.bundle.id == assignment.bundle_id);
+                                let bundle_name = bundle
+                                    .map(|bundle| bundle.bundle.name.clone())
+                                    .unwrap_or_else(|| assignment.bundle_id.to_string());
+                                let bundle_version = bundle
+                                    .and_then(|bundle| {
+                                        bundle
+                                            .bundle
+                                            .versions
+                                            .iter()
+                                            .find(|version| version.id == assignment.bundle_version_id)
+                                    })
+                                    .map(|version| version.version.clone())
+                                    .unwrap_or_else(|| assignment.bundle_version_id.to_string());
+                                AssignmentVersionCandidate {
+                                    assignment_id: assignment.id,
+                                    assignment_version_id: assignment.current_version_id,
+                                    bundle_id: assignment.bundle_id,
+                                    bundle_version_id: assignment.bundle_version_id,
+                                    bundle_name,
+                                    bundle_version,
+                                    scope_label: format!(
+                                        "{}:{}",
+                                        assignment.scope_type, assignment.scope_id
+                                    ),
+                                }
+                            })
+                            .collect::<Vec<_>>();
                         rsx! {
                             EvidenceDrawer {
                                 evidence: evidence_response.clone(),
                                 bundle_name: evidence_bundle_name.read().clone().unwrap_or_default(),
+                                assignment_versions,
+                                assignment_context_error: assignment_state
+                                    .as_ref()
+                                    .and_then(|result| result.as_ref().err())
+                                    .cloned(),
+                                viewer,
+                                on_poam_event: move |event| {
+                                    match event {
+                                        FindingPoamEvent::Open(poam_id) => selected_poam.set(Some(poam_id)),
+                                        FindingPoamEvent::Created(detail) | FindingPoamEvent::Linked(detail) => {
+                                            selected_poam.set(Some(detail.poam.id));
+                                            poam_resource.restart();
+                                        }
+                                        FindingPoamEvent::InvalidateAssessment(_) => poam_resource.restart(),
+                                    }
+                                    if let Some(poam_id) = selected_poam() {
+                                        let query = query_with_parameter(
+                                            &query_with_parameter(
+                                                &current_system_detail_query(),
+                                                "tab",
+                                                Some("compliance"),
+                                            ),
+                                            "poam",
+                                            Some(&poam_id.to_string()),
+                                        );
+                                        sync_system_detail_query(&query, true);
+                                    }
+                                },
                                 on_close: move |_| {
-                                    evidence_open.set(None);
+                                    evidence_generation += 1;
+                                    evidence_open.set(false);
                                     evidence_data.set(None);
                                 },
                             }
@@ -1773,38 +2201,179 @@ fn ComplianceTab(system: SystemDetail) -> Element {
                     }
                     Some(Err(error)) => {
                         rsx! {
-                            div { class: "fl-tray-backdrop", onclick: move |_| { evidence_open.set(None); evidence_data.set(None); } }
+                            div { class: "fl-tray-backdrop", onclick: move |_| { evidence_generation += 1; evidence_open.set(false); evidence_data.set(None); } }
                             aside {
+                                id: "system-evidence-error-dialog",
                                 class: "fl-tray",
+                                role: "dialog",
+                                aria_modal: "true",
+                                aria_labelledby: "system-evidence-error-title",
+                                tabindex: "-1",
                                 style: "width:min(480px,96vw);padding:24px;",
+                                onkeydown: move |event| {
+                                    event.stop_propagation();
+                                    if event.key() == Key::Escape {
+                                        evidence_generation += 1;
+                                        evidence_open.set(false);
+                                        evidence_data.set(None);
+                                    }
+                                },
+                                DialogFocusRestore {}
+                                DialogFocusSentinel { dialog_id: "system-evidence-error-dialog".to_string(), boundary: DialogFocusBoundary::Last }
                                 div { class: "sd-callout sd-callout-danger",
                                     Icon { name: IconName::Warn, size: 13 }
-                                    div { style: "font-size:12px;", "Failed to load evidence: {error}" }
+                                    div { id: "system-evidence-error-title", style: "font-size:12px;", "Failed to load evidence: {error}" }
                                 }
                                 div { style: "margin-top:14px;text-align:right;",
                                     button {
                                         class: "btn btn-ghost focus-ring",
-                                        onclick: move |_| { evidence_open.set(None); evidence_data.set(None); },
+                                        autofocus: true,
+                                        onclick: move |_| { evidence_generation += 1; evidence_open.set(false); evidence_data.set(None); },
                                         "Close"
                                     }
                                 }
+                                DialogFocusSentinel { dialog_id: "system-evidence-error-dialog".to_string(), boundary: DialogFocusBoundary::First }
                             }
                         }
                     }
                     None => {
                         rsx! {
-                            div { class: "fl-tray-backdrop" }
+                            div { class: "fl-tray-backdrop", onclick: move |_| { evidence_generation += 1; evidence_open.set(false); evidence_data.set(None); } }
                             aside {
+                                id: "system-evidence-loading-dialog",
                                 class: "fl-tray",
+                                role: "dialog",
+                                aria_modal: "true",
+                                aria_label: "Loading compliance evidence",
+                                tabindex: "-1",
+                                autofocus: true,
                                 style: "width:min(480px,96vw);padding:24px;display:flex;align-items:center;justify-content:center;",
+                                onkeydown: move |event| {
+                                    event.stop_propagation();
+                                    if event.key() == Key::Escape {
+                                        evidence_generation += 1;
+                                        evidence_open.set(false);
+                                        evidence_data.set(None);
+                                    }
+                                },
+                                DialogFocusRestore {}
+                                DialogFocusSentinel { dialog_id: "system-evidence-loading-dialog".to_string(), boundary: DialogFocusBoundary::Last }
                                 crate::components::loading::DashboardLoadingSpinner {
                                     label: "Loading evidence…".to_string(),
                                     size: 36,
                                 }
+                                DialogFocusSentinel { dialog_id: "system-evidence-loading-dialog".to_string(), boundary: DialogFocusBoundary::First }
                             }
                         }
                     }
                 }
+            }
+
+            if !evidence_choices.read().is_empty() {
+                div { class: "fl-tray-backdrop", onclick: move |_| evidence_choices.set(Vec::new()) }
+                aside { id: "system-evidence-context-dialog", class: "fl-tray", role: "dialog", aria_modal: "true", aria_labelledby: "system-evidence-context-title", tabindex: "-1", autofocus: true, style: "width:min(520px,96vw);padding:24px;", onkeydown: move |event| {
+                    event.stop_propagation();
+                    if event.key() == Key::Escape {
+                        evidence_choices.set(Vec::new());
+                    }
+                },
+                    DialogFocusRestore {}
+                    DialogFocusSentinel { dialog_id: "system-evidence-context-dialog".to_string(), boundary: DialogFocusBoundary::Last }
+                    h2 { id: "system-evidence-context-title", style: "font-size:16px;margin:0 0 6px;", "Choose exact evidence context" }
+                    p { class: "poam-muted", "This finding belongs to multiple bundle revisions. Select the evidence context to open." }
+                    div { class: "poam-picker-list",
+                        for target in evidence_choices.read().clone() {
+                            button { class: "poam-pick focus-ring", onclick: move |_| {
+                                evidence_choices.set(Vec::new());
+                                evidence_generation += 1;
+                                let requested = evidence_generation();
+                                evidence_open.set(true);
+                                evidence_bundle_name.set(Some(format!("{} {}", target.bundle_name, target.bundle_version)));
+                                evidence_data.set(None);
+                                spawn(async move {
+                                    let result = fetch_compliance_system_evidence(
+                                        &target.bundle_id,
+                                        &system_id,
+                                        Some(&target.bundle_version_id),
+                                    )
+                                    .await
+                                    .map(|response| focus_evidence_policy(response, target.policy_id))
+                                    .map_err(|error| error.to_string());
+                                    if evidence_generation() == requested {
+                                        evidence_data.set(Some(result));
+                                    }
+                                });
+                            },
+                                strong { "{target.bundle_name}" }
+                                small { "Exact revision {target.bundle_version} · " span { class: "mono", "{target.bundle_version_id}" } }
+                            }
+                        }
+                    }
+                    button { class: "btn btn-ghost focus-ring", onclick: move |_| evidence_choices.set(Vec::new()), "Cancel" }
+                    DialogFocusSentinel { dialog_id: "system-evidence-context-dialog".to_string(), boundary: DialogFocusBoundary::First }
+                }
+            }
+
+            PoamDetailHost {
+                poam_id: selected_poam(),
+                viewer,
+                on_close: move |_| {
+                    selected_poam.set(None);
+                    let query = query_with_parameter(
+                        &current_system_detail_query(),
+                        "poam",
+                        None,
+                    );
+                    sync_system_detail_query(&query, false);
+                },
+                on_open_finding: move |finding: FindingView| {
+                    if finding.system_id != system_id {
+                        return;
+                    }
+                    selected_poam.set(None);
+                    let query = query_with_parameter(
+                        &current_system_detail_query(),
+                        "poam",
+                        None,
+                    );
+                    sync_system_detail_query(&query, false);
+                    let targets = finding_evidence_targets(&finding, &data.bundles);
+                    if targets.len() > 1 {
+                        evidence_choices.set(targets);
+                        return;
+                    }
+                    let Some(target) = targets.into_iter().next() else {
+                        evidence_open.set(true);
+                        evidence_bundle_name.set(Some(finding.policy_name));
+                        evidence_data.set(Some(Err(
+                            "No exact visible bundle revision is available for this finding."
+                                .to_string(),
+                        )));
+                        return;
+                    };
+                    evidence_generation += 1;
+                    let requested = evidence_generation();
+                    evidence_open.set(true);
+                    evidence_bundle_name.set(Some(format!(
+                        "{} {}",
+                        target.bundle_name, target.bundle_version
+                    )));
+                    evidence_data.set(None);
+                    spawn(async move {
+                        let result = fetch_compliance_system_evidence(
+                            &target.bundle_id,
+                            &system_id,
+                            Some(&target.bundle_version_id),
+                        )
+                        .await
+                        .map(|response| focus_evidence_policy(response, target.policy_id))
+                        .map_err(|error| error.to_string());
+                        if evidence_generation() == requested {
+                            evidence_data.set(Some(result));
+                        }
+                    });
+                },
+                on_changed: move |_| poam_resource.restart(),
             }
         }
     }
@@ -7798,11 +8367,58 @@ fn map_agent_events_to_logs(events: Vec<SystemAgentEvent>) -> Vec<DeploymentLogE
 #[cfg(test)]
 mod tests {
     use super::{
-        HistoryEventKind, build_history_events, classify_history_entry, map_agent_events_to_logs,
-        map_history_entries_to_commit_history,
+        HistoryEventKind, Tab, build_history_events, classify_history_entry,
+        map_agent_events_to_logs, map_history_entries_to_commit_history, query_value,
+        query_with_parameter, tab_from_query, tab_from_route,
     };
     use crate::api::models::{SystemAgentEvent, SystemHistoryEntry};
     use chrono::{Duration, Utc};
+
+    #[test]
+    fn system_detail_tab_query_parsing_is_exact_and_covers_all_tabs() {
+        assert_eq!(tab_from_query("?tab=compliance"), Tab::Compliance);
+        assert_eq!(tab_from_query("?notice=1&tab=deploy&poam=abc"), Tab::Deploy);
+        assert_eq!(tab_from_query("?tab=history"), Tab::History);
+        assert_eq!(tab_from_query("?tab=hardening"), Tab::Hardening);
+        assert_eq!(tab_from_query("?tab=logs"), Tab::Logs);
+        assert_eq!(tab_from_query("?tab=config"), Tab::Config);
+        assert_eq!(tab_from_query("?tab=cves"), Tab::Cves);
+        assert_eq!(tab_from_query("?tab=deployment"), Tab::Overview);
+        assert_eq!(tab_from_query("?return=tab%3Ddeploy"), Tab::Overview);
+    }
+
+    #[test]
+    fn route_tab_takes_precedence_and_query_is_the_legacy_fallback() {
+        assert_eq!(tab_from_route("compliance", "?tab=deploy"), Tab::Compliance);
+        assert_eq!(tab_from_route("overview", "?tab=deploy"), Tab::Overview);
+        assert_eq!(tab_from_route("", "?tab=history"), Tab::History);
+        assert_eq!(tab_from_route("unknown", "?tab=cves"), Tab::Cves);
+    }
+
+    #[test]
+    fn poam_query_updates_preserve_unrelated_parameters() {
+        let opened = query_with_parameter(
+            "?notice=keep&tab=compliance&view=compact",
+            "poam",
+            Some("11111111-1111-4111-8111-111111111111"),
+        );
+        assert_eq!(
+            opened,
+            "?notice=keep&tab=compliance&view=compact&poam=11111111-1111-4111-8111-111111111111"
+        );
+        assert_eq!(
+            query_value(&opened, "poam").as_deref(),
+            Some("11111111-1111-4111-8111-111111111111")
+        );
+        assert_eq!(
+            query_with_parameter(&opened, "poam", None),
+            "?notice=keep&tab=compliance&view=compact"
+        );
+        assert_eq!(
+            query_with_parameter("?tab=deploy&tab=history&x=1", "tab", Some("compliance")),
+            "?x=1&tab=compliance"
+        );
+    }
 
     #[test]
     fn history_mapping_marks_revert_when_store_path_reappears() {

@@ -216,6 +216,34 @@ flake-check:
     - merge_requests
     - main
 
+# Generates reviewable strict-baseline candidates without weakening the normal
+# Web UI gate. Start this job only after a strict visual failure is confirmed as
+# intentional; semantic and critical-workflow failures still fail the job.
+web-ui-baseline-candidates:
+  stage: check
+  tags:
+    - nix
+  allow_failure: true
+  when: manual
+  before_script:
+    - echo "machine ${CI_SERVER_HOST}" > ~/.netrc
+    - echo "login gitlab-ci-token" >> ~/.netrc
+    - echo "password ${CI_JOB_TOKEN}" >> ~/.netrc
+    - chmod 600 ~/.netrc
+  script:
+    - CF_UI_UPDATE_BASELINES=1 nix build --impure ".#checks.x86_64-linux.web-ui" -L --show-trace
+    - mkdir -p web-ui-baseline-candidates
+    - STORE_PATH=$(readlink -f result)
+    - test -d "$STORE_PATH/screenshots"
+    - cp -r "$STORE_PATH/screenshots/"* web-ui-baseline-candidates/
+  artifacts:
+    expire_in: 30 days
+    paths:
+      - web-ui-baseline-candidates/
+    expose_as: "Web UI Baseline Candidates"
+  only:
+    - merge_requests
+
 # Post web UI screenshots as MR comment (with inline images)
 # Uses CI_JOB_TOKEN (always available) instead of GITLAB_TOKEN (protected variable).
 web-ui-screenshots-mr-comment:

@@ -177,6 +177,7 @@ Eval Complete → create_build_jobs() → notify_build_queue() → Build Workers
 3. **Rust implementation**: Memory safety and performance for security-critical deployment
 4. **Event-driven queues**: Immediate processing with coalesced wakeups and fallback polling
 5. **Flake-native**: Direct integration with modern Nix ecosystem
+6. **Option metadata authority**: Packaged NixOS option metadata is an authoring baseline, while each target flake's evaluation remains authoritative. See [NixOS Option Metadata Authority](./nixos-option-metadata.md).
 
 ### Observability Points
 

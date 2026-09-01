@@ -12,6 +12,42 @@
       "dark",
       "light"
     ],
+    "strictWorkflowNames": [
+      "task433-canonical-large-catalog",
+      "20af-policy-catalog-selection-delete-regressions",
+      "task433-canonical-imported-stig-refinement",
+      "task433-canonical-unmapped-nix-policy",
+      "task433-canonical-multiline-dod",
+      "task433-canonical-mixed-nix-cve-evidence",
+      "task433-canonical-poam-lifecycle"
+    ],
+    "requiredResponsiveArtifacts": [
+      {
+        "step": "06-dashboard",
+        "state": "poam-summary-watchlist",
+        "viewports": ["desktop", "narrowDesktop", "mobile"]
+      },
+      {
+        "step": "06a-onboarding-coach-dashboard",
+        "state": "expanded-nine-step-selected-current",
+        "viewports": ["desktop", "narrowDesktop", "mobile"]
+      },
+      {
+        "step": "06g-onboarding-coach-minimized",
+        "state": "minimized-selected-current",
+        "viewports": ["desktop", "narrowDesktop", "mobile"]
+      },
+      {
+        "step": "06h-onboarding-coach-all-configured",
+        "state": "completed-nine-step",
+        "viewports": ["desktop", "narrowDesktop", "mobile"]
+      },
+      {
+        "step": "09g-topbar-notifications-dark",
+        "state": "poam-notification",
+        "viewports": ["desktop", "narrowDesktop", "mobile"]
+      }
+    ],
     "designFixture": {
       "path": "checks/web-ui/design-fixtures.json",
       "policy": "non-blocking-gauge",
@@ -313,15 +349,16 @@
     },
     {
       "name": "06a-onboarding-coach-dashboard",
-      "description": "Non-blocking onboarding coach panel on dashboard",
+      "description": "Expanded nine-step Setup Coach with completed prerequisites and Create policy selected as current across desktop, narrow desktop, and mobile in both themes",
       "route": "/",
       "designRef": "docs/design/CrystalForge/components/DashboardView.jsx",
       "profiles": [
+        "ci_fast",
         "full"
       ],
       "semanticAssertions": true,
       "interactions": false,
-      "mockedData": false,
+      "mockedData": true,
       "baseline": "advisory"
     },
     {
@@ -534,23 +571,25 @@
     },
     {
       "name": "06g-onboarding-coach-minimized",
-      "description": "Coach panel: minimize to tab, verify tab visible and styled",
+      "description": "Minimized Setup Coach with Create policy selected as current across desktop, narrow desktop, and mobile in both themes",
       "route": "/systems",
       "designRef": "docs/design/CrystalForge/components/Systems.jsx",
       "profiles": [
+        "ci_fast",
         "full"
       ],
       "semanticAssertions": true,
       "interactions": true,
-      "mockedData": false,
+      "mockedData": true,
       "baseline": "advisory"
     },
     {
       "name": "06h-onboarding-coach-all-configured",
-      "description": "Coach panel: expand from tab, all steps show Configured",
+      "description": "Completed nine-step Setup Coach state across desktop, narrow desktop, and mobile in both themes",
       "route": "/systems",
       "designRef": "docs/design/CrystalForge/components/Systems.jsx",
       "profiles": [
+        "ci_fast",
         "full"
       ],
       "semanticAssertions": true,
@@ -719,7 +758,7 @@
     },
     {
       "name": "09g-topbar-notifications-dark",
-      "description": "Dark theme notifications panel opens with unread badge and settings placeholder",
+      "description": "Durable POA&M notification panel across desktop, narrow desktop, and mobile in both themes",
       "route": "/systems",
       "designRef": "docs/design/CrystalForge/components/Shell.jsx",
       "profiles": [
@@ -1436,8 +1475,8 @@
       "baseline": "advisory"
     },
     {
-      "name": "18-policies",
-      "description": "Policies view",
+      "name": "task433-canonical-large-catalog",
+      "description": "Persisted large catalog exercises deep search, collapse, chunking, cards/table, and range selection",
       "route": "/deployment-policies",
       "designRef": "docs/design/CrystalForge/components/PoliciesView.jsx",
       "profiles": [
@@ -1445,9 +1484,23 @@
         "full"
       ],
       "semanticAssertions": true,
-      "interactions": false,
+      "interactions": true,
       "mockedData": false,
-      "baseline": "advisory"
+      "baseline": "strict"
+    },
+    {
+      "name": "20af-policy-catalog-selection-delete-regressions",
+      "description": "Collapsed selection, Ctrl-click, re-expansion, and real partial bulk deletion are a merge-blocking regression gate",
+      "route": "/deployment-policies",
+      "designRef": "docs/design/CrystalForge/components/PoliciesView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "strict"
     },
     {
       "name": "19-policies-new-modal-fields",
@@ -1534,8 +1587,8 @@
       "baseline": "advisory"
     },
     {
-      "name": "20ae-anduril-nixos-stig-import-roundtrip",
-      "description": "The full Anduril NixOS STIG reaches import and preserves the complete backend response",
+      "name": "task433-canonical-imported-stig-refinement",
+      "description": "The official Anduril NixOS STIG import preserves read-only provenance and mappings while added Nix enforcement saves, reopens, and retains lineage",
       "route": "/compliance",
       "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
       "profiles": [
@@ -1545,7 +1598,7 @@
       "semanticAssertions": true,
       "interactions": true,
       "mockedData": false,
-      "baseline": "advisory"
+      "baseline": "strict"
     },
     {
       "name": "20b-policies-cve-gate-create-roundtrip",
@@ -1566,6 +1619,76 @@
       "description": "Compliance bundle requirement and policy memberships remain independent across create, edit, reload, and release changes",
       "route": "/compliance",
       "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "task433-canonical-unmapped-nix-policy",
+      "description": "An Unmapped custom policy authors real metadata-backed Nix enforcement and persists it across save and reopen",
+      "route": "/deployment-policies",
+      "designRef": "docs/design/CrystalForge/components/PoliciesView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "strict"
+    },
+    {
+      "name": "task433-canonical-multiline-dod",
+      "description": "The exact multiline DoD consent banner saves and reopens without semantic or byte-level alteration",
+      "route": "/deployment-policies",
+      "designRef": "docs/design/CrystalForge/data-enforcement.js",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "strict"
+    },
+    {
+      "name": "20ab2-policy-editor-eight-kind-roundtrip",
+      "description": "All eight exposed composite kinds author, persist, reload, edit, and export without exposing incomplete controls",
+      "route": "/deployment-policies",
+      "designRef": "docs/design/CrystalForge/data-enforcement.js",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "task433-canonical-mixed-nix-cve-evidence",
+      "description": "A mapped Nix and CVE policy renders human-readable framework and requirement context with exact persisted evaluator output through production evidence APIs and UI",
+      "route": "/compliance",
+      "designRef": "docs/design/CrystalForge/data-enforcement.js",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "strict"
+    },
+    {
+      "name": "20ac-policy-editor-category-and-imported-provenance",
+      "description": "Category changes preserve enforcement, and an imported policy exposes read-only provenance and mappings",
+      "route": "/deployment-policies",
+      "designRef": "docs/design/CrystalForge/components/PoliciesView.jsx",
       "profiles": [
         "ci_fast",
         "full"
@@ -1872,7 +1995,7 @@
     },
     {
       "name": "29b-compliance-evidence-drawer",
-      "description": "Compliance evidence drawer opens and renders control evidence",
+      "description": "Evidence loading, absent, transport-error, pending, and partial states precede a real persisted aggregate with concurrent Error and Partial presentation",
       "route": "/compliance",
       "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
       "profiles": [
@@ -1938,6 +2061,83 @@
       "semanticAssertions": true,
       "interactions": true,
       "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "29g-poam-failed-evidence-create",
+      "description": "Persisted FAIL evidence creates a POA&M from exact read-only finding context and returns through exact evidence navigation",
+      "route": "/compliance",
+      "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
+      "profiles": ["ci_fast", "full"],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "29h-poam-link-compatible-findings",
+      "description": "Server-compatible finding-origin search links same-lineage persisted FAIL findings and excludes incompatible lineage",
+      "route": "/compliance",
+      "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
+      "profiles": ["ci_fast", "full"],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "29i-poam-detail-edits-milestones-conflicts",
+      "description": "Common POA&M detail persists metadata, status, notes, milestone lifecycle, and presents real stale revisions",
+      "route": "/compliance",
+      "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
+      "profiles": ["ci_fast", "full"],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "task433-canonical-poam-lifecycle",
+      "description": "A mapped POA&M lifecycle renders human-readable framework and requirement context, retains failed evaluator evidence, rejects failing closure, then verifies PASS, closes, reloads, and preserves history",
+      "route": "/compliance",
+      "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
+      "profiles": ["ci_fast", "full"],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "strict"
+    },
+    {
+      "name": "29k-poam-system-rollups-navigation",
+      "description": "System compliance renders exact server POA&M rollups, filters, common detail, and linked evidence navigation",
+      "route": "/systems/:id?tab=compliance",
+      "designRef": "docs/design/CrystalForge/components/SystemDetail.jsx",
+      "profiles": ["ci_fast", "full"],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "29l-poam-bundle-rollups-batching",
+      "description": "Bundle compliance renders the authoritative POA&M mixture with bounded batch rollups and no eager row details",
+      "route": "/compliance",
+      "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
+      "profiles": ["ci_fast", "full"],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
+      "baseline": "advisory"
+    },
+    {
+      "name": "29m-poam-assignment-relationship-immutability",
+      "description": "Assignment POA&M relationship link and unlink preserve exact immutable assignment version content and pointer",
+      "route": "/compliance",
+      "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
+      "profiles": ["ci_fast", "full"],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": false,
       "baseline": "advisory"
     },
     {

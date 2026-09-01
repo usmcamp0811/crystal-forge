@@ -23,12 +23,14 @@
 , testProfile ? "ci_fast"
 , testSteps ? builtins.getEnv "CF_UI_TEST_STEPS"
 , runExportValidation ? true
+, updateVisualBaselines ? builtins.getEnv "CF_UI_UPDATE_BASELINES" == "1"
 , playwrightResultTimeout ? 1800
 , ...
 }:
 let
   testDir = ./tests;
   coverageManifest = ./coverage-manifest.json;
+  baselinesDir = ./baselines;
   designParityDir = ./design-parity;
   CF_TEST_SERVER_PORT = 3000;
 
@@ -424,6 +426,54 @@ in pkgs.testers.runNixOSTest {
       WHERE f.canonical_source_key = 'web-ui-mapping-roundtrip' AND r.canonical_requirement_key = 'MAP-2'
         AND v.canonical_release_key = 'web-ui-mapping-roundtrip-v1'
       ON CONFLICT (requirement_id, framework_version_id) DO NOTHING;
+
+      -- TASK-433 Phase 2: an imported policy with authoritative origin
+      -- provenance, written through the real schema (immutable source artifact,
+      -- source-object mapping, and an imported requirement mapping) so the
+      -- unified editor's read-only Provenance section and read-only mapping
+      -- behavior are exercised against persisted server state.
+      INSERT INTO compliance_source_artifacts
+          (content, filename, media_type, sha256, parser_version, detected_xccdf_version)
+      SELECT '<Benchmark id="web-ui-provenance"/>'::bytea,
+             'U_WEBUI_PROVENANCE_STIG.xml',
+             'application/xml',
+             encode(digest('<Benchmark id="web-ui-provenance"/>'::bytea, 'sha256'), 'hex'),
+             'xccdf-1.2',
+             '1.2'
+      WHERE NOT EXISTS (
+          SELECT 1 FROM compliance_source_artifacts
+           WHERE filename = 'U_WEBUI_PROVENANCE_STIG.xml'
+      );
+      INSERT INTO deployment_policies (name, policy_type, config, enabled)
+      SELECT 'Imported provenance control', 'custom_check', '{"mode":"all","rules":[]}'::jsonb, false
+      WHERE NOT EXISTS (
+          SELECT 1 FROM deployment_policies WHERE name = 'Imported provenance control'
+      );
+      UPDATE deployment_policy_versions v
+         SET source_artifact_id = a.id
+        FROM deployment_policies p, compliance_source_artifacts a
+       WHERE p.name = 'Imported provenance control'
+         AND v.id = p.current_draft_version_id
+         AND a.filename = 'U_WEBUI_PROVENANCE_STIG.xml'
+         AND v.source_artifact_id IS NULL;
+      INSERT INTO compliance_source_object_mappings
+          (source_artifact_id, object_kind, source_identity, policy_version_id, fidelity)
+      SELECT a.id, 'rule', 'SV-WEBUI-1_rule', p.current_draft_version_id, 'preserved_opaque'
+        FROM deployment_policies p, compliance_source_artifacts a
+       WHERE p.name = 'Imported provenance control'
+         AND a.filename = 'U_WEBUI_PROVENANCE_STIG.xml'
+      ON CONFLICT (source_artifact_id, object_kind, source_identity) DO NOTHING;
+      INSERT INTO policy_requirement_mappings
+          (policy_version_id, requirement_version_id, relationship, coverage,
+           rationale, provenance, source_artifact_id, trust_state)
+      SELECT p.current_draft_version_id, rv.id, 'implements', 'full',
+             'Recorded by the source benchmark import.', 'imported', a.id, 'trusted'
+        FROM deployment_policies p, compliance_source_artifacts a,
+             compliance_requirement_versions rv
+       WHERE p.name = 'Imported provenance control'
+         AND a.filename = 'U_WEBUI_PROVENANCE_STIG.xml'
+         AND rv.external_id = 'MAP-2'
+      ON CONFLICT (policy_version_id, requirement_version_id) DO NOTHING;
     """
     encoded_mapping_fixture_sql = base64.b64encode(
       mapping_fixture_sql.encode("utf-8")
@@ -542,13 +592,20 @@ in pkgs.testers.runNixOSTest {
     # Copy test files and coverage manifest into the VM
     machine.succeed("cp -r ${testDir}/* /tmp/web-ui-tests/")
     machine.succeed("cp ${coverageManifest} /tmp/web-ui-tests/coverage-manifest.json")
+    machine.succeed("mkdir -p /tmp/web-ui-baselines && cp -r ${baselinesDir}/. /tmp/web-ui-baselines/")
+    machine.succeed("cp ${./default.nix} /tmp/web-ui-tests/default.nix")
 
-    # Design-parity harness inputs: scripts + manifest (read by integration-test.js
-    # at /tmp/web-ui-tests/design-parity/manifest.json) and the offline design
-    # example bundle.
+    # Design-parity harness inputs must be present before static contracts run.
     machine.succeed("mkdir -p /tmp/web-ui-tests/design-parity")
     machine.succeed("cp -r ${designParityDir}/. /tmp/web-ui-tests/design-parity/")
     machine.succeed("mkdir -p /tmp/design-example && cp -r ${designExampleOffline}/. /tmp/design-example/")
+    machine.succeed(
+        "${pkgs.nodejs}/bin/node /tmp/web-ui-tests/design-parity/generate-design-targets-test.js"
+    )
+    machine.succeed(
+        "env CF_WEB_UI_SOURCE_DIR=/tmp/web-ui-tests CF_UI_STATIC_CONTRACTS=1 "
+        "${pkgs.nodejs}/bin/node /tmp/web-ui-tests/integration-test.js"
+    )
 
     test_profile = "${testProfile}"
     test_steps = ${if testSteps == null then "None" else "\"${testSteps}\""}
@@ -572,23 +629,74 @@ in pkgs.testers.runNixOSTest {
     # Run the integration test script
     machine.succeed("rm -f /tmp/web-ui-tests/integration.exit /tmp/screenshots/results.json /tmp/screenshots/fatal.json")
     machine.succeed(
-        f"nohup sh -c 'env CF_UI_TEST_PROFILE={test_profile}{test_steps_env} ${pkgs.nodejs}/bin/node /tmp/web-ui-tests/integration-test.js http://127.0.0.1:${
+        f"nohup sh -c 'env CF_UI_BASELINES_DIR=/tmp/web-ui-baselines CF_UI_TEST_PROFILE={test_profile}{test_steps_env} ${pkgs.nodejs}/bin/node /tmp/web-ui-tests/integration-test.js http://127.0.0.1:${
           toString CF_TEST_SERVER_PORT
         } /tmp/screenshots; status=$?; printf \"%s\\n\" \"$status\" > /tmp/web-ui-tests/integration.exit' > /tmp/web-ui-tests/integration.log 2>&1 </dev/null &"
     )
-    machine.wait_until_succeeds(
-        "test -f /tmp/screenshots/results.json -o -f /tmp/screenshots/fatal.json -o -f /tmp/web-ui-tests/integration.exit",
-        timeout=result_timeout,
-    )
+
+    def export_failure_artifacts():
+        # Preserve browser output and server diagnostics before rejecting the
+        # derivation. Artifact export errors must not hide the original failure.
+        try:
+            machine.succeed(
+                "journalctl -u crystal-forge-server.service --no-pager -n 300 "
+                "> /tmp/web-ui-tests/server-journal.log 2>&1 || true; "
+                "rm -rf /tmp/web-ui-failure-artifacts && "
+                "mkdir -p /tmp/web-ui-failure-artifacts && "
+                "cp -a /tmp/screenshots/. /tmp/web-ui-failure-artifacts/ && "
+                "cp /tmp/web-ui-tests/integration.log "
+                "/tmp/web-ui-failure-artifacts/integration.log && "
+                "cp /tmp/web-ui-tests/server-journal.log "
+                "/tmp/web-ui-failure-artifacts/server-journal.log && "
+                "if test -f /tmp/web-ui-tests/integration.exit; then "
+                "cp /tmp/web-ui-tests/integration.exit "
+                "/tmp/web-ui-failure-artifacts/integration.exit; fi"
+            )
+            machine.copy_from_vm(
+                "/tmp/web-ui-failure-artifacts",
+                "browser-failure-artifacts",
+            )
+        except Exception as e:
+            print(f"warning: could not export browser failure artifacts: {e}")
+
+    def print_browser_diagnostics(reason):
+        # Print diagnostics while the VM is reachable. Failed derivations do
+        # not reliably retain files copied only into the test-driver workdir.
+        print(f"=== Web UI browser diagnostics: {reason} ===")
+        try:
+            print(machine.succeed("cat /tmp/web-ui-tests/integration.log || true"))
+        except Exception as e:
+            print(f"warning: could not print integration.log: {e}")
+        print("=== Crystal Forge server journal ===")
+        try:
+            print(
+                machine.succeed(
+                    "journalctl -u crystal-forge-server.service --no-pager -n 300 || true"
+                )
+            )
+        except Exception as e:
+            print(f"warning: could not print server journal: {e}")
+
+    # The process can write results.json before post-processing finishes. Wait
+    # for the durable exit marker so a late non-zero exit cannot be hidden by
+    # an otherwise valid results artifact. Preserve partial output on timeout.
+    try:
+        machine.wait_for_file("/tmp/web-ui-tests/integration.exit", timeout=result_timeout)
+    except Exception:
+        print_browser_diagnostics("timed out waiting for integration.exit")
+        export_failure_artifacts()
+        raise
     output = machine.succeed("cat /tmp/web-ui-tests/integration.log")
     print(output)
 
     # Coverage-gate failures (manifest drift) abort before any results exist.
     if machine.execute("test -f /tmp/screenshots/fatal.json")[0] == 0:
+        export_failure_artifacts()
         fatal_json = machine.succeed("cat /tmp/screenshots/fatal.json")
         raise Exception(f"Web UI check aborted: {json.loads(fatal_json)['error']}")
 
     if machine.execute("test -f /tmp/screenshots/results.json")[0] != 0:
+        export_failure_artifacts()
         exit_code = machine.succeed("cat /tmp/web-ui-tests/integration.exit").strip()
         print("=== Crystal Forge server journal after integration failure ===")
         print(
@@ -600,6 +708,8 @@ in pkgs.testers.runNixOSTest {
             "integration process exited before producing results.json "
             f"(exit code {exit_code})"
         )
+
+    exit_code = machine.succeed("cat /tmp/web-ui-tests/integration.exit").strip()
 
     # Read results
     results_json = machine.succeed("cat /tmp/screenshots/results.json")
@@ -613,11 +723,12 @@ in pkgs.testers.runNixOSTest {
             )
         )
 
-    # Copy screenshots + visual reports out
+    # Copy final and intermediate screenshots for successful and failed steps.
+    # Intermediate captures are review evidence even when a later assertion in
+    # the same workflow fails.
     for r in results:
-        if r.get("ok"):
-            for visual in r.get("visuals", []):
-                machine.copy_from_vm(f"/tmp/screenshots/{visual['name']}.png", "screenshots")
+        for visual in r.get("visuals", []):
+            machine.copy_from_vm(f"/tmp/screenshots/{visual['name']}.png", "screenshots")
 
     for report_file in ["results.json", "visual-report.json", "visual-summary.md"]:
         try:
@@ -665,9 +776,16 @@ in pkgs.testers.runNixOSTest {
         print(f"warning: design-parity harness error (non-blocking): {e}")
 
     ok_count = sum(1 for r in results if r.get("ok"))
+    intermediate_count = sum(
+        1
+        for result in results
+        for visual in result.get("visuals", [])
+        if visual.get("intermediate")
+    )
 
     print("\n=== Summary ===")
     print(f"  Screenshots: {ok_count}/{len(results)} captured")
+    print(f"  Intermediate workflow artifacts: {intermediate_count} copied")
 
     for r in results:
         status = "OK" if r.get("ok") else "FAIL"
@@ -677,12 +795,12 @@ in pkgs.testers.runNixOSTest {
         else:
             print(f"  [{status}] {r['name']}")
 
+    integration_failures = []
     if ok_count == 0:
-        raise Exception("All screenshots failed")
+        integration_failures.append("All screenshots failed")
 
-    # Fail if critical tests failed
-    # Keep this list to stable smoke checks; richer UX flows are tracked by
-    # screenshot results but not treated as merge-blocking while UI is evolving.
+    # Critical workflows must be present and successful. Treating only returned
+    # failures as fatal would let profile or manifest drift silently skip them.
     critical_tests = [
       "01-login-page",
       "02-registration",
@@ -695,14 +813,54 @@ in pkgs.testers.runNixOSTest {
       "16b-cves-severity-filter",
       "26c-evaluations-latest-per-flake-populated",
       "26d-evaluations-latest-combined-filters-empty-clear",
+      "29g-poam-failed-evidence-create",
+      "29h-poam-link-compatible-findings",
+      "29i-poam-detail-edits-milestones-conflicts",
+      "29k-poam-system-rollups-navigation",
+      "29l-poam-bundle-rollups-batching",
+      "29m-poam-assignment-relationship-immutability",
       "30a-admin-automatic-retries-defaults-reset",
       "30b-admin-automatic-retries-save-reload",
       "30c-admin-automatic-retries-failed-save-retains-draft",
+      "30d-evidence-lifecycle",
       "30e-policy-card-direct-edit-preserves-evidence",
+      "task433-canonical-large-catalog",
+      "20af-policy-catalog-selection-delete-regressions",
+      "19-policies-new-modal-fields",
+      "20-policies-new-modal-rule-builder",
+      "20a-policies-new-modal-pending-mappings",
+      "20ac-stig-import-reconciliation-fixture",
+      "20aa-policies-new-modal-mappings-roundtrip",
+      "task433-canonical-unmapped-nix-policy",
+      "20ac-policy-editor-category-and-imported-provenance",
+      "task433-canonical-imported-stig-refinement",
+      "task433-canonical-multiline-dod",
+      "20ab2-policy-editor-eight-kind-roundtrip",
+      "task433-canonical-mixed-nix-cve-evidence",
+      "20ad-stig-nixos-assertion-roundtrip",
+      "20b-policies-cve-gate-create-roundtrip",
+      "20ab-compliance-bundle-requirement-baseline-roundtrip",
+      "20c-policies-multirule-create-roundtrip",
+      "20d-policies-cve-gate-invalid-rejected",
+      "20e-policies-multirule-rules-only-no-expression-required",
+      "task433-canonical-poam-lifecycle",
     ]
-    failed_critical = [r['name'] for r in results if r['name'] in critical_tests and not r.get('ok')]
+    selected_critical_tests = (
+      critical_tests
+      if not test_steps
+      else [name for name in critical_tests if name in {
+        selected.strip() for selected in test_steps.split(",") if selected.strip()
+      }]
+    )
+    returned_names = {r.get('name') for r in results}
+    missing_critical = [name for name in selected_critical_tests if name not in returned_names]
+    if missing_critical:
+        integration_failures.append(
+            f"Required critical web UI checks were absent: {missing_critical}"
+        )
+    failed_critical = [r['name'] for r in results if r['name'] in selected_critical_tests and not r.get('ok')]
     if failed_critical:
-        raise Exception(f"Critical web UI checks failed: {failed_critical}")
+        integration_failures.append(f"Critical web UI checks failed: {failed_critical}")
 
     # === Phase 4b: Visual Baseline Gate ===
     # Steps marked "strict" in coverage-manifest.json must match their
@@ -710,19 +868,37 @@ in pkgs.testers.runNixOSTest {
     # reported (with diff images in screenshots/diffs) but never block.
     visual_report_json = machine.succeed("cat /tmp/screenshots/visual-report.json")
     visual_report = json.loads(visual_report_json)
-    counts = visual_report.get("counts", {})
+    counts = visual_report.get("counts")
+    required_visual_counts = {"match", "diff", "new", "skipped", "error"}
+    if not isinstance(counts, dict) or not required_visual_counts.issubset(counts):
+        raise Exception("visual-report.json has an invalid counts schema")
+    if any(not isinstance(counts[key], int) or counts[key] < 0 for key in required_visual_counts):
+        raise Exception("visual-report.json contains invalid visual counts")
     print(
         f"  Visual baselines: {counts.get('match', 0)} match, "
         f"{counts.get('diff', 0)} differ, {counts.get('new', 0)} new, "
         f"{counts.get('skipped', 0)} skipped"
     )
-    visual_failures = visual_report.get("failures", [])
+    visual_failures = visual_report.get("failures")
+    if not isinstance(visual_failures, list):
+        raise Exception("visual-report.json has an invalid failures schema")
     if visual_failures:
         for f in visual_failures:
             print(f"  STRICT VISUAL FAIL: {f['name']} ({f['status']})")
-        raise Exception(
-            f"Strict visual baseline failures: {[f['name'] for f in visual_failures]}"
+        if ${if updateVisualBaselines then "False" else "True"}:
+            integration_failures.append(
+                f"Strict visual baseline failures: {[f['name'] for f in visual_failures]}"
+            )
+        else:
+            print("  Baseline update mode: strict visual failures are exported for review")
+
+    if exit_code != "0":
+        integration_failures.append(
+            f"integration process exited non-zero after producing results.json ({exit_code})"
         )
+    if integration_failures:
+        export_failure_artifacts()
+        raise Exception("; ".join(integration_failures))
 
     if not ${if runExportValidation then "True" else "False"}:
         print("=== Focused web UI check complete; export validation skipped ===")

@@ -1,11 +1,27 @@
+//! Reusable compliance catalog, roll-up, and evidence components.
+//!
+//! Components render server-derived compliance and POA&M state. They delegate
+//! persistence, authorization, route ownership, and finding identity decisions
+//! to their callers and the server APIs.
+
 use dioxus::prelude::*;
 
 use crate::Route;
+#[cfg(test)]
+use crate::api::models::CompositeAssessmentRuleResult;
 use crate::api::models::{
     ComplianceBundleSummary, ComplianceControlEvidence, ComplianceControlStatus,
     ComplianceEvidenceResponse, ComplianceRollupTotals, ComplianceSystemRollup,
+    CompositeAssessmentResult,
+};
+use crate::components::dialog_focus::{
+    DialogFocusBoundary, DialogFocusRestore, DialogFocusSentinel,
 };
 use crate::components::icon::{Icon, IconName};
+use crate::components::poam::{
+    AssignmentVersionCandidate, FindingPoamBar, FindingPoamContext, FindingPoamEvent,
+};
+use crate::views::poam_api::{self, AssessmentOutcome, FindingRelationshipEntry};
 
 pub mod refine_policy;
 pub use refine_policy::{
@@ -25,6 +41,12 @@ pub struct BundleCatalogProps {
     pub selected_version_id: Option<uuid::Uuid>,
     #[props(default)]
     pub on_select_version: EventHandler<uuid::Uuid>,
+    /// Provides server-computed POA&M counts for each bundle lineage.
+    #[props(default)]
+    pub poam_rollups: Vec<poam_api::Rollup>,
+    /// Indicates that POA&M roll-ups are still loading.
+    #[props(default)]
+    pub poam_rollups_loading: bool,
 }
 
 #[component]
@@ -114,6 +136,7 @@ pub fn BundleCatalog(props: BundleCatalogProps) -> Element {
                         let score_color = score.map_or("var(--cf-text-muted)", |score| if score >= 90 { "#34d399" } else if score >= 70 { "#fbbf24" } else { "#f87171" });
                         let score_label = score.map_or_else(|| "—".to_string(), |score| format!("{score}%"));
                         let system_count_label = format!("{} system{}", bundle.applicable_system_count, if bundle.applicable_system_count == 1 { "" } else { "s" });
+                        let poam_rollup = props.poam_rollups.iter().find(|rollup| rollup.scope_id == id);
                         rsx! {
                             tr {
                                 class: if selected { "selected" } else { "" },
@@ -128,6 +151,14 @@ pub fn BundleCatalog(props: BundleCatalogProps) -> Element {
                                     div { style: "font-size:11px;color:var(--cf-text-muted);margin-top:2px;",
                                         "{bundle.requirement_count} requirements · {bundle.policy_count} policies"
                                         if revisions.len() > 1 { " · {revisions.len()} revisions" }
+                                    }
+                                    if let Some(rollup) = poam_rollup {
+                                        div { "data-testid": "bundle-poam-summary", style: "font-size:10px;color:var(--cf-text-muted);margin-top:3px;",
+                                            span { style: "color:#f87171;font-weight:700;", "{rollup.open_findings} open" }
+                                            " · {rollup.on_poam_findings} on POA&M · {rollup.no_poam_findings} unassigned"
+                                        }
+                                    } else if props.poam_rollups_loading {
+                                        div { style: "font-size:10px;color:var(--cf-text-muted);margin-top:3px;", "Loading POA&M roll-up…" }
                                     }
                                 }
                                 td { span { class: "chip chip-info", "{framework}" } }
@@ -399,7 +430,17 @@ pub fn SystemsMatrix(props: SystemsMatrixProps) -> Element {
                              rsx! {
                                  tr {
                                      style: "cursor:pointer;",
+                                     role: "button",
+                                     tabindex: "0",
+                                     aria_label: "Open evidence for {hostname}",
                                      onclick: move |_| props.on_evidence.call(system_id),
+                                     onkeydown: move |event| {
+                                         let key = event.key();
+                                         if key == Key::Enter || matches!(key, Key::Character(ref value) if value == " ") {
+                                             event.prevent_default();
+                                             props.on_evidence.call(system_id);
+                                         }
+                                     },
                                       td {
                                          div { style: "display:flex;align-items:center;gap:8px;",
                                              span {
@@ -479,7 +520,35 @@ pub struct EvidenceDrawerProps {
     pub bundle_name: String,
     #[props(default)]
     pub system: Option<ComplianceSystemRollup>,
+    /// Contains the selected immutable bundle version label.
+    #[props(default)]
+    pub bundle_version: Option<String>,
+    /// Provides immutable assignment versions available as POA&M references.
+    #[props(default)]
+    pub assignment_versions: Vec<AssignmentVersionCandidate>,
+    /// Contains a non-fatal failure to resolve assignment reference context.
+    #[props(default)]
+    pub assignment_context_error: Option<String>,
+    /// Disables POA&M mutations for read-only users.
+    #[props(default)]
+    pub viewer: bool,
+    /// Selects the policy shown when the drawer opens.
+    #[props(default)]
+    pub initial_policy_id: Option<uuid::Uuid>,
+    /// Receives the authoritative policy ID selected in the navigator.
+    #[props(default)]
+    pub on_active_policy: EventHandler<uuid::Uuid>,
+    /// Receives server-backed POA&M workflow events from finding controls.
+    #[props(default)]
+    pub on_poam_event: EventHandler<FindingPoamEvent>,
     pub on_close: EventHandler<()>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum EvidencePoamState {
+    Loading,
+    Loaded(std::collections::HashMap<uuid::Uuid, FindingRelationshipEntry>),
+    Unavailable(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -620,15 +689,77 @@ fn reconciled_active(active: usize, visible: &[usize]) -> Option<usize> {
         .or_else(|| visible.first().copied())
 }
 
+/// Renders an accessible evidence drawer for one system and bundle version.
+///
+/// Evidence and finding IDs come from the server response. The drawer owns
+/// presentation state such as grouping, filtering, expansion, and active-row
+/// selection, but it does not infer finding identity or authorize mutations.
 #[component]
 pub fn EvidenceDrawer(props: EvidenceDrawerProps) -> Element {
-    let mut active_idx = use_signal(|| 0usize);
+    let initial_index = props
+        .initial_policy_id
+        .and_then(|policy_id| {
+            props
+                .evidence
+                .controls
+                .iter()
+                .position(|control| control.policy_id == policy_id)
+        })
+        .unwrap_or(0);
+    let mut active_idx = use_signal(|| initial_index);
     let mut filter = use_signal(String::new);
     let mut collapsed = use_signal(Vec::<String>::new);
+    let mut expanded = use_signal(|| false);
     let total = props.evidence.controls.len();
     let hostname = props.evidence.hostname.clone();
     let bundle_name = props.bundle_name.clone();
     let system = props.system.clone();
+    let mut poam_state = use_signal(|| EvidencePoamState::Loading);
+    let mut poam_generation = use_signal(|| 0_u64);
+
+    let mut load_relationships = move |finding_ids: Vec<uuid::Uuid>| {
+        poam_generation += 1;
+        let requested = poam_generation();
+        if finding_ids.is_empty() {
+            poam_state.set(EvidencePoamState::Unavailable(
+                "No authoritative finding identity is available for POA&M lookup.".to_string(),
+            ));
+            return;
+        }
+        poam_state.set(EvidencePoamState::Loading);
+        spawn(async move {
+            match poam_api::finding_relationships_by_finding(&finding_ids).await {
+                Ok(entries) if poam_generation() == requested => {
+                    poam_state.set(EvidencePoamState::Loaded(
+                        entries
+                            .into_iter()
+                            .map(|entry| (entry.finding_id, entry))
+                            .collect(),
+                    ));
+                }
+                Err(error) if poam_generation() == requested => {
+                    let message = if error.is_not_visible() || error.is_unauthorized() {
+                        "POA&M relationships are not visible for this evidence scope.".to_string()
+                    } else {
+                        format!("Could not load POA&M relationships: {error}")
+                    };
+                    poam_state.set(EvidencePoamState::Unavailable(message));
+                }
+                _ => {}
+            }
+        });
+    };
+
+    let finding_ids = props
+        .evidence
+        .controls
+        .iter()
+        .filter_map(|control| control.finding_id)
+        .collect::<Vec<_>>();
+    use_effect({
+        let finding_ids = finding_ids.clone();
+        move || load_relationships(finding_ids.clone())
+    });
 
     let query = filter.read().trim().to_ascii_lowercase();
     let groups = navigator_groups(
@@ -653,8 +784,13 @@ pub fn EvidenceDrawer(props: EvidenceDrawerProps) -> Element {
     rsx! {
         div { class: "fl-tray-backdrop", onclick: move |_| props.on_close.call(()) }
         aside {
-            class: "fl-tray",
-            style: "width:min(960px,96vw);",
+            id: "compliance-evidence-dialog",
+            class: if expanded() { "fl-tray compliance-drawer-expanded" } else { "fl-tray" },
+            role: "dialog",
+            aria_modal: "true",
+            aria_labelledby: "compliance-evidence-title",
+            tabindex: "-1",
+            style: if expanded() { "" } else { "width:min(960px,96vw);" },
             onkeydown: move |event| {
                 let visible = visible_control_order(&groups_for_keyboard, &collapsed.read());
                 let key = event.key().to_string();
@@ -683,6 +819,11 @@ pub fn EvidenceDrawer(props: EvidenceDrawerProps) -> Element {
                     _ => {}
                 }
             },
+            DialogFocusRestore {}
+            DialogFocusSentinel {
+                dialog_id: "compliance-evidence-dialog".to_string(),
+                boundary: DialogFocusBoundary::Last,
+            }
             header {
                 class: "fl-tray-head",
                 div {
@@ -693,9 +834,12 @@ pub fn EvidenceDrawer(props: EvidenceDrawerProps) -> Element {
                     div { style: "min-width:0;",
                         div {
                             style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap;",
-                            span { class: "mono", style: "font-weight:700;font-size:15px;", "{hostname}" }
+                            span { id: "compliance-evidence-title", class: "mono", style: "font-weight:700;font-size:15px;", "{hostname}" }
                             span { style: "font-size:11px;color:var(--cf-text-muted);", "vs" }
                             span { class: "chip chip-info", "{bundle_name}" }
+                            if let Some(framework) = props.evidence.framework.as_deref() {
+                                span { class: "chip chip-neutral", "{framework}" }
+                            }
                         }
                         div {
                             style: "font-size:11px;color:var(--cf-text-muted);margin-top:2px;",
@@ -719,13 +863,21 @@ pub fn EvidenceDrawer(props: EvidenceDrawerProps) -> Element {
                         }
                         Link {
                             class: "btn btn-ghost xs focus-ring",
-                            to: Route::SystemDetailView { id: system.system_id.to_string() },
+                            to: Route::SystemDetailView { id: system.system_id.to_string(), tab: String::new(), poam: String::new() },
                             "Open system"
                             Icon { name: IconName::ArrowRight, size: 12 }
                         }
                     }
                     button {
+                        class: "btn btn-ghost xs focus-ring",
+                        aria_pressed: expanded(),
+                        onclick: move |_| expanded.toggle(),
+                        if expanded() { "Restore" } else { "Expand" }
+                    }
+                    button {
                         class: "btn-icon focus-ring",
+                        autofocus: true,
+                        aria_label: "Close evidence",
                         title: "Close",
                         onclick: move |_| props.on_close.call(()),
                         Icon { name: IconName::X, size: 16 }
@@ -734,9 +886,10 @@ pub fn EvidenceDrawer(props: EvidenceDrawerProps) -> Element {
             }
 
             div {
-                style: "display:grid;grid-template-columns:minmax(0,260px) minmax(0,1fr);flex:1;min-height:0;overflow:hidden;",
+                class: "compliance-evidence-layout",
                 // Left: control nav
                 nav {
+                    aria_label: "Evidence controls",
                     style: "border-right:1px solid var(--cf-divider);overflow-y:auto;overflow-x:hidden;background:color-mix(in oklab,var(--cf-page-bg) 30%,var(--cf-card-bg));",
                     div { style: "position:sticky;top:0;z-index:1;padding:8px;background:color-mix(in oklab,var(--cf-page-bg) 55%,var(--cf-card-bg));border-bottom:1px solid var(--cf-divider);",
                         input {
@@ -777,6 +930,7 @@ pub fn EvidenceDrawer(props: EvidenceDrawerProps) -> Element {
                                                 active_idx.set(index);
                                             }
                                         },
+                                        aria_expanded: "{!is_collapsed}",
                                         Icon { name: if is_collapsed { IconName::ChevronRight } else { IconName::ChevronDown }, size: 10 }
                                         span { style: "flex:1;text-align:left;", "{label} · {controls.len()}" }
                                     }
@@ -791,7 +945,13 @@ pub fn EvidenceDrawer(props: EvidenceDrawerProps) -> Element {
                                                     button {
                                                         class: "focus-ring",
                                                         style: if is_sel { "all:unset;cursor:pointer;display:block;padding:10px 14px;width:100%;box-sizing:border-box;border-left:3px solid var(--cf-brand-purple);background:color-mix(in oklab,var(--cf-brand-purple) 8%,transparent);border-bottom:1px solid var(--cf-divider);" } else { "all:unset;cursor:pointer;display:block;padding:10px 14px;width:100%;box-sizing:border-box;border-left:3px solid transparent;background:transparent;border-bottom:1px solid var(--cf-divider);" },
-                                                        onclick: move |_| active_idx.set(index),
+                                                        "data-testid": "evidence-policy-target",
+                                                        "data-policy-id": "{control.policy_id}",
+                                                        aria_current: if is_sel { "true" } else { "false" },
+                                                        onclick: move |_| {
+                                                            active_idx.set(index);
+                                                            props.on_active_policy.call(control.policy_id);
+                                                        },
                                                         div { style: "display:flex;justify-content:space-between;align-items:center;gap:8px;",
                                                             span { class: "mono", style: "font-size:11px;color:var(--cf-text-muted);", "{index+1:02}" }
                                                             span { style: "width:8px;height:8px;border-radius:50%;background:{dot_color};" }
@@ -843,14 +1003,37 @@ pub fn EvidenceDrawer(props: EvidenceDrawerProps) -> Element {
                             }
                         }
                     }
+                    if let Some(error) = props.assignment_context_error.as_ref() {
+                        div { class: "sd-callout sd-callout-danger", "Could not load exact assignment references: {error}" }
+                    }
                     if let Some(ctrl) = active_control {
                         ControlEvidenceCard {
                             control: ctrl,
                             control_idx: reconciled_active(*active_idx.read(), &visible).unwrap_or(0),
                             total,
+                            system_id: props.evidence.system_id,
+                            hostname: props.evidence.hostname.clone(),
+                            bundle_id: props.evidence.bundle_id,
+                            bundle_name: props.bundle_name.clone(),
+                            bundle_version_id: props.evidence.bundle_version_id,
+                            bundle_version: props.bundle_version.clone(),
+                            evidence_framework: props.evidence.framework.clone(),
+                            assignment_versions: props.assignment_versions.clone(),
+                            viewer: props.viewer,
+                            poam_state: poam_state.read().clone(),
+                            on_poam_event: move |event: FindingPoamEvent| {
+                                if let FindingPoamEvent::InvalidateAssessment(_) = event {
+                                    load_relationships(finding_ids.clone());
+                                }
+                                props.on_poam_event.call(event);
+                            },
                         }
                     }
                 }
+            }
+            DialogFocusSentinel {
+                dialog_id: "compliance-evidence-dialog".to_string(),
+                boundary: DialogFocusBoundary::First,
             }
         }
     }
@@ -868,11 +1051,80 @@ fn control_status_color(status: &ComplianceControlStatus) -> &'static str {
     }
 }
 
+fn composite_status_presentation(status: &str) -> (&'static str, &'static str) {
+    match status {
+        "pass" => ("Pass", "#34d399"),
+        "fail" => ("Fail", "#f87171"),
+        "error" => ("Error", "#f43f5e"),
+        "not_checked" => ("Not checked", "#94a3b8"),
+        _ => ("Unknown", "#64748b"),
+    }
+}
+
+const AGGREGATE_OUTCOME_HELP: &str = "The aggregate outcome governs the finding. Constituent outcomes explain each rule and do not independently change remediation state.";
+
+fn aggregate_outcome_label(status: &str) -> String {
+    format!("Aggregate outcome · {status}")
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CompositePresentationState {
+    NoAssessment,
+    Pending,
+    Partial,
+    Complete,
+    Error,
+}
+
+fn composite_presentation_state(
+    expected: bool,
+    result: Option<&CompositeAssessmentResult>,
+) -> Option<CompositePresentationState> {
+    let Some(result) = result else {
+        return expected.then_some(CompositePresentationState::NoAssessment);
+    };
+    if result.overall_status == "error" {
+        return Some(CompositePresentationState::Error);
+    }
+    let unchecked = result
+        .rule_results
+        .iter()
+        .filter(|outcome| outcome.status == "not_checked")
+        .count();
+    Some(if unchecked == result.rule_results.len() {
+        CompositePresentationState::Pending
+    } else if unchecked > 0 {
+        CompositePresentationState::Partial
+    } else {
+        CompositePresentationState::Complete
+    })
+}
+
+fn composite_is_partial(result: &CompositeAssessmentResult) -> bool {
+    let unchecked = result
+        .rule_results
+        .iter()
+        .filter(|outcome| outcome.status == "not_checked")
+        .count();
+    unchecked > 0 && unchecked < result.rule_results.len()
+}
+
 #[derive(Props, Clone, PartialEq)]
 struct ControlEvidenceCardProps {
     control: ComplianceControlEvidence,
     control_idx: usize,
     total: usize,
+    system_id: uuid::Uuid,
+    hostname: String,
+    bundle_id: uuid::Uuid,
+    bundle_name: String,
+    bundle_version_id: Option<uuid::Uuid>,
+    bundle_version: Option<String>,
+    evidence_framework: Option<String>,
+    assignment_versions: Vec<AssignmentVersionCandidate>,
+    viewer: bool,
+    poam_state: EvidencePoamState,
+    on_poam_event: EventHandler<FindingPoamEvent>,
 }
 
 #[component]
@@ -892,9 +1144,11 @@ fn ControlEvidenceCard(props: ControlEvidenceCardProps) -> Element {
         ComplianceControlStatus::NotApplicable => "not applicable",
         ComplianceControlStatus::Error => "error",
     };
+    let aggregate_status_label = aggregate_outcome_label(status_label);
     let policy_name = props.control.policy_name.clone();
     let summary = props.control.summary.clone();
     let framework_mapping = props.control.framework_mapping.clone();
+    let requirements = props.control.requirements.clone();
     let evidence_count = props.control.evidence_items.len();
     let evidence_plural = if evidence_count == 1 { "" } else { "s" };
 
@@ -907,7 +1161,7 @@ fn ControlEvidenceCard(props: ControlEvidenceCardProps) -> Element {
                 span {
                     class: "chip",
                     style: "color:{sc};background:color-mix(in oklab,{sc} 14%,transparent);border:1px solid {sc};",
-                    "{status_label}"
+                    "{aggregate_status_label}"
                 }
                 span {
                     class: "chip",
@@ -972,11 +1226,120 @@ fn ControlEvidenceCard(props: ControlEvidenceCardProps) -> Element {
             ComplianceControlStatus::Error => rsx! {
                 div { class: "sd-callout sd-callout-danger",
                     div { style: "font-size:12px;",
-                        strong { "Evaluator error. " }
-                        "The control could not be evaluated. Check system logs for details."
+                        strong { "Assessment error. " }
+                        "The control could not be assessed in its required phase. Check system logs for details."
                     }
                 }
             },
+        }
+
+        if let Some(finding_id) = props.control.finding_id {
+            if let Some(policy_version_id) = props.control.composite_result.as_ref().map(|result| result.policy_version_id).or_else(|| props.control.finding_observation.as_ref().map(|observation| observation.policy_version_id)) {
+                {
+                    let assessment_id = props.control.composite_result.as_ref().and_then(|result| result.assessment_id);
+                    let assessment_outcome = match props.control.status {
+                        ComplianceControlStatus::Pass => AssessmentOutcome::Pass,
+                        ComplianceControlStatus::Fail => AssessmentOutcome::Fail,
+                        ComplianceControlStatus::Error => AssessmentOutcome::Error,
+                        _ => AssessmentOutcome::NotChecked,
+                    };
+                    let evidence_summary = if props.control.evidence_items.is_empty() {
+                        props.control.summary.clone()
+                    } else {
+                        props.control.evidence_items.iter().map(|item| item.label.as_str()).collect::<Vec<_>>().join(", ")
+                    };
+                    let context = FindingPoamContext {
+                        assessment_id,
+                        finding_id,
+                        observation: props.control.finding_observation.clone(),
+                        system_id: props.system_id,
+                        hostname: props.hostname.clone(),
+                        policy_lineage_id: props.control.policy_id,
+                        policy_version_id,
+                        policy_name: props.control.policy_name.clone(),
+                        policy_version: policy_version_id.to_string(),
+                        bundle_id: Some(props.bundle_id),
+                        bundle_name: Some(props.bundle_name.clone()),
+                        bundle_version_id: props.bundle_version_id,
+                        bundle_version: props.bundle_version.clone(),
+                        requirement: props.control.requirements.first().map(|requirement| requirement.external_id.clone()).or_else(|| (!props.control.framework_mapping.trim().is_empty()).then(|| props.control.framework_mapping.clone())),
+                        framework: props.control.requirements.first().map(|requirement| format!("{} · {}", requirement.framework_name, requirement.framework_version)).or_else(|| props.evidence_framework.clone()),
+                        result: assessment_outcome,
+                        evidence_summary,
+                        assignment_versions: props.assignment_versions.clone(),
+                    };
+                    match &props.poam_state {
+                        EvidencePoamState::Loading => rsx! { div { role: "status", aria_live: "polite", class: "sd-callout sd-callout-info", "Loading POA&M relationships for this authoritative finding…" } },
+                        EvidencePoamState::Unavailable(message) => rsx! { div { role: "alert", class: "sd-callout sd-callout-warn", "{message}" } },
+                        EvidencePoamState::Loaded(relationships) => {
+                            if let Some(relationship) = relationships.get(&finding_id) {
+                                rsx! { FindingPoamBar { context, relationship: relationship.clone(), viewer: props.viewer, on_event: props.on_poam_event } }
+                            } else {
+                                rsx! { div { role: "alert", class: "sd-callout sd-callout-warn", "The authoritative POA&M relationship response did not include this finding. Refresh evidence before acting." } }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+
+        if let Some(state) = composite_presentation_state(
+            props.control.composite_expected,
+            props.control.composite_result.as_ref(),
+        ) {
+            if state == CompositePresentationState::NoAssessment {
+                div { class: "sd-callout sd-callout-warn", "data-testid": "composite-no-assessment",
+                    strong { "No composite assessment. " }
+                    "No result exists for this exact system, target, policy version, and effective policy set."
+                }
+            }
+        }
+
+        if let Some(result) = props.control.composite_result.as_ref() {
+            {
+                let (overall_label, overall_color) = composite_status_presentation(&result.overall_status);
+                let state = composite_presentation_state(true, Some(result));
+                rsx! {
+                    div { "data-testid": "composite-assessment", style: "display:flex;flex-direction:column;gap:8px;",
+                        div { style: "display:flex;align-items:center;justify-content:space-between;gap:8px;",
+                            div {
+                                h3 { style: "font-size:11px;text-transform:uppercase;letter-spacing:0.08em;color:var(--cf-text-muted);margin:0;font-weight:600;", "Composite policy assessment" }
+                                p { class: "composite-outcome-help", "{AGGREGATE_OUTCOME_HELP}" }
+                            }
+                            span { class: "chip", "data-testid": "composite-overall-status", style: "color:{overall_color};border:1px solid {overall_color};", "Aggregate · {overall_label}" }
+                        }
+                        if composite_is_partial(result) {
+                            div { class: "sd-callout sd-callout-warn", "data-testid": "composite-partial", "Partial assessment. Completed outcomes are shown with the remaining expected phases as Not checked." }
+                        }
+                        match state {
+                            Some(CompositePresentationState::Pending) => rsx! { div { class: "sd-callout", "data-testid": "composite-pending", "Assessment pending. Every expected phase result is Not checked." } },
+                            Some(CompositePresentationState::Error) => rsx! { div { class: "sd-callout sd-callout-danger", "data-testid": "composite-error", "Composite assessment error. At least one constituent phase returned Error." } },
+                            _ => rsx! {},
+                        }
+                        for outcome in result.rule_results.iter() {
+                            {
+                                let (label, color) = composite_status_presentation(&outcome.status);
+                                let evidence = serde_json::to_string(&outcome.evidence).unwrap_or_else(|_| "null".to_string());
+                                rsx! {
+                                    div { class: "composite-rule-outcome", "data-testid": "composite-rule-outcome",
+                                        div { style: "display:flex;align-items:center;gap:7px;flex-wrap:wrap;",
+                                            span { class: "mono", style: "font-size:11px;font-weight:700;", "{outcome.kind}" }
+                                            span { class: "chip chip-neutral", style: "font-size:9px;", "{outcome.phase}" }
+                                            span { class: "chip", "data-testid": "composite-rule-status", style: "font-size:9px;color:{color};border:1px solid {color};", "{label}" }
+                                        }
+                                        div { style: "font-size:11.5px;color:var(--cf-text-secondary);", "{outcome.detail}" }
+                                        div { class: "composite-rule-id", span { "Rule ID" } code { class: "mono", "{outcome.rule_id}" } }
+                                        if outcome.evidence != serde_json::json!({}) && !outcome.evidence.is_null() {
+                                            details { class: "composite-raw-evidence", summary { "Raw evidence" } pre { "{evidence}" } }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // Evidence items
@@ -1031,8 +1394,20 @@ fn ControlEvidenceCard(props: ControlEvidenceCardProps) -> Element {
         div {
             style: "padding:12px;background:var(--cf-subtle-bg);border-radius:8px;font-size:11px;color:var(--cf-text-secondary);",
             strong { style: "color:var(--cf-text-primary);", "Framework mapping" }
-            span { style: "margin-left:8px;", "—" }
-            span { class: "mono", style: "margin-left:8px;", "{framework_mapping}" }
+            if requirements.is_empty() {
+                span { style: "margin-left:8px;", "—" }
+                span { class: "mono", style: "margin-left:8px;", if framework_mapping.trim().is_empty() { "Unmapped" } else { "{framework_mapping}" } }
+            } else {
+                div { style: "display:flex;flex-direction:column;gap:6px;margin-top:8px;",
+                    for requirement in requirements {
+                        div { "data-testid": "evidence-requirement-identity",
+                            strong { "{requirement.framework_name} · {requirement.framework_version}" }
+                            span { class: "mono", style: "margin-left:8px;", "{requirement.external_id}" }
+                            if let Some(title) = requirement.title { span { style: "margin-left:8px;", "{title}" } }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -1055,6 +1430,11 @@ mod tests {
             summary: String::new(),
             evidence_items: Vec::new(),
             framework_mapping: String::new(),
+            requirements: Vec::new(),
+            composite_result: None,
+            finding_id: None,
+            finding_observation: None,
+            composite_expected: false,
             control_family: Some("AC".to_string()),
             cmmc_level,
             cis_section: cis_section.map(str::to_string),
@@ -1086,6 +1466,90 @@ mod tests {
     }
 
     #[test]
+    fn constituent_result_statuses_have_distinct_presentations() {
+        let presentations =
+            ["pass", "fail", "not_checked", "error"].map(composite_status_presentation);
+        assert_eq!(
+            presentations.map(|item| item.0),
+            ["Pass", "Fail", "Not checked", "Error"]
+        );
+        assert_eq!(
+            presentations
+                .iter()
+                .map(|item| item.1)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            4
+        );
+    }
+
+    #[test]
+    fn aggregate_and_constituent_labels_are_not_interchangeable() {
+        assert_eq!(aggregate_outcome_label("fail"), "Aggregate outcome · fail");
+        assert!(AGGREGATE_OUTCOME_HELP.starts_with("The aggregate outcome governs the finding."));
+        assert!(AGGREGATE_OUTCOME_HELP.contains("Constituent outcomes explain each rule"));
+    }
+
+    #[test]
+    fn composite_states_distinguish_absent_pending_partial_complete_and_error() {
+        assert_eq!(
+            composite_presentation_state(true, None),
+            Some(CompositePresentationState::NoAssessment)
+        );
+        assert_eq!(composite_presentation_state(false, None), None);
+
+        let assessment = |overall: &str, statuses: &[&str]| CompositeAssessmentResult {
+            assessment_id: Some(Uuid::new_v4()),
+            evaluation_attempt_id: None,
+            policy_version_id: Uuid::new_v4(),
+            target_store_path: Some("/nix/store/test-system".to_string()),
+            effective_set_digest: Some("set".to_string()),
+            effective_config_digest: Some("config".to_string()),
+            overall_status: overall.to_string(),
+            rule_results: statuses
+                .iter()
+                .map(|status| CompositeAssessmentRuleResult {
+                    rule_id: Uuid::new_v4(),
+                    kind: "nixos_option".to_string(),
+                    phase: "evaluation".to_string(),
+                    status: (*status).to_string(),
+                    detail: String::new(),
+                    evidence: serde_json::json!({}),
+                })
+                .collect(),
+        };
+        assert_eq!(
+            composite_presentation_state(true, Some(&assessment("not_checked", &["not_checked"]))),
+            Some(CompositePresentationState::Pending)
+        );
+        assert_eq!(
+            composite_presentation_state(
+                true,
+                Some(&assessment("not_checked", &["pass", "not_checked"]))
+            ),
+            Some(CompositePresentationState::Partial)
+        );
+        assert_eq!(
+            composite_presentation_state(true, Some(&assessment("pass", &["pass"]))),
+            Some(CompositePresentationState::Complete)
+        );
+        assert_eq!(
+            composite_presentation_state(true, Some(&assessment("error", &["error"]))),
+            Some(CompositePresentationState::Error)
+        );
+        let partial_error = assessment("error", &["error", "not_checked"]);
+        assert_eq!(
+            composite_presentation_state(true, Some(&partial_error)),
+            Some(CompositePresentationState::Error)
+        );
+        assert!(composite_is_partial(&partial_error));
+        assert!(!composite_is_partial(&assessment(
+            "not_checked",
+            &["not_checked"]
+        )));
+    }
+
+    #[test]
     fn visible_order_reconciles_filter_and_collapsed_groups() {
         let controls = vec![
             control("Account management", None, None),
@@ -1098,6 +1562,14 @@ mod tests {
 
         let collapsed = vec![groups[0].key.clone()];
         assert!(visible_control_order(&groups, &collapsed).is_empty());
+    }
+
+    #[test]
+    fn mobile_navigator_sizes_to_content_with_a_bounded_height() {
+        let css = include_str!("../../../assets/app.css");
+        assert!(css.contains("grid-template-rows: auto minmax(0, 1fr)"));
+        assert!(css.contains(".compliance-evidence-layout > nav { max-height: 38vh"));
+        assert!(!css.contains("grid-template-rows: minmax(160px, 38vh)"));
     }
 
     #[test]
