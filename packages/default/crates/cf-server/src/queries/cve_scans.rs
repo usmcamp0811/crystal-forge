@@ -1403,14 +1403,38 @@ pub async fn heartbeat_cve_scan_execution(
     Ok(result.rows_affected() == 1)
 }
 
-/// Finalize a stale execution only after its scanner future has been dropped.
+/// Finalizes a stale execution after its scanner future has been dropped.
+///
 /// Recovery first records `execution_revoked_at` while retaining active-scan
-/// uniqueness; the former owner calls this after cancelling its live process.
+/// uniqueness. The former owner calls this function after it cancels its live
+/// process. The scan failure and the corresponding composite assessment update
+/// commit in one transaction, so durable enforcement state cannot retain the
+/// prior in-progress scan outcome.
+///
+/// # Errors
+///
+/// Returns an error when the transaction, finding lock, scan transition, or
+/// composite assessment update fails.
 pub async fn acknowledge_revoked_cve_scan_execution(
     pool: &PgPool,
     scan_id: Uuid,
     execution_id: Uuid,
 ) -> Result<bool> {
+    let mut tx = pool.begin().await?;
+    let Some(derivation_id) =
+        sqlx::query_scalar::<_, i32>("SELECT derivation_id FROM cve_scans WHERE id = $1")
+            .bind(scan_id)
+            .fetch_optional(&mut *tx)
+            .await?
+    else {
+        tx.rollback().await?;
+        return Ok(false);
+    };
+    crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx(
+        &mut tx,
+        derivation_id,
+    )
+    .await?;
     let result = sqlx::query(
         r#"
         UPDATE cve_scans
@@ -1430,10 +1454,17 @@ pub async fn acknowledge_revoked_cve_scan_execution(
     )
     .bind(scan_id)
     .bind(execution_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
 
-    Ok(result.rows_affected() == 1)
+    if result.rows_affected() != 1 {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+
+    crate::services::composite_enforcement::persist_scan_phase_in_tx(&mut tx, scan_id).await?;
+    tx.commit().await?;
+    Ok(true)
 }
 
 /// Return an owned but not-yet-started execution to the queue.

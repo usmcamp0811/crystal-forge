@@ -19,8 +19,9 @@ use crystal_forge::models::deployment_policies::{
     UpdateDeploymentPolicyRequest, composite_rule_result_key, policy_results_json,
 };
 use crystal_forge::queries::cve_scans::{
-    CreateCveScanOutcome, CveScanExecutionClaim, complete_cve_scan_for_execution, create_cve_scan,
-    mark_cve_scan_failed_by_id_for_execution,
+    CreateCveScanOutcome, CveScanExecutionClaim, acknowledge_revoked_cve_scan_execution,
+    complete_cve_scan_for_execution, create_cve_scan, mark_cve_scan_failed_by_id_for_execution,
+    recover_stale_scans,
 };
 use crystal_forge::queries::deployment_policies::{
     create_deployment_policy, get_deployment_policy_by_version, update_deployment_policy,
@@ -44,6 +45,7 @@ use crystal_forge::services::composite_enforcement::{
 };
 use sqlx::PgPool;
 use std::collections::BTreeMap;
+use std::time::Duration;
 use uuid::Uuid;
 
 fn composite_config() -> serde_json::Value {
@@ -1403,6 +1405,95 @@ async fn newer_pending_and_failed_scan_cannot_be_reversed_by_older_completion(po
         terminal,
         ("failed".into(), Some(second.scan_id), "error".into())
     );
+    let blocked = authorize_deployment_at(
+        &pool,
+        context.system_id,
+        context.derivation_id,
+        &context.store_path,
+        Utc.with_ymd_and_hms(2026, 8, 24, 12, 0, 0).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(blocked.outcome, EnforcementOutcome::Error);
+}
+
+#[sqlx::test]
+async fn revoked_scan_acknowledgment_atomically_recomputes_composite_assessment(pool: PgPool) {
+    let context = assessment_context(&pool).await;
+    persist_evaluation(&pool, &context, EnforcementOutcome::Pass).await;
+    let claim = created_scan(&pool, context.derivation_id, "revoked-composite").await;
+
+    let initial: (String, String, serde_json::Value) = sqlx::query_as(
+        r#"
+        SELECT assessment.overall_outcome, result.outcome, result.evidence
+        FROM composite_policy_assessments assessment
+        JOIN composite_policy_rule_results result ON result.assessment_id = assessment.id
+        WHERE assessment.system_id = $1 AND result.kind = 'cve_block'
+        "#,
+    )
+    .bind(context.system_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(initial.0, "not_checked");
+    assert_eq!(initial.1, "not_checked");
+    assert_eq!(initial.2["status"], "in_progress");
+
+    sqlx::query(
+        r#"
+        UPDATE cve_scans
+        SET scan_metadata = scan_metadata || jsonb_build_object(
+            'execution_heartbeat_at', NOW() - INTERVAL '2 hours'
+        )
+        WHERE id = $1
+        "#,
+    )
+    .bind(claim.scan_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        recover_stale_scans(&pool, Duration::from_secs(60))
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT status FROM cve_scans WHERE id = $1")
+            .bind(claim.scan_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        "in_progress",
+        "revocation must retain active-scan uniqueness until owner acknowledgment"
+    );
+
+    assert!(
+        acknowledge_revoked_cve_scan_execution(&pool, claim.scan_id, claim.execution_id)
+            .await
+            .unwrap()
+    );
+    let terminal: (String, String, String, Option<Uuid>, serde_json::Value) = sqlx::query_as(
+        r#"
+        SELECT scan.status, assessment.overall_outcome, result.outcome,
+               result.source_scan_id, result.evidence
+        FROM cve_scans scan
+        JOIN composite_policy_assessments assessment
+          ON assessment.derivation_id = scan.derivation_id
+        JOIN composite_policy_rule_results result ON result.assessment_id = assessment.id
+        WHERE scan.id = $1 AND result.kind = 'cve_block'
+        "#,
+    )
+    .bind(claim.scan_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(terminal.0, "failed");
+    assert_eq!(terminal.1, "error");
+    assert_eq!(terminal.2, "error");
+    assert_eq!(terminal.3, Some(claim.scan_id));
+    assert_eq!(terminal.4["status"], "failed");
+
     let blocked = authorize_deployment_at(
         &pool,
         context.system_id,

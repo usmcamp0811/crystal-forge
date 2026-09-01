@@ -7435,15 +7435,14 @@ const steps = [
           status: 202,
           payload: {
             enqueued_count: 2,
-            message:
-              "Queued 2 CVE scan(s); 1 eligible system configuration already has a scan pending or in progress.",
+            message: "Queued 2 CVE scan(s); 1 already had an active scan.",
           },
         },
         {
           status: 202,
           payload: {
             enqueued_count: 0,
-            message: "No eligible active system configurations were found.",
+            message: "No active systems are reporting a running configuration to scan.",
           },
         },
         {
@@ -7516,7 +7515,7 @@ const steps = [
       // already-active count rather than presenting the request as all-new.
       await fleetRescanButton.click();
       await assertVisible(
-        page.getByText("Queued 2 CVE scan(s); 1 eligible system configuration already has"),
+        page.getByText("Queued 2 CVE scan(s); 1 already had an active scan."),
         "Expected partial fleet enqueue/reuse feedback",
       );
 
@@ -7524,7 +7523,7 @@ const steps = [
       // from the all-already-active result above.
       await fleetRescanButton.click();
       await assertVisible(
-        page.getByText("No eligible active system configurations were found."),
+        page.getByText("No active systems are reporting a running configuration to scan."),
         "Expected zero-eligible fleet feedback",
       );
 
