@@ -4,6 +4,7 @@ title: Make Web UI Nix check fail when integration manifest steps fail
 status: Backlog
 assignee: []
 created_date: '2026-08-26 01:33'
+updated_date: '2026-09-01 03:12'
 labels:
   - web-ui
   - testing
@@ -11,6 +12,7 @@ labels:
 dependencies: []
 references:
   - TASK-433.5
+  - TASK-450.11
 modified_files:
   - checks/web-ui/default.nix
   - checks/web-ui/tests/integration-test.js
@@ -31,3 +33,9 @@ The authoritative `checks.x86_64-linux.web-ui` derivation can exit successfully 
 - [ ] #2 The check preserves and reports the failed step names and reasons
 - [ ] #3 A regression test proves a deliberately failing selected step causes the derivation to fail
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+TASK-450.11 treats this bug as a correctness prerequisite for web UI latency work. Required browser-step failures must propagate before the check is split, parallelized, or given tighter timing bounds; otherwise faster completion could preserve a false-success result. Preserve failed step names, reasons, and artifacts in a form that remains usable if the harness is later divided into multiple checks.
+<!-- SECTION:NOTES:END -->
