@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - opencode-gpt-5.6-sol
 created_date: '2026-09-01 03:12'
-updated_date: '2026-09-01 05:17'
+updated_date: '2026-09-01 05:40'
 labels:
   - web-ui
   - testing
@@ -70,6 +70,8 @@ TASK-438 is the correctness prerequisite because runtime measurements are not me
 3. Expose a small check set: production embedded-server smoke/shell coverage, balanced required semantic groups, independent browser export validation, and advisory design-parity evidence.
 4. Schedule blocking checks concurrently in GitLab. Preserve unique evidence paths and aggregate all statuses and artifacts into one reviewer-facing report.
 5. Document the logical gate and exact local commands. Run local focused checks, then use representative MR pipelines to balance groups and demonstrate a blocking critical path below 20 minutes without reducing coverage.
+
+Post-fleet correction: encode required versus advisory ownership for every ci_fast step while preserving exactly-once shard execution and compatibility smoke's six required steps. Extend browser and aggregate verdicts so only required failures block, while advisory failures and missing advisory results remain visible. Fix route teardown across failed steps/page recreation, make 12f and 12h focused fixtures self-contained and condition-synchronized, preserve context-scoped coach suppression, update gate documentation, and run focused/static/Nix verification without rerunning the full fleet unless needed.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
