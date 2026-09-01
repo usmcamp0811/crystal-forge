@@ -19,7 +19,8 @@ use crystal_forge::models::deployment_policies::{
     UpdateDeploymentPolicyRequest, composite_rule_result_key, policy_results_json,
 };
 use crystal_forge::queries::cve_scans::{
-    complete_cve_scan, create_cve_scan, mark_cve_scan_failed_by_id,
+    CreateCveScanOutcome, CveScanExecutionClaim, complete_cve_scan_for_execution, create_cve_scan,
+    mark_cve_scan_failed_by_id_for_execution,
 };
 use crystal_forge::queries::deployment_policies::{
     create_deployment_policy, get_deployment_policy_by_version, update_deployment_policy,
@@ -1033,15 +1034,40 @@ async fn persisted_kind_evidence(pool: &PgPool, system_id: Uuid, kind: &str) -> 
     .unwrap()
 }
 
-async fn completed_scan(pool: &PgPool, context: &AssessmentContext, critical: i32) -> Uuid {
-    let scan_id = create_cve_scan(pool, context.derivation_id, "ac3-matrix", None)
+async fn created_scan(
+    pool: &PgPool,
+    derivation_id: i32,
+    scanner_name: &str,
+) -> CveScanExecutionClaim {
+    match create_cve_scan(pool, derivation_id, scanner_name, None)
         .await
         .unwrap()
-        .id();
-    complete_cve_scan(pool, scan_id, 1, critical, critical, 0, 0, 0, Some(1), None)
-        .await
-        .unwrap();
-    scan_id
+    {
+        CreateCveScanOutcome::Created(claim) => claim,
+        CreateCveScanOutcome::Existing(scan_id) => {
+            panic!("test derivation unexpectedly reused active CVE scan {scan_id}")
+        }
+    }
+}
+
+async fn completed_scan(pool: &PgPool, context: &AssessmentContext, critical: i32) -> Uuid {
+    let claim = created_scan(pool, context.derivation_id, "ac3-matrix").await;
+    complete_cve_scan_for_execution(
+        pool,
+        claim.scan_id,
+        1,
+        critical,
+        critical,
+        0,
+        0,
+        0,
+        Some(1),
+        None,
+        claim.execution_id,
+    )
+    .await
+    .unwrap();
+    claim.scan_id
 }
 
 #[sqlx::test]
@@ -1106,15 +1132,13 @@ async fn ac3_mixed_lifecycle_failure_permutations_preserve_earlier_outcomes_and_
 
     let cve_error = assessment_context(&pool).await;
     persist_evaluation(&pool, &cve_error, EnforcementOutcome::Pass).await;
-    let failed_scan = create_cve_scan(&pool, cve_error.derivation_id, "ac3-matrix", None)
-        .await
-        .unwrap()
-        .id();
-    mark_cve_scan_failed_by_id(
+    let failed_scan = created_scan(&pool, cve_error.derivation_id, "ac3-matrix").await;
+    mark_cve_scan_failed_by_id_for_execution(
         &pool,
-        failed_scan,
+        failed_scan.scan_id,
         cve_error.derivation_id,
         "scanner failed",
+        failed_scan.execution_id,
     )
     .await
     .unwrap();
@@ -1275,13 +1299,7 @@ async fn phase_lifecycle_persists_ordered_placeholders_and_authorizes_only_after
     .unwrap();
     assert_eq!(before_scan.outcome, EnforcementOutcome::NotChecked);
 
-    let scan_id = create_cve_scan(&pool, context.derivation_id, "test", None)
-        .await
-        .unwrap()
-        .id();
-    complete_cve_scan(&pool, scan_id, 1, 0, 0, 0, 0, 0, Some(1), None)
-        .await
-        .unwrap();
+    completed_scan(&pool, &context, 0).await;
     let authorized = authorize_deployment_at(
         &pool,
         context.system_id,
@@ -1298,35 +1316,77 @@ async fn phase_lifecycle_persists_ordered_placeholders_and_authorizes_only_after
 async fn newer_pending_and_failed_scan_cannot_be_reversed_by_older_completion(pool: PgPool) {
     let context = assessment_context(&pool).await;
     persist_evaluation(&pool, &context, EnforcementOutcome::Pass).await;
-    let first = create_cve_scan(&pool, context.derivation_id, "test", None)
-        .await
-        .unwrap()
-        .id();
-    complete_cve_scan(&pool, first, 1, 0, 0, 0, 0, 0, Some(1), None)
-        .await
-        .unwrap();
-    let second = create_cve_scan(&pool, context.derivation_id, "test", None)
-        .await
-        .unwrap()
-        .id();
+    let first = created_scan(&pool, context.derivation_id, "test").await;
+    complete_cve_scan_for_execution(
+        &pool,
+        first.scan_id,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        Some(1),
+        None,
+        first.execution_id,
+    )
+    .await
+    .unwrap();
+    let second = created_scan(&pool, context.derivation_id, "test").await;
 
-    complete_cve_scan(&pool, first, 1, 1, 1, 0, 0, 0, Some(1), None)
+    assert!(
+        complete_cve_scan_for_execution(
+            &pool,
+            first.scan_id,
+            1,
+            1,
+            1,
+            0,
+            0,
+            0,
+            Some(1),
+            None,
+            first.execution_id,
+        )
         .await
-        .unwrap();
+        .is_err(),
+        "a completed execution must reject obsolete terminal writes"
+    );
     let current: (Option<Uuid>, String) = sqlx::query_as(
         "SELECT source_scan_id, outcome FROM composite_policy_rule_results WHERE phase = 'scan'",
     )
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(current, (Some(second), "not_checked".to_string()));
+    assert_eq!(current, (Some(second.scan_id), "not_checked".to_string()));
 
-    mark_cve_scan_failed_by_id(&pool, second, context.derivation_id, "scanner failed")
+    mark_cve_scan_failed_by_id_for_execution(
+        &pool,
+        second.scan_id,
+        context.derivation_id,
+        "scanner failed",
+        second.execution_id,
+    )
+    .await
+    .unwrap();
+    assert!(
+        complete_cve_scan_for_execution(
+            &pool,
+            second.scan_id,
+            1,
+            1,
+            1,
+            0,
+            0,
+            0,
+            Some(1),
+            None,
+            second.execution_id,
+        )
         .await
-        .unwrap();
-    complete_cve_scan(&pool, second, 1, 1, 1, 0, 0, 0, Some(1), None)
-        .await
-        .unwrap();
+        .is_err(),
+        "a failed execution must reject obsolete terminal writes"
+    );
     let terminal: (String, Option<Uuid>, String) = sqlx::query_as(
         r#"
         SELECT scan.status, result.source_scan_id, result.outcome
@@ -1335,11 +1395,14 @@ async fn newer_pending_and_failed_scan_cannot_be_reversed_by_older_completion(po
         WHERE scan.id = $1
         "#,
     )
-    .bind(second)
+    .bind(second.scan_id)
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(terminal, ("failed".into(), Some(second), "error".into()));
+    assert_eq!(
+        terminal,
+        ("failed".into(), Some(second.scan_id), "error".into())
+    );
     let blocked = authorize_deployment_at(
         &pool,
         context.system_id,
@@ -1358,13 +1421,7 @@ async fn final_authorization_is_exact_and_target_update_is_guarded_by_all_phase_
 ) {
     let context = assessment_context(&pool).await;
     persist_evaluation(&pool, &context, EnforcementOutcome::Fail).await;
-    let scan_id = create_cve_scan(&pool, context.derivation_id, "test", None)
-        .await
-        .unwrap()
-        .id();
-    complete_cve_scan(&pool, scan_id, 1, 0, 0, 0, 0, 0, Some(1), None)
-        .await
-        .unwrap();
+    completed_scan(&pool, &context, 0).await;
     let blocked = authorize_and_set_system_target(
         &pool,
         context.system_id,
@@ -1743,13 +1800,7 @@ async fn known_uncached_target_is_blocked_without_composite_policy(pool: PgPool)
 async fn heartbeat_claim_requires_unchanged_desired_target_and_live_pending_delivery(pool: PgPool) {
     let context = assessment_context(&pool).await;
     persist_evaluation(&pool, &context, EnforcementOutcome::Pass).await;
-    let scan_id = create_cve_scan(&pool, context.derivation_id, "test", None)
-        .await
-        .unwrap()
-        .id();
-    complete_cve_scan(&pool, scan_id, 1, 0, 0, 0, 0, 0, Some(1), None)
-        .await
-        .unwrap();
+    completed_scan(&pool, &context, 0).await;
     authorize_and_set_system_target(
         &pool,
         context.system_id,
@@ -1791,13 +1842,7 @@ async fn heartbeat_claim_requires_unchanged_desired_target_and_live_pending_deli
 async fn upgrade_target_gets_pending_delivery_only_after_exact_authorization(pool: PgPool) {
     let context = assessment_context(&pool).await;
     persist_evaluation(&pool, &context, EnforcementOutcome::Pass).await;
-    let scan_id = create_cve_scan(&pool, context.derivation_id, "test", None)
-        .await
-        .unwrap()
-        .id();
-    complete_cve_scan(&pool, scan_id, 1, 0, 0, 0, 0, 0, Some(1), None)
-        .await
-        .unwrap();
+    completed_scan(&pool, &context, 0).await;
     sqlx::query("UPDATE systems SET desired_target = $1 WHERE id = $2")
         .bind(&context.store_path)
         .bind(context.system_id)
@@ -2069,13 +2114,7 @@ fn pin_required_is_not_checked_while_evaluation_is_pending() {
 #[sqlx::test]
 async fn scan_before_evaluation_is_merged_and_later_evaluation_preserves_newest_scan(pool: PgPool) {
     let context = assessment_context(&pool).await;
-    let scan_id = create_cve_scan(&pool, context.derivation_id, "test", None)
-        .await
-        .unwrap()
-        .id();
-    complete_cve_scan(&pool, scan_id, 1, 0, 0, 0, 0, 0, Some(1), None)
-        .await
-        .unwrap();
+    let scan_id = completed_scan(&pool, &context, 0).await;
 
     persist_evaluation(&pool, &context, EnforcementOutcome::Fail).await;
     let after_first_eval: (String, Option<Uuid>) = sqlx::query_as(
@@ -2136,13 +2175,7 @@ async fn final_authorization_aggregates_multiple_exact_policy_versions_atomicall
     .await
     .unwrap();
     tx.commit().await.unwrap();
-    let scan_id = create_cve_scan(&pool, context.derivation_id, "test", None)
-        .await
-        .unwrap()
-        .id();
-    complete_cve_scan(&pool, scan_id, 1, 0, 0, 0, 0, 0, Some(1), None)
-        .await
-        .unwrap();
+    completed_scan(&pool, &context, 0).await;
 
     let blocked = authorize_and_set_system_target(
         &pool,
