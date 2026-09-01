@@ -3,16 +3,27 @@ id: TASK-450.3
 title: >-
   Separate the core server build from the embedded-UI server so web UI changes
   stop rebuilding the backend
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-08-31 22:39'
-updated_date: '2026-08-31 22:45'
+updated_date: '2026-09-01 02:05'
 labels: []
 dependencies: []
+references:
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/324'
 documentation:
   - >-
     backlog/docs/build/build-invalidation-graph/doc-23 -
     Build-Invalidation-Graph-and-CI-Feedback-Latency-Analysis.md
+modified_files:
+  - packages/default/default.nix
+  - modules/nixos/crystal-forge/default.nix
+  - checks/integration/default.nix
+  - checks/oidc-auth/default.nix
+  - checks/web-ui/default.nix
+  - lib/server-test-node/default.nix
+  - packages/dev-env/composition.nix
+  - packages/devScripts/default.nix
 parent_task_id: TASK-450
 priority: high
 type: enhancement
@@ -90,13 +101,13 @@ Read doc-23, `Build Invalidation Graph and CI Feedback Latency Analysis`, for th
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A server build exists that does not take the web UI derivation as an input
-- [ ] #2 A server build exists that embeds the web UI and is used for the production package and the NixOS module service
-- [ ] #3 A source-only change to the web UI does not change the derivation hash of the server used by the integration and oidc-auth checks, demonstrated by comparing derivation paths before and after the edit
-- [ ] #4 The integration and oidc-auth checks pass using the server build that has no web UI input
-- [ ] #5 One pre-merge check still exercises the production server binary serving the embedded production WASM in a real browser, and that check passes
-- [ ] #6 The behavior of a core server build when it receives a request for a UI route is defined, implemented deliberately, and documented
-- [ ] #7 The Nix source documents which server build each consumer uses and why, so a future change does not silently reintroduce the web UI dependency for backend-only checks
+- [x] #1 A server build exists that does not take the web UI derivation as an input
+- [x] #2 A server build exists that embeds the web UI and is used for the production package and the NixOS module service
+- [x] #3 A source-only change to the web UI does not change the derivation hash of the server used by the integration and oidc-auth checks, demonstrated by comparing derivation paths before and after the edit
+- [x] #4 The integration and oidc-auth checks pass using the server build that has no web UI input
+- [x] #5 One pre-merge check still exercises the production server binary serving the embedded production WASM in a real browser, and that check passes
+- [x] #6 The behavior of a core server build when it receives a request for a UI route is defined, implemented deliberately, and documented
+- [x] #7 The Nix source documents which server build each consumer uses and why, so a future change does not silently reintroduce the web UI dependency for backend-only checks
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -105,4 +116,18 @@ Read doc-23, `Build Invalidation Graph and CI Feedback Latency Analysis`, for th
 LOCK: opencode-claude-opus-5 on gray in /home/mcamp/code/crystal-forge/TASK-450-p0-build-graph
 
 Implemented together with TASK-450.1, TASK-450.2, and TASK-450.4 in a single MR at the user's explicit direction.
+
+Final web UI invalidation probe: embedded server changed l4c061z… to zpx7x1q…; core server stayed p9lw9l1…; integration and oidc-auth stayed unchanged after residual whole-flake inputs were removed; web-ui changed as required.
+
+The core server registers no axum UI fallback and therefore returns the framework default 404 Not Found for UI routes. The embedded production server remains the module default and the web-ui check explicitly selects it.
+
+Verification passed: core and embedded package builds, integration, oidc-auth, web-ui, and one complete nix flake check --keep-going -L run.
+
+LOCK RELEASED: implementation is pushed and MR !324 is awaiting review.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Created shared core and embedded-UI server variants from the same crate source. API-only checks and development paths use the core server with no web UI input. Production and the authoritative browser check retain the embedded server. Web UI changes no longer invalidate integration or OIDC.
+<!-- SECTION:FINAL_SUMMARY:END -->
