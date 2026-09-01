@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:43'
-updated_date: '2026-09-01 12:48'
+updated_date: '2026-09-01 13:35'
 labels:
   - design-parity
   - policy
@@ -115,6 +115,8 @@ Focused non-overlapping review remediation (2026-08-31): extend `policy_counts_d
 Final-candidate freeze review found that step-local viewport changes can leak into later strict captures. Reset the shared Playwright page to the manifest viewport before each step, rerun static contracts, regenerate/review any affected strict baselines, and rerun the normal strict gate before freezing the SHA.
 
 Complete the repository-required Rust documentation pass for TASK-433 public APIs and components before freezing. Correct stale SQLx cache rationale, run formatting and rustdoc checks, then inspect the aggregate diff again.
+
+Post-candidate review remediation: after TASK-433.7 fixes explicit remediation-plan persistence, extend the non-blocking design-parity manifest and contracts with deterministic authoritative targets for the common policy editor and POA&M detail tray where production fixture navigation permits. Record a per-surface authoritative design comparison for policy editor, POA&M detail/lifecycle, compliance/evidence, system/bundle rollups, dashboard/watchlist, notifications, Setup Coach, catalog, and responsive themes. Explicitly retain reviewed contract-compatible deviations, including Provenance presentation and production-only server-authoritative plan details/assignment sections. Then freeze a new SHA, run focused and required gates, push, require green exact-head CI, and reconcile TASK-433.1-.9 plus parent AC1-AC40. Pipeline 2809426014 proves only superseded candidate `da7ae7de` once a remediation commit exists.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
