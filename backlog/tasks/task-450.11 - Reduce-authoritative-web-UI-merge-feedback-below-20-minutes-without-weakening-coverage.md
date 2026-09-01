@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - opencode-gpt-5.6-sol
 created_date: '2026-09-01 03:12'
-updated_date: '2026-09-01 20:31'
+updated_date: '2026-09-01 21:58'
 labels:
   - web-ui
   - testing
@@ -124,6 +124,10 @@ MR !325 pipeline 2810519617 reached and completed Web UI gate builds, then all c
 Rebased the shared branch onto `origin/dev` at `701151f4` after TASK-433 merged. Resolved the Web UI constructor, Playwright harness, GitLab CI, ownership manifest, tests, and runbook conflicts while preserving the parallel five-job blocking gate, advisory design parity, strict TASK-433 baselines, the manual governance baseline-candidate job, fatal browser diagnostics, and runtime closure fixes. The rebased commits are `0504bbd1`, `e7184518`, and `425684d7`. Ownership now validates 116 `ci_fast` steps as 44 required and 72 advisory across fleet (3/32), pipeline (5/28), and governance (36/12). Post-rebase verification passed: 28 Node tests; ownership validation; Bash syntax; GitLab YAML parse; six Web UI Nix parses and evaluations; helper package builds; `git diff --check`; and the targeted OSCAL Rust test after adapting its fixture to TASK-433's expanded `ComplianceControlEvidence` model. The fixture adaptation remains an uncommitted working-tree change pending the next commit/push step. The previously successful pipeline predates this TASK-433 integration, so three representative pipelines must be collected from the rebased MR head.
 
 Committed the post-rebase OSCAL fixture adaptation as `9d1eb180` and force-pushed the rewritten branch with an explicit lease. MR !325 now targets `origin/dev` at `701151f4`, reports `has_conflicts: false`, and started MR pipeline 2810793756 at head `9d1eb180`. The worktree is clean and matches the remote branch. Updated the MR description to replace stale 100/17/83 ownership counts with 116/44/72 and to distinguish earlier VM evidence from verification performed at the TASK-433-integrated head.
+
+MR !325 P1 correction verification: the focused fresh-database governance workflow passed (`CF_UI_TEST_STEPS=20ac-policy-editor-category-and-imported-provenance nix build --impure path:.#checks.x86_64-linux.web-ui-governance -L --show-trace --no-link`), including the restored imported-provenance chain. The full `web-ui-exports` blocking check passed in 38.605 seconds; populated and empty-scope AR/AP/SSP/Catalog documents passed all four OSCAL 1.1.2 schemas and cross-document reference assertions, and SARIF passed. Node CI/static tests passed 22/22, the targeted OSCAL Rust test passed 1/1, rustfmt check passed, helper package builds passed, and `git diff --check` passed.
+
+The full `nix build path:.#checks.x86_64-linux.web-ui-governance -L --show-trace --no-link` ran all 48 selected workflows. All required browser steps passed, including imported provenance, but the blocking outer gate failed on six strict visual mismatches for 20af-policy-catalog-selection-delete-regressions, task433-canonical-unmapped-nix-policy, and task433-canonical-multiline-dod (dark/light). Seven advisory semantic failures were also retained. Screenshot inspection shows the committed strict baselines include two POAM fixture policies that are absent after the full sequential workflow; 20af reports bulk deletion of 61 draft policies. Resolving this requires new test-state isolation or explicit baseline approval beyond the four P1 corrections, so commit/push and representative pipelines remain blocked pending scope direction.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
