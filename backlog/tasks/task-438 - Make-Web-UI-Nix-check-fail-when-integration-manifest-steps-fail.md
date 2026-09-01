@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-gpt-5.6-sol
 created_date: '2026-08-26 01:33'
-updated_date: '2026-09-01 03:59'
+updated_date: '2026-09-01 18:07'
 labels:
   - web-ui
   - testing
@@ -14,6 +14,7 @@ dependencies: []
 references:
   - TASK-433.5
   - TASK-450.11
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/325'
 modified_files:
   - checks/web-ui/default.nix
   - checks/web-ui/tests/browser-verdict.js
