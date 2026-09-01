@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-gpt-5.6-sol
 created_date: '2026-06-13 19:35'
-updated_date: '2026-09-01 12:51'
+updated_date: '2026-09-01 13:25'
 labels:
   - web-ui
   - testing
@@ -19,6 +19,8 @@ modified_files:
   - checks/web-ui/tests/check-groups.test.js
   - checks/web-ui/coverage-manifest.json
   - checks/web-ui/check-groups.json
+  - checks/web-ui/default.nix
+  - docs/web-ui-check.md
 priority: medium
 ordinal: 299000
 ---
@@ -56,11 +58,11 @@ Note: The web-ui VM derivation currently exits 0 even when individual Playwright
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-1. Preserve context-scoped setup-coach suppression and wait-for-clean route teardown in the shared harness.
-2. Rename 12f consistently and assert the current System Detail inline Deploy workflow: accessible header/tab actions, commit-backed plan selection, deploy request payload/response, and visible success state.
-3. Rename 12h consistently, retain `role=tab`, and assert the current package-first CVE workflow: package expansion as detail filtering, advisory detail link, justification preset/payload/save acknowledgement, and refreshed justified state.
-4. Update coverage metadata, exclusions, group membership, and static ownership/route-cleanup tests without changing either step's advisory ownership.
-5. Run Node/static checks and one focused impure `path:.` VM evidence build selecting exactly the renamed 12f and 12h steps; inspect browser/check verdicts and require both pass with `processError: null`.
+1. Add atomic current-step publication immediately before each browser action and include that record in fatal diagnostics.
+2. Wrap the Node integration process in GNU `timeout` with TERM plus a bounded KILL grace period. Atomically publish `integration.exit` for every process outcome. Make the Nix driver classify timeout exit codes as infrastructure failure, print integration log, current step, and server journal, and refuse to consume or synthesize a logical verdict.
+3. Add static regression coverage for current-step publication, route cleanup, and timeout diagnostics. Document the final shard timeout rationale against the less-than-20-minute gate target.
+4. Temporarily use a shorter process timeout to reproduce the full fleet stall with diagnostics. Identify the exact step and repair its route, promise, or cleanup lifecycle without removing any ci_fast step.
+5. Restore the justified final timeout. Run Node/static checks, focused 12f/12h evidence if affected, and full `web-ui-fleet` evidence until all required steps pass, `processError` is null, and the gate succeeds. Record total runtime and advisory failures.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
