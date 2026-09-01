@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-gpt-5.6-sol'
 created_date: '2026-08-29 16:26'
-updated_date: '2026-09-01 00:03'
+updated_date: '2026-09-01 20:06'
 labels:
   - backend
   - frontend
@@ -130,4 +130,6 @@ Architecture research found the exact defect at `bcbeeb62`: streaming preparatio
 WIP checkpoint committed and pushed as 86a1ddc6 (`fix: enforce evaluation-wide planning barrier`) at user request. Backend release-A verification passed before commit: cf-server formatting, SQLX_OFFLINE cf-server test check, server-regressions, and diff check. Earlier focused Web UI 26bb verification passed before the last independent review. This is not final review evidence: the final frontend remediation agent was cancelled, remaining frontend P2 findings are unresolved, the tracked task file is not synchronized into the branch, exact-head CI is pending, and a fresh fetch shows the branch is 107 commits behind origin/dev.
 
 The user selected a two-release zero-downtime transition for the legacy global derivation_path unique constraint. Release A in 86a1ddc6 retains the constraint and represents cross-commit conflicts as explicit failed plans. TASK-443 tracks release B, which removes the constraint only after release A is deployed to every server process.
+
+Local branch rebased onto origin/dev at 701151f4. Conflicts preserved both TASK-433 and TASK-441 behavior. TASK-441 migrations were renumbered after rebase to the next available sequence: 0245 dependency counts, 0246 explicit plan state, and 0247 evaluation-wide barrier. Post-rebase formatting, SQLX_OFFLINE cf-server test check, wasm Web UI check, Node syntax check, server-regressions, and diff checks passed; existing warnings remain. Local rebased head is f2f472bc. Remote update requires an explicitly authorized force-with-lease push because rebase rewrote branch history.
 <!-- SECTION:NOTES:END -->
