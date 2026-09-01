@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - opencode-gpt-5.6-sol
 created_date: '2026-09-01 03:12'
-updated_date: '2026-09-01 14:29'
+updated_date: '2026-09-01 15:24'
 labels:
   - web-ui
   - testing
@@ -60,6 +60,7 @@ TASK-438 is the correctness prerequisite because runtime measurements are not me
 - [ ] #5 Existing required semantic browser coverage, screenshot evidence, OSCAL validation, SARIF validation, and design-parity evidence remain available after the runtime change
 - [ ] #6 Runtime reduction does not depend on suppressing failures, unbounded retries, or shorter timeouts that make supported CI runners unreliable
 - [ ] #7 The repository documents the authoritative web UI checks, their responsibilities, and the local Nix commands used to reproduce each check
+- [ ] #8 The production OSCAL Assessment Results download passes the vendored NIST OSCAL 1.1.2 schema in the isolated blocking browser export check
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -72,6 +73,8 @@ TASK-438 is the correctness prerequisite because runtime measurements are not me
 5. Document the logical gate and exact local commands. Run local focused checks, then use representative MR pipelines to balance groups and demonstrate a blocking critical path below 20 minutes without reducing coverage.
 
 Post-fleet correction: encode required versus advisory ownership for every ci_fast step while preserving exactly-once shard execution and compatibility smoke's six required steps. Extend browser and aggregate verdicts so only required failures block, while advisory failures and missing advisory results remain visible. Fix route teardown across failed steps/page recreation, make 12f and 12h focused fixtures self-contained and condition-synchronized, preserve context-scoped coach suppression, update gate documentation, and run focused/static/Nix verification without rerunning the full fleet unless needed.
+
+User-approved scope expansion: correct the production OSCAL Assessment Results generator so the real browser download passes the vendored NIST OSCAL 1.1.2 schema. Limit the production change to the three observed shape defects, add focused generator regression assertions, rerun the isolated blocking exports VM check, then continue the existing final verification and MR plan.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
