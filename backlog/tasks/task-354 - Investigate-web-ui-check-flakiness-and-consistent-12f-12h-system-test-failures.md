@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-gpt-5.6-sol
 created_date: '2026-06-13 19:35'
-updated_date: '2026-09-01 12:29'
+updated_date: '2026-09-01 12:34'
 labels:
   - web-ui
   - testing
@@ -16,8 +16,9 @@ references:
   - TASK-450.11
 modified_files:
   - checks/web-ui/tests/integration-test.js
-  - checks/web-ui/tests/oscal-export-test.js
-  - checks/web-ui/tests/sarif-export-test.js
+  - checks/web-ui/tests/check-groups.test.js
+  - checks/web-ui/coverage-manifest.json
+  - checks/web-ui/check-groups.json
 priority: medium
 ordinal: 299000
 ---
@@ -55,13 +56,11 @@ Note: The web-ui VM derivation currently exits 0 even when individual Playwright
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-1. Reproduce and classify the setup-coach leak, the `12h` accessible-role mismatch, and the `12f` deploy-modal timing path in focused execution.
-2. Keep the onboarding walkthrough isolated from ordinary check groups. Ensure non-onboarding groups begin with the setup coach suppressed and do not inherit onboarding routes or overlay state.
-3. Correct `12h` to use the application tab role and make route cleanup reliable after failure.
-4. Replace timing-sensitive `12f` actions with observable modal, request, and response conditions while preserving the product behavior under test.
-5. Run the focused workflows repeatedly in their final group and record whether remaining failures are product defects, deterministic harness defects, or runner resource sensitivity.
-
-User decision after focused browser verification: treat the current inline Deploy tab and package-first CVE workflow as authoritative. Update 12f and 12h to assert the current UI instead of restoring the obsolete modal and CVE-ID-grouped contracts. Keep both workflows advisory unless separately promoted through the explicit required-step policy.
+1. Preserve context-scoped setup-coach suppression and wait-for-clean route teardown in the shared harness.
+2. Rename 12f consistently and assert the current System Detail inline Deploy workflow: accessible header/tab actions, commit-backed plan selection, deploy request payload/response, and visible success state.
+3. Rename 12h consistently, retain `role=tab`, and assert the current package-first CVE workflow: package expansion as detail filtering, advisory detail link, justification preset/payload/save acknowledgement, and refreshed justified state.
+4. Update coverage metadata, exclusions, group membership, and static ownership/route-cleanup tests without changing either step's advisory ownership.
+5. Run Node/static checks and one focused impure `path:.` VM evidence build selecting exactly the renamed 12f and 12h steps; inspect browser/check verdicts and require both pass with `processError: null`.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
