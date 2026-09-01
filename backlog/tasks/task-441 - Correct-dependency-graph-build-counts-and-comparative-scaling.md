@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-gpt-5.6-sol'
 created_date: '2026-08-29 16:26'
-updated_date: '2026-09-01 20:06'
+updated_date: '2026-09-01 20:53'
 labels:
   - backend
   - frontend
@@ -132,4 +132,6 @@ WIP checkpoint committed and pushed as 86a1ddc6 (`fix: enforce evaluation-wide p
 The user selected a two-release zero-downtime transition for the legacy global derivation_path unique constraint. Release A in 86a1ddc6 retains the constraint and represents cross-commit conflicts as explicit failed plans. TASK-443 tracks release B, which removes the constraint only after release A is deployed to every server process.
 
 Local branch rebased onto origin/dev at 701151f4. Conflicts preserved both TASK-433 and TASK-441 behavior. TASK-441 migrations were renumbered after rebase to the next available sequence: 0245 dependency counts, 0246 explicit plan state, and 0247 evaluation-wide barrier. Post-rebase formatting, SQLX_OFFLINE cf-server test check, wasm Web UI check, Node syntax check, server-regressions, and diff checks passed; existing warnings remain. Local rebased head is f2f472bc. Remote update requires an explicitly authorized force-with-lease push because rebase rewrote branch history.
+
+User authorized a force-with-lease update after the verified rebase. Remote branch and MR !322 now point to f2f472bcf7b34a7bd2af6c8af3287dfebda9d5c6. The worktree is clean and origin/dev is an ancestor of the branch. Exact-head CI is pending.
 <!-- SECTION:NOTES:END -->
