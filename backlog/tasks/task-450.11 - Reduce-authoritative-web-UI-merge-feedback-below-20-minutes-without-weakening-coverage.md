@@ -3,10 +3,11 @@ id: TASK-450.11
 title: >-
   Reduce authoritative web UI merge feedback below 20 minutes without weakening
   coverage
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - opencode-gpt-5.6-sol
 created_date: '2026-09-01 03:12'
-updated_date: '2026-09-01 03:30'
+updated_date: '2026-09-01 03:31'
 labels:
   - web-ui
   - testing
@@ -67,4 +68,6 @@ TASK-438 is the correctness prerequisite because runtime measurements are not me
 The user approved a multiple-check topology so GitLab can schedule Web UI work concurrently across available runners. Treat the complete blocking set as one logical merge gate. The intended responsibility split is: a small production smoke check for the embedded server and production WASM in a real browser; independently reproducible required E2E shards with isolated deterministic state; separate OSCAL/SARIF browser export validation; and separate advisory design-parity evidence. Start with a small shard count and measure VM startup and runner overhead before adding more. Shared Nix inputs must retain identical derivation paths so parallel checks reuse build outputs rather than recompile them. CI artifacts must use collision-free per-check paths and one aggregate reviewer-facing report.
 
 The user selected the umbrella and its three subtasks for one shared branch, worktree, and MR together with prerequisite TASK-438 and flakiness task TASK-354. TASK-430, TASK-450.8, and TASK-450.10 remain outside this focused MR.
+
+LOCK: opencode-gpt-5.6-sol in /home/mcamp/code/crystal-forge/TASK-450-web-ui-parallel-checks on branch TASK-450.11-web-ui-parallel-checks, based on TASK-450-p0-build-graph at 437efd55.
 <!-- SECTION:NOTES:END -->
