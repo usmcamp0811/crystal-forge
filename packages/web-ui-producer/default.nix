@@ -6,6 +6,7 @@
 pkgs.writeShellApplication {
   name = "web-ui-producer";
   runtimeInputs = [
+    pkgs.bash
     pkgs.coreutils
     pkgs.curl
     pkgs.jq
