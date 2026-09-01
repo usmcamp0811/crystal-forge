@@ -3,10 +3,10 @@ id: TASK-450.1
 title: >-
   Filter the server source closure so unrelated component changes stop
   invalidating the server build
-status: Review
+status: Done
 assignee: []
 created_date: '2026-08-31 22:38'
-updated_date: '2026-09-01 02:04'
+updated_date: '2026-09-01 03:44'
 labels: []
 dependencies: []
 references:
@@ -104,6 +104,8 @@ Verification: the original unfiltered expression changed cf-server from cyn1qw4a
 Verification passed: server package build, integration, oidc-auth, xccdf-schema, web-ui, test-agent NixOS system build, and one complete nix flake check --keep-going -L run. TASK-451 tracks the discovered duplicate SQLx cache.
 
 LOCK RELEASED: implementation is pushed and MR !324 is awaiting review.
+
+MR !324 merged. LOCK RELEASED and the dedicated P0 worktree was removed.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
