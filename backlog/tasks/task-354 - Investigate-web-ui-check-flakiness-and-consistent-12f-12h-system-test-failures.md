@@ -4,12 +4,15 @@ title: Investigate web-ui check flakiness and consistent 12f/12h system test fai
 status: Backlog
 assignee: []
 created_date: '2026-06-13 19:35'
+updated_date: '2026-09-01 03:12'
 labels:
   - web-ui
   - testing
   - flaky-test
   - tech-debt
 dependencies: []
+references:
+  - TASK-450.11
 priority: medium
 ordinal: 299000
 ---
@@ -43,3 +46,9 @@ Note: The web-ui VM derivation currently exits 0 even when individual Playwright
 - TASK-353 fixed its own `12e` regression and added a deterministic `12k` test (8-tab rail + Compliance + header actions) that passes and captures a screenshot.
 - The interception overlay is visible in `12k-system-detail-tab-icons.png`.
 <!-- SECTION:DESCRIPTION:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+TASK-450.11 sets a less-than-20-minute blocking web UI feedback target. Resolve or characterize the fixture, selector, overlay, resource-contention, and timeout failures here so later sharding or concurrency does not amplify flakiness. Record whether each failure is product behavior, deterministic harness drift, or CI resource sensitivity. Runtime improvements must not rely on suppressing these failures or reducing timeouts below reliable bounds.
+<!-- SECTION:NOTES:END -->
