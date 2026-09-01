@@ -3,10 +3,10 @@ id: TASK-450.3
 title: >-
   Separate the core server build from the embedded-UI server so web UI changes
   stop rebuilding the backend
-status: Review
+status: Done
 assignee: []
 created_date: '2026-08-31 22:39'
-updated_date: '2026-09-01 02:30'
+updated_date: '2026-09-01 03:44'
 labels: []
 dependencies: []
 references:
@@ -138,6 +138,8 @@ Verification passed: core and embedded package builds, integration, oidc-auth, w
 LOCK RELEASED: implementation is pushed and MR !324 is awaiting review.
 
 Review update commit `437efd55` adds an executable regression for acceptance criterion 6. `add_ui_fallback` now centralizes the feature-gated fallback and documents the negative guarantee: without `embedded-ui`, Axum returns `404 Not Found` for unmatched UI routes. The targeted core-server test passed with `SQLX_OFFLINE=true nix develop ../.. -c cargo test --package cf-server --bin server unmatched_root_route_returns_not_found_without_embedded_ui`. Formatting passed with `nix develop ../.. -c cargo fmt --all --check`. The embedded variant compiled with `CRYSTAL_FORGE_UI_DIST=/tmp/opencode/empty-ui SQLX_OFFLINE=true nix develop ../.. -c cargo check --package cf-server --bin server --features embedded-ui`. Existing repository warnings remain; these commands introduced no verification failure.
+
+MR !324 merged. LOCK RELEASED and the dedicated P0 worktree was removed.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
