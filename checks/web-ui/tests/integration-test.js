@@ -13019,6 +13019,8 @@ security.audit.enable = true;</fixtext>
         { poamId: poam.id, revision: unlinkedDetail.revision },
       );
       await assertHidden(linkedRow, "Unlinked finding must leave the canonical POA&M detail");
+      // Keep strict evidence anchored after link actions scroll the tray.
+      await detail.locator(".poam-tray-scroll").evaluate((element) => { element.scrollTop = 0; });
       await captureWorkflowState(page, stepName, "failed-evidence-edited-remediation");
 
       await page.goto(`${baseUrl}/systems/${system.id}?tab=compliance`, { timeout: LOAD_TIMEOUT });
