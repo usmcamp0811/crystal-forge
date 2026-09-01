@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - opencode-gpt-5.6-sol
 created_date: '2026-09-01 03:12'
-updated_date: '2026-09-01 18:20'
+updated_date: '2026-09-01 18:45'
 labels:
   - web-ui
   - testing
@@ -116,4 +116,6 @@ Final static verification passed: 28/28 Node tests; ownership validation (100 ci
 Committed as `5492997f` (`TASK-450.11: parallelize authoritative Web UI checks`), rebased onto current `origin/dev` at `a977a3b9`, pushed, and opened draft MR !325: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/325. Task remains In Progress while the required representative pipelines run.
 
 MR !325 pipeline 2810483644 exposed a CI-only runtime closure defect: all six Web UI producers exited 127 because the flake-pinned `web-ui-producer` wrapper executed `bash`, but `pkgs.bash` was absent from `runtimeInputs` in Alpine jobs. Added `pkgs.bash` to the producer package. `nix build path:.#web-ui-producer --no-link` passed, and a clean package invocation reached the producer script and returned its expected missing `CHECK_NAME` error instead of exit 127. The first pipeline is not representative timing evidence because no Web UI check reached realization.
+
+MR !325 pipeline 2810519617 reached and completed Web UI gate builds, then all completed producers failed during post-build verdict validation with `env: can't execute 'node': No such file or directory`. The producer runtime included Bash but not Node.js, which is required by `ci/check-web-ui-verdict.js`. Added `pkgs.nodejs` to `web-ui-producer.runtimeInputs`; the helper package build passed. This pipeline is not representative acceptance evidence because producer publication did not complete, although observed blocking job durations remained below 20 minutes (compatibility 846.126s, fleet 1035.032s, pipeline 264.874s) and the jobs retained artifacts.
 <!-- SECTION:NOTES:END -->
