@@ -6,6 +6,7 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-09-01 03:12'
+updated_date: '2026-09-01 03:26'
 labels:
   - web-ui
   - testing
@@ -59,3 +60,9 @@ TASK-438 is the correctness prerequisite because runtime measurements are not me
 - [ ] #6 Runtime reduction does not depend on suppressing failures, unbounded retries, or shorter timeouts that make supported CI runners unreliable
 - [ ] #7 The repository documents the authoritative web UI checks, their responsibilities, and the local Nix commands used to reproduce each check
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+The user approved a multiple-check topology so GitLab can schedule Web UI work concurrently across available runners. Treat the complete blocking set as one logical merge gate. The intended responsibility split is: a small production smoke check for the embedded server and production WASM in a real browser; independently reproducible required E2E shards with isolated deterministic state; separate OSCAL/SARIF browser export validation; and separate advisory design-parity evidence. Start with a small shard count and measure VM startup and runner overhead before adding more. Shared Nix inputs must retain identical derivation paths so parallel checks reuse build outputs rather than recompile them. CI artifacts must use collision-free per-check paths and one aggregate reviewer-facing report.
+<!-- SECTION:NOTES:END -->
