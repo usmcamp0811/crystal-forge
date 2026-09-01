@@ -3,11 +3,11 @@ id: TASK-433.7
 title: >-
   TASK-433 Phase 6: POA&M integration in evidence/finding, system, bundle,
   assignment UI
-status: In Progress
+status: Review
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:43'
-updated_date: '2026-09-01 05:00'
+updated_date: '2026-09-01 07:29'
 labels:
   - design-parity
   - poam
@@ -106,4 +106,6 @@ Serial verification passed: default Rust formatting (`cargo fmt --all --check`),
 2026-08-29 final security review and push checkpoint: evidence reads now enforce system environment visibility before finding materialization. POA&M actions and evidence publishers use a deterministic advisory-lock protocol ordered by derivation publication key, system sentinel, finding key, then row locks; agent state publication, derivation/CVE writers, composite assessment writers, target authorization, and legacy finding materialization participate. Assignment relationship panels remount on system-scope changes. Serial verification passed: offline `cf-server` check; `poam_workflows` 20/20 against repository-isolated PostgreSQL; heartbeat 14/14; state 4/4; Web UI 233 passed/1 ignored; JavaScript syntax and `git diff --check`; and an authoritative Web UI check run passed before the final backend-only lock additions. The final post-lock authoritative rerun was interrupted at user request after a prior attempt failed because the onboarding coach overlay intercepted unrelated CVE test clicks; TASK-433 workflows 29g-29m passed in that failed attempt. Task remains In Progress pending a clean final authoritative check.
 
 Phase 8 independent artifact review found a P2 dark-theme contrast defect in completed POA&M detail captures: the desktop Expand and Reopen actions are effectively unreadable. TASK-433.7 is returned to In Progress for a CSS-only presentation correction and focused visual verification.
+
+Phase-8 dark-theme visual remediation completed. The shared POA&M tray now gives Expand an opaque subtle surface and readable primary text, and disabled Reopen uses readable muted text. Focused `task433-canonical-poam-lifecycle` update-mode browser verification passed, the post-fix captures passed independent visual review with no remaining P0-P2 finding, and the normal strict Web UI gate matched all 60 approved TASK-433 baselines. Lifecycle behavior and persistence semantics are unchanged.
 <!-- SECTION:NOTES:END -->
