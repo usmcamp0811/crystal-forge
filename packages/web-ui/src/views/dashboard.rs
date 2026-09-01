@@ -16,6 +16,7 @@ use crate::components::flake::FlakeTimelineWidget;
 use crate::components::icon::{Icon, IconName};
 use crate::components::loading::DashboardLoadingSpinner;
 use crate::components::notifications::{AlertBanner, AlertSeverity};
+use crate::components::poam::status_label;
 use crate::components::widget_grid::{GridWidget, StoredLayout, WidgetGrid};
 use crate::dashboard::adapter::{
     empty_dashboard_summary, load_dashboard_with_fallback, load_flake_timelines_with_fallback,
@@ -480,6 +481,21 @@ fn poam_attention_label(poam: &PoamSummary) -> &'static str {
     }
 }
 
+fn poam_watchlist_accessible_label(poam: &PoamSummary) -> String {
+    let due = poam
+        .target_date
+        .map(|date| format!(" Due {date}."))
+        .unwrap_or_default();
+    format!(
+        "Open {}: {}. Status {}. Urgency {}. Owner {}.{due}",
+        poam.human_id,
+        poam.title,
+        status_label(poam.status),
+        poam_attention_label(poam),
+        poam.owner,
+    )
+}
+
 fn compliance_route(poam: Option<uuid::Uuid>) -> Route {
     Route::ComplianceView {
         bundle: String::new(),
@@ -491,7 +507,10 @@ fn compliance_route(poam: Option<uuid::Uuid>) -> Route {
     }
 }
 
-/// The main dashboard page.
+/// Renders the fleet dashboard from independently loaded server summaries.
+///
+/// Widgets own presentation and navigation state only. POA&M counts, watchlist
+/// ordering, visibility, and status remain server-authoritative.
 #[component]
 pub fn DashboardView() -> Element {
     let nav = navigator();
@@ -830,13 +849,13 @@ pub fn DashboardView() -> Element {
             },
             "poam-summary" => match &poam_summary {
                 PoamDashboardState::Loading => rsx! {
-                    p { role: "status", class: "text-xs {theme::text::SECONDARY}", "Loading POA&M summary..." }
+                    p { role: "status", aria_live: "polite", class: "text-xs {theme::text::SECONDARY}", "Loading POA&M summary..." }
                 },
                 PoamDashboardState::Empty => rsx! {
-                    p { role: "status", class: "text-xs {theme::text::SECONDARY}", "No POA&M records are visible." }
+                    p { role: "status", aria_live: "polite", class: "text-xs {theme::text::SECONDARY}", "No POA&M records are visible." }
                 },
                 PoamDashboardState::Unauthorized => rsx! {
-                    p { class: "text-xs {theme::text::SECONDARY}", "You are not authorized to view POA&M summary data." }
+                    p { role: "alert", class: "text-xs {theme::text::SECONDARY}", "You are not authorized to view POA&M summary data." }
                 },
                 PoamDashboardState::Error => rsx! {
                     div { role: "alert", class: "flex items-center gap-2",
@@ -845,36 +864,36 @@ pub fn DashboardView() -> Element {
                     }
                 },
                 PoamDashboardState::Loaded(summary) => rsx! {
-                    div { style: "display:flex;flex-direction:column;gap:10px;",
+                    div { role: "status", aria_live: "polite", aria_atomic: "true", style: "display:flex;flex-direction:column;gap:10px;",
                         div { style: "display:flex;justify-content:space-between;align-items:baseline;",
                             span {
-                                style: if summary.active > 0 { "font-size:32px;font-weight:700;color:#60a5fa;line-height:1;font-variant-numeric:tabular-nums;" } else { "font-size:32px;font-weight:700;color:#34d399;line-height:1;font-variant-numeric:tabular-nums;" },
+                                style: if summary.active > 0 { "font-size:32px;font-weight:700;color:var(--cf-policy-blue);line-height:1;font-variant-numeric:tabular-nums;" } else { "font-size:32px;font-weight:700;color:var(--cf-policy-emerald);line-height:1;font-variant-numeric:tabular-nums;" },
                                 "{summary.active}"
                             }
                             span { style: "font-size:12px;color:var(--cf-text-muted);", "open remediation plans" }
                         }
                         if summary.overdue > 0 {
                             div {
-                                style: "padding:8px 10px;border-radius:6px;background:rgba(248,113,113,0.08);border:1px solid rgba(248,113,113,0.25);font-size:11px;color:#fca5a5;",
+                                style: "padding:8px 10px;border-radius:6px;background:var(--cf-red-bg);border:1px solid color-mix(in oklab, var(--cf-policy-red) 28%, transparent);font-size:11px;color:var(--cf-policy-red);",
                                 "{summary.overdue} overdue"
                             }
                         }
                         div { style: "display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:11px;",
-                            div { class: "dash-w-mini", span { "Awaiting verification" } strong { style: if summary.awaiting_verification > 0 { "color:#a78bfa;" } else { "" }, "{summary.awaiting_verification}" } }
-                            div { class: "dash-w-mini", span { "Completed" } strong { style: "color:#34d399;", "{summary.completed}" } }
+                            div { class: "dash-w-mini", span { "Awaiting verification" } strong { style: if summary.awaiting_verification > 0 { "color:var(--cf-policy-violet);" } else { "" }, "{summary.awaiting_verification}" } }
+                            div { class: "dash-w-mini", span { "Completed" } strong { style: "color:var(--cf-policy-emerald);", "{summary.completed}" } }
                         }
                     }
                 },
             },
             "poam-watchlist" => match &poam_watchlist {
                 PoamDashboardState::Loading => rsx! {
-                    p { role: "status", class: "text-xs {theme::text::SECONDARY}", "Loading POA&M watchlist..." }
+                    p { role: "status", aria_live: "polite", class: "text-xs {theme::text::SECONDARY}", "Loading POA&M watchlist..." }
                 },
                 PoamDashboardState::Empty => rsx! {
-                    p { role: "status", class: "text-xs {theme::text::SECONDARY}", "Nothing is overdue or awaiting verification." }
+                    p { role: "status", aria_live: "polite", class: "text-xs {theme::text::SECONDARY}", "Nothing is overdue or awaiting verification." }
                 },
                 PoamDashboardState::Unauthorized => rsx! {
-                    p { class: "text-xs {theme::text::SECONDARY}", "You are not authorized to view the POA&M watchlist." }
+                    p { role: "alert", class: "text-xs {theme::text::SECONDARY}", "You are not authorized to view the POA&M watchlist." }
                 },
                 PoamDashboardState::Error => rsx! {
                     div { role: "alert", class: "flex items-center gap-2",
@@ -884,30 +903,38 @@ pub fn DashboardView() -> Element {
                 },
                 PoamDashboardState::Loaded(items) => rsx! {
                     div { style: "display:flex;flex-direction:column;gap:6px;",
+                        span { role: "status", aria_live: "polite", class: "sr-only", "{items.len()} POA&M records need attention." }
                         for poam in items.iter().take(poam_watchlist_row_count(rows)) {
                             {
                                 let poam_id = poam.id;
                                 let attention = poam_attention_label(poam);
+                                let status = status_label(poam.status);
+                                let accessible_label = poam_watchlist_accessible_label(poam);
                                 let attention_style = if poam.overdue {
-                                    "font-size:9.5px;flex-shrink:0;color:#f87171;background:rgba(248,113,113,0.14);"
+                                    "font-size:9.5px;flex-shrink:0;color:var(--cf-policy-red);background:var(--cf-red-bg);"
                                 } else {
-                                    "font-size:9.5px;flex-shrink:0;color:#a78bfa;background:rgba(167,139,250,0.16);"
+                                    "font-size:9.5px;flex-shrink:0;color:var(--cf-policy-violet);background:color-mix(in oklab, var(--cf-policy-violet) 16%, transparent);"
                                 };
                                 rsx! {
                                     button {
                                         key: "{poam.id}",
-                                        class: "focus-ring",
-                                        style: "width:100%;display:flex;align-items:center;gap:10px;padding:7px 10px;background:var(--cf-subtle-bg);border:0;border-radius:6px;color:inherit;font:inherit;text-align:left;cursor:pointer;",
+                                        class: "poam-watchlist-row focus-ring",
                                         title: "Open {poam.human_id}: {poam.title}",
+                                        aria_label: "{accessible_label}",
                                         onclick: move |_| {
                                             nav.push(compliance_route(Some(poam_id)));
                                         },
-                                        span { class: "mono hidden sm:inline", style: "font-weight:700;font-size:11px;color:var(--cf-brand-purple);flex-shrink:0;", "{poam.human_id}" }
-                                        span { style: "flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;", "{poam.title}" }
-                                        span { class: "chip", style: attention_style, "{attention}" }
-                                        span { class: "hidden md:inline", style: "font-size:10px;color:var(--cf-text-muted);flex-shrink:0;", "{poam.owner}" }
-                                        if let Some(target_date) = poam.target_date {
-                                            span { class: "hidden lg:inline", style: "font-size:10px;color:var(--cf-text-muted);flex-shrink:0;", "{target_date}" }
+                                        span { class: "poam-watchlist-main",
+                                            span { class: "mono poam-watchlist-id", "{poam.human_id}" }
+                                            span { class: "poam-watchlist-title", "{poam.title}" }
+                                        }
+                                        span { class: "poam-watchlist-meta",
+                                            span { class: "chip poam-watchlist-status", "{status}" }
+                                            span { class: "chip poam-watchlist-urgency", style: attention_style, "{attention}" }
+                                            span { class: "poam-watchlist-owner", "Owner: {poam.owner}" }
+                                            if let Some(target_date) = poam.target_date {
+                                                span { class: "poam-watchlist-due", "Due: {target_date}" }
+                                            }
                                         }
                                     }
                                 }
@@ -1057,10 +1084,10 @@ pub fn DashboardView() -> Element {
                 match &*hardening_top_services.read_unchecked() {
                     Some(Some(Ok(rows))) => render_top_services_compact(rows),
                     Some(Some(Err(_))) => rsx! {
-                        p { class: "text-xs {theme::text::SECONDARY}", "Unable to load hardening service risk data." }
+                        p { role: "alert", class: "text-xs {theme::text::SECONDARY}", "Unable to load hardening service risk data." }
                     },
                     _ => rsx! {
-                        p { class: "text-xs {theme::text::SECONDARY}", "Loading hardening service risk..." }
+                        p { role: "status", aria_live: "polite", class: "text-xs {theme::text::SECONDARY}", "Loading hardening service risk..." }
                     },
                 }
             }
@@ -1149,12 +1176,14 @@ pub fn DashboardView() -> Element {
             }
             if let Some(message) = dashboard_notice.read().clone() {
                 p {
+                    role: "alert",
                     class: "text-xs px-3 py-2 rounded-lg border text-amber-100 cf-chip-warning",
                     "{message}"
                 }
             }
             if let Some(message) = timelines_notice.read().clone() {
                 p {
+                    role: "alert",
                     class: "text-xs px-3 py-2 rounded-lg border text-amber-100 cf-chip-warning",
                     "{message}"
                 }
@@ -1592,6 +1621,24 @@ fn hostnames_for_deployment(
 mod tests {
     use super::*;
 
+    fn relative_luminance(rgb: [u8; 3]) -> f64 {
+        let channel = |value: u8| {
+            let value = f64::from(value) / 255.0;
+            if value <= 0.04045 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(rgb[0]) + 0.7152 * channel(rgb[1]) + 0.0722 * channel(rgb[2])
+    }
+
+    fn contrast_ratio(foreground: [u8; 3], background: [u8; 3]) -> f64 {
+        let foreground = relative_luminance(foreground);
+        let background = relative_luminance(background);
+        (foreground.max(background) + 0.05) / (foreground.min(background) + 0.05)
+    }
+
     #[test]
     fn poam_widgets_are_available_to_all_roles_and_in_fresh_defaults() {
         let summary = widget_meta("poam-summary").unwrap();
@@ -1614,6 +1661,93 @@ mod tests {
         assert_eq!(ids.iter().filter(|id| **id == "poam-watchlist").count(), 1);
         assert_eq!(ids[0], "fleet-health");
         assert_eq!(ids[1], "poam-summary");
+    }
+
+    #[test]
+    fn light_theme_task_433_semantic_text_colors_meet_wcag_aa() {
+        let white = [255, 255, 255];
+        let semantic_colors = [
+            [4, 120, 87],  // emerald-700
+            [146, 64, 14], // amber-800
+            [185, 28, 28], // red-700
+            [29, 78, 216], // blue-700
+            [109, 40, 217],
+        ];
+        assert!(
+            semantic_colors
+                .into_iter()
+                .all(|color| contrast_ratio(color, white) >= 4.5)
+        );
+
+        let css = include_str!("../../assets/app.css");
+        for declaration in [
+            "--cf-emerald: #047857",
+            "--cf-amber: #92400e",
+            "--cf-red: #b91c1c",
+            "--cf-blue: #1d4ed8",
+            "--cf-policy-violet: #6d28d9",
+        ] {
+            assert!(css.contains(declaration), "missing {declaration}");
+        }
+    }
+
+    #[test]
+    fn dark_secondary_and_disabled_text_tokens_meet_wcag_aa() {
+        let card = [15, 23, 42];
+        assert!(contrast_ratio([193, 202, 215], card) >= 4.5);
+        assert!(contrast_ratio([154, 166, 183], card) >= 4.5);
+        assert!(contrast_ratio([135, 147, 165], card) >= 4.5);
+
+        let css = include_str!("../../assets/app.css");
+        for declaration in [
+            "--cf-text-secondary: #c1cad7",
+            "--cf-text-muted: #9aa6b7",
+            "--cf-text-disabled: #8793a5",
+        ] {
+            assert!(css.contains(declaration), "missing {declaration}");
+        }
+    }
+
+    #[test]
+    fn task433_responsive_watchlist_retains_authoritative_fields() {
+        let timestamp = chrono::DateTime::parse_from_rfc3339("2026-08-31T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let poam = PoamSummary {
+            id: uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000433").unwrap(),
+            human_id: "POAM-0433".into(),
+            title: "Rotate signing material".into(),
+            plan: "Use the approved rotation procedure".into(),
+            owner: "Platform Security".into(),
+            target_date: Some(chrono::NaiveDate::from_ymd_opt(2026, 9, 15).unwrap()),
+            risk: poam_api::PoamRisk::High,
+            status: poam_api::PoamStatus::Blocked,
+            revision: 4,
+            overdue: true,
+            finding_count: 1,
+            created_at: timestamp,
+            updated_at: timestamp,
+            closed_at: None,
+            closure_attempt_id: None,
+        };
+
+        let label = poam_watchlist_accessible_label(&poam);
+        for value in [
+            "POAM-0433",
+            "Rotate signing material",
+            "Status Blocked",
+            "Urgency Overdue",
+            "Owner Platform Security",
+            "Due 2026-09-15",
+        ] {
+            assert!(label.contains(value), "missing {value} in {label}");
+        }
+
+        let css = include_str!("../../assets/app.css");
+        assert!(css.contains(".poam-watchlist-row"));
+        assert!(css.contains(".poam-watchlist-owner"));
+        assert!(css.contains(".poam-watchlist-due"));
+        assert!(css.contains("@media (max-width: 640px)"));
     }
 
     #[test]

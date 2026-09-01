@@ -1458,10 +1458,10 @@ pub struct DeletionEligibility {
     pub blockers: Vec<DeletionBlocker>,
 }
 
-/// Request body for bulk-deleting deployment policies from the catalog's
-/// multi-select toolbar (TASK-433 Phase 1 — policy catalog scaling).
+/// Requests eligibility checks and deletion for multiple policy lineages.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BulkDeletePoliciesRequest {
+    /// Identifies each policy lineage to process exactly once.
     pub policy_ids: Vec<Uuid>,
 }
 
@@ -1470,9 +1470,11 @@ pub struct BulkDeletePoliciesRequest {
 /// returns on conflict.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BulkDeleteSkippedPolicy {
+    /// Identifies the policy lineage that was not deleted.
     pub policy_id: Uuid,
     /// Stable machine-readable reason: "not_found" or "deletion_blocked".
     pub reason: String,
+    /// Provides blockers when `reason` is `deletion_blocked`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub eligibility: Option<DeletionEligibility>,
 }
@@ -1484,7 +1486,9 @@ pub struct BulkDeleteSkippedPolicy {
 /// partial results.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BulkDeletePoliciesResponse {
+    /// Identifies policy lineages deleted by the transaction.
     pub deleted: Vec<Uuid>,
+    /// Reports every requested lineage that was not deleted.
     pub skipped: Vec<BulkDeleteSkippedPolicy>,
 }
 
@@ -1565,24 +1569,34 @@ pub struct DeploymentPolicyVersionSummary {
 pub struct PolicyOriginProvenance {
     /// Immutable source artifact the policy originated from.
     pub source_artifact_id: Uuid,
+    /// Gives the imported artifact's original filename.
     pub filename: String,
+    /// Gives the media type used to select the artifact parser.
     pub media_type: String,
+    /// Gives the lowercase SHA-256 digest of the imported artifact bytes.
     pub sha256: String,
+    /// Gives the parser version that produced the source mapping.
     pub parser_version: String,
+    /// Gives the XCCDF version detected by the parser, if present.
     #[serde(default)]
     pub detected_xccdf_version: Option<String>,
     /// Source-object mapping identity, when the artifact recorded which source
     /// object (normally an XCCDF rule) produced this policy version.
     #[serde(default)]
     pub object_kind: Option<String>,
+    /// Identifies the source object within the artifact, if recorded.
     #[serde(default)]
     pub source_identity: Option<String>,
+    /// Describes how faithfully the policy represents the source object.
     #[serde(default)]
     pub fidelity: Option<String>,
+    /// Identifies the user who imported the artifact, if retained.
     #[serde(default)]
     pub imported_by: Option<Uuid>,
+    /// Gives the current display name for the importing user, if available.
     #[serde(default)]
     pub imported_by_display: Option<String>,
+    /// Records when Crystal Forge imported the artifact.
     pub imported_at: DateTime<Utc>,
     /// Version that carries the authoritative origin record. Equal to the
     /// requested version for a direct import.
@@ -1939,6 +1953,27 @@ pub struct ComplianceEvidenceResponse {
     pub resolution_state: Option<String>,
 }
 
+/// Identifies one authoritative requirement release mapped to evidence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComplianceRequirementIdentity {
+    /// Identifies the immutable requirement version.
+    pub requirement_version_id: uuid::Uuid,
+    /// Contains the framework-published requirement or control identifier.
+    pub external_id: String,
+    /// Contains the optional human-readable requirement title.
+    pub title: Option<String>,
+    /// Identifies the authoritative framework lineage.
+    pub framework_id: uuid::Uuid,
+    /// Contains the human-readable framework name.
+    pub framework_name: String,
+    /// Identifies the immutable framework release.
+    pub framework_version_id: uuid::Uuid,
+    /// Contains the human-readable framework release version.
+    pub framework_version: String,
+    /// Contains the optional human-readable framework release title.
+    pub framework_title: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComplianceControlEvidence {
     pub policy_id: uuid::Uuid,
@@ -1948,6 +1983,10 @@ pub struct ComplianceControlEvidence {
     pub summary: String,
     pub evidence_items: Vec<ComplianceEvidenceItem>,
     pub framework_mapping: String,
+    /// Provides normalized identities in addition to the legacy mapping string.
+    #[serde(default)]
+    pub requirements: Vec<ComplianceRequirementIdentity>,
+    /// Reports constituent outcomes when this control uses a composite policy.
     #[serde(default)]
     pub composite_result: Option<CompositeAssessmentResult>,
     /// Stable remediation identity for this system and policy lineage.
@@ -1968,30 +2007,46 @@ pub struct ComplianceControlEvidence {
     pub cis_section: Option<String>,
 }
 
+/// Reports the persisted composite assessment used for compliance evidence.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompositeAssessmentResult {
+    /// Identifies the exact assessment when one has been persisted.
     #[serde(default)]
     pub assessment_id: Option<uuid::Uuid>,
+    /// Identifies the evaluation attempt that supplied evaluation-phase evidence.
     #[serde(default)]
     pub evaluation_attempt_id: Option<uuid::Uuid>,
+    /// Identifies the immutable policy version assessed.
     pub policy_version_id: uuid::Uuid,
+    /// Identifies the assessed deployment target when available.
     #[serde(default)]
     pub target_store_path: Option<String>,
+    /// Binds the assessment to the effective policy-version set.
     #[serde(default)]
     pub effective_set_digest: Option<String>,
+    /// Binds the assessment to the effective composite configuration.
     #[serde(default)]
     pub effective_config_digest: Option<String>,
+    /// Gives the aggregate status without promoting errors or unchecked rules.
     pub overall_status: String,
+    /// Reports each constituent rule outcome in policy order.
     pub rule_results: Vec<CompositeAssessmentRuleResult>,
 }
 
+/// Reports one phase-specific rule result within a composite assessment.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompositeAssessmentRuleResult {
+    /// Identifies the immutable rule within its policy version.
     pub rule_id: uuid::Uuid,
+    /// Gives the serialized composite rule kind.
     pub kind: String,
+    /// Gives the enforcement phase that produced the result.
     pub phase: String,
+    /// Gives the normalized pass, fail, error, or not-checked status.
     pub status: String,
+    /// Explains the result for operators and audit records.
     pub detail: String,
+    /// Preserves source-specific evidence without changing the common result shape.
     pub evidence: serde_json::Value,
 }
 
@@ -3586,31 +3641,49 @@ mod tests {
 // NixOS option metadata — GET /api/v1/nixos/options
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Describes one packaged NixOS option for policy authoring guidance.
+///
+/// Target evaluation remains authoritative because a target can use different
+/// nixpkgs or additional modules.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NixosOptionMetadata {
+    /// Gives the canonical dotted option path.
     pub path: String,
+    /// Classifies values that the policy editor can represent safely.
     pub value_type: NixosOptionValueType,
+    /// Lists allowed enum values; other option types use an empty list.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub enum_values: Vec<serde_json::Value>,
+    /// Gives the rendered upstream option description when available.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 }
 
+/// Classifies the authoring value shape of a packaged NixOS option.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum NixosOptionValueType {
+    /// Accepts a JSON Boolean.
     Boolean,
+    /// Accepts one value from the metadata entry's enum values.
     Enum,
+    /// Accepts a signed JSON integer.
     Integer,
+    /// Accepts one string value.
     String,
+    /// Accepts a string whose line boundaries are significant.
     Lines,
+    /// Accepts a string when metadata cannot determine a safer type.
     Unknown,
 }
 
+/// Selects a bounded case-insensitive NixOS option metadata search.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct NixosOptionsSearchQuery {
+    /// Matches option paths first and rendered descriptions last.
     #[serde(default)]
     pub query: String,
+    /// Requests a result count that the provider clamps to its supported range.
     pub limit: Option<usize>,
 }
 

@@ -63,51 +63,77 @@ async fn materialize_user_notifications(
     let _: i64 = sqlx::query_scalar("SELECT backfill_user_notification_source_events(256)")
         .fetch_one(&mut *tx)
         .await?;
-    sqlx::query(
-        r#"INSERT INTO user_notification_preferences (
-               user_id, deploy_failures_in_app_enabled_at,
-               build_failures_in_app_enabled_at,
-               critical_cves_in_app_enabled_at,
-               policy_violations_in_app_enabled_at, initialized_at
+    if let Some(user_id) = user_id {
+        sqlx::query(
+            r#"INSERT INTO user_notification_initialization_queue(
+                   user_id,initial_last_event_id
+               )
+               SELECT account.id,0
+               FROM users account
+               WHERE account.id=$1 AND account.is_active
+                 AND (
+                   NOT EXISTS (SELECT 1 FROM user_notification_preferences preference
+                               WHERE preference.user_id=account.id)
+                   OR NOT EXISTS (SELECT 1 FROM user_notification_materialization_schedule schedule
+                                  WHERE schedule.user_id=account.id)
+                   OR NOT EXISTS (SELECT 1 FROM user_notification_source_cursors cursor
+                                  WHERE cursor.user_id=account.id)
+                 )
+               ON CONFLICT(user_id) DO NOTHING"#,
+        )
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    // CONCURRENCY: Queue rows are locked before initialization and removed in
+    // the same transaction. Concurrent producers select disjoint bounded user
+    // batches, while idempotent inserts recover safely after a rollback.
+    let _: i64 = sqlx::query_scalar(
+        r#"WITH claimed AS MATERIALIZED (
+               SELECT queue.user_id,queue.initial_last_event_id,account.created_at
+               FROM user_notification_initialization_queue queue
+               JOIN users account ON account.id=queue.user_id
+               WHERE account.is_active
+                 AND ($1::uuid IS NULL OR queue.user_id=$1)
+               ORDER BY queue.enqueued_at,queue.user_id
+               LIMIT $2
+               FOR UPDATE OF queue SKIP LOCKED
+           ), initialized_preferences AS (
+               INSERT INTO user_notification_preferences (
+                   user_id,deploy_failures_in_app_enabled_at,
+                   build_failures_in_app_enabled_at,
+                   critical_cves_in_app_enabled_at,
+                   policy_violations_in_app_enabled_at,initialized_at
+               )
+               SELECT user_id,created_at,created_at,created_at,created_at,created_at
+               FROM claimed
+               ON CONFLICT(user_id) DO NOTHING
+               RETURNING user_id
+           ), initialized_schedule AS (
+               INSERT INTO user_notification_materialization_schedule(user_id)
+               SELECT user_id FROM claimed
+               ON CONFLICT(user_id) DO NOTHING
+               RETURNING user_id
+           ), initialized_cursors AS (
+               INSERT INTO user_notification_source_cursors(user_id,last_event_id)
+               SELECT user_id,initial_last_event_id FROM claimed
+               ON CONFLICT(user_id) DO NOTHING
+               RETURNING user_id
+           ), removed AS (
+               DELETE FROM user_notification_initialization_queue queue
+               USING claimed
+               WHERE queue.user_id=claimed.user_id
+               RETURNING 1
            )
-           SELECT u.id, u.created_at, u.created_at, u.created_at, u.created_at, u.created_at
-           FROM users u
-           WHERE u.is_active = TRUE
-             AND ($1::uuid IS NULL OR u.id = $1)
-           ON CONFLICT (user_id) DO NOTHING"#,
+           SELECT COUNT(*)
+                + 0 * (SELECT COUNT(*) FROM initialized_preferences)
+                + 0 * (SELECT COUNT(*) FROM initialized_schedule)
+                + 0 * (SELECT COUNT(*) FROM initialized_cursors)
+           FROM removed"#,
     )
     .bind(user_id)
-    .execute(&mut *tx)
-    .await?;
-    sqlx::query(
-        r#"INSERT INTO user_notification_materialization_schedule(user_id)
-           SELECT p.user_id
-           FROM user_notification_preferences p
-           JOIN users u ON u.id = p.user_id
-           WHERE u.is_active = TRUE
-             AND ($1::uuid IS NULL OR p.user_id = $1)
-           ON CONFLICT (user_id) DO NOTHING"#,
-    )
-    .bind(user_id)
-    .execute(&mut *tx)
-    .await?;
-    sqlx::query(
-        r#"INSERT INTO user_notification_source_cursors(user_id, last_event_id)
-           SELECT p.user_id, COALESCE(
-               (SELECT MIN(event.id) - 1
-                FROM user_notification_source_events event
-                WHERE event.occurred_at >= p.initialized_at),
-               (SELECT MAX(event.id) FROM user_notification_source_events event),
-               0
-           )
-           FROM user_notification_preferences p
-           JOIN users u ON u.id = p.user_id
-           WHERE u.is_active = TRUE
-             AND ($1::uuid IS NULL OR p.user_id = $1)
-           ON CONFLICT (user_id) DO NOTHING"#,
-    )
-    .bind(user_id)
-    .execute(&mut *tx)
+    .bind(users_per_pass.clamp(1, MATERIALIZATION_USERS_PER_PASS))
+    .fetch_one(&mut *tx)
     .await?;
     // CONCURRENCY: Producers serialize queue identity allocation through commit.
     // This query locks each selected scheduler row and cursor, so overlapping
@@ -265,12 +291,20 @@ async fn materialize_user_notifications(
            SELECT p.user_id
            FROM user_notification_preferences p
            JOIN users u ON u.id = p.user_id
+           JOIN user_notification_materialization_schedule schedule
+             ON schedule.user_id=p.user_id
+           LEFT JOIN user_notification_immediate_email_cursors cursor
+             ON cursor.user_id=p.user_id
            WHERE u.is_active = TRUE
              AND p.delivery_channel IN ('email', 'both')
              AND ($1::uuid IS NULL OR p.user_id = $1)
+             AND cursor.user_id IS NULL
+           ORDER BY schedule.last_serviced_at,schedule.user_id
+           LIMIT $2
            ON CONFLICT (user_id) DO NOTHING"#,
     )
     .bind(user_id)
+    .bind(users_per_pass.clamp(1, MATERIALIZATION_USERS_PER_PASS))
     .execute(&mut *tx)
     .await?;
     // Email candidates come only from durable inbox rows. This preserves the
@@ -1232,6 +1266,101 @@ mod tests {
     }
 
     #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "runs in the PostgreSQL server-regressions check"]
+    async fn notification_initialization_is_globally_bounded_across_many_users(pool: PgPool) {
+        let mut user_ids = Vec::new();
+        for index in 0..96 {
+            user_ids.push(create_test_user(&pool, &format!("bounded-init-{index}")).await);
+        }
+
+        materialize_all_user_notifications(&pool, false)
+            .await
+            .expect("initialize one bounded active-user batch");
+
+        let (preferences, schedules, cursors, pending): (i64, i64, i64, i64) =
+            sqlx::query_as(
+                "SELECT
+                   (SELECT COUNT(*) FROM user_notification_preferences WHERE user_id=ANY($1)),
+                   (SELECT COUNT(*) FROM user_notification_materialization_schedule WHERE user_id=ANY($1)),
+                   (SELECT COUNT(*) FROM user_notification_source_cursors WHERE user_id=ANY($1)),
+                   (SELECT COUNT(*) FROM user_notification_initialization_queue WHERE user_id=ANY($1))",
+            )
+            .bind(&user_ids)
+            .fetch_one(&pool)
+            .await
+            .expect("read bounded initialization state");
+        assert_eq!(preferences, 96, "user creation initializes preferences");
+        assert_eq!((schedules, cursors, pending), (32, 32, 64));
+
+        materialize_all_user_notifications(&pool, false)
+            .await
+            .expect("initialize second fair active-user batch");
+        let initialized: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM user_notification_source_cursors WHERE user_id=ANY($1)",
+        )
+        .bind(&user_ids)
+        .fetch_one(&pool)
+        .await
+        .expect("count fairly initialized users");
+        assert_eq!(initialized, 64);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "runs in the PostgreSQL server-regressions check"]
+    async fn notification_bootstrap_plan_limits_large_history_before_merge(pool: PgPool) {
+        sqlx::query(
+            "INSERT INTO attention_occurrences
+                 (id,category,subject_type,subject_id,source_occurrence_key,
+                  opened_at,last_observed_at,resolved_at)
+             SELECT gen_random_uuid(),'builds','builds',gen_random_uuid()::text,
+                    'bootstrap-plan-'||gen_random_uuid()::text,
+                    timestamptz '2000-01-01'+series*INTERVAL '1 second',
+                    timestamptz '2000-01-01'+series*INTERVAL '1 second',
+                    timestamptz '2000-01-01'+series*INTERVAL '1 second'
+             FROM generate_series(1,4096) series",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert large resolved attention history");
+        sqlx::query("ANALYZE attention_occurrences")
+            .execute(&pool)
+            .await
+            .expect("analyze large attention history");
+        let (cursor_at, cursor_id): (chrono::DateTime<chrono::Utc>, Uuid) = sqlx::query_as(
+            "SELECT opened_at,id FROM attention_occurrences
+             WHERE source_occurrence_key LIKE 'bootstrap-plan-%'
+             ORDER BY opened_at,id OFFSET 3999 LIMIT 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("select near-tail bootstrap cursor");
+
+        let plan: serde_json::Value = sqlx::query_scalar(
+            "EXPLAIN (ANALYZE,FORMAT JSON)
+             SELECT * FROM notification_source_bootstrap_batch($1,'attention_occurrence',$2,64)",
+        )
+        .bind(cursor_at)
+        .bind(cursor_id)
+        .fetch_one(&pool)
+        .await
+        .expect("explain exact production bootstrap batch");
+        let serialized = plan.to_string();
+        assert!(
+            serialized.contains("attention_occurrences_notification_bootstrap_idx"),
+            "large attention history must use the keyset index: {serialized}"
+        );
+        assert!(
+            serialized.contains("poam_activity_awaiting_verification_notifications")
+                && serialized.contains("system_events_deployment_failure_bootstrap_idx"),
+            "activity and system branches must retain indexed cursors: {serialized}"
+        );
+        assert!(
+            serialized.matches("\"Node Type\":\"Limit\"").count() >= 4,
+            "each source branch and the merge must have a limit: {serialized}"
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires repository-provided isolated PostgreSQL"]
     async fn notification_cursor_advances_past_skipped_source_rows(pool: PgPool) {
         let user_id = create_test_user(&pool, "skipped-source-cursor").await;
@@ -1481,6 +1610,124 @@ mod tests {
         .await
         .expect("read durable POA&M inbox state");
         assert_eq!(state, (3, 1, 1));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "runs in the PostgreSQL server-regressions check"]
+    async fn poam_inbox_combines_per_user_visibility_preferences_and_state(pool: PgPool) {
+        let visible_user = create_test_user(&pool, "combined-visible").await;
+        let hidden_user = create_test_user(&pool, "combined-hidden").await;
+        let poam_id = create_poam_fixture(&pool, visible_user).await;
+        sqlx::query(
+            "UPDATE user_notification_preferences
+             SET policy_violations=FALSE,
+                 policy_violations_in_app_enabled_at=NULL
+             WHERE user_id=$1",
+        )
+        .bind(visible_user)
+        .execute(&pool)
+        .await
+        .expect("disable visible user's policy notifications");
+        let suppressed_activity: Uuid = sqlx::query_scalar(
+            "INSERT INTO poam_activity(poam_id,actor_user_id,kind,payload)
+             VALUES($1,$2,'status_changed','{\"from\":\"in_progress\",\"to\":\"awaiting_verification\"}')
+             RETURNING id",
+        )
+        .bind(poam_id)
+        .bind(visible_user)
+        .fetch_one(&pool)
+        .await
+        .expect("insert preference-suppressed awaiting episode");
+        materialize_attention_notifications_for_user(&pool, visible_user, false)
+            .await
+            .expect("consume suppressed source");
+
+        sqlx::query(
+            "UPDATE user_notification_preferences
+             SET policy_violations=TRUE,
+                 policy_violations_in_app_enabled_at=clock_timestamp()
+             WHERE user_id=$1",
+        )
+        .bind(visible_user)
+        .execute(&pool)
+        .await
+        .expect("enable visible user's policy notifications");
+        let mut delivered_sources = Vec::new();
+        for from_status in ["in_progress", "verification_failed"] {
+            let activity_id: Uuid = sqlx::query_scalar(
+                "INSERT INTO poam_activity(poam_id,actor_user_id,kind,payload)
+                 VALUES($1,$2,'status_changed',jsonb_build_object(
+                   'from',$3::text,'to','awaiting_verification')) RETURNING id",
+            )
+            .bind(poam_id)
+            .bind(visible_user)
+            .bind(from_status)
+            .fetch_one(&pool)
+            .await
+            .expect("insert visible awaiting re-entry");
+            delivered_sources.push(activity_id);
+        }
+        for _ in 0..2 {
+            materialize_attention_notifications_for_user(&pool, visible_user, false)
+                .await
+                .expect("materialize visible POA&M sources");
+            materialize_attention_notifications_for_user(&pool, hidden_user, false)
+                .await
+                .expect("consume hidden POA&M sources");
+        }
+        let visible_notifications: Vec<(Uuid, Uuid)> = sqlx::query_as(
+            "SELECT id,source_occurrence_id
+             FROM user_notifications
+             WHERE user_id=$1 AND source_type='poams'
+             ORDER BY created_at,id",
+        )
+        .bind(visible_user)
+        .fetch_all(&pool)
+        .await
+        .expect("load visible POA&M inbox");
+        assert_eq!(visible_notifications.len(), 2);
+        assert!(
+            !visible_notifications
+                .iter()
+                .any(|(_, source_id)| *source_id == suppressed_activity)
+        );
+        assert!(delivered_sources.iter().all(|source_id| {
+            visible_notifications
+                .iter()
+                .any(|(_, inbox_source_id)| inbox_source_id == source_id)
+        }));
+        let hidden_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM user_notifications
+             WHERE user_id=$1 AND source_type='poams'",
+        )
+        .bind(hidden_user)
+        .fetch_one(&pool)
+        .await
+        .expect("count hidden POA&M inbox");
+        assert_eq!(hidden_count, 0);
+
+        assert!(
+            mark_notification_read(&pool, visible_user, visible_notifications[0].0)
+                .await
+                .expect("read visible POA&M notification")
+        );
+        assert!(
+            dismiss_notification(&pool, visible_user, visible_notifications[1].0)
+                .await
+                .expect("dismiss visible POA&M notification")
+        );
+        materialize_attention_notifications_for_user(&pool, visible_user, false)
+            .await
+            .expect("repeat combined POA&M materialization");
+        let state: (i64, i64, i64) = sqlx::query_as(
+            "SELECT COUNT(*),COUNT(read_at),COUNT(dismissed_at)
+             FROM user_notifications WHERE user_id=$1 AND source_type='poams'",
+        )
+        .bind(visible_user)
+        .fetch_one(&pool)
+        .await
+        .expect("read preserved combined inbox state");
+        assert_eq!(state, (2, 1, 1));
     }
 
     #[tokio::test]

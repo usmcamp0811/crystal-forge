@@ -491,6 +491,11 @@ pub async fn load_policy_version_usage_counts(
 ///   only when no source-object mapping already covers that artifact.
 ///
 /// Artifact bytes are never selected.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot execute or decode the provenance
+/// query.
 pub async fn fetch_policy_version_provenance(
     pool: &PgPool,
     policy_version_ids: &[Uuid],
@@ -639,6 +644,11 @@ pub async fn fetch_policy_version_provenance(
 ///
 /// Returns a map of `policy_id -> Vec<DeploymentPolicyVersionSummary>`,
 /// ordered newest-first per policy.
+///
+/// # Errors
+///
+/// Returns an error when version history, current pointers, or provenance
+/// cannot be loaded, or when stored evidence specifications are invalid.
 pub async fn fetch_policy_version_summaries(
     pool: &PgPool,
     policy_ids: &[Uuid],
@@ -763,6 +773,11 @@ pub async fn fetch_policy_version_summaries(
 /// version row with `semantic_digest = 'pending'`; within the same transaction
 /// we compute the real Rust-canonical digest and persist it. A digest failure
 /// rolls back the entire insert.
+///
+/// # Errors
+///
+/// Returns an error under the same conditions as
+/// [`create_deployment_policy_with_mappings`].
 pub async fn create_deployment_policy(
     pool: &PgPool,
     request: &CreateDeploymentPolicyRequest,
@@ -931,6 +946,11 @@ pub async fn create_deployment_policy_with_mappings(
 /// a plain name/config/enabled edit does not overwrite imported metadata (P1 #4).
 ///
 /// Runs entirely within a transaction; a digest failure rolls back the update.
+///
+/// # Errors
+///
+/// Returns an error when validation, draft creation, metadata decoding, digest
+/// computation, or any persistence operation fails.
 pub async fn update_deployment_policy(
     pool: &PgPool,
     policy_id: &Uuid,
@@ -1091,10 +1111,14 @@ pub async fn update_deployment_policy(
     Ok(policy)
 }
 
+/// Describes the expected result of a guarded policy-lineage deletion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PolicyDeleteOutcome {
+    /// Indicates that the policy lineage and disposable references were deleted.
     Deleted,
+    /// Indicates that the policy lineage did not exist at deletion time.
     NotFound,
+    /// Contains the retained references that prohibit deletion.
     Blocked(DeletionEligibility),
 }
 
@@ -1251,6 +1275,14 @@ async fn policy_deletion_eligibility_in_transaction(
     Ok(Some(eligibility(blockers)))
 }
 
+/// Returns the records that permit or prevent deletion of a policy lineage.
+///
+/// Returns `None` when the policy lineage does not exist.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot begin or execute the eligibility
+/// transaction. The read transaction is rolled back after the result is built.
 pub async fn policy_deletion_eligibility(
     pool: &PgPool,
     policy_id: &Uuid,
@@ -1267,6 +1299,11 @@ pub async fn policy_deletion_eligibility(
 /// Delete a policy lineage only when no immutable history or reference would
 /// be destroyed. The lineage row is locked for the full eligibility check and
 /// delete; the FK guards remain defense in depth.
+///
+/// # Errors
+///
+/// Returns an error when eligibility checks, disposable-reference deletion, or
+/// transaction commit fails.
 pub async fn delete_deployment_policy(
     pool: &PgPool,
     policy_id: &Uuid,
@@ -1356,13 +1393,15 @@ async fn delete_deployment_policy_in_transaction(
     Ok(PolicyDeleteOutcome::Deleted)
 }
 
-/// Result of a bulk-delete request (TASK-433 Phase 1 — policy catalog
-/// scaling multi-select toolbar).
+/// Describes deleted and skipped policy lineages from one bulk request.
 #[derive(Debug, Clone, Default)]
 pub struct BulkPolicyDeleteOutcome {
+    /// Lists policy lineage IDs deleted by the transaction.
     pub deleted: Vec<Uuid>,
-    /// `(policy_id, reason, eligibility)` — reason is "not_found" or
-    /// "deletion_blocked"; eligibility is present for the latter.
+    /// Lists `(policy_id, reason, eligibility)` for non-deleted lineages.
+    ///
+    /// The reason is `not_found` or `deletion_blocked`; eligibility is present
+    /// for `deletion_blocked`.
     pub skipped: Vec<(Uuid, &'static str, Option<DeletionEligibility>)>,
 }
 
@@ -1373,6 +1412,11 @@ pub struct BulkPolicyDeleteOutcome {
 /// and not-found outcomes are returned as skips, while an unexpected database
 /// error rolls back every eligible deletion so the caller never receives a
 /// generic failure after hidden committed mutations.
+///
+/// # Errors
+///
+/// Returns an error when an unexpected eligibility, deletion, or transaction
+/// failure occurs. No eligible deletion commits in that case.
 pub async fn bulk_delete_deployment_policies(
     pool: &PgPool,
     policy_ids: &[Uuid],

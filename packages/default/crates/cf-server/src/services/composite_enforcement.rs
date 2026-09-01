@@ -1,3 +1,10 @@
+//! Evaluates and persists multi-phase composite policy enforcement.
+//!
+//! Evaluation, scan, and deployment outcomes are tied to an exact system
+//! target and effective policy set. Authorization updates assessment aggregates
+//! and any guarded target state in one transaction so callers cannot consume
+//! stale passing evidence.
+
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Postgres, Transaction};
@@ -18,22 +25,30 @@ use crate::services::time_window_policy;
 // stable so derivation evidence and deployment publication share one key space.
 const POAM_DERIVATION_LOCK_NAMESPACE: i32 = 0x504F_414D;
 
+/// Describes the aggregate composite-policy decision for one system target.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompositeAuthorization {
+    /// Contains the aggregate outcome across all applicable assessments.
     pub outcome: EnforcementOutcome,
+    /// Identifies the exact assessment rows used for the decision.
     pub assessments: Vec<Uuid>,
+    /// Explains the aggregate decision for diagnostics.
     pub detail: String,
 }
 
 impl CompositeAuthorization {
+    /// Returns whether every applicable composite assessment passed.
     pub fn allowed(&self) -> bool {
         self.outcome == EnforcementOutcome::Pass
     }
 }
 
+/// Describes an atomic desired-target delivery claim and its authorization.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TargetDeliveryAuthorization {
+    /// Contains the claimed target, or `None` when no target was delivered.
     pub target: Option<String>,
+    /// Contains the composite-policy decision made while claiming the target.
     pub authorization: CompositeAuthorization,
 }
 
@@ -101,9 +116,15 @@ fn phase_str(phase: EnforcementPhase) -> &'static str {
     }
 }
 
-/// Seed NotChecked rows for the exact active evaluation attempt. Starting a
-/// newer attempt supersedes prior evidence; merely queueing a retry does not,
-/// so the terminal outcome remains readable until that retry actually starts.
+/// Seeds NotChecked rows for the exact active evaluation attempt.
+///
+/// Starting a newer attempt supersedes prior evidence; merely queueing a retry
+/// does not, so the terminal outcome remains readable until that retry starts.
+///
+/// # Errors
+///
+/// Returns an error when the active attempt cannot be loaded or when its
+/// evidence and affected assessment aggregates cannot be updated atomically.
 pub async fn initialize_eval_passed_attempt(
     pool: &PgPool,
     commit_id: i32,
@@ -191,7 +212,228 @@ pub async fn initialize_eval_passed_attempt(
     .bind(attempt_number)
     .execute(&mut *tx)
     .await?;
+    reset_eval_passed_assessments_for_attempt_in_tx(&mut tx, attempt_id, attempt_number).await?;
     tx.commit().await?;
+    Ok(())
+}
+
+async fn lock_eval_passed_assessments_for_attempt_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    attempt_id: Uuid,
+) -> Result<()> {
+    let system_ids: Vec<Uuid> = sqlx::query_scalar(
+        r#"
+        SELECT DISTINCT assessment.system_id
+        FROM composite_policy_assessments assessment
+        JOIN derivations derivation ON derivation.id = assessment.derivation_id
+        JOIN evaluation_attempts attempt ON attempt.commit_id = derivation.commit_id
+        WHERE attempt.id = $1
+          AND EXISTS (
+              SELECT 1
+              FROM composite_eval_attempt_rule_results attempt_result
+              WHERE attempt_result.evaluation_attempt_id = attempt.id
+                AND attempt_result.policy_version_id = assessment.policy_version_id
+                AND EXISTS (
+                    SELECT 1 FROM composite_policy_rule_results rule_result
+                    WHERE rule_result.assessment_id = assessment.id
+                      AND rule_result.rule_id = attempt_result.rule_id
+                      AND rule_result.kind = 'eval_passed'
+                )
+          )
+        ORDER BY assessment.system_id
+        "#,
+    )
+    .bind(attempt_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    for system_id in system_ids {
+        // CONCURRENCY: Deployment authorization and POA&M closure acquire the
+        // same system/finding keys before assessment rows. Keep that order so
+        // neither can observe a rule transition without its new aggregate.
+        lock_poam_findings_for_system_tx(tx, system_id).await?;
+    }
+    Ok(())
+}
+
+/// Resets exact-commit `eval_passed` assessments when a new attempt starts.
+///
+/// The transition does not wait for policy loading or evaluator setup. This
+/// prevents deployment authorization from consuming an earlier Pass during
+/// the interval between claiming the retry and initializing attempt evidence.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot lock or update the assessments.
+pub(crate) async fn reset_eval_passed_assessments_for_started_attempt_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    commit_id: i32,
+    attempt_id: Uuid,
+    attempt_number: i32,
+) -> Result<()> {
+    let system_ids: Vec<Uuid> = sqlx::query_scalar(
+        r#"
+        SELECT DISTINCT assessment.system_id
+        FROM composite_policy_assessments assessment
+        JOIN derivations derivation ON derivation.id = assessment.derivation_id
+        JOIN composite_policy_rule_results rule_result
+          ON rule_result.assessment_id = assessment.id
+        WHERE derivation.commit_id = $1 AND rule_result.kind = 'eval_passed'
+        ORDER BY assessment.system_id
+        "#,
+    )
+    .bind(commit_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    for system_id in system_ids {
+        // CONCURRENCY: Use the same system/finding lock order as deployment
+        // authorization and POA&M closure before changing assessment rows.
+        lock_poam_findings_for_system_tx(tx, system_id).await?;
+    }
+    let assessment_ids: Vec<Uuid> = sqlx::query_scalar(
+        r#"
+        UPDATE composite_policy_rule_results rule_result
+        SET outcome = 'not_checked', blocking = TRUE,
+            detail = 'Target evaluation retry is in progress',
+            evidence = jsonb_build_object(
+                'evaluation_attempt_id', $2,
+                'attempt_number', $3,
+                'terminal_outcome', 'pending'
+            ),
+            evaluated_at = NOW()
+        FROM composite_policy_assessments assessment
+        JOIN derivations derivation ON derivation.id = assessment.derivation_id
+        WHERE rule_result.assessment_id = assessment.id
+          AND derivation.commit_id = $1
+          AND rule_result.kind = 'eval_passed'
+        RETURNING assessment.id
+        "#,
+    )
+    .bind(commit_id)
+    .bind(attempt_id)
+    .bind(attempt_number)
+    .fetch_all(&mut **tx)
+    .await?;
+    // INVARIANT: Claiming a newer attempt and revoking prior Pass assessments
+    // are one transaction. Authorization sees either state, never a stale Pass
+    // paired with an in-progress retry.
+    recompute_aggregates(tx, &assessment_ids).await?;
+    Ok(())
+}
+
+async fn reset_eval_passed_assessments_for_attempt_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    attempt_id: Uuid,
+    attempt_number: i32,
+) -> Result<()> {
+    lock_eval_passed_assessments_for_attempt_in_tx(tx, attempt_id).await?;
+    let assessment_ids: Vec<Uuid> = sqlx::query_scalar(
+        r#"
+        UPDATE composite_policy_rule_results rule_result
+        SET outcome = 'not_checked', blocking = TRUE,
+            detail = 'Target evaluation retry is in progress',
+            evidence = jsonb_build_object(
+                'evaluation_attempt_id', $1,
+                'attempt_number', $2,
+                'terminal_outcome', 'pending'
+            ),
+            evaluated_at = NOW()
+        FROM composite_policy_assessments assessment
+        JOIN derivations derivation ON derivation.id = assessment.derivation_id
+        JOIN evaluation_attempts attempt ON attempt.commit_id = derivation.commit_id
+        WHERE rule_result.assessment_id = assessment.id
+          AND attempt.id = $1
+          AND rule_result.kind = 'eval_passed'
+          AND EXISTS (
+              SELECT 1
+              FROM composite_eval_attempt_rule_results attempt_result
+              WHERE attempt_result.evaluation_attempt_id = attempt.id
+                AND attempt_result.policy_version_id = assessment.policy_version_id
+                AND attempt_result.rule_id = rule_result.rule_id
+          )
+        RETURNING assessment.id
+        "#,
+    )
+    .bind(attempt_id)
+    .bind(attempt_number)
+    .fetch_all(&mut **tx)
+    .await?;
+    // INVARIANT: Starting an attempt invalidates every prior eval_passed Pass
+    // for this commit before the transaction becomes visible. Authorization
+    // can observe only the old terminal state or this NotChecked aggregate.
+    recompute_aggregates(tx, &assessment_ids).await?;
+    Ok(())
+}
+
+/// Fails provisional `eval_passed` evidence for an infrastructure failure.
+///
+/// Existing Fail or Error outcomes remain authoritative. Pass and NotChecked
+/// outcomes become Error in both attempt evidence and exact-target composite
+/// assessments before the evaluation failure transaction commits.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot lock or update the evidence.
+pub(crate) async fn fail_eval_passed_attempt_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    attempt_id: Uuid,
+    detail: &str,
+    failure_class: &str,
+) -> Result<()> {
+    lock_eval_passed_assessments_for_attempt_in_tx(tx, attempt_id).await?;
+    sqlx::query(
+        r#"
+        UPDATE composite_eval_attempt_rule_results
+        SET outcome = 'error', detail = $2,
+            evidence = evidence || jsonb_build_object(
+                'terminal_outcome', 'error', 'failure_class', $3
+            ),
+            evaluated_at = NOW()
+        WHERE evaluation_attempt_id = $1
+          AND outcome IN ('pass', 'not_checked')
+          AND superseded_at IS NULL
+        "#,
+    )
+    .bind(attempt_id)
+    .bind(detail)
+    .bind(failure_class)
+    .execute(&mut **tx)
+    .await?;
+
+    let assessment_ids: Vec<Uuid> = sqlx::query_scalar(
+        r#"
+        UPDATE composite_policy_rule_results rule_result
+        SET outcome = 'error', blocking = TRUE, detail = $2,
+            evidence = rule_result.evidence || jsonb_build_object(
+                'evaluation_attempt_id', $1,
+                'terminal_outcome', 'error',
+                'failure_class', $3
+            ),
+            evaluated_at = NOW()
+        FROM composite_policy_assessments assessment
+        JOIN derivations derivation ON derivation.id = assessment.derivation_id
+        JOIN evaluation_attempts attempt ON attempt.commit_id = derivation.commit_id
+        WHERE rule_result.assessment_id = assessment.id
+          AND attempt.id = $1
+          AND rule_result.kind = 'eval_passed'
+          AND rule_result.outcome IN ('pass', 'not_checked')
+          AND EXISTS (
+              SELECT 1
+              FROM composite_eval_attempt_rule_results attempt_result
+              WHERE attempt_result.evaluation_attempt_id = attempt.id
+                AND attempt_result.policy_version_id = assessment.policy_version_id
+                AND attempt_result.rule_id = rule_result.rule_id
+          )
+        RETURNING assessment.id
+        "#,
+    )
+    .bind(attempt_id)
+    .bind(detail)
+    .bind(failure_class)
+    .fetch_all(&mut **tx)
+    .await?;
+    // INVARIANT: A later infrastructure failure revokes a per-system Pass.
+    // Recompute in this transaction so deployment cannot consume stale Pass.
+    recompute_aggregates(tx, &assessment_ids).await?;
     Ok(())
 }
 
@@ -842,9 +1084,14 @@ async fn recompute_aggregates(
         .collect())
 }
 
-/// Persist the complete ordered assessment and evaluation-phase outcomes in
+/// Persists the complete ordered assessment and evaluation-phase outcomes in
 /// the caller's evaluation transaction. Assessment creation is intentionally
 /// private to validated lifecycle hooks and final authorization never creates it.
+///
+/// # Errors
+///
+/// Returns an error when effective policies are invalid, the target does not
+/// match the derivation, or PostgreSQL cannot persist the assessment state.
 pub async fn persist_evaluation_assessments_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     system_id: Uuid,
@@ -937,8 +1184,14 @@ async fn latest_scan_in_tx(
     .map_err(Into::into)
 }
 
-/// Merge a scan transition only when it is the newest attempt for the exact
-/// derivation. The source order guard makes delayed older completions a no-op.
+/// Merges a scan transition only when it is newest for the exact derivation.
+///
+/// The source order guard makes delayed older completions a no-op.
+///
+/// # Errors
+///
+/// Returns an error when the transaction cannot load or merge the scan
+/// outcome, or cannot commit the affected assessment aggregates.
 pub async fn persist_scan_phase(pool: &PgPool, scan_id: Uuid) -> Result<()> {
     let mut tx = pool.begin().await?;
     persist_scan_phase_in_tx(&mut tx, scan_id).await?;
@@ -946,6 +1199,16 @@ pub async fn persist_scan_phase(pool: &PgPool, scan_id: Uuid) -> Result<()> {
     Ok(())
 }
 
+/// Locks all POA&M finding keys affected by one derivation.
+///
+/// Callers must retain the transaction until the related evidence mutation is
+/// complete. The function uses the common derivation, system, and finding lock
+/// order used by assessment and POA&M writers.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot resolve or acquire the advisory
+/// lock.
 pub(crate) async fn lock_poam_findings_for_derivation_tx(
     tx: &mut Transaction<'_, Postgres>,
     derivation_id: i32,
@@ -1023,6 +1286,15 @@ async fn lock_poam_derivation_key_tx(
     Ok(())
 }
 
+/// Locks POA&M derivation keys that resolve to a deployed store path.
+///
+/// An absent or blank store path acquires no locks. Locks remain held for the
+/// caller's transaction.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot resolve or acquire an advisory
+/// lock.
 pub(crate) async fn lock_poam_derivations_for_store_path_tx(
     tx: &mut Transaction<'_, Postgres>,
     store_path: Option<&str>,
@@ -1045,6 +1317,13 @@ pub(crate) async fn lock_poam_derivations_for_store_path_tx(
     Ok(())
 }
 
+/// Locks the stable POA&M system sentinel for the caller's transaction.
+///
+/// Callers must acquire this sentinel before per-finding keys and row locks.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot acquire the advisory lock.
 pub(crate) async fn lock_poam_system_key_tx(
     tx: &mut Transaction<'_, Postgres>,
     system_id: Uuid,
@@ -1060,6 +1339,14 @@ pub(crate) async fn lock_poam_system_key_tx(
     Ok(())
 }
 
+/// Locks the POA&M system sentinel and all existing finding keys for a system.
+///
+/// Locks remain held for the caller's transaction and follow the global writer
+/// order used by deployment authorization and POA&M closure.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot enumerate or acquire the locks.
 pub(crate) async fn lock_poam_findings_for_system_tx(
     tx: &mut Transaction<'_, Postgres>,
     system_id: Uuid,
@@ -1083,6 +1370,15 @@ pub(crate) async fn lock_poam_findings_for_system_tx(
     Ok(())
 }
 
+/// Persists one scan phase transition in the caller's transaction.
+///
+/// A transition for an older scan is a no-op. A newest scan updates the exact
+/// derivation assessments and recomputes their aggregates before return.
+///
+/// # Errors
+///
+/// Returns an error when the scan is missing or its assessment state cannot be
+/// decoded, locked, or persisted.
 pub(crate) async fn persist_scan_phase_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     scan_id: Uuid,
@@ -1562,6 +1858,12 @@ async fn authorize_target_at(
     })
 }
 
+/// Authorizes an exact target for a system without changing desired state.
+///
+/// # Errors
+///
+/// Returns an error when policy resolution conflicts, target evidence is
+/// missing or stale, or PostgreSQL cannot complete authorization.
 pub async fn authorize_system_target(
     pool: &PgPool,
     system_id: Uuid,
@@ -1580,6 +1882,14 @@ pub async fn authorize_system_target(
     .authorization)
 }
 
+/// Authorizes and sets a system's desired target in one transaction.
+///
+/// The desired target changes only when the aggregate authorization passes.
+///
+/// # Errors
+///
+/// Returns an error when policy resolution or target validation fails, or when
+/// PostgreSQL cannot complete the guarded target update.
 pub async fn authorize_and_set_system_target(
     pool: &PgPool,
     system_id: Uuid,
@@ -1597,6 +1907,14 @@ pub async fn authorize_and_set_system_target(
     .authorization)
 }
 
+/// Authorizes and claims delivery of the expected desired target atomically.
+///
+/// A changed desired target or non-passing decision returns no claimed target.
+///
+/// # Errors
+///
+/// Returns an error when policy resolution or target validation fails, or when
+/// PostgreSQL cannot complete the delivery claim.
 pub async fn authorize_and_claim_desired_target(
     pool: &PgPool,
     system_id: Uuid,
@@ -1612,6 +1930,14 @@ pub async fn authorize_and_claim_desired_target(
     .await
 }
 
+/// Authorizes an exact deployment at the supplied evaluation timestamp.
+///
+/// The derivation ID and store path must identify the same deployable target.
+///
+/// # Errors
+///
+/// Returns an error when exact target evidence is incomplete or stale, policy
+/// resolution conflicts, or PostgreSQL cannot complete authorization.
 pub async fn authorize_deployment_at(
     pool: &PgPool,
     system_id: Uuid,
@@ -1632,6 +1958,11 @@ pub async fn authorize_deployment_at(
     .authorization)
 }
 
+/// Authorizes an exact deployment at the current UTC time.
+///
+/// # Errors
+///
+/// Returns an error under the same conditions as [`authorize_deployment_at`].
 pub async fn authorize_deployment(
     pool: &PgPool,
     system_id: Uuid,

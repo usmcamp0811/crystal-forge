@@ -1,10 +1,18 @@
+//! Loads and searches packaged NixOS option metadata for policy authoring.
+//!
+//! Metadata describes Crystal Forge's pinned nixpkgs only. It never replaces
+//! evaluation against a monitored target's actual module set.
+
 use crate::api::models::NixosOptionMetadata;
 use std::fmt::{Display, Formatter};
 use std::path::Path;
 use std::sync::Arc;
 
+/// Names the runtime override for the packaged metadata JSON path.
 pub const METADATA_PATH_ENV: &str = "CRYSTAL_FORGE_NIXOS_OPTIONS_METADATA";
+/// Sets the result limit used when a request does not specify one.
 pub const DEFAULT_SEARCH_LIMIT: usize = 20;
+/// Bounds every metadata search result set.
 pub const MAX_SEARCH_LIMIT: usize = 100;
 
 /// Packaged entries reflect Crystal Forge's pinned nixpkgs and are authoring
@@ -27,9 +35,12 @@ struct IndexedEntry {
     normalized_description: Option<String>,
 }
 
+/// Reports why packaged NixOS option metadata cannot answer a query.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MetadataProviderError {
+    /// Indicates that no metadata file could be located or read.
     Unavailable(String),
+    /// Indicates that the selected metadata file is not valid metadata JSON.
     Corrupt(String),
 }
 
@@ -44,6 +55,10 @@ impl Display for MetadataProviderError {
 impl std::error::Error for MetadataProviderError {}
 
 impl NixosOptionsMetadataProvider {
+    /// Creates a provider from the runtime override or packaged metadata path.
+    ///
+    /// The provider retains an unavailable state instead of failing construction
+    /// when neither path exists, so request handlers can return a stable error.
     pub fn from_runtime() -> Self {
         let path = std::env::var(METADATA_PATH_ENV)
             .ok()
@@ -60,6 +75,10 @@ impl NixosOptionsMetadataProvider {
         }
     }
 
+    /// Creates a provider that reads and indexes one metadata file.
+    ///
+    /// Read and parse failures are retained as provider state and are returned by
+    /// [`Self::search`] and [`Self::get_exact`].
     pub fn from_path(path: impl AsRef<Path>) -> Self {
         let path = path.as_ref();
         match std::fs::read(path) {
@@ -78,6 +97,11 @@ impl NixosOptionsMetadataProvider {
         }
     }
 
+    /// Creates a provider from a JSON array and sorts entries by canonical path.
+    ///
+    /// # Errors
+    ///
+    /// Returns a JSON error when `contents` is not a valid metadata array.
     pub fn from_json_bytes(contents: &[u8]) -> Result<Self, serde_json::Error> {
         let mut entries: Vec<NixosOptionMetadata> = serde_json::from_slice(contents)?;
         entries.sort_by(|left, right| left.path.cmp(&right.path));
@@ -97,6 +121,16 @@ impl NixosOptionsMetadataProvider {
         })
     }
 
+    /// Returns ranked case-insensitive path and description matches.
+    ///
+    /// Exact paths sort before path prefixes, path substrings, and description
+    /// matches. The method clamps `limit` to `1..=`[`MAX_SEARCH_LIMIT`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MetadataProviderError::Unavailable`] or
+    /// [`MetadataProviderError::Corrupt`] when provider construction could not
+    /// produce a usable index.
     pub fn search(
         &self,
         query: &str,
@@ -129,6 +163,15 @@ impl NixosOptionsMetadataProvider {
             .collect())
     }
 
+    /// Returns the metadata entry whose canonical path exactly matches `path`.
+    ///
+    /// Matching is case-sensitive and does not trim the supplied path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MetadataProviderError::Unavailable`] or
+    /// [`MetadataProviderError::Corrupt`] when provider construction could not
+    /// produce a usable index.
     pub fn get_exact(
         &self,
         path: &str,

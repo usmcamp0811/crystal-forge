@@ -39,15 +39,35 @@ function runFixtureSql(sql) {
 }
 
 // ── Node.js 24 safety net ──────────────────────────────────────────────────
-// Preserve diagnostics for detached Playwright promises without allowing an
-// unhandled rejection to produce a successful browser process.
-const unhandledRejections = [];
-process.on("unhandledRejection", (reason) => {
-  const diagnostic = reason instanceof Error ? (reason.stack || reason.message) : String(reason);
-  unhandledRejections.push(diagnostic);
+// Preserve diagnostics for detached Playwright failures without allowing an
+// uncaught exception or rejection to produce a successful browser process.
+const fatalRuntimeEvents = [];
+function recordFatalRuntimeEvent(kind, reason) {
+  const error = reason instanceof Error ? reason : new Error(String(reason));
+  const event = {
+    kind,
+    message: error.message,
+    stack: error.stack || null,
+  };
+  fatalRuntimeEvents.push(event);
   process.exitCode = 1;
-  console.error(`unhandledRejection: ${diagnostic}`);
+  console.error(`${kind}: ${event.stack || event.message}`);
+}
+
+process.on("unhandledRejection", (reason) => {
+  recordFatalRuntimeEvent("unhandledRejection", reason);
 });
+process.on("uncaughtException", (error) => {
+  recordFatalRuntimeEvent("uncaughtException", error);
+});
+
+async function settleFatalRuntimeEvents() {
+  // Drain promise callbacks, timer-zero callbacks, and the following check
+  // phase after Playwright shutdown before reports snapshot fatal state.
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setImmediate(resolve));
+}
 
 function firstExistingPath(paths) {
   return paths.find((candidate) => fs.existsSync(candidate));
@@ -85,6 +105,7 @@ function validateManifest(manifest) {
   const errors = [];
   const allowedProfiles = new Set(["ci_fast", "full"]);
   const allowedBaselines = new Set(["none", "advisory", "strict"]);
+  const allowedViewports = new Set(["desktop", "tablet", "narrowDesktop", "mobile"]);
   const stepNames = new Set();
   const themes = manifest.settings?.visualThemes;
   if (!Array.isArray(themes) || themes.length === 0 || themes.some((theme) => typeof theme !== "string" || !theme)) {
@@ -119,6 +140,39 @@ function validateManifest(manifest) {
       if (step?.maxDiffPixelRatio !== undefined &&
           (!Number.isFinite(step.maxDiffPixelRatio) || step.maxDiffPixelRatio < 0 || step.maxDiffPixelRatio > 1)) {
         errors.push(`${label}.maxDiffPixelRatio must be between 0 and 1`);
+      }
+    }
+  }
+  const strictWorkflowNames = manifest.settings?.strictWorkflowNames;
+  if (!Array.isArray(strictWorkflowNames) || strictWorkflowNames.length !== 7 ||
+      new Set(strictWorkflowNames).size !== strictWorkflowNames.length ||
+      strictWorkflowNames.some((name) => typeof name !== "string" || !name)) {
+    errors.push("settings.strictWorkflowNames must contain seven unique non-empty names");
+  } else {
+    const strictManifestSteps = manifest.steps.filter((step) => step.baseline === "strict").map((step) => step.name);
+    if (!isDeepStrictEqual(strictManifestSteps, strictWorkflowNames)) {
+      errors.push("settings.strictWorkflowNames must exactly match the ordered strict manifest steps");
+    }
+  }
+  const requiredResponsiveArtifacts = manifest.settings?.requiredResponsiveArtifacts;
+  if (!Array.isArray(requiredResponsiveArtifacts) || requiredResponsiveArtifacts.length === 0) {
+    errors.push("settings.requiredResponsiveArtifacts must be a non-empty array");
+  } else {
+    const artifactKeys = new Set();
+    for (const artifact of requiredResponsiveArtifacts) {
+      const key = `${artifact?.step || ""}--${artifact?.state || ""}`;
+      if (artifactKeys.has(key)) errors.push(`settings.requiredResponsiveArtifacts contains duplicate ${key}`);
+      artifactKeys.add(key);
+      if (typeof artifact?.step !== "string" || !artifact.step || !stepNames.has(artifact.step)) {
+        errors.push(`${key}.step must name a manifest step`);
+      }
+      if (typeof artifact?.state !== "string" || !/^[a-z0-9-]+$/.test(artifact.state)) {
+        errors.push(`${key}.state must be a deterministic kebab-case name`);
+      }
+      if (!Array.isArray(artifact?.viewports) || artifact.viewports.length === 0 ||
+          new Set(artifact.viewports).size !== artifact.viewports.length ||
+          artifact.viewports.some((viewport) => !allowedViewports.has(viewport))) {
+        errors.push(`${key}.viewports must contain unique known viewport names`);
       }
     }
   }
@@ -184,7 +238,12 @@ async function applyVisualTheme(page, theme) {
     }, theme);
     await page.waitForTimeout(100);
     const actual = await page.locator("html").getAttribute("data-theme");
-    if (actual === theme) return;
+    if (actual === theme) {
+      // The shell uses 300 ms color transitions. Capture only after those
+      // transitions settle so computed contrast and pixels are deterministic.
+      await page.waitForTimeout(350);
+      return;
+    }
   }
   const actual = await page.locator("html").getAttribute("data-theme");
   throw new Error(`Expected visual baseline theme ${theme}, got: ${actual}`);
@@ -346,7 +405,9 @@ async function captureThemedBaselines(page, step, visualThemes) {
 
     const captureName = `${step.name}--${theme}`;
     const outputPath = `${outputDir}/${captureName}.png`;
-    await page.screenshot({ path: outputPath });
+    // Playwright fast-forwards finite CSS transitions before capture. This
+    // prevents VM compositor timing from freezing an intermediate theme frame.
+    await page.screenshot({ path: outputPath, animations: "disabled" });
 
     const stats = fs.statSync(outputPath);
     const visual = compareToBaseline(captureName, MANIFEST_STEPS.get(step.name));
@@ -357,14 +418,15 @@ async function captureThemedBaselines(page, step, visualThemes) {
   return visuals;
 }
 
-async function captureWorkflowState(page, stepName, stateName) {
+async function captureWorkflowState(page, stepName, stateName, assertState) {
   const visuals = intermediateVisuals.get(stepName) || [];
   const originalTheme = await page.locator("html").getAttribute("data-theme");
   for (const theme of MANIFEST.settings.visualThemes || ["dark", "light"]) {
     await applyVisualTheme(page, theme);
+    if (assertState) await assertState(theme);
     const captureName = `${stepName}--${stateName}--${theme}`;
     const outputPath = `${outputDir}/${captureName}.png`;
-    await page.screenshot({ path: outputPath });
+    await page.screenshot({ path: outputPath, animations: "disabled" });
     const stats = fs.statSync(outputPath);
     const visual = compareToBaseline(captureName, MANIFEST_STEPS.get(stepName));
     console.log(`  OK intermediate: ${captureName}.png (${stats.size} bytes)`);
@@ -372,6 +434,40 @@ async function captureWorkflowState(page, stepName, stateName) {
   }
   if (originalTheme) await applyVisualTheme(page, originalTheme);
   intermediateVisuals.set(stepName, visuals);
+}
+
+async function captureWorkflowViewportState(page, stepName, stateName, viewportName, assertState) {
+  const viewport = VIEWPORTS[viewportName];
+  if (!viewport) throw new Error(`Unknown workflow viewport ${viewportName}`);
+  const originalViewport = page.viewportSize() || VIEWPORTS.desktop;
+  await page.setViewportSize(viewport);
+  try {
+    await captureWorkflowState(
+      page,
+      stepName,
+      `${stateName}--${viewportName}`,
+      assertState ? (theme) => assertState(viewportName, theme) : undefined,
+    );
+  } finally {
+    await page.setViewportSize(originalViewport);
+  }
+}
+
+async function captureRequiredResponsiveArtifact(page, stepName, stateName) {
+  const artifact = MANIFEST.settings.requiredResponsiveArtifacts.find(
+    (candidate) => candidate.step === stepName && candidate.state === stateName,
+  );
+  if (!artifact) throw new Error(`Missing responsive artifact contract for ${stepName}--${stateName}`);
+  const assertState = stepName.startsWith("06a-onboarding-coach-") ||
+    stepName.startsWith("06g-onboarding-coach-") ||
+    stepName.startsWith("06h-onboarding-coach-")
+    ? (viewportName, theme) => assertSetupCoachCaptureState(page, stepName, viewportName, theme)
+    : stepName === "06-dashboard"
+      ? (viewportName, theme) => assertDashboardWatchlistCaptureState(page, stepName, viewportName, theme)
+    : undefined;
+  for (const viewportName of artifact.viewports) {
+    await captureWorkflowViewportState(page, stepName, stateName, viewportName, assertState);
+  }
 }
 
 // Test user credentials
@@ -400,6 +496,119 @@ async function assertVisible(locator, message, timeoutMs = 5000) {
     .catch(() => false);
   if (!visible) {
     throw new Error(message);
+  }
+}
+
+async function assertSetupCoachCaptureState(page, stepName, viewportName, theme) {
+  const coach = page.locator("[data-testid='onboarding-coach-panel']");
+  await assertVisible(coach, `${stepName} must show the Setup Coach at ${viewportName}/${theme}`);
+  if (stepName === "06a-onboarding-coach-dashboard" || stepName === "06h-onboarding-coach-all-configured") {
+    if ((await coach.getAttribute("role")) !== "complementary" || (await coach.getAttribute("aria-modal")) !== null) {
+      throw new Error(`${stepName} must remain a nonmodal complementary surface`);
+    }
+  }
+  if (stepName === "06a-onboarding-coach-dashboard") {
+    const currentStep = page.locator("[data-testid='onboarding-step-policy']");
+    if ((await currentStep.getAttribute("aria-current")) !== "step" || !(await currentStep.textContent()).includes("Current step")) {
+      throw new Error(`${stepName} must preserve Create policy as the semantic current step at ${viewportName}/${theme}`);
+    }
+    if (!(await page.locator("[data-testid='onboarding-step-agent']").textContent()).includes("Acknowledged")) {
+      throw new Error(`${stepName} must preserve its completed prerequisite at ${viewportName}/${theme}`);
+    }
+  } else if (stepName === "06g-onboarding-coach-minimized") {
+    const label = await coach.getAttribute("aria-label");
+    if (label !== "Open Setup Coach, 6 of 9 complete") {
+      throw new Error(`${stepName} must preserve minimized progress at ${viewportName}/${theme}, got: ${label}`);
+    }
+    if (await page.locator("[data-testid^='onboarding-step-']").count() !== 0) {
+      throw new Error(`${stepName} must not render expanded step controls at ${viewportName}/${theme}`);
+    }
+  } else if (stepName === "06h-onboarding-coach-all-configured") {
+    for (const stepId of ["environment", "flake", "builder", "cache", "system", "policy", "bundle", "poam"]) {
+      if (!(await page.locator(`[data-testid='onboarding-step-${stepId}']`).textContent()).includes("Configured")) {
+        throw new Error(`${stepName} must preserve configured ${stepId} state at ${viewportName}/${theme}`);
+      }
+    }
+    if (!(await page.locator("[data-testid='onboarding-step-agent']").textContent()).includes("Acknowledged")) {
+      throw new Error(`${stepName} must preserve acknowledged agent state at ${viewportName}/${theme}`);
+    }
+  }
+  if ((await page.locator(".cf-overlay-backdrop, [data-testid='mobile-drawer-backdrop']").count()) !== 0) {
+    throw new Error(`${stepName} must not capture with a competing overlay`);
+  }
+
+  const viewport = VIEWPORTS[viewportName];
+  const shell = await page.locator(".app").boundingBox();
+  const main = await page.locator(".main").boundingBox();
+  if (!shell || !main || Math.abs(main.width - viewport.width) > 1) {
+    if (viewportName === "narrowDesktop" || viewportName === "mobile") {
+      throw new Error(`${stepName} content must receive the full ${viewport.width}px viewport width`);
+    }
+  }
+
+  if (viewportName === "narrowDesktop" || viewportName === "mobile") {
+    if (await page.locator("[data-testid='sidebar-nav']").isVisible()) {
+      throw new Error(`${stepName} must hide the persistent sidebar at ${viewport.width}px`);
+    }
+    await assertVisible(page.getByTestId("mobile-nav-toggle"), `${stepName} must expose overlay navigation at ${viewport.width}px`);
+    for (const name of ["Notifications", "Toggle theme", "Tweaks"]) {
+      const action = page.getByRole("button", { name: new RegExp(`^${name}`) }).first();
+      await assertVisible(action, `${name} must remain usable at ${viewport.width}px`);
+      const box = await action.boundingBox();
+      if (!box || box.x < 0 || box.x + box.width > viewport.width || box.width < 40 || box.height < 40) {
+        throw new Error(`${name} must remain within the viewport with a 40px target at ${viewport.width}px`);
+      }
+    }
+  }
+
+  if (theme === "light") {
+    const colors = await page.locator("[data-testid='sidebar-nav']").evaluate((element) => {
+      const style = getComputedStyle(element);
+      return { background: style.backgroundColor, color: style.color };
+    });
+    if (colors.background !== "rgb(255, 255, 255)" || colors.color !== "rgb(31, 41, 55)") {
+      throw new Error(`Light sidebar contrast is incorrect: ${JSON.stringify(colors)}`);
+    }
+  }
+}
+
+async function assertDashboardWatchlistCaptureState(page, stepName, viewportName, theme) {
+  const viewport = VIEWPORTS[viewportName];
+  const watchlist = page.locator('[data-widget-id="poam-watchlist"]');
+  await assertVisible(watchlist, `${stepName} must show the POA&M Watchlist at ${viewportName}/${theme}`);
+  await watchlist.evaluate((element) => element.scrollIntoView({ block: "center", inline: "center" }));
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+
+  const watchlistBox = await watchlist.boundingBox();
+  if (
+    !watchlistBox ||
+    watchlistBox.x < 0 ||
+    watchlistBox.y < 0 ||
+    watchlistBox.x + watchlistBox.width > viewport.width ||
+    watchlistBox.y + watchlistBox.height > viewport.height
+  ) {
+    throw new Error(`${stepName} must frame the complete Watchlist within ${viewportName}/${theme}`);
+  }
+
+  const fields = [
+    [watchlist.locator(".poam-watchlist-id").first(), "ID"],
+    [watchlist.locator(".poam-watchlist-status").first(), "status"],
+    [watchlist.locator(".poam-watchlist-owner").first(), "owner"],
+    [watchlist.locator(".poam-watchlist-due").first(), "due date"],
+  ];
+  for (const [field, label] of fields) {
+    await assertVisible(field, `${stepName} must show Watchlist ${label} at ${viewportName}/${theme}`);
+    const box = await field.boundingBox();
+    if (!box || box.x < 0 || box.y < 0 || box.x + box.width > viewport.width || box.y + box.height > viewport.height) {
+      throw new Error(`${stepName} must frame Watchlist ${label} within ${viewportName}/${theme}`);
+    }
+  }
+
+  if (viewportName === "narrowDesktop" || viewportName === "mobile") {
+    const main = await page.locator(".main").boundingBox();
+    if (!main || Math.abs(main.width - viewport.width) > 1) {
+      throw new Error(`${stepName} content must receive the full ${viewport.width}px viewport width`);
+    }
   }
 }
 
@@ -1889,6 +2098,18 @@ function mockSetupCoachProgress() {
   };
 }
 
+function mockSetupCoachSelectedProgress() {
+  return {
+    ...mockSetupCoachProgress(),
+    agent_acknowledged: true,
+    environment: { complete: true, count: 1 },
+    flake: { complete: true, count: 1 },
+    builder: { complete: true, count: 1 },
+    cache: { complete: true, count: 1 },
+    system: { complete: true, count: 1 },
+  };
+}
+
 async function routeSetupCoachData(page) {
   await page.route("**/api/v1/admin/setup-progress*", async (route) => {
     await route.fulfill({
@@ -2726,6 +2947,29 @@ async function phase6Api(page, requestPath, options = {}) {
   return result;
 }
 
+async function loadTask433RequirementContext(page) {
+  const frameworks = (await phase6Api(page, "/api/v1/compliance/frameworks")).body;
+  const framework = frameworks.find((item) => item.canonical_source_key === "web-ui-mapping-roundtrip");
+  if (!framework) throw new Error("TASK-433 normalized framework fixture is unavailable");
+  const versions = (await phase6Api(page, `/api/v1/compliance/frameworks/${framework.id}/versions`)).body;
+  const version = versions.find((item) => item.canonical_release_key === "web-ui-mapping-roundtrip-v1");
+  if (!version) throw new Error("TASK-433 normalized framework release fixture is unavailable");
+  const requirements = (await phase6Api(page, `/api/v1/compliance/framework-versions/${version.id}/requirements`)).body;
+  const requirement = requirements.find((item) => item.external_id === "MAP-1");
+  if (!requirement) throw new Error("TASK-433 normalized requirement fixture is unavailable");
+  return { framework, version, requirement };
+}
+
+function task433RequirementMapping(requirement, rationale) {
+  return {
+    requirement_version_id: requirement.id,
+    relationship: "implements",
+    coverage: "full",
+    rationale,
+    provenance: "manual",
+  };
+}
+
 function phase6SemanticDigest(value) {
   const canonicalize = (item) => {
     if (Array.isArray(item)) return item.map(canonicalize);
@@ -3317,6 +3561,8 @@ const steps = [
         watchlistWidget.getByTitle(`Open ${poam.human_id}: ${poam.title}`),
         "POA&M Watchlist should render the exact endpoint row",
       );
+      await collapseOnboardingCoach(page);
+      await captureRequiredResponsiveArtifact(page, "06-dashboard", "poam-summary-watchlist");
       await page.waitForFunction((expected) => {
         const stored = JSON.parse(localStorage.getItem("cf-dashboard-layout") || "null");
         return JSON.stringify(stored) === JSON.stringify(expected);
@@ -3583,6 +3829,18 @@ const steps = [
     name: "06a-onboarding-coach-dashboard",
     description: "Non-blocking onboarding coach panel on dashboard",
     action: async (page) => {
+      await page.unroute("**/api/v1/admin/setup-progress*");
+      await page.route("**/api/v1/admin/setup-progress*", async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify(mockSetupCoachSelectedProgress()),
+        });
+      });
+      await page.evaluate(() => {
+        localStorage.setItem("cf.coach.collapsed", "false");
+        localStorage.setItem("cf.coach.force_show", "true");
+      });
       await page.goto(`${baseUrl}/`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(1500);
       await assertVisible(
@@ -3593,6 +3851,17 @@ const steps = [
         page.locator("[data-testid='onboarding-step-environment']"),
         "Environment onboarding step should be visible",
       );
+      await assertVisible(page.locator("[data-testid='onboarding-step-poam']"), "Expanded Setup Coach should show all nine steps");
+      const completedStep = page.locator("[data-testid='onboarding-step-agent']");
+      const currentStep = page.locator("[data-testid='onboarding-step-policy']");
+      if (!(await completedStep.textContent()).includes("Acknowledged")) {
+        throw new Error("Expanded Setup Coach must include a deterministic completed prerequisite");
+      }
+      if ((await currentStep.getAttribute("aria-current")) !== "step" || !(await currentStep.textContent()).includes("Current step")) {
+        throw new Error("Expanded Setup Coach must select Create policy as the deterministic current step");
+      }
+      await captureRequiredResponsiveArtifact(page, "06a-onboarding-coach-dashboard", "expanded-nine-step-selected-current");
+      await page.evaluate(() => localStorage.setItem("cf.coach.force_show", "false"));
     },
   },
   // ============================================================
@@ -4164,7 +4433,24 @@ const steps = [
     name: "06g-onboarding-coach-minimized",
     description: "Coach panel: minimize to tab, verify tab visible and styled",
     action: async (page) => {
-      // Minimize the panel
+      await page.unroute("**/api/v1/admin/setup-progress*");
+      await page.route("**/api/v1/admin/setup-progress*", async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify(mockSetupCoachSelectedProgress()),
+        });
+      });
+      await page.evaluate(() => {
+        localStorage.setItem("cf.coach.collapsed", "false");
+        localStorage.setItem("cf.coach.force_show", "false");
+      });
+      await page.reload({ timeout: LOAD_TIMEOUT });
+      const currentStep = page.locator("[data-testid='onboarding-step-policy']");
+      await assertVisible(currentStep, "Create policy should be the selected current step before minimizing");
+      if ((await currentStep.getAttribute("aria-current")) !== "step") {
+        throw new Error("Minimized Setup Coach fixture must select Create policy as current");
+      }
       await page.locator("[data-testid='onboarding-coach-collapse']").click();
       await page.waitForTimeout(600);
 
@@ -4177,6 +4463,11 @@ const steps = [
         page.locator("[data-testid='onboarding-coach-panel']"),
         "Minimized coach tab should still be present",
       );
+      const minimizedLabel = await page.locator("[data-testid='onboarding-coach-panel']").getAttribute("aria-label");
+      if (minimizedLabel !== "Open Setup Coach, 6 of 9 complete") {
+        throw new Error(`Minimized Setup Coach must preserve deterministic progress, got: ${minimizedLabel}`);
+      }
+      await captureRequiredResponsiveArtifact(page, "06g-onboarding-coach-minimized", "minimized-selected-current");
     },
   },
   {
@@ -4184,6 +4475,7 @@ const steps = [
     description: "Coach panel: expand from tab, all steps show Configured",
     action: async (page) => {
       await page.evaluate(() => localStorage.setItem("cf.coach.force_show", "true"));
+      await page.unroute("**/api/v1/admin/setup-progress*");
       await page.route("**/api/v1/admin/setup-progress*", async (route) => {
         await route.fulfill({
           status: 200,
@@ -4243,6 +4535,7 @@ const steps = [
 
       await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
       await assertVisible(page.locator("[data-testid='onboarding-step-poam']"), "All nine Setup Coach steps should remain visible");
+      await captureRequiredResponsiveArtifact(page, "06h-onboarding-coach-all-configured", "completed-nine-step");
 
       await page.unroute("**/api/v1/admin/setup-progress*");
       await page.evaluate(() => localStorage.setItem("cf.coach.force_show", "false"));
@@ -4605,11 +4898,18 @@ const steps = [
       if (theme !== "light") {
         throw new Error(`Expected light theme for shell screenshot, got: ${theme}`);
       }
+      const sidebarColors = await sidebar.evaluate((element) => {
+        const style = getComputedStyle(element);
+        return { background: style.backgroundColor, color: style.color };
+      });
+      if (sidebarColors.background !== "rgb(255, 255, 255)" || sidebarColors.color !== "rgb(31, 41, 55)") {
+        throw new Error(`Light sidebar must render white with dark text: ${JSON.stringify(sidebarColors)}`);
+      }
     },
   },
   {
     name: "09g-topbar-notifications-dark",
-    description: "Dark theme notifications panel opens with server-backed unread badge and settings link",
+    description: "Durable POA&M notification panel across desktop, narrow desktop, and mobile in both themes",
     action: async (page) => {
       const fixture = await createPhase6PoamFixture(page, "phase-7-notification");
       const poam = await createFixturePoam(page, fixture.systems[0].assessmentId, {
@@ -4645,6 +4945,7 @@ const steps = [
       await assertVisible(settingsButton, "Expected functional notification settings button");
       const notificationRow = panel.locator(`[data-testid="topbar-notification-item-${notificationId}"]`);
       await assertVisible(notificationRow, "Expected durable POA&M notification row");
+      await captureRequiredResponsiveArtifact(page, "09g-topbar-notifications-dark", "poam-notification");
       await page.keyboard.press("ArrowDown");
       if (!(await notificationRow.evaluate((element) => element === document.activeElement))) {
         throw new Error("Notification ArrowDown must move focus from the menu to its first item");
@@ -4678,13 +4979,23 @@ const steps = [
       const reopenedPanel = page.locator("[data-testid='topbar-notifications-panel']");
       const reopenedRow = reopenedPanel.locator(`[data-testid="topbar-notification-item-${notificationId}"]`);
       await assertVisible(reopenedRow, "Read POA&M notification should remain durable until dismissed");
-      const dismissResponsePromise = page.waitForResponse(
-        (response) => response.url().endsWith(`/api/v1/user/notifications/${notificationId}`) && response.request().method() === "DELETE",
-      );
-      const dismissNotification = reopenedRow.getByTitle("Dismiss notification");
+      const dismissNotification = reopenedPanel.getByRole("menuitem", {
+        name: `Dismiss ${notificationTitle}`,
+        exact: true,
+      });
       await dismissNotification.focus();
-      await page.keyboard.press("Enter");
-      if ((await dismissResponsePromise).status() !== 204) {
+      const dismissResponseResult = page.waitForResponse(
+        (response) => response.url().endsWith(`/api/v1/user/notifications/${notificationId}`) && response.request().method() === "DELETE",
+      ).then(
+        (response) => ({ response, error: null }),
+        (error) => ({ response: null, error }),
+      );
+      const [dismissResult] = await Promise.all([
+        dismissResponseResult,
+        page.keyboard.press("Enter"),
+      ]);
+      if (dismissResult.error) throw dismissResult.error;
+      if (dismissResult.response.status() !== 204) {
         throw new Error("POA&M notification dismiss request failed");
       }
       await assertHidden(reopenedPanel.getByText(notificationTitle, { exact: true }), "Dismissed POA&M notification should leave the inbox");
@@ -7325,7 +7636,7 @@ const steps = [
     description: "Persisted large catalog exercises deep search, collapse, chunking, cards/table, and range selection",
     action: async (page) => {
       const stepName = "task433-canonical-large-catalog";
-      const prefix = `TASK433 catalog ${crypto.randomUUID()}`;
+      const prefix = "TASK433 canonical catalog";
       runFixtureSql(`
         INSERT INTO deployment_policies (name, description, policy_type, config, enabled)
         SELECT $name$${prefix} $name$ || lpad(series::text, 3, '0'),
@@ -7367,6 +7678,8 @@ const steps = [
       await captureWorkflowState(page, stepName, "table-range-selected");
       await page.getByRole("button", { name: "Cards", exact: true }).click();
       await captureWorkflowState(page, stepName, "cards-range-selected");
+      await collapseOnboardingCoach(page);
+      await captureWorkflowViewportState(page, stepName, "catalog-selection", "narrowDesktop");
       const fixturePolicyIds = runFixtureSql(`
         SELECT string_agg(id::text, ',') FROM deployment_policies
         WHERE name LIKE $name$${prefix} %$name$;
@@ -7384,8 +7697,9 @@ const steps = [
     name: "20af-policy-catalog-selection-delete-regressions",
     description: "Collapsed selection, Ctrl-click, re-expansion, and real partial bulk deletion are a merge-blocking regression gate",
     action: async (page) => {
+      const stepName = "20af-policy-catalog-selection-delete-regressions";
       await suppressOnboardingCoach(page);
-      const prefix = `TASK433 catalog regression ${crypto.randomUUID()}`;
+      const prefix = "TASK433 catalog deletion";
       runFixtureSql(`
         INSERT INTO deployment_policies (name, description, policy_type, config, enabled)
         SELECT $name$${prefix} $name$ || lpad(series::text, 3, '0'),
@@ -7477,6 +7791,8 @@ const steps = [
       await assertVisible(page.getByText("1 selected", { exact: true }), "The immutable policy must remain selected after partial success");
       await group.getByRole("button", { name: "Expand group" }).click();
       await assertCount(group.locator('[data-policy-card]'), 1, "Only the immutable policy may remain after accepted server mutations");
+      await collapseOnboardingCoach(page);
+      await captureWorkflowViewportState(page, stepName, "partial-delete-result", "narrowDesktop");
     },
   },
   {
@@ -7519,9 +7835,12 @@ const steps = [
       // A new policy starts honest: no seeded UI-only rules, and the state line
       // reports the independent enforcement/compliance/evidence dimensions.
       await assertVisible(page.getByTestId("policy-editor-state"), "Expected the editor state summary");
-      await assertVisible(page.getByText("No enforcement defined", { exact: true }).first(), "Expected custom no-enforcement wording");
       await assertVisible(page.getByText("Unmapped", { exact: true }).first(), "Expected Unmapped state for a new policy");
       await page.getByTestId("policy-editor-tab-enforcement").click();
+      await assertVisible(
+        page.getByTestId("policy-enforcement-empty").getByText("No enforcement defined.", { exact: true }),
+        "Expected custom no-enforcement wording",
+      );
       await assertVisible(page.getByText("Assertions & gate rules", { exact: false }).first(), "Expected assertions/gate rules builder in Enforcement");
       await assertVisible(page.getByTestId("policy-enforcement-recommendations"), "Expected category-driven enforcement recommendations");
       await assertHidden(page.getByTitle("Remove rule"), "A new policy must not be seeded with unsavable rules");
@@ -7681,6 +8000,7 @@ const steps = [
 
       try {
         await page.goto(`${baseUrl}/deployment-policies`, { timeout: LOAD_TIMEOUT });
+        await page.locator("[data-policy-card]").first().waitFor({ state: "visible", timeout: LOAD_TIMEOUT });
         await page.getByRole("button", { name: /New custom policy/i }).first().click();
         await page.getByRole("heading", { name: "New custom policy" }).waitFor({ timeout: 5000 });
         await page.getByTestId("policy-editor-tab-mappings").click();
@@ -7983,6 +8303,10 @@ const steps = [
 
       // Intercept the POST so we can capture the created policy id directly,
       // avoiding any dependency on list-page pagination.
+      let createdPolicy = null;
+      let policyDeleted = false;
+      let releaseDeleteGate = null;
+      try {
       const createResponsePromise = page.waitForResponse(
         (response) =>
           response.url().includes("/api/v1/deployment-policies") &&
@@ -7993,7 +8317,7 @@ const steps = [
       if (createResponse.status() !== 201) {
         throw new Error(`Expected policy create 201, got ${createResponse.status()}`);
       }
-      const createdPolicy = await createResponse.json();
+      createdPolicy = await createResponse.json();
       if (!createdPolicy.id) {
         throw new Error("Created policy response did not contain an id");
       }
@@ -8232,7 +8556,9 @@ const steps = [
            throw new Error("Shift+Tab after removing a mapping must remain inside the policy editor");
          }
 
-         await page.locator("#policy-editor-delete-trigger").click();
+          await page.getByTestId("policy-editor-tab-details").click();
+          await assertVisible(page.getByText("Danger zone", { exact: true }), "Policy deletion must remain available from Basics");
+          await page.locator("#policy-editor-delete-trigger").click();
          const deleteInput = page.locator("#policy-editor-delete-confirm");
          await deleteInput.fill(policyName);
          const editor = page.getByTestId("policy-editor-modal");
@@ -8244,9 +8570,8 @@ const steps = [
            throw new Error("The focus trap must wrap from header Close to the enabled dynamic Remove policy action");
          }
 
-          let releaseDelete;
-          let policyDeleteCount = 0;
-          const deleteGate = new Promise((resolve) => { releaseDelete = resolve; });
+           let policyDeleteCount = 0;
+           const deleteGate = new Promise((resolve) => { releaseDeleteGate = resolve; });
           await page.route("**/api/v1/deployment-policies**", async (route) => {
             if (route.request().method() === "DELETE" && route.request().url().endsWith(`/api/v1/deployment-policies/${createdPolicy.id}`)) {
               policyDeleteCount += 1;
@@ -8266,9 +8591,10 @@ const steps = [
          await assertAttribute(editor.locator(".cf-policy-delete-confirmation"), "inert", "", "Pending deletion must make the confirmation body inert");
          await assertDisabled(deleteInput, "Pending deletion must disable the typed confirmation input");
          await assertAttribute(editor.locator(".cf-policy-delete-actions"), "inert", "", "Pending deletion must make confirmation actions inert");
-          releaseDelete();
-          const deleted = await deleteResponse;
-          if (deleted.status() !== 204) throw new Error(`Expected policy deletion 204, got ${deleted.status()}`);
+           releaseDeleteGate();
+           const deleted = await deleteResponse;
+           if (deleted.status() !== 204) throw new Error(`Expected policy deletion 204, got ${deleted.status()}`);
+           policyDeleted = true;
           const deleteRefreshAlert = page.locator("#policy-editor-error");
           await assertVisible(deleteRefreshAlert.getByText(/Policy removed, but refresh failed/), "Successful delete must expose catalog refresh failure");
           await assertAttribute(deleteRefreshAlert, "role", "alert", "Delete refresh failure must be announced");
@@ -8292,9 +8618,26 @@ const steps = [
           ).catch(() => {
             throw new Error("Successful deletion must restore focus to the owning policy page");
           });
-         await page.reload({ waitUntil: "domcontentloaded" });
-        await assertHidden(page.locator(`[data-policy-card="true"][data-policy-id="${createdPolicy.id}"]`), "Deleted policy returned after reload");
-     },
+          await page.reload({ waitUntil: "domcontentloaded" });
+          await page.getByRole("heading", { name: "Policies", exact: true }).waitFor({ timeout: LOAD_TIMEOUT });
+          await page.getByTestId("policies-loading-state").waitFor({ state: "hidden", timeout: LOAD_TIMEOUT });
+          await page.locator('[data-policy-card="true"], [data-testid="policies-empty-state"], [data-testid="policies-error-state"]')
+            .first()
+            .waitFor({ state: "visible", timeout: LOAD_TIMEOUT });
+          await assertHidden(page.locator(`[data-policy-card="true"][data-policy-id="${createdPolicy.id}"]`), "Deleted policy returned after reload");
+      } finally {
+        releaseDeleteGate?.();
+        await page.unroute("**/api/v1/deployment-policies**").catch(() => {});
+        if (createdPolicy?.id && !policyDeleted) {
+          const cleanup = await phase6ApiResponse(page, `/api/v1/deployment-policies/${createdPolicy.id}`, {
+            method: "DELETE",
+          });
+          if (cleanup.status !== 204 && cleanup.status !== 404) {
+            throw new Error(`20aa policy cleanup failed with ${cleanup.status}: ${cleanup.text}`);
+          }
+        }
+      }
+      },
   },
   {
     name: "task433-canonical-unmapped-nix-policy",
@@ -8305,7 +8648,7 @@ const steps = [
       await page.goto(`${baseUrl}/deployment-policies`, { timeout: LOAD_TIMEOUT });
       await collapseOnboardingCoach(page);
       await openSecurityPolicyTab(page);
-      const policyName = `UI Unmapped Nix ${crypto.randomUUID()}`;
+      const policyName = "TASK433 canonical Unmapped Nix";
 
       await page.getByRole("button", { name: /New custom policy/i }).first().click();
       await page.getByRole("heading", { name: "New custom policy" }).waitFor({ timeout: 5000 });
@@ -8365,6 +8708,8 @@ const steps = [
       await assertValue(page.getByTestId("policy-rule-nixos-path-0"), optionPath, "Metadata-backed Nix option path must survive reload");
       await assertValue(page.getByTestId("policy-rule-nixos-value-0"), "true", "Typed Nix Boolean must survive reload");
       await captureWorkflowState(page, stepName, "reopened-unmapped-nix");
+      await collapseOnboardingCoach(page);
+      await captureWorkflowViewportState(page, stepName, "reopened-unmapped-nix", "narrowDesktop");
       await assertEnabled(
         page.getByRole("button", { name: "Save changes", exact: true }),
         "A reopened no-enforcement policy must remain savable",
@@ -8530,13 +8875,54 @@ const steps = [
       await importedCard.getByRole("button", { name: "Edit", exact: true }).click();
       await page.getByRole("heading", { name: /Edit Imported provenance control/ }).waitFor({ timeout: 5000 });
 
+      // Narrow desktop keeps every section discoverable in one scrolling rail
+      // and automatically reveals whichever tab becomes active.
+      await page.setViewportSize(VIEWPORTS.narrowDesktop);
+      const sectionTabs = page.getByRole("tablist", { name: "Policy editor sections" });
+      const expectedSections = ["Basics", "Enforcement", "Compliance", "Evidence", "Provenance"];
+      for (const section of expectedSections) {
+        await assertVisible(sectionTabs.getByRole("tab", { name: new RegExp(`^${section}`) }), `Expected ${section} in the narrow editor section rail`);
+      }
+      const sectionOverflow = await sectionTabs.evaluate((element) => ({
+        clientWidth: element.clientWidth,
+        overflowX: getComputedStyle(element).overflowX,
+        scrollWidth: element.scrollWidth,
+      }));
+      if (sectionOverflow.overflowX !== "auto" || sectionOverflow.scrollWidth <= sectionOverflow.clientWidth) {
+        throw new Error(`Expected a horizontally scrollable narrow editor rail: ${JSON.stringify(sectionOverflow)}`);
+      }
+      await assertVisible(sectionTabs.getByText("Scroll sections", { exact: false }), "Expected an explicit section overflow affordance");
+
       // Imported + no refined assertion is its own state, not "No enforcement defined".
-      await assertVisible(page.getByText("Enforcement needs refinement", { exact: true }).first(), "Expected the imported refinement state");
-      await assertHidden(page.getByText("No enforcement defined", { exact: true }), "An imported control must not report the custom empty state");
+      await page.getByTestId("policy-editor-tab-enforcement").click();
+      const importedEmptyEnforcement = page.getByTestId("policy-enforcement-empty");
+      await assertVisible(
+        importedEmptyEnforcement.getByText("Enforcement needs refinement.", { exact: true }),
+        "Expected the imported refinement state",
+      );
+      await assertHidden(
+        importedEmptyEnforcement.getByText("No enforcement defined.", { exact: true }),
+        "An imported control must not report the custom empty state",
+      );
       await assertVisible(page.getByTestId("policy-editor-mapped-not-enforced"), "Expected the mapped-but-not-enforced warning");
 
       // Read-only provenance from authoritative persisted data.
       await page.getByTestId("policy-editor-tab-provenance").click();
+      const activeTabVisibility = await page.getByTestId("policy-editor-tab-provenance").evaluate((tab) => {
+        const tablist = tab.parentElement;
+        if (!tablist) return null;
+         const tabRect = tab.getBoundingClientRect();
+         const listRect = tablist.getBoundingClientRect();
+         const affordanceRect = tablist.lastElementChild?.getBoundingClientRect();
+         const visibleRightEdge = affordanceRect?.left ?? listRect.right;
+         return {
+           selected: tab.getAttribute("aria-selected"),
+           visible: tabRect.left < visibleRightEdge && tabRect.right > listRect.left,
+         };
+       });
+      if (activeTabVisibility?.selected !== "true" || !activeTabVisibility.visible) {
+        throw new Error(`Active narrow editor tab was not revealed: ${JSON.stringify(activeTabVisibility)}`);
+      }
       const provenance = page.getByTestId("policy-editor-provenance");
       await assertVisible(provenance, "Expected the read-only Provenance section");
       await assertVisible(provenance.getByText("U_WEBUI_PROVENANCE_STIG.xml", { exact: true }), "Expected the source artifact filename");
@@ -8548,6 +8934,17 @@ const steps = [
 
       // Imported mappings are authoritative: labelled accurately, never editable.
       await page.getByTestId("policy-editor-tab-mappings").click();
+      const addMapping = page.locator("#policy-mapping-add-trigger");
+      await addMapping.scrollIntoViewIfNeeded();
+      const footerClearance = await addMapping.evaluate((button) => {
+        const dialog = button.closest('[data-testid="policy-editor-modal"]');
+        const footer = dialog?.querySelector(":scope > .modal-foot");
+        if (!footer) return null;
+        return footer.getBoundingClientRect().top - button.getBoundingClientRect().bottom;
+      });
+      if (footerClearance === null || footerClearance < 0) {
+        throw new Error(`Sticky editor footer obscured Add mapping: clearance=${footerClearance}`);
+      }
       const importedRow = page.getByTestId("policy-mapping-row").first();
       await importedRow.waitFor({ timeout: 5000 });
       await assertVisible(importedRow.getByText("Imported from benchmark", { exact: true }), "Expected an accurate imported provenance label");
@@ -8648,7 +9045,7 @@ const steps = [
         return found;
       }, { base: apiBaseUrl, paths: metadataPaths });
 
-      const policyName = `UI composite metadata ${Date.now()}`;
+      const policyName = "TASK433 canonical composite metadata";
       const dodConsentBanner = `You are accessing a U.S. Government (USG) Information System (IS) that is provided for USG-authorized use only.
 
 By using this IS (which includes any device attached to this IS), you consent to the following conditions:
@@ -8693,9 +9090,11 @@ By using this IS (which includes any device attached to this IS), you consent to
       await addMetadataRule(3, metadataPaths.lines);
       await page.getByTestId("policy-rule-nixos-value-3").fill(dodConsentBanner);
       await captureWorkflowState(page, stepName, "exact-banner-authored");
+      await collapseOnboardingCoach(page);
+      await captureWorkflowViewportState(page, stepName, "exact-banner-authored", "narrowDesktop");
 
       await addRule.selectOption("nixos_option");
-      const unknownPath = `services.crystalForge.unknown.${Date.now()}`;
+      const unknownPath = "services.crystalForge.unknown.canonical";
       await page.getByTestId("policy-rule-nixos-path-4").fill(unknownPath);
       const unknownMetadataNotice = page.getByTestId("policy-option-search-zero");
       await unknownMetadataNotice.waitFor({ state: "visible", timeout: 10000 });
@@ -8705,13 +9104,13 @@ By using this IS (which includes any device attached to this IS), you consent to
       await page.getByTestId("policy-rule-nixos-value-4").fill(difficult);
 
       await addMetadataRule(5, metadataPaths.string);
-      const shortString = `cf-${Date.now()}`;
+      const shortString = "cf-task433-canonical";
       await page.getByTestId("policy-rule-nixos-value-5").fill(shortString);
 
       // Keep target-specific semantics for a path that the CF baseline knows.
       // Typing without selecting autocomplete deliberately retains `unknown`.
       await addRule.selectOption("nixos_option");
-      const targetSpecificValue = `target-specific-${Date.now()}`;
+      const targetSpecificValue = "target-specific-task433-canonical";
       await page.getByTestId("policy-rule-nixos-path-6").fill(metadataPaths.enum);
       await page.getByTestId("policy-option-search-results").last().waitFor({ state: "visible", timeout: 10000 });
       await page.getByTestId("policy-rule-nixos-value-6").fill(targetSpecificValue);
@@ -9067,7 +9466,8 @@ By using this IS (which includes any device attached to this IS), you consent to
 
       await page.goto(`${baseUrl}/deployment-policies`, { timeout: LOAD_TIMEOUT });
       await collapseOnboardingCoach(page);
-      const policyName = `TASK433 Nix CVE ${crypto.randomUUID()}`;
+      const requirementContext = await loadTask433RequirementContext(page);
+      const policyName = "TASK433 canonical Nix CVE";
       await page.getByRole("button", { name: /New custom policy/i }).first().click();
       await page.getByPlaceholder("e.g. canary-25").fill(policyName);
       await page.getByTestId("policy-editor-tab-enforcement").click();
@@ -9081,7 +9481,9 @@ By using this IS (which includes any device attached to this IS), you consent to
       await addRule.selectOption("cve_block");
       await page.getByTestId("policy-rule-cve-severity-1").selectOption("critical");
       await page.getByTestId("policy-rule-cve-max-1").fill("0");
-      await captureWorkflowState(page, stepName, "dedicated-nix-cve-authored");
+      await captureWorkflowState(page, stepName, "policy-authoring-nix-cve");
+      await collapseOnboardingCoach(page);
+      await captureWorkflowViewportState(page, stepName, "policy-authoring-nix-cve", "narrowDesktop");
 
       const createPromise = page.waitForResponse((response) =>
         response.url().endsWith("/api/v1/deployment-policies") && response.request().method() === "POST");
@@ -9094,6 +9496,13 @@ By using this IS (which includes any device attached to this IS), you consent to
       if (detail.config.rules.length !== 2 || detail.config.rules[0].kind !== "nixos_option" || detail.config.rules[1].kind !== "cve_block") {
         throw new Error(`Canonical policy is not dedicated Nix+CVE enforcement: ${JSON.stringify(detail.config)}`);
       }
+      await phase6Api(page, `/api/v1/policy-versions/${policyVersionId}/requirement-mappings`, {
+        method: "POST",
+        body: JSON.stringify(task433RequirementMapping(
+          requirementContext.requirement,
+          "Canonical mixed enforcement evidence for the mapped requirement.",
+        )),
+      });
       await phase6Api(page, `/api/v1/policy-versions/${policyVersionId}/trust`, {
         method: "POST",
         body: JSON.stringify({ trusted: true, review_note: "TASK-433 canonical production evaluation" }),
@@ -9106,13 +9515,13 @@ By using this IS (which includes any device attached to this IS), you consent to
         method: "POST",
         body: JSON.stringify({
           name: policyName,
-          framework: "TASK-433 production evaluation",
-          version: "1",
+          framework: requirementContext.framework.name,
+          version: requirementContext.version.version,
           description: "Dedicated canonical Nix and CVE policy",
           layer: "system",
           required_envs: [],
           policy_ids: [policy.id],
-          requirement_version_ids: [],
+          requirement_version_ids: [requirementContext.requirement.id],
         }),
       })).body;
       const bundleVersionId = bundle.current_draft_version_id;
@@ -9172,9 +9581,16 @@ By using this IS (which includes any device attached to this IS), you consent to
       };
       const remediation = await openPhase6Evidence(page, fixture);
       await assertVisible(remediation.getByText("FAIL", { exact: true }), "Server-derived all-mode aggregate must render FAIL");
+      const requirementIdentity = page.locator("#compliance-evidence-dialog").getByTestId("evidence-requirement-identity");
+      await assertVisible(requirementIdentity.getByText(`${requirementContext.framework.name} · ${requirementContext.version.version}`, { exact: true }), "Evidence must render the normalized framework release");
+      await assertVisible(requirementIdentity.getByText(requirementContext.requirement.external_id, { exact: true }), "Evidence must render the normalized requirement identity");
+      if (await remediation.getByText("Unmapped", { exact: true }).count()) {
+        throw new Error("Production-mapped canonical evidence rendered as Unmapped");
+      }
       await assertVisible(page.getByText(nixResult.detail, { exact: true }), "Server-derived evaluation detail must render unchanged");
       await assertVisible(page.getByText(cveResult.detail, { exact: true }), "Server-derived scan detail must render unchanged");
       await captureWorkflowState(page, stepName, "server-derived-phases-sources-outcomes");
+      await captureWorkflowViewportState(page, stepName, "server-derived-evidence", "mobile");
     },
   },
   {
@@ -9302,8 +9718,13 @@ security.audit.enable = true;</fixtext>
         });
         await matchingPreviewResponsePromise;
         const resumedRefineTab = page.getByTestId("xccdf-refine-tab-enforcement");
-        if (!(await resumedRefineTab.isVisible().catch(() => false))) {
-          await page.getByTestId("xccdf-review-reconcile-button").click();
+        const resumedRefinementReady = await resumedRefineTab.waitFor({ state: "visible", timeout: 5000 })
+          .then(() => true)
+          .catch(() => false);
+        if (!resumedRefinementReady) {
+          const reconcileButton = page.getByTestId("xccdf-review-reconcile-button");
+          await reconcileButton.waitFor({ state: "visible", timeout: 10000 });
+          await reconcileButton.click();
           await page.getByRole("button", { name: "Refine all instead" }).click();
         }
         await resumedRefineTab.click();
@@ -9544,6 +9965,8 @@ security.audit.enable = true;</fixtext>
         const mappingBefore = await importedMapping.innerText();
         const mappingsBefore = (await phase6Api(page, `/api/v1/policy-versions/${importedBefore.current_version_id}/requirement-mappings`)).body;
         await captureWorkflowState(page, stepName, "official-readonly-provenance-mapping");
+        await collapseOnboardingCoach(page);
+        await captureWorkflowViewportState(page, stepName, "official-readonly-provenance-mapping", "narrowDesktop");
 
         await page.getByTestId("policy-editor-tab-enforcement").click();
         const existingRuleCount = await page.locator('[data-testid^="policy-rule-row-"]').count();
@@ -12338,12 +12761,13 @@ security.audit.enable = true;</fixtext>
         UPDATE systems SET system_configuration_name='test-agent'
         WHERE id='${systemId}'::uuid;
       `);
-      const nixRuleId = crypto.randomUUID();
-      const cveRuleId = crypto.randomUUID();
+      const requirementContext = await loadTask433RequirementContext(page);
+      const nixRuleId = "43300000-0000-4000-8000-000000000001";
+      const cveRuleId = "43300000-0000-4000-8000-000000000002";
       const policy = (await phase6Api(page, "/api/v1/deployment-policies", {
         method: "POST",
         body: JSON.stringify({
-          name: `TASK433 POA&M mixed ${crypto.randomUUID()}`,
+          name: "TASK433 canonical POA&M mixed",
           description: "Canonical POA&M production evaluation fixture",
           policy_type: "composite",
           config: {
@@ -12360,7 +12784,10 @@ security.audit.enable = true;</fixtext>
           srg_ids: [],
           cci_ids: [],
           evidence_specs: [],
-          requirement_mappings: [],
+          requirement_mappings: [task433RequirementMapping(
+            requirementContext.requirement,
+            "Canonical POA&M remediation for the mapped requirement.",
+          )],
         }),
       })).body;
       const policyDetail = (await phase6Api(page, `/api/v1/deployment-policies/${policy.id}`)).body;
@@ -12377,13 +12804,13 @@ security.audit.enable = true;</fixtext>
         method: "POST",
         body: JSON.stringify({
           name: policy.name,
-          framework: "TASK-433 POA&M production evaluation",
-          version: "1",
+          framework: requirementContext.framework.name,
+          version: requirementContext.version.version,
           description: "Canonical POA&M lifecycle bundle",
           layer: "system",
           required_envs: [],
           policy_ids: [policy.id],
-          requirement_version_ids: [],
+          requirement_version_ids: [requirementContext.requirement.id],
         }),
       })).body;
       const bundleVersionId = bundle.current_draft_version_id;
@@ -12409,8 +12836,8 @@ security.audit.enable = true;</fixtext>
         }),
       });
 
-      const linkedSystemId = crypto.randomUUID();
-      const linkedHostname = `task433-linked-${linkedSystemId.slice(0, 8)}`;
+      const linkedSystemId = "43300000-0000-4000-8000-000000000003";
+      const linkedHostname = "task433-linked-canonical";
       runFixtureSql(`
         INSERT INTO systems (
           id, hostname, environment_id, flake_id, is_active, public_key,
@@ -12493,6 +12920,7 @@ security.audit.enable = true;</fixtext>
       };
       const system = fixture.systems[0];
       const remediation = await openPhase6Evidence(page, fixture, system);
+      await assertVisible(page.getByText(requirementContext.framework.name, { exact: true }).first(), "Canonical POA&M evidence must render the normalized framework name");
       await assertVisible(
         remediation,
         "Canonical POA&M lifecycle must expose remediation controls for the persisted finding",
@@ -12514,6 +12942,10 @@ security.audit.enable = true;</fixtext>
       const poam = await createResponse.json();
       const detail = page.getByTestId("poam-detail");
       await waitForPhase6Target(page, detail, "Created canonical POA&M detail");
+      const primaryFinding = detail.locator(`[data-testid="poam-linked-finding"][data-finding-id="${findingId}"]`);
+      await assertVisible(primaryFinding.getByText(`${requirementContext.framework.name} · ${requirementContext.version.version}`, { exact: true }), "Linked finding must render the mapped framework and release");
+      await assertVisible(primaryFinding.getByText(requirementContext.requirement.external_id, { exact: true }), "Linked finding must render the mapped requirement identifier");
+      await assertVisible(primaryFinding.getByText(requirementContext.requirement.title, { exact: true }), "Linked finding must render the mapped requirement title");
       await detail.getByLabel("Owner").fill("Platform Security");
       await detail.getByPlaceholder("What will change, where, and how it will be verified").fill("Deploy the correction, rerun evaluation, and retain the exact PASS evidence.");
       await detail.getByRole("button", { name: "Save metadata", exact: true }).click();
@@ -12611,7 +13043,12 @@ security.audit.enable = true;</fixtext>
         `);
         throw new Error(`Verification did not persist authoritative FAIL: ${JSON.stringify(failedVerification)} diagnostic=${verificationDiagnostic}`);
       }
-      await assertVisible(detail.getByTestId("poam-verification-result").getByText("Fail", { exact: true }).first(), "Verification must expose authoritative FAIL", 15000);
+      const rejectedHistory = detail.getByTestId("poam-verification-result").first();
+      await assertVisible(rejectedHistory.getByText("Fail", { exact: true }).first(), "Verification must expose authoritative FAIL", 15000);
+      await assertVisible(rejectedHistory.getByText(hostname, { exact: true }), "Rejected verification history must retain the system hostname");
+      await assertVisible(rejectedHistory.getByText(policy.name, { exact: true }), "Rejected verification history must retain the policy name");
+      await assertVisible(rejectedHistory.getByText(`${requirementContext.framework.name} · ${requirementContext.version.version}`, { exact: true }), "Rejected verification history must retain the framework release");
+      await assertVisible(rejectedHistory.getByText(requirementContext.requirement.external_id, { exact: true }), "Rejected verification history must retain the requirement identity");
 
       const closeResponsePromise = page.waitForResponse(
         (response) => response.url().endsWith(`/api/v1/poams/${poam.id}/close`) && response.request().method() === "POST",
@@ -12663,8 +13100,14 @@ security.audit.enable = true;</fixtext>
         throw new Error(`Milestone history did not survive reload: ${JSON.stringify(reloadedPoam.milestones)}`);
       }
       await assertVisible(detail.getByTestId("poam-verification-result").getByText("Pass", { exact: true }).first(), "PASS verification history must survive reload");
+      const completedHistory = detail.getByTestId("poam-verification-result").first();
+      await assertVisible(completedHistory.getByText(hostname, { exact: true }), "Completed verification history must retain the system hostname after links retire");
+      await assertVisible(completedHistory.getByText(policy.name, { exact: true }), "Completed verification history must retain the policy name after links retire");
+      await assertVisible(completedHistory.getByText(`${requirementContext.framework.name} · ${requirementContext.version.version}`, { exact: true }), "Completed verification history must retain the framework release after links retire");
+      await assertVisible(completedHistory.getByText(requirementContext.requirement.external_id, { exact: true }), "Completed verification history must retain the requirement identity after links retire");
       await assertVisible(detail.locator('[data-activity-kind="closed"]'), "Closure activity must survive reload");
       await captureWorkflowState(page, stepName, "reloaded-completed-history");
+      await captureWorkflowViewportState(page, stepName, "reloaded-completed-history", "mobile");
     },
   },
   {
@@ -13478,7 +13921,13 @@ function runStaticHarnessContracts() {
   assertContract(defaultNix.includes('if exit_code != "0":'), "Nix driver must reject a nonzero integration exit");
   assertContract(defaultNix.includes("invalid counts schema"), "Nix driver must validate visual report counts");
   assertContract(defaultNix.includes("invalid failures schema"), "Nix driver must validate visual report failures");
+  assertContract(defaultNix.includes("CF_UI_BASELINES_DIR=/tmp/web-ui-baselines"), "Nix driver must configure repository visual baselines");
+  assertContract(defaultNix.includes("server-journal.log"), "Nix driver must export the server journal on browser failure");
+  assertContract(defaultNix.includes('print_browser_diagnostics("timed out waiting for integration.exit")'), "Nix driver must print browser logs before rethrowing a timeout");
+  assertContract(defaultNix.includes('if ${if updateVisualBaselines then "False" else "True"}:'), "Baseline update mode must bypass only strict visual rejection");
   assertContract(source.includes("process.exitCode = 1;"), "Browser failures must produce a nonzero process exit");
+  assertContract(source.includes('process.on("uncaughtException"'), "Browser harness must capture uncaught exceptions");
+  assertContract(source.includes('context.on("page", attachFatalPageHandlers)'), "Every context page must make runtime errors fatal");
   assertContract(source.includes("counts: { match: 0, diff: 0, new: 0, skipped: 0, error: 0 }"), "Visual report must initialize every consumed count");
   assertContract(source.includes("failures: []"), "Visual report must initialize strict failures");
   const sqlAuthoredHelperName = "createTask433Composite" + "AssessmentFixture";
@@ -13487,24 +13936,154 @@ function runStaticHarnessContracts() {
   const productionHelperEnd = source.indexOf("\n}\n\nasync function createPhase6PoamFixture", productionHelperStart);
   assertContract(productionHelperStart >= 0 && productionHelperEnd > productionHelperStart, "Could not isolate runTask433ProductionEvaluation");
   const productionHelperSource = source.slice(productionHelperStart, productionHelperEnd);
-  const authoredOutcomeWrite = /\b(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM|MERGE\s+INTO)\s+composite_policy_(?:assessments|rule_results)\b/i;
+  const sqlIdentifier = String.raw`(?:"(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*)`;
+  const authoredOutcomeWrite = new RegExp(
+    String.raw`\b(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM|MERGE\s+INTO)\s+(?:${sqlIdentifier}\s*\.\s*)?(?:"composite_policy_(?:assessments|rule_results)"|composite_policy_(?:assessments|rule_results))(?![A-Za-z0-9_$"])`,
+    "i",
+  );
+  for (const sql of [
+    'INSERT INTO "composite_policy_assessments" (id) VALUES (1)',
+    'UPDATE public."composite_policy_rule_results" SET outcome = \'pass\'',
+    'DELETE FROM "audit"."composite_policy_assessments" WHERE true',
+    'MERGE INTO public.composite_policy_rule_results USING source ON true',
+  ]) {
+    assertContract(authoredOutcomeWrite.test(sql), `Direct-write guard must reject quoted/schema-qualified SQL: ${sql}`);
+  }
+  const visibleNondeterminism = /\b(?:Date\.now|crypto\.randomUUID)\s*\(/;
   assertContract(productionHelperSource.includes("/re-evaluate"), "Production evaluation helper must invoke commit re-evaluation");
   assertContract(!authoredOutcomeWrite.test(productionHelperSource), "Production evaluation helper must not author assessment or rule-result outcomes with SQL");
-  for (const [name, nextName, minimumProductionEvaluations] of [
-    ["task433-canonical-mixed-nix-cve-evidence", "20ad-stig-nixos-assertion-roundtrip", 2],
-    ["task433-canonical-poam-lifecycle", "29k-poam-system-rollups-navigation", 4],
-  ]) {
+  const expectedStrictWorkflows = [
+    "task433-canonical-large-catalog",
+    "20af-policy-catalog-selection-delete-regressions",
+    "task433-canonical-imported-stig-refinement",
+    "task433-canonical-unmapped-nix-policy",
+    "task433-canonical-multiline-dod",
+    "task433-canonical-mixed-nix-cve-evidence",
+    "task433-canonical-poam-lifecycle",
+  ];
+  assertContract(
+    isDeepStrictEqual(MANIFEST.settings.strictWorkflowNames, expectedStrictWorkflows),
+    "Manifest must retain the exact seven deterministic strict workflow names",
+  );
+  const requiredStrictWorkflows = MANIFEST.settings.strictWorkflowNames;
+  const functionMatches = [...source.matchAll(/^(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/gm)];
+  const functionSources = new Map(functionMatches.map((match, index) => [
+    match[1],
+    source.slice(match.index, functionMatches[index + 1]?.index ?? source.length),
+  ]));
+  const sqlBackedHelpers = new Set(["runFixtureSql"]);
+  for (let changed = true; changed;) {
+    changed = false;
+    for (const [helperName, helperSource] of functionSources) {
+      if (sqlBackedHelpers.has(helperName)) continue;
+      if ([...sqlBackedHelpers].some((dependency) => new RegExp(`\\b${dependency}\\s*\\(`).test(helperSource))) {
+        sqlBackedHelpers.add(helperName);
+        changed = true;
+      }
+    }
+  }
+  const sqlHelperAllowlists = new Map([
+    ["task433-canonical-large-catalog", new Set(["runFixtureSql"])],
+    ["20af-policy-catalog-selection-delete-regressions", new Set(["runFixtureSql"])],
+    ["task433-canonical-unmapped-nix-policy", new Set()],
+    ["task433-canonical-imported-stig-refinement", new Set()],
+    ["task433-canonical-multiline-dod", new Set()],
+    ["task433-canonical-mixed-nix-cve-evidence", new Set(["runFixtureSql", "arrangeTask433CompletedScan", "arrangeTask433DeployedAssessment", "runTask433ProductionEvaluation"])],
+    ["task433-canonical-poam-lifecycle", new Set(["runFixtureSql", "arrangeTask433CompletedScan", "arrangeTask433DeployedAssessment", "runTask433ProductionEvaluation"])],
+  ]);
+  const collectSqlHelpers = (callerSource, collected = new Set()) => {
+    for (const helperName of sqlBackedHelpers) {
+      if (collected.has(helperName) || !new RegExp(`\\b${helperName}\\s*\\(`).test(callerSource)) continue;
+      collected.add(helperName);
+      collectSqlHelpers(functionSources.get(helperName) || "", collected);
+    }
+    return collected;
+  };
+  const isolateWorkflow = (name) => {
     const start = source.indexOf(`name: "${name}"`);
-    const end = source.indexOf(`name: "${nextName}"`, start);
-    const workflowSource = source.slice(start, end);
+    const end = source.indexOf('\n  {\n    name: "', start + 1);
     assertContract(start >= 0 && end > start, `Could not isolate canonical workflow ${name}`);
+    return source.slice(start, end);
+  };
+  const notificationWorkflowSource = isolateWorkflow("09g-topbar-notifications-dark");
+  assertContract(
+    notificationWorkflowSource.includes('reopenedPanel.getByRole("menuitem"') &&
+      !notificationWorkflowSource.includes('reopenedRow.getByTitle("Dismiss notification")'),
+    "Notification dismissal must locate the accessible sibling menu item",
+  );
+  assertContract(
+    /const dismissResponseResult = page\.waitForResponse\([\s\S]*?\)\.then\(/.test(notificationWorkflowSource) &&
+      notificationWorkflowSource.includes("const [dismissResult] = await Promise.all(["),
+    "Notification dismissal must immediately handle and jointly await its response waiter and keyboard action",
+  );
+  for (const artifact of MANIFEST.settings.requiredResponsiveArtifacts) {
+    const workflowSource = isolateWorkflow(artifact.step);
+    assertContract(
+      workflowSource.includes(`captureRequiredResponsiveArtifact(page, "${artifact.step}", "${artifact.state}")`),
+      `${artifact.step} must capture required responsive artifact state ${artifact.state}`,
+    );
+  }
+  for (const name of [
+    "06a-onboarding-coach-dashboard",
+    "06g-onboarding-coach-minimized",
+    "06h-onboarding-coach-all-configured",
+  ]) {
+    const manifestStep = MANIFEST_STEPS.get(name);
+    assertContract(manifestStep.semanticAssertions === true, `${name} must retain semantic assertions`);
+    assertContract(
+      manifestStep.profiles.includes("ci_fast") && manifestStep.profiles.includes("full"),
+      `${name} responsive evidence must run in ci_fast and full profiles`,
+    );
+  }
+  const mappingRoundTripSource = isolateWorkflow("20aa-policies-new-modal-mappings-roundtrip");
+  const deleteTriggerIndex = mappingRoundTripSource.indexOf('locator("#policy-editor-delete-trigger")');
+  assertContract(
+    deleteTriggerIndex > 0 &&
+      mappingRoundTripSource.lastIndexOf('getByTestId("policy-editor-tab-details")', deleteTriggerIndex) > 0,
+    "Mapping round-trip deletion must return to Basics before opening the Danger zone",
+  );
+  assertContract(
+    mappingRoundTripSource.includes("if (createdPolicy?.id && !policyDeleted)") &&
+      mappingRoundTripSource.includes("20aa policy cleanup failed"),
+    "Mapping round-trip must clean up its persisted policy after an early failure",
+  );
+  for (const name of requiredStrictWorkflows) {
+    const workflowSource = isolateWorkflow(name);
     assertContract(!authoredOutcomeWrite.test(workflowSource), `${name} must not author evaluated outcomes with SQL`);
+    assertContract(!visibleNondeterminism.test(workflowSource), `${name} must keep strict visual fixture values deterministic`);
+    const allowedSqlHelpers = sqlHelperAllowlists.get(name);
+    assertContract(allowedSqlHelpers, `${name} must declare its SQL helper allowlist`);
+    for (const helperName of collectSqlHelpers(workflowSource)) {
+      assertContract(allowedSqlHelpers.has(helperName), `${name} must not call non-allowlisted SQL helper ${helperName}`);
+      const helperSource = functionSources.get(helperName) || "";
+      assertContract(!authoredOutcomeWrite.test(helperSource), `${name} SQL helper ${helperName} must not author evaluated outcomes`);
+    }
+  }
+  for (const [name, minimumProductionEvaluations] of [
+    ["task433-canonical-mixed-nix-cve-evidence", 2],
+    ["task433-canonical-poam-lifecycle", 4],
+  ]) {
+    const workflowSource = isolateWorkflow(name);
     const productionEvaluationCalls = workflowSource.match(/\brunTask433ProductionEvaluation\s*\(/g) || [];
     assertContract(
       productionEvaluationCalls.length >= minimumProductionEvaluations,
       `${name} must invoke production commit re-evaluation at least ${minimumProductionEvaluations} times`,
     );
   }
+  const mixedWorkflowSource = isolateWorkflow("task433-canonical-mixed-nix-cve-evidence");
+  const poamWorkflowSource = isolateWorkflow("task433-canonical-poam-lifecycle");
+  for (const [name, workflowSource] of [
+    ["task433-canonical-mixed-nix-cve-evidence", mixedWorkflowSource],
+    ["task433-canonical-poam-lifecycle", poamWorkflowSource],
+  ]) {
+    assertContract(workflowSource.includes("loadTask433RequirementContext(page)"), `${name} must load normalized requirement context through production APIs`);
+    assertContract(workflowSource.includes("task433RequirementMapping("), `${name} must persist a real policy-to-requirement mapping`);
+    assertContract(workflowSource.includes("requirement_version_ids: [requirementContext.requirement.id]"), `${name} must persist real bundle requirement membership`);
+    assertContract(workflowSource.includes("requirementContext.framework.name"), `${name} must assert human-readable framework metadata`);
+  }
+  assertContract(poamWorkflowSource.includes("requirementContext.requirement.title"), "Canonical POA&M linked findings must assert the human-readable requirement title");
+  assertContract(!mixedWorkflowSource.includes("dedicated-nix-cve-authored"), "Mixed workflow capture state must not mislabel policy authoring as dedicated evidence");
+  assertContract(mixedWorkflowSource.includes('"policy-authoring-nix-cve"'), "Mixed workflow must identify the policy-authoring capture state accurately");
 
   validateManifest(MANIFEST);
   for (const name of [
@@ -13523,6 +14102,9 @@ function runStaticHarnessContracts() {
     assertContract(manifestStep.mockedData === false, `${name} must remain production-data coverage`);
     assertContract(manifestStep.semanticAssertions === true, `${name} must retain semantic assertions`);
     assertContract(manifestStep.profiles.includes("ci_fast") && manifestStep.profiles.includes("full"), `${name} must gate both profiles`);
+    if (requiredStrictWorkflows.includes(name)) {
+      assertContract(manifestStep.baseline === "strict", `${name} must enforce strict committed visual baselines`);
+    }
   }
   console.log("web-ui harness static contracts OK");
 }
@@ -13611,6 +14193,19 @@ if (process.env.CF_UI_STATIC_CONTRACTS === "1") {
     timezoneId: MANIFEST.settings.timezoneId,
     locale: MANIFEST.settings.locale,
   });
+  const pageRuntimeErrors = [];
+  const attachFatalPageHandlers = (runtimePage) => {
+    runtimePage.on("pageerror", (error) => {
+      pageRuntimeErrors.push({
+        url: runtimePage.url(),
+        message: error.message,
+        stack: error.stack || null,
+      });
+      process.exitCode = 1;
+      console.error(`pageerror at ${runtimePage.url()}: ${error.stack || error.message}`);
+    });
+  };
+  context.on("page", attachFatalPageHandlers);
 
   const createStepPage = async () => {
     const p = await context.newPage();
@@ -13630,8 +14225,14 @@ if (process.env.CF_UI_STATIC_CONTRACTS === "1") {
     !requestedSteps.has("05-login-submit");
   if (needsAuthPreflight) {
     // Focused post-login runs skip the onboarding steps that normally collapse
-    // the coach before policy interactions begin.
-    await suppressOnboardingCoach(page);
+    // the coach before policy interactions begin. Do not install the persistent
+    // suppression script when this run must exercise the coach itself.
+    const exercisesSetupCoach = [...requestedSteps].some((name) =>
+      name.startsWith("06a-onboarding-coach-") ||
+      name.startsWith("06g-onboarding-coach-") ||
+      name.startsWith("06h-onboarding-coach-"),
+    );
+    if (!exercisesSetupCoach) await suppressOnboardingCoach(page);
     if (process.env.CF_UI_TEST_STANDALONE === "1") {
       await routeStandaloneUiBootstrap(page);
     }
@@ -13647,6 +14248,10 @@ if (process.env.CF_UI_STATIC_CONTRACTS === "1") {
     let visuals = [];
 
     try {
+      // INVARIANT: Each step starts at the manifest viewport. A step may use a
+      // different viewport for its own assertions and captures, but it must not
+      // make later baseline dimensions depend on the selected profile or order.
+      await page.setViewportSize(MANIFEST.settings.viewport);
       await step.action(page);
 
       // Take one screenshot per required visual theme. Baseline names include
@@ -13701,7 +14306,8 @@ if (process.env.CF_UI_STATIC_CONTRACTS === "1") {
   // These captures never fail the check; compare-design-parity.js scores drift.
   const designParityDir = `${outputDir}/design-parity`;
   let designParityCaptured = 0;
-  const captureDesignParity = !requestedSteps && process.env.CF_UI_SKIP_DESIGN_PARITY !== "1";
+  const dioxusParityResults = [];
+  const captureDesignParity = process.env.CF_UI_SKIP_DESIGN_PARITY !== "1";
   if (captureDesignParity) try {
     const parityManifestPath = firstExistingPath([
       path.join(__dirname, "design-parity", "manifest.json"),
@@ -13710,30 +14316,70 @@ if (process.env.CF_UI_STATIC_CONTRACTS === "1") {
     if (fs.existsSync(parityManifestPath)) {
       const parityManifest = JSON.parse(fs.readFileSync(parityManifestPath, "utf8"));
       const parityThemes = parityManifest.settings.themes || ["dark", "light"];
+      const selectedRoutes = requestedSteps
+        ? [...new Set(stepsToRun.map((step) => MANIFEST_STEPS.get(step.name).route.split("?")[0]))]
+        : null;
+      const parityViews = selectedRoutes
+        ? parityManifest.views.filter((view) => {
+            const targetRoute = view.route.split("?")[0];
+            return selectedRoutes.some(
+              (stepRoute) => stepRoute === targetRoute || (targetRoute !== "/" && stepRoute.startsWith(`${targetRoute}/`)),
+            );
+          })
+        : parityManifest.views;
       fs.mkdirSync(designParityDir, { recursive: true });
-      const parityPage = await context.newPage();
-      for (const view of parityManifest.views) {
+      for (const view of parityViews) {
         for (const theme of parityThemes) {
           const name = `${view.name}--${theme}`;
+          const parityPage = await context.newPage();
           try {
             // Seed the CF theme, then load the route so the app applies its own
             // theme through the real cf.ui.theme path (not a forced attribute).
             await parityPage.goto(`${baseUrl}/?ui_check_auth=1`, { timeout: LOAD_TIMEOUT });
             await parityPage.evaluate((t) => localStorage.setItem("cf.ui.theme", t), theme);
-            await parityPage.goto(`${baseUrl}${view.route}?ui_check_auth=1`, { timeout: LOAD_TIMEOUT });
+            const separator = view.route.includes("?") ? "&" : "?";
+            await parityPage.goto(`${baseUrl}${view.route}${separator}ui_check_auth=1`, { timeout: LOAD_TIMEOUT });
             await parityPage.waitForTimeout(2000);
+            await applyVisualTheme(parityPage, theme);
+            const renderedTheme = await parityPage.locator("html").getAttribute("data-theme");
+            if (renderedTheme !== theme) {
+              throw new Error(`rendered theme ${JSON.stringify(renderedTheme)}, expected ${JSON.stringify(theme)}`);
+            }
+            for (const action of view.dioxusActions || []) {
+              let locator = parityPage.locator(action.selector);
+              if (action.text) locator = locator.filter({ hasText: action.text });
+              locator = locator.nth(action.index || 0);
+              await locator.waitFor({ state: "visible", timeout: action.timeout || 15000 });
+              await locator.click();
+              if (action.waitFor) {
+                await parityPage.locator(action.waitFor).waitFor({ state: "visible", timeout: action.timeout || 15000 });
+              }
+            }
+            if (!view.dioxusMarker?.selector) throw new Error("manifest has no Dioxus identity marker");
+            const marker = parityPage.locator(view.dioxusMarker.selector).first();
+            await marker.waitFor({ state: "visible", timeout: view.dioxusMarker.timeout || 15000 });
+            if (view.dioxusMarker.text) {
+              const markerText = (await marker.textContent()) || "";
+              if (!markerText.includes(view.dioxusMarker.text)) {
+                throw new Error(`marker ${view.dioxusMarker.selector} did not contain ${JSON.stringify(view.dioxusMarker.text)}`);
+              }
+            }
             await parityPage.screenshot({ path: `${designParityDir}/${name}.dioxus.png` });
             designParityCaptured += 1;
+            dioxusParityResults.push({ name, view: view.name, theme, ok: true, error: null });
             console.log(`  OK design-parity capture: ${name}`);
           } catch (err) {
+            dioxusParityResults.push({ name, view: view.name, theme, ok: false, error: err.message });
             console.error(`  design-parity capture failed (non-blocking): ${name} - ${err.message}`);
-            try {
-              await parityPage.screenshot({ path: `${designParityDir}/${name}.dioxus.png` });
-            } catch (_) {}
+          } finally {
+            await parityPage.close();
           }
         }
       }
-      await parityPage.close();
+      fs.writeFileSync(
+        `${designParityDir}/dioxus-targets.json`,
+        JSON.stringify({ results: dioxusParityResults }, null, 2),
+      );
     }
   } catch (err) {
     console.error(`Design-parity capture pass error (non-blocking): ${err.message}`);
@@ -13742,13 +14388,23 @@ if (process.env.CF_UI_STATIC_CONTRACTS === "1") {
 
   await context.close();
   await browser.close();
+  await settleFatalRuntimeEvents();
 
-  if (unhandledRejections.length) {
+  if (fatalRuntimeEvents.length) {
     results.push({
-      name: "harness-unhandled-rejection",
-      description: "Browser harness must not leave promise rejections unhandled",
+      name: "harness-runtime-fatal",
+      description: "Browser harness must not leave uncaught exceptions or promise rejections",
       ok: false,
-      error: unhandledRejections.join("\n\n"),
+      error: JSON.stringify(fatalRuntimeEvents, null, 2),
+      visuals: [],
+    });
+  }
+  if (pageRuntimeErrors.length) {
+    results.push({
+      name: "browser-page-runtime-error",
+      description: "Browser pages must not emit uncaught runtime errors",
+      ok: false,
+      error: JSON.stringify(pageRuntimeErrors, null, 2),
       visuals: [],
     });
   }
@@ -13775,7 +14431,12 @@ if (process.env.CF_UI_STATIC_CONTRACTS === "1") {
     counts: { match: 0, diff: 0, new: 0, skipped: 0, error: 0 },
     failures: [],
     themedCaptures: themed.length,
-    steps: results.map((r) => ({ name: r.name, ok: r.ok, visuals: r.visuals })),
+    steps: results.map((r) => ({
+      name: r.name,
+      semanticAssertions: MANIFEST_STEPS.get(r.name)?.semanticAssertions === true,
+      ok: r.ok,
+      visuals: r.visuals,
+    })),
   };
   for (const visual of themed) {
     if (visual.diagnostic) continue;

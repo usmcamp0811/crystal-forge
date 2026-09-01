@@ -1,3 +1,9 @@
+//! Coordinates automatic and agent-side system deployment.
+//!
+//! The server-side manager resolves effective policies for each auto-latest
+//! system, evaluates legacy advanced gates, and delegates the final desired
+//! target write to atomic composite authorization.
+
 use crate::compliance::resolver::{
     AssignmentMode, EffectivePolicy, ResolutionOutcome,
     resolve_systems_effective_policies_for_deployment_batch,
@@ -23,8 +29,9 @@ use tokio::time::{Instant, sleep};
 use tracing::{debug, error, info, warn};
 pub mod agent;
 pub use agent::*;
-/// Manages automatic deployment policies for systems
-/// Only handles auto_latest policy - manual and pinned policies are set by admin intervention
+/// Manages automatic target selection for systems with `auto_latest` policy.
+///
+/// Manual and pinned targets remain under administrator control.
 pub struct DeploymentPolicyManager {
     config: CrystalForgeConfig,
     pool: PgPool,
@@ -108,12 +115,20 @@ fn map_cve_threshold_decision(
 }
 
 impl DeploymentPolicyManager {
+    /// Creates a deployment policy manager for one server configuration and pool.
     pub fn new(config: CrystalForgeConfig, pool: PgPool) -> Self {
         Self { config, pool }
     }
 
-    /// Main deployment policy management loop
-    /// Only processes systems with auto_latest policy - manual/pinned policies don't need automatic updates
+    /// Runs the automatic deployment policy management loop.
+    ///
+    /// Each polling pass logs and contains its own failure so later passes can
+    /// continue. Manual and pinned systems are not changed.
+    ///
+    /// # Errors
+    ///
+    /// The loop currently runs until cancellation and does not return a
+    /// recoverable error during normal operation.
     pub async fn run(&self) -> Result<()> {
         let interval = self.config.deployment.deployment_poll_interval;
         info!(
@@ -629,7 +644,14 @@ struct PolicyUpdateStats {
     systems_updated: usize,
 }
 
-/// Spawn the deployment policy manager as a background task
+/// Spawns the deployment policy manager as a background task.
+///
+/// The returned task logs a terminal manager error instead of propagating it
+/// through the join result.
+///
+/// # Errors
+///
+/// This function currently performs no fallible setup before spawning.
 pub async fn spawn_deployment_policy_manager(
     config: CrystalForgeConfig,
     pool: PgPool,

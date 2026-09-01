@@ -12,6 +12,42 @@
       "dark",
       "light"
     ],
+    "strictWorkflowNames": [
+      "task433-canonical-large-catalog",
+      "20af-policy-catalog-selection-delete-regressions",
+      "task433-canonical-imported-stig-refinement",
+      "task433-canonical-unmapped-nix-policy",
+      "task433-canonical-multiline-dod",
+      "task433-canonical-mixed-nix-cve-evidence",
+      "task433-canonical-poam-lifecycle"
+    ],
+    "requiredResponsiveArtifacts": [
+      {
+        "step": "06-dashboard",
+        "state": "poam-summary-watchlist",
+        "viewports": ["desktop", "narrowDesktop", "mobile"]
+      },
+      {
+        "step": "06a-onboarding-coach-dashboard",
+        "state": "expanded-nine-step-selected-current",
+        "viewports": ["desktop", "narrowDesktop", "mobile"]
+      },
+      {
+        "step": "06g-onboarding-coach-minimized",
+        "state": "minimized-selected-current",
+        "viewports": ["desktop", "narrowDesktop", "mobile"]
+      },
+      {
+        "step": "06h-onboarding-coach-all-configured",
+        "state": "completed-nine-step",
+        "viewports": ["desktop", "narrowDesktop", "mobile"]
+      },
+      {
+        "step": "09g-topbar-notifications-dark",
+        "state": "poam-notification",
+        "viewports": ["desktop", "narrowDesktop", "mobile"]
+      }
+    ],
     "designFixture": {
       "path": "checks/web-ui/design-fixtures.json",
       "policy": "non-blocking-gauge",
@@ -313,15 +349,16 @@
     },
     {
       "name": "06a-onboarding-coach-dashboard",
-      "description": "Non-blocking onboarding coach panel on dashboard",
+      "description": "Expanded nine-step Setup Coach with completed prerequisites and Create policy selected as current across desktop, narrow desktop, and mobile in both themes",
       "route": "/",
       "designRef": "docs/design/CrystalForge/components/DashboardView.jsx",
       "profiles": [
+        "ci_fast",
         "full"
       ],
       "semanticAssertions": true,
       "interactions": false,
-      "mockedData": false,
+      "mockedData": true,
       "baseline": "advisory"
     },
     {
@@ -534,23 +571,25 @@
     },
     {
       "name": "06g-onboarding-coach-minimized",
-      "description": "Coach panel: minimize to tab, verify tab visible and styled",
+      "description": "Minimized Setup Coach with Create policy selected as current across desktop, narrow desktop, and mobile in both themes",
       "route": "/systems",
       "designRef": "docs/design/CrystalForge/components/Systems.jsx",
       "profiles": [
+        "ci_fast",
         "full"
       ],
       "semanticAssertions": true,
       "interactions": true,
-      "mockedData": false,
+      "mockedData": true,
       "baseline": "advisory"
     },
     {
       "name": "06h-onboarding-coach-all-configured",
-      "description": "Coach panel: expand from tab, all steps show Configured",
+      "description": "Completed nine-step Setup Coach state across desktop, narrow desktop, and mobile in both themes",
       "route": "/systems",
       "designRef": "docs/design/CrystalForge/components/Systems.jsx",
       "profiles": [
+        "ci_fast",
         "full"
       ],
       "semanticAssertions": true,
@@ -719,7 +758,7 @@
     },
     {
       "name": "09g-topbar-notifications-dark",
-      "description": "Dark theme notifications panel opens with unread badge and settings placeholder",
+      "description": "Durable POA&M notification panel across desktop, narrow desktop, and mobile in both themes",
       "route": "/systems",
       "designRef": "docs/design/CrystalForge/components/Shell.jsx",
       "profiles": [
@@ -1447,7 +1486,7 @@
       "semanticAssertions": true,
       "interactions": true,
       "mockedData": false,
-      "baseline": "advisory"
+      "baseline": "strict"
     },
     {
       "name": "20af-policy-catalog-selection-delete-regressions",
@@ -1461,7 +1500,7 @@
       "semanticAssertions": true,
       "interactions": true,
       "mockedData": false,
-      "baseline": "advisory"
+      "baseline": "strict"
     },
     {
       "name": "19-policies-new-modal-fields",
@@ -1559,7 +1598,7 @@
       "semanticAssertions": true,
       "interactions": true,
       "mockedData": false,
-      "baseline": "advisory"
+      "baseline": "strict"
     },
     {
       "name": "20b-policies-cve-gate-create-roundtrip",
@@ -1601,7 +1640,7 @@
       "semanticAssertions": true,
       "interactions": true,
       "mockedData": false,
-      "baseline": "advisory"
+      "baseline": "strict"
     },
     {
       "name": "task433-canonical-multiline-dod",
@@ -1615,7 +1654,7 @@
       "semanticAssertions": true,
       "interactions": true,
       "mockedData": false,
-      "baseline": "advisory"
+      "baseline": "strict"
     },
     {
       "name": "20ab2-policy-editor-eight-kind-roundtrip",
@@ -1633,8 +1672,8 @@
     },
     {
       "name": "task433-canonical-mixed-nix-cve-evidence",
-      "description": "A dedicated Nix and CVE policy renders exact persisted evaluator output through production evidence APIs and UI",
-      "route": "/deployment-policies",
+      "description": "A mapped Nix and CVE policy renders human-readable framework and requirement context with exact persisted evaluator output through production evidence APIs and UI",
+      "route": "/compliance",
       "designRef": "docs/design/CrystalForge/data-enforcement.js",
       "profiles": [
         "ci_fast",
@@ -1643,7 +1682,7 @@
       "semanticAssertions": true,
       "interactions": true,
       "mockedData": false,
-      "baseline": "advisory"
+      "baseline": "strict"
     },
     {
       "name": "20ac-policy-editor-category-and-imported-provenance",
@@ -2059,14 +2098,14 @@
     },
     {
       "name": "task433-canonical-poam-lifecycle",
-      "description": "A complete POA&M UI lifecycle consumes persisted evaluator output, retains failed evidence, edits and rollups, rejects failing closure, then verifies PASS, closes, reloads, and preserves history",
+      "description": "A mapped POA&M lifecycle renders human-readable framework and requirement context, retains failed evaluator evidence, rejects failing closure, then verifies PASS, closes, reloads, and preserves history",
       "route": "/compliance",
       "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx",
       "profiles": ["ci_fast", "full"],
       "semanticAssertions": true,
       "interactions": true,
       "mockedData": false,
-      "baseline": "advisory"
+      "baseline": "strict"
     },
     {
       "name": "29k-poam-system-rollups-navigation",

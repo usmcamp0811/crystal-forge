@@ -1,8 +1,18 @@
 use chrono::{DateTime, TimeZone, Utc};
-use crystal_forge::compliance::digest::PolicyVersionCanonical;
+use crystal_forge::compliance::canonical::{ImplementationState, PublicationState};
+use crystal_forge::compliance::digest::{
+    BundleMembershipEntry, BundleVersionCanonical, PolicyVersionCanonical,
+};
+use crystal_forge::compliance::interchange::{
+    CANONICALIZATION_VERSION, DIGEST_ALGORITHM, InterchangeLimits,
+};
 use crystal_forge::compliance::resolver::{
     EffectivePolicySet, ResolutionOutcome, resolve_system_effective_policies,
 };
+use crystal_forge::compliance::xccdf::export_models::{XccdfBundleExport, XccdfPolicyExport};
+use crystal_forge::compliance::xccdf::importer::validate_cf_native_document;
+use crystal_forge::compliance::xccdf::package::process_xccdf_bytes;
+use crystal_forge::compliance::xccdf::xml_writer::write_bundle_xccdf_export;
 use crystal_forge::models::deployment_policies::{
     AssignedPolicy, CompositePolicyConfig, CompositeRuleOutcome, CreateDeploymentPolicyRequest,
     DeploymentPolicy, EnforcementOutcome, EnforcementPhase, PolicyCheckResult,
@@ -18,13 +28,18 @@ use crystal_forge::queries::derivations::{
     SuccessfulEvalWrite, record_successful_eval_result, record_synthetic_eval_failure_in_tx,
 };
 use crystal_forge::queries::{
-    commits::{insert_commit, mark_commit_evaluation_failed},
+    commits::{
+        EvalStartOutcome, insert_commit, mark_commit_evaluation_complete,
+        mark_commit_evaluation_failed, mark_commit_evaluation_started, reset_commit_evaluation,
+    },
+    compliance_interchange::commit_cf_native_import,
     flakes::insert_flake,
+    users::insert_user,
 };
 use crystal_forge::services::composite_enforcement::{
     authorize_and_claim_desired_target, authorize_and_set_system_target, authorize_deployment_at,
     initialize_eval_passed_attempt, persist_eval_passed_for_system_in_tx,
-    persist_eval_passed_terminal_checks_in_tx, persist_evaluation_assessments_in_tx,
+    persist_evaluation_assessments_in_tx,
 };
 use sqlx::PgPool;
 use std::collections::BTreeMap;
@@ -335,6 +350,23 @@ fn ac3_crud_cases() -> Vec<(&'static str, serde_json::Value, serde_json::Value)>
     ]
 }
 
+fn all_eight_rule_config() -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": 1,
+        "mode": "all",
+        "rules": [
+            {"id": "52000000-0000-0000-0000-000000000001", "kind": "nixos_option", "config": {"path": "networking.firewall.enable", "operator": "==", "value_type": "boolean", "value": true}},
+            {"id": "52000000-0000-0000-0000-000000000002", "kind": "packages_installed", "config": {"packages": ["openssh"]}},
+            {"id": "52000000-0000-0000-0000-000000000003", "kind": "packages_absent", "config": {"packages": ["telnet"]}},
+            {"id": "52000000-0000-0000-0000-000000000004", "kind": "custom_eval", "config": {"expression": "config.networking.firewall.enable", "message": "firewall required"}},
+            {"id": "52000000-0000-0000-0000-000000000005", "kind": "cve_block", "config": {"severity": "critical", "max_allowed": 0}},
+            {"id": "52000000-0000-0000-0000-000000000006", "kind": "eval_passed", "config": {}},
+            {"id": "52000000-0000-0000-0000-000000000007", "kind": "pin_required", "config": {}},
+            {"id": "52000000-0000-0000-0000-000000000008", "kind": "time_window", "config": {"days": ["mon", "wed", "fri"], "from": "09:15", "to": "17:45", "tz": "UTC"}}
+        ]
+    })
+}
+
 #[sqlx::test]
 async fn ac3_create_validate_persist_reload_and_edit_matrix_covers_every_exposed_kind(
     pool: PgPool,
@@ -407,6 +439,166 @@ async fn ac3_create_validate_persist_reload_and_edit_matrix_covers_every_exposed
         assert_eq!(edited_reload.config, edited, "AC3 edit/reload [{kind}]");
         assert_eq!(edited_reload.name, edited_name, "AC3 edit/name [{kind}]");
     }
+}
+
+#[sqlx::test]
+async fn all_eight_kinds_survive_xccdf_commit_reload_and_reexport(pool: PgPool) {
+    let config = all_eight_rule_config();
+    let bundle_id = Uuid::new_v4();
+    let bundle_version_id = Uuid::new_v4();
+    let policy_id = Uuid::new_v4();
+    let policy_version_id = Uuid::new_v4();
+    let name = format!("AC38 all-eight XCCDF {policy_id}");
+    let description = Some("Discriminating all-eight-kind interchange matrix".to_string());
+    let compliance_metadata = serde_json::json!({"category": "security"});
+    let dependencies = serde_json::json!([]);
+    let policy_digest = PolicyVersionCanonical {
+        name: name.clone(),
+        description: description.clone(),
+        policy_type: "composite".into(),
+        implementation_state: "native".into(),
+        execution_phase: "multi-phase".into(),
+        config: config.clone(),
+        compliance_metadata: compliance_metadata.clone(),
+        dependencies: dependencies.clone(),
+        opaque_xml_digest: None,
+        enabled_by_default: Some(true),
+    }
+    .compute_digest();
+    let bundle_name = format!("AC38 XCCDF bundle {bundle_id}");
+    let bundle_digest = BundleVersionCanonical {
+        name: bundle_name.clone(),
+        framework: "CF-AC38".into(),
+        framework_version: Some("1.0".into()),
+        description: Some("All exposed enforcement kinds".into()),
+        layer: "os".into(),
+        owner: "AC38 tests".into(),
+        members: vec![BundleMembershipEntry {
+            policy_version_id,
+            selected: true,
+        }],
+    }
+    .compute_digest();
+    let snapshot = XccdfBundleExport {
+        bundle_id,
+        bundle_version_id,
+        version: "1.0".into(),
+        publication_state: PublicationState::Draft,
+        semantic_digest: bundle_digest,
+        digest_algorithm: DIGEST_ALGORITHM.into(),
+        canonicalization_version: CANONICALIZATION_VERSION.into(),
+        name: bundle_name,
+        description: Some("All exposed enforcement kinds".into()),
+        framework: "CF-AC38".into(),
+        framework_version: Some("1.0".into()),
+        layer: "os".into(),
+        owner: "AC38 tests".into(),
+        groups: vec![],
+        policies: vec![XccdfPolicyExport {
+            policy_id,
+            policy_version_id,
+            version: "1.0".into(),
+            publication_state: PublicationState::Draft,
+            semantic_digest: policy_digest,
+            digest_algorithm: DIGEST_ALGORITHM.into(),
+            canonicalization_version: CANONICALIZATION_VERSION.into(),
+            name,
+            description,
+            policy_type: "composite".into(),
+            execution_phase: "multi-phase".into(),
+            implementation_state: ImplementationState::Native,
+            enabled_default: true,
+            selected: true,
+            policy_order: 37,
+            config: config.clone(),
+            compliance_metadata,
+            dependencies,
+            opaque_xml: None,
+            source_mappings: vec![],
+        }],
+    };
+
+    let xml = write_bundle_xccdf_export(&snapshot).expect("all-eight XCCDF export");
+    let package = process_xccdf_bytes(
+        xml.into_bytes(),
+        Some("ac38-all-eight.xml".into()),
+        &InterchangeLimits::default(),
+    )
+    .expect("exported XCCDF must parse and pass package validation");
+    let parsed_meta = package.parsed.rules[0]
+        .cf_policy_meta
+        .as_ref()
+        .expect("exported rule must retain CF policy metadata");
+    assert_eq!(parsed_meta.execution_phase.as_deref(), Some("multi-phase"));
+    assert_eq!(parsed_meta.config.as_ref(), Some(&config));
+    let (validated, records) = validate_cf_native_document(&package.parsed)
+        .expect("all-eight XCCDF must pass native import validation");
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].config, config);
+    assert_eq!(records[0].policy_order, 37);
+
+    let user = insert_user(
+        &pool,
+        &format!("ac38-xccdf-{}@example.invalid", Uuid::new_v4()),
+        Some("AC38 XCCDF"),
+    )
+    .await
+    .expect("importing user");
+    let committed = commit_cf_native_import(&pool, user.id, package, validated, records)
+        .await
+        .expect("all-eight native import commit");
+    assert_eq!(committed.bundle_version_id, bundle_version_id);
+    assert_eq!(
+        committed.created_policy_version_ids,
+        vec![policy_version_id]
+    );
+
+    let reloaded = get_deployment_policy_by_version(&pool, &policy_version_id)
+        .await
+        .expect("reload imported policy")
+        .expect("imported policy version exists");
+    let (phase, order, selected): (String, i32, bool) = sqlx::query_as(
+        r#"
+        SELECT version.execution_phase, membership.policy_order, membership.selected
+        FROM deployment_policy_versions version
+        JOIN compliance_bundle_version_policies membership
+          ON membership.policy_version_id = version.id
+        WHERE version.id = $1 AND membership.bundle_version_id = $2
+        "#,
+    )
+    .bind(policy_version_id)
+    .bind(bundle_version_id)
+    .fetch_one(&pool)
+    .await
+    .expect("reload phase and ordered membership");
+    assert_eq!(reloaded.config, config);
+    assert_eq!(phase, "multi-phase");
+    assert_eq!((order, selected), (37, true));
+
+    let mut reexport = snapshot;
+    reexport.policies[0].name = reloaded.name;
+    reexport.policies[0].description = reloaded.description;
+    reexport.policies[0].policy_type = reloaded.policy_type;
+    reexport.policies[0].execution_phase = phase;
+    reexport.policies[0].config = reloaded.config;
+    reexport.policies[0].policy_order = order;
+    reexport.policies[0].selected = selected;
+    let reexported_xml =
+        write_bundle_xccdf_export(&reexport).expect("re-export reloaded policy version");
+    let reexported = process_xccdf_bytes(
+        reexported_xml.into_bytes(),
+        Some("ac38-all-eight-reexport.xml".into()),
+        &InterchangeLimits::default(),
+    )
+    .expect("re-exported XCCDF package validation");
+    let (_, reexported_records) = validate_cf_native_document(&reexported.parsed)
+        .expect("re-exported XCCDF native validation");
+    assert_eq!(reexported_records.len(), 1);
+    assert_eq!(reexported_records[0].policy_id, policy_id);
+    assert_eq!(reexported_records[0].policy_version_id, policy_version_id);
+    assert_eq!(reexported_records[0].execution_phase, "multi-phase");
+    assert_eq!(reexported_records[0].policy_order, 37);
+    assert_eq!(reexported_records[0].config, config);
 }
 
 fn policy_results(
@@ -825,6 +1017,22 @@ async fn persisted_phase_outcomes(pool: &PgPool, system_id: Uuid) -> Vec<(String
     .unwrap()
 }
 
+async fn persisted_kind_evidence(pool: &PgPool, system_id: Uuid, kind: &str) -> serde_json::Value {
+    sqlx::query_scalar(
+        r#"
+        SELECT result.evidence
+        FROM composite_policy_rule_results result
+        JOIN composite_policy_assessments assessment ON assessment.id = result.assessment_id
+        WHERE assessment.system_id = $1 AND result.kind = $2
+        "#,
+    )
+    .bind(system_id)
+    .bind(kind)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
 async fn completed_scan(pool: &PgPool, context: &AssessmentContext, critical: i32) -> Uuid {
     let scan_id = create_cve_scan(pool, context.derivation_id, "ac3-matrix", None)
         .await
@@ -891,6 +1099,10 @@ async fn ac3_mixed_lifecycle_failure_permutations_preserve_earlier_outcomes_and_
         persisted_phase_outcomes(&pool, cve_fail.system_id).await[0].1,
         "pass"
     );
+    let cve_fail_evidence = persisted_kind_evidence(&pool, cve_fail.system_id, "cve_block").await;
+    assert_eq!(cve_fail_evidence["status"], "completed");
+    assert_eq!(cve_fail_evidence["count"], 1);
+    assert_eq!(cve_fail_evidence["max_allowed"], 0);
 
     let cve_error = assessment_context(&pool).await;
     persist_evaluation(&pool, &cve_error, EnforcementOutcome::Pass).await;
@@ -945,6 +1157,13 @@ async fn ac3_mixed_lifecycle_failure_permutations_preserve_earlier_outcomes_and_
         persisted_phase_outcomes(&pool, cve_not_checked.system_id).await[0].1,
         "pass"
     );
+    let cve_pending_evidence =
+        persisted_kind_evidence(&pool, cve_not_checked.system_id, "cve_block").await;
+    assert_eq!(
+        cve_pending_evidence,
+        serde_json::json!({}),
+        "NotChecked without a scan must not fabricate evidence"
+    );
 
     let time_fail = assessment_context(&pool).await;
     persist_evaluation(&pool, &time_fail, EnforcementOutcome::Pass).await;
@@ -971,6 +1190,14 @@ async fn ac3_mixed_lifecycle_failure_permutations_preserve_earlier_outcomes_and_
             ("deployment".into(), "fail".into())
         ],
         "AC3 time fail preserves evaluation and scan outcomes"
+    );
+    let time_evidence = persisted_kind_evidence(&pool, time_fail.system_id, "time_window").await;
+    assert_eq!(time_evidence["timezone"], "UTC");
+    assert_eq!(
+        DateTime::parse_from_rfc3339(time_evidence["evaluated_at"].as_str().unwrap())
+            .unwrap()
+            .with_timezone(&Utc),
+        outside
     );
 }
 
@@ -1625,11 +1852,16 @@ async fn upgrade_target_gets_pending_delivery_only_after_exact_authorization(poo
     assert_eq!(marker_count, 0);
 }
 
-#[sqlx::test]
-async fn eval_passed_attempt_evidence_is_authoritative_and_new_attempt_supersedes_it(pool: PgPool) {
+struct EvalPassedAttemptContext {
+    assessment: AssessmentContext,
+    commit_id: i32,
+    policies: BTreeMap<String, Vec<AssignedPolicy>>,
+}
+
+async fn passing_eval_attempt(pool: &PgPool) -> EvalPassedAttemptContext {
     let config: CompositePolicyConfig =
         serde_json::from_value(single_rule_config("eval_passed", serde_json::json!({}))).unwrap();
-    let context = assessment_context_with_config(&pool, config.clone()).await;
+    let context = assessment_context_with_config(pool, config.clone()).await;
     let (commit_id, hostname): (i32, String) = sqlx::query_as(
         r#"
         SELECT derivation.commit_id, system.hostname
@@ -1640,23 +1872,15 @@ async fn eval_passed_attempt_evidence_is_authoritative_and_new_attempt_supersede
     )
     .bind(context.derivation_id)
     .bind(context.system_id)
-    .fetch_one(&pool)
+    .fetch_one(pool)
     .await
     .unwrap();
-    sqlx::query(
-        "UPDATE evaluation_attempts SET status = 'in_progress', started_at = NOW() WHERE commit_id = $1 AND attempt_number = 1",
-    )
-    .bind(commit_id)
-    .execute(&pool)
-    .await
-    .unwrap();
-    sqlx::query(
-        "UPDATE commits SET evaluation_status = 'in_progress', evaluation_attempt_count = 1 WHERE id = $1",
-    )
-    .bind(commit_id)
-    .execute(&pool)
-    .await
-    .unwrap();
+    assert_eq!(
+        mark_commit_evaluation_started(pool, commit_id)
+            .await
+            .unwrap(),
+        EvalStartOutcome::Started { attempt: 1 }
+    );
     let assigned = AssignedPolicy {
         policy_id: context.version_id,
         policy_name: "eval attempt evidence".into(),
@@ -1665,16 +1889,9 @@ async fn eval_passed_attempt_evidence_is_authoritative_and_new_attempt_supersede
         },
     };
     let policies = BTreeMap::from([(hostname.clone(), vec![assigned.clone()])]);
-    initialize_eval_passed_attempt(&pool, commit_id, 1, &policies)
+    initialize_eval_passed_attempt(pool, commit_id, 1, &policies)
         .await
         .unwrap();
-    let pending: (String, Option<Uuid>) =
-        sqlx::query_as("SELECT outcome, system_id FROM composite_eval_attempt_rule_results")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(pending, ("not_checked".into(), Some(context.system_id)));
-
     let passing_check = PolicyCheckResult::from_assigned(
         hostname.clone(),
         &serde_json::json!({"cfAgentEnabled": true}),
@@ -1696,40 +1913,117 @@ async fn eval_passed_attempt_evidence_is_authoritative_and_new_attempt_supersede
     .await
     .unwrap();
     tx.commit().await.unwrap();
-    let passed: String = sqlx::query_scalar(
-        "SELECT outcome FROM composite_eval_attempt_rule_results WHERE superseded_at IS NULL",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(passed, "pass");
-    let assessment_passed: String = sqlx::query_scalar(
-        "SELECT overall_outcome FROM composite_policy_assessments WHERE system_id=$1",
-    )
-    .bind(context.system_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(assessment_passed, "pass");
+    EvalPassedAttemptContext {
+        assessment: context,
+        commit_id,
+        policies,
+    }
+}
 
-    sqlx::query("UPDATE evaluation_attempts SET status = 'complete' WHERE commit_id = $1")
-        .bind(commit_id)
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query(
-        "INSERT INTO evaluation_attempts (commit_id, attempt_number, status, started_at) VALUES ($1, 2, 'in_progress', NOW())",
+#[sqlx::test]
+async fn infrastructure_failure_after_eval_pass_revokes_assessment_and_authorization(pool: PgPool) {
+    let context = passing_eval_attempt(&pool).await;
+    let before = authorize_deployment_at(
+        &pool,
+        context.assessment.system_id,
+        context.assessment.derivation_id,
+        &context.assessment.store_path,
+        Utc::now(),
     )
-    .bind(commit_id)
-    .execute(&pool)
     .await
     .unwrap();
-    sqlx::query("UPDATE commits SET evaluation_attempt_count = 2 WHERE id = $1")
-        .bind(commit_id)
-        .execute(&pool)
+    assert_eq!(before.outcome, EnforcementOutcome::Pass);
+
+    mark_commit_evaluation_failed(
+        &pool,
+        context.commit_id,
+        "evaluator transport failed",
+        1,
+        crystal_forge::models::retry_policy::RetryFailureClass::Transient,
+    )
+    .await
+    .unwrap();
+    let error: (String, String) = sqlx::query_as(
+        "SELECT outcome, detail FROM composite_eval_attempt_rule_results WHERE superseded_at IS NULL",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        error,
+        ("error".into(), "evaluator transport failed".into()),
+        "the production failure handler must revoke attempt Pass evidence"
+    );
+    let assessment_error: (String, String) = sqlx::query_as(
+        r#"SELECT assessment.overall_outcome,rule_result.detail
+           FROM composite_policy_assessments assessment
+           JOIN composite_policy_rule_results rule_result
+             ON rule_result.assessment_id=assessment.id
+           WHERE assessment.system_id=$1 AND rule_result.kind='eval_passed'"#,
+    )
+    .bind(context.assessment.system_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        assessment_error,
+        ("error".into(), "evaluator transport failed".into()),
+        "the production failure handler must revoke assessment Pass evidence"
+    );
+    let after = authorize_deployment_at(
+        &pool,
+        context.assessment.system_id,
+        context.assessment.derivation_id,
+        &context.assessment.store_path,
+        Utc::now(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(after.outcome, EnforcementOutcome::Error);
+}
+
+#[sqlx::test]
+async fn starting_manual_eval_retry_immediately_resets_prior_pass_and_authorization(pool: PgPool) {
+    let context = passing_eval_attempt(&pool).await;
+    mark_commit_evaluation_complete(&pool, context.commit_id, 1)
         .await
         .unwrap();
-    initialize_eval_passed_attempt(&pool, commit_id, 2, &policies)
+    reset_commit_evaluation(&pool, context.commit_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        mark_commit_evaluation_started(&pool, context.commit_id)
+            .await
+            .unwrap(),
+        EvalStartOutcome::Started { attempt: 2 }
+    );
+
+    let reset: (String, String, serde_json::Value) = sqlx::query_as(
+        r#"SELECT assessment.overall_outcome,rule_result.outcome,rule_result.evidence
+           FROM composite_policy_assessments assessment
+           JOIN composite_policy_rule_results rule_result
+             ON rule_result.assessment_id=assessment.id
+           WHERE assessment.system_id=$1 AND rule_result.kind='eval_passed'"#,
+    )
+    .bind(context.assessment.system_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(reset.0, "not_checked");
+    assert_eq!(reset.1, "not_checked");
+    assert_eq!(reset.2["attempt_number"], 2);
+    let blocked = authorize_deployment_at(
+        &pool,
+        context.assessment.system_id,
+        context.assessment.derivation_id,
+        &context.assessment.store_path,
+        Utc::now(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(blocked.outcome, EnforcementOutcome::NotChecked);
+
+    initialize_eval_passed_attempt(&pool, context.commit_id, 2, &context.policies)
         .await
         .unwrap();
     let states: Vec<(i32, String, bool)> = sqlx::query_as(
@@ -1747,120 +2041,29 @@ async fn eval_passed_attempt_evidence_is_authoritative_and_new_attempt_supersede
         states,
         vec![(1, "pass".into(), true), (2, "not_checked".into(), false)]
     );
+}
 
-    let failure = PolicyCheckResult::for_evaluation_terminal(
-        hostname.clone(),
+#[test]
+fn pin_required_is_not_checked_while_evaluation_is_pending() {
+    let config: CompositePolicyConfig =
+        serde_json::from_value(single_rule_config("pin_required", serde_json::json!({}))).unwrap();
+    let assigned = AssignedPolicy {
+        policy_id: Uuid::new_v4(),
+        policy_name: "pending pin evidence".into(),
+        policy: DeploymentPolicy::Composite { config },
+    };
+    let check = PolicyCheckResult::for_evaluation_terminal(
+        "pending-system".into(),
         std::slice::from_ref(&assigned),
-        crystal_forge::models::deployment_policies::EvaluationTerminalOutcome::ConfirmedFailure,
-        "target evaluation failed",
+        crystal_forge::models::deployment_policies::EvaluationTerminalOutcome::Pending,
+        "evaluation is pending",
     );
-    let mut tx = pool.begin().await.unwrap();
-    persist_eval_passed_terminal_checks_in_tx(&mut tx, commit_id, 2, &[failure])
-        .await
-        .unwrap();
-    tx.commit().await.unwrap();
-    let failed: String = sqlx::query_scalar(
-        "SELECT outcome FROM composite_eval_attempt_rule_results WHERE superseded_at IS NULL",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(failed, "fail");
-    let assessment_failed: String = sqlx::query_scalar(
-        "SELECT overall_outcome FROM composite_policy_assessments WHERE system_id=$1",
-    )
-    .bind(context.system_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(assessment_failed, "fail");
-
-    sqlx::query(
-        "UPDATE evaluation_attempts SET status = 'complete' WHERE commit_id = $1 AND attempt_number = 2",
-    )
-    .bind(commit_id)
-    .execute(&pool)
-    .await
-    .unwrap();
-    sqlx::query(
-        "INSERT INTO evaluation_attempts (commit_id, attempt_number, status, started_at) VALUES ($1, 3, 'in_progress', NOW())",
-    )
-    .bind(commit_id)
-    .execute(&pool)
-    .await
-    .unwrap();
-    sqlx::query(
-        "UPDATE commits SET evaluation_status = 'in_progress', evaluation_attempt_count = 3 WHERE id = $1",
-    )
-    .bind(commit_id)
-    .execute(&pool)
-    .await
-    .unwrap();
-    initialize_eval_passed_attempt(&pool, commit_id, 3, &policies)
-        .await
-        .unwrap();
-    let mut tx = pool.begin().await.unwrap();
-    persist_eval_passed_for_system_in_tx(&mut tx, commit_id, 3, context.system_id, &passing_check)
-        .await
-        .unwrap();
-    persist_evaluation_assessments_in_tx(
-        &mut tx,
-        context.system_id,
-        context.derivation_id,
-        &context.store_path,
-        &policy_results_json(&passing_check, std::slice::from_ref(&assigned)),
-        &context.resolved,
-    )
-    .await
-    .unwrap();
-    tx.commit().await.unwrap();
-    let terminal_error = PolicyCheckResult::for_evaluation_terminal(
-        hostname,
-        std::slice::from_ref(&assigned),
-        crystal_forge::models::deployment_policies::EvaluationTerminalOutcome::Error,
-        "policy metadata could not be parsed",
-    );
-    let mut tx = pool.begin().await.unwrap();
-    persist_eval_passed_terminal_checks_in_tx(&mut tx, commit_id, 3, &[terminal_error])
-        .await
-        .unwrap();
-    tx.commit().await.unwrap();
-    mark_commit_evaluation_failed(
-        &pool,
-        commit_id,
-        "evaluator transport failed",
-        3,
-        crystal_forge::models::retry_policy::RetryFailureClass::Transient,
-    )
-    .await
-    .unwrap();
-    let error: (String, String) = sqlx::query_as(
-        "SELECT outcome, detail FROM composite_eval_attempt_rule_results WHERE superseded_at IS NULL",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(
-        error,
-        ("error".into(), "policy metadata could not be parsed".into()),
-        "attempt failure handling must not reveal a provisional Pass"
-    );
-    let assessment_error: (String, String) = sqlx::query_as(
-        r#"SELECT assessment.overall_outcome,rule_result.detail
-           FROM composite_policy_assessments assessment
-           JOIN composite_policy_rule_results rule_result
-             ON rule_result.assessment_id=assessment.id
-           WHERE assessment.system_id=$1 AND rule_result.kind='eval_passed'"#,
-    )
-    .bind(context.system_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(
-        assessment_error,
-        ("error".into(), "policy metadata could not be parsed".into()),
-        "POA&M assessment evidence must receive the terminal Error"
-    );
+    let outcome = &check.assigned_results[&assigned.policy_id].composite_outcomes[0];
+    assert_eq!(outcome.kind, "pin_required");
+    assert_eq!(outcome.outcome, EnforcementOutcome::NotChecked);
+    assert!(outcome.blocking);
+    assert_eq!(outcome.evidence["terminal_outcome"], "pending");
+    assert_eq!(outcome.evidence["configuration"], "pending-system");
 }
 
 #[sqlx::test]

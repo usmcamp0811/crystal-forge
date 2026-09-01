@@ -4,13 +4,11 @@
 //! Preserves the same selection/edit/open semantics as `PolicyCard` so cards
 //! and table rows are interchangeable views over identical policy state.
 
-use dioxus::prelude::*;
-use uuid::Uuid;
-
 use super::types::{
     PolicyDefinition, is_core_policy, is_policy_enabled, is_policy_version_editable,
     policy_category, policy_rule_summaries,
 };
+use dioxus::prelude::*;
 
 /// A single row in the policy catalog table view.
 #[component]
@@ -18,7 +16,6 @@ pub fn PolicyRow(
     policy: PolicyDefinition,
     on_open: EventHandler<PolicyDefinition>,
     on_edit: EventHandler<PolicyDefinition>,
-    on_delete: EventHandler<Uuid>,
     #[props(default = false)] selection_mode: bool,
     #[props(default = false)] selected: bool,
     #[props(default)] on_toggle_select: EventHandler<bool>,
@@ -36,9 +33,9 @@ pub fn PolicyRow(
     let category = policy_category(&policy);
     let severity_label = policy.severity.as_deref().and_then(|severity| {
         match severity.to_ascii_lowercase().as_str() {
-            "high" => Some(("CAT I", "#f87171")),
-            "medium" => Some(("CAT II", "#fbbf24")),
-            "low" => Some(("CAT III", "#60a5fa")),
+            "high" => Some(("CAT I", "var(--cf-policy-red)")),
+            "medium" => Some(("CAT II", "var(--cf-policy-amber)")),
+            "low" => Some(("CAT III", "var(--cf-policy-blue)")),
             _ => None,
         }
     });
@@ -51,12 +48,10 @@ pub fn PolicyRow(
     let policy_for_open = policy.clone();
     let policy_for_keyboard = policy.clone();
     let policy_for_edit = policy.clone();
-    let policy_id = policy.id;
 
     rsx! {
         tr {
             class: if selected { "selectable selected" } else { "selectable" },
-            role: "button",
             tabindex: "0",
             aria_label: if selection_mode { format!("Select {}", policy.name) } else { format!("Open {}", policy.name) },
             "data-policy-row": "true",
@@ -100,7 +95,11 @@ pub fn PolicyRow(
             }
             td {
                 div { style: "display:flex;flex-direction:column;gap:2px;min-width:0;",
-                    span { class: "mono", style: "font-weight:600;font-size:12.5px;color:{category.color()};", "{policy.name}" }
+                    span {
+                        class: "mono policy-row-name",
+                        style: "--policy-name-color:{category.color()};",
+                        "{policy.name}"
+                    }
                     span { style: "font-size:11px;color:var(--cf-text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:360px;", title: "{policy.description}", "{policy.description}" }
                 }
             }
@@ -126,12 +125,6 @@ pub fn PolicyRow(
                         class: "btn btn-subtle focus-ring xs",
                         onclick: move |_| on_edit.call(policy_for_edit.clone()),
                         "Edit"
-                    }
-                    button {
-                        class: "btn btn-ghost focus-ring xs",
-                        style: "color:#f87171;border-color:rgba(248,113,113,0.3);margin-left:6px;",
-                        onclick: move |_| on_delete.call(policy_id),
-                        "Delete"
                     }
                 } else if !selection_mode {
                     span { class: "chip chip-unknown", "read-only" }

@@ -1,3 +1,9 @@
+//! Compliance catalog, evidence, assignment, and POA&M route.
+//!
+//! The view composes server-authoritative bundle, evidence, and remediation
+//! data. Route query state controls presentation only; server APIs enforce
+//! visibility, mutation authority, and immutable version identity.
+
 use std::collections::HashMap;
 
 use dioxus::prelude::*;
@@ -167,6 +173,11 @@ fn compliance_target_from_state(
     }
 }
 
+/// Renders compliance catalog browsing and server-backed workflow drawers.
+///
+/// The component owns route synchronization and transient selection state.
+/// Bundle administration is gated by authenticated role and enforced again by
+/// server APIs; evidence and POA&M identity always come from server responses.
 #[component]
 pub fn ComplianceView(
     bundle: String,
@@ -224,6 +235,7 @@ pub fn ComplianceView(
     let mut coverage_error = use_signal(|| None::<String>);
     let mut coverage_loading = use_signal(|| false);
     let mut coverage_expanded = use_signal(|| false);
+    let mut bundle_drawer_expanded = use_signal(|| false);
     let mut drawer_view =
         use_signal(|| BundleDrawerView::from_query(initial_target.view.as_deref()));
     let mut revisions_open = use_signal(|| false);
@@ -926,7 +938,7 @@ pub fn ComplianceView(
                 if *drawer_open.read() && policy_drawer.read().is_none() {
                     if let Some(bundle) = selected_bundle {
                         div { class: "fl-tray-backdrop", onclick: move |_| drawer_open.set(false) }
-                        aside { id: "compliance-bundle-dialog", class: "fl-tray", role: "dialog", aria_modal: "true", aria_labelledby: "compliance-bundle-drawer-title", tabindex: "-1", style: "width:min(900px,96vw);", onkeydown: move |event| if event.key() == Key::Escape { drawer_open.set(false) },
+                        aside { id: "compliance-bundle-dialog", class: if bundle_drawer_expanded() { "fl-tray compliance-drawer-expanded" } else { "fl-tray" }, role: "dialog", aria_modal: "true", aria_labelledby: "compliance-bundle-drawer-title", tabindex: "-1", style: if bundle_drawer_expanded() { "" } else { "width:min(900px,96vw);" }, onkeydown: move |event| if event.key() == Key::Escape { drawer_open.set(false) },
                             DialogFocusRestore {}
                             DialogFocusSentinel { dialog_id: "compliance-bundle-dialog".to_string(), boundary: DialogFocusBoundary::Last }
                             if *drawer_view.read() != BundleDrawerView::Overview {
@@ -943,13 +955,17 @@ pub fn ComplianceView(
                                             div { style: "font-size:11px;color:var(--cf-text-muted);margin-top:2px;", "{bundle.name}" }
                                         }
                                     }
-                                    button { class: "btn-icon focus-ring", autofocus: true, aria_label: "Close bundle detail", onclick: move |_| drawer_open.set(false), Icon { name: IconName::X, size: 16 } }
+                                    div { style: "display:flex;gap:6px;align-items:center;",
+                                        button { class: "btn btn-ghost xs focus-ring", aria_pressed: bundle_drawer_expanded(), onclick: move |_| bundle_drawer_expanded.toggle(), if bundle_drawer_expanded() { "Restore" } else { "Expand" } }
+                                        button { class: "btn-icon focus-ring", autofocus: true, aria_label: "Close bundle detail", onclick: move |_| drawer_open.set(false), Icon { name: IconName::X, size: 16 } }
+                                    }
                                 }
                             } else {
                                 header { class: "fl-tray-head",
                                     div { style: "display:flex;align-items:center;gap:12px;min-width:0;flex:1;", Icon { name: IconName::Shield, size: 18 }, span { id: "compliance-bundle-drawer-title", style: "font-size:11px;color:var(--cf-text-muted);", "Compliance bundle · {bundle.name}" } }
                                     div { style: "display:flex;gap:6px;",
                                         if is_admin { button { class: "btn btn-ghost focus-ring xs", "data-testid": "compliance-edit-bundle", onclick: move |_| show_edit_bundle.set(true), Icon { name: IconName::Edit, size: 12 }, " Edit bundle" } }
+                                        button { class: "btn btn-ghost xs focus-ring", aria_pressed: bundle_drawer_expanded(), onclick: move |_| bundle_drawer_expanded.toggle(), if bundle_drawer_expanded() { "Restore" } else { "Expand" } }
                                         button {
                                             class: "btn-icon focus-ring",
                                             "data-testid": "compliance-drawer-close",

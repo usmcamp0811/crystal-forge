@@ -1,24 +1,32 @@
-// Time window policy evaluation service
-// Checks if current time falls within configured deployment windows
+//! Evaluates deployment time-window policies.
+//!
+//! Windows use configured IANA time zones and inclusive start and end times.
+//! Overnight windows attribute their early-morning segment to the day on which
+//! the window started. Invalid configuration fails closed with a reason.
 
 use chrono::{Datelike, NaiveTime, Timelike, Utc};
 use chrono_tz::Tz;
 
 use crate::models::deployment_policies::TimeWindowConfig;
 
-/// Result of time window policy evaluation
+/// Describes whether a time-window policy permits deployment.
 #[derive(Debug, Clone)]
 pub struct TimeWindowResult {
+    /// Indicates whether deployment may proceed.
     pub deployment_allowed: bool,
+    /// Explains a block or warning; `None` indicates an in-window decision.
     pub reason: Option<String>,
 }
 
-/// Evaluate a time window policy against current time
+/// Evaluates a time-window policy at the current UTC time.
 pub fn check_time_window(config: &TimeWindowConfig) -> TimeWindowResult {
     check_time_window_at(config, Utc::now())
 }
 
-/// Evaluate a time window policy against a specific timestamp (testable)
+/// Evaluates a time-window policy at a specific UTC timestamp.
+///
+/// Invalid time zones or clock values return a blocked result with a reason.
+/// An out-of-window `warn` action permits deployment and includes a warning.
 pub fn check_time_window_at(
     config: &TimeWindowConfig,
     now_utc: chrono::DateTime<Utc>,
@@ -163,6 +171,12 @@ fn parse_time(time_str: &str) -> Result<NaiveTime, String> {
         .ok_or_else(|| format!("Hour {} or minute {} out of range", hour, minute))
 }
 
+/// Validates the shared fields of a deployment time window.
+///
+/// # Errors
+///
+/// Returns an error when no valid weekday is supplied, a clock value is not in
+/// `HH:MM` form, or `timezone` is not a valid IANA time-zone identifier.
 pub fn validate_window_parts(
     days: &[String],
     start_time: &str,
@@ -186,6 +200,12 @@ pub fn validate_window_parts(
     Ok(())
 }
 
+/// Validates a complete time-window policy configuration.
+///
+/// # Errors
+///
+/// Returns an error when the action is not `block` or `warn`, or when any
+/// window field fails [`validate_window_parts`].
 pub fn validate_config(config: &TimeWindowConfig) -> Result<(), String> {
     if !matches!(config.action.as_str(), "block" | "warn") {
         return Err("action must be block or warn".to_string());

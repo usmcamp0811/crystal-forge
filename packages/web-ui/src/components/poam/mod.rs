@@ -17,61 +17,105 @@ use crate::components::icon::{Icon, IconName};
 use crate::views::poam_api::{
     self, ActivityView, AddFindingRequest, AddMilestoneRequest, AddNoteRequest, AssessmentOutcome,
     AssignmentReferenceRequest, ClosePreconditionDetails, FindingObservationReference,
-    FindingRelationshipEntry, FindingView, MilestoneView, PoamApiError, PoamDetail,
-    PoamDetailQuery, PoamRisk, PoamStatus, PoamSummary, RevisionRequest, Rollup,
+    FindingRelationshipEntry, FindingRequirementView, FindingView, MilestoneView, PoamApiError,
+    PoamDetail, PoamDetailQuery, PoamRisk, PoamStatus, PoamSummary, RevisionRequest, Rollup,
     TransitionPoamRequest, UpdateMilestoneRequest, UpdatePoamRequest, VerificationResult,
 };
 
+/// Describes an immutable assignment version that a POA&M can reference.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AssignmentVersionCandidate {
+    /// Identifies the assignment lineage.
     pub assignment_id: Uuid,
+    /// Identifies the immutable assignment version.
     pub assignment_version_id: Uuid,
+    /// Identifies the assigned compliance bundle lineage.
     pub bundle_id: Uuid,
+    /// Identifies the exact assigned bundle version.
     pub bundle_version_id: Uuid,
+    /// Contains the human-readable bundle name.
     pub bundle_name: String,
+    /// Contains the human-readable bundle version.
     pub bundle_version: String,
+    /// Describes the system or environment assignment scope.
     pub scope_label: String,
 }
 
+/// Provides authoritative finding identity and read-only display context.
+///
+/// Components must use `finding_id`, `assessment_id`, and `observation` for
+/// mutations. Human-readable fields do not establish finding identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FindingPoamContext {
+    /// Identifies the current composite assessment when one exists.
     pub assessment_id: Option<Uuid>,
+    /// Identifies the stable server finding.
     pub finding_id: Uuid,
+    /// Binds source-neutral findings to the exact displayed observation.
     pub observation: Option<FindingObservationReference>,
+    /// Identifies the affected system.
     pub system_id: Uuid,
+    /// Contains the affected system's display hostname.
     pub hostname: String,
+    /// Identifies the policy lineage.
     pub policy_lineage_id: Uuid,
+    /// Identifies the immutable policy version used for the observation.
     pub policy_version_id: Uuid,
+    /// Contains the policy display name.
     pub policy_name: String,
+    /// Contains the immutable policy version label.
     pub policy_version: String,
+    /// Identifies the related bundle lineage when bundle context exists.
     pub bundle_id: Option<Uuid>,
+    /// Contains the related bundle name when available.
     pub bundle_name: Option<String>,
+    /// Identifies the exact related bundle version when available.
     pub bundle_version_id: Option<Uuid>,
+    /// Contains the related bundle version label when available.
     pub bundle_version: Option<String>,
+    /// Contains the authoritative requirement display label when available.
+    pub requirement: Option<String>,
+    /// Contains the authoritative framework display label when available.
+    pub framework: Option<String>,
+    /// Contains the assessment outcome displayed when remediation starts.
     pub result: AssessmentOutcome,
+    /// Summarizes the evidence without replacing authoritative identity.
     pub evidence_summary: String,
+    /// Contains immutable assignments available as supplemental references.
     pub assignment_versions: Vec<AssignmentVersionCandidate>,
 }
 
+/// Reports a remediation interaction to the component owner.
 #[derive(Debug, Clone, PartialEq)]
 pub enum FindingPoamEvent {
+    /// Requests that the owner open the identified POA&M.
     Open(Uuid),
+    /// Reports a newly created POA&M using the server response.
     Created(PoamDetail),
+    /// Reports a newly linked POA&M using the server response.
     Linked(PoamDetail),
+    /// Requests invalidation of cached assessment or finding evidence.
     InvalidateAssessment(Uuid),
 }
 
+/// Selects the lifecycle subset displayed in a POA&M list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PoamFilter {
+    /// Includes all non-completed remediation plans.
     #[default]
     Open,
+    /// Includes active remediation plans past their target date.
     Overdue,
+    /// Includes remediation plans waiting for verification.
     Awaiting,
+    /// Includes completed remediation plans.
     Closed,
+    /// Includes remediation plans in every lifecycle state.
     All,
 }
 
 impl PoamFilter {
+    /// Returns the product label for this filter.
     pub const fn label(self) -> &'static str {
         match self {
             Self::Open => "Open",
@@ -82,6 +126,7 @@ impl PoamFilter {
         }
     }
 
+    /// Returns whether a server summary belongs in this filter.
     pub fn includes(self, poam: &PoamSummary) -> bool {
         match self {
             Self::Open => poam.status.is_active(),
@@ -93,10 +138,12 @@ impl PoamFilter {
     }
 }
 
+/// Returns the product label for a server POA&M status.
 pub const fn status_label(status: PoamStatus) -> &'static str {
     status.label()
 }
 
+/// Returns the semantic CSS class for a server POA&M status.
 pub const fn status_class(status: PoamStatus) -> &'static str {
     match status {
         PoamStatus::Open => "poam-chip-open",
@@ -107,6 +154,7 @@ pub const fn status_class(status: PoamStatus) -> &'static str {
     }
 }
 
+/// Returns the category and severity label for a POA&M risk.
 pub const fn risk_label(risk: PoamRisk) -> &'static str {
     match risk {
         PoamRisk::High => "CAT I - High",
@@ -115,6 +163,7 @@ pub const fn risk_label(risk: PoamRisk) -> &'static str {
     }
 }
 
+/// Returns the semantic CSS class for a POA&M risk.
 pub const fn risk_class(risk: PoamRisk) -> &'static str {
     match risk {
         PoamRisk::High => "poam-risk-high",
@@ -123,6 +172,7 @@ pub const fn risk_class(risk: PoamRisk) -> &'static str {
     }
 }
 
+/// Returns the product label for an authoritative verification result.
 pub const fn result_label(result: VerificationResult) -> &'static str {
     match result {
         VerificationResult::Pass => "Pass",
@@ -138,6 +188,7 @@ pub const fn result_label(result: VerificationResult) -> &'static str {
     }
 }
 
+/// Returns the semantic CSS class for an authoritative verification result.
 pub const fn result_class(result: VerificationResult) -> &'static str {
     match result {
         VerificationResult::Pass => "poam-result-pass",
@@ -166,6 +217,70 @@ fn format_date(date: Option<NaiveDate>) -> String {
         .unwrap_or_else(|| "Not set".to_string())
 }
 
+fn target_timing_label(poam: &PoamSummary, today: NaiveDate) -> Option<String> {
+    if poam.status == PoamStatus::Completed {
+        return poam
+            .closed_at
+            .map(|closed| format!("Closed {}", closed.date_naive()));
+    }
+    poam.target_date.map(|target| {
+        let days = (target - today).num_days();
+        if days < 0 {
+            format!("{}d overdue", days.unsigned_abs())
+        } else if days == 0 {
+            "Due today".to_string()
+        } else {
+            format!("{days}d remaining")
+        }
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RequirementPresentation {
+    framework: Option<String>,
+    control: String,
+    title: Option<String>,
+}
+
+fn requirement_presentations(
+    requirements: &[FindingRequirementView],
+    requirement_version_ids: &[Uuid],
+) -> Vec<RequirementPresentation> {
+    if !requirements.is_empty() {
+        requirements
+            .iter()
+            .map(|requirement| RequirementPresentation {
+                framework: Some(format!(
+                    "{} · {}",
+                    requirement.framework_name, requirement.framework_version
+                )),
+                control: requirement.external_id.clone(),
+                title: requirement
+                    .title
+                    .clone()
+                    .filter(|title| !title.trim().is_empty()),
+            })
+            .collect()
+    } else if requirement_version_ids.is_empty() {
+        Vec::new()
+    } else {
+        requirement_version_ids
+            .iter()
+            .map(|id| RequirementPresentation {
+                framework: None,
+                control: id.to_string(),
+                title: None,
+            })
+            .collect()
+    }
+}
+
+fn close_rejection_message(committed_revision: i64) -> String {
+    format!(
+        "Closure was rejected after verification was committed at revision {committed_revision}. Current server data was reloaded; your drafts are preserved."
+    )
+}
+
 fn api_message(error: &PoamApiError) -> String {
     match error {
         PoamApiError::Server(server) => server.message.clone(),
@@ -188,15 +303,24 @@ fn RiskChip(risk: PoamRisk) -> Element {
     rsx! { span { class: "poam-chip {risk_class(risk)}", "{risk_label(risk)}" } }
 }
 
+/// Configures the remediation controls rendered beside one finding.
 #[derive(Props, Clone, PartialEq)]
 pub struct FindingPoamBarProps {
+    /// Provides immutable finding identity and display context.
     pub context: FindingPoamContext,
+    /// Provides the server-authoritative active and historical relationships.
     pub relationship: FindingRelationshipEntry,
+    /// Disables create and link mutations for read-only users.
     #[props(default)]
     pub viewer: bool,
+    /// Receives open, mutation, and evidence-invalidation events.
     pub on_event: EventHandler<FindingPoamEvent>,
 }
 
+/// Renders remediation state and create or link actions for one finding.
+///
+/// The component rejects mismatched relationship identity and delegates all
+/// persistence and cache invalidation outcomes to server responses and events.
 #[component]
 pub fn FindingPoamBar(props: FindingPoamBarProps) -> Element {
     let mut create_open = use_signal(|| false);
@@ -210,7 +334,7 @@ pub fn FindingPoamBar(props: FindingPoamBarProps) -> Element {
             && props.relationship.assessment_id != props.context.assessment_id)
     {
         return rsx! {
-            div { class: "sd-callout sd-callout-danger",
+            div { role: "alert", class: "sd-callout sd-callout-danger",
                 "Remediation relationship does not match this authoritative assessment. Refresh evidence before continuing."
             }
         };
@@ -342,7 +466,7 @@ fn PoamCreateModal(props: PoamCreateModalProps) -> Element {
                         }
                     }
                     div { class: "sd-callout sd-callout-info", Icon { name: IconName::Shield, size: 13 } div { "A POA&M records work to fix a deficiency. Risk acceptance uses the separate waiver flow; neither action changes this finding's result." } }
-                    if let Some(message) = error() { div { class: "sd-callout sd-callout-danger", Icon { name: IconName::Warn, size: 13 } div { "{message}" } } }
+                    if let Some(message) = error() { div { role: "alert", class: "sd-callout sd-callout-danger", Icon { name: IconName::Warn, size: 13 } div { "{message}" } } }
                 }
                 div { class: "modal-foot",
                     button { class: "btn btn-ghost focus-ring", disabled: pending(), onclick: move |_| close.call(()), "Cancel" }
@@ -353,6 +477,7 @@ fn PoamCreateModal(props: PoamCreateModalProps) -> Element {
                         let mut pending = pending; let mut error = error; let on_created = props.on_created;
                         spawn(async move { pending.set(true); match poam_api::create_poam(&request).await { Ok(detail) => on_created.call(detail), Err(err) => { error.set(Some(if err.is_active_remediation() { "This finding already has an active remediation plan. Refresh the finding before retrying.".to_string() } else { api_message(&err) })); pending.set(false); } } });
                     }, if pending() { "Creating..." } else { "Create POA&M" } }
+                    if pending() { span { role: "status", aria_live: "polite", class: "sr-only", "Creating POA&M." } }
                 }
                 DialogFocusSentinel { dialog_id: "poam-create-dialog".to_string(), boundary: DialogFocusBoundary::First }
             }
@@ -383,12 +508,16 @@ fn FindingContextPanel(context: FindingPoamContext) -> Element {
                 })
                 .unwrap_or_else(|| "Unavailable".to_string())
         });
+    let requirement = context.requirement.as_deref().unwrap_or("Not mapped");
+    let framework = context.framework.as_deref().unwrap_or("Not provided");
     rsx! {
         section { class: "poam-context", "data-testid": "poam-finding-context",
             header { Icon { name: IconName::Shield, size: 12 } "Finding context" span { "Authoritative and read-only" } }
             dl {
                 div { dt { "System" } dd { class: "mono", "{context.hostname}" } }
                 div { dt { "Policy / version" } dd { "{context.policy_name} · {context.policy_version}" } }
+                div { dt { "Requirement" } dd { class: "mono", "{requirement}" } }
+                div { dt { "Framework" } dd { "{framework}" } }
                 div { dt { "Bundle / version" } dd { "{bundle}" } }
                 div { dt { "Result" } dd { class: "poam-current-fail", "{assessment_label(context.result)}" } }
                 div { dt { "Observation" } dd { class: "mono", "{observation_label}" } }
@@ -474,9 +603,9 @@ fn PoamLinkExistingModal(props: PoamLinkExistingModalProps) -> Element {
                 div { class: "modal-body poam-modal-body",
                     div { class: "filter-search poam-search", Icon { name: IconName::Search, size: 12 } input { class: "input focus-ring", autofocus: true, value: "{query}", placeholder: "Search by POA&M ID, title, or owner", disabled: pending().is_some(), oninput: move |event| query.set(event.value()) } }
                     p { class: "poam-muted", "Compatibility and the one-active-remediation rule are enforced by the server. Linking does not change the FAIL result." }
-                    if loading() { div { class: "poam-empty", "Searching compatible POA&M items..." } }
-                    if let Some(message) = error() { div { class: "sd-callout sd-callout-danger", "{message}" } }
-                    if !loading() && error().is_none() && results.read().is_empty() { div { class: "poam-empty", "No compatible active POA&M items match." } }
+                    if loading() { div { role: "status", aria_live: "polite", class: "poam-empty", "Searching compatible POA&M items..." } }
+                    if let Some(message) = error() { div { role: "alert", class: "sd-callout sd-callout-danger", "{message}" } }
+                    if !loading() && error().is_none() && results.read().is_empty() { div { role: "status", class: "poam-empty", "No compatible active POA&M items match." } }
                     div { class: "poam-picker-list",
                         for item in results.read().clone() {
                             {
@@ -490,7 +619,7 @@ fn PoamLinkExistingModal(props: PoamLinkExistingModalProps) -> Element {
                                 div { class: "poam-pick-head", span { class: "mono poam-human-id", "{item.human_id}" } StatusChip { poam: item.clone() } RiskChip { risk: item.risk } }
                                 strong { "{item.title}" }
                                 small { "{item.owner} · due {format_date(item.target_date)} · {item.finding_count} linked findings · revision {item.revision}" }
-                                if pending() == Some(item.id) { span { class: "poam-pending", "Linking..." } }
+                                if pending() == Some(item.id) { span { role: "status", aria_live: "polite", class: "poam-pending", "Linking..." } }
                             } }
                             }
                         }
@@ -502,19 +631,27 @@ fn PoamLinkExistingModal(props: PoamLinkExistingModalProps) -> Element {
     }
 }
 
+/// Configures the optional POA&M detail tray host.
 #[derive(Props, Clone, PartialEq)]
 pub struct PoamDetailHostProps {
+    /// Selects the POA&M to open, or hides the tray when absent.
     pub poam_id: Option<Uuid>,
+    /// Disables all mutations for read-only users.
     #[props(default)]
     pub viewer: bool,
+    /// Provides immutable assignment versions that can be referenced.
     #[props(default)]
     pub assignment_versions: Vec<AssignmentVersionCandidate>,
+    /// Receives requests to close the tray.
     pub on_close: EventHandler<()>,
+    /// Receives requests to open a linked finding.
     pub on_open_finding: EventHandler<FindingView>,
+    /// Receives reconciled server state after successful mutations.
     #[props(default)]
     pub on_changed: Option<EventHandler<PoamDetail>>,
 }
 
+/// Renders a keyed POA&M detail tray when `poam_id` is present.
 #[component]
 pub fn PoamDetailHost(props: PoamDetailHostProps) -> Element {
     let Some(poam_id) = props.poam_id else {
@@ -523,15 +660,22 @@ pub fn PoamDetailHost(props: PoamDetailHostProps) -> Element {
     rsx! { PoamDetailTray { key: "{poam_id}", poam_id, viewer: props.viewer, assignment_versions: props.assignment_versions, on_close: props.on_close, on_open_finding: props.on_open_finding, on_changed: props.on_changed } }
 }
 
+/// Configures the server-backed POA&M detail tray.
 #[derive(Props, Clone, PartialEq)]
 pub struct PoamDetailTrayProps {
+    /// Identifies the POA&M to load and mutate.
     pub poam_id: Uuid,
+    /// Disables all mutations for read-only users.
     #[props(default)]
     pub viewer: bool,
+    /// Provides immutable assignment versions that can be referenced.
     #[props(default)]
     pub assignment_versions: Vec<AssignmentVersionCandidate>,
+    /// Receives requests to close the tray.
     pub on_close: EventHandler<()>,
+    /// Receives requests to open a linked finding.
     pub on_open_finding: EventHandler<FindingView>,
+    /// Receives reconciled server state after successful mutations.
     #[props(default)]
     pub on_changed: Option<EventHandler<PoamDetail>>,
 }
@@ -604,6 +748,10 @@ fn append_history_page(current: &mut PoamDetail, page: PoamDetail, kind: History
     }
 }
 
+/// Renders a server-backed POA&M detail tray and lifecycle controls.
+///
+/// Server revisions govern all mutations. Stale or rejected operations reload
+/// authoritative state while preserving user drafts where retry is safe.
 #[component]
 pub fn PoamDetailTray(props: PoamDetailTrayProps) -> Element {
     let mut state = use_signal(|| DetailState::Loading);
@@ -628,6 +776,8 @@ pub fn PoamDetailTray(props: PoamDetailTrayProps) -> Element {
     let mut finding_loading = use_signal(|| false);
     let mut assignment_choice = use_signal(String::new);
     let mut history_loading = use_signal(|| None::<HistoryPageKind>);
+    let mut expanded = use_signal(|| false);
+    let mut preserve_drafts_on_retry = use_signal(|| false);
     let close = props.on_close;
 
     let mut load = move |reset_drafts: bool| {
@@ -665,6 +815,7 @@ pub fn PoamDetailTray(props: PoamDetailTrayProps) -> Element {
                                 .collect(),
                         );
                     }
+                    preserve_drafts_on_retry.set(false);
                     state.set(DetailState::Loaded(detail));
                 }
                 Err(err)
@@ -764,19 +915,19 @@ pub fn PoamDetailTray(props: PoamDetailTrayProps) -> Element {
         DetailState::Loading => {
             return tray_shell(
                 props.on_close,
-                rsx! { div { class: "poam-tray-state", "Loading POA&M..." } },
+                rsx! { div { role: "status", aria_live: "polite", class: "poam-tray-state", "Loading POA&M..." } },
             );
         }
         DetailState::NotVisible => {
             return tray_shell(
                 props.on_close,
-                rsx! { div { class: "poam-tray-state", h2 { "POA&M not visible" } p { "It may not exist or you may not have access to its scope." } } },
+                rsx! { div { role: "alert", class: "poam-tray-state", h2 { "POA&M not visible" } p { "It may not exist or you may not have access to its scope." } } },
             );
         }
         DetailState::Failed(error) => {
             return tray_shell(
                 props.on_close,
-                rsx! { div { class: "poam-tray-state", h2 { "Could not load POA&M" } p { "{error}" } button { class: "btn btn-ghost focus-ring", onclick: move |_| load(true), "Retry" } } },
+                rsx! { div { role: "alert", class: "poam-tray-state", h2 { "Could not load POA&M" } p { "{error}" } button { class: "btn btn-ghost focus-ring", onclick: move |_| load(!preserve_drafts_on_retry()), "Retry" } } },
             );
         }
         DetailState::Loaded(detail) => detail,
@@ -810,6 +961,7 @@ pub fn PoamDetailTray(props: PoamDetailTrayProps) -> Element {
     } else {
         completed_milestones * 100 / detail.milestones.len()
     };
+    let target_timing = target_timing_label(&detail.poam, chrono::Utc::now().date_naive());
     let finding_page_query = detail
         .findings_next_cursor
         .as_ref()
@@ -873,33 +1025,41 @@ pub fn PoamDetailTray(props: PoamDetailTrayProps) -> Element {
             message.set(Some(
                 "That finding is already linked to another active remediation plan.".to_string(),
             ));
+        } else if let Some(details) = err.close_precondition_details() {
+            let committed_revision = details.committed_revision;
+            close_details.set(Some(details));
+            preserve_drafts_on_retry.set(true);
+            message.set(Some(close_rejection_message(committed_revision)));
+            load(false);
         } else {
-            if let Some(details) = err.close_precondition_details() {
-                close_details.set(Some(details));
-            }
             message.set(Some(api_message(&err)));
         }
     };
 
     rsx! {
         div { class: "poam-tray-backdrop", onclick: move |_| if busy().is_none() { close.call(()) } }
-        aside { id: "poam-detail-dialog", class: "poam-tray", role: "dialog", aria_modal: "true", aria_labelledby: "poam-detail-title", tabindex: "-1", "data-testid": "poam-detail", "data-poam-id": "{detail.poam.id}", "data-poam-revision": "{detail.poam.revision}", onkeydown: move |event| if event.key() == Key::Escape && busy().is_none() { close.call(()) },
+        aside { id: "poam-detail-dialog", class: if expanded() { "poam-tray poam-tray-expanded" } else { "poam-tray" }, role: "dialog", aria_modal: "true", aria_labelledby: "poam-detail-title", tabindex: "-1", "data-testid": "poam-detail", "data-poam-id": "{detail.poam.id}", "data-poam-revision": "{detail.poam.revision}", onkeydown: move |event| if event.key() == Key::Escape && busy().is_none() { close.call(()) },
             DialogFocusRestore {}
             DialogFocusSentinel { dialog_id: "poam-detail-dialog".to_string(), boundary: DialogFocusBoundary::Last }
             header { class: "poam-tray-head",
                 div { class: "poam-tray-title", Icon { name: IconName::Gear, size: 18 } div { div { id: "poam-detail-title", class: "poam-title-line", span { class: "mono poam-human-id", "{detail.poam.human_id}" } StatusChip { poam: detail.poam.clone() } RiskChip { risk: detail.poam.risk } } p { "{detail.poam.title}" } } }
-                button { class: "btn-icon focus-ring", autofocus: true, aria_label: "Close", disabled: busy().is_some(), onclick: move |_| close.call(()), Icon { name: IconName::X, size: 16 } }
+                div { class: "poam-tray-head-actions",
+                    button { class: "btn btn-ghost xs focus-ring", aria_pressed: expanded(), onclick: move |_| expanded.toggle(), if expanded() { "Restore" } else { "Expand" } }
+                    button { class: "btn-icon focus-ring", autofocus: true, aria_label: "Close", disabled: busy().is_some(), onclick: move |_| close.call(()), Icon { name: IconName::X, size: 16 } }
+                }
             }
             div { class: "poam-tray-scroll",
-                if let Some(text) = message() { div { class: "poam-tray-alert sd-callout sd-callout-warn", Icon { name: IconName::Warn, size: 13 } div { "{text}" } } }
-                section { class: "poam-meta-grid",
+                if let Some(intent) = busy() { div { role: "status", aria_live: "polite", class: "poam-tray-alert sd-callout sd-callout-info", "{intent}..." } }
+                if let Some(text) = message() { div { role: "alert", class: "poam-tray-alert sd-callout sd-callout-warn", Icon { name: IconName::Warn, size: 13 } div { "{text}" } } }
+                section { class: "poam-meta-grid", aria_label: "Remediation metadata", "data-testid": "poam-metadata-summary",
                     div { span { "Owner" } strong { "{detail.poam.owner}" } }
-                    div { span { "Target" } strong { class: if detail.poam.overdue { "poam-overdue" } else { "" }, "{format_date(detail.poam.target_date)}" } }
+                    div { span { "Target completion" } strong { class: if detail.poam.overdue { "poam-overdue" } else { "" }, "{format_date(detail.poam.target_date)}" } if let Some(timing) = target_timing.as_deref() { em { class: if detail.poam.overdue { "poam-target-timing poam-overdue" } else { "poam-target-timing" }, "{timing}" } } }
                     div { span { "Opened" } strong { class: "mono", "{detail.poam.created_at.date_naive()}" } }
-                    div { span { "Milestones" } strong { class: "mono", "{completed_milestones}/{detail.milestones.len()}" } div { class: "poam-progress", span { style: "width:{progress}%" } } }
+                    div { span { "Milestones" } strong { class: "mono", "{completed_milestones} of {detail.milestones.len()} complete" } div { class: "poam-progress", aria_label: "Milestone progress: {progress}%", span { style: "width:{progress}%" } } }
                 }
+                LifecycleSection { detail: detail.clone(), readonly, close_details: close_details(), verification_loading: history_loading() == Some(HistoryPageKind::Verification), on_load_more_verification: move |_| if let Some(query) = verification_page_query.clone() { load_more(HistoryPageKind::Verification, query); }, on_transition: move |status| { let request = TransitionPoamRequest { revision, status, note: None }; busy.set(Some("Changing status".to_string())); spawn(async move { match poam_api::transition_poam(props.poam_id, &request).await { Ok(next) => reconcile(next), Err(err) => handle_error("changing status", err) } }); }, on_verify: move |_| { let request = RevisionRequest { revision }; busy.set(Some("Verifying".to_string())); spawn(async move { match poam_api::verify_poam(props.poam_id, &request).await { Ok(_) => { busy.set(None); load(true); }, Err(err) => handle_error("verifying remediation", err) } }); }, on_close: move |_| { let request = RevisionRequest { revision }; busy.set(Some("Closing".to_string())); spawn(async move { match poam_api::close_poam(props.poam_id, &request).await { Ok(next) => reconcile(next), Err(err) => handle_error("closing", err) } }); }, on_reopen: move |_| { let request = RevisionRequest { revision }; busy.set(Some("Reopening".to_string())); spawn(async move { match poam_api::reopen_poam(props.poam_id, &request).await { Ok(next) => reconcile(next), Err(err) => handle_error("reopening", err) } }); } }
                 section { class: "poam-tray-section",
-                    header { h3 { "Metadata" } button { class: "btn btn-ghost xs focus-ring", disabled: readonly, onclick: move |_| {
+                    header { h3 { "Plan details" } button { class: "btn btn-ghost xs focus-ring", disabled: readonly, onclick: move |_| {
                         let target_date = if target.read().trim().is_empty() { Ok(None) } else { NaiveDate::parse_from_str(target.read().trim(), "%Y-%m-%d").map(Some).map_err(|_| ()) };
                         let Ok(target_date) = target_date else { message.set(Some("Enter a valid target date.".to_string())); return; };
                         let request = UpdatePoamRequest { revision, title: Some(title.read().trim().to_string()), plan: Some(plan.read().to_string()), owner: Some(owner.read().trim().to_string()), target_date: Some(target_date), risk: Some(risk()) };
@@ -912,12 +1072,11 @@ pub fn PoamDetailTray(props: PoamDetailTrayProps) -> Element {
                         label { class: "field", span { "Risk" } select { class: "input focus-ring", value: "{risk:?}", disabled: readonly, onchange: move |event| risk.set(match event.value().as_str() { "High" => PoamRisk::High, "Low" => PoamRisk::Low, _ => PoamRisk::Medium }), option { value: "High", "CAT I - High" } option { value: "Medium", "CAT II - Medium" } option { value: "Low", "CAT III - Low" } } }
                     }
                 }
-                LifecycleSection { detail: detail.clone(), readonly, close_details: close_details(), verification_loading: history_loading() == Some(HistoryPageKind::Verification), on_load_more_verification: move |_| if let Some(query) = verification_page_query.clone() { load_more(HistoryPageKind::Verification, query); }, on_transition: move |status| { let request = TransitionPoamRequest { revision, status, note: None }; busy.set(Some("Changing status".to_string())); spawn(async move { match poam_api::transition_poam(props.poam_id, &request).await { Ok(next) => reconcile(next), Err(err) => handle_error("changing status", err) } }); }, on_verify: move |_| { let request = RevisionRequest { revision }; busy.set(Some("Verifying".to_string())); spawn(async move { match poam_api::verify_poam(props.poam_id, &request).await { Ok(_) => { busy.set(None); load(true); }, Err(err) => handle_error("verifying remediation", err) } }); }, on_close: move |_| { let request = RevisionRequest { revision }; busy.set(Some("Closing".to_string())); spawn(async move { match poam_api::close_poam(props.poam_id, &request).await { Ok(next) => reconcile(next), Err(err) => handle_error("closing", err) } }); }, on_reopen: move |_| { let request = RevisionRequest { revision }; busy.set(Some("Reopening".to_string())); spawn(async move { match poam_api::reopen_poam(props.poam_id, &request).await { Ok(next) => reconcile(next), Err(err) => handle_error("reopening", err) } }); } }
                 section { class: "poam-tray-section",
                     header { h3 { "Linked findings · {active_findings.len()}" } button { class: "btn btn-ghost xs focus-ring", disabled: readonly, onclick: move |_| finding_picker.toggle(), Icon { name: IconName::Link, size: 11 } "Link finding" } }
-                    if active_findings.is_empty() { div { class: "poam-empty", "No findings are linked." } }
-                    div { class: "poam-table-wrap", table { class: "sys-table compact sys-table-dense poam-findings-table", thead { tr { th { "Host" } th { "Policy" } th { "Current result" } th { "Actions" } } } tbody {
-                        for finding in active_findings.clone() { { let finding_for_navigation = finding.clone(); let finding_id = finding.id; rsx! { tr { key: "{finding.link_id}", "data-testid": "poam-linked-finding", "data-finding-id": "{finding.id}", td { class: "mono", "{finding.hostname}" } td { "{finding.policy_name}" } td { span { class: "poam-chip {result_class(finding.resolution_state)}", "{result_label(finding.resolution_state)}" } } td { class: "poam-row-actions", button { class: "btn btn-ghost xs focus-ring", onclick: move |_| props.on_open_finding.call(finding_for_navigation.clone()), "Evidence" } button { class: "btn-icon focus-ring", title: "Unlink finding", disabled: readonly, onclick: move |_| { busy.set(Some("Unlinking finding".to_string())); spawn(async move { match poam_api::unlink_poam_finding(props.poam_id, finding_id, revision).await { Ok(next) => reconcile(next), Err(err) => handle_error("unlinking finding", err) } }); }, Icon { name: IconName::X, size: 12 } } } } } } }
+                    if active_findings.is_empty() { div { role: "status", class: "poam-empty", "No findings are linked." } }
+                    div { class: "poam-table-wrap", table { class: "sys-table compact sys-table-dense poam-findings-table", thead { tr { th { "Host" } th { "Requirement" } th { "Policy" } th { "Current result" } th { "Actions" } } } tbody {
+                        for finding in active_findings.clone() { { let finding_for_navigation = finding.clone(); let finding_id = finding.id; let requirements = requirement_presentations(&finding.requirements, &finding.requirement_version_ids); rsx! { tr { key: "{finding.link_id}", "data-testid": "poam-linked-finding", "data-finding-id": "{finding.id}", td { class: "mono", "{finding.hostname}" } td { class: "poam-requirement", if requirements.is_empty() { span { class: "poam-muted", "Not provided by this finding" } } else { for requirement in requirements { div { class: "poam-requirement-context", if let Some(framework) = requirement.framework { span { class: "poam-requirement-framework", "{framework}" } } else { span { class: "poam-requirement-framework", "Unresolved requirement version" } } strong { class: "mono", "{requirement.control}" } if let Some(title) = requirement.title { span { class: "poam-requirement-title", "{title}" } } } } } } td { "{finding.policy_name}" } td { span { class: "poam-chip {result_class(finding.resolution_state)}", "{result_label(finding.resolution_state)}" } } td { class: "poam-row-actions", button { class: "btn btn-ghost xs focus-ring", onclick: move |_| props.on_open_finding.call(finding_for_navigation.clone()), "Evidence" } button { class: "btn-icon focus-ring", title: "Unlink finding", disabled: readonly, onclick: move |_| { busy.set(Some("Unlinking finding".to_string())); spawn(async move { match poam_api::unlink_poam_finding(props.poam_id, finding_id, revision).await { Ok(next) => reconcile(next), Err(err) => handle_error("unlinking finding", err) } }); }, Icon { name: IconName::X, size: 12 } } } } } } }
                     } } }
                     if detail.findings_has_more { button { class: "btn btn-ghost focus-ring", "data-testid": "poam-load-more-findings", disabled: history_loading().is_some(), onclick: move |_| if let Some(query) = finding_page_query.clone() { load_more(HistoryPageKind::Findings, query); }, if history_loading() == Some(HistoryPageKind::Findings) { "Loading…" } else { "Load more findings" } } }
                     if finding_picker() {
@@ -995,10 +1154,63 @@ fn LifecycleSection(props: LifecycleSectionProps) -> Element {
         section { class: "poam-tray-section",
             header { h3 { "Remediation status" } div { class: "poam-lifecycle-actions", if status == PoamStatus::Completed { button { class: "btn btn-ghost xs focus-ring", disabled: props.readonly, onclick: move |_| props.on_reopen.call(()), Icon { name: IconName::Rollback, size: 11 } "Reopen" } } else { button { class: "btn btn-ghost xs focus-ring", disabled: props.readonly, onclick: move |_| props.on_verify.call(()), "Verify now" } if status == PoamStatus::AwaitingVerification { button { class: "btn btn-primary xs focus-ring", disabled: props.readonly, onclick: move |_| props.on_close.call(()), Icon { name: IconName::Check, size: 11 } "Authoritative close" } } } } }
             if status != PoamStatus::Completed { div { class: "seg poam-status-seg", for choice in [PoamStatus::Open, PoamStatus::InProgress, PoamStatus::Blocked, PoamStatus::AwaitingVerification] { button { class: if status == choice { "active" } else { "" }, disabled: props.readonly || status == choice, onclick: move |_| props.on_transition.call(choice), "{status_label(choice)}" } } } }
-            if status == PoamStatus::AwaitingVerification { div { class: "sd-callout sd-callout-warn", Icon { name: IconName::Warn, size: 13 } div { strong { "Awaiting verification." } " Remediation is reported complete, but the finding result remains independent. Verify against current assessments, then use authoritative close." } } }
-            for (index, attempt) in props.detail.verification_attempts.clone().into_iter().enumerate() { div { class: "poam-verification", "data-testid": "poam-verification-result", strong { if index == 0 { "Latest verification · {attempt.outcome:?}" } else { "Earlier verification · {attempt.outcome:?}" } } span { class: "mono", "{attempt.attempted_at}" } for item in attempt.items.clone() { div { class: "poam-verification-item", "data-finding-id": "{item.finding_id}", span { class: "mono", "{item.finding_id}" } span { class: "poam-chip {result_class(item.result)}", "{result_label(item.result)}" } span { "{item.detail}" } if item.result == VerificationResult::Waiver { strong { "Closure basis: waiver" } } } } } }
+            if status == PoamStatus::AwaitingVerification { div { role: "status", class: "sd-callout sd-callout-warn", Icon { name: IconName::Warn, size: 13 } div { strong { "Awaiting verification." } " Remediation is reported complete, but the finding result remains independent. Verify against current assessments, then use authoritative close." } } }
+            for (index, attempt) in props.detail.verification_attempts.clone().into_iter().enumerate() {
+                div { class: "poam-verification", "data-testid": "poam-verification-result",
+                    div { class: "poam-verification-head",
+                        strong { if index == 0 { "Latest verification · {attempt.outcome:?}" } else { "Earlier verification · {attempt.outcome:?}" } }
+                        time { class: "mono", "{attempt.attempted_at}" }
+                    }
+                    for item in attempt.items.clone() {
+                        {
+                            let requirements = requirement_presentations(&item.requirements, &item.requirement_version_ids);
+                            let host = item.hostname.clone().unwrap_or_else(|| item.system_id.to_string());
+                            let policy = item.policy_name.clone().unwrap_or_else(|| item.policy_lineage_id.to_string());
+                            rsx! {
+                                div { class: "poam-verification-item", "data-finding-id": "{item.finding_id}",
+                                    div { class: "poam-verification-identity",
+                                        span { "System / host" }
+                                        strong { "{host}" }
+                                        span { "Policy" }
+                                        strong { "{policy}" }
+                                        if let Some(version) = item.policy_version {
+                                            span { "Policy version" }
+                                            code { class: "mono", "{version}" }
+                                        }
+                                        if requirements.is_empty() {
+                                            span { "Finding ID" }
+                                            code { class: "mono", "{item.finding_id}" }
+                                        } else {
+                                            for requirement in requirements {
+                                                {
+                                                    let framework = requirement.framework.unwrap_or_else(|| "Unresolved requirement version".to_string());
+                                                    rsx! {
+                                                        span { "Framework / release" }
+                                                        strong { "{framework}" }
+                                                        span { "Requirement" }
+                                                        strong { class: "mono", "{requirement.control}" }
+                                                        if let Some(title) = requirement.title {
+                                                            span { "Requirement title" }
+                                                            span { "{title}" }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    span { class: "poam-chip {result_class(item.result)}", "{result_label(item.result)}" }
+                                    p { "{item.detail}" }
+                                    if item.result == VerificationResult::Waiver {
+                                        strong { class: "poam-verification-basis", "Closure basis: waiver" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             if props.detail.verification_has_more { button { class: "btn btn-ghost focus-ring", "data-testid": "poam-load-more-verification", disabled: props.verification_loading, onclick: move |_| props.on_load_more_verification.call(()), if props.verification_loading { "Loading…" } else { "Load more verification attempts" } } }
-            if let Some(details) = props.close_details { div { class: "poam-close-details", "data-testid": "poam-close-rejection", strong { "Closure rejected for these findings" } for item in details.items { div { "data-finding-id": "{item.finding_id}", span { class: "mono", "{item.finding_id}" } span { class: "poam-chip {result_class(item.result)}", "{result_label(item.result)}" } if item.result == VerificationResult::Waiver { span { "Accepted basis: waiver" } } } } } }
+            if let Some(details) = props.close_details { div { role: "alert", class: "poam-close-details", "data-testid": "poam-close-rejection", strong { "Closure rejected for these findings" } for item in details.items { div { "data-finding-id": "{item.finding_id}", span { class: "mono", "{item.finding_id}" } span { class: "poam-chip {result_class(item.result)}", "{result_label(item.result)}" } if item.result == VerificationResult::Waiver { span { "Accepted basis: waiver" } } } } } }
         }
     }
 }
@@ -1067,11 +1279,14 @@ fn activity_description(activity: &ActivityView) -> String {
     }
 }
 
+/// Configures the aggregate finding and POA&M count strip.
 #[derive(Props, Clone, PartialEq)]
 pub struct PoamCountStripProps {
+    /// Provides server-computed counts for one scope.
     pub rollup: Rollup,
 }
 
+/// Renders authoritative finding coverage and POA&M lifecycle counts.
 #[component]
 pub fn PoamCountStrip(props: PoamCountStripProps) -> Element {
     let cells = [
@@ -1093,32 +1308,45 @@ pub fn PoamCountStrip(props: PoamCountStripProps) -> Element {
     rsx! { div { class: "stat-strip stat-strip-flush poam-count-strip", for (label, value, class) in cells { div { class: "stat", div { class: "stat-label", "{label}" } div { class: "stat-value {class}", "{value}" } } } } }
 }
 
+/// Configures a compact table of server-visible POA&M summaries.
 #[derive(Props, Clone, PartialEq)]
 pub struct PoamTableProps {
+    /// Provides POA&M rows in the caller's chosen server order.
     pub items: Vec<PoamSummary>,
+    /// Receives the selected POA&M identity.
     pub on_open: EventHandler<Uuid>,
+    /// Provides the status text rendered when no rows are present.
     #[props(default = "No POA&M items in this view.".to_string())]
     pub empty_note: String,
 }
 
+/// Renders an accessible POA&M summary table or its explicit empty state.
 #[component]
 pub fn PoamTable(props: PoamTableProps) -> Element {
     if props.items.is_empty() {
-        return rsx! { div { class: "poam-empty", "{props.empty_note}" } };
+        return rsx! { div { role: "status", class: "poam-empty", "{props.empty_note}" } };
     }
     rsx! { div { class: "poam-table-wrap", table { class: "sys-table compact sys-table-dense poam-table", thead { tr { th { "POA&M" } th { "Title" } th { "Risk" } th { "Status" } th { "Owner" } th { "Due" } } } tbody { for item in props.items { tr { key: "{item.id}", role: "button", tabindex: "0", aria_label: "Open {item.human_id}: {item.title}", "data-testid": "poam-row", "data-poam-id": "{item.id}", "data-poam-human-id": "{item.human_id}", onclick: move |_| props.on_open.call(item.id), onkeydown: move |event| { let key = event.key(); if key == Key::Enter || matches!(key, Key::Character(ref value) if value == " ") { event.prevent_default(); props.on_open.call(item.id); } }, td { class: "mono poam-human-id", "{item.human_id}" } td { strong { "{item.title}" } small { "{item.finding_count} linked findings" } } td { RiskChip { risk: item.risk } } td { StatusChip { poam: item.clone() } } td { "{item.owner}" } td { class: if item.overdue { "mono poam-overdue" } else { "mono" }, "{format_date(item.target_date)}" } } } } } } }
 }
 
+/// Configures the POA&M section for one system detail view.
 #[derive(Props, Clone, PartialEq)]
 pub struct SystemPoamSectionProps {
+    /// Contains the system hostname used in the section heading.
     pub hostname: String,
+    /// Provides server-computed counts for the system.
     pub rollup: Rollup,
+    /// Provides all server-visible POA&M rows for client-side filtering.
     pub items: Vec<PoamSummary>,
+    /// Selects the lifecycle subset displayed in the table.
     pub filter: PoamFilter,
+    /// Receives filter changes so the parent owns selection state.
     pub on_filter: EventHandler<PoamFilter>,
+    /// Receives the selected POA&M identity.
     pub on_open: EventHandler<Uuid>,
 }
 
+/// Renders system-scoped POA&M counts, filters, and remediation rows.
 #[component]
 pub fn SystemPoamSection(props: SystemPoamSectionProps) -> Element {
     let filtered = props
@@ -1142,13 +1370,18 @@ fn FilterButtons(props: FilterButtonsProps) -> Element {
     rsx! { div { class: "seg poam-filter", for option in [PoamFilter::Open, PoamFilter::Overdue, PoamFilter::Awaiting, PoamFilter::Closed, PoamFilter::All] { { let count = match option { PoamFilter::Open => props.rollup.active, PoamFilter::Overdue => props.rollup.overdue, PoamFilter::Awaiting => props.rollup.awaiting_verification, PoamFilter::Closed => props.rollup.completed, PoamFilter::All => props.rollup.total }; rsx! { button { class: if props.filter == option { "active" } else { "" }, onclick: move |_| props.on_filter.call(option), "{option.label()}" span { class: "mono", "{count}" } } } } } } }
 }
 
+/// Configures a bundle-scoped POA&M roll-up.
 #[derive(Props, Clone, PartialEq)]
 pub struct BundlePoamRollupProps {
+    /// Contains the bundle name used in the roll-up heading.
     pub bundle_name: String,
+    /// Provides server-computed counts for the bundle.
     pub rollup: Rollup,
+    /// Receives the lifecycle filter selected by a roll-up action.
     pub on_open_list: EventHandler<PoamFilter>,
 }
 
+/// Renders bundle-scoped finding coverage and POA&M navigation actions.
 #[component]
 pub fn BundlePoamRollup(props: BundlePoamRollupProps) -> Element {
     rsx! { section { class: "poam-bundle-rollup", div { class: "poam-rollup-title", Icon { name: IconName::Gear, size: 14 } div { strong { "POA&M roll-up" } small { "Authoritative finding coverage for {props.bundle_name}" } } } div { class: "poam-rollup-counts", div { strong { class: "poam-count-fail", "{props.rollup.open_findings}" } span { "Open findings" } } div { strong { class: "poam-count-info", "{props.rollup.on_poam_findings}" } span { "On POA&M" } } div { strong { class: "poam-count-warn", "{props.rollup.no_poam_findings}" } span { "No POA&M" } } button { onclick: move |_| props.on_open_list.call(PoamFilter::Overdue), strong { class: "poam-count-fail", "{props.rollup.overdue}" } span { "Overdue" } } button { onclick: move |_| props.on_open_list.call(PoamFilter::Awaiting), strong { class: "poam-count-awaiting", "{props.rollup.awaiting_verification}" } span { "Awaiting" } } button { onclick: move |_| props.on_open_list.call(PoamFilter::Closed), strong { class: "poam-count-ok", "{props.rollup.completed}" } span { "Closed" } } button { class: "btn btn-ghost xs focus-ring", onclick: move |_| props.on_open_list.call(PoamFilter::All), "{props.rollup.total} POA&M items" Icon { name: IconName::ArrowRight, size: 11 } } } } }
@@ -1209,5 +1442,70 @@ mod tests {
         assert!(PoamFilter::Awaiting.includes(&awaiting));
         assert!(PoamFilter::Closed.includes(&closed));
         assert!(!PoamFilter::Open.includes(&closed));
+    }
+
+    #[test]
+    fn target_timing_reports_remaining_and_overdue_days() {
+        let today = NaiveDate::from_ymd_opt(2026, 8, 31).unwrap();
+        let mut item = summary(PoamStatus::Open, false);
+        item.target_date = NaiveDate::from_ymd_opt(2026, 9, 5);
+        assert_eq!(
+            target_timing_label(&item, today).as_deref(),
+            Some("5d remaining")
+        );
+        item.target_date = NaiveDate::from_ymd_opt(2026, 8, 29);
+        assert_eq!(
+            target_timing_label(&item, today).as_deref(),
+            Some("2d overdue")
+        );
+    }
+
+    #[test]
+    fn requirement_labels_prefer_authoritative_metadata_without_fabrication() {
+        let requirement_version_id = Uuid::from_u128(1);
+        let metadata = FindingRequirementView {
+            requirement_version_id,
+            external_id: "AC-2".into(),
+            title: Some("Account Management".into()),
+            framework_id: Uuid::from_u128(2),
+            framework_name: "NIST SP 800-53".into(),
+            framework_version_id: Uuid::from_u128(3),
+            framework_version: "Rev. 5".into(),
+            framework_title: None,
+        };
+        assert_eq!(
+            requirement_presentations(&[metadata], &[requirement_version_id]),
+            vec![RequirementPresentation {
+                framework: Some("NIST SP 800-53 · Rev. 5".into()),
+                control: "AC-2".into(),
+                title: Some("Account Management".into()),
+            }]
+        );
+        assert_eq!(
+            requirement_presentations(&[], &[requirement_version_id]),
+            vec![RequirementPresentation {
+                framework: None,
+                control: requirement_version_id.to_string(),
+                title: None,
+            }]
+        );
+        assert!(requirement_presentations(&[], &[]).is_empty());
+    }
+
+    #[test]
+    fn close_rejection_message_identifies_committed_revision_and_preserved_drafts() {
+        let message = close_rejection_message(9);
+        assert!(message.contains("revision 9"));
+        assert!(message.contains("drafts are preserved"));
+    }
+
+    #[test]
+    fn responsive_verification_and_disabled_controls_have_scoped_styles() {
+        let css = include_str!("../../../assets/app.css");
+        assert!(css.contains(".poam-verification-head"));
+        assert!(css.contains(".poam-verification-item p, .poam-verification-basis"));
+        assert!(css.contains("--cf-disabled-control-text: #9ca3af"));
+        assert!(css.contains("--cf-disabled-control-text: #4b5563"));
+        assert!(css.contains(".poam-tray :is(button, input, select, textarea):disabled"));
     }
 }

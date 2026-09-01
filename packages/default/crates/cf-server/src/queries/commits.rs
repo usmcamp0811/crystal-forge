@@ -352,7 +352,7 @@ pub async fn mark_commit_evaluation_started(
     commit_id: i32,
 ) -> Result<EvalStartOutcome> {
     let mut tx = pool.begin().await?;
-    let attempt = sqlx::query_as::<_, (i32,)>(
+    let attempt = sqlx::query_as::<_, (uuid::Uuid, i32)>(
         r#"
         WITH next_attempt AS (
             SELECT id
@@ -366,13 +366,13 @@ pub async fn mark_commit_evaluation_started(
         SET status = 'in_progress', started_at = NOW(), updated_at = NOW()
         FROM next_attempt
         WHERE ea.id = next_attempt.id
-        RETURNING ea.attempt_number
+        RETURNING ea.id, ea.attempt_number
         "#,
     )
     .bind(commit_id)
     .fetch_optional(&mut *tx)
     .await?;
-    let Some((attempt,)) = attempt else {
+    let Some((attempt_id, attempt)) = attempt else {
         tx.rollback().await?;
         return Ok(EvalStartOutcome::NoLongerPending);
     };
@@ -411,6 +411,11 @@ pub async fn mark_commit_evaluation_started(
         tx.rollback().await?;
         return Ok(EvalStartOutcome::NoLongerPending);
     }
+
+    crate::services::composite_enforcement::reset_eval_passed_assessments_for_started_attempt_in_tx(
+        &mut tx, commit_id, attempt_id, attempt,
+    )
+    .await?;
 
     tx.commit().await?;
     Ok(EvalStartOutcome::Started { attempt })
@@ -627,23 +632,9 @@ pub async fn mark_commit_evaluation_failed(
         return Ok(EvalFailureOutcome::SupersededOrCancelled);
     };
 
-    sqlx::query(
-        r#"
-        UPDATE composite_eval_attempt_rule_results
-        SET outcome = 'error', detail = $2,
-            evidence = evidence || jsonb_build_object(
-                'terminal_outcome', 'error', 'failure_class', $3
-            ),
-            evaluated_at = NOW()
-        WHERE evaluation_attempt_id = $1
-          AND outcome = 'not_checked'
-          AND superseded_at IS NULL
-        "#,
+    crate::services::composite_enforcement::fail_eval_passed_attempt_in_tx(
+        &mut tx, failed.id, error, class_name,
     )
-    .bind(failed.id)
-    .bind(error)
-    .bind(class_name)
-    .execute(&mut *tx)
     .await?;
 
     let policy = sqlx::query_as::<_, AutomaticRetryPolicy>(

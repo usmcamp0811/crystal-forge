@@ -149,12 +149,13 @@ impl PolicyCategory {
         }
     }
 
+    /// Returns the theme-aware semantic CSS color for this category.
     pub fn color(self) -> &'static str {
         match self {
-            Self::Deployment => "#60a5fa",
-            Self::Pipeline => "#a78bfa",
-            Self::Rollout => "#fbbf24",
-            Self::Security => "#f87171",
+            Self::Deployment => "var(--cf-policy-blue)",
+            Self::Pipeline => "var(--cf-policy-violet)",
+            Self::Rollout => "var(--cf-policy-amber)",
+            Self::Security => "var(--cf-policy-red)",
         }
     }
 

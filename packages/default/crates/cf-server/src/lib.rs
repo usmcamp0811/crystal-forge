@@ -1,3 +1,10 @@
+//! Provides Crystal Forge server APIs, domain models, persistence, and
+//! services.
+//!
+//! The server crate owns authorization, durable state, policy enforcement, and
+//! coordination with agents and builders. Public modules expose these
+//! server-side boundaries to workspace binaries and integration tests.
+
 pub mod api;
 pub mod auth;
 pub mod builder;

@@ -1,12 +1,19 @@
+//! Provides persistence queries for POA&M resources and evidence views.
+//!
+//! Callers supply actor visibility inputs explicitly. This module applies those
+//! filters in SQL and returns persistence models; lifecycle authorization and
+//! mutation policy remain in the POA&M service layer.
+
 use anyhow::Result;
 use chrono::NaiveDate;
 use sqlx::{PgPool, Postgres, QueryBuilder, Transaction};
 use uuid::Uuid;
 
 use crate::models::poam::{
-    ActivityView, AssignmentReferenceView, CompatibleFinding, DashboardSummary, FindingView,
-    HistoryCursor, MilestoneView, Page, PoamDetail, PoamListQuery, PoamSummary, Rollup,
-    VerificationAttemptView, VerificationItemView, WaiverListQuery, WaiverView,
+    ActivityView, AssignmentReferenceView, CompatibleFinding, DashboardSummary,
+    FindingRequirementView, FindingView, HistoryCursor, MilestoneView, Page, PoamDetail,
+    PoamListQuery, PoamSummary, Rollup, VerificationAttemptView, VerificationItemView,
+    WaiverListQuery, WaiverView,
 };
 
 const SUMMARY_COLUMNS: &str = r#"
@@ -79,6 +86,13 @@ impl RelatedPoamSummary {
     }
 }
 
+/// Loads visible assessment-to-finding identities in request order.
+///
+/// Missing or inaccessible assessments are omitted.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot execute or decode the query.
 pub async fn visible_assessment_findings(
     pool: &PgPool,
     assessment_ids: &[Uuid],
@@ -102,6 +116,13 @@ pub async fn visible_assessment_findings(
     .await?)
 }
 
+/// Loads visible stable finding identities in request order.
+///
+/// Missing or inaccessible findings are omitted.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot execute or decode the query.
 pub async fn visible_findings(
     pool: &PgPool,
     finding_ids: &[Uuid],
@@ -123,6 +144,15 @@ pub async fn visible_findings(
     .await?)
 }
 
+/// Loads active and historical POA&M summaries for visible findings.
+///
+/// Active relationships are always returned. When `history_page` is present,
+/// each finding receives at most one extra historical row for continuation
+/// detection beyond the requested page.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot execute or decode the query.
 pub async fn finding_poam_summaries(
     pool: &PgPool,
     finding_ids: &[Uuid],
@@ -163,6 +193,14 @@ pub async fn finding_poam_summaries(
         .collect())
 }
 
+/// Loads visible active POA&Ms compatible with a finding policy lineage.
+///
+/// Results exclude POA&Ms already related to the finding and include one extra
+/// row for continuation detection.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot execute or decode the query.
 pub async fn compatible_poams(
     pool: &PgPool,
     finding_id: Uuid,
@@ -209,6 +247,13 @@ pub async fn compatible_poams(
     Ok(builder.build_query_as().fetch_all(pool).await?)
 }
 
+/// Loads visible immutable assignment-version IDs in request order.
+///
+/// Missing or inaccessible versions are omitted.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot execute or decode the query.
 pub async fn visible_assignment_versions(
     pool: &PgPool,
     assignment_version_ids: &[Uuid],
@@ -231,6 +276,14 @@ pub async fn visible_assignment_versions(
     .await?)
 }
 
+/// Loads POA&M summaries related to visible assignment versions.
+///
+/// When `history_page` is present, each assignment receives at most one extra
+/// row for continuation detection beyond the requested page.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot execute or decode the query.
 pub async fn assignment_poam_summaries(
     pool: &PgPool,
     assignment_version_ids: &[Uuid],
@@ -276,6 +329,11 @@ pub async fn assignment_poam_summaries(
         .collect())
 }
 
+/// Loads environment IDs assigned to a user.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot execute or decode the query.
 pub async fn user_environment_ids(pool: &PgPool, user_id: Uuid) -> Result<Vec<Uuid>> {
     Ok(sqlx::query_scalar(
         "SELECT environment_id FROM user_environment_memberships WHERE user_id = $1",
@@ -285,6 +343,13 @@ pub async fn user_environment_ids(pool: &PgPool, user_id: Uuid) -> Result<Vec<Uu
     .await?)
 }
 
+/// Returns whether a POA&M exists and is visible in the supplied actor scope.
+///
+/// Administrators are checked only for resource existence.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot execute or decode the query.
 pub async fn poam_visible(
     pool: &PgPool,
     poam_id: Uuid,
@@ -308,6 +373,14 @@ pub async fn poam_visible(
     .await?)
 }
 
+/// Loads one page of visible POA&M summaries.
+///
+/// The query applies persistence-native filters and returns one extra row only
+/// internally to derive continuation metadata.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot execute or decode the query.
 pub async fn list(
     pool: &PgPool,
     query: &PoamListQuery,
@@ -408,6 +481,47 @@ pub async fn list(
     })
 }
 
+/// Loads display metadata for immutable requirement versions in one batch.
+///
+/// Missing requirement versions are omitted. Callers retain the original UUID
+/// arrays as the compatibility and identity contract.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot execute or decode the query.
+pub async fn finding_requirement_metadata(
+    tx: &mut Transaction<'_, Postgres>,
+    requirement_version_ids: &[Uuid],
+) -> Result<Vec<FindingRequirementView>> {
+    sqlx::query_as::<_, FindingRequirementView>(
+        r#"SELECT requirement.id AS requirement_version_id,
+                  requirement.external_id,requirement.title,
+                  framework.id AS framework_id,framework.name AS framework_name,
+                  framework_version.id AS framework_version_id,
+                  framework_version.version AS framework_version,
+                  framework_version.title AS framework_title
+           FROM compliance_requirement_versions requirement
+           JOIN compliance_framework_versions framework_version
+             ON framework_version.id=requirement.framework_version_id
+           JOIN compliance_frameworks framework
+             ON framework.id=framework_version.framework_id
+           WHERE requirement.id=ANY($1)
+           ORDER BY framework.name,framework_version.version,requirement.external_id,requirement.id"#,
+    )
+    .bind(requirement_version_ids)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(Into::into)
+}
+
+/// Loads a visible POA&M and its bounded history collections.
+///
+/// Returns `None` only when the POA&M row is absent. The service layer checks
+/// resource visibility and refreshes current evidence.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot execute or decode any detail query.
 pub async fn detail(
     tx: &mut Transaction<'_, Postgres>,
     poam_id: Uuid,
@@ -447,7 +561,8 @@ pub async fn detail(
                closure_item.effective_set_digest,closure_item.effective_config_digest,
                COALESCE(closure_item.bundle_ids,'{}'::uuid[]) AS bundle_ids,
                COALESCE(closure_item.bundle_version_ids,'{}'::uuid[]) AS bundle_version_ids,
-               COALESCE(closure_item.requirement_version_ids,'{}'::uuid[]) AS requirement_version_ids
+                COALESCE(closure_item.requirement_version_ids,'{}'::uuid[]) AS requirement_version_ids,
+                '[]'::jsonb AS requirements
         FROM poam_finding_links l JOIN poam_findings f ON f.id=l.finding_id
         JOIN systems s ON s.id=f.system_id JOIN deployment_policies policy ON policy.id=f.policy_lineage_id
         LEFT JOIN poam_verification_attempts closure_attempt
@@ -510,12 +625,16 @@ pub async fn detail(
         })
         .flatten();
     let attempt_ids = attempt_rows.iter().map(|row| row.0).collect::<Vec<_>>();
-    let verification_items=sqlx::query_as::<_,VerificationItemView>(r#"SELECT item.attempt_id,item.finding_id,item.system_id,item.policy_lineage_id,item.result,
+    let verification_items=sqlx::query_as::<_,VerificationItemView>(r#"SELECT item.attempt_id,item.finding_id,item.system_id,
+        COALESCE(item.system_hostname,system.hostname) AS hostname,item.policy_lineage_id,
+        COALESCE(policy_version.name,policy.name) AS policy_name,policy_version.version AS policy_version,item.result,
         item.policy_version_id,item.assessment_id,item.derivation_id,item.target_store_path,item.effective_set_digest,item.effective_config_digest,
         item.effective_config,item.observed_outcome,item.observation_token,item.observation_snapshot,item.assessment_updated_at,item.bundle_ids,item.bundle_version_ids,
-        item.requirement_version_ids,item.waiver_id,item.observed_at,item.detail
+        item.requirement_version_ids,'[]'::jsonb AS requirements,item.waiver_id,item.observed_at,item.detail
         FROM poam_verification_items item
         JOIN systems system ON system.id=item.system_id
+        JOIN deployment_policies policy ON policy.id=item.policy_lineage_id
+        LEFT JOIN deployment_policy_versions policy_version ON policy_version.id=item.policy_version_id
         WHERE item.attempt_id=ANY($1) AND ($2 OR system.environment_id=ANY($3))
         ORDER BY item.finding_id"#)
         .bind(&attempt_ids).bind(is_admin).bind(environment_ids).fetch_all(&mut **tx).await?;
@@ -597,6 +716,13 @@ pub async fn detail(
     }))
 }
 
+/// Loads visible findings that share a POA&M's policy lineage.
+///
+/// The service layer validates current evidence before exposing candidates.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot execute or decode the query.
 pub async fn compatible_findings(
     pool: &PgPool,
     poam_id: Uuid,
@@ -624,6 +750,11 @@ pub async fn compatible_findings(
         .fetch_all(pool).await?)
 }
 
+/// Loads aggregate POA&M dashboard counts for an actor scope.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot execute or decode the query.
 pub async fn dashboard(
     pool: &PgPool,
     today: NaiveDate,
@@ -646,6 +777,11 @@ pub async fn dashboard(
     .await?)
 }
 
+/// Loads a page of visible overdue or awaiting-verification POA&Ms.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot execute or decode the query.
 pub async fn watchlist(
     pool: &PgPool,
     today: NaiveDate,
@@ -688,6 +824,14 @@ pub async fn watchlist(
     })
 }
 
+/// Loads POA&M aggregate counts for visible requested systems.
+///
+/// Finding-state counts are initialized to zero and are populated from current
+/// authoritative evidence by the service layer.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot execute or decode the query.
 pub async fn system_rollups(
     pool: &PgPool,
     system_ids: &[Uuid],
@@ -716,6 +860,13 @@ pub async fn system_rollups(
       .bind(system_ids).bind(today).bind(is_admin).bind(envs).fetch_all(pool).await?)
 }
 
+/// Initializes rollup rows for requested bundle lineages that exist.
+///
+/// The service layer resolves assignment scope and populates all counts.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot execute or decode the query.
 pub async fn bundle_rollups(
     pool: &PgPool,
     bundle_ids: &[Uuid],
@@ -737,6 +888,14 @@ pub async fn bundle_rollups(
     .await?)
 }
 
+/// Inserts matching POA&M activity and administrative audit events.
+///
+/// Both events use the caller's transaction and must commit or roll back
+/// together with the mutation they describe.
+///
+/// # Errors
+///
+/// Returns an error when either event cannot be inserted.
 pub async fn insert_activity_and_audit(
     tx: &mut Transaction<'_, Postgres>,
     poam_id: Uuid,
@@ -761,6 +920,13 @@ pub async fn insert_activity_and_audit(
     Ok(())
 }
 
+/// Loads one page of waiver records.
+///
+/// Actor authorization is enforced by the service layer.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot execute or decode the query.
 pub async fn list_waivers(pool: &PgPool, query: &WaiverListQuery) -> Result<Page<WaiverView>> {
     let limit = query.limit.unwrap_or(25).clamp(1, 100);
     let offset = query.offset.unwrap_or(0).max(0);
@@ -801,6 +967,11 @@ pub async fn list_waivers(pool: &PgPool, query: &WaiverListQuery) -> Result<Page
     })
 }
 
+/// Loads one waiver record by ID.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot execute or decode the query.
 pub async fn waiver(pool: &PgPool, id: Uuid) -> Result<Option<WaiverView>> {
     Ok(sqlx::query_as::<_, WaiverView>(
         r#"SELECT waiver.id,waiver.finding_id,finding.system_id,

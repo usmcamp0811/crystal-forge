@@ -222,6 +222,7 @@ SQL
       --test policy_counts_defect \
       --test policy_editor_phase2 \
       --test poam_workflows \
+      --test task433_assignment_visibility \
       --test task433_csrf \
       --test time_window_policy_test \
       -- --test-threads=1
@@ -232,6 +233,9 @@ SQL
       -- --ignored --test-threads=1
     cargo test --offline --package cf-server --lib \
       handlers::api::setup_wizard::tests::setup_progress_counts_production_policy_bundle_and_poam_rows \
+      -- --ignored --test-threads=1
+    cargo test --offline --package cf-server --lib \
+      queries::compliance::tests::policy_requirement_identity_hydration_uses_exact_versions \
       -- --ignored --test-threads=1
     cargo test --offline --package cf-server --lib \
       queries::user_notifications::tests:: \

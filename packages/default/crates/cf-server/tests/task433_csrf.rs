@@ -12,7 +12,7 @@ use crystal_forge::auth::session::{
 };
 use crystal_forge::handlers::{
     agent_request::CFState,
-    api::{deployment_policies, framework_requirements, systems},
+    api::{compliance, deployment_policies, framework_requirements, systems},
 };
 use crystal_forge::models::auth_identity::AuthRole;
 use crystal_forge::queries::{
@@ -95,6 +95,38 @@ async fn server(pool: PgPool) -> String {
         .route(
             "/api/v1/systems/:id/rollback-generation",
             post(systems::rollback_system_generation),
+        )
+        .route(
+            "/api/v1/policy-versions/:id/trust",
+            post(compliance::trust_policy_version),
+        )
+        .route(
+            "/api/v1/policy-versions/:id/publish",
+            post(compliance::publish_policy_version),
+        )
+        .route(
+            "/api/v1/policies/:id/drafts",
+            post(compliance::create_policy_draft),
+        )
+        .route(
+            "/api/v1/compliance/bundle-versions/:id/trust",
+            post(compliance::trust_bundle_version),
+        )
+        .route(
+            "/api/v1/compliance/bundle-versions/:id/publish",
+            post(compliance::publish_bundle_version),
+        )
+        .route(
+            "/api/v1/compliance/bundles/:id/drafts",
+            post(compliance::create_bundle_draft),
+        )
+        .route(
+            "/api/v1/compliance/assignments",
+            post(compliance::create_assignment),
+        )
+        .route(
+            "/api/v1/compliance/assignments/:id",
+            put(compliance::update_assignment).delete(compliance::delete_assignment),
         )
         .with_state(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -351,4 +383,168 @@ async fn matching_csrf_preserves_existing_role_and_resource_checks(pool: PgPool)
     .await
     .expect("send admin bulk-delete request");
     assert_eq!(admin_response.status(), reqwest::StatusCode::OK);
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ComplianceMutationState {
+    policy_versions: i64,
+    reviewed_policy_versions: i64,
+    accepted_policy_versions: i64,
+    bundle_versions: i64,
+    reviewed_bundle_versions: i64,
+    accepted_bundle_versions: i64,
+    assignments: i64,
+    active_assignments: i64,
+    assignment_versions: i64,
+    audit_events: i64,
+}
+
+async fn compliance_mutation_state(pool: &PgPool) -> ComplianceMutationState {
+    let policy_versions = sqlx::query_scalar("SELECT COUNT(*) FROM deployment_policy_versions")
+        .fetch_one(pool)
+        .await
+        .expect("count policy versions");
+    let trusted_policy_versions = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM deployment_policy_versions WHERE trust_state != 'untrusted'",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("count reviewed policy versions");
+    let accepted_policy_versions = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM deployment_policy_versions WHERE publication_state = 'accepted'",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("count accepted policy versions");
+    let bundle_versions = sqlx::query_scalar("SELECT COUNT(*) FROM compliance_bundle_versions")
+        .fetch_one(pool)
+        .await
+        .expect("count bundle versions");
+    let reviewed_bundle_versions = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM compliance_bundle_versions WHERE trust_state != 'untrusted'",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("count reviewed bundle versions");
+    let accepted_bundle_versions = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM compliance_bundle_versions WHERE publication_state = 'accepted'",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("count accepted bundle versions");
+    let assignments = sqlx::query_scalar("SELECT COUNT(*) FROM compliance_bundle_assignments")
+        .fetch_one(pool)
+        .await
+        .expect("count assignments");
+    let active_assignments =
+        sqlx::query_scalar("SELECT COUNT(*) FROM compliance_bundle_assignments WHERE active")
+            .fetch_one(pool)
+            .await
+            .expect("count active assignments");
+    let assignment_versions =
+        sqlx::query_scalar("SELECT COUNT(*) FROM compliance_bundle_assignment_versions")
+            .fetch_one(pool)
+            .await
+            .expect("count assignment versions");
+    let audit_events = sqlx::query_scalar("SELECT COUNT(*) FROM admin_audit_events")
+        .fetch_one(pool)
+        .await
+        .expect("count audit events");
+    ComplianceMutationState {
+        policy_versions,
+        reviewed_policy_versions: trusted_policy_versions,
+        accepted_policy_versions,
+        bundle_versions,
+        reviewed_bundle_versions,
+        accepted_bundle_versions,
+        assignments,
+        active_assignments,
+        assignment_versions,
+        audit_events,
+    }
+}
+
+#[sqlx::test]
+async fn task433_policy_and_assignment_mutations_require_matching_csrf_before_state_changes(
+    pool: PgPool,
+) {
+    let base = server(pool.clone()).await;
+    let client = Client::new();
+    let admin = session(&pool, AuthRole::Admin).await;
+    let id = Uuid::new_v4();
+    let before = compliance_mutation_state(&pool).await;
+    let mutations = [
+        (
+            Method::POST,
+            format!("{base}/api/v1/policy-versions/{id}/trust"),
+            json!({"trusted":true}),
+        ),
+        (
+            Method::POST,
+            format!("{base}/api/v1/compliance/bundle-versions/{id}/trust"),
+            json!({"trusted":true}),
+        ),
+        (
+            Method::POST,
+            format!("{base}/api/v1/policy-versions/{id}/publish"),
+            json!({}),
+        ),
+        (
+            Method::POST,
+            format!("{base}/api/v1/policies/{id}/drafts"),
+            json!({}),
+        ),
+        (
+            Method::POST,
+            format!("{base}/api/v1/compliance/bundle-versions/{id}/publish"),
+            json!({}),
+        ),
+        (
+            Method::POST,
+            format!("{base}/api/v1/compliance/bundles/{id}/drafts"),
+            json!({}),
+        ),
+        (
+            Method::POST,
+            format!("{base}/api/v1/compliance/assignments"),
+            json!({
+                "bundle_version_id":id,
+                "scope_type":"environment",
+                "scope_id":id
+            }),
+        ),
+        (
+            Method::PUT,
+            format!("{base}/api/v1/compliance/assignments/{id}"),
+            json!({"expected_version_id":id}),
+        ),
+        (
+            Method::DELETE,
+            format!("{base}/api/v1/compliance/assignments/{id}"),
+            json!(null),
+        ),
+    ];
+
+    for (method, url, body) in mutations {
+        for (cookie, header) in [(None, None), (Some(CSRF), Some("mismatched-csrf"))] {
+            let response = request(
+                &client,
+                method.clone(),
+                url.clone(),
+                &admin,
+                cookie,
+                header,
+                body.clone(),
+            )
+            .send()
+            .await
+            .expect("send TASK-433 mutation without matching CSRF");
+            assert_csrf_rejected(response).await;
+            assert_eq!(
+                compliance_mutation_state(&pool).await,
+                before,
+                "CSRF rejection must precede all policy and assignment state changes"
+            );
+        }
+    }
 }

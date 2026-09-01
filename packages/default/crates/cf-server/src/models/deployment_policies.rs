@@ -1,3 +1,10 @@
+//! Defines deployment-policy configuration, validation, and evaluator
+//! metadata.
+//!
+//! Composite policy versions are immutable typed rule sets. Validation
+//! protects persistence boundaries. Evaluation preserves each rule's phase and
+//! outcome so an error or missing observation cannot become a pass.
+
 use serde::{Deserialize, Serialize};
 use sqlx::types::chrono::{DateTime, Utc};
 use std::collections::{BTreeMap, HashMap};
@@ -7,6 +14,7 @@ use std::time::{Duration, Instant};
 use tracing::warn;
 use uuid::Uuid;
 
+/// Identifies the typed heterogeneous deployment-policy format.
 pub const COMPOSITE_POLICY_TYPE: &str = "composite";
 
 /// Maximum number of rules accepted in one composite policy version.
@@ -15,42 +23,64 @@ pub const COMPOSITE_POLICY_TYPE: &str = "composite";
 /// rows, and authorization work for each immutable policy version.
 pub const MAX_COMPOSITE_RULES: usize = 64;
 
+/// Defines one immutable composite policy version.
+///
+/// Valid configurations use schema version 1, `all` mode, unique non-nil rule
+/// IDs, and between 1 and [`MAX_COMPOSITE_RULES`] rules.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CompositePolicyConfig {
+    /// Selects the serialized composite schema; the only valid value is 1.
     pub schema_version: u8,
+    /// Selects how constituent outcomes form the aggregate outcome.
     pub mode: CompositeRuleMode,
+    /// Preserves the ordered immutable rules in this policy version.
     pub rules: Vec<CompositeRule>,
 }
 
+/// Selects the aggregate semantics for a composite policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CompositeRuleMode {
+    /// Requires every constituent rule to pass.
     All,
 }
 
+/// Associates a stable rule identity with one typed rule configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CompositeRule {
+    /// Identifies the rule within every assessment of this policy version.
     pub id: Uuid,
+    /// Defines the rule's evidence source and comparison semantics.
     #[serde(flatten)]
     pub rule: CompositeRuleKind,
 }
 
+/// Defines the supported evidence and enforcement rule kinds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "config", rename_all = "snake_case")]
 pub enum CompositeRuleKind {
+    /// Compares one evaluated NixOS option with a typed expected value.
     NixosOption(NixosOptionRuleConfig),
+    /// Requires each named package in direct `environment.systemPackages` entries.
     PackagesInstalled(PackagesInstalledRuleConfig),
+    /// Prohibits each named package in direct `environment.systemPackages` entries.
     PackagesAbsent(PackagesAbsentRuleConfig),
+    /// Evaluates a bounded custom Nix Boolean expression.
     CustomEval(CustomEvalRuleConfig),
+    /// Limits CVEs at or above a configured severity.
     CveBlock(CveBlockRuleConfig),
+    /// Requires the configuration evaluation to finish successfully.
     EvalPassed(EmptyRuleConfig),
+    /// Requires Nix to resolve the exact requested immutable revision.
     PinRequired(EmptyRuleConfig),
+    /// Restricts deployment to a validated local-time window.
     TimeWindow(TimeWindowRuleConfig),
 }
 
 impl CompositeRuleKind {
+    /// Returns the stable snake-case kind used in persistence and evidence.
     pub fn kind(&self) -> &'static str {
         match self {
             Self::NixosOption(_) => "nixos_option",
@@ -65,102 +95,156 @@ impl CompositeRuleKind {
     }
 }
 
+/// Classifies the expected JSON and Nix value for an option comparison.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NixosOptionValueType {
+    /// Requires a Boolean value.
     Boolean,
+    /// Requires a string selected from an option enum.
     Enum,
+    /// Requires a signed integer value.
     Integer,
+    /// Requires a string value.
     String,
+    /// Requires a string whose line boundaries are significant.
     Lines,
+    /// Requires a string when metadata cannot infer a safer type.
     Unknown,
 }
 
+/// Configures a typed comparison against one NixOS option.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NixosOptionRuleConfig {
+    /// Gives a dotted Nix attribute path with optional JSON-quoted segments.
     pub path: String,
+    /// Gives the comparison operator allowed by `value_type`.
     pub operator: String,
+    /// Determines the accepted operators and JSON value shape.
     pub value_type: NixosOptionValueType,
+    /// Gives the expected value and must match `value_type`.
     pub value: serde_json::Value,
 }
 
+/// Configures package identities that must be directly installed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PackagesInstalledRuleConfig {
+    /// Lists unique package `pname` values to require.
     pub packages: Vec<String>,
 }
 
+/// Configures package identities that must be absent from direct installation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PackagesAbsentRuleConfig {
+    /// Lists package `pname` values to prohibit.
     pub packages: Vec<String>,
 }
 
+/// Represents a rule kind that has no additional configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct EmptyRuleConfig {}
 
+/// Configures one contained custom Nix evaluation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CustomEvalRuleConfig {
+    /// Gives a Nix expression evaluated with `config` in scope.
     pub expression: String,
+    /// Gives operator-facing detail when the expression fails.
     pub message: String,
 }
 
+/// Selects the minimum CVE severity counted by a CVE block rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CveBlockSeverity {
+    /// Counts critical CVEs.
     Critical,
+    /// Counts high and critical CVEs.
     High,
+    /// Counts medium, high, and critical CVEs.
     Medium,
+    /// Counts all known severity levels.
     Low,
 }
 
+/// Configures a maximum CVE count at or above one severity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CveBlockRuleConfig {
+    /// Selects the minimum counted severity.
     pub severity: CveBlockSeverity,
+    /// Gives the largest count that still passes.
     pub max_allowed: u32,
 }
 
+/// Configures an allowed deployment window in one IANA timezone.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TimeWindowRuleConfig {
+    /// Lists normalized weekdays on which the window applies.
     pub days: Vec<String>,
+    /// Gives the inclusive local start time in `HH:MM` form.
     pub from: String,
+    /// Gives the local end time in `HH:MM` form.
     pub to: String,
+    /// Gives the IANA timezone used to interpret local times.
     pub tz: String,
 }
 
+/// Identifies the lifecycle phase that produced a rule outcome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EnforcementPhase {
+    /// Indicates configuration evaluation evidence.
     Evaluation,
+    /// Indicates vulnerability-scan evidence.
     Scan,
+    /// Indicates deployment-time evidence.
     Deployment,
 }
 
+/// Represents a normalized constituent rule result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EnforcementOutcome {
+    /// Indicates authoritative evidence satisfied the rule.
     Pass,
+    /// Indicates authoritative evidence violated the rule.
     Fail,
+    /// Indicates the rule could not evaluate its available evidence.
     Error,
+    /// Indicates that the required phase or evidence has not completed.
     NotChecked,
 }
 
+/// Preserves one rule's normalized result and source-specific evidence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompositeRuleOutcome {
+    /// Identifies the immutable rule within its policy version.
     pub rule_id: Uuid,
+    /// Gives the stable serialized rule kind.
     pub kind: String,
+    /// Identifies the phase that produced this outcome.
     pub phase: EnforcementPhase,
+    /// Gives the normalized outcome without collapsing errors into failures.
     pub outcome: EnforcementOutcome,
+    /// Indicates whether this outcome prevents enforcement from proceeding.
     pub blocking: bool,
+    /// Explains the outcome for operators and audit records.
     pub detail: String,
+    /// Preserves phase-specific facts used to derive the outcome.
     pub evidence: serde_json::Value,
 }
 
+/// Returns the conservative aggregate of constituent composite outcomes.
+///
+/// Precedence is error, fail, not checked, then pass. An empty input is not
+/// checked, so absent evidence never produces a pass.
 pub fn aggregate_composite_outcomes(outcomes: &[CompositeRuleOutcome]) -> EnforcementOutcome {
     if outcomes
         .iter()
@@ -188,6 +272,7 @@ pub fn aggregate_composite_outcomes(outcomes: &[CompositeRuleOutcome]) -> Enforc
     }
 }
 
+/// Returns the canonical semantic digest for a composite configuration.
 pub fn composite_config_digest(config: &CompositePolicyConfig) -> String {
     let value = serde_json::to_value(config).unwrap_or_else(|_| serde_json::Value::Null);
     crate::compliance::canonical::semantic_digest(&value)
@@ -328,7 +413,7 @@ fn validate_custom_eval_syntax(expressions: &[&str]) -> Result<(), String> {
     Err(format!("invalid Nix expression syntax: {diagnostic}"))
 }
 
-/// Validate the exact stored policy type/config pairing at every persistence boundary.
+/// Validates the exact policy type and config at each persistence boundary.
 /// Non-composite policy validation remains on its legacy paths.
 fn decode_policy_type_config(
     policy_type: &str,
@@ -480,9 +565,15 @@ fn decode_policy_type_config(
     Ok(Some(composite))
 }
 
-/// Decode and structurally validate persisted policy data without invoking any
-/// external parser. Runtime authorization, scanning, and evaluation paths must
-/// use this function; immutable write/import boundaries use the full validator.
+/// Decodes and structurally validates persisted policy data without a parser.
+///
+/// Runtime authorization, scanning, and evaluation paths must use this
+/// function. Immutable write and import boundaries use the full validator.
+///
+/// # Errors
+///
+/// Returns an error when a composite configuration violates its schema, rule
+/// identity, type, operator, value, package-name, or time-window constraints.
 pub fn deserialize_policy_type_config(
     policy_type: &str,
     config: &serde_json::Value,
@@ -490,7 +581,15 @@ pub fn deserialize_policy_type_config(
     decode_policy_type_config(policy_type, config, false)
 }
 
-/// Fully validate policy input at immutable create, update, and import boundaries.
+/// Fully validates policy input at immutable persistence boundaries.
+///
+/// Custom expressions are parsed in one bounded Nix subprocess in addition to
+/// the structural checks performed by [`deserialize_policy_type_config`].
+///
+/// # Errors
+///
+/// Returns a structural validation error, a Nix syntax error, an error starting
+/// or collecting the parser, or a parser timeout.
 pub fn validate_policy_type_config(
     policy_type: &str,
     config: &serde_json::Value,
@@ -798,10 +897,14 @@ pub enum DeploymentPolicy {
     CveThreshold { config: CveThresholdConfig },
     /// Typed heterogeneous policy executed by the phase-specific composite
     /// evaluator. Legacy single-expression helpers cannot represent this variant.
-    Composite { config: CompositePolicyConfig },
+    Composite {
+        /// Defines the immutable typed rules evaluated by their owning phases.
+        config: CompositePolicyConfig,
+    },
 }
 
 impl DeploymentPolicy {
+    /// Returns whether a failed policy blocks deployment.
     pub fn is_strict(&self) -> bool {
         match self {
             DeploymentPolicy::RequireCrystalForgeAgent { strict }
@@ -817,6 +920,7 @@ impl DeploymentPolicy {
         }
     }
 
+    /// Returns an operator-facing summary of the configured policy behavior.
     pub fn description(&self) -> String {
         match self {
             DeploymentPolicy::RequireCrystalForgeAgent { .. } => {
@@ -1235,6 +1339,7 @@ pub struct CveCheckOutcome {
 #[derive(Debug, Clone)]
 pub struct AssignedPolicyCheckResult {
     pub passed: Option<bool>,
+    /// Preserves each constituent result for composite policies.
     pub composite_outcomes: Vec<CompositeRuleOutcome>,
 }
 
@@ -1261,10 +1366,14 @@ pub struct PolicyCheckResult {
     pub cve_checks: Vec<CveCheckOutcome>,
 }
 
+/// Classifies a configuration evaluation that did not produce normal metadata.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EvaluationTerminalOutcome {
+    /// Indicates that evaluation completed with a confirmed policy failure.
     ConfirmedFailure,
+    /// Indicates that infrastructure or evaluation execution failed.
     Error,
+    /// Indicates that evaluation has not reached a terminal outcome.
     Pending,
 }
 
@@ -1279,6 +1388,10 @@ impl EvaluationTerminalOutcome {
 }
 
 impl PolicyCheckResult {
+    /// Creates composite rule evidence for an abnormal evaluation state.
+    ///
+    /// Evaluation-dependent rules become error or not checked as appropriate;
+    /// scan and deployment rules remain absent until their owning phase runs.
     pub fn for_evaluation_terminal(
         system_name: String,
         assigned: &[AssignedPolicy],
@@ -1361,16 +1474,16 @@ impl PolicyCheckResult {
         }
     }
 
-    /// Create a `PolicyCheckResult` from Nix-output JSON using the per-configuration
-    /// `AssignedPolicy` list (stable-key path).
+    /// Creates a policy result from Nix JSON and stable assigned-policy identities.
     ///
     /// Uses `policy_result_key(policy_id)` for CF-agent and package checks, and
     /// `rule.field_name` for multi-rule custom checks (existing convention).
     ///
-    /// Returns `None` when a Nix-evaluated policy's expected key is absent from
-    /// the JSON (indicating an expression-generation/parser mismatch rather than
-    /// a normal policy failure).  The caller should treat `None` as an
-    /// infrastructure error for that configuration.
+    /// # Errors
+    ///
+    /// Returns an error when required evaluator metadata is absent, has the
+    /// wrong type, or contradicts the unconditional agent result. Constituent
+    /// composite evaluation errors remain contained rule outcomes.
     pub fn from_assigned(
         system_name: String,
         policies_json: &serde_json::Value,
@@ -1799,8 +1912,10 @@ impl PolicyCheckResult {
         })
     }
 
-    /// Create a new PolicyCheckResult from parsed JSON and policies (Nix-evaluated path).
-    /// Legacy flat-policies path; kept for existing tests.
+    /// Creates a policy result through the legacy flat-policy compatibility path.
+    ///
+    /// Composite policies cannot retain stable identities through this path and
+    /// therefore produce a blocking compatibility failure.
     pub fn from_json(
         system_name: String,
         policies_json: &serde_json::Value,
@@ -1991,7 +2106,10 @@ impl PolicyCheckResult {
 // Nix expression builder
 // ============================================================================
 
-/// Produce a Nix double-quoted string expression without permitting interpolation.
+/// Returns a Nix double-quoted string without permitting interpolation.
+///
+/// A NUL byte produces a Nix `throw` expression because Nix strings cannot
+/// represent NUL.
 pub fn nix_string_pub(value: &str) -> String {
     nix_string(value)
 }
@@ -2033,6 +2151,7 @@ pub fn policy_result_key(policy_id: &Uuid) -> String {
     format!("policy_{}", policy_id.to_string().replace('-', ""))
 }
 
+/// Returns the stable evaluator metadata key for one composite rule.
 pub fn composite_rule_result_key(policy_id: &Uuid, rule_id: &Uuid) -> String {
     format!("composite_{}_{}", policy_id.simple(), rule_id.simple())
 }
@@ -2094,8 +2213,10 @@ fn composite_evaluation_expression(rule: &CompositeRuleKind) -> Option<String> {
     ))
 }
 
-/// Build the Nix field lines for one configuration's assigned policies (standalone path).
-/// Returns a vec of `"  key = expr;"` strings (2-space indent for standalone expression).
+/// Builds standalone Nix field lines for one configuration's assigned policies.
+///
+/// Each line uses two-space indentation. Composite rules use stable policy and
+/// rule IDs so results cannot collide across policies.
 pub fn build_policy_fields_for_config_standalone(assigned: &[AssignedPolicy]) -> Vec<String> {
     build_policy_fields_for_config_indented(assigned, "  ")
 }

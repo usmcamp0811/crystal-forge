@@ -938,6 +938,67 @@ pub(crate) struct PolicyRow {
     pub compliance_metadata: Value,
 }
 
+#[derive(Debug, FromRow)]
+struct PolicyRequirementIdentityRow {
+    policy_version_id: Uuid,
+    requirement_version_id: Uuid,
+    external_id: String,
+    title: Option<String>,
+    framework_id: Uuid,
+    framework_name: String,
+    framework_version_id: Uuid,
+    framework_version: String,
+    framework_title: Option<String>,
+}
+
+async fn load_policy_requirement_identities(
+    pool: &PgPool,
+    policy_version_ids: &[Uuid],
+) -> Result<HashMap<Uuid, Vec<crate::api::models::ComplianceRequirementIdentity>>> {
+    if policy_version_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let rows = sqlx::query_as::<_, PolicyRequirementIdentityRow>(
+        r#"SELECT mapping.policy_version_id,
+                  requirement.id AS requirement_version_id,
+                  requirement.external_id,requirement.title,
+                  framework.id AS framework_id,framework.name AS framework_name,
+                  framework_version.id AS framework_version_id,
+                  framework_version.version AS framework_version,
+                  framework_version.title AS framework_title
+           FROM policy_requirement_mappings mapping
+           JOIN compliance_requirement_versions requirement
+             ON requirement.id=mapping.requirement_version_id
+           JOIN compliance_framework_versions framework_version
+             ON framework_version.id=requirement.framework_version_id
+           JOIN compliance_frameworks framework
+             ON framework.id=framework_version.framework_id
+           WHERE mapping.policy_version_id=ANY($1)
+           ORDER BY mapping.policy_version_id,framework.name,
+                    framework_version.version,requirement.external_id,requirement.id"#,
+    )
+    .bind(policy_version_ids)
+    .fetch_all(pool)
+    .await?;
+    let mut identities =
+        HashMap::<Uuid, Vec<crate::api::models::ComplianceRequirementIdentity>>::new();
+    for row in rows {
+        identities.entry(row.policy_version_id).or_default().push(
+            crate::api::models::ComplianceRequirementIdentity {
+                requirement_version_id: row.requirement_version_id,
+                external_id: row.external_id,
+                title: row.title,
+                framework_id: row.framework_id,
+                framework_name: row.framework_name,
+                framework_version_id: row.framework_version_id,
+                framework_version: row.framework_version,
+                framework_title: row.framework_title,
+            },
+        );
+    }
+    Ok(identities)
+}
+
 fn bundle_from_row(row: BundleRow) -> ComplianceBundleSummary {
     let required_envs = row
         .env_ids
@@ -2763,6 +2824,13 @@ pub async fn get_system_evidence(
     {
         composite_results.entry(version_id).or_insert(result);
     }
+    let policy_version_ids = policies
+        .iter()
+        .filter_map(|policy| policy.version_id)
+        .collect::<Vec<_>>();
+    // PERFORMANCE: Resolve mappings for every control in one exact-version query.
+    let mut requirement_identities =
+        load_policy_requirement_identities(pool, &policy_version_ids).await?;
     let mut controls = Vec::with_capacity(policies.len());
     for policy in policies {
         let version_id = policy.version_id;
@@ -2793,6 +2861,24 @@ pub async fn get_system_evidence(
         control.finding_observation = matches!(control.status, ComplianceControlStatus::Fail)
             .then_some(finding_observation)
             .flatten();
+        if let Some(version_id) = version_id {
+            control.requirements = requirement_identities
+                .remove(&version_id)
+                .unwrap_or_default();
+            control.framework_mapping = control
+                .requirements
+                .iter()
+                .map(|requirement| {
+                    format!(
+                        "{} {} · {}",
+                        requirement.framework_name,
+                        requirement.framework_version,
+                        requirement.external_id
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+        }
         controls.push(control);
     }
 
@@ -4770,6 +4856,7 @@ fn control_evidence_with_resolved_status(
             }),
         }],
         framework_mapping: String::new(),
+        requirements: Vec::new(),
         composite_result: None,
         finding_id: None,
         finding_observation: None,
@@ -4897,6 +4984,7 @@ fn control_evidence(system: &SystemRow, policy: PolicyRow) -> ComplianceControlE
             }),
         }],
         framework_mapping,
+        requirements: Vec::new(),
         composite_result: None,
         finding_id: None,
         finding_observation: None,
@@ -6164,6 +6252,81 @@ mod tests {
              got: {:?}",
             ev.framework_mapping
         );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires the repository-provided isolated PostgreSQL database"]
+    async fn policy_requirement_identity_hydration_uses_exact_versions(pool: PgPool) {
+        let framework_id = Uuid::new_v4();
+        let framework_version_id = Uuid::new_v4();
+        let requirement_id = Uuid::new_v4();
+        let requirement_version_id = Uuid::new_v4();
+        let policy_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO deployment_policies(name,policy_type,config) VALUES('Mapped evidence policy','custom_check','{}') RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let policy_version_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO deployment_policy_versions(policy_id,version,name,policy_type,config,semantic_digest) VALUES($1,'7','Mapped evidence policy','custom_check','{}','mapped-evidence') RETURNING id",
+        )
+        .bind(policy_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO compliance_frameworks(id,name,canonical_source_key) VALUES($1,'NIST SP 800-53',$2)",
+        )
+        .bind(framework_id)
+        .bind(format!("mapped-evidence-{framework_id}"))
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO compliance_framework_versions(id,framework_id,version,canonical_release_key,title) VALUES($1,$2,'Rev. 5',$3,'Security and Privacy Controls')",
+        )
+        .bind(framework_version_id)
+        .bind(framework_id)
+        .bind(format!("mapped-release-{framework_version_id}"))
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO compliance_requirements(id,framework_id,canonical_requirement_key) VALUES($1,$2,'AC-2')",
+        )
+        .bind(requirement_id)
+        .bind(framework_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO compliance_requirement_versions(id,requirement_id,framework_version_id,external_id,title,kind) VALUES($1,$2,$3,'AC-2','Account Management','control')",
+        )
+        .bind(requirement_version_id)
+        .bind(requirement_id)
+        .bind(framework_version_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO policy_requirement_mappings(policy_version_id,requirement_version_id,relationship,coverage,provenance,trust_state) VALUES($1,$2,'implements','full','manual','trusted')",
+        )
+        .bind(policy_version_id)
+        .bind(requirement_version_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let hydrated =
+            load_policy_requirement_identities(&pool, &[policy_version_id, Uuid::new_v4()])
+                .await
+                .unwrap();
+        assert_eq!(hydrated.len(), 1);
+        let identity = &hydrated[&policy_version_id][0];
+        assert_eq!(identity.framework_name, "NIST SP 800-53");
+        assert_eq!(identity.framework_version, "Rev. 5");
+        assert_eq!(identity.external_id, "AC-2");
+        assert_eq!(identity.title.as_deref(), Some("Account Management"));
     }
 
     #[test]

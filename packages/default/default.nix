@@ -92,11 +92,10 @@ let
   # offline query cache from the workspace root, so `.sqlx` at the workspace
   # root is a required build input for the server and must survive filtering.
   #
-  # COMPATIBILITY: `crates/cf-server/.sqlx` also exists but is a strict subset
-  # of the workspace-root cache and is missing five queries. Excluding the root
-  # cache fails the build with "set `DATABASE_URL` to use query macros online".
-  # Do not remove this entry without first proving the crate-level cache is
-  # complete. See TASK-451 for reconciling the two caches.
+  # COMPATIBILITY: `crates/cf-server/.sqlx` also exists for commands that use
+  # the crate manifest directly. The two caches currently contain the same
+  # query metadata, but the component workspace still resolves offline queries
+  # from this workspace-root path. See TASK-451 for cache reconciliation.
   #
   # The agent, builder, and keygen crates expand no query macros, so they do
   # not receive the query cache and are not invalidated when it changes.

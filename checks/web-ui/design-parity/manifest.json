@@ -1,6 +1,6 @@
 {
-  "version": 1,
-  "$schema_note": "Design-parity manifest for the web-ui check. Maps each primary view to (a) the design example's internal view name (rendered headlessly from docs/design/CrystalForge with the shared fixture) and (b) the real Dioxus route. The harness screenshots both sides for each theme and computes a NON-BLOCKING design-drift metric per view/theme. See docs/web-ui-check.md and docs/design/CrystalForge/fixtures/README.md.",
+  "version": 2,
+  "$schema_note": "Design-parity manifest for the web-ui check. Each target navigates the authoritative design example through its real UI, validates the expected surface marker, and maps it to the Dioxus route and optional interaction path. Drift remains non-blocking, but a missing or wrong surface is reported and is never saved as a valid target.",
   "settings": {
     "viewport": {
       "width": 1920,
@@ -8,7 +8,7 @@
     },
     "themes": ["dark", "light"],
     "blocking": false,
-    "note": "Design drift is reported as a directional gauge only; React (design example) and Dioxus (real UI) are not expected to be pixel-identical. This never fails the web-ui check.",
+    "note": "Design drift is reported as a directional gauge only; React (design example) and Dioxus (real UI) are not expected to be pixel-identical. Target navigation and identity validation are required even though visual drift is non-blocking.",
     "compare": {
       "method": "imagemagick-rmse-normalized",
       "resizeWidth": 960,
@@ -18,81 +18,154 @@
   "views": [
     {
       "name": "dashboard",
-      "designView": "dashboard",
       "route": "/",
+      "designMarker": { "selector": ".content[data-screen-label='dashboard']" },
+      "dioxusMarker": { "selector": "[data-testid='dashboard']" },
       "designRef": "docs/design/CrystalForge/components/DashboardView.jsx"
     },
     {
       "name": "systems",
-      "designView": "systems",
       "route": "/systems",
+      "designActions": [{ "type": "click", "selector": ".nav-item", "text": "Systems" }],
+      "designMarker": { "selector": ".content[data-screen-label='systems']" },
+      "dioxusMarker": { "selector": ".page-title", "text": "Systems" },
       "designRef": "docs/design/CrystalForge/components/Systems.jsx"
     },
     {
+      "name": "system-detail",
+      "route": "/systems",
+      "designActions": [
+        { "type": "click", "selector": ".nav-item", "text": "Systems", "waitFor": ".sys-card" },
+        { "type": "click", "selector": ".sys-card", "waitFor": ".side-panel" },
+        { "type": "click", "selector": "button", "text": "Open full detail", "waitFor": ".sd-root[data-screen-label='SystemDetail']" }
+      ],
+      "designMarker": { "selector": ".sd-root[data-screen-label='SystemDetail']" },
+      "dioxusActions": [
+        { "type": "click", "selector": "[data-testid='systems-cards'] .sys-card", "waitFor": "[data-testid='systems-side-panel']" },
+        { "type": "click", "selector": "button", "text": "Open full detail", "waitFor": "[data-testid='system-detail']" }
+      ],
+      "dioxusMarker": { "selector": "[data-testid='system-detail']" },
+      "designRef": "docs/design/CrystalForge/components/SystemDetail.jsx"
+    },
+    {
       "name": "builds",
-      "designView": "builds",
       "route": "/builds",
+      "designActions": [{ "type": "click", "selector": ".nav-item", "text": "Builds" }],
+      "designMarker": { "selector": ".content[data-screen-label='builds']" },
+      "dioxusMarker": { "selector": ".page-title", "text": "Builds" },
       "designRef": "docs/design/CrystalForge/components/BuildsView.jsx"
     },
     {
       "name": "evaluations",
-      "designView": "evals",
       "route": "/evaluations",
+      "designActions": [{ "type": "click", "selector": ".nav-item", "text": "Evaluations" }],
+      "designMarker": { "selector": ".content[data-screen-label='evals']" },
+      "dioxusMarker": { "selector": ".page-title", "text": "Evaluations" },
       "designRef": "docs/design/CrystalForge/components/EvalsView.jsx"
     },
     {
       "name": "flakes",
-      "designView": "flakes",
       "route": "/flakes",
+      "designActions": [{ "type": "click", "selector": ".nav-item", "text": "Flakes" }],
+      "designMarker": { "selector": ".content[data-screen-label='flakes']" },
+      "dioxusMarker": { "selector": ".page-title", "text": "Flakes" },
       "designRef": "docs/design/CrystalForge/components/FlakesView.jsx"
     },
     {
       "name": "environments",
-      "designView": "environments",
       "route": "/environments",
+      "designActions": [{ "type": "click", "selector": ".nav-item", "text": "Environments" }],
+      "designMarker": { "selector": ".content[data-screen-label='environments']" },
+      "dioxusMarker": { "selector": ".page-title", "text": "Environments" },
       "designRef": "docs/design/CrystalForge/components/EnvironmentsView.jsx"
     },
     {
       "name": "caches",
-      "designView": "caches",
       "route": "/caches",
+      "designActions": [{ "type": "click", "selector": ".nav-item", "text": "Caches" }],
+      "designMarker": { "selector": ".content[data-screen-label='caches']" },
+      "dioxusMarker": { "selector": ".page-title", "text": "Caches" },
       "designRef": "docs/design/CrystalForge/components/CachesView.jsx"
     },
     {
       "name": "builders",
-      "designView": "builders",
       "route": "/builders",
+      "designActions": [{ "type": "click", "selector": ".nav-item", "text": "Builders" }],
+      "designMarker": { "selector": ".content[data-screen-label='builders']" },
+      "dioxusMarker": { "selector": ".page-title", "text": "Builders" },
       "designRef": "docs/design/CrystalForge/components/BuildersView.jsx"
     },
     {
       "name": "policies",
-      "designView": "policies",
       "route": "/deployment-policies",
+      "designActions": [{ "type": "click", "selector": ".nav-item", "text": "Policies" }],
+      "designMarker": { "selector": ".content[data-screen-label='policies']" },
+      "dioxusMarker": { "selector": ".page-title", "text": "Policies" },
       "designRef": "docs/design/CrystalForge/components/PoliciesView.jsx"
     },
     {
       "name": "compliance",
-      "designView": "compliance",
       "route": "/compliance",
+      "designActions": [{ "type": "click", "selector": ".nav-item", "text": "Compliance" }],
+      "designMarker": { "selector": ".content[data-screen-label='compliance']" },
+      "dioxusMarker": { "selector": ".page-title", "text": "Compliance" },
+      "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx"
+    },
+    {
+      "name": "compliance-evidence",
+      "route": "/compliance",
+      "designActions": [
+        { "type": "click", "selector": ".nav-item", "text": "Compliance", "waitFor": ".content[data-screen-label='compliance']" },
+        { "type": "click", "selector": ".content .sys-table tbody tr", "waitFor": ".fl-tray .sys-table tbody tr" },
+        { "type": "click", "selector": ".fl-tray .sys-table tbody tr", "waitFor": ".fl-tray input[placeholder='Filter controls…']" }
+      ],
+      "designMarker": { "selector": ".fl-tray input[placeholder='Filter controls…']" },
+      "dioxusActions": [
+        { "type": "click", "selector": "[data-testid='compliance-bundle-row']", "waitFor": "#compliance-bundle-dialog" },
+        { "type": "click", "selector": "[data-testid='bundle-systems-card'] tbody tr[role='button']", "waitFor": "#compliance-evidence-dialog" }
+      ],
+      "dioxusMarker": { "selector": "#compliance-evidence-dialog" },
       "designRef": "docs/design/CrystalForge/components/ComplianceView.jsx"
     },
     {
       "name": "cves",
-      "designView": "cves",
       "route": "/cves",
+      "designActions": [{ "type": "click", "selector": ".nav-item", "text": "CVEs" }],
+      "designMarker": { "selector": ".content[data-screen-label='cves']" },
+      "dioxusMarker": { "selector": ".page-title", "text": "CVEs" },
       "designRef": "docs/design/CrystalForge/components/CvesView.jsx"
     },
     {
       "name": "scanning",
-      "designView": "scanning",
       "route": "/scanning",
+      "designActions": [{ "type": "click", "selector": ".nav-item", "text": "Scanning" }],
+      "designMarker": { "selector": ".content[data-screen-label='scanning']" },
+      "dioxusMarker": { "selector": ".page-title", "text": "Scanning" },
       "designRef": "docs/design/CrystalForge/components/ScanningView.jsx"
     },
     {
       "name": "admin",
-      "designView": "admin",
       "route": "/admin",
+      "designActions": [{ "type": "click", "selector": ".nav-item", "text": "Server" }],
+      "designMarker": { "selector": ".content[data-screen-label='admin']" },
+      "dioxusMarker": { "selector": ".page-title", "text": "Server Management" },
       "designRef": "docs/design/CrystalForge/components/AdminView.jsx"
+    },
+    {
+      "name": "notifications",
+      "route": "/",
+      "designActions": [{ "type": "click", "selector": "[aria-label='Notifications']", "waitFor": ".notif-panel" }],
+      "designMarker": { "selector": ".notif-panel", "text": "Notifications" },
+      "dioxusActions": [{ "type": "click", "selector": "[data-testid='topbar-notifications-button']", "waitFor": "[data-testid='topbar-notifications-panel']" }],
+      "dioxusMarker": { "selector": "[data-testid='topbar-notifications-panel']" },
+      "designRef": "docs/design/CrystalForge/components/Shell.jsx"
+    },
+    {
+      "name": "setup-coach",
+      "route": "/",
+      "designMarker": { "selector": ".coach[aria-label='Setup Coach']", "text": "Track a POA&M" },
+      "dioxusMarker": { "selector": "[data-testid='onboarding-coach-panel']" },
+      "designRef": "docs/design/CrystalForge/components/SetupCoach.jsx"
     }
   ]
 }

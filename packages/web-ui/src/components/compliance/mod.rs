@@ -1,3 +1,9 @@
+//! Reusable compliance catalog, roll-up, and evidence components.
+//!
+//! Components render server-derived compliance and POA&M state. They delegate
+//! persistence, authorization, route ownership, and finding identity decisions
+//! to their callers and the server APIs.
+
 use dioxus::prelude::*;
 
 use crate::Route;
@@ -35,8 +41,10 @@ pub struct BundleCatalogProps {
     pub selected_version_id: Option<uuid::Uuid>,
     #[props(default)]
     pub on_select_version: EventHandler<uuid::Uuid>,
+    /// Provides server-computed POA&M counts for each bundle lineage.
     #[props(default)]
     pub poam_rollups: Vec<poam_api::Rollup>,
+    /// Indicates that POA&M roll-ups are still loading.
     #[props(default)]
     pub poam_rollups_loading: bool,
 }
@@ -512,18 +520,25 @@ pub struct EvidenceDrawerProps {
     pub bundle_name: String,
     #[props(default)]
     pub system: Option<ComplianceSystemRollup>,
+    /// Contains the selected immutable bundle version label.
     #[props(default)]
     pub bundle_version: Option<String>,
+    /// Provides immutable assignment versions available as POA&M references.
     #[props(default)]
     pub assignment_versions: Vec<AssignmentVersionCandidate>,
+    /// Contains a non-fatal failure to resolve assignment reference context.
     #[props(default)]
     pub assignment_context_error: Option<String>,
+    /// Disables POA&M mutations for read-only users.
     #[props(default)]
     pub viewer: bool,
+    /// Selects the policy shown when the drawer opens.
     #[props(default)]
     pub initial_policy_id: Option<uuid::Uuid>,
+    /// Receives the authoritative policy ID selected in the navigator.
     #[props(default)]
     pub on_active_policy: EventHandler<uuid::Uuid>,
+    /// Receives server-backed POA&M workflow events from finding controls.
     #[props(default)]
     pub on_poam_event: EventHandler<FindingPoamEvent>,
     pub on_close: EventHandler<()>,
@@ -674,6 +689,11 @@ fn reconciled_active(active: usize, visible: &[usize]) -> Option<usize> {
         .or_else(|| visible.first().copied())
 }
 
+/// Renders an accessible evidence drawer for one system and bundle version.
+///
+/// Evidence and finding IDs come from the server response. The drawer owns
+/// presentation state such as grouping, filtering, expansion, and active-row
+/// selection, but it does not infer finding identity or authorize mutations.
 #[component]
 pub fn EvidenceDrawer(props: EvidenceDrawerProps) -> Element {
     let initial_index = props
@@ -689,6 +709,7 @@ pub fn EvidenceDrawer(props: EvidenceDrawerProps) -> Element {
     let mut active_idx = use_signal(|| initial_index);
     let mut filter = use_signal(String::new);
     let mut collapsed = use_signal(Vec::<String>::new);
+    let mut expanded = use_signal(|| false);
     let total = props.evidence.controls.len();
     let hostname = props.evidence.hostname.clone();
     let bundle_name = props.bundle_name.clone();
@@ -764,12 +785,12 @@ pub fn EvidenceDrawer(props: EvidenceDrawerProps) -> Element {
         div { class: "fl-tray-backdrop", onclick: move |_| props.on_close.call(()) }
         aside {
             id: "compliance-evidence-dialog",
-            class: "fl-tray",
+            class: if expanded() { "fl-tray compliance-drawer-expanded" } else { "fl-tray" },
             role: "dialog",
             aria_modal: "true",
             aria_labelledby: "compliance-evidence-title",
             tabindex: "-1",
-            style: "width:min(960px,96vw);",
+            style: if expanded() { "" } else { "width:min(960px,96vw);" },
             onkeydown: move |event| {
                 let visible = visible_control_order(&groups_for_keyboard, &collapsed.read());
                 let key = event.key().to_string();
@@ -816,6 +837,9 @@ pub fn EvidenceDrawer(props: EvidenceDrawerProps) -> Element {
                             span { id: "compliance-evidence-title", class: "mono", style: "font-weight:700;font-size:15px;", "{hostname}" }
                             span { style: "font-size:11px;color:var(--cf-text-muted);", "vs" }
                             span { class: "chip chip-info", "{bundle_name}" }
+                            if let Some(framework) = props.evidence.framework.as_deref() {
+                                span { class: "chip chip-neutral", "{framework}" }
+                            }
                         }
                         div {
                             style: "font-size:11px;color:var(--cf-text-muted);margin-top:2px;",
@@ -845,6 +869,12 @@ pub fn EvidenceDrawer(props: EvidenceDrawerProps) -> Element {
                         }
                     }
                     button {
+                        class: "btn btn-ghost xs focus-ring",
+                        aria_pressed: expanded(),
+                        onclick: move |_| expanded.toggle(),
+                        if expanded() { "Restore" } else { "Expand" }
+                    }
+                    button {
                         class: "btn-icon focus-ring",
                         autofocus: true,
                         aria_label: "Close evidence",
@@ -859,6 +889,7 @@ pub fn EvidenceDrawer(props: EvidenceDrawerProps) -> Element {
                 class: "compliance-evidence-layout",
                 // Left: control nav
                 nav {
+                    aria_label: "Evidence controls",
                     style: "border-right:1px solid var(--cf-divider);overflow-y:auto;overflow-x:hidden;background:color-mix(in oklab,var(--cf-page-bg) 30%,var(--cf-card-bg));",
                     div { style: "position:sticky;top:0;z-index:1;padding:8px;background:color-mix(in oklab,var(--cf-page-bg) 55%,var(--cf-card-bg));border-bottom:1px solid var(--cf-divider);",
                         input {
@@ -899,6 +930,7 @@ pub fn EvidenceDrawer(props: EvidenceDrawerProps) -> Element {
                                                 active_idx.set(index);
                                             }
                                         },
+                                        aria_expanded: "{!is_collapsed}",
                                         Icon { name: if is_collapsed { IconName::ChevronRight } else { IconName::ChevronDown }, size: 10 }
                                         span { style: "flex:1;text-align:left;", "{label} · {controls.len()}" }
                                     }
@@ -915,6 +947,7 @@ pub fn EvidenceDrawer(props: EvidenceDrawerProps) -> Element {
                                                         style: if is_sel { "all:unset;cursor:pointer;display:block;padding:10px 14px;width:100%;box-sizing:border-box;border-left:3px solid var(--cf-brand-purple);background:color-mix(in oklab,var(--cf-brand-purple) 8%,transparent);border-bottom:1px solid var(--cf-divider);" } else { "all:unset;cursor:pointer;display:block;padding:10px 14px;width:100%;box-sizing:border-box;border-left:3px solid transparent;background:transparent;border-bottom:1px solid var(--cf-divider);" },
                                                         "data-testid": "evidence-policy-target",
                                                         "data-policy-id": "{control.policy_id}",
+                                                        aria_current: if is_sel { "true" } else { "false" },
                                                         onclick: move |_| {
                                                             active_idx.set(index);
                                                             props.on_active_policy.call(control.policy_id);
@@ -984,6 +1017,7 @@ pub fn EvidenceDrawer(props: EvidenceDrawerProps) -> Element {
                             bundle_name: props.bundle_name.clone(),
                             bundle_version_id: props.evidence.bundle_version_id,
                             bundle_version: props.bundle_version.clone(),
+                            evidence_framework: props.evidence.framework.clone(),
                             assignment_versions: props.assignment_versions.clone(),
                             viewer: props.viewer,
                             poam_state: poam_state.read().clone(),
@@ -1025,6 +1059,12 @@ fn composite_status_presentation(status: &str) -> (&'static str, &'static str) {
         "not_checked" => ("Not checked", "#94a3b8"),
         _ => ("Unknown", "#64748b"),
     }
+}
+
+const AGGREGATE_OUTCOME_HELP: &str = "The aggregate outcome governs the finding. Constituent outcomes explain each rule and do not independently change remediation state.";
+
+fn aggregate_outcome_label(status: &str) -> String {
+    format!("Aggregate outcome · {status}")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1080,6 +1120,7 @@ struct ControlEvidenceCardProps {
     bundle_name: String,
     bundle_version_id: Option<uuid::Uuid>,
     bundle_version: Option<String>,
+    evidence_framework: Option<String>,
     assignment_versions: Vec<AssignmentVersionCandidate>,
     viewer: bool,
     poam_state: EvidencePoamState,
@@ -1103,9 +1144,11 @@ fn ControlEvidenceCard(props: ControlEvidenceCardProps) -> Element {
         ComplianceControlStatus::NotApplicable => "not applicable",
         ComplianceControlStatus::Error => "error",
     };
+    let aggregate_status_label = aggregate_outcome_label(status_label);
     let policy_name = props.control.policy_name.clone();
     let summary = props.control.summary.clone();
     let framework_mapping = props.control.framework_mapping.clone();
+    let requirements = props.control.requirements.clone();
     let evidence_count = props.control.evidence_items.len();
     let evidence_plural = if evidence_count == 1 { "" } else { "s" };
 
@@ -1118,7 +1161,7 @@ fn ControlEvidenceCard(props: ControlEvidenceCardProps) -> Element {
                 span {
                     class: "chip",
                     style: "color:{sc};background:color-mix(in oklab,{sc} 14%,transparent);border:1px solid {sc};",
-                    "{status_label}"
+                    "{aggregate_status_label}"
                 }
                 span {
                     class: "chip",
@@ -1219,18 +1262,20 @@ fn ControlEvidenceCard(props: ControlEvidenceCardProps) -> Element {
                         bundle_name: Some(props.bundle_name.clone()),
                         bundle_version_id: props.bundle_version_id,
                         bundle_version: props.bundle_version.clone(),
+                        requirement: props.control.requirements.first().map(|requirement| requirement.external_id.clone()).or_else(|| (!props.control.framework_mapping.trim().is_empty()).then(|| props.control.framework_mapping.clone())),
+                        framework: props.control.requirements.first().map(|requirement| format!("{} · {}", requirement.framework_name, requirement.framework_version)).or_else(|| props.evidence_framework.clone()),
                         result: assessment_outcome,
                         evidence_summary,
                         assignment_versions: props.assignment_versions.clone(),
                     };
                     match &props.poam_state {
-                        EvidencePoamState::Loading => rsx! { div { class: "sd-callout sd-callout-info", "Loading POA&M relationships for this authoritative finding…" } },
-                        EvidencePoamState::Unavailable(message) => rsx! { div { class: "sd-callout sd-callout-warn", "{message}" } },
+                        EvidencePoamState::Loading => rsx! { div { role: "status", aria_live: "polite", class: "sd-callout sd-callout-info", "Loading POA&M relationships for this authoritative finding…" } },
+                        EvidencePoamState::Unavailable(message) => rsx! { div { role: "alert", class: "sd-callout sd-callout-warn", "{message}" } },
                         EvidencePoamState::Loaded(relationships) => {
                             if let Some(relationship) = relationships.get(&finding_id) {
                                 rsx! { FindingPoamBar { context, relationship: relationship.clone(), viewer: props.viewer, on_event: props.on_poam_event } }
                             } else {
-                                rsx! { div { class: "sd-callout sd-callout-warn", "The authoritative POA&M relationship response did not include this finding. Refresh evidence before acting." } }
+                                rsx! { div { role: "alert", class: "sd-callout sd-callout-warn", "The authoritative POA&M relationship response did not include this finding. Refresh evidence before acting." } }
                             }
                         }
                     }
@@ -1258,8 +1303,11 @@ fn ControlEvidenceCard(props: ControlEvidenceCardProps) -> Element {
                 rsx! {
                     div { "data-testid": "composite-assessment", style: "display:flex;flex-direction:column;gap:8px;",
                         div { style: "display:flex;align-items:center;justify-content:space-between;gap:8px;",
-                            h3 { style: "font-size:11px;text-transform:uppercase;letter-spacing:0.08em;color:var(--cf-text-muted);margin:0;font-weight:600;", "Constituent outcomes" }
-                            span { class: "chip", "data-testid": "composite-overall-status", style: "color:{overall_color};border:1px solid {overall_color};", "Overall · {overall_label}" }
+                            div {
+                                h3 { style: "font-size:11px;text-transform:uppercase;letter-spacing:0.08em;color:var(--cf-text-muted);margin:0;font-weight:600;", "Composite policy assessment" }
+                                p { class: "composite-outcome-help", "{AGGREGATE_OUTCOME_HELP}" }
+                            }
+                            span { class: "chip", "data-testid": "composite-overall-status", style: "color:{overall_color};border:1px solid {overall_color};", "Aggregate · {overall_label}" }
                         }
                         if composite_is_partial(result) {
                             div { class: "sd-callout sd-callout-warn", "data-testid": "composite-partial", "Partial assessment. Completed outcomes are shown with the remaining expected phases as Not checked." }
@@ -1274,16 +1322,16 @@ fn ControlEvidenceCard(props: ControlEvidenceCardProps) -> Element {
                                 let (label, color) = composite_status_presentation(&outcome.status);
                                 let evidence = serde_json::to_string(&outcome.evidence).unwrap_or_else(|_| "null".to_string());
                                 rsx! {
-                                    div { "data-testid": "composite-rule-outcome", style: "padding:10px 12px;border:1px solid var(--cf-divider);border-radius:8px;background:var(--cf-subtle-bg);display:flex;flex-direction:column;gap:5px;",
+                                    div { class: "composite-rule-outcome", "data-testid": "composite-rule-outcome",
                                         div { style: "display:flex;align-items:center;gap:7px;flex-wrap:wrap;",
                                             span { class: "mono", style: "font-size:11px;font-weight:700;", "{outcome.kind}" }
                                             span { class: "chip chip-neutral", style: "font-size:9px;", "{outcome.phase}" }
                                             span { class: "chip", "data-testid": "composite-rule-status", style: "font-size:9px;color:{color};border:1px solid {color};", "{label}" }
-                                            span { class: "mono", style: "font-size:9px;color:var(--cf-text-muted);", "{outcome.rule_id}" }
                                         }
                                         div { style: "font-size:11.5px;color:var(--cf-text-secondary);", "{outcome.detail}" }
+                                        div { class: "composite-rule-id", span { "Rule ID" } code { class: "mono", "{outcome.rule_id}" } }
                                         if outcome.evidence != serde_json::json!({}) && !outcome.evidence.is_null() {
-                                            pre { style: "margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font-size:10px;color:var(--cf-text-muted);", "{evidence}" }
+                                            details { class: "composite-raw-evidence", summary { "Raw evidence" } pre { "{evidence}" } }
                                         }
                                     }
                                 }
@@ -1346,8 +1394,20 @@ fn ControlEvidenceCard(props: ControlEvidenceCardProps) -> Element {
         div {
             style: "padding:12px;background:var(--cf-subtle-bg);border-radius:8px;font-size:11px;color:var(--cf-text-secondary);",
             strong { style: "color:var(--cf-text-primary);", "Framework mapping" }
-            span { style: "margin-left:8px;", "—" }
-            span { class: "mono", style: "margin-left:8px;", "{framework_mapping}" }
+            if requirements.is_empty() {
+                span { style: "margin-left:8px;", "—" }
+                span { class: "mono", style: "margin-left:8px;", if framework_mapping.trim().is_empty() { "Unmapped" } else { "{framework_mapping}" } }
+            } else {
+                div { style: "display:flex;flex-direction:column;gap:6px;margin-top:8px;",
+                    for requirement in requirements {
+                        div { "data-testid": "evidence-requirement-identity",
+                            strong { "{requirement.framework_name} · {requirement.framework_version}" }
+                            span { class: "mono", style: "margin-left:8px;", "{requirement.external_id}" }
+                            if let Some(title) = requirement.title { span { style: "margin-left:8px;", "{title}" } }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -1370,6 +1430,7 @@ mod tests {
             summary: String::new(),
             evidence_items: Vec::new(),
             framework_mapping: String::new(),
+            requirements: Vec::new(),
             composite_result: None,
             finding_id: None,
             finding_observation: None,
@@ -1420,6 +1481,13 @@ mod tests {
                 .len(),
             4
         );
+    }
+
+    #[test]
+    fn aggregate_and_constituent_labels_are_not_interchangeable() {
+        assert_eq!(aggregate_outcome_label("fail"), "Aggregate outcome · fail");
+        assert!(AGGREGATE_OUTCOME_HELP.starts_with("The aggregate outcome governs the finding."));
+        assert!(AGGREGATE_OUTCOME_HELP.contains("Constituent outcomes explain each rule"));
     }
 
     #[test]
@@ -1494,6 +1562,14 @@ mod tests {
 
         let collapsed = vec![groups[0].key.clone()];
         assert!(visible_control_order(&groups, &collapsed).is_empty());
+    }
+
+    #[test]
+    fn mobile_navigator_sizes_to_content_with_a_bounded_height() {
+        let css = include_str!("../../../assets/app.css");
+        assert!(css.contains("grid-template-rows: auto minmax(0, 1fr)"));
+        assert!(css.contains(".compliance-evidence-layout > nav { max-height: 38vh"));
+        assert!(!css.contains("grid-template-rows: minmax(160px, 38vh)"));
     }
 
     #[test]

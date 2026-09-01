@@ -63,17 +63,27 @@ use crate::compliance::digest::{AssignmentEffectiveSetCanonical, CombinedEffecti
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AssignmentTarget {
-    Environment { environment_id: Uuid },
-    System { system_id: Uuid },
+    /// Targets every applicable system in one environment.
+    Environment {
+        /// Identifies the target environment.
+        environment_id: Uuid,
+    },
+    /// Targets one exact system.
+    System {
+        /// Identifies the target system.
+        system_id: Uuid,
+    },
 }
 
 impl AssignmentTarget {
+    /// Returns the persistence discriminator for this target.
     pub fn scope_type(&self) -> &'static str {
         match self {
             Self::Environment { .. } => "environment",
             Self::System { .. } => "system",
         }
     }
+    /// Returns the environment or system ID represented by this target.
     pub fn scope_id(&self) -> Uuid {
         match self {
             Self::Environment { environment_id } => *environment_id,
@@ -86,11 +96,14 @@ impl AssignmentTarget {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AssignmentMode {
+    /// Applies policy outcomes to enforcement decisions.
     Enforce,
+    /// Records evidence without blocking deployment.
     ReportOnly,
 }
 
 impl AssignmentMode {
+    /// Returns the persistence representation of this mode.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Enforce => "enforce",
@@ -102,9 +115,11 @@ impl AssignmentMode {
 /// A single value override targeting one policy in the effective set.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PolicyOverride {
+    /// Identifies the exact immutable policy version to modify.
     pub policy_version_id: Uuid,
     /// JSON-path within the policy config that this override sets.
     pub value_path: String,
+    /// Contains the replacement JSON value.
     pub value: serde_json::Value,
 }
 
@@ -144,7 +159,9 @@ pub struct EffectivePolicy {
 /// One contributing source in the effective policy set.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProvenanceEntry {
+    /// Describes how the contributing policy entered its effective set.
     pub source: EffectivePolicySource,
+    /// Records the precedence of the contributing source.
     pub specificity: PolicySpecificity,
     /// Assignment that contributed this policy, when it came from a bundle.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -155,9 +172,12 @@ pub struct ProvenanceEntry {
     /// Exact assigned bundle version, when it came from a bundle.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bundle_version_id: Option<Uuid>,
+    /// Records the assignment scope discriminator when one exists.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope_type: Option<String>,
+    /// Records the assignment enforcement mode for this source.
     pub enforcement_mode: String,
+    /// Indicates whether this source supplies the winning effective semantics.
     pub authoritative: bool,
 }
 
@@ -215,14 +235,18 @@ pub struct EffectivePolicySet {
 /// A conflict that prevents resolution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolutionConflict {
+    /// Contains a stable machine-readable conflict code.
     pub code: String,
+    /// Explains the conflict for operators and API clients.
     pub message: String,
 }
 
 /// Result of resolving one assignment: either a complete set or a conflict.
 #[derive(Debug)]
 pub enum ResolutionOutcome {
+    /// Contains the complete deterministic effective policy set.
     Resolved(EffectivePolicySet),
+    /// Contains all semantic conflicts that prevent a complete set.
     Conflict(Vec<ResolutionConflict>),
 }
 
@@ -231,6 +255,7 @@ pub enum ResolutionOutcome {
 /// All inputs needed to resolve one assignment's effective set.
 #[derive(Debug)]
 pub struct EffectivePolicyResolutionInput {
+    /// Identifies the scope for which the set is resolved.
     pub target: AssignmentTarget,
     /// Exact immutable bundle version ID (must be in 'accepted' state).
     pub bundle_version_id: Uuid,
@@ -465,7 +490,7 @@ fn enforce_mode_unresolved_conflicts(
 
 // ── Authoritative resolver ────────────────────────────────────────────────────
 
-/// Resolve the effective policy set for one assignment.
+/// Resolves the effective policy set for one assignment.
 ///
 /// This is the **single authoritative implementation** of the effective-policy
 /// algorithm. All callers (evaluation, deployment, compliance rollups,
@@ -1077,7 +1102,7 @@ fn apply_json_path_override(
 
 // ── System-level combined resolution ─────────────────────────────────────────
 
-/// Resolve all effective policies for a system by combining:
+/// Resolves all effective policies for a system by combining:
 ///   - Environment bundle assignments
 ///   - System bundle assignments
 ///   - Direct environment policy additions
@@ -1086,6 +1111,11 @@ fn apply_json_path_override(
 /// Returns one combined EffectivePolicySet covering all active assignments.
 /// Conflicts between assignments (duplicate policy lineages) are returned as
 /// typed ResolutionConflicts.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot load a consistent policy snapshot.
+/// It also returns an error when persisted policy configuration cannot decode.
 pub async fn resolve_system_effective_policies(
     pool: &PgPool,
     system_id: Uuid,
@@ -1093,9 +1123,14 @@ pub async fn resolve_system_effective_policies(
     resolve_system_effective_policies_with_options(pool, system_id, false).await
 }
 
-/// Resolve the exact effective policy set through a caller-owned transaction.
+/// Resolves the exact effective policy set through a caller-owned transaction.
 /// Callers that authorize a target use this to keep policy resolution, target
 /// validation, assessment merges, and the guarded target write atomic.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot load policy inputs through the
+/// transaction or persisted policy configuration cannot be decoded.
 pub async fn resolve_system_effective_policies_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     system_id: Uuid,
@@ -1103,9 +1138,16 @@ pub async fn resolve_system_effective_policies_in_tx(
     resolve_system_effective_policies_with_options_in_tx(tx, system_id, false).await
 }
 
-/// Resolve complete policy semantics for a deterministic system batch through
+/// Resolves complete policy semantics for a deterministic system batch through
 /// the caller's transaction. This is the authoritative API for decisions that
 /// must remain in the same serializable closure as their locks and writes.
+///
+/// Duplicate input IDs are resolved once. Missing system IDs are omitted.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot load batch inputs through the
+/// transaction or persisted policy configuration cannot be decoded.
 pub async fn resolve_systems_effective_policies_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     system_ids: &[Uuid],
@@ -1122,10 +1164,16 @@ pub async fn resolve_systems_effective_policies_in_tx(
         .collect())
 }
 
-/// Resolve only the policy semantics relevant to Nix evaluation while still
-/// retaining the complete resolver for compliance and deployment consumers.
+/// Resolves only policy semantics relevant to Nix evaluation while retaining
+/// the complete resolver for compliance and deployment consumers.
 /// Conflicts between two non-Nix policy versions at the same specificity are
 /// ignored here because they cannot affect nix-eval-jobs.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot load a consistent policy snapshot.
+/// It also returns an error when persisted evaluation configuration cannot
+/// decode.
 pub async fn resolve_system_effective_policies_for_evaluation(
     pool: &PgPool,
     system_id: Uuid,
@@ -1153,6 +1201,11 @@ pub async fn resolve_system_effective_policies_for_evaluation(
 /// resolution produced a conflict are included in the map as
 /// `ResolutionOutcome::Conflict(_)`.  System IDs not found in the DB are
 /// omitted silently (the caller should treat absence as "no assignments").
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot create or query the repeatable-read
+/// snapshot, or when persisted policy configuration cannot be decoded.
 pub async fn resolve_systems_effective_policies_for_evaluation_batch(
     pool: &PgPool,
     system_ids: &[Uuid],
@@ -1170,8 +1223,15 @@ pub async fn resolve_systems_effective_policies_for_evaluation_batch(
         .collect())
 }
 
-/// Resolve complete compliance and deployment semantics for many systems in one
+/// Resolves compliance and deployment semantics for many systems in one
 /// repeatable-read snapshot.
+///
+/// Missing system IDs are omitted from the returned map.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot create or query the repeatable-read
+/// snapshot, or when persisted policy configuration cannot be decoded.
 pub async fn resolve_systems_effective_policies_for_deployment_batch(
     pool: &PgPool,
     system_ids: &[Uuid],
@@ -1185,10 +1245,15 @@ pub async fn resolve_systems_effective_policies_for_deployment_batch(
         .collect())
 }
 
-/// Resolve one exact bundle version for all provided systems in one batch.
+/// Resolves one exact bundle version for all provided systems in one batch.
 /// Explicit assignments for the requested version are authoritative; systems
 /// in the bundle scope without one receive the unmodified baseline. Direct
 /// environment and system policies still use the normal precedence rules.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot create or query the repeatable-read
+/// snapshot, or when persisted policy configuration cannot be decoded.
 pub async fn resolve_systems_effective_policies_for_bundle_version_batch(
     pool: &PgPool,
     system_ids: &[Uuid],
@@ -1211,13 +1276,21 @@ pub async fn resolve_systems_effective_policies_for_bundle_version_batch(
         .collect())
 }
 
-/// Resolve exact bundle versions for explicit system sets in one batch.
+/// Resolves exact bundle versions for explicit system sets in one batch.
 ///
 /// Unlike the single-version compatibility API, the requested bundle-version IDs
 /// are first-class inputs: metadata and baseline membership are loaded for every
 /// requested version even when there are no explicit assignments. Results are
 /// keyed by `(bundle_version_id, system_id)` so callers can aggregate many
 /// versions without accidentally merging assignments from another revision.
+///
+/// Empty requests return an empty map. Duplicate system IDs within a requested
+/// version are resolved once.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot create or query the repeatable-read
+/// snapshot, or when persisted policy configuration cannot be decoded.
 pub async fn resolve_systems_effective_policies_for_bundle_versions_batch(
     pool: &PgPool,
     requests: &[(Uuid, Vec<Uuid>)],

@@ -23,12 +23,14 @@
 , testProfile ? "ci_fast"
 , testSteps ? builtins.getEnv "CF_UI_TEST_STEPS"
 , runExportValidation ? true
+, updateVisualBaselines ? builtins.getEnv "CF_UI_UPDATE_BASELINES" == "1"
 , playwrightResultTimeout ? 1800
 , ...
 }:
 let
   testDir = ./tests;
   coverageManifest = ./coverage-manifest.json;
+  baselinesDir = ./baselines;
   designParityDir = ./design-parity;
   CF_TEST_SERVER_PORT = 3000;
 
@@ -590,6 +592,7 @@ in pkgs.testers.runNixOSTest {
     # Copy test files and coverage manifest into the VM
     machine.succeed("cp -r ${testDir}/* /tmp/web-ui-tests/")
     machine.succeed("cp ${coverageManifest} /tmp/web-ui-tests/coverage-manifest.json")
+    machine.succeed("mkdir -p /tmp/web-ui-baselines && cp -r ${baselinesDir}/. /tmp/web-ui-baselines/")
     machine.succeed("cp ${./default.nix} /tmp/web-ui-tests/default.nix")
     machine.succeed(
         "env CF_WEB_UI_SOURCE_DIR=/tmp/web-ui-tests CF_UI_STATIC_CONTRACTS=1 "
@@ -625,47 +628,74 @@ in pkgs.testers.runNixOSTest {
     # Run the integration test script
     machine.succeed("rm -f /tmp/web-ui-tests/integration.exit /tmp/screenshots/results.json /tmp/screenshots/fatal.json")
     machine.succeed(
-        f"nohup sh -c 'env CF_UI_TEST_PROFILE={test_profile}{test_steps_env} ${pkgs.nodejs}/bin/node /tmp/web-ui-tests/integration-test.js http://127.0.0.1:${
+        f"nohup sh -c 'env CF_UI_BASELINES_DIR=/tmp/web-ui-baselines CF_UI_TEST_PROFILE={test_profile}{test_steps_env} ${pkgs.nodejs}/bin/node /tmp/web-ui-tests/integration-test.js http://127.0.0.1:${
           toString CF_TEST_SERVER_PORT
         } /tmp/screenshots; status=$?; printf \"%s\\n\" \"$status\" > /tmp/web-ui-tests/integration.exit' > /tmp/web-ui-tests/integration.log 2>&1 </dev/null &"
     )
-    # The process can write results.json before post-processing finishes. Wait
-    # for the durable exit marker so a late non-zero exit cannot be hidden by
-    # an otherwise valid results artifact.
-    machine.wait_for_file("/tmp/web-ui-tests/integration.exit", timeout=result_timeout)
-    output = machine.succeed("cat /tmp/web-ui-tests/integration.log")
-    print(output)
 
-    def export_pre_results_artifacts():
-        # Preserve all output that exists when Playwright exits before it can
-        # produce results.json. Artifact export errors must not hide the test
-        # failure that caused this path.
+    def export_failure_artifacts():
+        # Preserve browser output and server diagnostics before rejecting the
+        # derivation. Artifact export errors must not hide the original failure.
         try:
             machine.succeed(
-                "rm -rf /tmp/web-ui-pre-results-artifacts && "
-                "mkdir -p /tmp/web-ui-pre-results-artifacts && "
-                "cp -a /tmp/screenshots/. /tmp/web-ui-pre-results-artifacts/ && "
+                "journalctl -u crystal-forge-server.service --no-pager -n 300 "
+                "> /tmp/web-ui-tests/server-journal.log 2>&1 || true; "
+                "rm -rf /tmp/web-ui-failure-artifacts && "
+                "mkdir -p /tmp/web-ui-failure-artifacts && "
+                "cp -a /tmp/screenshots/. /tmp/web-ui-failure-artifacts/ && "
                 "cp /tmp/web-ui-tests/integration.log "
-                "/tmp/web-ui-pre-results-artifacts/integration.log && "
+                "/tmp/web-ui-failure-artifacts/integration.log && "
+                "cp /tmp/web-ui-tests/server-journal.log "
+                "/tmp/web-ui-failure-artifacts/server-journal.log && "
                 "if test -f /tmp/web-ui-tests/integration.exit; then "
                 "cp /tmp/web-ui-tests/integration.exit "
-                "/tmp/web-ui-pre-results-artifacts/integration.exit; fi"
+                "/tmp/web-ui-failure-artifacts/integration.exit; fi"
             )
             machine.copy_from_vm(
-                "/tmp/web-ui-pre-results-artifacts",
+                "/tmp/web-ui-failure-artifacts",
                 "browser-failure-artifacts",
             )
         except Exception as e:
-            print(f"warning: could not export pre-results browser artifacts: {e}")
+            print(f"warning: could not export browser failure artifacts: {e}")
+
+    def print_browser_diagnostics(reason):
+        # Print diagnostics while the VM is reachable. Failed derivations do
+        # not reliably retain files copied only into the test-driver workdir.
+        print(f"=== Web UI browser diagnostics: {reason} ===")
+        try:
+            print(machine.succeed("cat /tmp/web-ui-tests/integration.log || true"))
+        except Exception as e:
+            print(f"warning: could not print integration.log: {e}")
+        print("=== Crystal Forge server journal ===")
+        try:
+            print(
+                machine.succeed(
+                    "journalctl -u crystal-forge-server.service --no-pager -n 300 || true"
+                )
+            )
+        except Exception as e:
+            print(f"warning: could not print server journal: {e}")
+
+    # The process can write results.json before post-processing finishes. Wait
+    # for the durable exit marker so a late non-zero exit cannot be hidden by
+    # an otherwise valid results artifact. Preserve partial output on timeout.
+    try:
+        machine.wait_for_file("/tmp/web-ui-tests/integration.exit", timeout=result_timeout)
+    except Exception:
+        print_browser_diagnostics("timed out waiting for integration.exit")
+        export_failure_artifacts()
+        raise
+    output = machine.succeed("cat /tmp/web-ui-tests/integration.log")
+    print(output)
 
     # Coverage-gate failures (manifest drift) abort before any results exist.
     if machine.execute("test -f /tmp/screenshots/fatal.json")[0] == 0:
-        export_pre_results_artifacts()
+        export_failure_artifacts()
         fatal_json = machine.succeed("cat /tmp/screenshots/fatal.json")
         raise Exception(f"Web UI check aborted: {json.loads(fatal_json)['error']}")
 
     if machine.execute("test -f /tmp/screenshots/results.json")[0] != 0:
-        export_pre_results_artifacts()
+        export_failure_artifacts()
         exit_code = machine.succeed("cat /tmp/web-ui-tests/integration.exit").strip()
         print("=== Crystal Forge server journal after integration failure ===")
         print(
@@ -854,15 +884,19 @@ in pkgs.testers.runNixOSTest {
     if visual_failures:
         for f in visual_failures:
             print(f"  STRICT VISUAL FAIL: {f['name']} ({f['status']})")
-        integration_failures.append(
-            f"Strict visual baseline failures: {[f['name'] for f in visual_failures]}"
-        )
+        if ${if updateVisualBaselines then "False" else "True"}:
+            integration_failures.append(
+                f"Strict visual baseline failures: {[f['name'] for f in visual_failures]}"
+            )
+        else:
+            print("  Baseline update mode: strict visual failures are exported for review")
 
     if exit_code != "0":
         integration_failures.append(
             f"integration process exited non-zero after producing results.json ({exit_code})"
         )
     if integration_failures:
+        export_failure_artifacts()
         raise Exception("; ".join(integration_failures))
 
     if not ${if runExportValidation then "True" else "False"}:

@@ -1,3 +1,9 @@
+//! Exposes authenticated HTTP endpoints for POA&M lifecycle workflows.
+//!
+//! Handlers parse transport inputs, construct the actor scope, enforce CSRF on
+//! mutations, and translate service failures into the shared structured POA&M
+//! error response. Domain validation and persistence remain in the service.
+
 use axum::{
     Json,
     extract::{
@@ -132,6 +138,10 @@ fn path_body<T>(path: Result<Path<T>, PathRejection>) -> Result<T, Response> {
     })
 }
 
+/// Lists POA&Ms visible to the authenticated actor.
+///
+/// Returns a structured error response when authentication, query validation,
+/// actor lookup, or POA&M listing fails.
 pub async fn list(
     State(pool): State<PgPool>,
     RequireAuth(user): RequireAuth,
@@ -159,8 +169,8 @@ pub async fn list(
 
 /// Selects finding relationships and optional bounded history pages.
 ///
-/// Omitting both history fields preserves the original all-history response
-/// for deployed clients. `history_offset` requires `history_limit`.
+/// Omitting both history fields selects the bounded compatibility page for
+/// deployed clients. `history_offset` requires `history_limit`.
 #[derive(Deserialize)]
 pub struct FindingRelationshipsQuery {
     /// Contains comma-separated current composite assessment IDs.
@@ -175,8 +185,8 @@ pub struct FindingRelationshipsQuery {
 
 /// Selects assignment relationships and optional bounded history pages.
 ///
-/// Omitting both history fields preserves the original all-history response
-/// for deployed clients. `history_offset` requires `history_limit`.
+/// Omitting both history fields selects the bounded compatibility page for
+/// deployed clients. `history_offset` requires `history_limit`.
 #[derive(Deserialize)]
 pub struct AssignmentRelationshipsQuery {
     /// Contains comma-separated immutable assignment-version IDs.
@@ -187,16 +197,29 @@ pub struct AssignmentRelationshipsQuery {
     pub history_offset: Option<i64>,
 }
 
+/// Selects a finding observation and page for compatible-POA&M search.
+///
+/// Callers provide either `assessment_id` alone or the complete stable finding
+/// observation fields. Partial combinations are invalid.
 #[derive(Deserialize)]
 pub struct CompatiblePoamsQuery {
+    /// Identifies a current composite assessment.
     pub assessment_id: Option<Uuid>,
+    /// Identifies a stable finding for legacy observation lookup.
     pub finding_id: Option<Uuid>,
+    /// Identifies the authoritative legacy observation source.
     pub observation_source: Option<FindingObservationSource>,
+    /// Identifies the source record within the observation source.
     pub observation_source_id: Option<String>,
+    /// Identifies the immutable policy version observed by the source.
     pub observation_policy_version_id: Option<Uuid>,
+    /// Binds the request to the exact observed evidence.
     pub observation_token: Option<String>,
+    /// Filters compatible POA&Ms by text when present.
     pub q: Option<String>,
+    /// Limits the number of returned summaries.
     pub limit: Option<i64>,
+    /// Skips this many compatible summaries.
     pub offset: Option<i64>,
 }
 
@@ -229,6 +252,11 @@ fn relationship_ids(value: &str, field: &str) -> Result<Vec<Uuid>, Response> {
     Ok(ids)
 }
 
+/// Returns POA&M relationships for visible assessments or stable findings.
+///
+/// Returns a structured error response when authentication, query or ID
+/// validation, actor lookup, visibility filtering, or relationship loading
+/// fails.
 pub async fn finding_relationships(
     State(pool): State<PgPool>,
     RequireAuth(user): RequireAuth,
@@ -292,6 +320,10 @@ pub async fn finding_relationships(
     }
 }
 
+/// Lists active POA&Ms compatible with one authoritative finding observation.
+///
+/// Returns a structured error response when authentication, query validation,
+/// actor lookup, evidence validation, or compatible search fails.
 pub async fn compatible_poams(
     State(pool): State<PgPool>,
     RequireAuth(user): RequireAuth,
@@ -362,6 +394,11 @@ pub async fn compatible_poams(
     }
 }
 
+/// Returns POA&M relationships for visible immutable assignment versions.
+///
+/// Returns a structured error response when authentication, query or ID
+/// validation, actor lookup, visibility filtering, or relationship loading
+/// fails.
 pub async fn assignment_relationships(
     State(pool): State<PgPool>,
     RequireAuth(user): RequireAuth,
@@ -399,6 +436,10 @@ pub async fn assignment_relationships(
     }
 }
 
+/// Returns one visible POA&M with requested bounded history pages.
+///
+/// Returns a structured error response when authentication, path or query
+/// validation, actor lookup, visibility checks, or detail loading fails.
 pub async fn get(
     State(pool): State<PgPool>,
     RequireAuth(user): RequireAuth,
@@ -428,6 +469,10 @@ pub async fn get(
         Err(e) => error_response(e),
     }
 }
+/// Creates a POA&M from a current failing finding.
+///
+/// Returns a structured error response when CSRF, authentication, body
+/// validation, authorization, evidence validation, or creation fails.
 pub async fn create(
     State(pool): State<PgPool>,
     RequireAuth(user): RequireAuth,
@@ -455,6 +500,10 @@ pub async fn create(
         Err(e) => error_response(e),
     }
 }
+/// Updates mutable fields on one POA&M.
+///
+/// Returns a structured error response when CSRF, authentication, path or body
+/// validation, authorization, revision checks, or persistence fails.
 pub async fn update(
     State(pool): State<PgPool>,
     RequireAuth(user): RequireAuth,
@@ -487,6 +536,10 @@ pub async fn update(
         Err(e) => error_response(e),
     }
 }
+/// Transitions one POA&M between active workflow states.
+///
+/// Returns a structured error response when CSRF, authentication, path or body
+/// validation, authorization, lifecycle checks, or persistence fails.
 pub async fn transition(
     State(pool): State<PgPool>,
     RequireAuth(user): RequireAuth,
@@ -519,6 +572,10 @@ pub async fn transition(
         Err(e) => error_response(e),
     }
 }
+/// Adds an audited note to one POA&M.
+///
+/// Returns a structured error response when CSRF, authentication, path or body
+/// validation, authorization, revision checks, or persistence fails.
 pub async fn note(
     State(pool): State<PgPool>,
     RequireAuth(user): RequireAuth,
@@ -546,6 +603,10 @@ pub async fn note(
         Err(e) => error_response(e),
     }
 }
+/// Adds a milestone to one POA&M.
+///
+/// Returns a structured error response when CSRF, authentication, path or body
+/// validation, authorization, revision checks, or persistence fails.
 pub async fn add_milestone(
     State(pool): State<PgPool>,
     RequireAuth(user): RequireAuth,
@@ -573,6 +634,10 @@ pub async fn add_milestone(
         Err(e) => error_response(e),
     }
 }
+/// Updates one POA&M milestone.
+///
+/// Returns a structured error response when CSRF, authentication, path or body
+/// validation, authorization, revision checks, or persistence fails.
 pub async fn update_milestone(
     State(pool): State<PgPool>,
     RequireAuth(user): RequireAuth,
@@ -600,6 +665,10 @@ pub async fn update_milestone(
         Err(e) => error_response(e),
     }
 }
+/// Removes one POA&M milestone.
+///
+/// Returns a structured error response when CSRF, authentication, path,
+/// query validation, authorization, revision checks, or persistence fails.
 pub async fn remove_milestone(
     State(pool): State<PgPool>,
     RequireAuth(user): RequireAuth,
@@ -627,6 +696,10 @@ pub async fn remove_milestone(
         Err(e) => error_response(e),
     }
 }
+/// Links a current failing finding to one POA&M.
+///
+/// Returns a structured error response when CSRF, authentication, path or body
+/// validation, authorization, evidence checks, or persistence fails.
 pub async fn link_finding(
     State(pool): State<PgPool>,
     RequireAuth(user): RequireAuth,
@@ -654,6 +727,10 @@ pub async fn link_finding(
         Err(e) => error_response(e),
     }
 }
+/// Retires one active finding link from a POA&M.
+///
+/// Returns a structured error response when CSRF, authentication, path,
+/// query validation, authorization, revision checks, or persistence fails.
 pub async fn unlink_finding(
     State(pool): State<PgPool>,
     RequireAuth(user): RequireAuth,
@@ -681,6 +758,10 @@ pub async fn unlink_finding(
         Err(e) => error_response(e),
     }
 }
+/// Links an immutable assignment version to one POA&M.
+///
+/// Returns a structured error response when CSRF, authentication, path or body
+/// validation, authorization, compatibility checks, or persistence fails.
 pub async fn link_assignment(
     State(pool): State<PgPool>,
     RequireAuth(user): RequireAuth,
@@ -708,6 +789,10 @@ pub async fn link_assignment(
         Err(e) => error_response(e),
     }
 }
+/// Removes an immutable assignment-version reference from one POA&M.
+///
+/// Returns a structured error response when CSRF, authentication, path,
+/// query validation, authorization, revision checks, or persistence fails.
 pub async fn unlink_assignment(
     State(pool): State<PgPool>,
     RequireAuth(user): RequireAuth,
@@ -736,12 +821,20 @@ pub async fn unlink_assignment(
     }
 }
 
+/// Selects a text-filtered offset page.
 #[derive(Deserialize)]
 pub struct SearchQuery {
+    /// Filters results by text when present.
     pub q: Option<String>,
+    /// Limits the number of returned records.
     pub limit: Option<i64>,
+    /// Skips this many matching records.
     pub offset: Option<i64>,
 }
+/// Lists current failing findings compatible with one POA&M.
+///
+/// Returns a structured error response when authentication, path or query
+/// validation, actor lookup, evidence checks, or candidate loading fails.
 pub async fn compatible(
     State(pool): State<PgPool>,
     RequireAuth(user): RequireAuth,
@@ -775,6 +868,10 @@ pub async fn compatible(
         Err(e) => error_response(e),
     }
 }
+/// Verifies and closes an awaiting-verification POA&M.
+///
+/// Returns a structured error response when CSRF, authentication, path or body
+/// validation, authorization, closure preconditions, or persistence fails.
 pub async fn close(
     State(pool): State<PgPool>,
     RequireAuth(user): RequireAuth,
@@ -802,6 +899,11 @@ pub async fn close(
         Err(e) => error_response(e),
     }
 }
+/// Records a sealed verification attempt for one POA&M.
+///
+/// Returns a structured error response when CSRF, authentication, path or body
+/// validation, authorization, verification preconditions, or persistence
+/// fails.
 pub async fn verify(
     State(pool): State<PgPool>,
     RequireAuth(user): RequireAuth,
@@ -829,6 +931,10 @@ pub async fn verify(
         Err(e) => error_response(e),
     }
 }
+/// Reopens one completed POA&M.
+///
+/// Returns a structured error response when CSRF, authentication, path or body
+/// validation, authorization, reopen preconditions, or persistence fails.
 pub async fn reopen(
     State(pool): State<PgPool>,
     RequireAuth(user): RequireAuth,
@@ -856,6 +962,10 @@ pub async fn reopen(
         Err(e) => error_response(e),
     }
 }
+/// Creates a pending waiver request for a current failing finding.
+///
+/// Returns a structured error response when CSRF, authentication, body
+/// validation, authorization, evidence checks, or persistence fails.
 pub async fn create_waiver(
     State(pool): State<PgPool>,
     RequireAuth(user): RequireAuth,
@@ -878,6 +988,10 @@ pub async fn create_waiver(
         Err(e) => error_response(e),
     }
 }
+/// Lists waiver records for an authenticated administrator.
+///
+/// Returns a structured error response when authentication, query validation,
+/// administrator authorization, actor lookup, or record loading fails.
 pub async fn list_waivers(
     State(pool): State<PgPool>,
     RequireAuth(user): RequireAuth,
@@ -897,6 +1011,10 @@ pub async fn list_waivers(
         Err(error) => error_response(error),
     }
 }
+/// Returns one waiver record to an authenticated administrator.
+///
+/// Returns a structured error response when authentication, path validation,
+/// administrator authorization, actor lookup, or record loading fails.
 pub async fn get_waiver(
     State(pool): State<PgPool>,
     RequireAuth(user): RequireAuth,
@@ -916,6 +1034,11 @@ pub async fn get_waiver(
         Err(error) => error_response(error),
     }
 }
+/// Applies an administrator decision to one waiver.
+///
+/// Returns a structured error response when CSRF, authentication, path or body
+/// validation, administrator authorization, lifecycle checks, or persistence
+/// fails.
 pub async fn decide_waiver(
     State(pool): State<PgPool>,
     RequireAuth(user): RequireAuth,
@@ -951,6 +1074,10 @@ pub async fn decide_waiver(
         Err(e) => error_response(e),
     }
 }
+/// Returns POA&M dashboard counts visible to the authenticated actor.
+///
+/// Returns a structured error response when authentication, actor lookup, or
+/// aggregate loading fails.
 pub async fn dashboard(
     State(pool): State<PgPool>,
     RequireAuth(user): RequireAuth,
@@ -965,6 +1092,10 @@ pub async fn dashboard(
         Err(e) => error_response(e),
     }
 }
+/// Returns the authenticated actor's paginated POA&M watchlist.
+///
+/// Returns a structured error response when authentication, query validation,
+/// actor lookup, or watchlist loading fails.
 pub async fn watchlist(
     State(pool): State<PgPool>,
     RequireAuth(user): RequireAuth,
@@ -992,8 +1123,10 @@ pub async fn watchlist(
         Err(e) => error_response(e),
     }
 }
+/// Selects a bounded batch of resource IDs.
 #[derive(Deserialize)]
 pub struct BatchQuery {
+    /// Contains comma-separated resource UUIDs.
     pub ids: String,
 }
 
@@ -1026,6 +1159,10 @@ fn batch_ids(value: &str) -> Result<Vec<Uuid>, Response> {
     ids.dedup();
     Ok(ids)
 }
+/// Returns POA&M rollups for visible requested systems.
+///
+/// Returns a structured error response when authentication, query or ID
+/// validation, actor lookup, scope expansion, or rollup loading fails.
 pub async fn system_rollups(
     State(pool): State<PgPool>,
     RequireAuth(user): RequireAuth,
@@ -1054,6 +1191,10 @@ pub async fn system_rollups(
         Err(e) => error_response(e),
     }
 }
+/// Returns POA&M rollups for visible requested bundle lineages.
+///
+/// Returns a structured error response when authentication, query or ID
+/// validation, actor lookup, scope expansion, or rollup loading fails.
 pub async fn bundle_rollups(
     State(pool): State<PgPool>,
     RequireAuth(user): RequireAuth,

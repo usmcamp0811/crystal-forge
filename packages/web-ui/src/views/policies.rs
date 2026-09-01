@@ -9,9 +9,8 @@ use wasm_bindgen::JsCast;
 
 use crate::Route;
 use crate::api::client::{
-    bulk_delete_deployment_policies, delete_deployment_policy, export_policy_versions,
-    fetch_compliance_grouping_schemes, fetch_policy_requirement_mappings,
-    fetch_policy_version_usage,
+    bulk_delete_deployment_policies, export_policy_versions, fetch_compliance_grouping_schemes,
+    fetch_policy_requirement_mappings, fetch_policy_version_usage,
 };
 use crate::api::models::{
     BulkDeletePoliciesResponse, ComplianceGroupingScheme, PolicyMappingRow,
@@ -27,6 +26,7 @@ use crate::components::policy::{
     PolicyFormat, PolicyRow, is_core_policy, is_policy_version_editable, normalized_policy_type,
     policy_category,
 };
+use crate::components::{Icon, IconName};
 use crate::state::navigation_focus::{FocusTarget, NavigationFocus};
 use crate::state::{app_state::AppState, auth};
 use crate::theme;
@@ -37,6 +37,77 @@ use crate::views::policies_api;
 const BIG_GROUP: usize = 150;
 /// Number of items a group renders before "Show more" / "Show all".
 const CHUNK: usize = 60;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CatalogContentState {
+    Loading,
+    Unavailable,
+    NoResults,
+    Empty,
+    Ready,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CatalogGroupExpansion {
+    Collapsed,
+    Explicit,
+    Search,
+}
+
+impl CatalogGroupExpansion {
+    fn presentation(explicit_collapsed: bool, searching: bool) -> Self {
+        if searching {
+            Self::Search
+        } else if explicit_collapsed {
+            Self::Collapsed
+        } else {
+            Self::Explicit
+        }
+    }
+
+    fn expanded(self) -> bool {
+        self != Self::Collapsed
+    }
+
+    fn icon(self) -> IconName {
+        if self.expanded() {
+            IconName::ChevronDown
+        } else {
+            IconName::ChevronRight
+        }
+    }
+
+    fn forced(self) -> bool {
+        self == Self::Search
+    }
+
+    fn title(self) -> &'static str {
+        match self {
+            Self::Collapsed => "Expand group",
+            Self::Explicit => "Collapse group",
+            Self::Search => "Expanded to show search results",
+        }
+    }
+}
+
+fn catalog_content_state(
+    loading: bool,
+    has_error: bool,
+    has_filters: bool,
+    has_policies: bool,
+) -> CatalogContentState {
+    if loading {
+        CatalogContentState::Loading
+    } else if has_error {
+        CatalogContentState::Unavailable
+    } else if has_policies {
+        CatalogContentState::Ready
+    } else if has_filters {
+        CatalogContentState::NoResults
+    } else {
+        CatalogContentState::Empty
+    }
+}
 
 /// Whether a group of this size defaults to collapsed absent an explicit
 /// user override.
@@ -65,11 +136,24 @@ fn flat_range<'a>(full_flat_ids: &'a [Uuid], a: usize, b: usize) -> &'a [Uuid] {
 
 /// Build the filtered logical selection order independently of presentation
 /// state. Collapsed groups and unrendered chunks remain part of this order.
-fn logical_flat_ids(group_states: &[(PolicyGroup, bool, usize)]) -> Vec<Uuid> {
+fn logical_flat_ids(group_states: &[(PolicyGroup, CatalogGroupExpansion, usize)]) -> Vec<Uuid> {
     group_states
         .iter()
         .flat_map(|(group, _, _)| group.items.iter().map(|policy| policy.id))
         .collect()
+}
+
+fn exportable_selected_version_ids(
+    selected_policy_ids: &HashSet<Uuid>,
+    policies: &[PolicyDefinition],
+) -> Vec<Uuid> {
+    let mut version_ids: Vec<Uuid> = selected_policy_ids
+        .iter()
+        .filter_map(|id| policies.iter().find(|policy| policy.id == *id))
+        .filter_map(|policy| policy.version_id)
+        .collect();
+    version_ids.sort();
+    version_ids
 }
 
 const POLICY_JSON_TEMPLATE: &str = r#"{
@@ -81,12 +165,17 @@ const POLICY_JSON_TEMPLATE: &str = r#"{
   }
 }"#;
 
-/// The policies page for global policy management.
+/// Renders global policy catalog browsing and administration workflows.
+///
+/// The view owns filtering, grouping, chunking, and selection state. Server
+/// responses remain authoritative for immutable versions, deletion eligibility,
+/// normalized mappings, provenance, and mutation authorization.
 #[component]
 pub fn PoliciesView() -> Element {
     let mut navigation_focus = use_context::<Signal<Option<NavigationFocus>>>();
     let mut policy_library: Signal<Vec<PolicyDefinition>> = use_signal(Vec::new);
     let mut policies_load_error: Signal<Option<String>> = use_signal(|| None);
+    let mut policies_loading = use_signal(|| true);
     let mut show_editor = use_signal(|| false);
     let mut show_import = use_signal(|| false);
     let mut show_grouping_schemes = use_signal(|| false);
@@ -96,6 +185,7 @@ pub fn PoliciesView() -> Element {
 
     use_effect(move || {
         spawn(async move {
+            policies_loading.set(true);
             match policies_api::load_policies().await {
                 policies_api::PolicyLoadResult::Ok(p) => {
                     policies_load_error.set(None);
@@ -105,6 +195,7 @@ pub fn PoliciesView() -> Element {
                     policies_load_error.set(Some(e));
                 }
             }
+            policies_loading.set(false);
         });
     });
 
@@ -125,12 +216,6 @@ pub fn PoliciesView() -> Element {
     let mut domain = use_signal(|| "platform".to_string());
     let mut security_grouping = use_signal(|| "control-family".to_string());
     let mut type_filter = use_signal(|| "all".to_string());
-    let mut delete_confirm: Signal<Option<Uuid>> = use_signal(|| None);
-    let mut delete_busy = use_signal(|| false);
-    let mut delete_error: Signal<Option<String>> = use_signal(|| None);
-    let mut delete_eligibility: Signal<Option<crate::api::models::DeletionEligibility>> =
-        use_signal(|| None);
-    let mut delete_eligibility_loading = use_signal(|| false);
     let mut focused_policy_name = use_signal(|| None::<String>);
     let mut policies_loaded = use_signal(|| false);
     let mut pending_policy_focus = use_signal(|| None::<NavigationFocus>);
@@ -349,27 +434,23 @@ pub fn PoliciesView() -> Element {
         &current_grouping_schemes,
     );
 
-    // Catalog scaling (TASK-433 Phase 1): while a search is active, collapse
-    // is suspended entirely (a match can never hide in a collapsed group)
-    // without mutating the user's stored collapse state, and the chunk cap
-    // is lifted so every match is reachable. Clearing search restores the
-    // prior explicit collapse/chunk shape exactly, because neither map was
-    // ever written to during the search.
+    // Catalog scaling (TASK-433 Phase 1): search results and selected policies
+    // cannot hide in a collapsed group. Forced expansion does not mutate the
+    // user's explicit collapse state, so clearing search or selection restores
+    // the prior shape. Search also lifts the chunk cap so every match is
+    // reachable.
     let is_searching = !query.trim().is_empty();
-    let group_states: Vec<(PolicyGroup, bool, usize)> = grouped_policies
+    let group_states: Vec<(PolicyGroup, CatalogGroupExpansion, usize)> = grouped_policies
         .iter()
         .cloned()
         .map(|group| {
             let default_collapsed = group_default_collapsed(group.items.len());
-            let collapsed = if is_searching {
-                false
-            } else {
-                collapse_overrides
-                    .read()
-                    .get(&group.key)
-                    .copied()
-                    .unwrap_or(default_collapsed)
-            };
+            let explicit_collapsed = collapse_overrides
+                .read()
+                .get(&group.key)
+                .copied()
+                .unwrap_or(default_collapsed);
+            let expansion = CatalogGroupExpansion::presentation(explicit_collapsed, is_searching);
             let shown = if is_searching {
                 group.items.len()
             } else {
@@ -380,7 +461,7 @@ pub fn PoliciesView() -> Element {
                     .unwrap_or_else(|| group_default_shown(group.items.len()))
                     .min(group.items.len())
             };
-            (group, collapsed, shown)
+            (group, expansion, shown)
         })
         .collect();
     // The full logical order across every filtered group, used for Shift-range
@@ -395,7 +476,15 @@ pub fn PoliciesView() -> Element {
         .map(|(index, id)| (*id, index))
         .collect();
     let all_group_keys: Vec<String> = group_states.iter().map(|(g, _, _)| g.key.clone()).collect();
-    let any_group_collapsed = group_states.iter().any(|(_, collapsed, _)| *collapsed);
+    let any_group_collapsed = group_states
+        .iter()
+        .any(|(_, expansion, _)| !expansion.expanded());
+    let catalog_state = catalog_content_state(
+        policies_loading(),
+        policies_load_error.read().is_some(),
+        has_filters,
+        !grouped_policies.is_empty(),
+    );
 
     // Shared row-click handler: a plain click toggles the single item; a
     // Shift-click selects the inclusive range against the full logical order
@@ -433,13 +522,8 @@ pub fn PoliciesView() -> Element {
         }
     };
 
-    let mut selected_version_ids: Vec<Uuid> = selected_policy_ids
-        .read()
-        .iter()
-        .filter_map(|id| all_policies.iter().find(|policy| policy.id == *id))
-        .filter_map(|policy| policy.version_id)
-        .collect();
-    selected_version_ids.sort();
+    let selected_version_ids =
+        exportable_selected_version_ids(&selected_policy_ids.read(), &all_policies);
     let mut custom_version_ids: Vec<Uuid> = all_policies
         .iter()
         .filter(|policy| !is_core_policy(policy))
@@ -447,125 +531,226 @@ pub fn PoliciesView() -> Element {
         .collect();
     custom_version_ids.sort();
 
+    let export_selected_json = {
+        let all_policies = all_policies.clone();
+        move |_| {
+            let ids = exportable_selected_version_ids(&selected_policy_ids.read(), &all_policies);
+            if ids.is_empty() {
+                return;
+            }
+            spawn(async move {
+                match export_policy_versions(&ids, "json").await {
+                    Ok(body) => {
+                        let filename = if ids.len() == 1 {
+                            "policy.json"
+                        } else {
+                            "policies.json"
+                        };
+                        if let Err(error) =
+                            crate::export::trigger_download(filename, "application/json", &body)
+                        {
+                            export_error.set(Some(error));
+                        } else {
+                            selected_policy_ids.clear();
+                            selection_mode.set(false);
+                            last_selected_flat_idx.set(None);
+                        }
+                    }
+                    Err(error) => export_error.set(Some(error.to_string())),
+                }
+            });
+        }
+    };
+
     rsx! {
-        div { class: "space-y-4",
+        div { class: "space-y-4 policies-page",
             div { class: "page-head",
-                div {
-                    h1 { class: "page-title", "Policies" }
-                    p { class: "page-subtitle",
-                        "Criteria a system must satisfy to deploy · {built_in_count} built-in · {custom_count} custom"
+                if selection_mode() {
+                    div { class: "pol-selection-heading",
+                        h1 { class: "page-title", "{selected_policy_ids.read().len()} selected" }
+                        p { class: "page-subtitle", "Shift-click another policy to select a range." }
+                    }
+                    div { class: "page-head-actions pol-selection-actions",
+                        button {
+                            class: "btn btn-primary focus-ring",
+                            disabled: selected_version_ids.is_empty(),
+                            onclick: export_selected_json,
+                            crate::components::Icon { name: crate::components::IconName::Download, size: 14 }
+                            "Export selected"
+                        }
+                        if is_admin_user {
+                            button {
+                                class: "btn btn-danger-subtle focus-ring",
+                                disabled: selected_policy_ids.read().is_empty(),
+                                onclick: move |_| {
+                                    bulk_delete_result.set(None);
+                                    bulk_delete_error.set(None);
+                                    bulk_delete_confirm.set(true);
+                                },
+                                "Delete selected"
+                            }
+                        }
+                        button {
+                            class: "btn btn-ghost focus-ring",
+                            onclick: move |_| {
+                                selection_mode.set(false);
+                                selected_policy_ids.clear();
+                                last_selected_flat_idx.set(None);
+                            },
+                            "Cancel"
+                        }
+                    }
+                } else {
+                    div { class: "page-head-copy",
+                        h1 { class: "page-title", "Policies" }
+                        p { class: "page-subtitle",
+                            "Criteria a system must satisfy to deploy · {built_in_count} built-in · {custom_count} custom"
+                        }
+                    }
+                    div { class: "page-head-actions",
+                        // Shared Import / Export menu (AC #32, #35)
+                        IOMenu {
+                            trigger_label: "Import / Export".to_string(),
+                            trigger_class: "focus-ring".to_string(),
+                            id: "policies-io".to_string(),
+                            items: vec![
+                                if is_admin_user {
+                                    IOMenuItem::action("Import policies…")
+                                } else {
+                                    IOMenuItem::disabled("Import policies…", "Administrator permission required")
+                                },
+                                IOMenuItem::Separator,
+                                if custom_version_ids.is_empty() {
+                                    IOMenuItem::disabled("Export all custom policies (JSON)", "No exportable custom policies")
+                                } else {
+                                    IOMenuItem::action("Export all custom policies (JSON)")
+                                },
+                                if custom_version_ids.is_empty() {
+                                    IOMenuItem::disabled("Export all custom policies (TOML)", "No exportable custom policies")
+                                } else {
+                                    IOMenuItem::action("Export all custom policies (TOML)")
+                                },
+                                IOMenuItem::Separator,
+                                IOMenuItem::action("Select multiple…"),
+                            ],
+                            on_action: move |idx: usize| {
+                                match idx {
+                                    0 => show_import.set(true),
+                                    1 | 2 => {
+                                        let ids = custom_version_ids.clone();
+                                        let format = if idx == 1 { "json" } else { "toml" };
+                                        let content_type = if idx == 1 {
+                                            "application/json"
+                                        } else {
+                                            "application/toml"
+                                        };
+                                        let mut export_error = export_error;
+                                        spawn(async move {
+                                            match export_policy_versions(&ids, format).await {
+                                                Ok(body) => {
+                                                    let filename = if ids.len() == 1 {
+                                                        format!("policy.{format}")
+                                                    } else {
+                                                        format!("policies.{format}")
+                                                    };
+                                                    if let Err(error) = crate::export::trigger_download(
+                                                        &filename,
+                                                        content_type,
+                                                        &body,
+                                                    ) {
+                                                        export_error.set(Some(error));
+                                                    }
+                                                }
+                                                Err(error) => export_error.set(Some(error.to_string())),
+                                            }
+                                        });
+                                    }
+                                    3 => selection_mode.set(true),
+                                    _ => {}
+                                }
+                            },
+                        }
+                        button {
+                            class: "btn btn-primary focus-ring",
+                            onclick: move |_| {
+                                editing_policy_id.set(None);
+                                editing_policy.set(None);
+                                edit_name.set(String::new());
+                                edit_description.set(String::new());
+                                edit_body.set(POLICY_JSON_TEMPLATE.to_string());
+                                edit_format.set(PolicyFormat::Json);
+                                edit_srg_ids.set(String::new());
+                                edit_cci_ids.set(String::new());
+                                show_editor.set(true);
+                            },
+                            svg { width: "14", height: "14", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+                                path { d: "M12 5v14M5 12h14" }
+                            }
+                            " New custom policy"
+                        }
                     }
                 }
-                div { style: "display:flex; gap:8px; align-items:center;",
-                    // Shared Import / Export menu (AC #32, #35)
-                    IOMenu {
-                        trigger_label: "Import / Export".to_string(),
-                        trigger_class: "focus-ring".to_string(),
-                        id: "policies-io".to_string(),
-                        items: vec![
-                            if is_admin_user {
-                                IOMenuItem::action("Import policies…")
-                            } else {
-                                IOMenuItem::disabled("Import policies…", "Administrator permission required")
-                            },
-                            IOMenuItem::Separator,
-                            if custom_version_ids.is_empty() {
-                                IOMenuItem::disabled("Export all custom policies (JSON)", "No exportable custom policies")
-                            } else {
-                                IOMenuItem::action("Export all custom policies (JSON)")
-                            },
-                            if custom_version_ids.is_empty() {
-                                IOMenuItem::disabled("Export all custom policies (TOML)", "No exportable custom policies")
-                            } else {
-                                IOMenuItem::action("Export all custom policies (TOML)")
-                            },
-                            IOMenuItem::Separator,
-                            IOMenuItem::action("Select multiple…"),
-                            if selected_version_ids.is_empty() {
-                                IOMenuItem::disabled("Export selected policies (JSON)", "Select at least one policy")
-                            } else {
-                                IOMenuItem::action("Export selected policies (JSON)")
-                            },
-                            if selected_version_ids.is_empty() {
-                                IOMenuItem::disabled("Export selected policies (TOML)", "Select at least one policy")
-                            } else {
-                                IOMenuItem::action("Export selected policies (TOML)")
-                            },
-                        ],
-                        on_action: move |idx: usize| {
-                            let ids = if idx == 1 || idx == 2 {
-                                custom_version_ids.clone()
-                            } else {
-                                selected_version_ids.clone()
-                            };
-                            match idx {
-                                0 => show_import.set(true),
-                                1 | 4 => {
-                                    let mut export_error = export_error;
-                                    let mut selected_policy_ids = selected_policy_ids;
-                                    spawn(async move {
-                                        match export_policy_versions(&ids, "json").await {
-                                            Ok(body) => {
-                                                let filename = if ids.len() == 1 { "policy.json" } else { "policies.json" };
-                                                if let Err(error) = crate::export::trigger_download(filename, "application/json", &body) {
-                                                    export_error.set(Some(error));
-                                                } else {
-                                                    selected_policy_ids.clear();
-                                                    selection_mode.set(false);
-                                                }
-                                            }
-                                            Err(error) => export_error.set(Some(error.to_string())),
-                                        }
-                                    });
-                                }
-                                2 | 5 => {
-                                    let mut export_error = export_error;
-                                    let mut selected_policy_ids = selected_policy_ids;
-                                    spawn(async move {
-                                        match export_policy_versions(&ids, "toml").await {
-                                            Ok(body) => {
-                                                let filename = if ids.len() == 1 { "policy.toml" } else { "policies.toml" };
-                                                if let Err(error) = crate::export::trigger_download(filename, "application/toml", &body) {
-                                                    export_error.set(Some(error));
-                                                } else {
-                                                    selected_policy_ids.clear();
-                                                    selection_mode.set(false);
-                                                }
-                                            }
-                                            Err(error) => export_error.set(Some(error.to_string())),
-                                        }
-                                    });
-                                }
-                                3 => selection_mode.set(true),
-                                _ => {}
-                            }
-                        },
-                    }
-                    button {
-                        class: "btn btn-primary focus-ring",
-                        onclick: move |_| {
-                            editing_policy_id.set(None);
-                            editing_policy.set(None);
-                            edit_name.set(String::new());
-                            edit_description.set(String::new());
-                            edit_body.set(POLICY_JSON_TEMPLATE.to_string());
-                            edit_format.set(PolicyFormat::Json);
-                            edit_srg_ids.set(String::new());
-                            edit_cci_ids.set(String::new());
-                            show_editor.set(true);
-                        },
-                        svg { width: "14", height: "14", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
-                            path { d: "M12 5v14M5 12h14" }
+            }
+
+            if let Some(result) = bulk_delete_result.read().clone() {
+                div { class: if result.skipped.is_empty() { "sd-callout sd-callout-info pol-bulk-feedback" } else { "sd-callout sd-callout-warn pol-bulk-feedback" }, role: "status",
+                    div { class: "pol-bulk-feedback-content",
+                        div {
+                            span { style: "font-weight:600;", "Bulk delete: " }
+                            "{result.deleted.len()} deleted"
+                            if !result.skipped.is_empty() { ", {result.skipped.len()} skipped" }
+                            "."
                         }
-                        " New custom policy"
+                        if !result.skipped.is_empty() {
+                            ul { class: "pol-bulk-feedback-list",
+                                for skipped in result.skipped.iter() {
+                                    {
+                                        let name = all_policies.iter().find(|p| p.id == skipped.policy_id).map(|p| p.name.clone()).unwrap_or_else(|| skipped.policy_id.to_string());
+                                        let reason = skipped.eligibility.as_ref()
+                                            .and_then(|e| e.blockers.first())
+                                            .map(|b| b.message.clone())
+                                            .unwrap_or_else(|| if skipped.reason == "not_found" { "No longer exists".to_string() } else { "Blocked".to_string() });
+                                        rsx! { li { key: "{skipped.policy_id}", "{name}: {reason}" } }
+                                    }
+                                }
+                            }
+                        }
                     }
+                    button { class: "btn btn-ghost xs focus-ring", onclick: move |_| bulk_delete_result.set(None), "Dismiss" }
+                }
+            }
+            if let Some(ref err) = *bulk_delete_error.read() {
+                div { class: "sd-callout sd-callout-danger pol-bulk-feedback", role: "alert",
+                    div { class: "pol-bulk-feedback-content", "Bulk delete failed: {err}" }
+                    button { class: "btn btn-ghost xs focus-ring", onclick: move |_| bulk_delete_error.set(None), "Dismiss" }
                 }
             }
 
             // Show an explicit error when the policy API fails (AC #34).
             if let Some(ref err) = *policies_load_error.read() {
-                div { class: "sd-callout sd-callout-danger",
-                    "Failed to load policies: {err}"
+                div { class: "sd-callout sd-callout-danger", role: "alert", "data-testid": "policies-error-state",
+                    div { style: "flex:1;", "Failed to load policies: {err}" }
+                    button {
+                        class: "btn btn-ghost xs focus-ring",
+                        disabled: policies_loading(),
+                        onclick: move |_| {
+                            policies_loading.set(true);
+                            policies_load_error.set(None);
+                            spawn(async move {
+                                match policies_api::load_policies().await {
+                                    policies_api::PolicyLoadResult::Ok(policies) => {
+                                        policy_library.set(policies);
+                                        policies_load_error.set(None);
+                                    }
+                                    policies_api::PolicyLoadResult::Err(error) => {
+                                        policies_load_error.set(Some(error));
+                                    }
+                                }
+                                policies_loading.set(false);
+                            });
+                        },
+                        if policies_loading() { "Retrying…" } else { "Retry" }
+                    }
                 }
             }
             if let Some(ref err) = *export_error.read() {
@@ -577,8 +762,8 @@ pub fn PoliciesView() -> Element {
 
             div { class: "pol-domain-tabs", role: "tablist", "aria-label": "Policy domain",
                 for (domain_id, label, count, color, blurb) in [
-                    ("platform", "Platform", all_policies.iter().filter(|policy| policy_domain(policy) == "platform").count(), "#60a5fa", "Deployment modes, pipeline gates, and rollout controls."),
-                    ("security", "Security controls", all_policies.iter().filter(|policy| policy_domain(policy) == "security").count(), "#f87171", "Framework-owned controls for security and compliance."),
+                    ("platform", "Platform", all_policies.iter().filter(|policy| policy_domain(policy) == "platform").count(), "var(--cf-policy-blue)", "Deployment modes, pipeline gates, and rollout controls."),
+                    ("security", "Security controls", all_policies.iter().filter(|policy| policy_domain(policy) == "security").count(), "var(--cf-policy-red)", "Framework-owned controls for security and compliance."),
                 ] {
                     button {
                         key: "{domain_id}",
@@ -595,6 +780,7 @@ pub fn PoliciesView() -> Element {
                 }
             }
 
+            div { class: "pol-catalog-toolbar",
             div { class: "pol-group-toolbar",
                 span { class: "pol-group-toolbar-label", if domain() == "platform" { "Category" } else { "Grouping" } }
                 if domain() == "platform" {
@@ -645,7 +831,7 @@ pub fn PoliciesView() -> Element {
                 }
             }
 
-            div { class: "filterbar", style: "min-height:42px;",
+            div { class: "filterbar pol-catalog-filters",
                 div { class: "filter-search", style: "max-width:280px;",
                     svg { width: "14", height: "14", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
                         circle { cx: "11", cy: "11", r: "8" }
@@ -684,7 +870,7 @@ pub fn PoliciesView() -> Element {
                 span { class: "filter-count", "{filtered_count} {filtered_label}" }
             }
 
-            div { style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap;",
+            div { class: "pol-catalog-view-controls",
                 div { class: "seg", role: "group", "aria-label": "Catalog view",
                     button {
                         class: if !table_view() { "active" } else { "" },
@@ -713,61 +899,47 @@ pub fn PoliciesView() -> Element {
                         if any_group_collapsed { "Expand all" } else { "Collapse all" }
                     }
                 }
-                if selection_mode() {
-                    span { style: "margin-left:auto;display:flex;align-items:center;gap:8px;flex-wrap:wrap;",
-                        span { class: "filter-count", "{selected_policy_ids.read().len()} selected" }
-                        if is_admin_user && !selected_policy_ids.read().is_empty() {
-                            button {
-                                class: "btn btn-ghost focus-ring xs",
-                                style: "color:#f87171;border-color:rgba(248,113,113,0.3);",
-                                onclick: move |_| {
-                                    bulk_delete_result.set(None);
-                                    bulk_delete_error.set(None);
-                                    bulk_delete_confirm.set(true);
-                                },
-                                "Delete selected"
+            }
+            }
+
+            if catalog_state == CatalogContentState::Loading {
+                Card {
+                    children: rsx! {
+                        div { class: "text-center py-12", role: "status", "data-testid": "policies-loading-state",
+                            crate::components::loading::DashboardLoadingSpinner {
+                                label: "Loading policies".to_string(),
                             }
-                        }
-                        button {
-                            class: "btn btn-ghost xs focus-ring",
-                            onclick: move |_| {
-                                selection_mode.set(false);
-                                selected_policy_ids.clear();
-                                last_selected_flat_idx.set(None);
-                            },
-                            "Clear"
                         }
                     }
                 }
-            }
-
-            if grouped_policies.is_empty() {
+            } else if catalog_state != CatalogContentState::Ready {
                 Card {
                     children: rsx! {
                         div { class: "text-center py-12",
-                            if has_filters {
-                                svg { width: "20", height: "20", class: "mx-auto text-gray-600 mb-2", style: "opacity:0.5;", fill: "none", stroke: "currentColor", stroke_width: "2", view_box: "0 0 24 24",
+                            if catalog_state == CatalogContentState::NoResults {
+                                svg { width: "20", height: "20", class: "mx-auto mb-2", style: "opacity:0.7;color:var(--cf-text-muted);", fill: "none", stroke: "currentColor", stroke_width: "2", view_box: "0 0 24 24",
                                     circle { cx: "11", cy: "11", r: "8" }
                                     path { stroke_linecap: "round", stroke_linejoin: "round", d: "m21 21-4.35-4.35" }
                                 }
-                                p { class: "text-gray-400 mb-2", "No policies match these filters." }
-                                p { class: "text-sm text-gray-500", "Clear the filters or try a different search." }
-                            } else if policies_load_error.read().is_some() {
-                                p { class: "text-gray-400 mb-2", "Policy data is unavailable." }
-                                p { class: "text-sm text-gray-500", "Resolve the management API error above and retry." }
+                                p { class: "mb-2", style: "color:var(--cf-text-secondary);", "No policies match these filters." }
+                                p { class: "text-sm", style: "color:var(--cf-text-muted);", "Clear the filters or try a different search." }
+                            } else if catalog_state == CatalogContentState::Unavailable {
+                                p { class: "mb-2", style: "color:var(--cf-text-secondary);", "Policy data is unavailable." }
+                                p { class: "text-sm", style: "color:var(--cf-text-muted);", "Use Retry above to request the policy catalog again." }
                             } else {
-                                svg { width: "48", height: "48", class: "mx-auto text-gray-600 mb-4", style: "display:block;width:48px;height:48px;max-width:48px;max-height:48px;", fill: "none", stroke: "currentColor", view_box: "0 0 24 24",
+                                svg { width: "48", height: "48", class: "mx-auto mb-4", style: "display:block;width:48px;height:48px;max-width:48px;max-height:48px;color:var(--cf-text-muted);", fill: "none", stroke: "currentColor", view_box: "0 0 24 24",
                                     path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "1.5", d: "M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" }
                                 }
-                                p { class: "text-gray-400 mb-2", "No policies yet" }
-                                p { class: "text-sm text-gray-500", "Create your first custom policy to get started." }
+                                p { class: "mb-2", style: "color:var(--cf-text-secondary);", "No policies yet" }
+                                p { class: "text-sm", style: "color:var(--cf-text-muted);", "Create your first custom policy to get started." }
                             }
                         }
                     }
                 }
             } else {
-                for (group, collapsed, shown) in group_states.iter().cloned() {
+                for (group, expansion, shown) in group_states.iter().cloned() {
                     {
+                        let collapsed = !expansion.expanded();
                         let group_key = group.key.clone();
                         let group_ids: Vec<Uuid> = group.items.iter().map(|p| p.id).collect();
                         let group_all_selected = !group_ids.is_empty()
@@ -780,19 +952,17 @@ pub fn PoliciesView() -> Element {
                                 div { style: "display:flex;align-items:flex-start;gap:11px;flex:1;min-width:0;",
                                     button {
                                         class: "pol-group-toggle focus-ring",
-                                        title: if collapsed { "Expand group" } else { "Collapse group" },
-                                        "aria-expanded": "{!collapsed}",
+                                        title: expansion.title(),
+                                        aria_label: expansion.title(),
+                                        disabled: expansion.forced(),
+                                        "aria-expanded": "{expansion.expanded()}",
                                         onclick: {
                                             let group_key = group_key.clone();
                                             move |_| {
-                                                collapse_overrides.write().insert(group_key.clone(), !collapsed);
+                                                collapse_overrides.write().insert(group_key.clone(), expansion.expanded());
                                             }
                                         },
-                                        svg {
-                                            width: "13", height: "13", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
-                                            style: if collapsed { "transform:rotate(-90deg);transition:transform .12s ease;" } else { "transition:transform .12s ease;" },
-                                            polyline { points: "6 9 12 15 18 9" }
-                                        }
+                                        Icon { name: expansion.icon(), size: 13 }
                                     }
                                     span { class: "pol-group-icon", style: "background:color-mix(in oklab, {group.color} 16%, transparent);color:{group.color};",
                                         svg { width: "13", height: "13", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
@@ -829,6 +999,7 @@ pub fn PoliciesView() -> Element {
                                      "collapsed · {group.items.len()} polic", if group.items.len() == 1 { "y" } else { "ies" }
                                 }
                             } else if table_view() {
+                                div { class: "pol-table-card",
                                 table { class: "sys-table",
                                     thead {
                                         tr {
@@ -868,19 +1039,6 @@ pub fn PoliciesView() -> Element {
                                                             edit_cci_ids.set(p.cci_ids.join(", "));
                                                             show_editor.set(true);
                                                         },
-                                                        on_delete: move |id: Uuid| {
-                                                            delete_eligibility.set(None);
-                                                            delete_error.set(None);
-                                                            delete_eligibility_loading.set(true);
-                                                            delete_confirm.set(Some(id));
-                                                            spawn(async move {
-                                                                match crate::api::client::fetch_policy_deletion_eligibility(&id).await {
-                                                                    Ok(result) => delete_eligibility.set(Some(result)),
-                                                                    Err(_) => {}
-                                                                }
-                                                                delete_eligibility_loading.set(false);
-                                                            });
-                                                        },
                                                         selection_mode: selection_mode(),
                                                         selected: selected_policy_ids.read().contains(&policy.id),
                                                         on_toggle_select: move |selected: bool| {
@@ -894,6 +1052,7 @@ pub fn PoliciesView() -> Element {
                                             }
                                         }
                                     }
+                                }
                                 }
                                 if hidden_count > 0 {
                                     div { class: "pol-group-more",
@@ -951,20 +1110,6 @@ pub fn PoliciesView() -> Element {
                                                         edit_cci_ids.set(p.cci_ids.join(", "));
                                                         show_editor.set(true);
                                                     },
-                                                    on_delete: move |id: Uuid| {
-                                                        // Fetch deletion eligibility before showing the dialog.
-                                                        delete_eligibility.set(None);
-                                                        delete_error.set(None);
-                                                        delete_eligibility_loading.set(true);
-                                                        delete_confirm.set(Some(id));
-                                                        spawn(async move {
-                                                            match crate::api::client::fetch_policy_deletion_eligibility(&id).await {
-                                                                Ok(result) => delete_eligibility.set(Some(result)),
-                                                                Err(_) => {}
-                                                            }
-                                                            delete_eligibility_loading.set(false);
-                                                        });
-                                                    },
                                                     selection_mode: selection_mode(),
                                                     selected: selected_policy_ids.read().contains(&policy.id),
                                                     on_toggle_select: move |selected: bool| {
@@ -1007,40 +1152,6 @@ pub fn PoliciesView() -> Element {
                         }
                         }
                     }
-                }
-            }
-
-            if let Some(result) = bulk_delete_result.read().clone() {
-                div { class: if result.skipped.is_empty() { "sd-callout sd-callout-info" } else { "sd-callout sd-callout-warn" }, role: "status",
-                    div {
-                        span { style: "font-weight:600;", "Bulk delete: " }
-                        "{result.deleted.len()} deleted"
-                        if !result.skipped.is_empty() {
-                            ", {result.skipped.len()} skipped"
-                        }
-                        "."
-                    }
-                    if !result.skipped.is_empty() {
-                        ul { style: "margin:6px 0 0;padding-left:18px;font-size:11.5px;",
-                            for skipped in result.skipped.iter() {
-                                {
-                                    let name = all_policies.iter().find(|p| p.id == skipped.policy_id).map(|p| p.name.clone()).unwrap_or_else(|| skipped.policy_id.to_string());
-                                    let reason = skipped.eligibility.as_ref()
-                                        .and_then(|e| e.blockers.first())
-                                        .map(|b| b.message.clone())
-                                        .unwrap_or_else(|| if skipped.reason == "not_found" { "No longer exists".to_string() } else { "Blocked".to_string() });
-                                    rsx! { li { key: "{skipped.policy_id}", "{name}: {reason}" } }
-                                }
-                            }
-                        }
-                    }
-                    button { class: "btn btn-ghost xs focus-ring", onclick: move |_| bulk_delete_result.set(None), "Dismiss" }
-                }
-            }
-            if let Some(ref err) = *bulk_delete_error.read() {
-                div { class: "sd-callout sd-callout-danger", role: "alert",
-                    "Bulk delete failed: {err}"
-                    button { class: "btn btn-ghost xs focus-ring", onclick: move |_| bulk_delete_error.set(None), "Dismiss" }
                 }
             }
 
@@ -1169,62 +1280,15 @@ pub fn PoliciesView() -> Element {
                 }
             }
 
-            if let Some(id) = *delete_confirm.read() {
-                DeleteConfirmModal {
-                    policy_id: id,
-                    policy_name: policy_library.read().iter().find(|p| p.id == id).map(|p| p.name.clone()).unwrap_or_default(),
-                    busy: *delete_busy.read(),
-                    eligibility_loading: *delete_eligibility_loading.read(),
-                    eligibility: delete_eligibility.read().clone(),
-                    error: delete_error.read().clone(),
-                    on_confirm: move |_| {
-                        let mut policy_library = policy_library;
-                        let mut delete_confirm = delete_confirm;
-                        let mut delete_busy = delete_busy;
-                        let mut delete_error = delete_error;
-                        delete_error.set(None);
-                        delete_busy.set(true);
-                        spawn(async move {
-                            match delete_deployment_policy(&id).await {
-                                Ok(()) => {
-                                    match policies_api::load_policies().await {
-                                        policies_api::PolicyLoadResult::Ok(p) => {
-                                            policies_load_error.set(None);
-                                            policy_library.set(p);
-                                        }
-                                        policies_api::PolicyLoadResult::Err(e) => {
-                                            policies_load_error.set(Some(e));
-                                        }
-                                    }
-                                    delete_busy.set(false);
-                                    delete_confirm.set(None);
-                                }
-                                Err(error) => {
-                                    web_sys::console::error_1(&format!("Failed to delete policy: {error}").into());
-                                    delete_busy.set(false);
-                                    delete_error.set(Some(match error {
-                                        crate::api::client::ApiClientError::Status { code, body } => {
-                                            format!("Delete failed (HTTP {code}): {body}")
-                                        }
-                                        other => format!("Failed to delete policy: {other}"),
-                                    }));
-                                }
-                            }
-                        });
-                    },
-                    on_cancel: move |_| {
-                        if !*delete_busy.read() {
-                            delete_error.set(None);
-                            delete_confirm.set(None);
-                        }
-                    },
-                }
-            }
         }
     }
 }
 
-/// Renders the accessible detail dialog for one policy version.
+/// Renders the accessible detail dialog for one exact policy version.
+///
+/// The drawer owns revision selection and expansion state. It loads normalized
+/// mappings and usage for the selected immutable version and delegates all
+/// lifecycle authority and persistence to server APIs and parent handlers.
 #[component]
 pub fn PolicyDrawer(
     policy: PolicyDefinition,
@@ -1236,6 +1300,7 @@ pub fn PolicyDrawer(
 ) -> Element {
     let mut selected_version_id = use_signal(|| policy.version_id);
     let mut show_revisions = use_signal(|| initial_revisions);
+    let mut expanded = use_signal(|| false);
     let policy_version_id = policy.version_id;
     use_effect(move || selected_version_id.set(policy_version_id));
     use_effect(move || show_revisions.set(initial_revisions));
@@ -1384,7 +1449,7 @@ pub fn PolicyDrawer(
         }
         aside {
             id: "policy-detail-dialog",
-            class: "fl-tray",
+            class: if expanded() { "fl-tray policy-drawer-expanded" } else { "fl-tray" },
             role: "dialog",
             aria_modal: "true",
             aria_labelledby: "policy-drawer-title",
@@ -1430,6 +1495,13 @@ pub fn PolicyDrawer(
                     }
                 }
                 div { style: "display: flex; gap: 6px; align-items: center;",
+                    button {
+                        class: "btn btn-ghost focus-ring xs",
+                        aria_pressed: expanded(),
+                        title: if expanded() { "Restore policy drawer width" } else { "Expand policy drawer" },
+                        onclick: move |_| expanded.toggle(),
+                        if expanded() { "Restore" } else { "Expand" }
+                    }
                     if !is_core && is_editable {
                         button {
                             class: "btn btn-ghost focus-ring xs",
@@ -2353,10 +2425,13 @@ mod interchange_tests {
 #[cfg(test)]
 mod catalog_scaling_tests {
     use super::{
-        BIG_GROUP, CHUNK, PolicyCategory, PolicyGroup, flat_range, group_default_collapsed,
-        group_default_shown, grouped_policies, logical_flat_ids,
+        BIG_GROUP, CHUNK, CatalogContentState, CatalogGroupExpansion, PolicyCategory, PolicyGroup,
+        catalog_content_state, exportable_selected_version_ids, flat_range,
+        group_default_collapsed, group_default_shown, grouped_policies, logical_flat_ids,
     };
+    use crate::components::IconName;
     use crate::components::policy::{PolicyDefinition, PolicyFormat};
+    use std::collections::HashSet;
     use uuid::Uuid;
 
     fn policy_named(name: &str, category: Option<&str>) -> PolicyDefinition {
@@ -2398,8 +2473,139 @@ mod catalog_scaling_tests {
     }
 
     #[test]
+    fn catalog_presentation_distinguishes_loading_failure_and_empty_results() {
+        assert_eq!(
+            catalog_content_state(true, false, false, false),
+            CatalogContentState::Loading
+        );
+        assert_eq!(
+            catalog_content_state(false, true, false, false),
+            CatalogContentState::Unavailable
+        );
+        assert_eq!(
+            catalog_content_state(false, false, true, false),
+            CatalogContentState::NoResults
+        );
+        assert_eq!(
+            catalog_content_state(false, false, false, false),
+            CatalogContentState::Empty
+        );
+        assert_eq!(
+            catalog_content_state(false, false, true, true),
+            CatalogContentState::Ready
+        );
+    }
+
+    #[test]
+    fn policy_containers_keep_child_controls_semantically_isolated() {
+        let card = include_str!("../components/policy/policy_card.rs");
+        let row = include_str!("../components/policy/policy_row.rs");
+
+        assert!(card.contains("role: \"group\""));
+        assert!(!card.contains("role: \"button\""));
+        assert!(
+            card.matches("onkeydown: move |event| event.stop_propagation()")
+                .count()
+                >= 4
+        );
+        assert!(!row.contains("role: \"button\""));
+        assert!(
+            row.matches("onkeydown: move |event| event.stop_propagation()")
+                .count()
+                >= 2
+        );
+    }
+
+    #[test]
+    fn catalog_exposes_deletion_only_as_bulk_or_editor_danger_zone() {
+        let catalog = include_str!("policies.rs");
+        let card = include_str!("../components/policy/policy_card.rs");
+        let row = include_str!("../components/policy/policy_row.rs");
+        let editor = include_str!("../components/policy/policy_editor_modal.rs");
+
+        assert!(!card.contains("on_delete"));
+        assert!(!row.contains("on_delete"));
+        assert!(!card.contains("\"Delete\""));
+        assert!(!row.contains("\"Delete\""));
+        assert!(catalog.contains("Delete selected"));
+        assert!(editor.contains("Danger zone"));
+    }
+
+    #[test]
+    fn selection_header_and_partial_feedback_stay_in_catalog_flow() {
+        let source = include_str!("policies.rs");
+        let styles = include_str!("../../assets/app.css");
+        let header = source.find("pol-selection-heading").unwrap();
+        let feedback = source.find("pol-bulk-feedback").unwrap();
+        let domains = source.find("pol-domain-tabs").unwrap();
+
+        assert!(source[header..feedback].contains("Shift-click another policy"));
+        assert!(source[header..feedback].contains("Export selected"));
+        assert!(source[header..feedback].contains("Delete selected"));
+        assert!(source[header..feedback].contains("Cancel"));
+        assert!(
+            feedback < domains,
+            "bulk feedback must remain beside the header"
+        );
+        assert!(source.contains("pol-bulk-feedback-content"));
+        assert!(source.contains("pol-bulk-feedback-list"));
+        assert!(styles.contains(".pol-bulk-feedback-content"));
+        assert!(styles.contains("flex-direction: column"));
+    }
+
+    #[test]
+    fn selected_table_policy_names_use_selection_color() {
+        let row = include_str!("../components/policy/policy_row.rs");
+        let styles = include_str!("../../assets/app.css");
+
+        assert!(row.contains("class: \"mono policy-row-name\""));
+        assert!(row.contains("--policy-name-color:{category.color()}"));
+        assert!(styles.contains("tr.selected .policy-row-name"));
+        assert!(styles.contains("color: var(--cf-brand-purple)"));
+    }
+
+    #[test]
+    fn selected_export_uses_only_portable_versions() {
+        let mut portable = policy_named("portable", None);
+        portable.version_id = Some(Uuid::new_v4());
+        let unavailable = policy_named("unavailable", None);
+        let selected = HashSet::from([portable.id, unavailable.id]);
+
+        assert_eq!(
+            exportable_selected_version_ids(&selected, &[portable.clone(), unavailable]),
+            vec![portable.version_id.unwrap()]
+        );
+    }
+
+    #[test]
     fn groups_over_threshold_default_collapsed() {
         assert!(group_default_collapsed(BIG_GROUP + 1));
+    }
+
+    #[test]
+    fn group_disclosure_presentation_tracks_every_expansion_source() {
+        let collapsed = CatalogGroupExpansion::presentation(true, false);
+        assert_eq!(collapsed, CatalogGroupExpansion::Collapsed);
+        assert!(!collapsed.expanded());
+        assert_eq!(collapsed.icon(), IconName::ChevronRight);
+        assert!(!collapsed.forced());
+
+        let explicit = CatalogGroupExpansion::presentation(false, false);
+        assert_eq!(explicit, CatalogGroupExpansion::Explicit);
+        assert!(explicit.expanded());
+        assert_eq!(explicit.icon(), IconName::ChevronDown);
+        assert!(!explicit.forced());
+
+        let search = CatalogGroupExpansion::presentation(true, true);
+        assert_eq!(search, CatalogGroupExpansion::Search);
+        assert!(search.expanded());
+        assert_eq!(search.icon(), IconName::ChevronDown);
+        assert!(search.forced());
+
+        let selected_collapsed = CatalogGroupExpansion::presentation(true, false);
+        assert_eq!(selected_collapsed, CatalogGroupExpansion::Collapsed);
+        assert!(!selected_collapsed.expanded());
+        assert!(!selected_collapsed.forced());
     }
 
     #[test]
@@ -2441,7 +2647,7 @@ mod catalog_scaling_tests {
                     color: "#fff",
                     items: vec![first.clone()],
                 },
-                false,
+                CatalogGroupExpansion::Explicit,
                 1,
             ),
             (
@@ -2452,7 +2658,7 @@ mod catalog_scaling_tests {
                     color: "#fff",
                     items: vec![middle.clone()],
                 },
-                true,
+                CatalogGroupExpansion::Collapsed,
                 1,
             ),
             (
@@ -2463,7 +2669,7 @@ mod catalog_scaling_tests {
                     color: "#fff",
                     items: vec![last.clone()],
                 },
-                false,
+                CatalogGroupExpansion::Explicit,
                 1,
             ),
         ];
@@ -2506,111 +2712,6 @@ mod catalog_scaling_tests {
     }
 }
 
-#[component]
-fn DeleteConfirmModal(
-    policy_id: Uuid,
-    policy_name: String,
-    busy: bool,
-    eligibility_loading: bool,
-    eligibility: Option<crate::api::models::DeletionEligibility>,
-    error: Option<String>,
-    on_confirm: EventHandler<()>,
-    on_cancel: EventHandler<()>,
-) -> Element {
-    let _ = policy_id;
-    let can_delete = eligibility.as_ref().map(|e| e.eligible).unwrap_or(false);
-    let permanently_blocked = eligibility
-        .as_ref()
-        .map(|e| e.permanently_blocked())
-        .unwrap_or(false);
-
-    rsx! {
-        div {
-            class: "modal-backdrop",
-            onclick: move |_| on_cancel.call(()),
-            div {
-                class: "modal",
-                style: "width:min(520px,96vw);max-height:92vh;",
-                onclick: |evt| evt.stop_propagation(),
-
-                div { class: "modal-head",
-                    h2 { style: "display:flex;align-items:center;gap:8px;",
-                        span { style: "color:#f87171;display:inline-flex;",
-                            crate::components::icon::Icon { name: crate::components::icon::IconName::Trash, size: 15 }
-                        }
-                        if permanently_blocked { "Policy cannot be permanently deleted" }
-                        else if !can_delete && eligibility.is_some() { "Remove references before deleting" }
-                        else { "Delete draft policy?" }
-                    }
-                    p {
-                        if permanently_blocked {
-                            "{policy_name} has published or immutable compliance history that Crystal Forge retains for auditability."
-                        } else if !can_delete && eligibility.is_some() {
-                            "{policy_name} is still referenced by unpublished draft content. Remove those references first."
-                        } else if can_delete {
-                            "This policy has never been published and has no retained compliance history."
-                        } else {
-                            "Checking deletion eligibility…"
-                        }
-                    }
-                }
-
-                div { class: "modal-body",
-                    if eligibility_loading {
-                        div { style: "color:var(--cf-text-muted);font-size:13px;", "Checking deletion eligibility…" }
-                    } else if let Some(elig) = eligibility.as_ref() {
-                        if !elig.eligible {
-                            div { class: "sd-callout sd-callout-danger", style: "margin-bottom:12px;",
-                                crate::components::icon::Icon { name: crate::components::icon::IconName::Warn, size: 13 }
-                                div { style: "font-size:12px;",
-                                    for blocker in elig.blockers.iter() {
-                                        p { style: "margin:0 0 4px;font-weight:600;", "{blocker.message}" }
-                                    }
-                                    if permanently_blocked {
-                                        p { style: "margin:6px 0 0;color:var(--cf-text-muted);font-size:11px;",
-                                            "Remove this policy from future drafts and active assignments. Historical references will remain."
-                                        }
-                                    }
-                                }
-                            }
-                        } else {
-                            div { style: "font-size:13px;color:var(--cf-text-muted);margin-bottom:12px;",
-                                "Permanently deleting "
-                                span { style: "font-weight:600;color:var(--cf-text-primary);", "{policy_name}" }
-                                " removes its unpublished policy versions and mutable import/source mappings. "
-                                "This cannot be undone."
-                            }
-                        }
-                    }
-
-                    if let Some(error) = error {
-                        div { class: "sd-callout sd-callout-danger", style: "margin-bottom:12px;", "{error}" }
-                    }
-                }
-
-                div { class: "modal-foot",
-                    button {
-                        class: "btn btn-ghost focus-ring",
-                        disabled: busy,
-                        onclick: move |_| on_cancel.call(()),
-                        "Cancel"
-                    }
-                    if !permanently_blocked && can_delete {
-                        button {
-                            class: "btn focus-ring",
-                            style: "background:#dc2626;color:white;",
-                            disabled: busy,
-                            onclick: move |_| on_confirm.call(()),
-                            crate::components::icon::Icon { name: crate::components::icon::IconName::Trash, size: 13 }
-                            if busy { " Deleting…" } else { " Delete permanently" }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
 /// Confirmation modal for bulk-deleting the selected policies (TASK-433
 /// Phase 1). Server-side eligibility is checked per-policy inside the bulk
 /// delete request itself, so this dialog states that outcome will vary
@@ -2633,7 +2734,7 @@ fn BulkDeletePoliciesConfirm(
                 onclick: |evt| evt.stop_propagation(),
                 div { class: "modal-head",
                     h2 { style: "display:flex;align-items:center;gap:8px;",
-                        span { style: "color:#f87171;display:inline-flex;",
+                        span { style: "color:var(--cf-policy-red);display:inline-flex;",
                             crate::components::icon::Icon { name: crate::components::icon::IconName::Trash, size: 15 }
                         }
                         "Delete {count} selected {plural}?"

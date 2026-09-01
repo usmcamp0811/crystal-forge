@@ -545,6 +545,14 @@ const POLICY_EDITOR_TABS: [PolicyEditorTab; 5] = [
     PolicyEditorTab::Provenance,
 ];
 
+fn visible_policy_editor_tabs(include_provenance: bool) -> &'static [PolicyEditorTab] {
+    if include_provenance {
+        &POLICY_EDITOR_TABS
+    } else {
+        &POLICY_EDITOR_TABS[..POLICY_EDITOR_TABS.len() - 1]
+    }
+}
+
 fn policy_editor_tab_id(tab: PolicyEditorTab) -> &'static str {
     match tab {
         PolicyEditorTab::Details => "policy-editor-tab-details",
@@ -560,11 +568,7 @@ fn move_policy_editor_tab(
     movement: PolicyEditorTabMove,
     include_provenance: bool,
 ) -> PolicyEditorTab {
-    let tabs = if include_provenance {
-        &POLICY_EDITOR_TABS[..]
-    } else {
-        &POLICY_EDITOR_TABS[..POLICY_EDITOR_TABS.len() - 1]
-    };
+    let tabs = visible_policy_editor_tabs(include_provenance);
     let position = tabs.iter().position(|tab| *tab == active).unwrap_or(0);
     match movement {
         PolicyEditorTabMove::Previous => tabs[(position + tabs.len() - 1) % tabs.len()],
@@ -586,6 +590,41 @@ fn focus_policy_editor_element(id: &str) {
 
     #[cfg(not(target_arch = "wasm32"))]
     let _ = id;
+}
+
+fn reveal_policy_editor_tab(tab: PolicyEditorTab) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let Some(tab) = web_sys::window()
+            .and_then(|window| window.document())
+            .and_then(|document| document.get_element_by_id(policy_editor_tab_id(tab)))
+            .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok())
+        else {
+            return;
+        };
+        let Some(tablist) = tab
+            .parent_element()
+            .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok())
+        else {
+            return;
+        };
+        let visible_left = tablist.scroll_left();
+        let affordance_width = tablist
+            .last_element_child()
+            .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok())
+            .map_or(0, |element| element.offset_width());
+        let visible_right = visible_left + tablist.client_width() - affordance_width;
+        let tab_left = tab.offset_left();
+        let tab_right = tab_left + tab.offset_width();
+        if tab_left < visible_left {
+            tablist.set_scroll_left(tab_left);
+        } else if tab_right > visible_right {
+            tablist.set_scroll_left(tab_right - tablist.client_width() + affordance_width);
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = tab;
 }
 
 fn reload_policy_page() {
@@ -1098,6 +1137,19 @@ enum MappingLoadState {
     Loaded,
 }
 
+fn mapping_header_metadata(state: MappingLoadState, count: usize) -> (&'static str, String) {
+    match state {
+        MappingLoadState::Loading => ("chip chip-unknown", "Mappings loading".to_string()),
+        MappingLoadState::Failed => ("chip chip-critical", "Mappings unavailable".to_string()),
+        MappingLoadState::Loaded if count > 0 => ("chip chip-info", format!("Mapped · {count}")),
+        MappingLoadState::Loaded => ("chip chip-unknown", "Unmapped".to_string()),
+    }
+}
+
+fn danger_zone_visible(is_editing: bool, active_tab: PolicyEditorTab) -> bool {
+    is_editing && active_tab == PolicyEditorTab::Details
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MappingCatalogRetry {
     Frameworks,
@@ -1105,54 +1157,13 @@ enum MappingCatalogRetry {
     Requirements,
 }
 
-/// Independent editor state dimensions.
-///
-/// Enforcement, compliance, and evidence are separate concepts, and the
-/// enforcement wording additionally depends on the policy's origin: an imported
-/// control with no assertion needs refinement, while a custom policy simply has
-/// no enforcement defined yet.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct PolicyEditorState {
-    enforcement: &'static str,
-    compliance: &'static str,
-    evidence: &'static str,
-    /// True when the policy claims compliance requirements while asserting
-    /// nothing, which cannot pass or fail and warrants an explicit warning.
-    mapped_not_enforced: bool,
-}
-
-fn policy_editor_state(
-    is_imported: bool,
+/// Returns whether mappings claim compliance while the policy asserts nothing.
+fn policy_is_mapped_not_enforced(
     mapping_state: MappingLoadState,
     mapping_count: usize,
     rule_count: usize,
-    evidence_count: usize,
-) -> PolicyEditorState {
-    let enforcement = match (rule_count > 0, is_imported) {
-        (true, _) => "Enforced",
-        (false, true) => "Enforcement needs refinement",
-        (false, false) => "No enforcement defined",
-    };
-
-    let compliance = match mapping_state {
-        MappingLoadState::Loading => "Compliance mappings loading",
-        MappingLoadState::Failed => "Compliance mappings unavailable",
-        MappingLoadState::Loaded if mapping_count > 0 => "Mapped",
-        MappingLoadState::Loaded => "Unmapped",
-    };
-
-    PolicyEditorState {
-        enforcement,
-        compliance,
-        evidence: if evidence_count > 0 {
-            "Evidence collected"
-        } else {
-            "No evidence"
-        },
-        mapped_not_enforced: mapping_state == MappingLoadState::Loaded
-            && mapping_count > 0
-            && rule_count == 0,
-    }
+) -> bool {
+    mapping_state == MappingLoadState::Loaded && mapping_count > 0 && rule_count == 0
 }
 
 /// A requirement mapping may only be edited or removed when the server will
@@ -1685,7 +1696,7 @@ fn PolicyMappingsTab(
     }
 
     rsx! {
-        div { style: "margin-top:6px;display:flex;flex-direction:column;gap:14px;",
+        div { class: "cf-policy-mappings-tab", style: "margin-top:6px;display:flex;flex-direction:column;gap:14px;",
             div { style: "font-size:12px;color:var(--cf-text-secondary);margin-bottom:2px;line-height:1.5;",
                 "Map this policy to the compliance requirements it implements, supports, or provides evidence for. Policies can map to requirements from multiple frameworks."
             }
@@ -1898,7 +1909,7 @@ fn PolicyMappingsTab(
                 }
             }
             if mapping_target != MappingEditorTarget::Unavailable && !show_mapping_editor() {
-                button { id: "policy-mapping-add-trigger", class: "btn btn-ghost focus-ring", style: "align-self:flex-start;", onclick: move |_| show_mapping_editor.set(true), "+ Add mapping" }
+                button { id: "policy-mapping-add-trigger", class: "btn btn-ghost focus-ring cf-policy-mapping-add-trigger", style: "align-self:flex-start;", onclick: move |_| show_mapping_editor.set(true), "+ Add mapping" }
             }
             if mapping_target != MappingEditorTarget::Unavailable && show_mapping_editor() {
                 div { style: "border:1px solid var(--cf-brand-purple);border-radius:10px;padding:14px;background:color-mix(in oklab, var(--cf-brand-purple) 5%, var(--cf-card-bg));display:flex;flex-direction:column;gap:14px;margin-top:8px;",
@@ -2040,7 +2051,11 @@ fn PolicyMappingsTab(
 // Modal component
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Modal for creating or editing a policy definition (design-faithful).
+/// Renders the server-backed policy create and exact-version edit workflow.
+///
+/// The modal owns draft authoring state and presentation. Server APIs remain
+/// authoritative for editability, immutable provenance, normalized mappings,
+/// deletion eligibility, and persisted policy versions.
 #[component]
 pub fn PolicyEditorModal(
     editing_policy_id: Signal<Option<Uuid>>,
@@ -2230,6 +2245,12 @@ pub fn PolicyEditorModal(
             }
         });
     }
+    use_effect(move || {
+        let tab = *active_tab.read();
+        if tabs_horizontal() {
+            reveal_policy_editor_tab(tab);
+        }
+    });
     // Mount Compliance on first use and retain it afterward. Its local draft
     // survives tab changes without fetching framework data before it is needed.
     let mut mappings_tab_mounted = use_signal(|| false);
@@ -2401,17 +2422,10 @@ pub fn PolicyEditorModal(
 
     let mapping_count = mappings.read().len() + pending_mappings.read().len();
     let mapping_state = *mapping_load_state.read();
-    let mut policy_state = policy_editor_state(
-        is_imported,
-        mapping_state,
-        mapping_count,
-        rule_count,
-        evidence_count,
-    );
-    if enforcement_opaque {
-        policy_state.enforcement = "Enforcement unavailable in this editor";
-        policy_state.mapped_not_enforced = false;
-    }
+    let (mapping_header_class, mapping_header_label) =
+        mapping_header_metadata(mapping_state, mapping_count);
+    let mapped_not_enforced = !enforcement_opaque
+        && policy_is_mapped_not_enforced(mapping_state, mapping_count, rule_count);
     let delete_matches = delete_typed.read().as_str() == name_value;
 
     rsx! {
@@ -2459,8 +2473,8 @@ pub fn PolicyEditorModal(
                     // ── Danger zone: typed-confirmation delete ──────────────────
                     div { class: "modal-head", style: "background:rgba(248,113,113,0.06);",
                         div {
-                        h2 { id: "policy-editor-title", style: "color:#fecaca;display:flex;align-items:center;gap:8px;",
-                            svg { width: "16", height: "16", view_box: "0 0 24 24", fill: "none", stroke: "#f87171", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+                        h2 { id: "policy-editor-title", style: "color:var(--cf-policy-danger-text);display:flex;align-items:center;gap:8px;",
+                            svg { width: "16", height: "16", view_box: "0 0 24 24", fill: "none", stroke: "var(--cf-policy-red)", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
                                 path { d: "M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" }
                                 path { d: "M12 9v4M12 17h.01" }
                             }
@@ -2485,7 +2499,7 @@ pub fn PolicyEditorModal(
                             label {
                                 r#for: "policy-editor-delete-confirm",
                                 "Type "
-                                span { class: "mono", style: "color:#fecaca;font-weight:700;", "{name_value}" }
+                                span { class: "mono", style: "color:var(--cf-policy-danger-text);font-weight:700;", "{name_value}" }
                                 " to confirm"
                             }
                             input {
@@ -2609,6 +2623,23 @@ pub fn PolicyEditorModal(
                             "{title}"
                         }
                         p { id: "policy-editor-subtitle", "{subtitle}" }
+                        if !edit_description.read().trim().is_empty() {
+                            p { class: "cf-policy-editor-header-description", "{edit_description}" }
+                        }
+                        div { class: "cf-policy-editor-header-meta", "data-testid": "policy-editor-state",
+                            span {
+                                class: "chip",
+                                style: "color:{selected_category.color()};background:color-mix(in oklab, {selected_category.color()} 14%, transparent);",
+                                "{selected_category.short_label()}"
+                            }
+                            if is_imported {
+                                span { class: "chip chip-info", "Imported" }
+                            }
+                            span {
+                                class: "{mapping_header_class}",
+                                "{mapping_header_label}"
+                            }
+                        }
                         }
                         button {
                             class: "btn-icon focus-ring",
@@ -2636,40 +2667,11 @@ pub fn PolicyEditorModal(
                                     if is_imported {
                                         PolicyEditorTabButton { tab: PolicyEditorTab::Provenance, active: *active_tab.read(), include_provenance: true, horizontal: tabs_horizontal(), label: "Provenance".to_string(), on_select: move |tab| { if tab == PolicyEditorTab::Mappings { mappings_tab_mounted.set(true); } active_tab.set(tab); } }
                                     }
-                                }
-                                if is_imported {
-                                    div { class: "cf-policy-provenance-summary", "data-testid": "policy-editor-provenance-summary",
-                                        div { class: "cf-policy-provenance-summary-title",
-                                            span { class: "chip chip-info", "Imported" }
-                                            span { "Read-only origin" }
-                                        }
-                                        div { class: "cf-policy-provenance-summary-value", "{provenance.len()} recorded source(s)" }
-                                        if let Some(origin) = provenance.first() {
-                                            div { class: "cf-policy-provenance-summary-value mono", "{origin.filename}" }
-                                            div { class: "cf-policy-provenance-summary-value mono", "{origin.media_type}" }
-                                        }
-                                        button {
-                                            class: "btn btn-ghost xs focus-ring",
-                                            onclick: move |_| active_tab.set(PolicyEditorTab::Provenance),
-                                            "View full provenance"
-                                        }
-                                    }
+                                    span { class: "cf-policy-editor-nav-affordance", aria_hidden: "true", "Scroll sections →" }
                                 }
                             }
                             div { class: "cf-policy-editor-content",
-                        div { class: "sd-callout sd-callout-info", "data-testid": "policy-editor-state", style: "margin:10px 0 0;font-size:11px;",
-                            "Policy state: "
-                            strong { "{policy_state.enforcement}" }
-                            " · "
-                            strong { "{policy_state.compliance}" }
-                            " · "
-                            span { "{policy_state.evidence}" }
-                            if is_imported {
-                                span { " · " }
-                                span { class: "chip chip-info", style: "font-size:10px;", "Imported" }
-                            }
-                        }
-                        if policy_state.mapped_not_enforced {
+                        if mapped_not_enforced {
                             div { class: "sd-callout sd-callout-warn", "data-testid": "policy-editor-mapped-not-enforced", style: "margin:8px 0 0;font-size:11.5px;",
                                 strong { "Mapped, not enforced." }
                                 span { " This policy claims {mapping_count} compliance requirement(s) but asserts nothing yet, so it cannot pass or fail. Add enforcement to make it real." }
@@ -2851,7 +2853,7 @@ pub fn PolicyEditorModal(
                         div { class: "field",
                             label { "Severity" }
                             div { class: "seg seg-sev", role: "radiogroup", aria_label: "Severity", style: "width:fit-content;",
-                                for (value, label, color) in [("", "Unset", "var(--cf-text-muted)"), ("high", "High", "#f87171"), ("medium", "Medium", "#fbbf24"), ("low", "Low", "#60a5fa")] {
+                                for (value, label, color) in [("", "Unset", "var(--cf-text-muted)"), ("high", "High", "var(--cf-policy-red)"), ("medium", "Medium", "var(--cf-policy-amber)"), ("low", "Low", "var(--cf-policy-blue)")] {
                                     button {
                                         key: "{value}", r#type: "button", role: "radio",
                                         aria_checked: if severity.read().as_str() == value { "true" } else { "false" },
@@ -2893,51 +2895,55 @@ pub fn PolicyEditorModal(
 
                         // Read-only imported origin, recorded at import time.
                         if *active_tab.read() == PolicyEditorTab::Provenance {
-                            div { "data-testid": "policy-editor-provenance", style: "margin-top:6px;display:flex;flex-direction:column;gap:10px;",
-                                div { style: "display:flex;align-items:baseline;gap:8px;",
-                                    label { style: "font-size:12px;font-weight:600;color:var(--cf-text-primary);", "Provenance" }
+                            div { class: "cf-policy-provenance", "data-testid": "policy-editor-provenance",
+                                div { class: "cf-policy-provenance-heading",
+                                    label { "Provenance" }
                                     span { class: "chip chip-neutral", style: "font-size:10px;", "read-only" }
                                 }
-                                div { style: "font-size:11.5px;color:var(--cf-text-secondary);line-height:1.5;",
+                                div { class: "cf-policy-provenance-intro",
                                     "Recorded when this control was imported. Editing where information came from would rewrite history, so it cannot be changed here. Compliance relationships live in Compliance."
                                 }
                                 for origin in provenance.iter() {
                                     div { key: "{origin.source_artifact_id}-{origin.origin_policy_version_id}-{origin.source_identity.clone().unwrap_or_default()}",
                                         class: "cf-policy-provenance-detail",
-                                        style: "display:flex;flex-direction:column;gap:3px;padding:9px 11px;background:var(--cf-subtle-bg);border:1px solid var(--cf-divider);border-radius:8px;font-size:11.5px;",
-                                        div { style: "display:flex;gap:6px;flex-wrap:wrap;align-items:center;",
-                                            span { class: "chip chip-info", style: "font-size:10px;", "Imported" }
-                                            if origin.inherited {
-                                                span { class: "chip chip-neutral", "data-testid": "policy-provenance-inherited", style: "font-size:10px;", "Inherited from source version" }
+                                        div { class: "cf-policy-provenance-card-head",
+                                            div { class: "cf-policy-provenance-artifact",
+                                                span { "Source artifact" }
+                                                strong { class: "mono", title: "{origin.filename}", "{origin.filename}" }
                                             }
-                                            if let Some(fidelity) = origin.fidelity.as_ref() {
-                                                span { class: "chip chip-neutral", style: "font-size:10px;", "{fidelity}" }
+                                            div { class: "cf-policy-provenance-badges",
+                                                span { class: "chip chip-info", style: "font-size:10px;", "Imported" }
+                                                if origin.inherited {
+                                                    span { class: "chip chip-neutral", "data-testid": "policy-provenance-inherited", style: "font-size:10px;", "Inherited from source version" }
+                                                }
+                                                if let Some(fidelity) = origin.fidelity.as_ref() {
+                                                    span { class: "chip chip-neutral", style: "font-size:10px;", "{fidelity}" }
+                                                }
                                             }
                                         }
-                                        div { class: "cf-policy-provenance-row", span { "Artifact" }, span { class: "mono", "{origin.filename}" } }
-                                        div { class: "cf-policy-provenance-row", span { "Source type" }, span { class: "mono", "{origin.media_type}" } }
-                                        div { class: "cf-policy-provenance-row", span { "SHA-256" }, span { class: "mono", "{origin.sha256}" } }
+                                        div { class: "cf-policy-provenance-row", span { "Source type" }, span { class: "mono cf-policy-provenance-value", title: "{origin.media_type}", "{origin.media_type}" } }
+                                        div { class: "cf-policy-provenance-row", span { "SHA-256" }, span { class: "mono cf-policy-provenance-value", title: "{origin.sha256}", "{origin.sha256}" } }
                                         if let Some(identity) = origin.source_identity.as_ref() {
-                                            div { class: "cf-policy-provenance-row", span { {origin.object_kind.clone().map(|kind| format!("Source {kind} ID")).unwrap_or_else(|| "Source ID".to_string())} }, span { class: "mono", "{identity}" } }
+                                            div { class: "cf-policy-provenance-row", span { {origin.object_kind.clone().map(|kind| format!("Source {kind} ID")).unwrap_or_else(|| "Source ID".to_string())} }, span { class: "mono cf-policy-provenance-value", title: "{identity}", "{identity}" } }
                                         }
                                         if let Some(xccdf) = origin.detected_xccdf_version.as_ref() {
-                                            div { class: "cf-policy-provenance-row", span { "XCCDF version" }, span { class: "mono", "{xccdf}" } }
+                                            div { class: "cf-policy-provenance-row", span { "XCCDF version" }, span { class: "mono cf-policy-provenance-value", title: "{xccdf}", "{xccdf}" } }
                                         }
-                                        div { class: "cf-policy-provenance-row", span { "Parser" }, span { class: "mono", "{origin.parser_version}" } }
+                                        div { class: "cf-policy-provenance-row", span { "Parser" }, span { class: "mono cf-policy-provenance-value", title: "{origin.parser_version}", "{origin.parser_version}" } }
                                         div { class: "cf-policy-provenance-row",
                                             span { "Imported" }
-                                            span { class: "mono", {match origin.imported_by_display.as_ref() { Some(user) => format!("{} · {}", origin.imported_at.to_rfc3339(), user), None => origin.imported_at.to_rfc3339() }} }
+                                            span { class: "mono cf-policy-provenance-imported", {match origin.imported_by_display.as_ref() { Some(user) => format!("{} · {}", origin.imported_at.to_rfc3339(), user), None => origin.imported_at.to_rfc3339() }} }
                                         }
                                     }
                                 }
                             }
                         }
 
-                         // Assertions & gate rules builder
+                         // Enforcement builder.
                         if *active_tab.read() == PolicyEditorTab::Enforcement {
                         div { style: "margin-top:6px;",
-                            div { style: "display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px;",
-                                h3 { style: "margin:0;font-size:12px;font-weight:600;color:var(--cf-text-primary);", "Assertions & gate rules ({rule_count})" }
+                            div { class: "cf-policy-section-head",
+                                h3 { style: "margin:0;font-size:12px;font-weight:600;color:var(--cf-text-primary);", "Enforcement · Assertions & gate rules ({rule_count})" }
                                 span { style: "font-size:11px;color:var(--cf-text-muted);", "All must hold — each compiles to a policy check." }
                             }
                             if enforcement_opaque {
@@ -2996,9 +3002,9 @@ pub fn PolicyEditorModal(
                                         "data-testid": "policy-rule-row-{index}",
                                         "data-rule-id": "{rule.id}",
                                         "data-rule-kind": "{rule.kind}",
-                                        style: "display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;padding:8px 10px;background:var(--cf-subtle-bg);border-radius:8px;",
+                                        class: "cf-policy-rule-shell",
                                         RuleEditorRow { index, rule: rule.clone(), rules, enforcement_changed }
-                                        div { style: "display:flex;flex-direction:column;gap:3px;",
+                                        div { class: "cf-policy-rule-controls",
                                             button { class: "btn-icon focus-ring", title: "Move rule up", disabled: index == 0, onclick: move |_| { let mut next = rules.read().clone(); if index > 0 && index < next.len() { next.swap(index, index - 1); rules.set(next); enforcement_changed.set(true); } }, "↑" }
                                             button { class: "btn-icon focus-ring", title: "Move rule down", disabled: index + 1 >= rule_count, onclick: move |_| { let mut next = rules.read().clone(); if index + 1 < next.len() { next.swap(index, index + 1); rules.set(next); enforcement_changed.set(true); } }, "↓" }
                                             button {
@@ -3043,7 +3049,7 @@ pub fn PolicyEditorModal(
                                         }
                                         add_rule_kind.set(String::new());
                                     },
-                                    option { value: "", disabled: true, "+ Add assertion / rule…" }
+                                    option { value: "", disabled: true, "+ Add enforcement · Add assertion / rule…" }
                                     for (kind, label, persisted) in RULE_OPTIONS {
                                         if persisted {
                                             option { value: "{kind}", "{label}" }
@@ -3058,7 +3064,7 @@ pub fn PolicyEditorModal(
                         // Evidence for ATO builder.
                          if *active_tab.read() == PolicyEditorTab::Evidence {
                          div { style: "margin-top:6px;",
-                             div { style: "display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px;",
+                             div { class: "cf-policy-section-head",
                                  label { style: "font-size:12px;font-weight:600;color:var(--cf-text-primary);",
                                      "Evidence for ATO ({evidence_count})"
                                  }
@@ -3121,7 +3127,7 @@ pub fn PolicyEditorModal(
                                  if evidence_count > 0 {
                                      button {
                                          class: "btn btn-ghost focus-ring",
-                                         style: "color:#f87171;border-color:rgba(248,113,113,0.3);",
+                                         style: "color:var(--cf-policy-red);border-color:color-mix(in oklab, var(--cf-policy-red) 35%, transparent);",
                                          title: "Clear all evidence",
                                           onclick: move |_| {
                                               evidence.set(Vec::new());
@@ -3136,13 +3142,13 @@ pub fn PolicyEditorModal(
 
                         }
 
-                        if is_editing {
+                        if danger_zone_visible(is_editing, *active_tab.read()) {
                             div { style: "margin-top:10px;padding-top:14px;border-top:1px solid var(--cf-divider);",
                                 div { style: "font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;color:var(--cf-text-muted);margin-bottom:8px;", "Danger zone" }
                                 button {
                                     id: "policy-editor-delete-trigger",
                                     class: "btn btn-ghost focus-ring",
-                                    style: "color:#f87171;border-color:rgba(248,113,113,0.3);",
+                                    style: "color:var(--cf-policy-red);border-color:color-mix(in oklab, var(--cf-policy-red) 35%, transparent);",
                                     onclick: move |_| confirm_delete.set(true),
                                     svg { width: "12", height: "12", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round", style: "margin-right:6px;vertical-align:text-bottom;",
                                         path { d: "M18 6 6 18M6 6l12 12" }
@@ -3682,7 +3688,7 @@ fn RuleEditorRow(
                         match option_search.read().clone() {
                             OptionSearchState::Idle => rsx! { span { "data-testid": "policy-option-search-idle", class: "help", "Type any option path, or search the metadata index." } },
                             OptionSearchState::Loading => rsx! { span { "data-testid": "policy-option-search-loading", class: "help", "Searching NixOS options…" } },
-                            OptionSearchState::Error(error) => rsx! { span { "data-testid": "policy-option-search-error", class: "help", style: "color:#f87171;", "Search failed: {error}. You can still enter a path manually." } },
+                            OptionSearchState::Error(error) => rsx! { span { "data-testid": "policy-option-search-error", class: "help", style: "color:var(--cf-policy-red);", "Search failed: {error}. You can still enter a path manually." } },
                             OptionSearchState::Unavailable(message) => rsx! { span { "data-testid": "policy-option-search-unavailable", class: "help", "{message}" } },
                             OptionSearchState::Zero => rsx! { span { "data-testid": "policy-option-search-zero", class: "help", "No Crystal Forge baseline metadata matches. The option may still be valid for the target and will be kept as a custom string option." } },
                             OptionSearchState::Results(results) => rsx! {
@@ -3716,7 +3722,7 @@ fn RuleEditorRow(
                                 "{advisory}"
                             }
                         }
-                        div { style: "display:flex;gap:6px;align-items:flex-start;flex-wrap:wrap;",
+                        div { class: "cf-policy-rule-value-row",
                             select {
                                 "data-testid": "policy-rule-nixos-operator-{index}",
                                 aria_label: "Comparison operator",
@@ -3735,7 +3741,7 @@ fn RuleEditorRow(
                                 "boolean" => rsx! { select { "data-testid": "policy-rule-nixos-value-{index}", aria_label: "Expected boolean value", class: "input focus-ring mono", value: if rule.value.as_bool().unwrap_or(false) { "true" } else { "false" }, onchange: move |event| set_rule_field!(value, serde_json::Value::Bool(event.value() == "true")), option { value: "true", "true" } option { value: "false", "false" } } },
                                 "enum" if !rule.option_values.is_empty() && rule.value.as_str().is_some_and(|value| rule.option_values.iter().any(|candidate| candidate == value)) => rsx! { select { "data-testid": "policy-rule-nixos-value-{index}", aria_label: "Expected enum value", class: "input focus-ring mono", value: "{rule.value.as_str().unwrap_or_default()}", onchange: move |event| set_rule_field!(value, serde_json::Value::String(event.value())), for value in rule.option_values.iter() { option { value: "{value}", selected: rule.value.as_str() == Some(value.as_str()), "{value}" } } } },
                                 "integer" => rsx! { input { "data-testid": "policy-rule-nixos-value-{index}", aria_label: "Expected integer value", r#type: "number", class: "input focus-ring mono", value: "{rule.value.as_i64().map(|value| value.to_string()).or_else(|| rule.value.as_str().map(str::to_string)).unwrap_or_default()}", oninput: move |event| { let raw = event.value(); if let Ok(value) = raw.parse::<i64>() { set_rule_field!(value, serde_json::json!(value)); } else { set_rule_field!(value, serde_json::Value::String(raw)); } } } },
-                                "lines" => rsx! { textarea { "data-testid": "policy-rule-nixos-value-{index}", aria_label: "Expected multiline value", class: "input focus-ring mono code-editor", rows: "8", style: "flex:1;min-width:260px;resize:vertical;", value: "{rule.value.as_str().unwrap_or_default()}", oninput: move |event| set_rule_field!(value, serde_json::Value::String(event.value())) } },
+                                "lines" => rsx! { textarea { "data-testid": "policy-rule-nixos-value-{index}", aria_label: "Expected multiline value", class: "input focus-ring mono code-editor cf-policy-multiline-value", rows: "8", value: "{rule.value.as_str().unwrap_or_default()}", oninput: move |event| set_rule_field!(value, serde_json::Value::String(event.value())) } },
                                 _ => rsx! { input { "data-testid": "policy-rule-nixos-value-{index}", aria_label: "Expected string value", class: "input focus-ring mono", style: "flex:1;min-width:180px;", value: "{rule.value.as_str().unwrap_or_default()}", oninput: move |event| set_rule_field!(value, serde_json::Value::String(event.value())) } },
                             }
                             span { class: "chip chip-neutral", style: "font-size:10px;", "{normalize_option_type(&rule.option_type)}" }
@@ -3968,6 +3974,16 @@ mod tests {
     #[test]
     fn tab_navigation_wraps_and_excludes_unavailable_provenance() {
         assert_eq!(
+            visible_policy_editor_tabs(false),
+            &[
+                PolicyEditorTab::Details,
+                PolicyEditorTab::Enforcement,
+                PolicyEditorTab::Mappings,
+                PolicyEditorTab::Evidence,
+            ]
+        );
+        assert_eq!(visible_policy_editor_tabs(true), &POLICY_EDITOR_TABS);
+        assert_eq!(
             move_policy_editor_tab(
                 PolicyEditorTab::Details,
                 PolicyEditorTabMove::Previous,
@@ -3999,6 +4015,52 @@ mod tests {
             move_policy_editor_tab(PolicyEditorTab::Details, PolicyEditorTabMove::Last, true,),
             PolicyEditorTab::Provenance
         );
+    }
+
+    #[test]
+    fn editor_layout_styles_override_generic_modal_and_preserve_narrow_tabs() {
+        let css = include_str!("../../../assets/app.css");
+        let desktop = css
+            .split_once(".modal.cf-policy-editor-dialog {")
+            .expect("editor modal selector")
+            .1
+            .split_once('}')
+            .expect("editor modal rule")
+            .0;
+        assert!(desktop.contains("width: min(1180px, calc(100vw - 48px))"));
+
+        let narrow = css
+            .split_once("@media (max-width: 700px)")
+            .expect("narrow editor breakpoint")
+            .1;
+        assert!(narrow.contains(".modal.cf-policy-editor-dialog {\n    width: 100%;"));
+        assert!(narrow.contains(".cf-policy-editor-nav {"));
+        assert!(narrow.contains("overflow-x: auto"));
+        assert!(narrow.contains(".cf-policy-editor-nav .cf-modal-tab {\n    flex: none;\n    width: auto;\n    inline-size: auto;\n    max-width: none;\n    min-width: 0;\n    min-inline-size: max-content;"));
+        assert!(narrow.contains(
+            ".cf-policy-editor-nav .cf-modal-tab--active {\n    border-bottom-color: currentColor;"
+        ));
+        assert!(narrow.contains(".cf-policy-editor-nav-affordance {"));
+        assert!(narrow.contains("display: flex"));
+    }
+
+    #[test]
+    fn mapping_action_stays_in_scrolling_content_above_footer() {
+        let source = include_str!("policy_editor_modal.rs");
+        let css = include_str!("../../../assets/app.css");
+        let mappings = source.find("cf-policy-mappings-tab").expect("mappings tab");
+        let add_mapping = source
+            .find("id: \"policy-mapping-add-trigger\"")
+            .expect("add mapping action");
+        let footer = source.find("// ── Footer").expect("editor footer");
+
+        assert!(mappings < add_mapping && add_mapping < footer);
+        assert!(
+            css.contains(".cf-policy-mappings-tab {\n  min-height: 100%;\n  padding-bottom: 72px;")
+        );
+        assert!(css.contains(".cf-policy-mapping-add-trigger {\n  margin-bottom: 16px;\n  scroll-margin-bottom: 104px;"));
+        assert!(source.contains("class: \"cf-policy-editor-nav-affordance\""));
+        assert!(source.contains("\"Scroll sections →\""));
     }
 
     #[test]
@@ -4160,51 +4222,48 @@ mod tests {
     }
 
     #[test]
-    fn editor_state_keeps_origin_enforcement_and_mapping_independent() {
+    fn mapped_without_enforcement_requires_known_nonempty_mappings() {
         let loaded = MappingLoadState::Loaded;
+        assert!(!policy_is_mapped_not_enforced(loaded, 0, 0));
+        assert!(!policy_is_mapped_not_enforced(loaded, 2, 1));
+        assert!(policy_is_mapped_not_enforced(loaded, 2, 0));
+    }
 
-        // custom + rules > 0 + mappings == 0 => Unmapped
-        let custom_enforced = policy_editor_state(false, loaded, 0, 1, 0);
-        assert_eq!(custom_enforced.enforcement, "Enforced");
-        assert_eq!(custom_enforced.compliance, "Unmapped");
-        assert!(!custom_enforced.mapped_not_enforced);
+    #[test]
+    fn editor_header_mapping_metadata_is_honest_during_every_load_state() {
+        assert_eq!(
+            mapping_header_metadata(MappingLoadState::Loading, 0),
+            ("chip chip-unknown", "Mappings loading".to_string())
+        );
+        assert_eq!(
+            mapping_header_metadata(MappingLoadState::Failed, 0),
+            ("chip chip-critical", "Mappings unavailable".to_string())
+        );
+        assert_eq!(
+            mapping_header_metadata(MappingLoadState::Loaded, 0),
+            ("chip chip-unknown", "Unmapped".to_string())
+        );
+        assert_eq!(
+            mapping_header_metadata(MappingLoadState::Loaded, 3),
+            ("chip chip-info", "Mapped · 3".to_string())
+        );
+    }
 
-        // custom + rules == 0 + mappings == 0 => No enforcement defined + Unmapped
-        let custom_empty = policy_editor_state(false, loaded, 0, 0, 0);
-        assert_eq!(custom_empty.enforcement, "No enforcement defined");
-        assert_eq!(custom_empty.compliance, "Unmapped");
-        assert!(!custom_empty.mapped_not_enforced);
-
-        // custom + rules == 0 + mappings > 0 => Mapped but no enforcement
-        let custom_mapped = policy_editor_state(false, loaded, 2, 0, 0);
-        assert_eq!(custom_mapped.enforcement, "No enforcement defined");
-        assert_eq!(custom_mapped.compliance, "Mapped");
-        assert!(custom_mapped.mapped_not_enforced);
-
-        // imported + rules == 0 + mappings == 0 => needs refinement + Unmapped
-        let imported_empty = policy_editor_state(true, loaded, 0, 0, 0);
-        assert_eq!(imported_empty.enforcement, "Enforcement needs refinement");
-        assert_eq!(imported_empty.compliance, "Unmapped");
-        assert!(!imported_empty.mapped_not_enforced);
-
-        // imported + rules == 0 + mappings > 0 => needs refinement + warning
-        let imported_mapped = policy_editor_state(true, loaded, 4, 0, 1);
-        assert_eq!(imported_mapped.enforcement, "Enforcement needs refinement");
-        assert_eq!(imported_mapped.compliance, "Mapped");
-        assert!(imported_mapped.mapped_not_enforced);
-        assert_eq!(imported_mapped.evidence, "Evidence collected");
+    #[test]
+    fn danger_zone_is_limited_to_editing_basics() {
+        assert!(danger_zone_visible(true, PolicyEditorTab::Details));
+        assert!(!danger_zone_visible(false, PolicyEditorTab::Details));
+        assert!(!danger_zone_visible(true, PolicyEditorTab::Enforcement));
+        assert!(!danger_zone_visible(true, PolicyEditorTab::Mappings));
+        assert!(!danger_zone_visible(true, PolicyEditorTab::Evidence));
+        assert!(!danger_zone_visible(true, PolicyEditorTab::Provenance));
     }
 
     #[test]
     fn mapping_load_failure_is_never_reported_as_unmapped() {
-        let loading = policy_editor_state(false, MappingLoadState::Loading, 0, 1, 0);
-        assert_eq!(loading.compliance, "Compliance mappings loading");
-        assert!(!loading.mapped_not_enforced);
-
-        let failed = policy_editor_state(true, MappingLoadState::Failed, 0, 0, 0);
-        assert_eq!(failed.compliance, "Compliance mappings unavailable");
         assert!(
-            !failed.mapped_not_enforced,
+            !policy_is_mapped_not_enforced(MappingLoadState::Loading, 2, 0)
+                && !policy_is_mapped_not_enforced(MappingLoadState::Failed, 2, 0),
             "an unknown mapping set must not raise the mapped-not-enforced warning"
         );
     }

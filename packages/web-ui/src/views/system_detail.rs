@@ -394,7 +394,11 @@ struct FlakeCommitPeekState {
 // Main Component
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// The system detail page, reached via `/systems/:id`.
+/// Renders the server-backed system detail page reached via `/systems/:id`.
+///
+/// Route parameters select tabs and an optional POA&M drawer. System,
+/// compliance, finding, and remediation identity remain server-authoritative;
+/// the view owns only transient presentation and form state.
 #[component]
 pub fn SystemDetailView(id: String, tab: String, poam: String) -> Element {
     let nav = navigator();
@@ -1918,9 +1922,59 @@ fn ComplianceTab(system: SystemDetail, viewer: bool, initial_poam: String) -> El
         div {
             style: "display:flex;flex-direction:column;gap:14px;",
 
+            // Remediation is the primary compliance action and precedes bundle summaries.
+            match poam_resource.read_unchecked().clone() {
+                None => rsx! {
+                    section { class: "card poam-system-section",
+                        div { role: "status", aria_live: "polite", class: "poam-tray-state", "Loading authoritative POA&M rollup and items..." }
+                    }
+                },
+                Some(SystemPoamData::Unauthorized) => rsx! {
+                    section { class: "card poam-system-section",
+                        div { role: "alert", class: "sd-callout sd-callout-warn",
+                            Icon { name: IconName::Key, size: 13 }
+                            div { "POA&M data is not available to your role for this system. Compliance results remain visible below." }
+                        }
+                    }
+                },
+                Some(SystemPoamData::Failed(error)) => rsx! {
+                    section { class: "card poam-system-section",
+                        div { role: "alert", class: "sd-callout sd-callout-danger",
+                            Icon { name: IconName::Warn, size: 13 }
+                            div { "{error}" }
+                        }
+                        button { class: "btn btn-ghost focus-ring", onclick: move |_| poam_resource.restart(), "Retry POA&M" }
+                    }
+                },
+                Some(SystemPoamData::Loaded { rollup, items }) => rsx! {
+                    SystemPoamSection {
+                        hostname: system.hostname.clone(),
+                        rollup,
+                        items,
+                        filter: poam_filter(),
+                        on_filter: move |filter| poam_filter.set(filter),
+                        on_open: move |poam_id| {
+                            selected_poam.set(Some(poam_id));
+                            let query = query_with_parameter(
+                                &query_with_parameter(
+                                    &current_system_detail_query(),
+                                    "tab",
+                                    Some("compliance"),
+                                ),
+                                "poam",
+                                Some(&poam_id.to_string()),
+                            );
+                            sync_system_detail_query(&query, true);
+                        },
+                    }
+                },
+            }
+
             // Loading state
             if loading {
                 div {
+                    role: "status",
+                    aria_live: "polite",
                     class: "flex items-center justify-center py-8",
                     crate::components::loading::DashboardLoadingSpinner {
                         label: "Loading compliance data…".to_string(),
@@ -1931,6 +1985,7 @@ fn ComplianceTab(system: SystemDetail, viewer: bool, initial_poam: String) -> El
             // Error state (only if no bundles loaded at all)
             else if data.bundles.is_empty() && data.error.is_some() {
                 div {
+                    role: "alert",
                     class: "sd-callout sd-callout-danger",
                     Icon { name: IconName::Warn, size: 13 }
                     div { style: "font-size:12px;", "{data.error.as_ref().unwrap()}" }
@@ -2061,53 +2116,6 @@ fn ComplianceTab(system: SystemDetail, viewer: bool, initial_poam: String) -> El
                         }
                     }
                 }
-            }
-
-            match poam_resource.read_unchecked().clone() {
-                None => rsx! {
-                    section { class: "card poam-system-section",
-                        div { class: "poam-tray-state", "Loading authoritative POA&M rollup and items..." }
-                    }
-                },
-                Some(SystemPoamData::Unauthorized) => rsx! {
-                    section { class: "card poam-system-section",
-                        div { class: "sd-callout sd-callout-warn",
-                            Icon { name: IconName::Key, size: 13 }
-                            div { "POA&M data is not available to your role for this system. Compliance results remain visible above." }
-                        }
-                    }
-                },
-                Some(SystemPoamData::Failed(error)) => rsx! {
-                    section { class: "card poam-system-section",
-                        div { class: "sd-callout sd-callout-danger",
-                            Icon { name: IconName::Warn, size: 13 }
-                            div { "{error}" }
-                        }
-                        button { class: "btn btn-ghost focus-ring", onclick: move |_| poam_resource.restart(), "Retry POA&M" }
-                    }
-                },
-                Some(SystemPoamData::Loaded { rollup, items }) => rsx! {
-                    SystemPoamSection {
-                        hostname: system.hostname.clone(),
-                        rollup,
-                        items,
-                        filter: poam_filter(),
-                        on_filter: move |filter| poam_filter.set(filter),
-                        on_open: move |poam_id| {
-                            selected_poam.set(Some(poam_id));
-                            let query = query_with_parameter(
-                                &query_with_parameter(
-                                    &current_system_detail_query(),
-                                    "tab",
-                                    Some("compliance"),
-                                ),
-                                "poam",
-                                Some(&poam_id.to_string()),
-                            );
-                            sync_system_detail_query(&query, true);
-                        },
-                    }
-                },
             }
 
             // Evidence drawer — shown when evidence is loading, loaded, or errored

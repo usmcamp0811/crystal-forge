@@ -1,22 +1,28 @@
 //! Policy card component for displaying policy definitions.
 
-use dioxus::prelude::*;
-use uuid::Uuid;
-
 use super::types::{
     PolicyDefinition, is_core_policy, is_policy_enabled, is_policy_version_editable,
     policy_category, policy_rule_summaries,
 };
 use crate::components::{Icon, IconName};
+use dioxus::prelude::*;
 
-/// Card component for displaying a policy definition with design-parity rule summaries.
+const COLLAPSIBLE_DESCRIPTION_CHARS: usize = 120;
+
+fn description_is_expandable(description: &str) -> bool {
+    description.chars().count() > COLLAPSIBLE_DESCRIPTION_CHARS || description.lines().count() > 2
+}
+
+/// Renders one policy catalog card with enforcement and mapping summaries.
+///
+/// The parent owns catalog selection, exact-version navigation, and edit
+/// authority. The card owns only description expansion and interaction wiring.
 #[component]
 pub fn PolicyCard(
     policy: PolicyDefinition,
     on_open: EventHandler<PolicyDefinition>,
     on_open_revisions: EventHandler<PolicyDefinition>,
     on_edit: EventHandler<PolicyDefinition>,
-    on_delete: EventHandler<Uuid>,
     #[props(default = false)] selection_mode: bool,
     #[props(default = false)] selected: bool,
     #[props(default)] on_toggle_select: EventHandler<bool>,
@@ -28,6 +34,7 @@ pub fn PolicyCard(
     on_row_click: EventHandler<MouseEvent>,
     #[props(default = false)] highlighted: bool,
 ) -> Element {
+    let mut description_expanded = use_signal(|| false);
     let rules = policy_rule_summaries(&policy);
     let is_core = is_core_policy(&policy);
     let enabled = is_policy_enabled(&policy);
@@ -36,9 +43,9 @@ pub fn PolicyCard(
     let rail_color = if enabled { category.color() } else { "#6b7280" };
     let severity_label = policy.severity.as_deref().and_then(|severity| {
         match severity.to_ascii_lowercase().as_str() {
-            "high" => Some(("CAT I", "#f87171")),
-            "medium" => Some(("CAT II", "#fbbf24")),
-            "low" => Some(("CAT III", "#60a5fa")),
+            "high" => Some(("CAT I", "var(--cf-policy-red)")),
+            "medium" => Some(("CAT II", "var(--cf-policy-amber)")),
+            "low" => Some(("CAT III", "var(--cf-policy-blue)")),
             _ => None,
         }
     });
@@ -52,13 +59,12 @@ pub fn PolicyCard(
     let policy_for_open = policy.clone();
     let policy_for_keyboard = policy.clone();
     let policy_for_edit = policy.clone();
-    let policy_id = policy.id;
     let policy_for_revisions = policy.clone();
 
     rsx! {
         div {
-            class: "sys-card",
-            role: "button",
+            class: if selected { "sys-card policy-card selected" } else { "sys-card policy-card" },
+            role: "group",
             tabindex: "0",
             aria_label: if selection_mode { format!("Select {}", policy.name) } else { format!("Open {}", policy.name) },
             onclick: move |evt| {
@@ -101,7 +107,7 @@ pub fn PolicyCard(
                                 r#type: "checkbox",
                                 class: "focus-ring",
                                 checked: selected,
-                                aria_label: "Select {policy.name} for export",
+                                aria_label: "Select {policy.name}",
                                 onclick: move |event| event.stop_propagation(),
                                 onkeydown: move |event| event.stop_propagation(),
                                 onchange: move |event| on_toggle_select.call(event.checked()),
@@ -114,7 +120,24 @@ pub fn PolicyCard(
                         }
                         span { "{policy.name}" }
                     }
-                    div { style: "font-size:11px;color:var(--cf-text-secondary);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;", title: "{policy.description}", "{policy.description}" }
+                    div {
+                        class: if description_expanded() { "policy-card-description policy-card-description-expanded" } else { "policy-card-description" },
+                        title: "{policy.description}",
+                        "{policy.description}"
+                    }
+                    if description_is_expandable(&policy.description) {
+                        button {
+                            r#type: "button",
+                            class: "policy-card-description-toggle focus-ring",
+                            aria_expanded: if description_expanded() { "true" } else { "false" },
+                            onclick: move |event| {
+                                event.stop_propagation();
+                                description_expanded.toggle();
+                            },
+                            onkeydown: move |event| event.stop_propagation(),
+                            if description_expanded() { "Show less" } else { "Show more" }
+                        }
+                    }
                 }
                 div { style: "display:flex;flex-direction:column;align-items:flex-end;gap:5px;flex-shrink:0;",
                     span { class: "{type_chip}", "{type_label}" }
@@ -138,18 +161,18 @@ pub fn PolicyCard(
             }
 
             div {
-                div { style: "font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--cf-text-muted);font-weight:600;margin-bottom:6px;", "Rules" }
+                div { style: "font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--cf-text-muted);font-weight:600;margin-bottom:6px;", "Enforcement" }
                 div { class: "flex flex-col gap-1.5",
                     if rules.is_empty() {
-                        div { class: "text-[11px] italic text-gray-500", "No enforcement defined." }
+                        div { style: "font-size:11px;font-style:italic;color:var(--cf-text-muted);", "No enforcement defined." }
                     } else {
                         for rule in rules.iter() {
                             div { class: "flex items-start gap-2", style: "font-size:11px;color:var(--cf-text-primary);",
                                 svg {
-                                    class: "mt-0.5 shrink-0", width: "10", height: "10", view_box: "0 0 24 24", fill: "none", stroke: "#34d399", stroke_width: "3", stroke_linecap: "round", stroke_linejoin: "round",
+                                    class: "mt-0.5 shrink-0", width: "10", height: "10", view_box: "0 0 24 24", fill: "none", stroke: "var(--cf-policy-emerald)", stroke_width: "3", stroke_linecap: "round", stroke_linejoin: "round",
                                     polyline { points: "20 6 9 17 4 12" }
                                 }
-                                span { "{rule.label}" }
+                                span { class: "policy-card-rule-summary", title: "{rule.label}", "{rule.label}" }
                             }
                         }
                     }
@@ -191,7 +214,7 @@ pub fn PolicyCard(
                     span { "systems use this" }
                 }
                 if is_core {
-                    span { class: "text-xs text-emerald-300", "Always on" }
+                    span { style: "font-size:12px;color:var(--cf-policy-emerald);", "Always on" }
                 } else if !selection_mode && is_editable {
                     div { class: "flex items-center gap-2",
                         button {
@@ -203,16 +226,6 @@ pub fn PolicyCard(
                             },
                             onkeydown: move |event| event.stop_propagation(),
                             Icon { name: IconName::Gear, size: 12 } "Edit"
-                        }
-                        button {
-                            class: "btn btn-ghost focus-ring xs",
-                            style: "color:#f87171;border-color:rgba(248,113,113,0.3);",
-                            onclick: move |evt| {
-                                evt.stop_propagation();
-                                on_delete.call(policy_id);
-                            },
-                            onkeydown: move |event| event.stop_propagation(),
-                            "Delete"
                         }
                     }
                 } else if !selection_mode {
@@ -232,5 +245,19 @@ pub fn PolicyCard(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::description_is_expandable;
+
+    #[test]
+    fn descriptions_expand_only_when_the_card_clamp_can_hide_content() {
+        assert!(!description_is_expandable("Short policy description."));
+        assert!(description_is_expandable(
+            "first line\nsecond line\nthird line"
+        ));
+        assert!(description_is_expandable(&"x".repeat(121)));
     }
 }

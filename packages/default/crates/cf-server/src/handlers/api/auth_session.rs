@@ -1,3 +1,9 @@
+//! Establishes and invalidates browser authentication sessions.
+//!
+//! Session cookies are HTTP-only and paired with a readable double-submit CSRF
+//! cookie. Client-address attribution trusts forwarded addresses only through
+//! an explicitly configured proxy chain.
+
 use axum::{
     Json,
     extract::{FromRequestParts, State},
@@ -18,14 +24,18 @@ use crate::{
     queries::auth_identity::{create_user_session, invalidate_session_by_token_hash},
 };
 
+/// Defines the default browser session lifetime in seconds.
 pub const SESSION_TTL_SECONDS: i64 = 60 * 60 * 8;
 const MAX_FORWARDED_ADDRESSES: usize = 10;
 const SESSION_TTL_ENV: &str = "CRYSTAL_FORGE_SESSION_TTL_SECONDS";
 const SESSION_TTL_MIN_SECONDS: i64 = 60;
 const SESSION_TTL_MAX_SECONDS: i64 = 60 * 60 * 24 * 30;
 
+/// Contains the session and CSRF `Set-Cookie` header values for a new session.
 pub struct SessionCookies {
+    /// Contains the HTTP-only authentication session cookie.
     pub session_cookie: HeaderValue,
+    /// Contains the double-submit CSRF cookie.
     pub csrf_cookie: HeaderValue,
 }
 
@@ -105,6 +115,15 @@ fn ip_in_cidr(address: IpAddr, cidr: &str) -> bool {
     }
 }
 
+/// Persists a user session and constructs its session and CSRF cookies.
+///
+/// The configured lifetime is clamped to the supported range before it is used
+/// for both persistence and cookie expiry.
+///
+/// # Errors
+///
+/// Returns [`SessionError::Database`] when session persistence fails or
+/// [`SessionError::InvalidCookieHeader`] when a cookie cannot become a header.
 pub async fn establish_user_session(
     pool: &PgPool,
     user_id: Uuid,
@@ -138,6 +157,16 @@ pub async fn establish_user_session(
     })
 }
 
+/// Invalidates the current browser session and clears both session cookies.
+///
+/// A request without a session cookie is an idempotent success. A request with
+/// a session cookie must pass double-submit CSRF validation.
+///
+/// # Errors
+///
+/// Returns a CSRF error for an invalid authenticated request, a database error
+/// when invalidation fails, or a cookie-header error when clearing cookies
+/// cannot be represented in the response.
 pub async fn logout(
     State(pool): State<PgPool>,
     headers: HeaderMap,
@@ -207,7 +236,13 @@ fn parse_session_ttl(raw: Option<&str>) -> i64 {
 
 /// Reusable double-submit CSRF validation for state-changing cookie-auth endpoints.
 ///
-/// Mutation handlers use this through [`RequireCsrf`] or [`require_csrf`].
+/// Mutation handlers use this through [`RequireCsrf`] or the crate-private
+/// request validator.
+///
+/// # Errors
+///
+/// Returns a [`SessionError`] when the CSRF cookie or header is absent or when
+/// their values do not match.
 pub fn validate_csrf(headers: &HeaderMap) -> Result<(), SessionError> {
     let csrf_cookie =
         extract_cookie(headers, CSRF_COOKIE_NAME).ok_or(SessionError::MissingCsrfCookie)?;
@@ -228,6 +263,7 @@ pub fn validate_csrf(headers: &HeaderMap) -> Result<(), SessionError> {
 ///
 /// Mutation handlers place this extractor after their authentication extractor
 /// so an authenticated session and role are not sufficient to mutate state.
+/// Rejection is an HTTP 403 structured CSRF error response.
 pub struct RequireCsrf;
 
 #[axum::async_trait]
@@ -263,12 +299,18 @@ pub(crate) fn require_csrf(headers: &HeaderMap) -> Result<(), Response> {
     })
 }
 
+/// Represents a browser-session or CSRF failure.
 #[derive(Debug)]
 pub enum SessionError {
+    /// Indicates that the double-submit CSRF cookie is absent.
     MissingCsrfCookie,
+    /// Indicates that the CSRF request header is absent or invalid.
     MissingCsrfHeader,
+    /// Indicates that the CSRF cookie and request header differ.
     CsrfMismatch,
+    /// Indicates that session persistence or invalidation failed.
     Database,
+    /// Indicates that a cookie value could not be represented as a header.
     InvalidCookieHeader,
 }
 

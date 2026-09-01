@@ -1,3 +1,10 @@
+//! Implements POA&M lifecycle, authorization, and evidence services.
+//!
+//! This module validates actor scope and lifecycle transitions before invoking
+//! persistence queries. Mutations record activity and audit events in the same
+//! transaction. Verification and closure bind results to exact current policy
+//! evidence so stale observations cannot close a POA&M.
+
 use std::collections::{BTreeSet, HashMap};
 
 use chrono::{DateTime, Duration, NaiveDate, Utc};
@@ -17,15 +24,20 @@ use crate::queries::compliance::{
 };
 use crate::queries::poam::{self, insert_activity_and_audit};
 
+/// Provides the current time used by POA&M lifecycle decisions.
 pub trait PoamClock: Send + Sync {
+    /// Returns the current UTC timestamp.
     fn now(&self) -> DateTime<Utc>;
+    /// Returns the current UTC calendar date.
     fn today(&self) -> NaiveDate {
         self.now().date_naive()
     }
 }
 
+/// Provides production UTC time for POA&M operations.
 pub struct SystemClock;
 const MAX_POAM_RELATIONSHIPS: i64 = 100;
+const LEGACY_RELATIONSHIP_HISTORY_LIMIT: i64 = 100;
 const MAX_SHORT_TEXT_BYTES: usize = 256;
 const MAX_SEARCH_BYTES: usize = 256;
 const MAX_NOTE_BYTES: usize = 4_096;
@@ -39,23 +51,38 @@ impl PoamClock for SystemClock {
     }
 }
 
+/// Describes the authenticated actor and authorization scope for an operation.
 #[derive(Debug, Clone)]
 pub struct PoamActor {
+    /// Identifies the user recorded on mutations and audit events.
     pub user_id: Uuid,
+    /// Contains the stable user identifier recorded in administrative audits.
     pub identifier: String,
+    /// Indicates whether the actor can access every environment and admin API.
     pub is_admin: bool,
+    /// Indicates whether the actor may mutate POA&M resources.
     pub can_mutate: bool,
+    /// Lists environments visible to a non-admin actor.
     pub environment_ids: Vec<Uuid>,
+    /// Identifies the request origin recorded with audit events, when available.
     pub request_origin: Option<String>,
 }
 
+/// Represents an expected POA&M service failure.
 #[derive(Debug)]
 pub enum PoamError {
+    /// Indicates that the resource is absent or hidden by actor scope.
     NotFound,
+    /// Indicates that the actor lacks permission for the operation.
     Forbidden,
+    /// Contains a stable code and message for invalid request data.
     Validation(&'static str, String),
+    /// Contains a stable code and message for a lifecycle or revision conflict.
     Conflict(&'static str, String),
+    /// Contains a stable code, message, and optional evidence for a failed
+    /// operation precondition.
     Precondition(&'static str, String, Option<Value>),
+    /// Wraps an unexpected persistence or internal data error.
     Database(anyhow::Error),
 }
 
@@ -185,11 +212,10 @@ fn relationship_page_bounds(
     offset: Option<i64>,
 ) -> Result<Option<(i64, i64)>, PoamError> {
     match (limit, offset) {
-        // COMPATIBILITY: The original relationship endpoints returned every
-        // relationship when callers supplied no pagination parameters. Keep
-        // that exact behavior for deployed clients that do not understand the
-        // pagination metadata. Current clients always send both parameters.
-        (None, None) => Ok(None),
+        // COMPATIBILITY: Deployed clients can omit pagination parameters. Keep
+        // that request valid, but use the response's existing continuation
+        // metadata so legacy requests cannot expand without a resource bound.
+        (None, None) => Ok(Some((LEGACY_RELATIONSHIP_HISTORY_LIMIT, 0))),
         (None, Some(_)) => Err(PoamError::Validation(
             "invalid_relationship_pagination",
             "history_offset requires history_limit".into(),
@@ -736,6 +762,15 @@ async fn validate_assignment_compatibility_tx(
     Ok(())
 }
 
+/// Creates a POA&M from one current failing finding.
+///
+/// The operation validates assignment references, creates optional default
+/// milestones, and records creation activity atomically.
+///
+/// # Errors
+///
+/// Returns an authorization, validation, conflict, precondition, not-found, or
+/// database error when the corresponding creation requirement is not met.
 pub async fn create(
     pool: &PgPool,
     actor: &PoamActor,
@@ -895,6 +930,15 @@ pub async fn create(
     detail(pool, actor, poam_id, clock).await
 }
 
+/// Lists POA&Ms visible to an actor using the requested filters and page.
+///
+/// Filters that require current policy context are resolved against
+/// authoritative evidence and have bounded candidate expansion.
+///
+/// # Errors
+///
+/// Returns a validation error for invalid or overly broad filters and a
+/// database error when visible summaries or policy context cannot be loaded.
 pub async fn list(
     pool: &PgPool,
     actor: &PoamActor,
@@ -1095,6 +1139,12 @@ async fn canonical_context_match_ids(
         .collect())
 }
 
+/// Returns a POA&M with default bounded history pages.
+///
+/// # Errors
+///
+/// Returns [`PoamError::NotFound`] when the POA&M is absent or outside the
+/// actor's scope. It returns a validation or database error on load failure.
 pub async fn detail(
     pool: &PgPool,
     actor: &PoamActor,
@@ -1104,6 +1154,16 @@ pub async fn detail(
     detail_with_history(pool, actor, id, &PoamDetailQuery::default(), clock).await
 }
 
+/// Returns a POA&M with caller-selected cursor-based history pages.
+///
+/// Current findings are refreshed from authoritative assessment evidence.
+/// Historical verification items retain their captured system and policy
+/// identity, and requirement metadata is hydrated for display.
+///
+/// # Errors
+///
+/// Returns a not-found error for an inaccessible POA&M, a validation error for
+/// invalid cursor or limit combinations, or a database error on query failure.
 pub async fn detail_with_history(
     pool: &PgPool,
     actor: &PoamActor,
@@ -1179,6 +1239,53 @@ pub async fn detail_with_history(
             }
         }
     }
+    // PERFORMANCE: One metadata query hydrates the current finding page and all
+    // bounded verification items in the response.
+    let requirement_version_ids = detail
+        .findings
+        .iter()
+        .flat_map(|finding| finding.requirement_version_ids.iter().copied())
+        .chain(
+            detail
+                .verification_attempts
+                .iter()
+                .flat_map(|attempt| attempt.items.iter())
+                .flat_map(|item| item.requirement_version_ids.iter().copied()),
+        )
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let requirement_metadata =
+        poam::finding_requirement_metadata(&mut tx, &requirement_version_ids).await?;
+    for finding in &mut detail.findings {
+        finding.requirements = sqlx::types::Json(
+            requirement_metadata
+                .iter()
+                .filter(|requirement| {
+                    finding
+                        .requirement_version_ids
+                        .contains(&requirement.requirement_version_id)
+                })
+                .cloned()
+                .collect(),
+        );
+    }
+    for item in detail
+        .verification_attempts
+        .iter_mut()
+        .flat_map(|attempt| attempt.items.iter_mut())
+    {
+        item.requirements = sqlx::types::Json(
+            requirement_metadata
+                .iter()
+                .filter(|requirement| {
+                    item.requirement_version_ids
+                        .contains(&requirement.requirement_version_id)
+                })
+                .cloned()
+                .collect(),
+        );
+    }
     tx.commit().await?;
     Ok(detail)
 }
@@ -1240,6 +1347,12 @@ async fn bump_and_audit(
     Ok(revision)
 }
 
+/// Updates mutable POA&M fields using optimistic revision control.
+///
+/// # Errors
+///
+/// Returns an authorization, validation, not-found, conflict, or database
+/// error when the update cannot be applied atomically.
 pub async fn update(
     pool: &PgPool,
     actor: &PoamActor,
@@ -1302,6 +1415,14 @@ fn transition_allowed(from: &str, to: PoamStatus) -> bool {
     )
 }
 
+/// Transitions an active POA&M between non-terminal workflow states.
+///
+/// Completion is excluded and must use [`close`].
+///
+/// # Errors
+///
+/// Returns an authorization, validation, not-found, conflict, or database
+/// error when the transition is not valid at the supplied revision.
 pub async fn transition(
     pool: &PgPool,
     actor: &PoamActor,
@@ -1348,6 +1469,12 @@ pub async fn transition(
     detail(pool, actor, id, clock).await
 }
 
+/// Adds an audited note to an active POA&M.
+///
+/// # Errors
+///
+/// Returns an authorization, validation, not-found, conflict, or database
+/// error when the note cannot be recorded at the supplied revision.
 pub async fn add_note(
     pool: &PgPool,
     actor: &PoamActor,
@@ -1372,6 +1499,12 @@ pub async fn add_note(
     detail(pool, actor, id, clock).await
 }
 
+/// Adds a milestone to an active POA&M.
+///
+/// # Errors
+///
+/// Returns an authorization, validation, not-found, conflict, or database
+/// error when the milestone cannot be recorded at the supplied revision.
 pub async fn add_milestone(
     pool: &PgPool,
     actor: &PoamActor,
@@ -1413,6 +1546,12 @@ pub async fn add_milestone(
     detail(pool, actor, id, clock).await
 }
 
+/// Updates one milestone and records the changed state in the audit history.
+///
+/// # Errors
+///
+/// Returns an authorization, validation, not-found, conflict, or database
+/// error when the milestone cannot be updated at the supplied revision.
 pub async fn update_milestone(
     pool: &PgPool,
     actor: &PoamActor,
@@ -1478,6 +1617,12 @@ pub async fn update_milestone(
     detail(pool, actor, id, clock).await
 }
 
+/// Removes one milestone from an active POA&M.
+///
+/// # Errors
+///
+/// Returns an authorization, not-found, conflict, or database error when the
+/// milestone cannot be removed at the supplied revision.
 pub async fn remove_milestone(
     pool: &PgPool,
     actor: &PoamActor,
@@ -1513,6 +1658,15 @@ pub async fn remove_milestone(
     detail(pool, actor, id, clock).await
 }
 
+/// Links a current failing finding to an active POA&M.
+///
+/// The finding must share the POA&M's policy lineage. Another active POA&M
+/// must not manage it. Evidence validation and link creation are atomic.
+///
+/// # Errors
+///
+/// Returns an authorization, validation, precondition, not-found, conflict, or
+/// database error when the finding cannot be linked.
 pub async fn link_finding(
     pool: &PgPool,
     actor: &PoamActor,
@@ -1597,6 +1751,12 @@ pub async fn link_finding(
     detail(pool, actor, id, clock).await
 }
 
+/// Retires an active finding link while retaining at least one finding.
+///
+/// # Errors
+///
+/// Returns an authorization, validation, not-found, conflict, or database
+/// error when the link cannot be retired at the supplied revision.
 pub async fn unlink_finding(
     pool: &PgPool,
     actor: &PoamActor,
@@ -1638,6 +1798,15 @@ pub async fn unlink_finding(
     detail(pool, actor, id, clock).await
 }
 
+/// Links an immutable assignment version to an active POA&M.
+///
+/// The assignment must be visible to the actor. Its scope and policy lineage
+/// must overlap an active finding.
+///
+/// # Errors
+///
+/// Returns an authorization, validation, not-found, conflict, or database
+/// error when the assignment reference cannot be linked.
 pub async fn link_assignment(
     pool: &PgPool,
     actor: &PoamActor,
@@ -1695,6 +1864,12 @@ pub async fn link_assignment(
     detail(pool, actor, id, clock).await
 }
 
+/// Removes an immutable assignment-version reference from an active POA&M.
+///
+/// # Errors
+///
+/// Returns an authorization, not-found, conflict, or database error when the
+/// reference cannot be removed at the supplied revision.
 pub async fn unlink_assignment(
     pool: &PgPool,
     actor: &PoamActor,
@@ -1732,6 +1907,15 @@ pub async fn unlink_assignment(
     detail(pool, actor, id, clock).await
 }
 
+/// Lists current failing findings that can be linked to a POA&M.
+///
+/// Candidates are visible to the actor and share the POA&M policy lineage. The
+/// service validates current authoritative evidence before returning them.
+///
+/// # Errors
+///
+/// Returns a not-found error for an inaccessible POA&M, a validation error for
+/// invalid bounds or broad searches, or a database error on query failure.
 pub async fn compatible(
     pool: &PgPool,
     actor: &PoamActor,
@@ -1823,10 +2007,10 @@ pub async fn compatible(
 
 /// Returns visible relationships for current composite assessments.
 ///
-/// When both pagination arguments are absent, the response contains all
-/// historical relationships for compatibility with the original endpoint.
-/// Supplying `history_limit` enables bounded per-finding pagination;
-/// `history_offset` is invalid without a limit.
+/// When both pagination arguments are absent, the response uses the bounded
+/// compatibility page and reports truncation through `historical_has_more` and
+/// `historical_next_offset`. Supplying `history_limit` selects an explicit
+/// per-finding page; `history_offset` is invalid without a limit.
 ///
 /// # Errors
 ///
@@ -1928,8 +2112,8 @@ pub async fn finding_relationships(
 ///
 /// Findings outside the actor's environment scope are omitted. The request
 /// must contain between 1 and 100 IDs. When both pagination arguments are
-/// absent, the response contains all historical relationships for compatibility
-/// with the original endpoint. `history_offset` requires `history_limit`.
+/// absent, the response uses the bounded compatibility page and reports its
+/// continuation metadata. `history_offset` requires `history_limit`.
 ///
 /// # Errors
 ///
@@ -2066,6 +2250,15 @@ pub async fn compatible_for_finding(
     })
 }
 
+/// Returns visible active POA&Ms compatible with one current assessment.
+///
+/// The assessment must be current, visible, and failing. Results share its
+/// policy lineage and exclude POA&Ms already linked to the finding.
+///
+/// # Errors
+///
+/// Returns a validation error for invalid bounds, a not-found error for hidden
+/// assessments, a precondition error for stale evidence, or a database error.
 pub async fn compatible_for_assessment(
     pool: &PgPool,
     actor: &PoamActor,
@@ -2123,10 +2316,10 @@ pub async fn compatible_for_assessment(
 
 /// Returns visible POA&M relationships for immutable assignment versions.
 ///
-/// When both pagination arguments are absent, the response contains all
-/// relationships for compatibility with the original endpoint. Supplying
-/// `history_limit` enables bounded per-assignment pagination;
-/// `history_offset` is invalid without a limit.
+/// When both pagination arguments are absent, the response uses the bounded
+/// compatibility page and reports truncation through `poams_has_more` and
+/// `poams_next_offset`. Supplying `history_limit` selects an explicit
+/// per-assignment page; `history_offset` is invalid without a limit.
 ///
 /// # Errors
 ///
@@ -2190,6 +2383,15 @@ pub async fn assignment_relationships(
         .collect())
 }
 
+/// Creates a pending waiver request for one current failing finding.
+///
+/// The stored observation snapshot and token bind later decisions to the exact
+/// evidence validated during creation.
+///
+/// # Errors
+///
+/// Returns an authorization, validation, precondition, not-found, conflict, or
+/// database error when the waiver request cannot be created.
 pub async fn create_waiver(
     pool: &PgPool,
     actor: &PoamActor,
@@ -2306,6 +2508,12 @@ pub async fn create_waiver(
     Ok(payload)
 }
 
+/// Lists waiver records for an administrator.
+///
+/// # Errors
+///
+/// Returns [`PoamError::Forbidden`] for non-admin actors. It returns a
+/// validation error for invalid filters or a database error on load failure.
 pub async fn list_waivers(
     pool: &PgPool,
     actor: &PoamActor,
@@ -2329,6 +2537,12 @@ pub async fn list_waivers(
     Ok(poam::list_waivers(pool, query).await?)
 }
 
+/// Returns one waiver record to an administrator.
+///
+/// # Errors
+///
+/// Returns [`PoamError::Forbidden`] for non-admin actors,
+/// [`PoamError::NotFound`] for an absent waiver, or a database error.
 pub async fn waiver(pool: &PgPool, actor: &PoamActor, id: Uuid) -> Result<WaiverView, PoamError> {
     if !actor.is_admin {
         return Err(PoamError::Forbidden);
@@ -2336,6 +2550,15 @@ pub async fn waiver(pool: &PgPool, actor: &PoamActor, id: Uuid) -> Result<Waiver
     poam::waiver(pool, id).await?.ok_or(PoamError::NotFound)
 }
 
+/// Applies an administrator decision to a waiver.
+///
+/// The transition is validated against the waiver lifecycle and current
+/// evidence while holding the finding lock.
+///
+/// # Errors
+///
+/// Returns an authorization, validation, precondition, not-found, conflict, or
+/// database error when the decision cannot be applied.
 pub async fn decide_waiver(
     pool: &PgPool,
     actor: &PoamActor,
@@ -3182,6 +3405,34 @@ async fn insert_verification_items(
     items: &[VerificationItem],
     now: DateTime<Utc>,
 ) -> Result<(), PoamError> {
+    // INVARIANT: Verification already holds each finding advisory lock. System
+    // hostname updates take the same locks, so this read and the item insert
+    // capture one transactional identity before the attempt is sealed.
+    let system_ids = items
+        .iter()
+        .map(|item| item.system_id)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let system_hostnames =
+        sqlx::query_as::<_, (Uuid, String)>("SELECT id,hostname FROM systems WHERE id=ANY($1)")
+            .bind(&system_ids)
+            .fetch_all(&mut **tx)
+            .await?
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+    let item_hostnames = items
+        .iter()
+        .map(|item| {
+            system_hostnames.get(&item.system_id).ok_or_else(|| {
+                PoamError::Database(anyhow::anyhow!(
+                    "verification system {} disappeared while its finding was locked",
+                    item.system_id
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
     // SECURITY: The server is the sole supported persistence writer. SQL cannot
     // safely duplicate resolver precedence, so the server persists resolver
     // output outside the POA&M DML surface and the trigger requires an exact
@@ -3242,33 +3493,37 @@ async fn insert_verification_items(
         attestations.insert(item.finding_id, attestation_id);
     }
     let mut builder = sqlx::QueryBuilder::<Postgres>::new(
-        "INSERT INTO poam_verification_items(attempt_id,finding_id,system_id,policy_lineage_id,result,policy_version_id,assessment_id,derivation_id,target_store_path,effective_set_digest,effective_config_digest,effective_config,observed_outcome,observation_token,observation_snapshot,assessment_updated_at,bundle_ids,bundle_version_ids,requirement_version_ids,waiver_id,observed_at,detail,effective_context_attestation_id) ",
+        "INSERT INTO poam_verification_items(attempt_id,finding_id,system_id,system_hostname,policy_lineage_id,result,policy_version_id,assessment_id,derivation_id,target_store_path,effective_set_digest,effective_config_digest,effective_config,observed_outcome,observation_token,observation_snapshot,assessment_updated_at,bundle_ids,bundle_version_ids,requirement_version_ids,waiver_id,observed_at,detail,effective_context_attestation_id) ",
     );
-    builder.push_values(items, |mut row, item| {
-        row.push_bind(attempt_id)
-            .push_bind(item.finding_id)
-            .push_bind(item.system_id)
-            .push_bind(item.policy_lineage_id)
-            .push_bind(&item.result)
-            .push_bind(item.policy_version_id)
-            .push_bind(item.assessment_id)
-            .push_bind(item.derivation_id)
-            .push_bind(&item.target_store_path)
-            .push_bind(&item.effective_set_digest)
-            .push_bind(&item.effective_config_digest)
-            .push_bind(&item.effective_config)
-            .push_bind(&item.observed_outcome)
-            .push_bind(&item.observation_token)
-            .push_bind(&item.observation_snapshot)
-            .push_bind(item.assessment_updated_at)
-            .push_bind(&item.bundle_ids)
-            .push_bind(&item.bundle_version_ids)
-            .push_bind(&item.requirement_version_ids)
-            .push_bind(item.waiver_id)
-            .push_bind(now)
-            .push_bind(&item.detail)
-            .push_bind(attestations.get(&item.finding_id).copied());
-    });
+    builder.push_values(
+        items.iter().zip(item_hostnames),
+        |mut row, (item, hostname)| {
+            row.push_bind(attempt_id)
+                .push_bind(item.finding_id)
+                .push_bind(item.system_id)
+                .push_bind(hostname)
+                .push_bind(item.policy_lineage_id)
+                .push_bind(&item.result)
+                .push_bind(item.policy_version_id)
+                .push_bind(item.assessment_id)
+                .push_bind(item.derivation_id)
+                .push_bind(&item.target_store_path)
+                .push_bind(&item.effective_set_digest)
+                .push_bind(&item.effective_config_digest)
+                .push_bind(&item.effective_config)
+                .push_bind(&item.observed_outcome)
+                .push_bind(&item.observation_token)
+                .push_bind(&item.observation_snapshot)
+                .push_bind(item.assessment_updated_at)
+                .push_bind(&item.bundle_ids)
+                .push_bind(&item.bundle_version_ids)
+                .push_bind(&item.requirement_version_ids)
+                .push_bind(item.waiver_id)
+                .push_bind(now)
+                .push_bind(&item.detail)
+                .push_bind(attestations.get(&item.finding_id).copied());
+        },
+    );
     if !items.is_empty() {
         builder.build().execute(&mut **tx).await?;
     }
@@ -3286,6 +3541,15 @@ fn is_serialization_failure(error: &anyhow::Error) -> bool {
     )
 }
 
+/// Records a sealed verification attempt for an awaiting-verification POA&M.
+///
+/// Serialization and deadlock failures are retried twice. The response records
+/// whether every current finding has acceptable exact evidence.
+///
+/// # Errors
+///
+/// Returns an authorization, validation, precondition, not-found, conflict, or
+/// database error when verification cannot produce a sealed attempt.
 pub async fn verify(
     pool: &PgPool,
     actor: &PoamActor,
@@ -3369,6 +3633,16 @@ async fn verify_once(
     )
 }
 
+/// Verifies and closes an awaiting-verification POA&M atomically.
+///
+/// Closure succeeds only when every current finding has an exact Pass or an
+/// accepted applicable waiver. A rejected attempt is retained as evidence.
+/// Serialization and deadlock failures are retried twice.
+///
+/// # Errors
+///
+/// Returns an authorization, validation, precondition, not-found, conflict, or
+/// database error when the POA&M cannot be verified and closed.
 pub async fn close(
     pool: &PgPool,
     actor: &PoamActor,
@@ -3481,6 +3755,14 @@ async fn close_once(
     detail(pool, actor, id, clock).await
 }
 
+/// Reopens a completed POA&M and restores its closure finding set.
+///
+/// Reopening fails if another active POA&M has claimed a closure finding.
+///
+/// # Errors
+///
+/// Returns an authorization, not-found, conflict, or database error when the
+/// closure state cannot be restored at the supplied revision.
 pub async fn reopen(
     pool: &PgPool,
     actor: &PoamActor,
@@ -3579,6 +3861,11 @@ pub async fn reopen(
     detail(pool, actor, id, clock).await
 }
 
+/// Returns aggregate POA&M dashboard counts visible to an actor.
+///
+/// # Errors
+///
+/// Returns a database error when visible aggregate counts cannot be loaded.
 pub async fn dashboard(
     pool: &PgPool,
     actor: &PoamActor,
@@ -3586,6 +3873,12 @@ pub async fn dashboard(
 ) -> Result<DashboardSummary, PoamError> {
     Ok(poam::dashboard(pool, clock.today(), actor.is_admin, &actor.environment_ids).await?)
 }
+/// Returns the actor's paginated overdue and awaiting-verification watchlist.
+///
+/// # Errors
+///
+/// Returns a validation error for invalid page bounds or a database error when
+/// the watchlist cannot be loaded.
 pub async fn watchlist(
     pool: &PgPool,
     actor: &PoamActor,
@@ -3604,6 +3897,12 @@ pub async fn watchlist(
     )
     .await?)
 }
+/// Returns POA&M and current-finding rollups for visible systems.
+///
+/// # Errors
+///
+/// Returns a validation error for invalid or excessively broad batches and a
+/// database error when authoritative rollup evidence cannot be loaded.
 pub async fn system_rollups(
     pool: &PgPool,
     actor: &PoamActor,
@@ -3674,6 +3973,12 @@ pub async fn system_rollups(
     }
     Ok(rollups)
 }
+/// Returns POA&M and current-finding rollups for visible compliance bundles.
+///
+/// # Errors
+///
+/// Returns a validation error for invalid or excessively broad batches and a
+/// database error when assignment or finding evidence cannot be loaded.
 pub async fn bundle_rollups(
     pool: &PgPool,
     actor: &PoamActor,

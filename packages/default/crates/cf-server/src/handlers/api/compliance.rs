@@ -42,6 +42,7 @@ use crate::compliance::xccdf::importer::{
 use crate::compliance::xccdf::package::{ProcessingError, process_xccdf_bytes};
 use crate::compliance::xccdf::reconciliation::{NativeReconcileFailure, ReconcileConflict};
 use crate::compliance::xccdf::xml_writer::{XccdfWriterError, write_bundle_xccdf_export};
+use crate::handlers::api::auth_session::require_csrf;
 use crate::handlers::api::rbac::{authenticated_user_roles, has_admin_role};
 use crate::queries::compliance::{
     BundleDeleteOutcome, BundleDraftDerivationError, BundleDraftIntent, BundleValidationError,
@@ -65,6 +66,29 @@ const MAX_GROUPING_GROUP_ID_BYTES: usize = 128;
 const MAX_GROUPING_GROUP_NAME_BYTES: usize = 255;
 const MAX_GROUPING_DESCRIPTION_BYTES: usize = 4_096;
 const MAX_GROUPING_QUERY_BYTES: usize = 4_096;
+
+/// Returns whether the caller can inspect data in an environment scope.
+///
+/// Admins have fleet-wide access. Other roles must have an explicit environment
+/// membership. A missing environment ID is inaccessible to non-admin callers.
+///
+/// # Errors
+///
+/// Returns an HTTP 500 response when environment memberships cannot be loaded.
+async fn can_view_environment_scope(
+    pool: &PgPool,
+    user_id: Uuid,
+    roles: &[crate::models::auth_identity::AuthRole],
+    environment_id: Option<Uuid>,
+) -> Result<bool, axum::response::Response> {
+    if has_admin_role(roles) {
+        return Ok(true);
+    }
+    let memberships = get_user_environment_membership_ids(pool, user_id)
+        .await
+        .map_err(|_| internal_error("Failed to load environment memberships"))?;
+    Ok(environment_id.is_some_and(|id| memberships.contains(&id)))
+}
 
 /// `GET /api/v1/compliance/grouping-schemes`
 pub async fn list_compliance_grouping_schemes(
@@ -937,6 +961,9 @@ pub async fn trust_policy_version(
     if !has_admin_role(&roles) {
         return forbidden();
     }
+    if let Err(response) = require_csrf(&headers) {
+        return response;
+    }
 
     let new_trust_state = if payload.trusted {
         "trusted"
@@ -1064,6 +1091,9 @@ pub async fn trust_bundle_version(
     if !has_admin_role(&roles) {
         return forbidden();
     }
+    if let Err(response) = require_csrf(&headers) {
+        return response;
+    }
 
     let new_trust_state = if payload.trusted {
         "trusted"
@@ -1188,6 +1218,9 @@ pub async fn publish_policy_version(
 
     if !has_admin_role(&roles) {
         return forbidden();
+    }
+    if let Err(response) = require_csrf(&headers) {
+        return response;
     }
 
     // Begin transaction immediately after RBAC
@@ -1334,6 +1367,9 @@ pub async fn create_policy_draft(
     if !has_admin_role(&roles) {
         return forbidden();
     }
+    if let Err(response) = require_csrf(&headers) {
+        return response;
+    }
 
     let mut tx = match pool.begin().await {
         Ok(tx) => tx,
@@ -1449,6 +1485,9 @@ pub async fn publish_bundle_version(
 
     if !has_admin_role(&roles) {
         return forbidden();
+    }
+    if let Err(response) = require_csrf(&headers) {
+        return response;
     }
 
     // Begin transaction immediately after RBAC
@@ -1840,6 +1879,9 @@ pub async fn create_bundle_draft(
 
     if !has_admin_role(&roles) {
         return forbidden();
+    }
+    if let Err(response) = require_csrf(&headers) {
+        return response;
     }
 
     let mut tx = match pool.begin().await {
@@ -2747,6 +2789,9 @@ pub async fn create_assignment(
     if !has_admin_role(&roles) {
         return forbidden();
     }
+    if let Err(response) = require_csrf(&headers) {
+        return response;
+    }
 
     // Validate and normalize reason
     match validate_assignment_reason(&payload.reason) {
@@ -2774,6 +2819,9 @@ pub async fn update_assignment(
     };
     if !has_admin_role(&roles) {
         return forbidden();
+    }
+    if let Err(response) = require_csrf(&headers) {
+        return response;
     }
 
     // Load existing assignment and its current immutable snapshot atomically
@@ -2856,18 +2904,19 @@ pub async fn get_assignment(
     headers: HeaderMap,
     Path(assignment_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
     };
     if !crate::handlers::api::rbac::has_viewer_or_above_role(&roles) {
         return forbidden();
     }
 
-    let row = sqlx::query_as::<_, (Uuid, Option<Uuid>, Option<Uuid>, Option<Uuid>, String, Option<Uuid>, Option<Uuid>, Option<String>, Option<String>, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>, bool)>(
-            "SELECT a.id, av.id, bv.bundle_id, av.bundle_version_id, a.scope_type, a.environment_id, a.system_id, av.enforcement_mode, av.assignment_overlay_digest, a.created_at, a.updated_at, a.active \
+    let row = sqlx::query_as::<_, (Uuid, Option<Uuid>, Option<Uuid>, Option<Uuid>, String, Option<Uuid>, Option<Uuid>, Option<Uuid>, Option<String>, Option<String>, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>, bool)>(
+            "SELECT a.id, av.id, bv.bundle_id, av.bundle_version_id, a.scope_type, a.environment_id, a.system_id, COALESCE(a.environment_id, s.environment_id), av.enforcement_mode, av.assignment_overlay_digest, a.created_at, a.updated_at, a.active \
          FROM compliance_bundle_assignments a \
          LEFT JOIN compliance_bundle_assignment_versions av ON av.id = a.current_version_id \
          LEFT JOIN compliance_bundle_versions bv ON bv.id = av.bundle_version_id \
+         LEFT JOIN systems s ON s.id = a.system_id \
          WHERE a.id = $1",
     )
     .bind(assignment_id)
@@ -2882,6 +2931,7 @@ pub async fn get_assignment(
         scope_type,
         env_id,
         sys_id,
+        target_environment_id,
         mode,
         digest,
         created_at,
@@ -2895,6 +2945,15 @@ pub async fn get_assignment(
             return internal_error("Failed to load assignment");
         }
     };
+
+    // SECURITY: Assignment existence, inactive state, and policy overlays are
+    // sensitive. Return the same 404 as an unknown assignment when a scoped
+    // caller does not belong to the assignment target's environment.
+    match can_view_environment_scope(&pool, user_id, &roles, target_environment_id).await {
+        Ok(true) => {}
+        Ok(false) => return not_found(),
+        Err(response) => return response,
+    }
 
     // Deactivated assignments have no current immutable snapshot.
     // Return a 410 Gone so the UI knows the assignment has been removed.
@@ -3148,6 +3207,9 @@ pub async fn delete_assignment(
     if !has_admin_role(&roles) {
         return forbidden();
     }
+    if let Err(response) = require_csrf(&headers) {
+        return response;
+    }
     deactivate_assignment_inner(
         &pool,
         user_id,
@@ -3296,11 +3358,30 @@ pub async fn list_environment_assignments(
     headers: HeaderMap,
     Path(environment_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
     };
     if !crate::handlers::api::rbac::has_viewer_or_above_role(&roles) {
         return forbidden();
+    }
+
+    let exists = match sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM environments WHERE id = $1)",
+    )
+    .bind(environment_id)
+    .fetch_one(&pool)
+    .await
+    {
+        Ok(exists) => exists,
+        Err(_) => return internal_error("Failed to load environment"),
+    };
+    if !exists {
+        return not_found();
+    }
+    match can_view_environment_scope(&pool, user_id, &roles, Some(environment_id)).await {
+        Ok(true) => {}
+        Ok(false) => return not_found(),
+        Err(response) => return response,
     }
 
     match list_assignments_for_scope(&pool, "environment", environment_id).await {
@@ -3322,11 +3403,22 @@ pub async fn list_system_assignments(
     headers: HeaderMap,
     Path(system_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
     };
     if !crate::handlers::api::rbac::has_viewer_or_above_role(&roles) {
         return forbidden();
+    }
+
+    let system = match find_system_access_row(&pool, system_id).await {
+        Ok(Some(system)) => system,
+        Ok(None) => return not_found(),
+        Err(_) => return internal_error("Failed to load system"),
+    };
+    match can_view_environment_scope(&pool, user_id, &roles, system.environment_id).await {
+        Ok(true) => {}
+        Ok(false) => return not_found(),
+        Err(response) => return response,
     }
 
     match list_assignments_for_scope(&pool, "system", system_id).await {
@@ -3353,11 +3445,22 @@ pub async fn get_system_effective_policies(
     headers: HeaderMap,
     Path(system_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
     };
     if !crate::handlers::api::rbac::has_viewer_or_above_role(&roles) {
         return forbidden();
+    }
+
+    let access_row = match find_system_access_row(&pool, system_id).await {
+        Ok(Some(system)) => system,
+        Ok(None) => return not_found(),
+        Err(_) => return internal_error("Failed to load system"),
+    };
+    match can_view_environment_scope(&pool, user_id, &roles, access_row.environment_id).await {
+        Ok(true) => {}
+        Ok(false) => return not_found(),
+        Err(response) => return response,
     }
 
     // Verify the system exists and load its health/environment data.
@@ -3431,7 +3534,7 @@ pub async fn get_assignment_effective_policies(
     headers: HeaderMap,
     Path(assignment_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
     };
     if !crate::handlers::api::rbac::has_viewer_or_above_role(&roles) {
@@ -3440,21 +3543,40 @@ pub async fn get_assignment_effective_policies(
 
     // Bundle version and enforcement mode are immutable snapshot fields. The
     // mutable lineage row only provides the target scope and active state.
-    let row = sqlx::query_as::<_, (Option<Uuid>, Option<Uuid>, Option<String>, String, Option<Uuid>, Option<Uuid>, bool)>(
-        "SELECT av.id, av.bundle_version_id, av.enforcement_mode, a.scope_type, a.environment_id, a.system_id, a.active \
+    let row = sqlx::query_as::<_, (Option<Uuid>, Option<Uuid>, Option<String>, String, Option<Uuid>, Option<Uuid>, Option<Uuid>, bool)>(
+        "SELECT av.id, av.bundle_version_id, av.enforcement_mode, a.scope_type, a.environment_id, a.system_id, COALESCE(a.environment_id, s.environment_id), a.active \
          FROM compliance_bundle_assignments a \
          LEFT JOIN compliance_bundle_assignment_versions av ON av.id = a.current_version_id \
+         LEFT JOIN systems s ON s.id = a.system_id \
          WHERE a.id = $1",
     )
     .bind(assignment_id)
     .fetch_optional(&pool)
     .await;
 
-    let (current_version_id, bv_id, mode, scope_type, env_id, sys_id, active) = match row {
+    let (
+        current_version_id,
+        bv_id,
+        mode,
+        scope_type,
+        env_id,
+        sys_id,
+        target_environment_id,
+        active,
+    ) = match row {
         Ok(Some(r)) => r,
         Ok(None) => return not_found(),
         Err(_) => return internal_error("Failed to load assignment"),
     };
+
+    // SECURITY: Check scope before exposing whether the assignment is active or
+    // returning any immutable overlay data. Unknown and inaccessible IDs are
+    // intentionally indistinguishable.
+    match can_view_environment_scope(&pool, user_id, &roles, target_environment_id).await {
+        Ok(true) => {}
+        Ok(false) => return not_found(),
+        Err(response) => return response,
+    }
 
     let Some((current_version_id, bv_id, mode)) = current_version_id
         .zip(bv_id)
@@ -3582,7 +3704,7 @@ pub async fn preview_assignment(
     headers: HeaderMap,
     Json(payload): Json<crate::api::models::PreviewAssignmentRequest>,
 ) -> impl IntoResponse {
-    let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
     };
     if !crate::handlers::api::rbac::has_viewer_or_above_role(&roles) {
@@ -3602,29 +3724,29 @@ pub async fn preview_assignment(
             .into_response();
     }
 
-    let target_exists: bool = if scope_type == "environment" {
-        match sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS(SELECT 1 FROM environments WHERE id = $1)",
-        )
-        .bind(payload.scope_id)
-        .fetch_one(&pool)
-        .await
+    let target_environment_id: Option<Option<Uuid>> = if scope_type == "environment" {
+        match sqlx::query_scalar::<_, Uuid>("SELECT id FROM environments WHERE id = $1")
+            .bind(payload.scope_id)
+            .fetch_optional(&pool)
+            .await
         {
-            Ok(exists) => exists,
+            Ok(environment_id) => environment_id.map(Some),
             Err(_) => return internal_error("Failed to verify assignment environment"),
         }
     } else {
-        match sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM systems WHERE id = $1)")
-            .bind(payload.scope_id)
-            .fetch_one(&pool)
-            .await
+        match sqlx::query_scalar::<_, Option<Uuid>>(
+            "SELECT environment_id FROM systems WHERE id = $1",
+        )
+        .bind(payload.scope_id)
+        .fetch_optional(&pool)
+        .await
         {
-            Ok(exists) => exists,
+            Ok(environment_id) => environment_id,
             Err(_) => return internal_error("Failed to verify assignment system"),
         }
     };
 
-    if !target_exists {
+    let Some(target_environment_id) = target_environment_id else {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({
@@ -3634,6 +3756,21 @@ pub async fn preview_assignment(
             })),
         )
             .into_response();
+    };
+    match can_view_environment_scope(&pool, user_id, &roles, target_environment_id).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "error": "Target not found",
+                    "message": format!("{} {} does not exist", scope_type, payload.scope_id),
+                    "code": "ASSIGNMENT_TARGET_NOT_FOUND"
+                })),
+            )
+                .into_response();
+        }
+        Err(response) => return response,
     }
 
     let target = if scope_type == "environment" {
