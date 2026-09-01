@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-gpt-5.6-sol
 created_date: '2026-09-01 03:27'
-updated_date: '2026-09-01 04:04'
+updated_date: '2026-09-01 04:29'
 labels:
   - web-ui
   - testing
@@ -76,4 +76,6 @@ The task must preserve shared derivation identity so separate checks can reuse N
 The user selected this task for one focused Web UI optimization MR with TASK-438, TASK-354, TASK-450.11.2, and TASK-450.11.3.
 
 LOCK: opencode-gpt-5.6-sol in /home/mcamp/code/crystal-forge/TASK-450-web-ui-parallel-checks on branch TASK-450.11-web-ui-parallel-checks, based on TASK-450-p0-build-graph at 437efd55.
+
+Implemented the Nix/check partition on top of the existing uncommitted harness reliability changes. Added explicit `ci_fast` ownership (fleet 32, pipeline 33, governance 35), named-profile selection/auth validation, stable Snowfall wrappers for production compatibility, required groups, exports, and advisory design parity, and an evidence/gate split with `.evidence` passthru. Production `web-ui` continues to use `cf-server-drv`, `verifyWebUiAssets`, the packaged Web UI, and real Chromium. Verified Node syntax/tests and static ownership in `nix develop`, parsed all six Nix definitions, evaluated all stable check and evidence derivations, compiled generated NixOS Python test scripts for normal/export/design variants, and confirmed shared input derivation paths are identical. No VM builds, commit, push, or `.gitlab-ci.yml` change were performed.
 <!-- SECTION:NOTES:END -->
