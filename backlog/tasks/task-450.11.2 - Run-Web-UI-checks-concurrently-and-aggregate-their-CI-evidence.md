@@ -1,9 +1,10 @@
 ---
 id: TASK-450.11.2
 title: Run Web UI checks concurrently and aggregate their CI evidence
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-09-01 03:27'
+updated_date: '2026-09-01 03:30'
 labels:
   - web-ui
   - testing
@@ -49,3 +50,9 @@ The pipeline must remain correct when fewer runners are available: jobs may queu
 - [ ] #8 Safe long-running Web UI jobs support superseded-pipeline cancellation consistently with TASK-450.8
 - [ ] #9 The CI and Web UI check documentation identifies which jobs are blocking, which are advisory, and how to locate each job's artifacts
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+The user selected this task for one focused Web UI optimization MR with TASK-438, TASK-354, TASK-450.11.1, and TASK-450.11.3.
+<!-- SECTION:NOTES:END -->
