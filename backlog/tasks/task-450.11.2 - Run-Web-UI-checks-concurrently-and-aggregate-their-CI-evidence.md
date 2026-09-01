@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-gpt-5.6-sol
 created_date: '2026-09-01 03:27'
-updated_date: '2026-09-01 04:45'
+updated_date: '2026-09-01 04:46'
 labels:
   - web-ui
   - testing
@@ -62,7 +62,7 @@ The pipeline must remain correct when fewer runners are available: jobs may queu
 
 <!-- SECTION:PLAN:BEGIN -->
 1. Remove `web-ui` from the generic flake matrix and add a required five-entry Web UI producer matrix plus one advisory design-parity producer, all with aligned merge-request/main rules and safe cancellation.
-2. Add a focused producer script that records the gate exit status, always builds the check's `.evidence` output without repeating successful VM work, copies it to `web-ui-evidence/<check>/`, records machine-readable producer status, and returns the blocking result while identifying evidence infrastructure failures.
+2. Add a focused producer script that records the gate exit status, resolves and copies the gate's already-realized `.evidence` store output without a second VM build, publishes it under `web-ui-evidence/<check>/`, records machine-readable producer status, and preserves blocking failure semantics while identifying evidence infrastructure failures.
 3. Add one `when: always`, non-blocking aggregator that downloads all producer artifacts with `needs`, reports every expected producer and detailed evidence, owns MR uploads/commenting, and always retains a report artifact.
 4. Add fixture-driven Node tests for producer and aggregation behavior, update the Web UI CI runbook, and validate scripts, tests, Nix evaluation, and GitLab YAML syntax with repository/Nix tooling.
 <!-- SECTION:PLAN:END -->
