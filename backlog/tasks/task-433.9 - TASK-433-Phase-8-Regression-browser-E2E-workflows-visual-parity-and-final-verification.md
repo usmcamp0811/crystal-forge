@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:43'
-updated_date: '2026-09-01 12:43'
+updated_date: '2026-09-01 12:48'
 labels:
   - design-parity
   - policy
@@ -155,4 +155,6 @@ Focused authorization regression update (2026-08-31): `policy_drawer_owner_and_u
 Completed the TASK-433 Rust documentation pass across new and materially changed public server and Web UI APIs, including lifecycle transitions, error contracts, fields, and component authority boundaries. Corrected stale SQLx cache and design-parity harness documentation. `nix develop -c cargo fmt --manifest-path packages/default/Cargo.toml --all -- --check`, Web UI formatting, Node syntax, harness static contracts, approval-script fixtures, and `git diff --check` pass. `SQLX_OFFLINE=true cargo doc --manifest-path packages/default/Cargo.toml -p cf-server --no-deps` and Web UI `cargo doc --no-deps` pass with pre-existing rustdoc warnings outside TASK-433 scope. A first server rustdoc attempt without `SQLX_OFFLINE=true` failed because the ambient database user lacks table permissions; the offline rerun is the valid documentation build. Independent final review found no P0-P2 pre-commit blocker. Candidate remains uncommitted pending explicit commit authorization; exact-final-SHA matrix has not started.
 
 Exact candidate SHA is `da7ae7de480c485ee79db676f8d99893bf07c572` (`Finalize TASK-433 verification candidate`). The worktree is clean after the commit. Exact source checks: the task-listed default-workspace `cargo fmt` command fails mechanically with `Failed to find targets`; the equivalent `--all` command passes. Web UI formatting, Node syntax, harness static contracts, approval-script fixtures, and `git diff --check` pass. `nix build .#packages.x86_64-linux.server --no-link -L` passes and includes 1,242 cf-server tests with 0 failures. The direct task-listed `cargo test` command failed during SQLx macro expansion because the ambient `DATABASE_URL` user lacks table permissions; this is an environment failure, not a test assertion failure. Per user direction, stop the remaining exhaustive local matrix and use CI for it after pushing the candidate.
+
+Remote verification after the user's push found MR !318 at `3fd41e264f0ec41ff20e94aa791c0f040ad30649`, not candidate `da7ae7de480c485ee79db676f8d99893bf07c572`. `da7ae7de` is not an ancestor of the remote head. The remote tree omits the final remediation commit, migrations 0243-0244, approval tooling, and all 60 strict baselines; GitLab reports `has_conflicts: true`. Pipeline 2809402843 is pending for `3fd41e26` and is not valid exact-candidate evidence. Do not use that pipeline for TASK-433 closure. The likely cause is that the original TASK-433 worktree/branch was pushed instead of `/tmp/opencode/TASK-433-publish` branch `TASK-433-publish-temp`.
 <!-- SECTION:NOTES:END -->
