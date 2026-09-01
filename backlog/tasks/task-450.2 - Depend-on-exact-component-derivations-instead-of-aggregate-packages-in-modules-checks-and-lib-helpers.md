@@ -3,10 +3,10 @@ id: TASK-450.2
 title: >-
   Depend on exact component derivations instead of aggregate packages in
   modules, checks, and lib helpers
-status: Review
+status: Done
 assignee: []
 created_date: '2026-08-31 22:39'
-updated_date: '2026-09-01 02:04'
+updated_date: '2026-09-01 03:44'
 labels: []
 dependencies: []
 references:
@@ -120,6 +120,8 @@ Final invalidation probes: web UI edits leave cf-test-sys, integration, and oidc
 Verification passed: integration, oidc-auth, xccdf-schema, web-ui, test-agent NixOS system build, and one complete nix flake check --keep-going -L run.
 
 LOCK RELEASED: implementation is pushed and MR !324 is awaiting review.
+
+MR !324 merged. LOCK RELEASED and the dedicated P0 worktree was removed.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
