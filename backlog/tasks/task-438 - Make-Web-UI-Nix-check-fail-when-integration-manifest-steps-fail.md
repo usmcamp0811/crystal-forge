@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-gpt-5.6-sol
 created_date: '2026-08-26 01:33'
-updated_date: '2026-09-01 03:31'
+updated_date: '2026-09-01 03:46'
 labels:
   - web-ui
   - testing
@@ -34,6 +34,15 @@ The authoritative `checks.x86_64-linux.web-ui` derivation can exit successfully 
 - [ ] #2 The check preserves and reports the failed step names and reasons
 - [ ] #3 A regression test proves a deliberately failing selected step causes the derivation to fail
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Define one machine-readable browser result contract that lists every selected step, failed step name, failure reason, process completion, and available artifacts.
+2. Make `integration-test.js` return non-zero after it finishes writing reports whenever any selected required step fails. Make the Nix driver wait for the process exit marker instead of treating early `results.json` creation as completion.
+3. Separate report production from the blocking gate so a failed logical gate retains an addressable evidence derivation. Expose the evidence through the blocking check for CI recovery.
+4. Add Node regression tests for all-passing, failed-step, missing-result, and process-exit outcomes. Verify focused and named-group execution use the same verdict path.
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
