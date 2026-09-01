@@ -3,20 +3,25 @@ id: TASK-450.4
 title: >-
   Build backend Cargo dependencies in a derivation independent of application
   source
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-08-31 22:39'
-updated_date: '2026-08-31 22:45'
+updated_date: '2026-09-01 02:05'
 labels: []
 dependencies:
   - TASK-450.1
   - TASK-450.3
 references:
   - 'https://crane.dev/API.html'
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/324'
 documentation:
   - >-
     backlog/docs/build/build-invalidation-graph/doc-23 -
     Build-Invalidation-Graph-and-CI-Feedback-Latency-Analysis.md
+modified_files:
+  - flake.nix
+  - flake.lock
+  - packages/default/default.nix
 parent_task_id: TASK-450
 priority: high
 type: enhancement
@@ -85,14 +90,14 @@ Read doc-23, `Build Invalidation Graph and CI Feedback Latency Analysis`, for th
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A backend dependency artifact is produced by a derivation whose input is workspace dependency metadata and not application source
-- [ ] #2 A source-only change to a backend crate does not change the hash of the dependency artifact derivation, demonstrated by comparing derivation paths before and after the edit
-- [ ] #3 The backend server build consumes the shared dependency artifact instead of recompiling third-party crates
-- [ ] #4 The server package produces the same binaries with the same names and paths as before the change
-- [ ] #5 Dependency versions still come from the committed lock file and the build remains hermetic inside the Nix sandbox
-- [ ] #6 A recorded measurement compares wall-clock rebuild time for a one-line backend source change before and after the change, on an otherwise warm store
-- [ ] #7 Checks that build or boot the server still pass
-- [ ] #8 The Nix source documents which inputs are intentionally excluded from the dependency artifact and why, so a future edit does not reintroduce an application-source dependency
+- [x] #1 A backend dependency artifact is produced by a derivation whose input is workspace dependency metadata and not application source
+- [x] #2 A source-only change to a backend crate does not change the hash of the dependency artifact derivation, demonstrated by comparing derivation paths before and after the edit
+- [x] #3 The backend server build consumes the shared dependency artifact instead of recompiling third-party crates
+- [x] #4 The server package produces the same binaries with the same names and paths as before the change
+- [x] #5 Dependency versions still come from the committed lock file and the build remains hermetic inside the Nix sandbox
+- [x] #6 A recorded measurement compares wall-clock rebuild time for a one-line backend source change before and after the change, on an otherwise warm store
+- [x] #7 Checks that build or boot the server still pass
+- [x] #8 The Nix source documents which inputs are intentionally excluded from the dependency artifact and why, so a future edit does not reintroduce an application-source dependency
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -101,4 +106,20 @@ Read doc-23, `Build Invalidation Graph and CI Feedback Latency Analysis`, for th
 LOCK: opencode-claude-opus-5 on gray in /home/mcamp/code/crystal-forge/TASK-450-p0-build-graph
 
 Implemented together with TASK-450.1, TASK-450.2, and TASK-450.3 in a single MR at the user's explicit direction. The declared dependencies on TASK-450.1 and TASK-450.3 are satisfied within this MR by landing the source filter and the server variant split before the dependency-artifact conversion.
+
+Crane input pinned at revision 692f7e9ef2ece8125b466f66f2af532b3edaed0d. The shared dependency artifact derivation is mav536fx…-cf-server-deps-0.3.0.drv and remained unchanged after a server .rs edit.
+
+Controlled source-only rebuild on the same filtered/core code: buildRustPackage at 7d39b700 took 8m55.77s; Crane with a warm dependency artifact took 5m39.69s, a 3m16.08s / 36.6% reduction. The Crane log compiled only cf-protocol, cf-config, and cf-server.
+
+Both server variants built, ran the existing test scope (over 1,500 tests including ignored entries), and installed server, hardening-worker, test-agent, and xccdf-export-fixture. The production aggregate retained its historical builder and cf-keygen binaries.
+
+Verification passed: server package, test-agent/core package, all affected checks, test-agent NixOS system, and one complete nix flake check --keep-going -L run.
+
+LOCK RELEASED: implementation is pushed and MR !324 is awaiting review.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Pinned Crane and added one source-independent cf-server dependency artifact based on Cargo.lock and cleaned manifests. Both core and embedded server builds reuse it while retaining locked, hermetic builds, SQLx offline compilation, existing tests, and installed binary paths. A source-only rebuild improved by 36.6% locally.
+<!-- SECTION:FINAL_SUMMARY:END -->
