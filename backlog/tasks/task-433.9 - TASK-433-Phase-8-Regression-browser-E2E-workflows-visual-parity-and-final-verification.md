@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:43'
-updated_date: '2026-09-01 10:58'
+updated_date: '2026-09-01 12:43'
 labels:
   - design-parity
   - policy
@@ -153,4 +153,6 @@ Focused authorization regression update (2026-08-31): `policy_drawer_owner_and_u
 2026-09-01 pre-commit closure: added a per-step manifest viewport reset and disabled finite CSS animations for strict screenshots. Regenerated and independently reviewed all 60 strict captures; no P0-P2 visual defect remains. Accepted P3: POA&M verification timestamps vary without changing layout. Hardened `approve-baselines.sh` so read-only Nix-store captures replace existing baselines and become writable; its fixture test now proves re-approval. Updated all 60 approved baselines. The normal gate `nix build path:.#checks.x86_64-linux.web-ui --no-link -L` passed with `60 match, 0 differ`; all seven TASK-433 strict workflows passed, while 34 known non-critical legacy steps still report failure and the non-blocking design gauge remains 30/34.
 
 Completed the TASK-433 Rust documentation pass across new and materially changed public server and Web UI APIs, including lifecycle transitions, error contracts, fields, and component authority boundaries. Corrected stale SQLx cache and design-parity harness documentation. `nix develop -c cargo fmt --manifest-path packages/default/Cargo.toml --all -- --check`, Web UI formatting, Node syntax, harness static contracts, approval-script fixtures, and `git diff --check` pass. `SQLX_OFFLINE=true cargo doc --manifest-path packages/default/Cargo.toml -p cf-server --no-deps` and Web UI `cargo doc --no-deps` pass with pre-existing rustdoc warnings outside TASK-433 scope. A first server rustdoc attempt without `SQLX_OFFLINE=true` failed because the ambient database user lacks table permissions; the offline rerun is the valid documentation build. Independent final review found no P0-P2 pre-commit blocker. Candidate remains uncommitted pending explicit commit authorization; exact-final-SHA matrix has not started.
+
+Exact candidate SHA is `da7ae7de480c485ee79db676f8d99893bf07c572` (`Finalize TASK-433 verification candidate`). The worktree is clean after the commit. Exact source checks: the task-listed default-workspace `cargo fmt` command fails mechanically with `Failed to find targets`; the equivalent `--all` command passes. Web UI formatting, Node syntax, harness static contracts, approval-script fixtures, and `git diff --check` pass. `nix build .#packages.x86_64-linux.server --no-link -L` passes and includes 1,242 cf-server tests with 0 failures. The direct task-listed `cargo test` command failed during SQLx macro expansion because the ambient `DATABASE_URL` user lacks table permissions; this is an environment failure, not a test assertion failure. Per user direction, stop the remaining exhaustive local matrix and use CI for it after pushing the candidate.
 <!-- SECTION:NOTES:END -->
