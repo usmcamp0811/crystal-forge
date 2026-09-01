@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-08-31 11:29'
+updated_date: '2026-09-01 00:02'
 labels:
   - design-parity
   - web-ui
@@ -22,6 +22,7 @@ references:
   - git commit cafc678ef
   - git commit 1b9a0594193a26da99b0935151b64323acf8f913
   - git commit 4e09d60a
+  - git commit f4dbfad6
 documentation:
   - docs/design/CrystalForge/app.jsx
   - docs/design/CrystalForge/components/SystemDetail.jsx
@@ -411,6 +412,8 @@ Backend latest-review remediation committed and pushed as `4e09d60a` on 2026-08-
 2026-08-31 frontend Config/Flake parity closure: modified only packages/web-ui and preserved backend HEAD 4e09d60a plus existing checks/web-ui diffs (numstat remains 96/0, 8/0, 368/17). Config now retains/dims the prior available page during background debounce/query, guards both raw and debounced query identity, shows Querying, and supports clear/continuous typing. Measured page sizing now sums natural child card rectangles and rendered inter-card gaps rather than the stretched side wrapper, retaining formula/clamp/hysteresis/offset reset. Source tray shows locked provenance metadata and explicitly says source content is unavailable; Evaluation uses cached. Flake DTOs consume backend global warning counts, systems continuation, and transitive descendants; continuation is active-pane-local, merges deduplicate collections/global deltas, missing module binding is unavailable, follows strings render unquoted, and full SHA remains title/accessible identity. Ported remaining Config/Flake dimensions from eb5a185 and added Node/NodeList web-sys features. Verification: targeted rustfmt completed; `nix develop -c cargo test --manifest-path packages/web-ui/Cargo.toml` passed 283 tests with 1 ignored; targeted exact flake DTO test passed; `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown` passed; `git diff --check` passed. `nix build .#checks.x86_64-linux.web-ui --no-link` was attempted twice: dependencies built and the final VM integration derivation started, but both runs exceeded tool limits (20 minutes then 10 minutes) and were terminated without a pass/fail result. No commit or push.
 
 Continuation preflight on 2026-08-31: TASK-440 remains In Progress in `/home/mcamp/code/crystal-forge/TASK-440-system-config-flake-parity` on branch `TASK-440-system-config-flake-parity` at pushed HEAD `4e09d60a`. Existing frontend/browser/docs changes remain dirty and are preserved. AC24 remains unchecked. Current scope is final P1/P2 review closure and exact verification; MR !323 remains stacked on !318.
+
+Committed and pushed the current final-review implementation as `f4dbfad6` (`TASK-440: Complete configuration and flake parity`) on 2026-08-31. The commit excludes untracked `result-task440-web-ui`. Focused backend/server-regression, frontend/WASM, design-target, and eight-step authoritative browser checks had passed in preceding review passes. A final evidence-remediation pass was interrupted before completion; outstanding audit concerns remain around making TASK-440 design generation/comparison failures strictly blocking and enforcing one shared exact semantic fixture contract. AC24 remains unchecked and the task remains In Progress.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
