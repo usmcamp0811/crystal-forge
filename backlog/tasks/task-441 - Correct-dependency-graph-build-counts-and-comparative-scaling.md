@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-gpt-5.6-sol'
 created_date: '2026-08-29 16:26'
-updated_date: '2026-08-30 13:49'
+updated_date: '2026-09-01 00:03'
 labels:
   - backend
   - frontend
@@ -126,4 +126,8 @@ Committed remediation as `bcbeeb62` (`fix: harden dependency build planning`) an
 REVIEW REMEDIATION REOPENED (2026-08-30): MR !322 at `bcbeeb62` has a P1 evaluation-wide snapshot defect. Per-system terminal gating can activate system A while B/C or graph-only/fallback systems still calculate against the mutable Nix store. This remediation will add a durable evaluation-attempt barrier, deterministic multi-system ordering tests, and explicit recovery/re-evaluation semantics. The prior Review status, checked acceptance criteria, final summary, and pipeline evidence are superseded until new exact-head verification passes. LOCK: openai-gpt-5.6-sol in /home/mcamp/code/crystal-forge/TASK-441-dependency-graph-counts.
 
 Architecture research found the exact defect at `bcbeeb62`: streaming preparation tasks perform plan -> root -> activate independently; graph-only planning uses detached `tokio::spawn`; fallback calls the combined single-system finalizer; and recovery plans/activates candidates sequentially. Claim queries gate only on each derivation's terminal state. The selected fix uses an immutable evaluation-attempt UUID barrier plus derivation tagging, atomic barrier release/job activation/commit completion, claim and reservation predicates plus trigger enforcement, and explicit re-evaluation rejection while builds are active. Historical pre-0235 attempts will be marked as legacy-released for rolling-upgrade continuity; every new attempt uses strict barrier semantics.
+
+WIP checkpoint committed and pushed as 86a1ddc6 (`fix: enforce evaluation-wide planning barrier`) at user request. Backend release-A verification passed before commit: cf-server formatting, SQLX_OFFLINE cf-server test check, server-regressions, and diff check. Earlier focused Web UI 26bb verification passed before the last independent review. This is not final review evidence: the final frontend remediation agent was cancelled, remaining frontend P2 findings are unresolved, the tracked task file is not synchronized into the branch, exact-head CI is pending, and a fresh fetch shows the branch is 107 commits behind origin/dev.
+
+The user selected a two-release zero-downtime transition for the legacy global derivation_path unique constraint. Release A in 86a1ddc6 retains the constraint and represents cross-commit conflicts as explicit failed plans. TASK-443 tracks release B, which removes the constraint only after release A is deployed to every server process.
 <!-- SECTION:NOTES:END -->
