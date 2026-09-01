@@ -21,6 +21,7 @@ pub mod deployment_policies;
 pub mod derivations;
 pub mod environments;
 pub mod eval_logs;
+pub mod evaluation_snapshots;
 pub mod flake_credentials;
 pub mod flakes;
 pub mod framework_requirements;

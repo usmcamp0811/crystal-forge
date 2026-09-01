@@ -282,7 +282,7 @@ pub fn SidebarNav() -> Element {
                 }
                 NavLink {
                     collapsed: is_collapsed,
-                    to: Route::SystemsView {},
+                    to: Route::SystemsView { query: String::new() },
                     label: "Systems",
                     badge_count: if systems_attention > 0 { Some(systems_attention) } else { None },
                     badge_attention: systems_attention > 0,
@@ -303,7 +303,7 @@ pub fn SidebarNav() -> Element {
                 }
                 NavLink {
                     collapsed: is_collapsed,
-                    to: Route::FlakesView {},
+                    to: Route::FlakesView { query: String::new() },
                     label: "Flakes",
                     badge_count: if flakes_errored > 0 { Some(flakes_errored) } else { None },
                     badge_attention: flakes_errored > 0,
@@ -328,7 +328,7 @@ pub fn SidebarNav() -> Element {
                 }
                 NavLink {
                     collapsed: is_collapsed,
-                    to: Route::EnvironmentsView {},
+                    to: Route::EnvironmentsView { query: String::new() },
                     label: "Environments",
                     badge_count: if environments_attention > 0 { Some(environments_attention) } else { None },
                     badge_attention: environments_attention > 0,
@@ -687,7 +687,7 @@ pub fn MobileDrawer() -> Element {
                 }
                 NavLink {
                     collapsed: false,
-                    to: Route::SystemsView {},
+                    to: Route::SystemsView { query: String::new() },
                     label: "Systems",
                     icon: rsx!(
                         svg {
@@ -704,7 +704,7 @@ pub fn MobileDrawer() -> Element {
                 }
                 NavLink {
                     collapsed: false,
-                    to: Route::FlakesView {},
+                    to: Route::FlakesView { query: String::new() },
                     label: "Flakes",
                     icon: rsx!(
                         svg {
@@ -721,7 +721,7 @@ pub fn MobileDrawer() -> Element {
                 }
                 NavLink {
                     collapsed: false,
-                    to: Route::EnvironmentsView {},
+                    to: Route::EnvironmentsView { query: String::new() },
                     label: "Environments",
                     icon: rsx!(
                         svg {

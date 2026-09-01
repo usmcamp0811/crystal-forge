@@ -228,7 +228,11 @@ let
     '';
     CRYSTAL_FORGE_NIXOS_OPTIONS_METADATA = "${nixosOptionsMetadata}/share/crystal-forge/nixos-options.json";
 
-    nativeBuildInputs = commonNativeBuildInputs ++ (with pkgs; [ nix sqlx-cli ]);
+    nativeBuildInputs = commonNativeBuildInputs ++ (with pkgs; [
+      git # Server tests exercise shallow-clone and first-parent behavior.
+      nix
+      sqlx-cli
+    ]);
     buildInputs = commonBuildInputs;
 
     runtimeDeps = with pkgs; [

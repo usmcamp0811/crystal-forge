@@ -1,6 +1,7 @@
 use crate::config::{BuildConfig, CacheConfig};
 use anyhow::{Result, anyhow};
 use std::collections::HashSet;
+use std::process::Stdio;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use tokio::process::Command;
@@ -9,6 +10,7 @@ use tracing::{debug, info, warn};
 
 const CLOSURE_COUNT_COMMAND_TIMEOUT_SECS: u64 = 120;
 const CLOSURE_COUNT_ARG_CHUNK_SIZE: usize = 500;
+const CLOSURE_PATH_INFO_BYTES_LIMIT: u64 = 32 * 1024 * 1024;
 
 /// Add/remove to taste; this set covers AWS + MinIO/common S3 endpoints.
 pub const CACHE_ENV_ALLOWLIST: &[&str] = &[
@@ -535,17 +537,24 @@ pub async fn get_store_path_and_build_status(drv_path: &str) -> Result<(String, 
     Ok((store_path, is_built))
 }
 
-/// Count the total packages in a system closure and how many are already cached.
+/// Counts closure packages, cached outputs, and available recursive Nix bytes.
 ///
 /// Uses two nix calls:
 ///   1. `nix-store --query --requisites <drv>` — list all .drv files in the closure (fast)
 ///   2. `nix-store --query --outputs <drv>...` — map each .drv to its output path
 ///   3. `nix path-info <paths>...` — batch check which outputs exist in the store
 ///
-/// Returns `(total, cached)` where:
+/// Returns `(total, cached, closure_size_bytes)` where:
 ///   total  = number of packages in the closure (excluding the nixos-system drv itself)
 ///   cached = number already present in the local/substituter-accessible store
-pub async fn count_closure_packages(drv_path: &str) -> Result<(i32, i32)> {
+///   closure_size_bytes = sum of `narSize` for each unique path returned by a
+///   complete local recursive Nix query, or `None` when that query is unavailable
+///
+/// # Errors
+///
+/// Returns an error when Nix cannot enumerate the derivation closure or its
+/// outputs, a command exceeds the bounded timeout, or command output is invalid.
+pub async fn count_closure_packages(drv_path: &str) -> Result<(i32, i32, Option<i64>)> {
     // Step 1: get all .drv requisites (the full closure as .drv paths)
     info!("📦 Counting closure requisites for {}", drv_path);
     let command_timeout = Duration::from_secs(CLOSURE_COUNT_COMMAND_TIMEOUT_SECS);
@@ -578,8 +587,38 @@ pub async fn count_closure_packages(drv_path: &str) -> Result<(i32, i32)> {
         .collect();
 
     let total = drv_paths.len() as i32;
+
+    // A closure-size measurement is authoritative only when the actual NixOS
+    // toplevel output exists in this store and one recursive query succeeds.
+    // Dependency outputs alone are not a substitute for the system closure.
+    let root_outputs = timeout(
+        command_timeout,
+        Command::new("nix-store")
+            .args(["--query", "--outputs", drv_path])
+            .output(),
+    )
+    .await;
+    let closure_size_bytes = match root_outputs {
+        Ok(Ok(output)) if output.status.success() => {
+            let roots = String::from_utf8(output.stdout).ok();
+            let roots = roots.as_deref().map(str::lines).into_iter().flatten();
+            let mut roots_to_measure = Vec::new();
+            let mut root_count = 0usize;
+            for root in roots.filter(|root| !root.is_empty()) {
+                roots_to_measure.push(root.to_string());
+                root_count += 1;
+            }
+            if root_count == 0 {
+                None
+            } else {
+                collect_closure_size(&roots_to_measure, command_timeout).await
+            }
+        }
+        _ => None,
+    };
+
     if total == 0 {
-        return Ok((0, 0));
+        return Ok((0, 0, closure_size_bytes));
     }
 
     // Step 2: map .drv paths → output store paths. Large NixOS closures can
@@ -619,13 +658,15 @@ pub async fn count_closure_packages(drv_path: &str) -> Result<(i32, i32)> {
         } else {
             // Fall back to zero cached if we can't map outputs
             warn!("nix-store --query --outputs failed; assuming 0 cached");
-            return Ok((total, 0));
+            return Ok((total, 0, closure_size_bytes));
         }
     }
 
     if store_paths.is_empty() {
-        return Ok((total, 0));
+        return Ok((total, 0, closure_size_bytes));
     }
+    store_paths.sort();
+    store_paths.dedup();
 
     // Step 3: batch check which outputs exist. Large closures are chunked for
     // the same argv-limit reason as output resolution.
@@ -668,7 +709,79 @@ pub async fn count_closure_packages(drv_path: &str) -> Result<(i32, i32)> {
         };
     }
 
-    Ok((total, cached))
+    Ok((total, cached, closure_size_bytes))
+}
+
+/// Streams one recursive Nix path-info result under a strict byte ceiling.
+///
+/// `kill_on_drop` guarantees cancellation and timeout terminate the child. A
+/// measurement is returned only after the complete stream parses and the child
+/// exits successfully; truncated or partial JSON is never authoritative.
+async fn collect_closure_size(roots: &[String], command_timeout: Duration) -> Option<i64> {
+    use tokio::io::AsyncReadExt;
+
+    let mut command = Command::new("nix");
+    command
+        .args(["path-info", "--json", "--recursive"])
+        .args(roots)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    let mut child = command.spawn().ok()?;
+    let stdout = child.stdout.take()?;
+    let mut bytes = Vec::new();
+    let mut limited = stdout.take(CLOSURE_PATH_INFO_BYTES_LIMIT + 1);
+    match timeout(command_timeout, limited.read_to_end(&mut bytes)).await {
+        Ok(Ok(_)) if (bytes.len() as u64) <= CLOSURE_PATH_INFO_BYTES_LIMIT => {}
+        _ => {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            return None;
+        }
+    }
+    let status = match timeout(command_timeout, child.wait()).await {
+        Ok(Ok(status)) if status.success() => status,
+        _ => return None,
+    };
+    debug_assert!(status.success());
+    parse_nix_path_sizes(&bytes).and_then(|sizes| {
+        sizes
+            .values()
+            .try_fold(0i64, |total, size| total.checked_add(*size))
+    })
+}
+
+fn parse_nix_path_sizes(bytes: &[u8]) -> Option<std::collections::BTreeMap<String, i64>> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    let mut sizes = std::collections::BTreeMap::new();
+    match value {
+        serde_json::Value::Object(paths) => {
+            for (path, metadata) in paths {
+                let size = metadata.get("narSize")?.as_i64()?;
+                if size < 0 {
+                    return None;
+                }
+                if sizes.insert(path, size).is_some() {
+                    return None;
+                }
+            }
+        }
+        serde_json::Value::Array(paths) => {
+            for metadata in paths {
+                let path = metadata.get("path")?.as_str()?.to_string();
+                let size = metadata.get("narSize")?.as_i64()?;
+                if size < 0 {
+                    return None;
+                }
+                if sizes.get(&path).is_some_and(|existing| *existing != size) {
+                    return None;
+                }
+                sizes.insert(path, size);
+            }
+        }
+        _ => return None,
+    }
+    Some(sizes)
 }
 
 // ============================================================================
@@ -678,6 +791,24 @@ pub async fn count_closure_packages(drv_path: &str) -> Result<(i32, i32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nix_path_sizes_accepts_both_json_shapes_and_deduplicates_paths() {
+        let object = br#"{"/nix/store/a":{"narSize":7},"/nix/store/b":{"narSize":11}}"#;
+        assert_eq!(
+            parse_nix_path_sizes(object).unwrap().values().sum::<i64>(),
+            18
+        );
+        let array = br#"[{"path":"/nix/store/a","narSize":7},{"path":"/nix/store/a","narSize":7}]"#;
+        assert_eq!(
+            parse_nix_path_sizes(array).unwrap().values().sum::<i64>(),
+            7
+        );
+        let conflicting =
+            br#"[{"path":"/nix/store/a","narSize":7},{"path":"/nix/store/a","narSize":8}]"#;
+        assert!(parse_nix_path_sizes(conflicting).is_none());
+        assert!(parse_nix_path_sizes(br#"{"/nix/store/a":{}}"#).is_none());
+    }
 
     #[test]
     fn test_normalize_scp_ssh_url_no_dot_git() {

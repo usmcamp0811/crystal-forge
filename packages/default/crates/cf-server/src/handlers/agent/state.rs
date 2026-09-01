@@ -100,6 +100,13 @@ pub async fn update(
             record_report_events_tx(&mut tx, previous_observed.as_ref(), payload, None, None)
                 .await?;
             insert_system_state(&mut *tx, payload, version_compatible, None, None).await?;
+            crate::queries::evaluation_snapshots::retain_generation_snapshot_tx(
+                &mut tx,
+                &payload.hostname,
+                payload.generation,
+                payload.store_path.as_deref(),
+            )
+            .await?;
 
             tx.commit().await?;
             Ok(())

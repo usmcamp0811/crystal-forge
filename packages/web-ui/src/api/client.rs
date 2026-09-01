@@ -599,6 +599,127 @@ pub async fn fetch_system(id: &uuid::Uuid) -> Result<SystemDetail, ApiClientErro
     fetch_json(&url).await
 }
 
+/// Fetches one bounded page of cached evaluated options without launching evaluation.
+///
+/// # Errors
+///
+/// Returns [`ApiClientError`] when the request fails or the response cannot be
+/// decoded as [`EvaluatedOptionsPage`].
+pub async fn fetch_system_evaluated_options(
+    id: &uuid::Uuid,
+    request: &EvaluatedOptionsRequest,
+) -> Result<EvaluatedOptionsPage, ApiClientError> {
+    let mut parts = vec![
+        format!("revision={}", encode_query_value(&request.revision)),
+        format!("mode={}", request.mode.as_query_value()),
+        format!("filter={}", request.filter.as_query_value()),
+        format!("limit={}", request.limit.clamp(1, 100)),
+        format!("offset={}", request.offset.clamp(0, 100_000)),
+    ];
+    if let Some(generation) = request.generation {
+        parts.push(format!("generation={generation}"));
+    }
+    if !request.search.is_empty() {
+        parts.push(format!("search={}", encode_query_value(&request.search)));
+    }
+    let url = format!(
+        "{}/systems/{}/evaluated-options?{}",
+        base_url(),
+        id,
+        parts.join("&")
+    );
+    fetch_json(&url).await
+}
+
+/// Fetches complete selected-revision module, evaluation, and drift metadata.
+///
+/// # Errors
+///
+/// Returns [`ApiClientError`] when the request fails or the response cannot be
+/// decoded as [`SelectedEvaluationSummary`].
+pub async fn fetch_system_evaluation_summary(
+    id: &uuid::Uuid,
+    revision: &str,
+    generation: Option<i32>,
+    mode: SnapshotRevisionMode,
+) -> Result<SelectedEvaluationSummary, ApiClientError> {
+    let mut parts = vec![
+        format!("revision={}", encode_query_value(revision)),
+        format!("mode={}", mode.as_query_value()),
+    ];
+    if let Some(generation) = generation {
+        parts.push(format!("generation={generation}"));
+    }
+    let url = format!(
+        "{}/systems/{}/evaluation-summary?{}",
+        base_url(),
+        id,
+        parts.join("&")
+    );
+    fetch_json(&url).await
+}
+
+/// Fetches one bounded module-source page without launching evaluation.
+///
+/// Page zero omits `snapshot_token`. Continuation requests must send the token
+/// returned by page zero so the server can reject mixed-snapshot pages.
+///
+/// # Errors
+///
+/// Returns [`ApiClientError`] when the request fails or the response cannot be
+/// decoded as [`EvaluationModuleSourcesPage`].
+pub async fn fetch_system_evaluation_module_sources(
+    id: &uuid::Uuid,
+    revision: &str,
+    generation: Option<i32>,
+    mode: SnapshotRevisionMode,
+    limit: i64,
+    offset: i64,
+    snapshot_token: Option<&str>,
+) -> Result<EvaluationModuleSourcesPage, ApiClientError> {
+    let mut parts = vec![
+        format!("revision={}", encode_query_value(revision)),
+        format!("mode={}", mode.as_query_value()),
+        format!("limit={}", limit.clamp(1, 100)),
+        format!("offset={}", offset.max(0)),
+    ];
+    if let Some(generation) = generation {
+        parts.push(format!("generation={generation}"));
+    }
+    if let Some(snapshot_token) = snapshot_token {
+        parts.push(format!(
+            "snapshot_token={}",
+            encode_query_value(snapshot_token)
+        ));
+    }
+    let url = format!(
+        "{}/systems/{}/evaluation-module-sources?{}",
+        base_url(),
+        id,
+        parts.join("&")
+    );
+    fetch_json(&url).await
+}
+
+/// Explicitly queues or reuses evaluation work for a full revision SHA.
+///
+/// # Errors
+///
+/// Returns [`ApiClientError`] when authorization, queueing, transport, or
+/// response decoding fails.
+pub async fn queue_system_evaluation(
+    id: &uuid::Uuid,
+    revision: &str,
+) -> Result<QueueEvaluationResponse, ApiClientError> {
+    let url = format!(
+        "{}/systems/{}/evaluations/{}",
+        base_url(),
+        id,
+        encode_uri_component(revision)
+    );
+    send_json_with_csrf("POST", &url, None::<&()>).await
+}
+
 /// Fetch CVE vulnerabilities for a single system.
 pub async fn fetch_system_cves(
     id: &uuid::Uuid,
@@ -746,9 +867,27 @@ pub async fn request_system_sync(
 pub async fn deploy_system(
     id: &uuid::Uuid,
     request: &crate::api::models::DeploySystemRequest,
-) -> Result<SystemMutationResponse, ApiClientError> {
+) -> Result<crate::api::models::ManualDeploymentResponse, ApiClientError> {
     let url = format!("{}/systems/{}/deploy", base_url(), id);
-    send_json_with_csrf("POST", &url, Some(request)).await
+    let body = serde_json::to_string(request)
+        .map_err(|error| ApiClientError::Deserialize(error.to_string()))?;
+    let (status, response_body) = send_request_with_csrf("POST", &url, Some(&body)).await?;
+    if let Ok(response) =
+        serde_json::from_str::<crate::api::models::ManualDeploymentResponse>(&response_body)
+    {
+        // A non-2xx response can still report a successful persisted policy
+        // conversion followed by a deployment failure.
+        return Ok(response);
+    }
+    if !(200..300).contains(&status) {
+        return Err(ApiClientError::Status {
+            code: status,
+            body: decode_api_error_message(&response_body),
+        });
+    }
+    Err(ApiClientError::Deserialize(
+        "invalid manual deployment response".to_string(),
+    ))
 }
 
 pub async fn fetch_system_commits(
@@ -1404,6 +1543,70 @@ pub async fn bulk_delete_deployment_policies(
 /// Fetch all flakes from registry.
 pub async fn fetch_flakes() -> Result<Vec<FlakeRegistryItem>, ApiClientError> {
     let url = format!("{}/flakes", base_url());
+    fetch_json(&url).await
+}
+
+/// Fetches one bounded collection page for an exact full flake revision.
+///
+/// `limit` and `offset` apply to each top-level output collection. Callers must
+/// merge continuation pages while retaining the response's authoritative
+/// revision-wide totals. Page zero omits `snapshot_token`; continuations must
+/// send the token returned by page zero.
+///
+/// # Errors
+///
+/// Returns [`ApiClientError`] when the request fails or the server response
+/// cannot be decoded as [`FlakeOutputSnapshotResponse`].
+pub async fn fetch_flake_revision_outputs(
+    flake_id: i32,
+    revision: &str,
+    system_filter: FlakeSystemFilter,
+    limit: usize,
+    offset: usize,
+    snapshot_token: Option<&str>,
+) -> Result<FlakeOutputSnapshotResponse, ApiClientError> {
+    let mut url = format!(
+        "{}/flakes/{}/revisions/{}/outputs?system_filter={}&limit={limit}&offset={offset}",
+        base_url(),
+        flake_id,
+        encode_uri_component(revision),
+        system_filter.as_query_value(),
+    );
+    if let Some(snapshot_token) = snapshot_token {
+        url.push_str("&snapshot_token=");
+        url.push_str(&encode_uri_component(snapshot_token));
+    }
+    fetch_json(&url).await
+}
+
+/// Fetches one stable declaration page for an exported module and exact revision.
+///
+/// Page one omits `snapshot_token`. Every continuation request must reuse the
+/// token returned by page one so the server can reject mixed-snapshot pages.
+///
+/// # Errors
+///
+/// Returns [`ApiClientError`] when the request fails, the snapshot changed, or
+/// the response cannot be decoded as [`FlakeModuleDeclarationsPage`].
+pub async fn fetch_flake_module_declarations(
+    flake_id: i32,
+    revision: &str,
+    module_name: &str,
+    limit: usize,
+    offset: usize,
+    snapshot_token: Option<&str>,
+) -> Result<FlakeModuleDeclarationsPage, ApiClientError> {
+    let mut url = format!(
+        "{}/flakes/{}/revisions/{}/modules/{}/declarations?limit={limit}&offset={offset}",
+        base_url(),
+        flake_id,
+        encode_uri_component(revision),
+        encode_uri_component(module_name)
+    );
+    if let Some(token) = snapshot_token {
+        url.push_str("&snapshot_token=");
+        url.push_str(&encode_uri_component(token));
+    }
     fetch_json(&url).await
 }
 

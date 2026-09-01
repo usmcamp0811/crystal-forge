@@ -15,6 +15,8 @@ pub struct NewSystemDraft {
     pub environment: String,
     /// Name of the flake this system belongs to
     pub flake_name: String,
+    /// Branch context supplied by revision-scoped registration navigation.
+    pub flake_branch: String,
     /// NixOS configuration name inside the flake (defaults to hostname)
     pub system_configuration_name: String,
     /// Deployment policy ("manual", "auto_latest", "pinned")
@@ -29,6 +31,7 @@ impl NewSystemDraft {
             public_key: String::new(),
             environment: String::new(),
             flake_name: String::new(),
+            flake_branch: String::new(),
             system_configuration_name: String::new(),
             deployment_policy: "manual".to_string(),
         }
@@ -223,6 +226,18 @@ pub fn AddSystemForm(
                                     p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
                                     p { style: "margin:2px 0 0 0;", "Select the flake source this system should evaluate and deploy from." }
                                 }
+                            }
+                        }
+                        if !draft.read().flake_branch.is_empty() {
+                            label {
+                                class: "space-y-2 block",
+                                span { class: "text-xs uppercase tracking-wide text-gray-500", "Flake Branch" }
+                                input {
+                                    class: "w-full rounded-lg px-3 py-2 text-sm font-mono {theme::interactive::INPUT} {theme::text::SECONDARY}",
+                                    value: "{draft.read().flake_branch}",
+                                    readonly: true,
+                                }
+                                p { class: "text-xs {theme::text::SECONDARY}", "Prefilled from the selected flake revision context." }
                             }
                         }
                         // Configuration name

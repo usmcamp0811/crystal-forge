@@ -15,6 +15,8 @@ const MOCK_EVAL_TOTAL_DURATION_MS: u64 = 30_000;
 const MOCK_EVAL_MIN_PER_SYSTEM_MS: u64 = 5_000;
 const MOCK_EVAL_STAGE_COUNT: u64 = 5;
 const EVAL_OUTPUT_IDLE_TIMEOUT_SECS: u64 = 300;
+/// Hard ceiling for one bulk evaluator process, including continuously noisy jobs.
+const EVAL_OVERALL_TIMEOUT_SECS: u64 = 1800;
 const EVAL_PROGRESS_HEARTBEAT_SECS: u64 = 30;
 /// Maximum number of missing systems to attempt individual fallback evaluation
 /// for. Beyond this threshold, treat as a likely process-wide evaluator failure
@@ -104,7 +106,7 @@ impl CappedOutput {
                 self.total_bytes
             ));
         }
-        text
+        crate::security::snapshot_redaction::redact_text(&text)
     }
 }
 
@@ -123,6 +125,100 @@ where
         }
         output.push(&chunk[..count], limit);
     }
+}
+
+/// Complete bounded output from one external Nix helper.
+#[derive(Debug)]
+pub(crate) struct BoundedProcessOutput {
+    /// Child exit status.
+    pub(crate) status: std::process::ExitStatus,
+    /// Standard output retained up to the caller's byte ceiling.
+    pub(crate) stdout: CappedOutput,
+    /// Standard error retained up to the caller's byte ceiling.
+    pub(crate) stderr: CappedOutput,
+}
+
+/// Runs an expensive Nix child under one deadline and bounded output buffers.
+///
+/// The function starts a new process group, drains both pipes concurrently, and
+/// keeps draining after each retention ceiling so a verbose child cannot block.
+/// The deadline covers child execution and pipe draining. Timeout or cancellation
+/// kills the complete process group, including helper processes that inherited a
+/// pipe. This function does not perform network access itself.
+///
+/// # Errors
+///
+/// Returns an error when the child cannot start, wait, or drain its pipes, or
+/// when the overall deadline expires.
+pub(crate) async fn run_nix_command_bounded(
+    command: &mut Command,
+    process_name: &str,
+    deadline: Duration,
+    stdout_limit: usize,
+    stderr_limit: usize,
+) -> Result<BoundedProcessOutput> {
+    command
+        .kill_on_drop(true)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    command.process_group(0);
+
+    let child = command
+        .spawn()
+        .with_context(|| format!("failed to spawn {process_name}"))?;
+    let mut guard = NixEvalProcessGuard::from_spawned_child(child, process_name)?;
+    let stdout = guard
+        .child_mut()
+        .stdout
+        .take()
+        .context("bounded child stdout was not piped")?;
+    let stderr = guard
+        .child_mut()
+        .stderr
+        .take()
+        .context("bounded child stderr was not piped")?;
+    let mut stdout_task = tokio::spawn(read_capped(stdout, stdout_limit));
+    let mut stderr_task = tokio::spawn(read_capped(stderr, stderr_limit));
+    let expires_at = Instant::now() + deadline;
+
+    let status = match tokio::time::timeout_at(expires_at, guard.wait()).await {
+        Ok(result) => result.with_context(|| format!("failed to wait for {process_name}"))?,
+        Err(_) => {
+            guard.terminate().await;
+            stdout_task.abort();
+            stderr_task.abort();
+            bail!("{process_name} timed out after {}s", deadline.as_secs());
+        }
+    };
+    let stdout = match tokio::time::timeout_at(expires_at, &mut stdout_task).await {
+        Ok(result) => result
+            .context("bounded stdout reader task failed")?
+            .context("failed to read bounded stdout")?,
+        Err(_) => {
+            guard.terminate().await;
+            stdout_task.abort();
+            stderr_task.abort();
+            bail!("{process_name} timed out while draining stdout");
+        }
+    };
+    let stderr = match tokio::time::timeout_at(expires_at, &mut stderr_task).await {
+        Ok(result) => result
+            .context("bounded stderr reader task failed")?
+            .context("failed to read bounded stderr")?,
+        Err(_) => {
+            guard.terminate().await;
+            stderr_task.abort();
+            bail!("{process_name} timed out while draining stderr");
+        }
+    };
+    guard.disarm_after_output_drained();
+
+    Ok(BoundedProcessOutput {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 /// Terminate an entire Nix evaluator process *group* (direct child + all
@@ -331,6 +427,7 @@ use crate::models::deployment_policies::{
     AssignedPolicy, EvaluationTerminalOutcome, PoliciesByConfiguration, PolicyCheckResult,
     build_nix_eval_expression, policies_for_config, policy_requirements_met, policy_results_json,
 };
+use crate::models::evaluation_snapshots::EvaluatedOption;
 use crate::models::flakes::Flake;
 use crate::models::retry_policy::RetryFailureClass;
 use crate::queries::build_jobs::{
@@ -474,7 +571,9 @@ async fn resolve_expected_store_path(
     };
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stderr = crate::security::snapshot_redaction::redact_text(
+            String::from_utf8_lossy(&output.stderr).trim(),
+        );
         warn!(
             "Failed to resolve expected store path via nix-store for drv {}: {}",
             drv_path,
@@ -547,12 +646,13 @@ fn spawn_closure_counting(pool: PgPool, finalized: FinalizedDerivation) {
         };
 
         match count_closure_packages(&drv_cc).await {
-            Ok((total, cached)) => {
+            Ok((total, cached, closure_size_bytes)) => {
                 if let Err(err) = crate::queries::derivations::set_closure_counts(
                     &pool_cc,
                     derivation_id_cc,
                     total,
                     cached,
+                    closure_size_bytes,
                 )
                 .await
                 {
@@ -583,6 +683,9 @@ async fn broadcast_and_persist_eval_log(
     sequence: &mut i32,
     message: String,
 ) {
+    // SECURITY: This is the common boundary for evaluator diagnostics. Redact
+    // before broadcast, in-memory history, persistence, or log-level parsing.
+    let message = crate::security::snapshot_redaction::redact_text(&message);
     let lower = message.to_ascii_lowercase();
 
     // Broadcast via WebSocket (existing infrastructure)
@@ -853,7 +956,8 @@ pub async fn evaluate_single_system_with_policies(
     guard.disarm_after_output_drained();
 
     if !status.success() {
-        let stderr = stderr.diagnostic_excerpt(500);
+        let stderr =
+            crate::security::snapshot_redaction::redact_text(&stderr.diagnostic_excerpt(500));
         let error = if stderr.trim().is_empty() {
             "System evaluation failed with no error output".to_string()
         } else {
@@ -1068,7 +1172,7 @@ in
         };
     }
 
-    let stderr = stderr.diagnostic_excerpt(500);
+    let stderr = crate::security::snapshot_redaction::redact_text(&stderr.diagnostic_excerpt(500));
     let error = if stderr.trim().is_empty() {
         "System evaluation failed with no error output".to_string()
     } else {
@@ -1214,6 +1318,10 @@ pub struct EvaluationPlan {
     pub successful_systems: Vec<SuccessfulSystemResult>,
     /// Systems confirmed as failures by the fallback phase.
     pub confirmed_failures: Vec<ConfirmedSystemFailure>,
+    /// Pre-persistence-redacted NixOS options keyed by configuration name.
+    pub evaluation_snapshots: HashMap<String, Vec<EvaluatedOption>>,
+    /// Revision-scoped flake outputs extracted once during bulk evaluation.
+    pub flake_output_snapshot: Option<serde_json::Value>,
     /// True when any result has a Nix evaluation error.
     pub had_system_eval_errors: bool,
     #[cfg(test)]
@@ -2325,6 +2433,43 @@ pub async fn finalize_evaluation_attempt(
         )
         .await
         .with_context(|| format!("Failed to write synthetic failure for {}", cf.system_name))?;
+        crate::queries::evaluation_snapshots::persist_failed_snapshot_deferred_tx(
+            &mut tx,
+            commit_id,
+            &cf.system_name,
+            &cf.error,
+        )
+        .await
+        .with_context(|| format!("Failed to persist failed snapshot for {}", cf.system_name))?;
+    }
+
+    // SECURITY: Evaluator metadata was recursively redacted before it entered
+    // the plan. Persist it in this transaction so a commit cannot become
+    // complete without its corresponding reusable configuration snapshots.
+    for (configuration_name, options) in &plan.evaluation_snapshots {
+        crate::queries::evaluation_snapshots::persist_available_snapshot_deferred_tx(
+            &mut tx,
+            commit_id,
+            configuration_name,
+            options.clone(),
+        )
+        .await
+        .with_context(|| {
+            format!("Failed to persist evaluation snapshot for {configuration_name}")
+        })?;
+    }
+    // INVARIANT: Every snapshot mutation and this complete-corpus recomputation
+    // share the finalization transaction. Readers see either the old corpus and
+    // metrics or the complete new corpus and metrics, never an intermediate mix.
+    crate::queries::evaluation_snapshots::recompute_host_deltas_tx(&mut tx, commit_id)
+        .await
+        .context("Failed to recompute finalized evaluation host deltas")?;
+    if let Some(payload) = &plan.flake_output_snapshot {
+        crate::queries::evaluation_snapshots::persist_flake_output_snapshot_tx(
+            &mut tx, commit_id, payload,
+        )
+        .await
+        .context("Failed to persist flake output snapshot")?;
     }
 
     #[cfg(test)]
@@ -2841,6 +2986,8 @@ async fn evaluate_with_nix_eval_jobs_inner(
 
     let mut results = Vec::new();
     let mut policy_checks = Vec::new();
+    let mut evaluation_snapshots = HashMap::new();
+    let mut flake_output_snapshot = None;
     let mut found_target = false;
     let mut stderr_diagnostic = CappedOutput::default();
     let mut stderr_log_batch: Vec<(i32, Option<String>, String)> = Vec::new();
@@ -2860,9 +3007,18 @@ async fn evaluate_with_nix_eval_jobs_inner(
         tokio::time::interval(Duration::from_secs(EVAL_PROGRESS_HEARTBEAT_SECS));
     progress_ticker.tick().await; // consume immediate first tick
     let mut last_output_at = Instant::now();
+    let evaluation_deadline = tokio::time::sleep(Duration::from_secs(EVAL_OVERALL_TIMEOUT_SECS));
+    tokio::pin!(evaluation_deadline);
 
     loop {
         tokio::select! {
+            _ = &mut evaluation_deadline => {
+                guard.terminate().await;
+                bail!(
+                    "evaluation exceeded the overall {}s deadline",
+                    EVAL_OVERALL_TIMEOUT_SECS
+                );
+            }
             // Third arm: cooperative cancellation poll
             _ = cancel_ticker.tick() => {
                 match crate::queries::commits::check_cancellation_requested(pool, commit.id).await {
@@ -2914,12 +3070,25 @@ async fn evaluate_with_nix_eval_jobs_inner(
                     Some(line) if !line.trim().is_empty() => {
                         last_output_at = Instant::now();
                         match serde_json::from_str::<NixEvalJobResult>(&line) {
-                            Ok(result) => {
+                            Ok(mut result) => {
+                                result.error = result.error.take().map(|error| {
+                                    crate::security::snapshot_redaction::redact_evaluation_error(
+                                        &error,
+                                    )
+                                });
                                 let system_name = result
                                     .attr_path
                                     .last()
                                     .cloned()
                                     .unwrap_or_else(|| result.attr.clone());
+                                if system_name == "__crystalForgeFlakeOutput" {
+                                    flake_output_snapshot = result
+                                        .meta
+                                        .as_ref()
+                                        .and_then(|meta| meta.get("flakeOutputSnapshot"))
+                                        .map(crate::security::snapshot_redaction::redact_json);
+                                    continue;
+                                }
                                 let build_eligible = match &allowed_systems {
                                     Some(systems) => systems.iter().any(|c| c == &system_name),
                                     None => true,
@@ -3001,6 +3170,20 @@ async fn evaluate_with_nix_eval_jobs_inner(
                                     // Error lines are converted to confirmed target failures below.
                                     // They have no successful policy metadata contract to parse.
                                 } else if let Some(meta) = &result.meta {
+                                    if let Some(snapshot) = meta.get("evaluationSnapshot") {
+                                        let options = serde_json::from_value::<Vec<EvaluatedOption>>(
+                                            snapshot.clone(),
+                                        )
+                                        .with_context(|| {
+                                            format!(
+                                                "Invalid evaluation snapshot metadata for {system_name}"
+                                            )
+                                        })?
+                                        .into_iter()
+                                        .map(EvaluatedOption::redacted)
+                                        .collect();
+                                        evaluation_snapshots.insert(system_name.clone(), options);
+                                    }
                                     if let Some(policies_json) = meta.get("policies") {
                                         // Parse policy results using this configuration's assigned
                                         // policies only (stable-key path).
@@ -3639,6 +3822,7 @@ async fn evaluate_with_nix_eval_jobs_inner(
                                 }
                             }
                             Err(e) => {
+                                let line = crate::security::snapshot_redaction::redact_text(&line);
                                 warn!("Failed to parse nix-eval-jobs output: {}\nLine: {}", e, line);
                             }
                         }
@@ -3650,6 +3834,7 @@ async fn evaluate_with_nix_eval_jobs_inner(
             line_result = stderr_reader.next_line(), if !stderr_done => {
                 match line_result? {
                     Some(line) => {
+                        let line = crate::security::snapshot_redaction::redact_text(&line);
                         last_output_at = Instant::now();
                         if line.contains("error:") {
                             error!("nix-eval-jobs stderr: {}", line);
@@ -3819,7 +4004,9 @@ async fn evaluate_with_nix_eval_jobs_inner(
         commit.id, child_status
     );
     if !child_status.success() {
-        let stderr_text = stderr_diagnostic.diagnostic_excerpt(500);
+        let stderr_text = crate::security::snapshot_redaction::redact_text(
+            &stderr_diagnostic.diagnostic_excerpt(500),
+        );
         warn!(
             "nix-eval-jobs failed with exit code: {}\nStderr:\n{}",
             child_status.code().unwrap_or(-1),
@@ -4448,6 +4635,8 @@ async fn evaluate_with_nix_eval_jobs_inner(
         policy_checks,
         successful_systems: successful_results,
         confirmed_failures,
+        evaluation_snapshots,
+        flake_output_snapshot,
         had_system_eval_errors,
         #[cfg(test)]
         force_build_job_insert_failure: false,
@@ -4683,6 +4872,8 @@ async fn evaluate_with_mock_eval_jobs_inner(
         policy_checks: checks,
         successful_systems,
         confirmed_failures: Vec::new(),
+        evaluation_snapshots: HashMap::new(),
+        flake_output_snapshot: None,
         had_system_eval_errors,
         #[cfg(test)]
         force_build_job_insert_failure: false,
@@ -4945,12 +5136,14 @@ mod tests {
         SystemBuildActivationOutcome, SystemFinalizeOutcome, SystemNotQueuedReason,
         SystemPersistenceOutcome, activate_evaluated_system_build, finalize_evaluated_system,
         finalize_evaluation_attempt, mock_eval_stage_delay, persist_evaluated_system, read_capped,
-        resolve_mock_systems, should_mock_policy_fail, summarize_commit_metadata,
+        resolve_mock_systems, run_nix_command_bounded, should_mock_policy_fail,
+        summarize_commit_metadata,
     };
     use crate::api::models::CancelEvalOutcome;
     use crate::models::deployment_policies::{
         AssignedPolicy, DeploymentPolicy, PolicyCheckResult, policy_result_key, policy_results_json,
     };
+    use crate::models::evaluation_snapshots::{EvaluatedOption, SafeOptionValue};
     use crate::queries::commits::{
         EvalFailureOutcome, EvalStartOutcome, cancel_commit_evaluation,
         mark_commit_evaluation_failed, mark_commit_evaluation_started,
@@ -5190,6 +5383,53 @@ mod tests {
         assert!(output.is_truncated());
     }
 
+    #[tokio::test]
+    async fn bounded_process_collection_limits_both_output_streams() {
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            "i=0; while [ $i -lt 4096 ]; do printf x; printf y >&2; i=$((i+1)); done",
+        ]);
+
+        let output = run_nix_command_bounded(
+            &mut command,
+            "bounded-output test",
+            std::time::Duration::from_secs(2),
+            64,
+            32,
+        )
+        .await
+        .expect("bounded child should complete");
+
+        assert!(output.status.success());
+        assert_eq!(output.stdout.bytes.len(), 64);
+        assert_eq!(output.stdout.total_bytes, 4096);
+        assert!(output.stdout.is_truncated());
+        assert_eq!(output.stderr.bytes.len(), 32);
+        assert_eq!(output.stderr.total_bytes, 4096);
+        assert!(output.stderr.is_truncated());
+    }
+
+    #[tokio::test]
+    async fn bounded_process_collection_enforces_overall_deadline() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 60"]);
+
+        let started = std::time::Instant::now();
+        let error = run_nix_command_bounded(
+            &mut command,
+            "deadline test",
+            std::time::Duration::from_millis(100),
+            64,
+            64,
+        )
+        .await
+        .expect_err("long-running child must time out");
+
+        assert!(error.to_string().contains("timed out"));
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
+
     fn test_database_url() -> String {
         std::env::var("CRYSTAL_FORGE_TEST_DATABASE_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))
@@ -5357,6 +5597,8 @@ mod tests {
             policy_checks,
             successful_systems: successes,
             confirmed_failures: failures,
+            evaluation_snapshots: std::collections::HashMap::new(),
+            flake_output_snapshot: None,
             had_system_eval_errors: false,
             force_build_job_insert_failure: false,
         }
@@ -5610,6 +5852,53 @@ mod tests {
             cancel_commit_evaluation(&pool, commit_id).await.unwrap(),
             CancelEvalOutcome::AlreadyTerminal
         );
+
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn finalization_populates_host_metrics_for_complete_configuration_corpus() {
+        let pool = test_pool().await;
+        cleanup_throwaway_flakes(&pool).await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+        let attempt = start_eval(&pool, commit_id).await;
+        let mut evaluation = plan(Vec::new(), Vec::new());
+        for (configuration, value) in [("alpha", "one"), ("beta", "two")] {
+            evaluation.evaluation_snapshots.insert(
+                configuration.to_string(),
+                vec![EvaluatedOption {
+                    path: "services.example.value".to_string(),
+                    declared_type: "string".to_string(),
+                    value: SafeOptionValue::Scalar(serde_json::json!(value)),
+                    definitions: Vec::new(),
+                    overridden: false,
+                }],
+            );
+        }
+
+        let outcome = finalize_evaluation_attempt(&pool, commit_id, attempt, &evaluation)
+            .await
+            .expect("finalization should persist the complete snapshot corpus");
+        assert!(matches!(
+            outcome,
+            EvaluationFinalizeOutcome::Completed { .. }
+        ));
+        let metrics: Vec<Option<i64>> = sqlx::query_scalar(
+            "SELECT host_delta_count FROM evaluation_snapshots \
+             WHERE commit_id = $1 ORDER BY configuration_name",
+        )
+        .bind(commit_id)
+        .fetch_all(&pool)
+        .await
+        .expect("finalized metrics should load");
+        assert_eq!(metrics.len(), 2);
+        assert!(metrics.iter().all(Option::is_some));
+        assert_eq!(metrics.iter().flatten().sum::<i64>(), 1);
 
         let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
             .bind(flake_id)

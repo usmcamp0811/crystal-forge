@@ -1,7 +1,7 @@
 //! Flakes registry API handlers.
 
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -86,12 +86,16 @@ fn apply_remote_commit_order_if_available(
 }
 
 pub async fn list_flakes(State(pool): State<PgPool>, headers: HeaderMap) -> impl IntoResponse {
-    if require_viewer_or_above(&pool, &headers).await.is_none() {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden_viewer();
+    };
+    if !has_viewer_or_above_role(&roles) {
         return forbidden_viewer();
     }
+    let visibility_user = (!has_admin_role(&roles)).then_some(user_id);
 
     let t = std::time::Instant::now();
-    match list_flake_registry(&pool).await {
+    match list_flake_registry(&pool, visibility_user).await {
         Ok(flakes) => {
             info!(
                 flake_count = flakes.len(),
@@ -182,7 +186,8 @@ pub async fn get_flake_timelines(
         // Database-only read path (TASK-397): no Git operations.
         // Ordering and visibility use the branch-commit snapshot when available,
         // falling back to deterministic timestamp ordering for unsynchronized flakes.
-        fetch_flake_timelines(&pool, max_commits, flake_ids.as_deref()).await
+        let visibility_user = (!has_admin_role(&roles)).then_some(user_id);
+        fetch_flake_timelines(&pool, max_commits, flake_ids.as_deref(), visibility_user).await
     };
 
     match fetch_result {
@@ -276,6 +281,240 @@ pub async fn get_flake_timelines(
                 .into_response()
         }
     }
+}
+
+/// Returns cached outputs for one full flake revision.
+///
+/// The endpoint performs database reads only. Non-admin callers must have an
+/// environment membership through an active managed system for the flake.
+/// Supplied snapshot tokens detect selected-output or first-parent replacement.
+/// Tokenless positive offsets retain the endpoint's bounded legacy behavior.
+pub async fn get_flake_revision_outputs(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path((flake_id, revision)): Path<(i32, String)>,
+    Query(params): Query<crate::models::evaluation_snapshots::FlakeOutputParams>,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden_viewer();
+    };
+    if !has_viewer_or_above_role(&roles) {
+        return forbidden_viewer();
+    }
+    if !is_full_commit_sha(&revision) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiError {
+                error: "validation_error".to_string(),
+                message: "revision must be a full 40- or 64-character commit SHA".to_string(),
+                details: None,
+            }),
+        )
+            .into_response();
+    }
+    if !has_admin_role(&roles) {
+        let visible = sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM systems s
+                JOIN user_environment_memberships membership
+                  ON membership.environment_id = s.environment_id
+                 AND membership.user_id = $2
+                WHERE s.flake_id = $1 AND s.is_active = true
+            )
+            "#,
+        )
+        .bind(flake_id)
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await;
+        match visible {
+            Ok(true) => {}
+            Ok(false) => return flake_not_found(),
+            Err(error) => {
+                tracing::error!(flake_id, error = %error, "failed to authorize flake output snapshot");
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+        }
+    }
+
+    match crate::queries::evaluation_snapshots::get_flake_output_snapshot_with_token(
+        &pool,
+        flake_id,
+        &revision,
+        params.snapshot_token.as_deref(),
+        (!has_admin_role(&roles)).then_some(user_id),
+        params.system_filter,
+        params.limit.unwrap_or(50),
+        params.offset.unwrap_or(0),
+    )
+    .await
+    {
+        Ok(Some(snapshot)) => (StatusCode::OK, Json(snapshot)).into_response(),
+        Ok(None) => flake_not_found(),
+        Err(error) if flake_output_snapshot_changed(&error, params.snapshot_token.is_some()) => (
+            StatusCode::CONFLICT,
+            Json(ApiError {
+                error: "snapshot_changed".to_string(),
+                message: "Flake output snapshot changed; reload collections from offset 0"
+                    .to_string(),
+                details: None,
+            }),
+        )
+            .into_response(),
+        Err(error) => {
+            tracing::error!(flake_id, error = %error, "failed to load flake output snapshot");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+fn flake_output_snapshot_changed(error: &anyhow::Error, token_supplied: bool) -> bool {
+    token_supplied
+        && error.to_string() == crate::queries::evaluation_snapshots::FLAKE_OUTPUT_SNAPSHOT_CHANGED
+}
+
+/// Returns one cached declaration page for one exported module and full revision.
+///
+/// The endpoint performs database reads only. It applies the same environment
+/// visibility and non-disclosure policy as [`get_flake_revision_outputs`].
+pub async fn get_flake_module_declarations(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path((flake_id, revision, module_name)): Path<(i32, String, String)>,
+    Query(params): Query<crate::models::evaluation_snapshots::FlakeModuleDeclarationsParams>,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden_viewer();
+    };
+    if !has_viewer_or_above_role(&roles) {
+        return forbidden_viewer();
+    }
+    if !is_full_commit_sha(&revision) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiError {
+                error: "validation_error".to_string(),
+                message: "revision must be a full 40- or 64-character commit SHA".to_string(),
+                details: None,
+            }),
+        )
+            .into_response();
+    }
+    if module_name.trim().is_empty() || module_name.len() > 512 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiError {
+                error: "validation_error".to_string(),
+                message: "module must be a non-empty name of at most 512 bytes".to_string(),
+                details: None,
+            }),
+        )
+            .into_response();
+    }
+    if params.offset.unwrap_or(0) > 0 && params.snapshot_token.is_none() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiError {
+                error: "validation_error".to_string(),
+                message: "snapshot_token is required when offset is greater than 0".to_string(),
+                details: None,
+            }),
+        )
+            .into_response();
+    }
+    if params.snapshot_token.as_deref().is_some_and(|token| {
+        token.len() != 64 || !token.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiError {
+                error: "validation_error".to_string(),
+                message: "snapshot_token must be a 64-character hexadecimal digest".to_string(),
+                details: None,
+            }),
+        )
+            .into_response();
+    }
+
+    if !has_admin_role(&roles) {
+        let visible = sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM systems s
+                JOIN user_environment_memberships membership
+                  ON membership.environment_id = s.environment_id
+                 AND membership.user_id = $2
+                WHERE s.flake_id = $1 AND s.is_active = true
+            )
+            "#,
+        )
+        .bind(flake_id)
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await;
+        match visible {
+            Ok(true) => {}
+            Ok(false) => return flake_not_found(),
+            Err(error) => {
+                tracing::error!(flake_id, error = %error, "failed to authorize module declarations");
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+        }
+    }
+
+    match crate::queries::evaluation_snapshots::get_flake_module_declarations(
+        &pool,
+        flake_id,
+        &revision,
+        &module_name,
+        params.snapshot_token.as_deref(),
+        params.limit.unwrap_or(50),
+        params.offset.unwrap_or(0),
+    )
+    .await
+    {
+        Ok(crate::queries::evaluation_snapshots::FlakeModuleDeclarationsQuery::Page(page)) => {
+            (StatusCode::OK, Json(page)).into_response()
+        }
+        Ok(crate::queries::evaluation_snapshots::FlakeModuleDeclarationsQuery::NotFound) => {
+            flake_not_found()
+        }
+        Ok(crate::queries::evaluation_snapshots::FlakeModuleDeclarationsQuery::SnapshotChanged) => {
+            (
+                StatusCode::CONFLICT,
+                Json(ApiError {
+                    error: "snapshot_changed".to_string(),
+                    message: "Flake output snapshot changed; reload declarations from offset 0"
+                        .to_string(),
+                    details: None,
+                }),
+            )
+                .into_response()
+        }
+        Err(error) => {
+            tracing::error!(flake_id, module_name, error = %error, "failed to load module declarations");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+fn is_full_commit_sha(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn flake_not_found() -> axum::response::Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(ApiError {
+            error: "not_found".to_string(),
+            message: "Flake not found".to_string(),
+            details: None,
+        }),
+    )
+        .into_response()
 }
 
 async fn upsert_commit_artifacts_cache(
@@ -1832,7 +2071,7 @@ pub async fn sync_all_flakes_handler(
 ) -> impl IntoResponse {
     let pool = state.pool.clone();
 
-    let flakes = match list_flake_registry(&pool).await {
+    let flakes = match list_flake_registry(&pool, None).await {
         Ok(flakes) => flakes,
         Err(e) => {
             error!("Failed to list flakes for sync: {e:#}");
@@ -2320,6 +2559,24 @@ mod tests {
     use super::*;
     use crate::api::models::FlakeCommit;
     use chrono::Utc;
+    use sqlx::postgres::PgPoolOptions;
+
+    #[tokio::test]
+    async fn module_declarations_require_authentication_before_database_access() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
+            .expect("lazy pool should construct");
+        let response = get_flake_module_declarations(
+            State(pool),
+            HeaderMap::new(),
+            Path((1, "a".repeat(40), "module".to_string())),
+            Query(crate::models::evaluation_snapshots::FlakeModuleDeclarationsParams::default()),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
 
     #[test]
     fn create_payload_requires_name() {
@@ -2389,6 +2646,50 @@ mod tests {
         assert_eq!(one, two);
         assert_eq!(one.len(), 40);
         assert!(one.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[tokio::test]
+    async fn flake_output_read_requires_authentication_before_revision_disclosure() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
+            .expect("lazy pool should construct");
+        let response = get_flake_revision_outputs(
+            State(pool),
+            HeaderMap::new(),
+            Path((1, "a".repeat(40))),
+            Query(crate::models::evaluation_snapshots::FlakeOutputParams::default()),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn flake_output_conflict_requires_a_supplied_snapshot_token() {
+        let changed =
+            anyhow::anyhow!(crate::queries::evaluation_snapshots::FLAKE_OUTPUT_SNAPSHOT_CHANGED);
+        assert!(flake_output_snapshot_changed(&changed, true));
+        assert!(!flake_output_snapshot_changed(&changed, false));
+        assert!(!flake_output_snapshot_changed(
+            &anyhow::anyhow!("database unavailable"),
+            true
+        ));
+    }
+
+    #[tokio::test]
+    async fn module_declaration_read_requires_authentication_before_revision_disclosure() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
+            .expect("lazy pool should construct");
+        let response = get_flake_module_declarations(
+            State(pool),
+            HeaderMap::new(),
+            Path((1, "a".repeat(40), "default".to_string())),
+            Query(crate::models::evaluation_snapshots::FlakeModuleDeclarationsParams::default()),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
     #[test]

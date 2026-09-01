@@ -2,7 +2,12 @@
   # Create a reusable git server node for tests with cgit web interface
   # This provides a standardized git server that can serve repositories over git protocol and HTTP
   makeGitServerNode =
-    { port ? 8080, extraConfig ? { }, systemBuildClosure, pkgs, }:
+    { port ? 8080
+    , writableHttp ? false
+    , extraConfig ? { }
+    , systemBuildClosure
+    , pkgs
+    , }:
     {
       services.getty.autologinUser = "root";
       networking.firewall.allowedTCPPorts = [ port 80 ];
@@ -58,7 +63,7 @@
       # Create cgit user
       users.users.cgit = {
         isSystemUser = true;
-        group = "cgit";
+        group = if writableHttp then "git" else "cgit";
         home = "/var/lib/cgit";
       };
       users.groups.cgit = { };
@@ -95,6 +100,13 @@
               ${pkgs.git}/bin/git -C "$dst" update-server-info
               chown -R git:git "$dst"
               chmod -R u+rwX,go+rX "$dst"
+              ${lib.optionalString writableHttp ''
+                # The rewrite-recovery test pushes only to this disposable
+                # repository. Group sharing keeps receive-pack writes usable.
+                ${pkgs.git}/bin/git -C "$dst" config core.sharedRepository group
+                ${pkgs.git}/bin/git -C "$dst" config http.receivepack true
+                chmod -R g+rwX "$dst"
+              ''}
             fi
           '';
           RemainAfterExit = true;
@@ -133,7 +145,7 @@
           };
 
           user = "cgit";
-          group = "cgit";
+          group = if writableHttp then "git" else "cgit";
         };
       };
 
@@ -153,6 +165,20 @@
 
       # Enable nginx for cgit
       services.nginx.enable = true;
+      services.nginx.virtualHosts.localhost.locations = lib.mkIf writableHttp {
+        "~ /.+/git-receive-pack" = {
+          fastcgiParams = {
+            SCRIPT_FILENAME = "${pkgs.git}/libexec/git-core/git-http-backend";
+            GIT_PROJECT_ROOT = "/srv/git";
+            GIT_HTTP_EXPORT_ALL = "1";
+            HOME = "/srv/git";
+          };
+          extraConfig = ''
+            fastcgi_param PATH_INFO $uri;
+            fastcgi_pass unix:/run/fcgiwrap-cgit-gitserver.sock;
+          '';
+        };
+      };
 
       # Git daemon for git:// protocol access
       systemd.services.git-daemon = {

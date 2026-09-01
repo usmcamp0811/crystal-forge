@@ -1,57 +1,53 @@
 /**
- * Design-parity comparison.
+ * Compares authoritative React targets with matching Dioxus captures.
  *
- * Compares each design-example target screenshot (<view>--<theme>.design.png)
- * against the corresponding real Dioxus screenshot (<view>--<theme>.dioxus.png)
- * and writes a NON-BLOCKING design-drift report + a side-by-side montage per
- * view/theme so drift is visible in the MR.
- *
- * The two renderers (React design example vs Dioxus app) are never expected to
- * be pixel-identical, so we normalize both screenshots (resize to a common
- * width, flatten onto an opaque background) and use ImageMagick
- * `compare -metric RMSE` to produce a stable similarity gauge. Lower drift =
- * closer to the design.
- *
- * Usage:
- *   node compare-design-parity.js <manifest> <designDir> <dioxusDir> <outDir>
- *
- *   <designDir>  Directory with <view>--<theme>.design.png (targets).
- *   <dioxusDir>  Directory with <view>--<theme>.dioxus.png (real UI captures).
- *   <outDir>     Where the report, summary, and montages are written.
+ * The RMSE metric is advisory. Retained montages are the review evidence.
  */
 const fs = require("fs");
 const path = require("path");
-const { execSync } = require("child_process");
+const { execFileSync } = require("child_process");
 
-function sh(cmd) {
-  return execSync(cmd, { encoding: "utf8", shell: "/bin/sh" }).trim();
+function run(program, args, tolerateDifference = false) {
+  try {
+    return execFileSync(program, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  } catch (error) {
+    const output = `${error.stdout || ""}${error.stderr || ""}`.trim();
+    if (tolerateDifference && error.status === 1) return output;
+    throw new Error(`${program} failed: ${output || error.message}`);
+  }
+}
+
+function dimensions(file) {
+  const output = run("identify", ["-format", "%wx%h", file]);
+  const match = output.match(/^(\d+)x(\d+)$/);
+  return match ? { width: Number(match[1]), height: Number(match[2]) } : null;
 }
 
 function normalize(src, dst, width) {
-  // Resize to a common width and flatten onto an opaque background so
-  // transparency / height differences do not dominate the metric.
-  sh(
-    `convert "${src}" -resize ${width}x -background white -flatten "${dst}" 2>&1 || true`,
-  );
-  return fs.existsSync(dst);
+  run("convert", [src, "-resize", `${width}x`, "-background", "white", "-flatten", dst]);
+}
+
+function crop(src, dst, surface) {
+  const x = Math.max(0, Math.floor(surface.x));
+  const y = Math.max(0, Math.floor(surface.y));
+  const width = Math.max(1, Math.floor(surface.width));
+  const height = Math.max(1, Math.floor(surface.height));
+  run("convert", [src, "-crop", `${width}x${height}+${x}+${y}`, "+repage", dst]);
+}
+
+function alignHeights(src, dst, width, height) {
+  run("convert", [src, "-gravity", "north", "-crop", `${width}x${height}+0+0`, "+repage", dst]);
 }
 
 function rmse(a, b) {
-  // compare -metric RMSE prints "<abs> (<normalized>)"; the normalized value in
-  // parentheses is in [0,1]. compare exits non-zero when images differ, so
-  // tolerate that and parse the number.
-  let out;
-  try {
-    out = sh(`compare -metric RMSE "${a}" "${b}" null: 2>&1 || true`);
-  } catch (err) {
-    out = String(err.stdout || err.message || "");
-  }
-  const m = out.match(/\(([0-9.eE+-]+)\)/);
-  if (m) {
-    const v = Number.parseFloat(m[1]);
-    if (Number.isFinite(v)) return v;
-  }
-  return null;
+  const output = run("compare", ["-metric", "RMSE", a, b, "null:"], true);
+  const match = output.match(/\(([0-9.eE+-]+)\)/);
+  const score = match ? Number.parseFloat(match[1]) : NaN;
+  return Number.isFinite(score) ? score : null;
+}
+
+function sameViewport(actual, expected) {
+  return actual?.width === expected.width && actual?.height === expected.height;
 }
 
 function main() {
@@ -59,196 +55,193 @@ function main() {
   const designDir = process.argv[3];
   const dioxusDir = process.argv[4];
   const outDir = process.argv[5] || "/tmp/design-parity";
-
   if (!manifestPath || !designDir || !dioxusDir) {
-    console.error(
-      "usage: node compare-design-parity.js <manifest> <designDir> <dioxusDir> <outDir>",
-    );
-    process.exit(2);
+    throw new Error("usage: node compare-design-parity.js <manifest> <designDir> <dioxusDir> <outDir>");
   }
 
   const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
   const themes = manifest.settings.themes || ["dark", "light"];
-  const width = (manifest.settings.compare && manifest.settings.compare.resizeWidth) || 960;
-
+  const width = manifest.settings.compare?.resizeWidth || 960;
+  const captures = [
+    ...(process.env.CF_TASK440_TARGETS ? [] : manifest.views.map((view) => ({ ...view, group: "primary", viewport: manifest.settings.viewport }))),
+    ...(manifest.targets?.task440 || [])
+      .filter((target) => !process.env.CF_TASK440_TARGETS || process.env.CF_TASK440_TARGETS.split(",").includes(target.name))
+      .map((target) => ({ ...target, group: "task440" })),
+  ];
+  const expectedTask440 = captures.filter((capture) => capture.group === "task440").length * themes.length;
+  const targetResultsPath = path.join(designDir, "design-targets.json");
+  const targetResults = fs.existsSync(targetResultsPath)
+    ? new Map(JSON.parse(fs.readFileSync(targetResultsPath, "utf8")).results.map((result) => [result.name, result]))
+    : new Map();
+  const dioxusContractsPath = path.join(dioxusDir, "task440-semantic-contracts.json");
+  const dioxusContracts = fs.existsSync(dioxusContractsPath)
+    ? new Map(JSON.parse(fs.readFileSync(dioxusContractsPath, "utf8")).results.map((result) => [result.name, result]))
+    : new Map();
   const normDir = path.join(outDir, "normalized");
   const montageDir = path.join(outDir, "montages");
+  const diffDir = path.join(outDir, "diffs");
   fs.mkdirSync(normDir, { recursive: true });
   fs.mkdirSync(montageDir, { recursive: true });
+  fs.mkdirSync(diffDir, { recursive: true });
 
   const rows = [];
-  for (const view of manifest.views) {
+  for (const capture of captures) {
     for (const theme of themes) {
-      const name = `${view.name}--${theme}`;
+      const name = `${capture.name}--${theme}`;
       const designPng = path.join(designDir, `${name}.design.png`);
       const dioxusPng = path.join(dioxusDir, `${name}.dioxus.png`);
-
-      const hasDesign = fs.existsSync(designPng);
-      const hasDioxus = fs.existsSync(dioxusPng);
-
+      const targetResult = targetResults.get(name);
       const row = {
         name,
-        view: view.name,
+        group: capture.group,
+        view: capture.name,
         theme,
-        route: view.route,
-        designRef: view.designRef || null,
-        hasDesign,
-        hasDioxus,
+        viewport: capture.viewport,
+        dioxusStep: capture.dioxusStep || null,
+        route: capture.route || null,
+        designRef: capture.designRef || null,
+        hasDesign: fs.existsSync(designPng),
+        hasDioxus: fs.existsSync(dioxusPng),
+        designGenerationError: targetResult && !targetResult.ok ? targetResult.error : null,
+        semanticContract: capture.group === "task440" ? {
+          design: targetResult?.semanticContract || { name: capture.name, ok: false, error: "missing design semantic result" },
+          dioxus: dioxusContracts.get(name) || { name: capture.name, ok: false, error: "missing Dioxus semantic result" },
+        } : null,
+        designDimensions: null,
+        dioxusDimensions: null,
         drift: null,
         similarity: null,
         status: "missing",
       };
 
-      if (hasDesign && hasDioxus) {
-        const nd = path.join(normDir, `${name}.design.png`);
-        const nx = path.join(normDir, `${name}.dioxus.png`);
-        const okD = normalize(designPng, nd, width);
-        const okX = normalize(dioxusPng, nx, width);
-        if (okD && okX) {
-          const score = rmse(nd, nx);
-          if (score !== null) {
-            row.drift = Number(score.toFixed(4));
-            row.similarity = Number((1 - score).toFixed(4));
-            row.status = "compared";
-            // Side-by-side montage for MR review.
-            try {
-              sh(
-                `montage "${nd}" "${nx}" -tile 2x1 -geometry +4+4 -background '#111827' "${path.join(
-                  montageDir,
-                  `${name}.montage.png`,
-                )}" 2>&1 || true`,
-              );
-            } catch (_) {}
+      if (row.designGenerationError) {
+        row.status = "design-target-failed";
+      } else if (row.semanticContract && (!row.semanticContract.design.ok || !row.semanticContract.dioxus.ok)) {
+        row.status = "semantic-contract-failed";
+      } else if (row.hasDesign && row.hasDioxus) {
+        try {
+          row.designDimensions = dimensions(designPng);
+          row.dioxusDimensions = dimensions(dioxusPng);
+          if (!sameViewport(row.designDimensions, capture.viewport) || !sameViewport(row.dioxusDimensions, capture.viewport)) {
+            row.status = "viewport-mismatch";
           } else {
-            row.status = "compare-error";
+            const designSource = path.join(normDir, `${name}.design-source.png`);
+            const dioxusSource = path.join(normDir, `${name}.dioxus-source.png`);
+            if (capture.group === "task440") {
+              crop(designPng, designSource, targetResult.contentSurface);
+              crop(dioxusPng, dioxusSource, dioxusContracts.get(name).contentSurface);
+            } else {
+              run("convert", [designPng, designSource]);
+              run("convert", [dioxusPng, dioxusSource]);
+            }
+            const resizedDesign = path.join(normDir, `${name}.design-resized.png`);
+            const resizedDioxus = path.join(normDir, `${name}.dioxus-resized.png`);
+            normalize(designSource, resizedDesign, width);
+            normalize(dioxusSource, resizedDioxus, width);
+            const designHeight = dimensions(resizedDesign).height;
+            const dioxusHeight = dimensions(resizedDioxus).height;
+            const comparedHeight = Math.min(designHeight, dioxusHeight);
+            const normalizedDesign = path.join(normDir, `${name}.design.png`);
+            const normalizedDioxus = path.join(normDir, `${name}.dioxus.png`);
+            alignHeights(resizedDesign, normalizedDesign, width, comparedHeight);
+            alignHeights(resizedDioxus, normalizedDioxus, width, comparedHeight);
+            const score = rmse(normalizedDesign, normalizedDioxus);
+            if (score === null) {
+              row.status = "compare-error";
+            } else {
+              row.drift = Number(score.toFixed(4));
+              row.similarity = Number((1 - score).toFixed(4));
+              row.status = "compared";
+              row.comparedSurface = { width, height: comparedHeight };
+              row.diffImage = `diffs/${name}.difference.png`;
+              run("convert", [normalizedDesign, normalizedDioxus, "+append", path.join(montageDir, `${name}.montage.png`)]);
+              run("convert", [normalizedDesign, normalizedDioxus, "-compose", "difference", "-composite", path.join(diffDir, `${name}.difference.png`)]);
+            }
           }
-        } else {
-          row.status = "normalize-error";
+        } catch (error) {
+          row.status = "compare-error";
+          row.error = error.message;
         }
+      } else if (!row.hasDesign && row.hasDioxus) {
+        row.status = "missing-design";
+      } else if (row.hasDesign && !row.hasDioxus) {
+        row.status = "missing-dioxus";
       }
-
       rows.push(row);
     }
   }
 
-  // ── Combined matrix grid (montage of all per-view montages) ────────────────
-  // Creates a single 6-column grid image showing all montages side-by-side so
-  // the MR comment has one compact visual to glance at.
+  const montageFiles = fs.readdirSync(montageDir).filter((file) => file.endsWith(".montage.png")).sort();
   const gridPath = path.join(outDir, "design-parity-matrix.png");
-  try {
-    const existing = fs
-      .readdirSync(montageDir)
-      .filter((f) => f.endsWith(".montage.png"))
-      .sort()
-      .map((f) => path.join(montageDir, f));
-    if (existing.length > 0) {
-      const cols = Math.min(6, existing.length);
-      sh(
-        `montage "${existing.join('" "')}" -tile ${cols}x -geometry +2+2 -background '#111827' "${gridPath}" 2>&1 || true`,
-      );
+  if (montageFiles.length) {
+    try {
+      run("convert", [
+        ...montageFiles.map((file) => path.join(montageDir, file)),
+        "-append", gridPath,
+      ]);
+    } catch (error) {
+      console.error(`  Matrix creation failed: ${error.message}`);
     }
-  } catch (_) {
-    // Grid creation is best-effort; don't let it fail the comparison.
   }
 
-  const compared = rows.filter((r) => r.status === "compared");
+  const compared = rows.filter((row) => row.status === "compared");
+  const task440Compared = compared.filter((row) => row.group === "task440");
   const avgDrift = compared.length
-    ? Number(
-        (compared.reduce((a, r) => a + r.drift, 0) / compared.length).toFixed(4),
-      )
+    ? Number((compared.reduce((total, row) => total + row.drift, 0) / compared.length).toFixed(4))
     : null;
-  const avgSimilarity = avgDrift !== null ? Number((1 - avgDrift).toFixed(4)) : null;
-  const worst = compared
-    .slice()
-    .sort((a, b) => b.drift - a.drift)
-    .slice(0, 5)
-    .map((r) => ({ name: r.name, drift: r.drift }));
-
+  const avgSimilarity = avgDrift === null ? null : Number((1 - avgDrift).toFixed(4));
+  const worst = compared.slice().sort((a, b) => b.drift - a.drift).slice(0, 5).map((row) => ({ name: row.name, drift: row.drift }));
   const report = {
-    version: 2,
-    blocking: false,
+    version: 4,
+    blocking: "semantic-contract-and-comparison-status",
+    advisory: true,
+    reviewRequirement: "Similarity is not a parity verdict. Inspect each content-surface montage and absolute-difference image.",
     gridImage: fs.existsSync(gridPath) ? "design-parity-matrix.png" : null,
     themes,
     counts: {
-      views: manifest.views.length,
+      captures: captures.length,
       compared: compared.length,
-      missing: rows.filter((r) => r.status === "missing").length,
-      errors: rows.filter((r) => r.status.endsWith("error")).length,
+      task440Targets: captures.filter((capture) => capture.group === "task440").length,
+      task440Compared: task440Compared.length,
+      missing: rows.filter((row) => row.status.startsWith("missing")).length,
+      errors: rows.filter((row) => row.status.includes("error") || row.status.includes("failed") || row.status === "viewport-mismatch").length,
     },
     avgDrift,
     avgSimilarity,
     worst,
     rows,
   };
+  fs.writeFileSync(path.join(outDir, "design-drift-report.json"), JSON.stringify(report, null, 2));
 
-  fs.mkdirSync(outDir, { recursive: true });
-  fs.writeFileSync(
-    path.join(outDir, "design-drift-report.json"),
-    JSON.stringify(report, null, 2),
+  const markdown = [
+    "## Design Parity",
+    "Semantic contracts and successful content-surface comparison are blocking. The RMSE score remains advisory and is not a visual-parity verdict. Inspect every montage and absolute-difference image.",
+    avgSimilarity === null
+      ? "**Overall design similarity:** no comparable captures were produced."
+      : `**Overall design similarity:** ${(avgSimilarity * 100).toFixed(1)}% (avg drift ${avgDrift}) across ${compared.length} captures.`,
+    `**TASK-440 actual comparisons:** ${task440Compared.length}/${expectedTask440}.`,
+  ];
+  const notCompared = rows.filter((row) => row.status !== "compared");
+  if (notCompared.length) markdown.push(`**Not compared:** ${notCompared.map((row) => `\`${row.name}\` (${row.status})`).join(", ")}`);
+  markdown.push(
+    "| target | group | theme | viewport | drift | similarity | status |\n" +
+      "| --- | --- | --- | --- | --- | --- | --- |\n" +
+      rows.map((row) => `| ${row.view} | ${row.group} | ${row.theme} | ${row.viewport.width}x${row.viewport.height} | ${row.drift ?? "-"} | ${row.similarity === null ? "-" : `${(row.similarity * 100).toFixed(1)}%`} | ${row.status} |`).join("\n"),
   );
-
-  // Markdown summary consumed by the MR-comment CI job.
-  const md = [];
-  md.push("## Design Parity (non-blocking)");
-  md.push(
-    "Directional gauge of how closely the real Dioxus UI matches the tracked " +
-      "design example under `docs/design/CrystalForge`, using the shared golden " +
-      "fixture. Lower drift = closer to the design. This never fails the check.",
-  );
-  if (avgSimilarity !== null) {
-    md.push(
-      `**Overall design similarity:** ${(avgSimilarity * 100).toFixed(1)}% ` +
-        `(avg drift ${avgDrift}) across ${compared.length} view/theme captures.`,
-    );
-  } else {
-    md.push("**Overall design similarity:** no comparable captures were produced.");
-  }
-  if (worst.length) {
-    md.push(
-      "**Highest drift:** " +
-        worst.map((w) => `\`${w.name}\` (${w.drift})`).join(", "),
-    );
-  }
-  const missing = rows.filter((r) => r.status !== "compared");
-  if (missing.length) {
-    md.push(
-      "**Not compared:** " +
-        missing.map((r) => `\`${r.name}\` (${r.status})`).join(", "),
-    );
-  }
-  md.push(
-    "Per-view table:\n\n" +
-      "| view | theme | drift | similarity | status |\n" +
-      "| --- | --- | --- | --- | --- |\n" +
-      rows
-        .map(
-          (r) =>
-            `| ${r.view} | ${r.theme} | ${r.drift ?? "—"} | ${
-              r.similarity !== null ? `${(r.similarity * 100).toFixed(1)}%` : "—"
-            } | ${r.status} |`,
-        )
-        .join("\n"),
-  );
-  if (fs.existsSync(gridPath)) {
-    md.push("**Visual matrix:** All comparison montages tiled in a single grid image.");
-  }
-  fs.writeFileSync(path.join(outDir, "design-drift-summary.md"), md.join("\n\n") + "\n");
+  fs.writeFileSync(path.join(outDir, "design-drift-summary.md"), `${markdown.join("\n\n")}\n`);
 
   console.log("=== Design Parity ===");
-  console.log(
-    `  Compared: ${compared.length}/${rows.length}  avgDrift=${avgDrift}  avgSimilarity=${
-      avgSimilarity !== null ? (avgSimilarity * 100).toFixed(1) + "%" : "n/a"
-    }`,
-  );
-  for (const r of rows) {
-    console.log(`  ${r.name}: ${r.status}${r.drift !== null ? ` drift=${r.drift}` : ""}`);
+  console.log(`  Compared: ${compared.length}/${rows.length}; TASK-440: ${task440Compared.length}/${expectedTask440}`);
+  for (const row of rows) console.log(`  ${row.name}: ${row.status}${row.drift === null ? "" : ` drift=${row.drift}`}`);
+  const failedTask440 = rows.filter((row) => row.group === "task440" && row.status !== "compared");
+  if (task440Compared.length !== expectedTask440 || failedTask440.length) {
+    throw new Error(`TASK-440 comparison contract failed: ${task440Compared.length}/${expectedTask440} compared; failures: ${failedTask440.map((row) => `${row.name} (${row.status})`).join(", ")}`);
   }
 }
 
 try {
   main();
-} catch (err) {
-  console.error(`Design parity comparison error (non-blocking): ${err.message}`);
-  // Non-blocking: never fail the web-ui check on design parity.
-  process.exit(0);
+} catch (error) {
+  console.error(`Design parity comparison error: ${error.message}`);
+  process.exit(1);
 }

@@ -5,8 +5,8 @@ use dioxus::prelude::*;
 use crate::views::environments_list::EnvironmentsListView;
 
 #[component]
-pub fn EnvironmentsView() -> Element {
+pub fn EnvironmentsView(query: String) -> Element {
     rsx! {
-        EnvironmentsListView {}
+        EnvironmentsListView { initial_query: query }
     }
 }

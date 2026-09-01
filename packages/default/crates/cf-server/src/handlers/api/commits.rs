@@ -18,7 +18,9 @@ use crate::api::models::{
     EvalQueueItem, EvalQueueParams, EvalQueueSummary, ReorderEvalQueueRequest,
 };
 use crate::handlers::agent_request::CFState;
-use crate::handlers::api::rbac::{require_operator_or_admin, require_viewer_or_above};
+use crate::handlers::api::rbac::{
+    require_admin, require_operator_or_admin, require_viewer_or_above,
+};
 
 const EVAL_LOG_CHANNEL_BUFFER: usize = 1000;
 const MAX_EVAL_LOG_CHANNELS: usize = 1024;
@@ -700,7 +702,14 @@ pub async fn cleanup_eval_channel(state: &CFState, commit_id: i32) {
 pub async fn re_evaluate_commit(
     Path(commit_id): Path<i32>,
     State(state): State<CFState>,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
+    // SECURITY: The evaluator processes every configuration on the commit.
+    // Environment-scoped operators must not trigger work for hidden systems.
+    if require_admin(&state.pool, &headers).await.is_none() {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+
     match crate::queries::commits::reset_commit_evaluation(&state.pool, commit_id).await {
         Ok(_) => {
             state.queue_notifier.notify_eval_queue();
@@ -711,14 +720,20 @@ pub async fn re_evaluate_commit(
                     "message": format!("Commit {} queued for re-evaluation", commit_id)
                 })),
             )
+                .into_response()
         }
-        Err(e) => (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            axum::Json(serde_json::json!({
-                "status": "error",
-                "message": format!("Failed to reset evaluation: {}", e)
-            })),
-        ),
+        Err(error) => {
+            let error = crate::security::snapshot_redaction::redact_text(&error.to_string());
+            tracing::error!(commit_id, error = %error, "failed to reset evaluation");
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(serde_json::json!({
+                    "status": "error",
+                    "message": "Failed to reset evaluation"
+                })),
+            )
+                .into_response()
+        }
     }
 }
 

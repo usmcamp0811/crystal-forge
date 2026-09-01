@@ -263,6 +263,17 @@ pub async fn log(
             debug!("❌ failed to insert reboot system state: {e:?}");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
+        if let Err(e) = crate::queries::evaluation_snapshots::retain_generation_snapshot_tx(
+            &mut tx,
+            &payload.hostname,
+            payload.generation,
+            payload.store_path.as_deref(),
+        )
+        .await
+        {
+            debug!("failed to retain reboot generation snapshot: {e:?}");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
     } else {
         // No reboot: use the precomputed heartbeat vs state decision.
         match &heartbeat_or_state {
@@ -292,6 +303,17 @@ pub async fn log(
                 .await
                 {
                     debug!("❌ failed to insert system state: {e:?}");
+                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                }
+                if let Err(e) = crate::queries::evaluation_snapshots::retain_generation_snapshot_tx(
+                    &mut tx,
+                    &payload.hostname,
+                    payload.generation,
+                    payload.store_path.as_deref(),
+                )
+                .await
+                {
+                    debug!("failed to retain generation snapshot: {e:?}");
                     return StatusCode::INTERNAL_SERVER_ERROR.into_response();
                 }
             }

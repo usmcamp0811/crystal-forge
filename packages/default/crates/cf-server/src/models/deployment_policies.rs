@@ -2367,11 +2367,479 @@ let
     (config.systemd.services.crystal-forge-agent.enable or false)
     || ((config.services.crystal-forge.enable or false)
         && (config.services.crystal-forge.client.enable or false));
+  min = left: right: if left < right then left else right;
+  take = count: values: builtins.genList
+    (index: builtins.elemAt values index) (min count (builtins.length values));
+  safeValue = depth: raw:
+    let
+      # Classify weak-head-normal-form first. Collection elements are forced
+      # only after the bounded prefix is selected, so an omitted element cannot
+      # poison retained values.
+      typeAttempt = builtins.tryEval (builtins.typeOf raw);
+      valueType = typeAttempt.value or "failed";
+      scalarAttempt = builtins.tryEval (builtins.deepSeq raw raw);
+      scalar = scalarAttempt.value or null;
+      namesAttempt = if valueType == "set"
+        then builtins.tryEval (builtins.attrNames raw)
+        else {{ success = false; value = []; }};
+      limitedNames = take 100 (namesAttempt.value or []);
+      lengthAttempt = if valueType == "list"
+        then builtins.tryEval (builtins.length raw)
+        else {{ success = false; value = 0; }};
+    in
+      if !typeAttempt.success then {{
+        kind = "failed";
+        value = {{ code = "not_evaluated"; message = "Option value did not evaluate"; }};
+      }} else if builtins.elem valueType [ "null" "bool" "int" "float" "string" ]
+        && !scalarAttempt.success then {{
+        kind = "failed";
+        value = {{ code = "not_evaluated"; message = "Option scalar did not evaluate"; }};
+      }} else if builtins.elem valueType [ "null" "bool" "int" "float" "string" ] then {{
+        kind = "scalar"; value = scalar;
+      }} else if valueType == "path" then {{
+        kind = "scalar"; value = builtins.toString raw;
+      }} else if valueType == "lambda" then {{
+        kind = "opaque"; value = {{ type_name = "lambda"; }};
+      }} else if depth >= 4 then {{
+        kind = "opaque"; value = {{ type_name = valueType; }};
+      }} else if valueType == "list" && lengthAttempt.success then {{
+        # A prefix is not a truthful representation of the option value. Mark
+        # an over-limit collection opaque instead of serializing silent loss.
+        kind = if lengthAttempt.value > 100 then "opaque" else "list";
+        value = if lengthAttempt.value > 100
+          then {{ type_name = "list_over_limit"; }}
+          else builtins.genList
+            (index: safeValue (depth + 1) (builtins.elemAt raw index))
+            lengthAttempt.value;
+      }} else if valueType == "list" then {{
+        kind = "failed";
+        value = {{ code = "not_evaluated"; message = "Option list length did not evaluate"; }};
+      }} else if valueType == "set" && (raw.type or null) == "derivation" then {{
+        kind = "package";
+        value = {{
+          name = (builtins.tryEval (raw.name or null)).value or null;
+          pname = (builtins.tryEval (raw.pname or null)).value or null;
+          version = (builtins.tryEval (raw.version or null)).value or null;
+          output_path = (builtins.tryEval
+            (if raw ? outPath then builtins.toString raw.outPath else null)).value or null;
+        }};
+      }} else if valueType == "set" && namesAttempt.success then {{
+        kind = if builtins.length (namesAttempt.value or []) > 100
+          then "opaque" else "attribute_set";
+        value = if builtins.length (namesAttempt.value or []) > 100
+          then {{ type_name = "attribute_set_over_limit"; }}
+          else builtins.listToAttrs (map (key: {{
+            name = key; value = safeValue (depth + 1) raw.${{key}};
+          }}) limitedNames);
+      }} else if valueType == "set" then {{
+        kind = "failed";
+        value = {{ code = "not_evaluated"; message = "Option attribute names did not evaluate"; }};
+      }} else {{
+        kind = "opaque"; value = {{ type_name = valueType; }};
+      }};
+  # This guard prevents cyclic or recursively generated attrsets from
+  # exhausting the evaluator. It marks omitted subtrees instead of limiting
+  # the number of ordinary options in the snapshot.
+  optionTraversalDepthLimit = 16;
+  walkOptions = depth: prefix: attrs:
+    # A recursive option tree must remain bounded, but reaching the guard is
+    # data rather than absence. Emit one explicit failed subtree marker so the
+    # persisted snapshot cannot silently claim completeness.
+    if depth >= optionTraversalDepthLimit then
+      if builtins.attrNames attrs == [] then [] else [ {{
+        path = prefix;
+        over_depth = true;
+      }} ]
+    else builtins.concatLists (map (name:
+    let
+      current = attrs.${{name}};
+      path = prefix ++ [ name ];
+    in
+      if builtins.isAttrs current && (current._type or null) == "option" then
+        [ {{ inherit path; option = current; }} ]
+      else if builtins.isAttrs current then walkOptions (depth + 1) path current
+      else []
+  ) (builtins.attrNames attrs));
+  optionSnapshot = lib: inputOrigins: rawModules: item:
+    if item.over_depth or false then {{
+      path = builtins.concatStringsSep "." item.path;
+      declared_type = "unknown";
+      value = {{
+        kind = "failed";
+        value = {{
+          code = "over_depth";
+          message = "Option subtree exceeds the traversal depth limit";
+        }};
+      }};
+      definitions = [];
+      overridden = false;
+    }} else let
+      path = builtins.concatStringsSep "." item.path;
+      option = item.option;
+      declaredType = option.type.description or (option.type.name or "unknown");
+      winningDefinitions = map (definition:
+        let
+          sourcePath = builtins.toString (definition.file or "untracked");
+          sourceInputs = builtins.filter
+            (inputName:
+              let origin = inputOrigins.${{inputName}};
+              in origin.path != null && lib.hasPrefix origin.path sourcePath)
+            (builtins.attrNames inputOrigins);
+          sourceInput = if sourceInputs == [] then null else builtins.head sourceInputs;
+        in {{
+          source_path = sourcePath;
+          source_input = sourceInput;
+          source_revision = if sourceInput == null then null else inputOrigins.${{sourceInput}}.revision;
+          value = safeValue 0 (definition.value or null);
+          # definitionsWithLocations contains the definitions that participate
+          # in the final module-system merge. Discarded mkOverride values are
+          # not exposed and therefore are not fabricated as provenance.
+          winning = true;
+          priority = option.highestPrio or null;
+          status = "winning";
+          winner_note = "This definition participates in the final module-system merge.";
+        }}) (option.definitionsWithLocations or []);
+      rawDefinitions = builtins.filter (definition: definition != null) (map (module:
+        let
+          absent = {{ _crystalForgeMissing = true; }};
+          present = lib.hasAttrByPath item.path (module.config or {{}});
+          raw = lib.attrByPath item.path absent (module.config or {{}});
+           attempted = builtins.tryEval raw;
+          forced = attempted.value or absent;
+          priority = if builtins.isAttrs forced && (forced._type or null) == "override"
+            then forced.priority else 100;
+          sourcePath = builtins.toString (module._file or "untracked");
+          sourceInputs = builtins.filter
+            (inputName:
+              let origin = inputOrigins.${{inputName}};
+              in origin.path != null && lib.hasPrefix origin.path sourcePath)
+            (builtins.attrNames inputOrigins);
+          sourceInput = if sourceInputs == [] then null else builtins.head sourceInputs;
+        in if !present || priority <= (option.highestPrio or 100) then null else {{
+          source_path = sourcePath;
+          source_input = sourceInput;
+          source_revision = if sourceInput == null then null else inputOrigins.${{sourceInput}}.revision;
+          value = safeValue 0 raw;
+          winning = false;
+          inherit priority;
+          status = "overridden";
+          winner_note = "A lower numeric module-system priority won.";
+        }}) rawModules);
+      definitions = winningDefinitions ++ rawDefinitions;
+    in {{
+      inherit path definitions;
+      declared_type = declaredType;
+      value =
+        if lib.hasInfix "submodule" declaredType then
+          let rendered = safeValue 0 option.value;
+          in if rendered.kind == "attribute_set" then rendered // {{ kind = "submodule"; }} else rendered
+        else safeValue 0 option.value;
+      overridden = rawDefinitions != [];
+    }};
+  safeOptionSnapshot = lib: inputOrigins: rawModules: item:
+    let
+      path = builtins.concatStringsSep "." item.path;
+      snapshot = optionSnapshot lib inputOrigins rawModules item;
+      attempted = builtins.tryEval (builtins.deepSeq snapshot snapshot);
+    in attempted.value or {{
+      inherit path;
+      declared_type = "unknown";
+      value = {{
+        kind = "failed";
+        value = {{ code = "not_evaluated"; message = "Option snapshot did not evaluate"; }};
+      }};
+      definitions = [];
+      overridden = false;
+    }};
+  configurationNames = builtins.attrNames (flake.nixosConfigurations or {{}});
+  exportedModuleNames = builtins.attrNames (flake.nixosModules or {{}});
+  carrierLibInputNames = builtins.filter
+    (inputName: flake.inputs.${{inputName}} ? lib)
+    (builtins.attrNames (flake.inputs or {{}}));
+  carrierLibInput =
+    if flake.inputs ? nixpkgs && flake.inputs.nixpkgs ? lib then flake.inputs.nixpkgs
+    else if carrierLibInputNames != [] then
+      flake.inputs.${{builtins.head carrierLibInputNames}}
+    else null;
+  carrierConfigurationLibAttempt =
+    if configurationNames == [] then {{ success = false; value = null; }}
+    else builtins.tryEval
+      (builtins.getAttr (builtins.head configurationNames) flake.nixosConfigurations).pkgs.lib;
+  carrierLib =
+    if carrierConfigurationLibAttempt.success then carrierConfigurationLibAttempt.value
+    else if carrierLibInput != null then carrierLibInput.lib
+    else null;
+  carrierLibSource =
+    if carrierConfigurationLibAttempt.success then "configuration"
+    else if carrierLibInput != null then "input"
+    else null;
+  carrierUnique = values: builtins.foldl'
+    (result: value: if builtins.elem value result then result else result ++ [ value ])
+    [] values;
+  carrierPkgs =
+    if carrierConfigurationLibAttempt.success then
+      (builtins.getAttr (builtins.head configurationNames) flake.nixosConfigurations).pkgs
+    else if carrierLibInput != null && carrierLibInput ? legacyPackages
+      && builtins.hasAttr builtins.currentSystem carrierLibInput.legacyPackages
+    then builtins.getAttr builtins.currentSystem carrierLibInput.legacyPackages
+    else null;
+  carrierLockPath = flake.outPath + "/flake.lock";
+  carrierLockAttempt = if builtins.pathExists carrierLockPath
+    then builtins.tryEval (let
+      parsed = builtins.fromJSON (builtins.readFile carrierLockPath);
+      in builtins.deepSeq parsed parsed)
+    else {{ success = false; value = null; }};
+  carrierLock = if carrierLockAttempt.success then carrierLockAttempt.value
+    else {{ nodes = {{}}; root = "root"; }};
+  carrierLockNodes = carrierLock.nodes or {{}};
+  carrierRootNodeId = carrierLock.root or "root";
+  carrierRootInputs = (carrierLockNodes.${{carrierRootNodeId}} or {{}}).inputs or {{}};
+  carrierResolvePath = path: builtins.foldl' (nodeId: inputName:
+    let reference = (carrierLockNodes.${{nodeId}}.inputs or {{}}).${{inputName}};
+    in if builtins.isList reference then carrierResolvePath reference else reference
+  ) carrierRootNodeId path;
+  carrierResolveReference = reference:
+    if builtins.isList reference then carrierResolvePath reference else reference;
+  carrierNodeChildren = nodeId: carrierUnique (builtins.filter
+    (child: child != null && builtins.hasAttr child carrierLockNodes)
+    (map carrierResolveReference
+      (builtins.attrValues ((carrierLockNodes.${{nodeId}} or {{}}).inputs or {{}}))));
+  # INVARIANT: Raw lock JSON can contain a cyclic node graph before carrier
+  # validation. genericClosure tracks visited keys, so traversal terminates.
+  # Removing the start node gives exact distinct-descendant semantics for both
+  # cyclic graphs and shared subgraphs.
+  carrierDescendantsByNode = builtins.mapAttrs (nodeId: _node:
+    builtins.filter (item: item.key != nodeId) (builtins.genericClosure {{
+      startSet = [ {{ key = nodeId; }} ];
+      operator = item: map (child: {{ key = child; }})
+        (carrierNodeChildren item.key);
+    }}))
+    carrierLockNodes;
+  carrierInput = nodeId: node:
+    let
+      locked = node.locked or {{}};
+      original = node.original or {{}};
+      directNames = builtins.filter (inputName:
+        carrierResolveReference carrierRootInputs.${{inputName}} == nodeId)
+        (builtins.attrNames carrierRootInputs);
+      followsPaths = map (inputName: carrierRootInputs.${{inputName}})
+        (builtins.filter (inputName: builtins.isList carrierRootInputs.${{inputName}})
+          directNames);
+      transitiveDescendantCount = if directNames == [] then null
+        else builtins.length carrierDescendantsByNode.${{nodeId}};
+      directDescendantCount = if directNames == [] then null
+        else builtins.length (carrierNodeChildren nodeId);
+    in {{
+      node = nodeId;
+      names = directNames;
+      direct = directNames != [];
+      transitive = directNames == [];
+      follows = followsPaths;
+      inherit original locked;
+      source_type = locked.type or (original.type or "unknown");
+      source = locked.url or (original.url or null);
+      locked_revision = locked.rev or null;
+      last_modified = locked.lastModified or null;
+      channel = (original.type or null) == "indirect";
+      tracked = builtins.elem (locked.type or null)
+        [ "git" "github" "gitlab" "sourcehut" ];
+      # Both counts come from the complete lock graph, not the bounded API page.
+      # direct_descendant_count remains as a compatibility field for consumers
+      # that have not migrated to the transitive count; it now reports only the
+      # immediate children its name promises.
+      transitive_descendant_count = transitiveDescendantCount;
+      direct_descendant_count = directDescendantCount;
+    }};
+  carrierInputs = map (nodeId: carrierInput nodeId carrierLockNodes.${{nodeId}})
+    (builtins.filter (nodeId: nodeId != carrierRootNodeId)
+      (builtins.attrNames carrierLockNodes));
+  carrierInputOrigins = (builtins.mapAttrs (_inputName: input: {{
+    path = if input ? outPath then builtins.toString input.outPath
+      else if input ? sourceInfo && input.sourceInfo ? outPath
+      then builtins.toString input.sourceInfo.outPath else null;
+    revision = input.rev or (input.sourceInfo.rev or null);
+  }}) (flake.inputs or {{}})) // {{ self = {{
+    path = if flake ? outPath then builtins.toString flake.outPath else null;
+    revision = flake.rev or (flake.sourceInfo.rev or null);
+  }}; }};
+  carrierHasPathPrefix = root: path:
+    root != null && (path == root || builtins.substring 0
+      (builtins.stringLength root + 1) path == root + "/");
+  # Module-level source identifies only the nixosModules export binding. It is
+  # not value provenance and must not imply that navigation reaches the module
+  # implementation. Option declarations retain their own source paths.
+  carrierSourceOrigin = moduleName:
+    let
+      positionAttempt = builtins.tryEval
+        (builtins.unsafeGetAttrPos moduleName (flake.nixosModules or {{}}));
+      position = positionAttempt.value or null;
+      file = if position == null || !(position ? file) then null
+        else builtins.toString position.file;
+      matchingInputs = if file == null then [] else builtins.filter
+        (inputName: carrierHasPathPrefix carrierInputOrigins.${{inputName}}.path file)
+        (builtins.attrNames carrierInputOrigins);
+      longestRootLength = builtins.foldl' (maximum: value:
+        if value > maximum then value else maximum) 0 (map
+        (inputName: builtins.stringLength carrierInputOrigins.${{inputName}}.path)
+        matchingInputs);
+      sourceInputs = builtins.filter (inputName:
+        builtins.stringLength carrierInputOrigins.${{inputName}}.path == longestRootLength)
+        matchingInputs;
+      # SECURITY: Equal longest roots are ambiguous. Do not select one by
+      # attribute ordering because that would manufacture navigable provenance.
+      sourceInput = if builtins.length sourceInputs == 1 then builtins.head sourceInputs else null;
+      root = if sourceInput == null then null else carrierInputOrigins.${{sourceInput}}.path;
+      sourcePath = if root == null || file == null then null
+        else if file == root then "."
+        else builtins.substring (builtins.stringLength root + 1)
+          (builtins.stringLength file) file;
+    in {{
+      source_input = sourceInput;
+      source_revision = if sourceInput == null then null
+        else carrierInputOrigins.${{sourceInput}}.revision;
+      source_path = sourcePath;
+    }};
+  carrierConfigurationSources = builtins.mapAttrs (_configName: configuration:
+    let attempted = builtins.tryEval (builtins.deepSeq
+      (carrierUnique (builtins.concatLists (map (item:
+        map (definition: builtins.toString (definition.file or "untracked"))
+          (item.option.definitionsWithLocations or []))
+        (builtins.filter (item: !(item.over_depth or false))
+          (walkOptions 0 [] configuration.options)))))
+      (carrierUnique (builtins.concatLists (map (item:
+        map (definition: builtins.toString (definition.file or "untracked"))
+          (item.option.definitionsWithLocations or []))
+        (builtins.filter (item: !(item.over_depth or false))
+          (walkOptions 0 [] configuration.options))))));
+    in attempted.value or []) (flake.nixosConfigurations or {{}});
+  carrierModuleSnapshot = moduleName: module:
+    let
+      moduleOrigin = carrierSourceOrigin moduleName;
+      attemptedDeclarations = if carrierLib == null then {{ success = false; value = []; }}
+      else builtins.tryEval (let
+        evaluated = carrierLib.evalModules {{
+          # INVARIANT: Common NixOS modules set config paths whose declarations
+          # live in the full NixOS module graph. Ignore only those unmatched
+          # definitions while extracting the exported module's own options.
+          modules = [ module {{ _module.check = false; }} ];
+          specialArgs = {{ inputs = flake.inputs or {{}}; pkgs = carrierPkgs; }};
+        }};
+        declarations = map (item:
+          if item.over_depth or false then {{
+            path = builtins.concatStringsSep "." item.path;
+            declared_type = "unknown";
+            has_default = false;
+            default = null;
+            source_paths = [];
+            error = "Option subtree exceeds the traversal depth limit";
+          }} else let
+            declaredType = item.option.type.description or (item.option.type.name or "unknown");
+          in {{
+            path = builtins.concatStringsSep "." item.path;
+            declared_type = declaredType;
+            has_default = item.option ? default;
+            default = if item.option ? default then safeValue 0 item.option.default else null;
+            source_paths = map (definition: builtins.toString (definition.file or "untracked"))
+              (item.option.definitionsWithLocations or []);
+          }}) (builtins.filter
+          (item: item.path != [] && builtins.head item.path != "_module")
+          (walkOptions 0 [] evaluated.options));
+      in declarations);
+      declarations = attemptedDeclarations.value or [];
+      descriptionAttempt = builtins.tryEval (builtins.deepSeq
+        (if builtins.isAttrs module then module.description or (module.meta.description or null)
+         else null)
+        (if builtins.isAttrs module then module.description or (module.meta.description or null)
+         else null));
+      moduleSources = carrierUnique (builtins.concatLists
+        (map (declaration: declaration.source_paths) declarations));
+      consumers = builtins.attrNames (builtins.listToAttrs (builtins.filter
+        (entry: entry.value)
+        (map (configName: {{ name = configName; value =
+          let sources = carrierConfigurationSources.${{configName}};
+          in builtins.any (source: builtins.elem source sources) moduleSources; }})
+          (builtins.attrNames carrierConfigurationSources))));
+    in {{
+      name = moduleName;
+      description = descriptionAttempt.value or null;
+      inherit (moduleOrigin) source_input source_revision source_path;
+      inherit declarations consumers;
+      declaration_count = builtins.length declarations;
+      consumer_count = builtins.length consumers;
+      error = if attemptedDeclarations.success then null
+        else if carrierLib == null
+        then "Module evaluation unavailable: no configuration or input provides nixpkgs lib"
+        else "Exported module could not be evaluated";
+    }};
+  safeCarrierModuleSnapshot = moduleName: module:
+    let
+      snapshot = carrierModuleSnapshot moduleName module;
+      attempted = builtins.tryEval (builtins.deepSeq snapshot snapshot);
+    in attempted.value or {{
+      name = moduleName;
+      description = null;
+      source_input = null;
+      source_revision = null;
+      source_path = null;
+      declarations = [];
+      consumers = [];
+      declaration_count = 0;
+      consumer_count = 0;
+      error = "Exported module could not be evaluated";
+    }};
+  carrierNixpkgsRevisions = carrierUnique (builtins.filter (revision: revision != null)
+    (map (input: input.locked_revision)
+      (builtins.filter (input:
+        builtins.any (inputName: builtins.match ".*[nN][iI][xX][pP][kK][gG][sS].*" inputName != null)
+          (input.names ++ [ input.node ])) carrierInputs)));
+  flakeOutputCarrierSnapshot = {{
+    declared_systems = configurationNames;
+    exported_modules = map
+      (moduleName: safeCarrierModuleSnapshot moduleName flake.nixosModules.${{moduleName}})
+      exportedModuleNames;
+    inputs = carrierInputs;
+    direct_input_count = builtins.length
+      (builtins.filter (input: input.direct) carrierInputs);
+    resolved_input_count = builtins.length carrierInputs;
+    lock_error = if carrierLockAttempt.success then null else "flake.lock could not be read";
+    module_evaluation = {{
+      available = carrierLib != null;
+      source = carrierLibSource;
+      error = if carrierLib == null
+        then "Module evaluation unavailable: no configuration or input provides nixpkgs lib"
+        else null;
+    }};
+    nixpkgsRevisions = carrierNixpkgsRevisions;
+    multiple_nixpkgs_revisions = builtins.length carrierNixpkgsRevisions > 1;
+  }};
+  flakeOutputCarrier = builtins.derivation {{
+    name = "crystal-forge-flake-output-snapshot";
+    system = builtins.currentSystem;
+    builder = "/bin/false";
+  }};
 in
-  builtins.mapAttrs (name: cfg:
+  {{ __crystalForgeFlakeOutput = flakeOutputCarrier // {{
+    meta = (flakeOutputCarrier.meta or {{}}) // {{
+      flakeOutputSnapshot = flakeOutputCarrierSnapshot;
+    }};
+  }}; }} // builtins.mapAttrs (name: cfg:
     let
       drv     = cfg.config.system.build.toplevel;
       checker = policyCheckers.${{name}} or (_: {{}});
+      lib = cfg.pkgs.lib;
+      inputOrigins = (builtins.mapAttrs (_inputName: input: {{
+        path = if input ? outPath then builtins.toString input.outPath
+          else if input ? sourceInfo && input.sourceInfo ? outPath
+          then builtins.toString input.sourceInfo.outPath else null;
+        revision = input.rev or (input.sourceInfo.rev or null);
+      }}) (flake.inputs or {{}})) // {{ self = {{
+        path = if flake ? outPath then builtins.toString flake.outPath else null;
+        revision = flake.rev or (flake.sourceInfo.rev or null);
+      }}; }};
+      flattenGraph = nodes: builtins.concatLists (map
+        (node: [ node.module ] ++ flattenGraph (node.imports or [])) nodes);
+      rawModules = flattenGraph (cfg._module.graph or []);
+       optionItems = walkOptions 0 [] cfg.options;
     in
       drv // {{
         meta = (drv.meta or {{}}) // {{
@@ -2380,9 +2848,11 @@ in
             requestedSourceRevision = {requested_revision};
             resolvedSourceRevision = flake.sourceInfo.rev or null;
           }};
+          evaluationSnapshot = map
+            (safeOptionSnapshot lib inputOrigins rawModules) optionItems;
         }};
       }}
-  ) flake.nixosConfigurations
+  ) (flake.nixosConfigurations or {{}})
 "#,
         flake_ref = nix_string(flake_ref),
         checkers = checkers_block,
@@ -3574,6 +4044,422 @@ in {{ {fields} }}"#
         assert!(expr.contains("policyCheckers"));
         assert!(expr.contains("cfAgentEnabled"));
         assert!(expr.contains("cfAgentEnabledExpr"));
+        assert!(expr.contains("evaluationSnapshot"));
+        assert!(expr.contains("cfg.options"));
+        assert!(expr.contains("flakeOutputSnapshot"));
+        assert!(expr.contains("walkOptions 0 [] cfg.options"));
+        assert!(expr.contains("definitionsWithLocations"));
+        assert!(expr.contains("attemptedDeclarations"));
+        assert!(expr.contains("descriptionAttempt"));
+        assert!(expr.contains("status = \"overridden\""));
+        assert!(expr.contains("inherit priority"));
+        assert!(expr.contains("consumer_count"));
+        assert!(expr.contains("carrierResolveReference"));
+        assert!(expr.contains("carrierConfigurationLibAttempt"));
+        assert!(expr.contains("carrierLibInput != null"));
+        assert!(expr.contains("module_evaluation"));
+        assert!(expr.contains("multiple_nixpkgs_revisions"));
+    }
+
+    #[test]
+    fn snapshot_extraction_is_complete_and_forces_only_retained_values() {
+        let expr = build_nix_eval_expression("github:user/repo", &PoliciesByConfiguration::new());
+
+        for truncated_collection in [
+            "take 10000 (walkOptions",
+            "take 5000 (walkOptions",
+            "take 100 (builtins.attrNames flake.nixosConfigurations)",
+            "take 100 (builtins.attrNames (flake.nixosModules",
+            "boundedNames attrs",
+        ] {
+            assert!(
+                !expr.contains(truncated_collection),
+                "persisted extraction must not truncate {truncated_collection}"
+            );
+        }
+        assert!(!expr.contains("attempted = builtins.tryEval (builtins.deepSeq raw raw)"));
+        assert!(expr.contains("scalarAttempt = builtins.tryEval (builtins.deepSeq raw raw)"));
+        assert!(expr.contains("list_over_limit"));
+        assert!(expr.contains("attribute_set_over_limit"));
+        assert!(!expr.contains("(min 100 lengthAttempt.value)"));
+        assert!(expr.contains("safeValue (depth + 1) (builtins.elemAt raw index)"));
+        assert!(expr.contains("safeOptionSnapshot"));
+        assert!(expr.contains("safeCarrierModuleSnapshot"));
+        assert!(expr.contains("over_depth = true"));
+        assert!(expr.contains("code = \"over_depth\""));
+        assert!(expr.contains("Option subtree exceeds the traversal depth limit"));
+    }
+
+    #[test]
+    fn flake_output_snapshot_has_a_configuration_independent_carrier() {
+        let expr = build_nix_eval_expression("github:user/repo", &PoliciesByConfiguration::new());
+
+        assert!(expr.contains("__crystalForgeFlakeOutput"));
+        assert!(expr.contains("flakeOutputCarrierSnapshot"));
+        assert!(expr.contains("flake.nixosConfigurations or {}"));
+        assert!(expr.contains("} // builtins.mapAttrs (name: cfg:"));
+        assert!(expr.contains(") (flake.nixosConfigurations or {})"));
+        assert_eq!(
+            expr.matches("flakeOutputSnapshot").count(),
+            1,
+            "only the independent carrier may emit flake output metadata"
+        );
+        assert!(expr.contains("carrierModuleSnapshot"));
+        assert!(expr.contains("_module.check = false"));
+        assert!(expr.contains("carrierConfigurationSources"));
+        assert!(expr.contains("carrierNixpkgsRevisions"));
+        assert!(expr.contains("carrierResolveReference"));
+        assert!(expr.contains("builtins.genericClosure"));
+        assert!(expr.contains("item.key != nodeId"));
+        assert!(
+            !expr.contains("name == builtins.head"),
+            "flake metadata must not depend on the first configuration"
+        );
+    }
+
+    #[test]
+    fn lock_descendant_closure_terminates_on_cycles_when_nix_is_available() {
+        if std::env::var_os("NIX_BUILD_TOP").is_some() {
+            return;
+        }
+        let expression = r#"
+          let
+            children = { a = [ "b" ]; b = [ "a" "c" ]; c = []; };
+            descendants = nodeId: builtins.map (item: item.key)
+              (builtins.filter (item: item.key != nodeId) (builtins.genericClosure {
+                startSet = [ { key = nodeId; } ];
+                operator = item: map (child: { key = child; }) children.${item.key};
+              }));
+          in descendants "a"
+        "#;
+        let output = match std::process::Command::new("nix-instantiate")
+            .args(["--eval", "--strict", "--json", "--expr", expression])
+            .output()
+        {
+            Ok(output) => output,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(error) => panic!("failed to run nix-instantiate: {error}"),
+        };
+        assert!(
+            output.status.success(),
+            "cycle-safe closure evaluation failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&output.stdout)
+                .expect("closure output should be JSON"),
+            serde_json::json!(["b", "c"])
+        );
+    }
+
+    #[test]
+    fn exported_module_binding_rejects_equal_longest_source_roots() {
+        let expression =
+            build_nix_eval_expression("path:/tmp/fixture", &PoliciesByConfiguration::new());
+        assert!(expression.contains(
+            "sourceInput = if builtins.length sourceInputs == 1 then builtins.head sourceInputs else null"
+        ));
+        assert!(expression.contains(
+            "builtins.stringLength carrierInputOrigins.${inputName}.path == longestRootLength"
+        ));
+    }
+
+    #[test]
+    fn generated_evaluation_expression_parses_when_nix_is_available() {
+        // Nix package builds cannot run nested Nix commands because the build
+        // sandbox has no writable Nix state or daemon. The structural tests
+        // above still validate the generated expression in that environment.
+        if std::env::var_os("NIX_BUILD_TOP").is_some() {
+            return;
+        }
+        let expr = build_nix_eval_expression(
+            "git+https://example.test/flake.git?rev=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            &PoliciesByConfiguration::new(),
+        );
+        let output = match std::process::Command::new("nix-instantiate")
+            .args(["--parse", "--expr", &expr])
+            .output()
+        {
+            Ok(output) => output,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(error) => panic!("failed to run nix-instantiate: {error}"),
+        };
+        assert!(
+            output.status.success(),
+            "generated Nix expression did not parse: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn independent_carrier_survives_a_flake_without_nixpkgs_lib() {
+        // A Nix build sandbox cannot recursively access the daemon. `nix
+        // develop` also sets NIX_BUILD_TOP, so IN_NIX_SHELL distinguishes the
+        // developer regression environment where this must execute for real.
+        if std::env::var_os("NIX_BUILD_TOP").is_some() && std::env::var_os("IN_NIX_SHELL").is_none()
+        {
+            return;
+        }
+        if std::process::Command::new("nix")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let directory = std::env::temp_dir().join(format!(
+            "crystal-forge-carrier-no-lib-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&directory).expect("temporary flake directory should be created");
+        std::fs::create_dir(directory.join("raw"))
+            .expect("temporary input directory should be created");
+        std::fs::create_dir(directory.join("nested"))
+            .expect("temporary nested input directory should be created");
+        std::fs::create_dir(directory.join("sibling"))
+            .expect("temporary sibling input directory should be created");
+        std::fs::create_dir(directory.join("leaf"))
+            .expect("temporary leaf input directory should be created");
+        std::fs::write(
+            directory.join("leaf/flake.nix"),
+            r#"{ outputs = { self }: { marker = "leaf-input"; }; }"#,
+        )
+        .expect("temporary leaf input flake should be written");
+        std::fs::write(
+            directory.join("nested/flake.nix"),
+            r#"{
+  inputs.leaf.url = "path:../leaf";
+  outputs = { self, leaf }: { marker = "nested-input"; };
+}"#,
+        )
+        .expect("temporary nested input flake should be written");
+        std::fs::write(
+            directory.join("sibling/flake.nix"),
+            r#"{
+  inputs.leaf.url = "path:../leaf";
+  outputs = { self, leaf }: { marker = "sibling-input"; };
+}"#,
+        )
+        .expect("temporary sibling input flake should be written");
+        std::fs::write(
+            directory.join("raw/flake.nix"),
+            r#"{
+  inputs.nested.url = "path:../nested";
+  inputs.sibling.url = "path:../sibling";
+  inputs.sibling.inputs.leaf.follows = "nested/leaf";
+  outputs = { self, nested, sibling }: {
+    marker = "raw-input";
+    nixosModules.fromInput = { ... }: { options = {}; };
+  };
+}"#,
+        )
+        .expect("temporary input flake should be written");
+        std::fs::write(
+            directory.join("flake.nix"),
+            r#"{
+  inputs.raw.url = "path:./raw";
+  outputs = { self, raw }: {
+    nixosModules = raw.nixosModules;
+  };
+}"#,
+        )
+        .expect("temporary flake should be written");
+        let lock = std::process::Command::new("nix")
+            .args([
+                "--extra-experimental-features",
+                "nix-command flakes",
+                "flake",
+                "lock",
+            ])
+            .current_dir(&directory)
+            .output()
+            .expect("nix flake lock should start");
+        assert!(
+            lock.status.success(),
+            "temporary flake lock failed: {}",
+            String::from_utf8_lossy(&lock.stderr)
+        );
+        let expression = build_nix_eval_expression(
+            &format!("path:{}", directory.display()),
+            &PoliciesByConfiguration::new(),
+        );
+        let selector = format!("({expression}).__crystalForgeFlakeOutput.meta.flakeOutputSnapshot");
+        let output = std::process::Command::new("nix")
+            .args([
+                "--extra-experimental-features",
+                "nix-command flakes",
+                "eval",
+                "--impure",
+                "--json",
+                "--expr",
+                &selector,
+            ])
+            .output()
+            .expect("nix eval should start");
+        let _ = std::fs::remove_dir_all(&directory);
+        assert!(
+            output.status.success(),
+            "configuration-independent carrier failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let payload: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("carrier output should be JSON");
+        assert_eq!(payload["declared_systems"], serde_json::json!([]));
+        let modules = payload["exported_modules"]
+            .as_array()
+            .expect("exported modules should be an array");
+        let from_input = modules
+            .iter()
+            .find(|module| module["name"] == "fromInput")
+            .expect("input module should be extracted");
+        // unsafeGetAttrPos reports only the root flake's export binding. This
+        // does not claim that the module value or option declarations originate
+        // in self, and the API must not present the field as value navigation.
+        assert_eq!(from_input["source_input"], "self");
+        assert_eq!(from_input["source_revision"], serde_json::Value::Null);
+        assert_eq!(from_input["source_path"], "raw/flake.nix");
+        assert_eq!(payload["resolved_input_count"], 4);
+        let raw = payload["inputs"]
+            .as_array()
+            .and_then(|inputs| {
+                inputs.iter().find(|input| {
+                    input["names"]
+                        .as_array()
+                        .is_some_and(|names| names.iter().any(|name| name == "raw"))
+                })
+            })
+            .expect("direct raw input should be present");
+        assert_eq!(raw["direct_descendant_count"], 2);
+        assert_eq!(
+            raw["transitive_descendant_count"], 3,
+            "the leaf shared by both branches must be counted once"
+        );
+        assert_eq!(payload["module_evaluation"]["available"], false);
+        assert!(
+            payload["module_evaluation"]["error"].as_str().is_some_and(
+                |error| error.contains("no configuration or input provides nixpkgs lib")
+            )
+        );
+    }
+
+    #[test]
+    fn exported_module_declarations_ignore_unmatched_nixos_definitions() {
+        if std::env::var_os("NIX_BUILD_TOP").is_some() {
+            return;
+        }
+        if std::process::Command::new("nix")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(4)
+            .expect("cf-server must remain under the repository packages directory");
+        let archive = std::process::Command::new("nix")
+            .args([
+                "--extra-experimental-features",
+                "nix-command flakes",
+                "flake",
+                "archive",
+                "--json",
+                "--no-write-lock-file",
+            ])
+            .arg(repository)
+            .output()
+            .expect("repository flake archive should start");
+        assert!(
+            archive.status.success(),
+            "repository flake archive failed: {}",
+            String::from_utf8_lossy(&archive.stderr)
+        );
+        let archive: serde_json::Value =
+            serde_json::from_slice(&archive.stdout).expect("flake archive output should be JSON");
+        let nixpkgs_path = archive["inputs"]["nixpkgs"]["path"]
+            .as_str()
+            .expect("repository archive should contain the locked nixpkgs path");
+        let directory = std::env::temp_dir().join(format!(
+            "crystal-forge-exported-module-check-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&directory).expect("temporary flake directory should be created");
+        std::fs::write(
+            directory.join("flake.nix"),
+            format!(
+                r#"{{
+  inputs.nixpkgs.url = "path:{nixpkgs_path}";
+  outputs = {{ self, nixpkgs }}: {{
+    nixosModules.demo = {{ lib, ... }}: {{
+      options.crystalForgeFixture.message = lib.mkOption {{
+        type = lib.types.str;
+        default = "declared";
+      }};
+      config.services.unmatchedForDeclarationExtraction.enable = true;
+    }};
+  }};
+}}"#
+            ),
+        )
+        .expect("temporary flake should be written");
+        let lock = std::process::Command::new("nix")
+            .args([
+                "--extra-experimental-features",
+                "nix-command flakes",
+                "flake",
+                "lock",
+            ])
+            .current_dir(&directory)
+            .output()
+            .expect("nix flake lock should start");
+        assert!(
+            lock.status.success(),
+            "temporary flake lock failed: {}",
+            String::from_utf8_lossy(&lock.stderr)
+        );
+        let expression = build_nix_eval_expression(
+            &format!("path:{}", directory.display()),
+            &PoliciesByConfiguration::new(),
+        );
+        let selector = format!("({expression}).__crystalForgeFlakeOutput.meta.flakeOutputSnapshot");
+        let output = std::process::Command::new("nix")
+            .args([
+                "--extra-experimental-features",
+                "nix-command flakes",
+                "eval",
+                "--impure",
+                "--json",
+                "--expr",
+                &selector,
+            ])
+            .output()
+            .expect("nix eval should start");
+        let _ = std::fs::remove_dir_all(&directory);
+        assert!(
+            output.status.success(),
+            "exported module extraction failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let payload: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("carrier output should be JSON");
+        let module = &payload["exported_modules"][0];
+        assert_eq!(module["name"], "demo");
+        assert_eq!(module["error"], serde_json::Value::Null);
+        assert_eq!(module["declaration_count"], 1);
+        assert_eq!(
+            module["declarations"][0]["path"],
+            "crystalForgeFixture.message"
+        );
+        assert!(
+            module["declarations"]
+                .as_array()
+                .expect("module declarations should be an array")
+                .iter()
+                .all(|declaration| declaration["path"]
+                    != "services.unmatchedForDeclarationExtraction.enable"),
+            "unmatched config definitions must not become declarations"
+        );
     }
 
     #[test]

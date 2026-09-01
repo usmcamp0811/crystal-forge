@@ -440,8 +440,10 @@ async fn run_post_finalize_derivation_side_effects(
                 }
             };
             match count_closure_packages(&drv2).await {
-                Ok((total, cached)) => {
-                    if let Err(err) = set_closure_counts(&pool2, derivation_id, total, cached).await
+                Ok((total, cached, closure_size_bytes)) => {
+                    if let Err(err) =
+                        set_closure_counts(&pool2, derivation_id, total, cached, closure_size_bytes)
+                            .await
                     {
                         warn!(
                             "⚠️  Failed to store closure counts for id={}: {}",
@@ -499,12 +501,15 @@ async fn handle_evaluation_attempt_failure(
     error: &str,
     failure_class: crate::models::retry_policy::RetryFailureClass,
 ) -> Result<()> {
+    // SECURITY: This function logs and persists the failure. Redact once at
+    // entry so no branch can expose the raw evaluator diagnostic.
+    let error = crate::security::snapshot_redaction::redact_evaluation_error(error);
     error!(
         "❌ Failed to evaluate commit {}: {}",
         commit.git_commit_hash, error
     );
 
-    match mark_commit_evaluation_failed(pool, commit.id, error, attempt, failure_class).await {
+    match mark_commit_evaluation_failed(pool, commit.id, &error, attempt, failure_class).await {
         Err(mark_err) => {
             crate::handlers::api::commits::cleanup_eval_channel(cf_state, commit.id).await;
             return Err(mark_err).with_context(|| {

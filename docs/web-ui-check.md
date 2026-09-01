@@ -148,7 +148,7 @@ Their final, intermediate, narrow, and mobile captures must all have committed
 baselines. The rendered design example remains a separate non-blocking visual
 reference.
 
-## Design parity gauge
+## Design parity evidence
 
 `docs/design/CrystalForge/` remains the mocked JSX design reference. To make
 comparisons more objective, `checks/web-ui/design-fixtures.json` defines the
@@ -157,24 +157,25 @@ refactored or regenerated. Pass this JSON to Claude/design tooling alongside the
 target design component so the design example and Playwright state use the same
 base fleet/build/security/compliance data.
 
-The web-ui check reports a **non-blocking design parity gauge** in
-`visual-report.json` and `visual-summary.md`:
+The web-ui check records design-reference coverage in `visual-report.json` and
+`visual-summary.md`:
 
 - which checked steps have a `designRef` mapping;
 - which fixture file should be used to align the design example;
-- the current policy (`non-blocking-gauge`).
+- the current design-reference policy.
 
-### Rendered design-parity harness (non-blocking)
+### Rendered design-parity harness
 
 The check also renders the tracked design example itself and compares it,
-per view and theme, against the real Dioxus UI. Both sides are backed by the
-shared golden fixture (`docs/design/CrystalForge/fixtures/crystal-forge.fixtures.json`),
-so a difference indicates real UI/design drift rather than data differences.
+per view and theme, against the real Dioxus UI. TASK-440 has eight canonical
+targets in two themes, so each focused run produces 16 actual React-vs-Dioxus
+pixel comparisons. `checks/web-ui/design-fixtures.json` records the shared
+representative identities and counts that keep these targets comparable.
 
 | Path | Purpose |
 | --- | --- |
-| `checks/web-ui/design-parity/manifest.json` | Maps each named surface to its Dioxus route, design and Dioxus interaction paths, identity markers, themes, and compare method |
-| `checks/web-ui/design-parity/generate-design-targets.js` | Playwright uses the real design navigation and identity marker per surface and theme → `<view>--<theme>.design.png` |
+| `checks/web-ui/design-parity/manifest.json` | Maps primary surfaces and nested TASK-440 targets to design and Dioxus interactions, identity markers, viewports, canonical workflow steps, themes, and the compare method |
+| `checks/web-ui/design-parity/generate-design-targets.js` | Playwright drives the offline design through real controls, validates each observable state, and writes `<target>--<theme>.design.png` |
 | `checks/web-ui/design-parity/compare-design-parity.js` | Normalizes both sides and scores drift (ImageMagick RMSE) → report, summary, montages |
 
 Flow inside the check (Phase 4c):
@@ -190,17 +191,41 @@ Flow inside the check (Phase 4c):
    `designMarker` identifies the expected surface.
 3. Each pair is normalized (resized to a common width, flattened) and scored with
    `compare -metric RMSE`. Lower drift = closer to the design.
+4. Canonical TASK-440 workflows also copy their themed captures to the mapped
+   parity target names. The generator drives `cf-open-system` and Flake controls,
+   validates the active state and exact fixture text, and records semantic
+   contracts for both React and Dioxus.
+5. TASK-440 source images must match the target viewport. The comparator crops
+   the mapped content surface, creates a montage and absolute-difference image,
+   and requires all selected pairs to compare without semantic or report errors.
+   A focused run requires two themed pairs per selected workflow. A complete run
+   requires all 16 pairs.
 
 Outputs (in `screenshots/`, exposed as MR artifacts):
 
 - `design-drift-report.json` — per view/theme drift + similarity, averages, worst offenders.
 - `design-drift-summary.md` — table + overall similarity, prepended to the MR comment.
 - `montages/<view>--<theme>.montage.png` — side-by-side (design target | real Dioxus).
+- `diffs/<view>--<theme>.difference.png` — absolute content-surface difference.
 - `design-targets/` and `design-parity/` — raw target and Dioxus captures.
 
-This is **non-blocking**: it never fails the check. It is a directional gauge —
-React and Dioxus will never be pixel-identical, so treat the number as "how far
-from the design" and inspect the montages for real drift.
+For TASK-440, missing, mislabeled, failed, wrong-viewport, and semantically
+invalid targets fail the check. Failure to compare an expected pair also fails
+the check. RMSE is advisory: a low similarity score does not fail the check and
+is not a visual-parity verdict. Inspect every TASK-440 montage and
+absolute-difference image before accepting the implementation.
+
+The design data uses abbreviated commit revisions for presentation. Browser
+API fixtures use synthetic 40-character revisions with the same prefixes
+because production APIs, navigation, snapshots, and comparisons require full
+immutable SHA identity. Assertions continue to enforce the displayed design
+prefix separately.
+
+The Config comparison has one intentional security-driven difference. The
+production DTO exposes provenance paths and input/revision identity, but it does
+not expose Nix source text. Dioxus therefore reports that source text is
+unavailable while the mocked design example can display source code. Do not add
+fixture-only DTO fields to erase this difference.
 
 To add a view to the parity harness, add an entry to
 `checks/web-ui/design-parity/manifest.json`. Set the design `route` and, when
@@ -209,6 +234,10 @@ and `dioxusMarker` selectors and the `designActions` or `dioxusActions` needed
 to reach nested surfaces. A design action can set `force: true` only when a
 known design overlay obscures the intended control; normal actions retain
 Playwright actionability checks.
+
+For a nested TASK-440 target, also define its viewport, observable
+`designState`, expected text, content selector, and canonical `dioxusStep`
+mapping.
 
 ### Approving baselines
 
@@ -319,7 +348,7 @@ documented in the manifest's `exclusions`.
 `visual-summary.md`, `diffs/`, plus `design-drift-report.json`,
 `design-drift-summary.md`, `montages/`, `design-targets/`, `design-parity/`) as
 artifacts. The `web-ui-screenshots-mr-comment` job posts/updates an MR comment
-with the coverage + visual + non-blocking design-parity summary, all themed step
+with the coverage + visual + design-parity summary, all themed step
 screenshots, up to 20 diff images, and up to 26 design-parity montages.
 The opt-in `web-ui-baseline-candidates` job publishes equivalent candidate
 artifacts after semantic and critical-workflow gates pass in baseline update

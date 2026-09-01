@@ -2186,25 +2186,35 @@ pub async fn mark_target_failed(
     mark_derivation_failed(pool, target_id, phase, error_message).await
 }
 
-/// Persist closure package counts on a nixos-type derivation row.
-/// Called asynchronously after eval completes for a system.
+/// Persists closure package counts and an optional actual Nix byte measurement.
+///
+/// The byte value is `None` unless a complete recursive local Nix query
+/// succeeded. An unavailable later measurement does not erase a successful
+/// measurement. The function is called asynchronously after system evaluation.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot update the derivation row.
 pub async fn set_closure_counts(
     pool: &PgPool,
     derivation_id: i32,
     total: i32,
     cached: i32,
+    closure_size_bytes: Option<i64>,
 ) -> Result<()> {
-    sqlx::query!(
+    sqlx::query(
         r#"
         UPDATE derivations
            SET closure_total  = $2,
-               closure_cached = $3
+               closure_cached = $3,
+               closure_size_bytes = COALESCE($4, closure_size_bytes)
          WHERE id = $1
         "#,
-        derivation_id,
-        total,
-        cached,
     )
+    .bind(derivation_id)
+    .bind(total)
+    .bind(cached)
+    .bind(closure_size_bytes)
     .execute(pool)
     .await?;
     Ok(())

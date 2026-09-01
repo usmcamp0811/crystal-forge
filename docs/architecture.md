@@ -94,6 +94,15 @@ Agent State + Builder Evaluation → Server Comparison → Compliance Alert
 
 Current system state compared against latest evaluated configuration to detect unauthorized changes.
 
+#### 4. Evaluation and Flake Snapshot Flow
+
+The authorized commit evaluation path extracts redacted, content-addressed
+NixOS options and flake-output read models. Config and flake explorer reads use
+PostgreSQL only and never launch Nix, Git, network, or queue work. See
+[Evaluation and Flake Snapshot Architecture](./evaluation-flake-snapshots.md)
+for ownership, lifecycle, comparison, retention, redaction, authorization, and
+compatibility contracts.
+
 ### Event-Driven Queue Architecture
 
 Crystal Forge uses an event-driven architecture for both evaluation and build queues, replacing polling-based approaches with immediate notifications.
@@ -177,7 +186,9 @@ Eval Complete → create_build_jobs() → notify_build_queue() → Build Workers
 3. **Rust implementation**: Memory safety and performance for security-critical deployment
 4. **Event-driven queues**: Immediate processing with coalesced wakeups and fallback polling
 5. **Flake-native**: Direct integration with modern Nix ecosystem
-6. **Option metadata authority**: Packaged NixOS option metadata is an authoring baseline, while each target flake's evaluation remains authoritative. See [NixOS Option Metadata Authority](./nixos-option-metadata.md).
+6. **Side-effect-free snapshot reads**: Revision exploration uses persisted,
+   bounded read models extracted by the authorized evaluation path
+7. **Option metadata authority**: Packaged NixOS option metadata is an authoring baseline, while each target flake's evaluation remains authoritative. See [NixOS Option Metadata Authority](./nixos-option-metadata.md).
 
 ### Observability Points
 

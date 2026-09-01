@@ -782,7 +782,7 @@ fn CommitNode(
     } else if is_eval_active(commit.evaluation_status.as_deref()) {
         Some(Route::EvaluationsView {})
     } else {
-        Some(Route::FlakesView {})
+        Some(Route::FlakesView { query: String::new() })
     };
     let clickable = target_route.is_some();
 

@@ -37,21 +37,25 @@ pub enum Route {
     #[route("/")]
     DashboardView {},
 
-    #[route("/systems")]
-    SystemsView {},
+    #[route("/systems?:..query")]
+    SystemsView { query: String },
 
-    #[route("/environments")]
-    EnvironmentsView {},
+    #[route("/environments?:..query")]
+    EnvironmentsView { query: String },
 
-    #[route("/systems/:id?:tab&:poam")]
+    #[route("/systems/:id?:tab&:poam&:config_mode&:revision&:generation&:deploy_generation")]
     SystemDetailView {
         id: String,
         tab: String,
         poam: String,
+        config_mode: String,
+        revision: String,
+        generation: String,
+        deploy_generation: String,
     },
 
-    #[route("/flakes")]
-    FlakesView {},
+    #[route("/flakes?:..query")]
+    FlakesView { query: String },
 
     #[route("/builds")]
     BuildsView {},

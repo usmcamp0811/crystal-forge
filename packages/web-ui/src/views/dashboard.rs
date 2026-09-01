@@ -1545,13 +1545,13 @@ fn WidgetPicker(
 /// Map a widget `nav` slug to a concrete route.
 fn route_for_nav(route: &str) -> Option<Route> {
     Some(match route {
-        "systems" => Route::SystemsView {},
-        "flakes" => Route::FlakesView {},
+        "systems" => Route::SystemsView { query: String::new() },
+        "flakes" => Route::FlakesView { query: String::new() },
         "builds" => Route::BuildsView {},
         "evals" => Route::EvaluationsView {},
         "cves" => Route::CvesView {},
         "caches" => Route::CachesView {},
-        "environments" => Route::EnvironmentsView {},
+        "environments" => Route::EnvironmentsView { query: String::new() },
         "compliance" => compliance_route(None),
         _ => return None,
     })
