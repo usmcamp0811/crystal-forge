@@ -29,6 +29,11 @@ with lib; rec {
   }:
     lib.strings.removeSuffix "\n" (builtins.readFile "${keyPair}/agent.pub");
 
+  # These helpers drive simulated agents in test VMs. They run only the
+  # test-agent binary, which the cf-server crate produces, so they reference
+  # the core server build. Referencing the aggregate package would add the
+  # real agent, builder, keygen, and web UI closures to every VM that
+  # simulates agent traffic.
   mkAgent = {
     pkgs,
     hostname,
@@ -125,7 +130,7 @@ with lib; rec {
           else ""
         }
 
-        ${pkgs.crystal-forge.default}/bin/test-agent \
+        ${pkgs.crystal-forge.default.cf-server-core-drv}/bin/test-agent \
           --hostname "${hostname}" \
           --change-reason "${changeReason}" \
           --derivation "${derivPath}" \
@@ -464,7 +469,7 @@ with lib; rec {
           in ''
             # Execute ${event.type} for ${event.hostname} (${debugInfo})
             echo "Executing ${event.type} for ${event.hostname} at ${timestampCalculation}"
-            ${pkgs.crystal-forge.default}/bin/test-agent \
+            ${pkgs.crystal-forge.default.cf-server-core-drv}/bin/test-agent \
               --hostname "${event.hostname}" \
               --change-reason "${changeReason}" \
               --derivation "${event.derivationPath or ""}" \

@@ -35,7 +35,7 @@ let
       runtimeInputs = with pkgs; [
         hostname
         coreutils
-        pkgs.crystal-forge.default.cf-keygen
+        pkgs.crystal-forge.default.cf-keygen-drv
       ];
       text = ''
         set -euo pipefail
@@ -253,7 +253,7 @@ let
       if [[ "''${1:-}" == "--dev" ]]; then
         exec sudo -E nix run .#agent
       else
-        exec sudo -E ${pkgs.crystal-forge.default.agent}/bin/agent
+        exec sudo -E ${pkgs.crystal-forge.default.cf-agent-drv}/bin/agent
       fi
     '';
   };
@@ -270,7 +270,7 @@ let
       if [[ "''${1:-}" == "--dev" ]]; then
         exec nix run .#server
       else
-        exec ${pkgs.crystal-forge.default.server}/bin/server
+        exec ${pkgs.crystal-forge.default.cf-server-drv}/bin/server
       fi
     '';
   };
@@ -279,7 +279,7 @@ let
     name = "bootstrap-dev-builder";
     runtimeInputs = with pkgs; [
       postgresql
-      pkgs.crystal-forge.default.cf-keygen
+      pkgs.crystal-forge.default.cf-keygen-drv
       coreutils
     ];
     text = ''
@@ -356,7 +356,7 @@ let
       if [[ "''${1:-}" == "--dev" ]]; then
         exec nix run .#builder
       else
-        exec ${pkgs.crystal-forge.default.builder}/bin/builder
+        exec ${pkgs.crystal-forge.default.cf-builder-drv}/bin/builder
       fi
     '';
   };
@@ -374,7 +374,7 @@ let
       if [[ "''${1:-}" == "--dev" ]]; then
         exec nix run .#server
       else
-        exec ${pkgs.crystal-forge.default.server}/bin/server
+        exec ${pkgs.crystal-forge.default.cf-server-drv}/bin/server
       fi
     '';
   };
@@ -537,7 +537,10 @@ let
         echo "   (dev mode — building server from source)"
         nix run "$PROJECT_ROOT#server" &
       else
-        ${pkgs.crystal-forge.default.server}/bin/server &
+        # The Dioxus development server provides the UI in this workflow. Use
+        # the core backend so changing UI source does not rebuild an unused
+        # embedded copy of that same UI.
+        ${pkgs.crystal-forge.default.cf-server-core-drv}/bin/server &
       fi
       SERVER_PID=$!
 
@@ -596,7 +599,7 @@ let
       if [[ "''${1:-}" == "--dev" ]]; then
         exec nix run .#builder
       else
-        exec ${pkgs.crystal-forge.default.builder}/bin/builder
+        exec ${pkgs.crystal-forge.default.cf-builder-drv}/bin/builder
       fi
     '';
   };

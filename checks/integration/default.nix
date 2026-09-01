@@ -15,10 +15,27 @@ let
   # Port 8000 for Crystal Forge server; Grafana occupies 3000 by default.
   CF_TEST_SERVER_PORT = 8000;
   GRAFANA_PORT = 3000;
+
+  # Components this check actually runs.
+  #
+  # The VM enables the server and the agent and sets `build.enable = false`,
+  # so the builder never starts. Keys are fixed fixtures (see keyPath above),
+  # so cf-keygen never runs either. Referencing the aggregate package instead
+  # would add the builder and keygen closures to every VM image this check
+  # builds, and would rebuild the image whenever either component changed.
+  #
+  # The server comes from the core build because this check exercises the API
+  # and the deployment lifecycle, never the browser UI. Using the core build
+  # keeps the web UI derivation out of this check, so a Dioxus change does not
+  # rebuild the integration VM.
+  cfServer = pkgs.crystal-forge.default.cf-server-core-drv;
+  cfAgent = pkgs.crystal-forge.default.cf-agent-drv;
+
   systemBuildClosure = pkgs.closureInfo {
     rootPaths = [
       inputs.self.nixosConfigurations.cf-test-sys.config.system.build.toplevel
-      pkgs.crystal-forge.default
+      cfServer
+      cfAgent
       pkgs.path
     ] ++ lib.crystal-forge.prefetchedPaths;
   };
@@ -79,10 +96,12 @@ in pkgs.testers.runNixOSTest {
         hello
         openssl
         curl
-        crystal-forge.default
         crystal-forge.default.migrate
         crystal-forge.cf-test-suite.runTests
         crystal-forge.cf-test-suite.testRunner
+      ] ++ [
+        cfServer
+        cfAgent
       ];
 
       environment.variables = {
@@ -103,6 +122,7 @@ in pkgs.testers.runNixOSTest {
 
         client = {
           enable = true;
+          package = cfAgent;
           server_host = "localhost";
           server_port = CF_TEST_SERVER_PORT;
           private_key = "/etc/server.key";
@@ -117,6 +137,7 @@ in pkgs.testers.runNixOSTest {
 
         server = {
           enable = true;
+          package = cfServer;
           port = CF_TEST_SERVER_PORT;
           host = "0.0.0.0";
         };
