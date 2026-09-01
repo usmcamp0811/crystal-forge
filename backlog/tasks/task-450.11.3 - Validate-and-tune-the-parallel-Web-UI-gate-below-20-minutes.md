@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-gpt-5.6-sol
 created_date: '2026-09-01 03:28'
-updated_date: '2026-09-01 16:28'
+updated_date: '2026-09-01 17:34'
 labels:
   - web-ui
   - testing
@@ -68,4 +68,8 @@ Before opening the MR, extend producer metadata with pipeline/job timestamps, qu
 The user selected this task for one focused Web UI optimization MR with TASK-438, TASK-354, TASK-450.11.1, and TASK-450.11.2.
 
 LOCK: opencode-gpt-5.6-sol in /home/mcamp/code/crystal-forge/TASK-450-web-ui-parallel-checks on branch TASK-450.11-web-ui-parallel-checks, based on TASK-450-p0-build-graph at 437efd55.
+
+Pre-MR timing instrumentation is complete. Each producer records GitLab Jobs API `queued_duration` with a 5-second connection timeout and 15-second total timeout, Nix realization cache classification, job duration, gate realization, evidence lookup, and artifact copy. The aggregate report records per-producer timing and cache state and withholds median, maximum, and critical-path values unless all five blocking producers have valid durations. The runbook documents the 20-minute envelope and phase-based regression diagnosis.
+
+Local final exports evidence completed in 35.288 seconds total (19.131 seconds VM fixture setup and 15.946 seconds exports). Fleet, pipeline, governance, compatibility, and design evidence timings remain recorded from the earlier successful local runs. Acceptance criteria requiring three representative MR pipelines and recorded cross-run median/maximum remain pending after push.
 <!-- SECTION:NOTES:END -->
