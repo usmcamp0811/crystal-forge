@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:43'
-updated_date: '2026-09-01 13:35'
+updated_date: '2026-09-01 13:36'
 labels:
   - design-parity
   - policy
@@ -117,6 +117,8 @@ Final-candidate freeze review found that step-local viewport changes can leak in
 Complete the repository-required Rust documentation pass for TASK-433 public APIs and components before freezing. Correct stale SQLx cache rationale, run formatting and rustdoc checks, then inspect the aggregate diff again.
 
 Post-candidate review remediation: after TASK-433.7 fixes explicit remediation-plan persistence, extend the non-blocking design-parity manifest and contracts with deterministic authoritative targets for the common policy editor and POA&M detail tray where production fixture navigation permits. Record a per-surface authoritative design comparison for policy editor, POA&M detail/lifecycle, compliance/evidence, system/bundle rollups, dashboard/watchlist, notifications, Setup Coach, catalog, and responsive themes. Explicitly retain reviewed contract-compatible deviations, including Provenance presentation and production-only server-authoritative plan details/assignment sections. Then freeze a new SHA, run focused and required gates, push, require green exact-head CI, and reconcile TASK-433.1-.9 plus parent AC1-AC40. Pipeline 2809426014 proves only superseded candidate `da7ae7de` once a remediation commit exists.
+
+User verification constraint: do not spend local time on the approximately 20-minute Web UI Nix check. Continue implementation/parity/static work while CI runs. After the remediation is pushed, use the new exact-head GitLab Web UI job for authoritative browser and screenshot evidence; do not treat pipeline 2809426014 at `da7ae7de` as final-head proof.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
