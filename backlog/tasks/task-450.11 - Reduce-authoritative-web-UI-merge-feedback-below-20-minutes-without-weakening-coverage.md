@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - opencode-gpt-5.6-sol
 created_date: '2026-09-01 03:12'
-updated_date: '2026-09-01 21:58'
+updated_date: '2026-09-01 22:04'
 labels:
   - web-ui
   - testing
@@ -80,6 +80,8 @@ User-approved scope expansion: correct the production OSCAL Assessment Results g
 Final review correction: make generated OSCAL control IDs NCName-safe and stable, cover names with punctuation, keep empty-scope exports schema-valid or explicitly constrained, and correct the documented AP/SSP reference guarantee. Add producer cache-state and queue metadata plus aggregate per-job timing, median, maximum, and blocking critical-path reporting before representative MR runs. Run the aggregate report through a flake-pinned Node/curl package instead of a mutable Alpine image. Correct stale baseline and SARIF fixture prose, remove local result links, then rerun focused Rust/schema and static CI/Nix verification.
 
 Review correction for MR !325 P1 blockers: (1) restore the TASK-433 imported-provenance SQL in the shared fresh-database fixture setup, add a relational fixture-chain assertion, and run the focused required governance workflow plus the full governance shard; (2) make `web-ui-evidence-report` artifact-only by removing persistent token access, curl uploads, MR note writes, related runtime inputs, tests, and runbook claims while preserving the complete exposed aggregate artifact; (3) replace the dangling OSCAL bundle/control references with a self-contained AR → embedded AP → embedded SSP → embedded Catalog chain, derive Catalog controls from real unscoped bundle policies, remove synthetic empty-scope control/component identifiers, add the official OSCAL 1.1.2 Catalog schema, and add recursive schema plus cross-document referential-integrity assertions; (4) rerun targeted static/Rust/browser checks and all blocking shards, then collect three successful representative current-head MR pipelines with required timing, queue, cache, critical-path, median, maximum, and VM phase evidence before review.
+
+User-approved governance isolation correction: constrain the 20af bulk-delete regression to policies created by that workflow, or restore equivalent fixture state before later strict captures. Preserve the intended partial-delete contract and committed strict baselines; do not approve post-deletion visuals. Add a regression contract for fixture preservation, rerun focused 20af plus affected strict workflows, then rerun the full governance shard before committing and pushing the P1 corrections.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
