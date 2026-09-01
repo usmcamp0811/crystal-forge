@@ -172,6 +172,15 @@ To add a view to the parity harness, add an entry to
    committed. After the baseline commit, the normal `.#checks...` form is
    equivalent.
 
+If a strict failure occurs only in GitLab CI and the failed Nix derivation has
+no review artifact, start the manual MR job `web-ui-baseline-candidates`. The
+job runs the same check with baseline update mode enabled and publishes the
+`web-ui-baseline-candidates/` artifact. Download the artifact, inspect its
+`visual-report.json`, strict PNGs, and diffs, and pass the artifact directory to
+`approve-baselines.sh`. The manual job is not final verification. After an
+approved baseline commit, the normal `flake-check: [web-ui]` job must pass at
+the exact MR head.
+
 The approval utility copies only captures whose generated visual record has
 policy `strict`. It skips failed-step diagnostics, reports, diffs, and export
 screenshots. It rejects empty strict sets, failed owning semantic steps,
@@ -238,6 +247,9 @@ documented in the manifest's `exclusions`.
 artifacts. The `web-ui-screenshots-mr-comment` job posts/updates an MR comment
 with the coverage + visual + non-blocking design-parity summary, all themed step
 screenshots, up to 20 diff images, and up to 26 design-parity montages.
+The opt-in `web-ui-baseline-candidates` job publishes equivalent candidate
+artifacts after semantic and critical-workflow gates pass in baseline update
+mode. It does not replace or weaken `flake-check: [web-ui]`.
 
 ## Known issues
 
