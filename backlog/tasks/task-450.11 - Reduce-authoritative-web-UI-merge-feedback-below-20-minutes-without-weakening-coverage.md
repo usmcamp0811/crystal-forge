@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - opencode-gpt-5.6-sol
 created_date: '2026-09-01 03:12'
-updated_date: '2026-09-01 18:45'
+updated_date: '2026-09-01 19:54'
 labels:
   - web-ui
   - testing
@@ -118,4 +118,6 @@ Committed as `5492997f` (`TASK-450.11: parallelize authoritative Web UI checks`)
 MR !325 pipeline 2810483644 exposed a CI-only runtime closure defect: all six Web UI producers exited 127 because the flake-pinned `web-ui-producer` wrapper executed `bash`, but `pkgs.bash` was absent from `runtimeInputs` in Alpine jobs. Added `pkgs.bash` to the producer package. `nix build path:.#web-ui-producer --no-link` passed, and a clean package invocation reached the producer script and returned its expected missing `CHECK_NAME` error instead of exit 127. The first pipeline is not representative timing evidence because no Web UI check reached realization.
 
 MR !325 pipeline 2810519617 reached and completed Web UI gate builds, then all completed producers failed during post-build verdict validation with `env: can't execute 'node': No such file or directory`. The producer runtime included Bash but not Node.js, which is required by `ci/check-web-ui-verdict.js`. Added `pkgs.nodejs` to `web-ui-producer.runtimeInputs`; the helper package build passed. This pipeline is not representative acceptance evidence because producer publication did not complete, although observed blocking job durations remained below 20 minutes (compatibility 846.126s, fleet 1035.032s, pipeline 264.874s) and the jobs retained artifacts.
+
+Rebased the shared branch onto `origin/dev` at `701151f4` after TASK-433 merged. Resolved the Web UI constructor, Playwright harness, GitLab CI, ownership manifest, tests, and runbook conflicts while preserving the parallel five-job blocking gate, advisory design parity, strict TASK-433 baselines, the manual governance baseline-candidate job, fatal browser diagnostics, and runtime closure fixes. The rebased commits are `0504bbd1`, `e7184518`, and `425684d7`. Ownership now validates 116 `ci_fast` steps as 44 required and 72 advisory across fleet (3/32), pipeline (5/28), and governance (36/12). Post-rebase verification passed: 28 Node tests; ownership validation; Bash syntax; GitLab YAML parse; six Web UI Nix parses and evaluations; helper package builds; `git diff --check`; and the targeted OSCAL Rust test after adapting its fixture to TASK-433's expanded `ComplianceControlEvidence` model. The fixture adaptation remains an uncommitted working-tree change pending the next commit/push step. The previously successful pipeline predates this TASK-433 integration, so three representative pipelines must be collected from the rebased MR head.
 <!-- SECTION:NOTES:END -->
