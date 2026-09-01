@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-gpt-5.6-sol
 created_date: '2026-06-13 19:35'
-updated_date: '2026-09-01 03:59'
+updated_date: '2026-09-01 12:29'
 labels:
   - web-ui
   - testing
@@ -60,6 +60,8 @@ Note: The web-ui VM derivation currently exits 0 even when individual Playwright
 3. Correct `12h` to use the application tab role and make route cleanup reliable after failure.
 4. Replace timing-sensitive `12f` actions with observable modal, request, and response conditions while preserving the product behavior under test.
 5. Run the focused workflows repeatedly in their final group and record whether remaining failures are product defects, deterministic harness defects, or runner resource sensitivity.
+
+User decision after focused browser verification: treat the current inline Deploy tab and package-first CVE workflow as authoritative. Update 12f and 12h to assert the current UI instead of restoring the obsolete modal and CVE-ID-grouped contracts. Keep both workflows advisory unless separately promoted through the explicit required-step policy.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
