@@ -11,6 +11,7 @@ pkgs.writeShellApplication {
     pkgs.curl
     pkgs.jq
     pkgs.nix
+    pkgs.nodejs
   ];
   text = ''
     exec bash ${inputs.self}/ci/web-ui-producer.sh "$@"
