@@ -1,9 +1,10 @@
 ---
 id: TASK-450.11.3
 title: Validate and tune the parallel Web UI gate below 20 minutes
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-09-01 03:28'
+updated_date: '2026-09-01 03:30'
 labels:
   - web-ui
   - testing
@@ -47,3 +48,9 @@ Measurements must distinguish execution time from runner queue time and must ide
 - [ ] #6 A deliberately failing required workflow demonstrates that the parallel logical gate fails and identifies the responsible check without requiring unrelated successful groups to be rerun locally
 - [ ] #7 Documentation records the final check grouping, expected timing envelope, measurement method, exact local Nix commands, and how maintainers detect a latency regression
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+The user selected this task for one focused Web UI optimization MR with TASK-438, TASK-354, TASK-450.11.1, and TASK-450.11.2.
+<!-- SECTION:NOTES:END -->
