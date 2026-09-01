@@ -6,13 +6,14 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-08-31 22:41'
-updated_date: '2026-08-31 22:41'
+updated_date: '2026-09-01 03:12'
 labels: []
 dependencies:
   - TASK-450.4
 references:
   - 'https://docs.cachix.org/what-is-a-binary-cache'
   - 'https://nix-gitlab-ci.projects.tf/caching/'
+  - TASK-450.11
 documentation:
   - >-
     backlog/docs/build/build-invalidation-graph/doc-23 -
@@ -67,3 +68,9 @@ Read doc-23, `Build Invalidation Graph and CI Feedback Latency Analysis`, for th
 - [ ] #6 The set of published outputs is deliberate and documented, and excludes outputs that should not be shared
 - [ ] #7 Setup instructions exist for connecting a developer or agent machine to the cache
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+TASK-450.11 should measure cache substitution separately from browser runtime. Include stable embedded-server, web UI, and shared test-environment outputs in the publication analysis when they are safe to share. A cache miss or outage must still build locally, so the less-than-20-minute target must report whether each representative run was warm or cold.
+<!-- SECTION:NOTES:END -->
