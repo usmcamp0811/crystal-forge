@@ -3,11 +3,11 @@ id: TASK-433.7
 title: >-
   TASK-433 Phase 6: POA&M integration in evidence/finding, system, bundle,
   assignment UI
-status: Review
+status: In Progress
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:43'
-updated_date: '2026-08-29 01:49'
+updated_date: '2026-09-01 05:00'
 labels:
   - design-parity
   - poam
@@ -86,6 +86,8 @@ Phase-6 review remediation at exact head `fd7548ad`: (1) prove and close the pro
 Legacy observation design decision: preserve the deployed Phase-5 composite-assessment API for compatibility, and add a narrow source-neutral observation reference for evidence-origin actions. Each failed control exposes its stable finding identity plus an authoritative observation reference (`source_kind`, source identifier, and semantic observation token). The server resolves that reference against the latest deployed derivation/CVE scan or exact composite assessment, rechecks current effective policy/version and FAIL state, and never derives outcome from POA&M state. Stable `poam_findings` rows are idempotently materialized for resolved evidence controls; relationship and compatible-search APIs accept finding IDs so legacy and composite sources share the same remediation identity without fabricating composite assessments. Create/link mutations accept the observation reference while retaining `assessment_id` compatibility. Closure/waiver behavior remains unchanged unless discriminating tests show the review finding requires extending those Phase-5 workflows.
 
 Implement this as a focused additive contract: shared canonical legacy-observation snapshot/token helpers; evidence DTO fields; finding-ID batch relationship and compatible lookup; authoritative create/link validation; Web UI adapter and evidence-bar wiring; server/unit/browser regression proving a persisted legacy failure can create a POA&M and remains FAIL afterward. Then implement the independent pagination/activity/typed-routing findings and verify serially.
+
+Phase-8 visual remediation: correct dark-theme contrast for the shared POA&M detail tray's Expand and Reopen actions. Keep behavior and lifecycle semantics unchanged. Verify with focused TASK-433 POA&M browser captures before returning the owner to Review.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -102,4 +104,6 @@ Phase-6 review remediation completed. Legacy custom-check FAIL evidence now crea
 Serial verification passed: default Rust formatting (`cargo fmt --all --check`), Web UI formatting, PostgreSQL-backed `poam_workflows` 17/17, Web UI unit tests 233 passed/1 ignored, Web UI package build, focused browser workflows 29g/29i/29m independently, and the full `checks.x86_64-linux.web-ui` harness. The full harness had no failures, so no baseline comparison at `42488e89` was required. JavaScript syntax and `git diff --check` also passed.
 
 2026-08-29 final security review and push checkpoint: evidence reads now enforce system environment visibility before finding materialization. POA&M actions and evidence publishers use a deterministic advisory-lock protocol ordered by derivation publication key, system sentinel, finding key, then row locks; agent state publication, derivation/CVE writers, composite assessment writers, target authorization, and legacy finding materialization participate. Assignment relationship panels remount on system-scope changes. Serial verification passed: offline `cf-server` check; `poam_workflows` 20/20 against repository-isolated PostgreSQL; heartbeat 14/14; state 4/4; Web UI 233 passed/1 ignored; JavaScript syntax and `git diff --check`; and an authoritative Web UI check run passed before the final backend-only lock additions. The final post-lock authoritative rerun was interrupted at user request after a prior attempt failed because the onboarding coach overlay intercepted unrelated CVE test clicks; TASK-433 workflows 29g-29m passed in that failed attempt. Task remains In Progress pending a clean final authoritative check.
+
+Phase 8 independent artifact review found a P2 dark-theme contrast defect in completed POA&M detail captures: the desktop Expand and Reopen actions are effectively unreadable. TASK-433.7 is returned to In Progress for a CSS-only presentation correction and focused visual verification.
 <!-- SECTION:NOTES:END -->
