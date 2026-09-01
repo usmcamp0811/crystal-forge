@@ -3,11 +3,11 @@ id: TASK-433.1
 title: >-
   TASK-433 Phase 0: Baseline design-diff inventory and phase plan for
   policy/POA&M work
-status: In Progress
+status: Review
 assignee:
   - claude-agent
 created_date: '2026-08-23 01:42'
-updated_date: '2026-08-23 01:50'
+updated_date: '2026-09-01 15:22'
 labels:
   - design-parity
   - policy
@@ -21,11 +21,13 @@ references:
     https://gitlab.com/crystal-forge/crystal-forge/-/commit/ae20da816edb1cb14275db9cd646010e69d88cd8
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/commit/c2f5db08'
   - TASK-433
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/318'
 documentation:
   - docs/design/CrystalForge/
   - docs/agent/database-safety.md
   - docs/agent/verification.md
   - packages/default/WORKSPACE.md
+  - docs/task-433-design-parity-review.md
 parent_task_id: TASK-433
 priority: high
 type: spike
@@ -72,6 +74,8 @@ Documentation/plan review only; no automated verification commands apply to this
 Confirmed c2f5db08 and ae20da816edb1cb14275db9cd646010e69d88cd8 are commits within this repo's own history (dev branch), not an external repo. `git diff --stat c2f5db08..ae20da81 -- docs/design/CrystalForge` gives the exact 21-file delta: .thumbnail, app.jsx, components/ComplianceView.jsx, components/DashboardView.jsx, components/PoamViews.jsx (new, 693 lines), components/PoliciesView.jsx (rewritten, 752 lines), components/PolicyEditor.jsx (new, 633 lines), components/SetupCoach.jsx, components/Shell.jsx, components/SystemDetail.jsx, crystal-forge.html, data-compliance.js, data-dashboard.js, data-enforcement.js (new, 115 lines), data-mappings.js, data-poam.js (new, 368 lines), data-policies.js, data.js, fixtures/*.js/.json, styles.css. Starting file-by-file review and current-implementation audit next.
 
 Full design-diff analysis and current-state audit completed via two parallel research passes (design delta report + server/web-ui current-state report). Summary and full phase-by-phase plan recorded in parent TASK-433 planSet. No production/test files were modified; only backlog/ task records were written. 9 phase subtasks (TASK-433.2 through TASK-433.9) created with distributed, non-overlapping acceptance criteria and a strict dependency chain. Ready for user review before Phase 1 (TASK-433.2) implementation begins.
+
+Final reconciliation confirms all six research acceptance criteria remain proven. The exact 21-file design-delta classification is retained in the task and parent records, and `docs/task-433-design-parity-review.md` now carries the final affected-surface source/contract comparison and pending exact-head visual artifact gate. No authoritative design file is modified by MR !318. TASK-433.1 moves to Review, not Done, because the shared MR is not merged.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
