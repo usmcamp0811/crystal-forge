@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-gpt-5.6-sol
 created_date: '2026-06-13 19:35'
-updated_date: '2026-09-01 03:31'
+updated_date: '2026-09-01 03:46'
 labels:
   - web-ui
   - testing
@@ -47,6 +47,16 @@ Note: The web-ui VM derivation currently exits 0 even when individual Playwright
 - TASK-353 fixed its own `12e` regression and added a deterministic `12k` test (8-tab rail + Compliance + header actions) that passes and captures a screenshot.
 - The interception overlay is visible in `12k-system-detail-tab-icons.png`.
 <!-- SECTION:DESCRIPTION:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Reproduce and classify the setup-coach leak, the `12h` accessible-role mismatch, and the `12f` deploy-modal timing path in focused execution.
+2. Keep the onboarding walkthrough isolated from ordinary check groups. Ensure non-onboarding groups begin with the setup coach suppressed and do not inherit onboarding routes or overlay state.
+3. Correct `12h` to use the application tab role and make route cleanup reliable after failure.
+4. Replace timing-sensitive `12f` actions with observable modal, request, and response conditions while preserving the product behavior under test.
+5. Run the focused workflows repeatedly in their final group and record whether remaining failures are product defects, deterministic harness defects, or runner resource sensitivity.
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
