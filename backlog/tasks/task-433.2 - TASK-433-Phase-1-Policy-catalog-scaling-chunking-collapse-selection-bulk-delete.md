@@ -3,7 +3,7 @@ id: TASK-433.2
 title: >-
   TASK-433 Phase 1: Policy catalog scaling (chunking, collapse, selection, bulk
   delete)
-status: Review
+status: Done
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:42'
@@ -39,7 +39,7 @@ modified_files:
 parent_task_id: TASK-433
 priority: high
 type: feature
-ordinal: 475000
+ordinal: 5000
 ---
 
 ## Description
