@@ -1,11 +1,11 @@
 ---
 id: TASK-440
 title: Bring system configuration and flake exploration into full design parity
-status: In Progress
+status: Review
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-01 19:42'
+updated_date: '2026-09-02 02:44'
 labels:
   - design-parity
   - web-ui
@@ -53,7 +53,7 @@ modified_files:
   - checks/web-ui/
 priority: high
 type: feature
-ordinal: 449000
+ordinal: 1000
 ---
 
 ## Description
