@@ -1,11 +1,11 @@
 ---
 id: TASK-450.11.3
 title: Validate and tune the parallel Web UI gate below 20 minutes
-status: Review
+status: Done
 assignee:
   - opencode-gpt-5.6-sol
 created_date: '2026-09-01 03:28'
-updated_date: '2026-09-02 02:39'
+updated_date: '2026-09-02 02:41'
 labels:
   - web-ui
   - testing
@@ -23,7 +23,7 @@ references:
 parent_task_id: TASK-450.11
 priority: high
 type: enhancement
-ordinal: 466000
+ordinal: 13000
 ---
 
 ## Description
