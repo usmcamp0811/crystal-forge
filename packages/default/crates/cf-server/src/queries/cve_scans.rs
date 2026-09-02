@@ -68,15 +68,37 @@ fn execution_lock_id(execution_id: Uuid) -> i64 {
 /// Returns `true` if the lock exists and is held by an active session, `false` otherwise.
 /// This is used by recovery to distinguish a paused/stalled live process (lock still held)
 /// from a crashed process (lock released when its session ended).
+///
+/// # Advisory lock key reconstruction
+///
+/// [`acquire_execution_lock`] and [`release_execution_lock`] use the
+/// single-bigint form `pg_advisory_lock(key bigint)`. PostgreSQL does not
+/// store that 64-bit key directly in `pg_locks`; it splits it into two
+/// 32-bit `oid` columns: `classid` holds the upper 32 bits and `objid` holds
+/// the lower 32 bits, with `objsubid = 1` identifying the single-bigint form
+/// (as opposed to `objsubid = 2` for the two-`int4`-key form). A lookup that
+/// compares `objid` directly against the full 64-bit key is a false-negative
+/// bug: it silently never matches, so recovery can no longer distinguish a
+/// live paused process from a crashed one and can revoke an active execution
+/// out from under it. The key must be reconstructed with
+/// `(classid::bigint << 32) | objid::bigint` and scoped to `objsubid = 1` and
+/// the current database, mirroring exactly how PostgreSQL stores it.
 pub async fn execution_lock_is_held(pool: &PgPool, execution_id: Uuid) -> Result<bool> {
     let lock_id = execution_lock_id(execution_id);
     let is_held = sqlx::query_scalar::<_, bool>(
         r#"
         SELECT EXISTS(
-            SELECT 1 FROM pg_locks 
+            SELECT 1
+            FROM pg_locks
             WHERE locktype = 'advisory'
-              AND objid = $1::bigint
+              AND objsubid = 1
               AND granted = TRUE
+              AND database = (
+                  SELECT oid
+                  FROM pg_database
+                  WHERE datname = current_database()
+              )
+              AND ((classid::bigint << 32) | objid::bigint) = $1::bigint
         )
         "#,
     )
@@ -120,18 +142,88 @@ pub async fn acquire_execution_lock(conn: &mut sqlx::PgConnection, execution_id:
 
 /// Release a PostgreSQL session-level advisory lock for an execution.
 ///
-/// Must be called on the same connection that acquired the lock.
-/// After this call, the connection may be safely returned to the pool
-/// without retaining the advisory lock.
+/// Must be called on the same connection that acquired the lock. The full
+/// 64-bit lock_id is bound to $1; PostgreSQL internally splits it.
 ///
-/// The full 64-bit lock_id is bound to $1; PostgreSQL internally splits it.
-pub async fn release_execution_lock(conn: &mut sqlx::PgConnection, execution_id: Uuid) -> Result<()> {
+/// # Return value
+///
+/// Returns `Ok(true)` when `pg_advisory_unlock` confirms this session held
+/// and released the lock. Returns `Ok(false)` when the lock was not held by
+/// this session (for example, it was already released or never acquired).
+///
+/// A caller MUST NOT treat `Ok(false)` as equivalent to a successful release:
+/// the underlying session may still hold the lock through the state this
+/// function could not confirm. Callers holding a pooled connection MUST
+/// discard that connection (see [`release_execution_lock_or_close`]) rather
+/// than return it to the pool when this function returns `Ok(false)` or an
+/// error, because a pooled connection that still owns the lock could be
+/// handed to an unrelated execution and silently violate active-scan
+/// uniqueness.
+pub async fn release_execution_lock(
+    conn: &mut sqlx::PgConnection,
+    execution_id: Uuid,
+) -> Result<bool> {
     let lock_id = execution_lock_id(execution_id);
-    sqlx::query("SELECT pg_advisory_unlock($1::bigint)")
+    let released = sqlx::query_scalar::<_, bool>("SELECT pg_advisory_unlock($1::bigint)")
         .bind(lock_id)
-        .execute(conn)
+        .fetch_one(conn)
         .await?;
-    Ok(())
+    Ok(released)
+}
+
+/// Releases an execution's advisory lock and disposes of the connection that
+/// held it, either by returning it to the pool or by closing it outright.
+///
+/// # Connection lifecycle
+///
+/// A PostgreSQL session-level advisory lock is tied to the backend session
+/// that acquired it, not to the pooled connection handle. Returning a
+/// [`sqlx::pool::PoolConnection`] to the pool via `Drop` does **not**
+/// terminate that backend session, so an unconfirmed or failed unlock must
+/// not be followed by an ordinary drop: the pool could later hand the same
+/// still-locked session to an unrelated execution, letting two callers
+/// believe they each hold the lock.
+///
+/// When [`release_execution_lock`] confirms the lock was released
+/// (`Ok(true)`), the connection is returned to the pool normally. Otherwise
+/// the connection is closed explicitly via
+/// [`sqlx::pool::PoolConnection::close`] so its session — and any lock it
+/// might still hold — cannot be reused.
+pub async fn release_execution_lock_or_close(
+    mut conn: sqlx::pool::PoolConnection<sqlx::Postgres>,
+    execution_id: Uuid,
+) {
+    match release_execution_lock(&mut conn, execution_id).await {
+        Ok(true) => {
+            // CONCURRENCY: Unlock confirmed by PostgreSQL; the session no
+            // longer holds the lock, so returning it to the pool is safe.
+        }
+        Ok(false) => {
+            tracing::error!(
+                "Advisory lock for CVE scan execution {execution_id} was not held at \
+                 release time; closing the connection instead of returning it to the pool"
+            );
+            if let Err(err) = conn.close().await {
+                tracing::error!(
+                    "Failed to close CVE scan execution lock connection for {execution_id}: {err:#}"
+                );
+            }
+            return;
+        }
+        Err(err) => {
+            tracing::error!(
+                "Failed to release advisory lock for CVE scan execution {execution_id}: {err:#}; \
+                 closing the connection instead of returning it to the pool"
+            );
+            if let Err(close_err) = conn.close().await {
+                tracing::error!(
+                    "Failed to close CVE scan execution lock connection for {execution_id}: {close_err:#}"
+                );
+            }
+            return;
+        }
+    }
+    drop(conn);
 }
 
 /// Get derivations that need CVE scanning
@@ -1397,66 +1489,130 @@ pub async fn enqueue_fleet_cve_scans(
 
 /// Atomically claim queued CVE scans for execution.
 ///
-/// Selecting and claiming must happen in one statement. A plain `SELECT`
-/// followed by a separate `UPDATE` lets two `cf-server` processes sharing a
-/// database read the same `pending` row and both execute it: the partial unique
-/// index does not help, because both workers operate on the *same* row rather
-/// than inserting competing ones.
+/// # Composite-assessment atomicity
 ///
-/// `FOR UPDATE SKIP LOCKED` gives each caller a disjoint set of rows, and the
-/// `status = 'pending'` predicate in the UPDATE is a second guard so a row that
-/// changed state between planning and execution is not claimed twice. Only rows
-/// actually transitioned by this call are returned, so a caller may execute
-/// exactly what it received.
+/// Claiming `pending -> in_progress` and invalidating any composite
+/// assessment's prior `cve_block` Pass for the same derivation commit in the
+/// same transaction. [`scan_outcome`][crate::services::composite_enforcement]
+/// treats an `in_progress` scan as `NotChecked`/blocking, so a Pass persisted
+/// while the derivation had only a completed scan MUST stop authorizing
+/// deployment as soon as a retry actually starts, not merely when it is
+/// queued as `pending`. Persisting the claim and the composite recomputation
+/// separately would leave a window where a reader could observe the scan as
+/// `in_progress` while the composite assessment still reports the old Pass.
+/// This function calls [`persist_scan_phase_in_tx`][composite_persist] inside
+/// the exact transaction that performs the claim so no such window is ever
+/// committed.
+///
+/// [composite_persist]: crate::services::composite_enforcement::persist_scan_phase_in_tx
+///
+/// # Claim procedure and lock order
+///
+/// Candidate rows are first identified with a plain, unlocked `SELECT`. The
+/// actual exclusivity comes from the per-candidate guarded `UPDATE ... WHERE
+/// status = 'pending'` below, so two callers that both see the same candidate
+/// cannot both win it: PostgreSQL's row lock serializes their `UPDATE`
+/// statements, and the loser's `WHERE status = 'pending'` predicate no longer
+/// matches once the winner commits.
+///
+/// Each candidate is claimed in its own short transaction that:
+///
+/// 1. Acquires the established POA&M/composite derivation lock via
+///    [`lock_poam_findings_for_derivation_tx`][lock_poam] — the same lock
+///    every other CVE scan transition (create/complete/fail/revoke) acquires
+///    before mutating `cve_scans`, preserving the repository's writer lock
+///    order.
+/// 2. Performs the guarded claim UPDATE for that one row.
+/// 3. Calls `persist_scan_phase_in_tx` for the newly claimed scan.
+/// 4. Commits.
+///
+/// A claim is only appended to the returned vector after its transaction
+/// commits, so a caller never receives a claim for a scan whose composite
+/// invalidation did not durably commit alongside it.
 ///
 /// The claim timestamp is recorded in `scan_metadata.execution_started_at` so
 /// stale recovery can age a scan from when execution started rather than from
 /// when it entered the queue. Those are the same instant for worker-created
 /// scans, but can be far apart for operator-queued fleet scans.
+///
+/// [lock_poam]: crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx
 pub async fn claim_queued_cve_scans(
     pool: &PgPool,
     limit: i64,
 ) -> Result<Vec<CveScanExecutionClaim>> {
-    let rows = sqlx::query(
+    let candidates: Vec<(Uuid, i32)> = sqlx::query_as(
         r#"
-        WITH candidates AS (
-            SELECT id, gen_random_uuid() AS execution_id
-            FROM cve_scans
-            WHERE status = 'pending'
-            ORDER BY created_at ASC, id ASC
-            LIMIT $1
-            FOR UPDATE SKIP LOCKED
-        )
-        UPDATE cve_scans cs
-        SET status = 'in_progress',
-            attempts = cs.attempts + 1,
-            scan_metadata = COALESCE(cs.scan_metadata, '{}'::jsonb)
-                || jsonb_build_object(
-                    'execution_id', c.execution_id,
-                    'execution_started_at', NOW(),
-                    'execution_heartbeat_at', NOW()
-                )
-        FROM candidates c
-        WHERE cs.id = c.id
-          AND cs.status = 'pending'
-        RETURNING
-            cs.id AS scan_id,
-            cs.derivation_id,
-            (cs.scan_metadata ->> 'execution_id')::uuid AS execution_id
+        SELECT id, derivation_id
+        FROM cve_scans
+        WHERE status = 'pending'
+        ORDER BY created_at ASC, id ASC
+        LIMIT $1
         "#,
     )
     .bind(limit)
     .fetch_all(pool)
     .await?;
 
-    Ok(rows
-        .into_iter()
-        .map(|row| CveScanExecutionClaim {
+    let mut claims = Vec::with_capacity(candidates.len());
+    for (scan_id, derivation_id) in candidates {
+        let mut tx = pool.begin().await?;
+        // CONCURRENCY: Acquire the derivation's POA&M/composite lock before
+        // the claim mutation, matching every other CVE scan writer. This
+        // also serializes against a concurrent caller that identified the
+        // same candidate: the loser blocks here until the winner commits,
+        // then its guarded UPDATE below affects zero rows.
+        crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx(
+            &mut tx,
+            derivation_id,
+        )
+        .await?;
+
+        let claimed = sqlx::query(
+            r#"
+            UPDATE cve_scans
+            SET status = 'in_progress',
+                attempts = attempts + 1,
+                scan_metadata = COALESCE(scan_metadata, '{}'::jsonb)
+                    || jsonb_build_object(
+                        'execution_id', gen_random_uuid(),
+                        'execution_started_at', NOW(),
+                        'execution_heartbeat_at', NOW()
+                    )
+            WHERE id = $1
+              AND status = 'pending'
+            RETURNING
+                id AS scan_id,
+                derivation_id,
+                (scan_metadata ->> 'execution_id')::uuid AS execution_id
+            "#,
+        )
+        .bind(scan_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let Some(row) = claimed else {
+            // Another caller already claimed this row between the unlocked
+            // candidate read above and this transaction's guarded UPDATE.
+            tx.rollback().await?;
+            continue;
+        };
+
+        let claim = CveScanExecutionClaim {
             scan_id: row.get("scan_id"),
             derivation_id: row.get("derivation_id"),
             execution_id: row.get("execution_id"),
-        })
-        .collect())
+        };
+        // INVARIANT: The claim transition and the composite recomputation
+        // that invalidates the prior Pass commit together. No observer can
+        // see this scan `in_progress` while its composite assessment still
+        // reports stale Pass evidence.
+        crate::services::composite_enforcement::persist_scan_phase_in_tx(&mut tx, claim.scan_id)
+            .await?;
+        tx.commit().await?;
+        claims.push(claim);
+    }
+
+    Ok(claims)
 }
 
 /// Refresh a queued execution lease. A zero-row result means this worker no
@@ -2471,6 +2627,66 @@ mod tests {
             .execute(&setup_pool)
             .await
             .expect("claim-race derivation should be deleted");
+    }
+
+    /// Directly proves the PostgreSQL advisory-lock detection query against a
+    /// real session: [`execution_lock_is_held`] must observe a lock acquired
+    /// by [`acquire_execution_lock`] on a separate connection, and must stop
+    /// observing it the moment [`release_execution_lock`] confirms release.
+    ///
+    /// This is a regression against comparing `objid` directly to the full
+    /// 64-bit lock key: that comparison never matches a real PostgreSQL
+    /// single-bigint advisory lock, so the assertion below would fail with
+    /// that bug reintroduced.
+    #[tokio::test]
+    async fn execution_lock_detects_real_acquire_and_confirmed_release() {
+        let Ok(database_url) = std::env::var("CRYSTAL_FORGE_TEST_DATABASE_URL") else {
+            return;
+        };
+        let observer_pool = PgPool::connect(&database_url)
+            .await
+            .expect("dedicated CVE test database should be reachable");
+        let holder_pool = PgPool::connect(&database_url)
+            .await
+            .expect("lock-holder pool should connect");
+
+        let execution_id = Uuid::new_v4();
+
+        assert!(
+            !execution_lock_is_held(&observer_pool, execution_id)
+                .await
+                .expect("lock status should be queryable before acquisition"),
+            "an unacquired execution lock must not be reported as held"
+        );
+
+        let mut holder_conn = holder_pool
+            .acquire()
+            .await
+            .expect("lock-holder connection should be acquired");
+        acquire_execution_lock(&mut holder_conn, execution_id)
+            .await
+            .expect("advisory lock should be acquired");
+
+        assert!(
+            execution_lock_is_held(&observer_pool, execution_id)
+                .await
+                .expect("lock status should be queryable while held"),
+            "a real PostgreSQL advisory lock acquired on another session must be detected"
+        );
+
+        assert!(
+            release_execution_lock(&mut holder_conn, execution_id)
+                .await
+                .expect("unlock should execute"),
+            "pg_advisory_unlock must confirm this session held and released the lock"
+        );
+
+        assert!(
+            !execution_lock_is_held(&observer_pool, execution_id)
+                .await
+                .expect("lock status should be queryable after release"),
+            "the lock must no longer be observed as held once explicitly released"
+        );
     }
 
     /// Queue age is not execution age: a row may wait longer than the stale

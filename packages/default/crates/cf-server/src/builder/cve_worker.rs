@@ -29,10 +29,11 @@ use crate::models::cache_destination::CacheDestination;
 use crate::queries::cache_destinations::get_cache_destination;
 use crate::queries::cve_scans::{
     CreateCveScanOutcome, CveScanExecutionClaim, acknowledge_revoked_cve_scan_execution,
-    acquire_execution_lock, release_execution_lock, claim_queued_cve_scans, create_cve_scan, get_targets_needing_cve_rescan,
-    get_targets_needing_cve_scan, heartbeat_cve_scan_execution,
+    acquire_execution_lock, claim_queued_cve_scans, create_cve_scan,
+    get_targets_needing_cve_rescan, get_targets_needing_cve_scan, heartbeat_cve_scan_execution,
     mark_cve_scan_failed_by_id_for_execution, mark_cve_scan_failed_for_execution,
-    recover_stale_scans, requeue_cve_scan_execution, save_scan_results_for_execution,
+    recover_stale_scans, release_execution_lock_or_close, requeue_cve_scan_execution,
+    save_scan_results_for_execution,
 };
 use crate::queries::derivations::get_derivation_by_id;
 use crate::queries::scanning::get_scan_schedule_policy;
@@ -672,8 +673,10 @@ async fn scan_one<R: CveScanRunner + Sync>(
 ///
 /// Keeps a PostgreSQL session-level advisory lock held for the entire execution
 /// duration. This allows recovery to distinguish a paused live process (lock held)
-/// from a crashed process (lock released). The lock is automatically released when
-/// the connection is returned to the pool or closed.
+/// from a crashed process (lock released). The lock is explicitly released before
+/// the connection is returned to the pool. The connection must NOT be returned
+/// to the pool while still owning an advisory lock, because a pooled connection
+/// could be reused by another worker and silently violate active-scan uniqueness.
 ///
 /// Keeping this as the single execution path is deliberate. A caller that
 /// invokes vulnix directly would skip cache materialization and fail for
@@ -717,11 +720,11 @@ async fn execute_scan<R: CveScanRunner + Sync>(
         tokio::select! {
             biased;
             result = &mut execution => {
-                // RELEASE the advisory lock BEFORE dropping the connection,
-                // so the pooled connection never returns to general use while
-                // still owning an execution lock (P1-1 fix).
-                let _ = release_execution_lock(&mut lock_conn, execution_id).await;
-                drop(lock_conn);
+                // Release the advisory lock (or discard the connection if
+                // release cannot be confirmed) before returning it to the
+                // pool, so a pooled connection never re-enters general use
+                // while still owning an execution lock.
+                release_execution_lock_or_close(lock_conn, execution_id).await;
                 return result;
             }
             _ = heartbeat.tick() => {
@@ -733,13 +736,12 @@ async fn execute_scan<R: CveScanRunner + Sync>(
                 {
                     Ok(Ok(true)) => {}
                     Ok(Ok(false)) => {
-                        // Cancel the scanner before acknowledging revocation.
-                        // Until this future is dropped the row remains
-                        // in_progress, preserving active-scan uniqueness.
+                        // Cancel the scanner before releasing the lock or
+                        // acknowledging revocation. Until this future is
+                        // dropped the row remains in_progress, preserving
+                        // active-scan uniqueness.
                         drop(execution);
-                        // RELEASE the advisory lock before returning connection to pool
-                        let _ = release_execution_lock(&mut lock_conn, execution_id).await;
-                        drop(lock_conn);
+                        release_execution_lock_or_close(lock_conn, execution_id).await;
                         let _ = acknowledge_revoked_cve_scan_execution(
                             pool,
                             scan_id,
@@ -750,9 +752,7 @@ async fn execute_scan<R: CveScanRunner + Sync>(
                     }
                     Ok(Err(err)) => {
                         drop(execution);
-                        // RELEASE the advisory lock before returning connection to pool
-                        let _ = release_execution_lock(&mut lock_conn, execution_id).await;
-                        drop(lock_conn);
+                        release_execution_lock_or_close(lock_conn, execution_id).await;
                         let heartbeat_error = err.context(
                             "Failed to refresh CVE scan execution heartbeat",
                         );
@@ -768,9 +768,7 @@ async fn execute_scan<R: CveScanRunner + Sync>(
                     }
                     Err(_) => {
                         drop(execution);
-                        // RELEASE the advisory lock before returning connection to pool
-                        let _ = release_execution_lock(&mut lock_conn, execution_id).await;
-                        drop(lock_conn);
+                        release_execution_lock_or_close(lock_conn, execution_id).await;
                         let heartbeat_error = anyhow::anyhow!(
                             "Timed out refreshing CVE scan {scan_id} execution heartbeat"
                         );
@@ -2000,9 +1998,25 @@ mod tests {
         assert!(status.next_run_at.is_some(), "next_run_at should be set");
     }
 
+    /// Proves the complete stale-owner fencing invariant against a real
+    /// PostgreSQL session, in four stages:
+    ///
+    /// 1. A stale heartbeat with a still-held execution lock (a paused live
+    ///    process) must leave the row completely untouched — recovery must
+    ///    revoke nothing while the owning session could still be alive.
+    /// 2. Explicitly releasing the lock (never merely dropping the pooled
+    ///    connection, which does not terminate the backend session) makes the
+    ///    scan look like a crashed process, so the next recovery pass revokes
+    ///    it while still retaining active-scan uniqueness.
+    /// 3. Before the acknowledgment grace period elapses, revocation alone
+    ///    does not finalize the row.
+    /// 4. Once the grace period has elapsed, recovery finalizes the
+    ///    revocation to `failed`.
     #[tokio::test]
     async fn stale_execution_lock_prevents_recovery_paused_process_race() {
-        use crate::queries::cve_scans::{acquire_execution_lock, execution_lock_is_held};
+        use crate::queries::cve_scans::{
+            acquire_execution_lock, execution_lock_is_held, release_execution_lock,
+        };
 
         let Some(pool) = db_test_pool().await else {
             return;
@@ -2014,7 +2028,7 @@ mod tests {
         .await
         .expect("independent stale-recovery pool should connect");
 
-        // Create an execution row with an ownership claim
+        // 1. Create a token-owned in_progress scan.
         let derivation = insert_derivation(
             &pool,
             None,
@@ -2027,13 +2041,13 @@ mod tests {
         let claim = create_cve_scan(&pool, derivation.id, "test-vulnix", None)
             .await
             .expect("execution claim should be created");
-
         let CreateCveScanOutcome::Created(claim) = claim else {
             panic!("expected a newly created execution claim");
         };
 
-        // Simulate a paused/stalled execution: acquire the advisory lock in a separate
-        // connection that we'll hold for the duration of the test.
+        // 2. Acquire its execution advisory lock on a dedicated connection,
+        // simulating a paused/stalled live process that still holds its
+        // backend session.
         let mut lock_holder = pool
             .acquire()
             .await
@@ -2042,7 +2056,7 @@ mod tests {
             .await
             .expect("advisory lock should be acquired by the simulated paused execution");
 
-        // Verify the lock is held
+        // 3. The lock must be observably held.
         assert!(
             execution_lock_is_held(&pool, claim.execution_id)
                 .await
@@ -2050,7 +2064,7 @@ mod tests {
             "execution lock must be held after acquisition"
         );
 
-        // Artificially age the heartbeat to trigger stale recovery
+        // 4. Artificially age the heartbeat past the stale threshold.
         sqlx::query(
             r#"
             UPDATE cve_scans
@@ -2065,59 +2079,110 @@ mod tests {
         .await
         .expect("heartbeat should be aged");
 
-        // Attempt recovery while the lock is still held
-        let recovered_count = recover_stale_scans(&recovery_pool, std::time::Duration::from_secs(1800))
-            .await
-            .expect("concurrent stale recovery should succeed");
-
-        // The execution should have been revoked (marked as awaiting acknowledgment)
-        // but NOT finalized to 'failed' because the lock is still held
+        // 5/6. A stale heartbeat with a still-held execution lock must not
+        // revoke or otherwise touch the row: recovery must not treat a
+        // paused live process as crashed.
+        let recovered_while_held =
+            recover_stale_scans(&recovery_pool, std::time::Duration::from_secs(1800))
+                .await
+                .expect("recovery attempt while lock is held should succeed");
+        assert_eq!(
+            recovered_while_held, 0,
+            "recovery must not act on a stale heartbeat while its advisory lock is still held"
+        );
         let (status, is_revoked): (String, bool) = sqlx::query_as(
-            r#"
-            SELECT status, scan_metadata ? 'execution_revoked_at' FROM cve_scans WHERE id = $1
-            "#,
+            "SELECT status, scan_metadata ? 'execution_revoked_at' FROM cve_scans WHERE id = $1",
         )
         .bind(claim.scan_id)
         .fetch_one(&pool)
         .await
         .expect("execution state should be queryable");
-
         assert_eq!(
             status, "in_progress",
-            "execution must remain in_progress while lock is held (revocation awaits acknowledgment)"
+            "a live paused process must remain in_progress and untouched"
         );
-        assert!(is_revoked, "execution should be marked as revoked");
+        assert!(
+            !is_revoked,
+            "a live paused process must not be revoked while its lock is held"
+        );
 
-        // Release the lock by dropping the connection
+        // 7. Explicitly release the advisory lock. Dropping the pooled
+        // connection is intentionally NOT used here: returning a connection
+        // to the pool does not terminate its backend session, so the lock
+        // would remain held from PostgreSQL's perspective.
+        assert!(
+            release_execution_lock(&mut lock_holder, claim.execution_id)
+                .await
+                .expect("explicit unlock should execute"),
+            "pg_advisory_unlock must confirm the lock was released"
+        );
         drop(lock_holder);
 
-        // Verify the lock is now released
+        // 8. The lock must now be observably released.
         assert!(
             !execution_lock_is_held(&pool, claim.execution_id)
                 .await
                 .expect("lock status should be queryable after release"),
-            "execution lock must be released after connection drop"
+            "execution lock must be released after explicit unlock"
         );
 
-        // Now recovery should finalize the revoked scan to 'failed'
-        let recovered_count_after = recover_stale_scans(&recovery_pool, std::time::Duration::from_secs(1800))
-            .await
-            .expect("concurrent stale recovery should succeed on finalization pass");
-
-        let (final_status,): (String,) = sqlx::query_as(
-            "SELECT status FROM cve_scans WHERE id = $1",
+        // 9/10. Recovery may now revoke the still heartbeat-stale execution,
+        // but must retain active-scan uniqueness until the acknowledgment
+        // grace period elapses.
+        let recovered_after_release =
+            recover_stale_scans(&recovery_pool, std::time::Duration::from_secs(1800))
+                .await
+                .expect("recovery after lock release should succeed");
+        assert_eq!(
+            recovered_after_release, 1,
+            "recovery must revoke a stale execution once its lock is released"
+        );
+        let (status, is_revoked): (String, bool) = sqlx::query_as(
+            "SELECT status, scan_metadata ? 'execution_revoked_at' FROM cve_scans WHERE id = $1",
         )
         .bind(claim.scan_id)
         .fetch_one(&pool)
         .await
-        .expect("final execution state should be queryable");
-
+        .expect("revoked execution state should be queryable");
         assert_eq!(
-            final_status, "failed",
-            "execution must be finalized to 'failed' after lock release"
+            status, "in_progress",
+            "revocation retains active-scan uniqueness until the grace period elapses"
+        );
+        assert!(
+            is_revoked,
+            "a crashed process must be revoked once its lock is gone"
         );
 
-        // Cleanup
+        // 11. Age execution_revoked_at beyond the acknowledgment grace period
+        // instead of sleeping in real time.
+        sqlx::query(
+            "UPDATE cve_scans SET scan_metadata = scan_metadata || jsonb_build_object('execution_revoked_at', NOW() - INTERVAL '2 minutes') WHERE id = $1",
+        )
+        .bind(claim.scan_id)
+        .execute(&pool)
+        .await
+        .expect("revocation should be artificially aged beyond its grace period");
+
+        // 12/13. Recovery now finalizes the expired revocation to failed.
+        let recovered_final =
+            recover_stale_scans(&recovery_pool, std::time::Duration::from_secs(1800))
+                .await
+                .expect("finalization recovery should succeed");
+        assert_eq!(
+            recovered_final, 1,
+            "an expired revocation must be finalized exactly once"
+        );
+        let final_status: String = sqlx::query_scalar("SELECT status FROM cve_scans WHERE id = $1")
+            .bind(claim.scan_id)
+            .fetch_one(&pool)
+            .await
+            .expect("final execution state should be queryable");
+        assert_eq!(
+            final_status, "failed",
+            "execution must be finalized to 'failed' after the grace period elapses"
+        );
+
+        // 14. Clean up.
         sqlx::query("DELETE FROM cve_scans WHERE id = $1")
             .bind(claim.scan_id)
             .execute(&pool)

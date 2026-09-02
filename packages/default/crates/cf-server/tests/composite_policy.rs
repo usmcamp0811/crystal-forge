@@ -20,8 +20,8 @@ use crystal_forge::models::deployment_policies::{
 };
 use crystal_forge::queries::cve_scans::{
     CreateCveScanOutcome, CveScanExecutionClaim, acknowledge_revoked_cve_scan_execution,
-    complete_cve_scan_for_execution, create_cve_scan, mark_cve_scan_failed_by_id_for_execution,
-    recover_stale_scans,
+    claim_queued_cve_scans, complete_cve_scan_for_execution, create_cve_scan,
+    mark_cve_scan_failed_by_id_for_execution, recover_stale_scans, requeue_cve_scan_execution,
 };
 use crystal_forge::queries::deployment_policies::{
     create_deployment_policy, get_deployment_policy_by_version, update_deployment_policy,
@@ -1415,6 +1415,184 @@ async fn newer_pending_and_failed_scan_cannot_be_reversed_by_older_completion(po
     .await
     .unwrap();
     assert_eq!(blocked.outcome, EnforcementOutcome::Error);
+}
+
+/// Proves that a queued retry claim atomically invalidates the prior
+/// completed scan's composite Pass: the `pending -> in_progress` transition
+/// and the composite recomputation that turns `cve_block` from `pass` to
+/// `not_checked`/blocking commit in the exact same transaction, so no
+/// observer can see the retry `in_progress` while the composite assessment
+/// still reports stale Pass evidence.
+#[sqlx::test]
+async fn queued_retry_claim_atomically_invalidates_prior_pass_composite(pool: PgPool) {
+    let context = assessment_context(&pool).await;
+    persist_evaluation(&pool, &context, EnforcementOutcome::Pass).await;
+
+    // A prior completed scan with zero critical CVEs satisfies
+    // `phase_config()`'s `cve_block` rule (max_allowed = 0), so the composite
+    // assessment starts out Pass for that rule. `phase_config()` also has a
+    // `time_window` deployment-phase rule that only becomes Pass once
+    // deployment authorization actually evaluates it, so authorize once here
+    // to establish a genuine full-composite Pass baseline.
+    completed_scan(&pool, &context, 0).await;
+    let baseline = authorize_deployment_at(
+        &pool,
+        context.system_id,
+        context.derivation_id,
+        &context.store_path,
+        Utc.with_ymd_and_hms(2026, 8, 24, 12, 0, 0).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        baseline.outcome,
+        EnforcementOutcome::Pass,
+        "the baseline must authorize deployment before the retry is enqueued"
+    );
+    let (overall_before, rule_before): (String, String) = sqlx::query_as(
+        r#"
+        SELECT assessment.overall_outcome, result.outcome
+        FROM composite_policy_assessments assessment
+        JOIN composite_policy_rule_results result ON result.assessment_id = assessment.id
+        WHERE assessment.system_id = $1 AND result.kind = 'cve_block'
+        "#,
+    )
+    .bind(context.system_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        rule_before, "pass",
+        "a clean completed scan must pass cve_block"
+    );
+    assert_eq!(
+        overall_before, "pass",
+        "the full composite must authorize deployment"
+    );
+
+    // An operator enqueues a retry. Merely queuing it does not invalidate the
+    // prior evidence: the derivation's most recent *executing* evidence is
+    // still the completed scan until the retry actually starts.
+    let pending_scan_id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO cve_scans (
+            id, derivation_id, scanner_name, status, attempts,
+            total_packages, total_vulnerabilities,
+            critical_count, high_count, medium_count, low_count
+        )
+        VALUES ($1, $2, 'vulnix', 'pending', 0, 0, 0, 0, 0, 0, 0)
+        "#,
+    )
+    .bind(pending_scan_id)
+    .bind(context.derivation_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let rule_while_pending: String = sqlx::query_scalar(
+        r#"
+        SELECT result.outcome
+        FROM composite_policy_assessments assessment
+        JOIN composite_policy_rule_results result ON result.assessment_id = assessment.id
+        WHERE assessment.system_id = $1 AND result.kind = 'cve_block'
+        "#,
+    )
+    .bind(context.system_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        rule_while_pending, "pass",
+        "a merely queued retry must not invalidate prior terminal evidence"
+    );
+
+    // The worker claims the queued retry. The claim transition and the
+    // composite invalidation must be visible together as soon as this call
+    // returns: there is no separate committed state where the scan is
+    // in_progress while the composite assessment still reports Pass.
+    let claimed = claim_queued_cve_scans(&pool, 10).await.unwrap();
+    let claim = claimed
+        .into_iter()
+        .find(|claim| claim.scan_id == pending_scan_id)
+        .expect("the queued retry must be claimed");
+
+    let (scan_status, overall_after, rule_after, blocking_after, source_scan_id): (
+        String,
+        String,
+        String,
+        bool,
+        Option<Uuid>,
+    ) = sqlx::query_as(
+        r#"
+        SELECT scan.status, assessment.overall_outcome, result.outcome, result.blocking,
+               result.source_scan_id
+        FROM cve_scans scan
+        JOIN composite_policy_assessments assessment
+          ON assessment.derivation_id = scan.derivation_id
+        JOIN composite_policy_rule_results result ON result.assessment_id = assessment.id
+        WHERE scan.id = $1 AND result.kind = 'cve_block'
+        "#,
+    )
+    .bind(pending_scan_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(scan_status, "in_progress", "the claim must start the retry");
+    assert_eq!(
+        rule_after, "not_checked",
+        "an in_progress retry must immediately invalidate the prior Pass"
+    );
+    assert!(
+        blocking_after,
+        "an invalidated cve_block rule must block deployment"
+    );
+    assert_eq!(
+        overall_after, "not_checked",
+        "the full composite must stop authorizing deployment once the retry starts"
+    );
+    assert_eq!(
+        source_scan_id,
+        Some(pending_scan_id),
+        "the claimed retry must be the current evidence source, not the old completed scan"
+    );
+
+    // Requeuing an already-started retry (for example, because execution was
+    // disabled before the scanner ran) must not accidentally restore the
+    // stale Pass: the composite invalidation already committed at claim time
+    // and requeuing only resets the scan row's own status.
+    assert!(
+        requeue_cve_scan_execution(
+            &pool,
+            claim.scan_id,
+            claim.execution_id,
+            "test-requeue-before-scanner-start",
+        )
+        .await
+        .unwrap(),
+        "the claim owner must be able to requeue its own execution"
+    );
+    let (requeued_status, rule_after_requeue): (String, String) = sqlx::query_as(
+        r#"
+        SELECT scan.status, result.outcome
+        FROM cve_scans scan
+        JOIN composite_policy_assessments assessment
+          ON assessment.derivation_id = scan.derivation_id
+        JOIN composite_policy_rule_results result ON result.assessment_id = assessment.id
+        WHERE scan.id = $1 AND result.kind = 'cve_block'
+        "#,
+    )
+    .bind(pending_scan_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        requeued_status, "pending",
+        "requeue returns the scan to pending"
+    );
+    assert_eq!(
+        rule_after_requeue, "not_checked",
+        "requeuing a previously-started retry must not restore the stale Pass"
+    );
 }
 
 #[sqlx::test]
