@@ -3,11 +3,11 @@ id: TASK-411
 title: >-
   Builds sidebar alert badge (64) not dismissing when viewing completed/failed
   builds
-status: Review
+status: Done
 assignee:
   - agent
 created_date: '2026-07-31 04:08'
-updated_date: '2026-07-31 04:21'
+updated_date: '2026-09-02 02:41'
 labels:
   - builds
   - sidebar
@@ -26,7 +26,7 @@ modified_files:
   - packages/web-ui/src/views/builds.rs
 priority: high
 type: bug
-ordinal: 400000
+ordinal: 20000
 ---
 
 ## Description
