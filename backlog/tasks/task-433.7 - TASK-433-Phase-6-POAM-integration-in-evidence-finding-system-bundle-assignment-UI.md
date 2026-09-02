@@ -3,7 +3,7 @@ id: TASK-433.7
 title: >-
   TASK-433 Phase 6: POA&M integration in evidence/finding, system, bundle,
   assignment UI
-status: Review
+status: Done
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:43'
@@ -29,7 +29,7 @@ modified_files:
 parent_task_id: TASK-433
 priority: high
 type: feature
-ordinal: 474000
+ordinal: 6000
 ---
 
 ## Description
