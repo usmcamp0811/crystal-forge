@@ -29,7 +29,7 @@ use crate::models::cache_destination::CacheDestination;
 use crate::queries::cache_destinations::get_cache_destination;
 use crate::queries::cve_scans::{
     CreateCveScanOutcome, CveScanExecutionClaim, acknowledge_revoked_cve_scan_execution,
-    acquire_execution_lock, claim_queued_cve_scans, create_cve_scan, get_targets_needing_cve_rescan,
+    acquire_execution_lock, release_execution_lock, claim_queued_cve_scans, create_cve_scan, get_targets_needing_cve_rescan,
     get_targets_needing_cve_scan, heartbeat_cve_scan_execution,
     mark_cve_scan_failed_by_id_for_execution, mark_cve_scan_failed_for_execution,
     recover_stale_scans, requeue_cve_scan_execution, save_scan_results_for_execution,
@@ -687,8 +687,9 @@ async fn execute_scan<R: CveScanRunner + Sync>(
     scan_id: uuid::Uuid,
     execution_id: uuid::Uuid,
 ) -> Result<()> {
-    // INVARIANT: This connection holds the execution lock for the entire scan
-    // lifetime. Do not drop it until execution completes.
+    // Acquire a connection from the pool that will hold the execution lock.
+    // The lock must be released before this connection is returned to the pool,
+    // otherwise the pool would return a connection still owning an advisory lock.
     let mut lock_conn = pool.acquire().await
         .context("Failed to acquire connection for CVE scan execution lock")?;
     acquire_execution_lock(&mut lock_conn, execution_id).await
@@ -716,7 +717,10 @@ async fn execute_scan<R: CveScanRunner + Sync>(
         tokio::select! {
             biased;
             result = &mut execution => {
-                // Drop the lock connection and return the result.
+                // RELEASE the advisory lock BEFORE dropping the connection,
+                // so the pooled connection never returns to general use while
+                // still owning an execution lock (P1-1 fix).
+                let _ = release_execution_lock(&mut lock_conn, execution_id).await;
                 drop(lock_conn);
                 return result;
             }
@@ -733,6 +737,8 @@ async fn execute_scan<R: CveScanRunner + Sync>(
                         // Until this future is dropped the row remains
                         // in_progress, preserving active-scan uniqueness.
                         drop(execution);
+                        // RELEASE the advisory lock before returning connection to pool
+                        let _ = release_execution_lock(&mut lock_conn, execution_id).await;
                         drop(lock_conn);
                         let _ = acknowledge_revoked_cve_scan_execution(
                             pool,
@@ -744,6 +750,8 @@ async fn execute_scan<R: CveScanRunner + Sync>(
                     }
                     Ok(Err(err)) => {
                         drop(execution);
+                        // RELEASE the advisory lock before returning connection to pool
+                        let _ = release_execution_lock(&mut lock_conn, execution_id).await;
                         drop(lock_conn);
                         let heartbeat_error = err.context(
                             "Failed to refresh CVE scan execution heartbeat",
@@ -760,6 +768,8 @@ async fn execute_scan<R: CveScanRunner + Sync>(
                     }
                     Err(_) => {
                         drop(execution);
+                        // RELEASE the advisory lock before returning connection to pool
+                        let _ = release_execution_lock(&mut lock_conn, execution_id).await;
                         drop(lock_conn);
                         let heartbeat_error = anyhow::anyhow!(
                             "Timed out refreshing CVE scan {scan_id} execution heartbeat"

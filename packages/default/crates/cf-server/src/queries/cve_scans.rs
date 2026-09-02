@@ -118,6 +118,22 @@ pub async fn acquire_execution_lock(conn: &mut sqlx::PgConnection, execution_id:
     Ok(())
 }
 
+/// Release a PostgreSQL session-level advisory lock for an execution.
+///
+/// Must be called on the same connection that acquired the lock.
+/// After this call, the connection may be safely returned to the pool
+/// without retaining the advisory lock.
+///
+/// The full 64-bit lock_id is bound to $1; PostgreSQL internally splits it.
+pub async fn release_execution_lock(conn: &mut sqlx::PgConnection, execution_id: Uuid) -> Result<()> {
+    let lock_id = execution_lock_id(execution_id);
+    sqlx::query("SELECT pg_advisory_unlock($1::bigint)")
+        .bind(lock_id)
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
 /// Get derivations that need CVE scanning
 pub async fn get_targets_needing_cve_scan(
     pool: &PgPool,
@@ -1630,7 +1646,17 @@ pub async fn recover_stale_scans(
             match Uuid::parse_str(&execution_id_str) {
                 Ok(execution_id) => {
                     // Lock is not held means the session crashed or ended.
-                    !execution_lock_is_held(pool, execution_id).await.unwrap_or(false)
+                    // If we cannot determine lock status, do NOT revoke —
+                    // fail closed to preserve ownership fencing (P1-3 fix).
+                    let lock_is_held = execution_lock_is_held(pool, execution_id)
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "failed to inspect execution lock for scan {}: {}",
+                                scan_id, e
+                            )
+                        })?;
+                    !lock_is_held
                 }
                 Err(_) => {
                     // Invalid UUID in metadata; revoke it.
