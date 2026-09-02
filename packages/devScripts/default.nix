@@ -438,6 +438,9 @@ let
       nix
       coreutils
       procps
+      # `ss`, used by db-usability-check.sh to find which OS process is
+      # listening on the dev database port for its worktree-identity check.
+      iproute2
       curl
       postgresql
       dioxus-cli-0_7_3
@@ -467,7 +470,12 @@ let
       DB_STARTED_BY_US=0
       if ! pg_isready -h 127.0.0.1 -p 3042 -U crystal_forge -d crystal_forge &>/dev/null; then
         echo "📦 PostgreSQL is not running. Starting db-only (detached)..."
-        setsid nix run "$PROJECT_ROOT#devScripts.db-only" -- up --tui=false \
+        # See db-only-start.sh: it starts db-only with $PROJECT_ROOT as its
+        # working directory, which its relative dataDir needs to resolve
+        # to the location the worktree-identity check below expects,
+        # regardless of which directory inside this worktree run-ui-dev
+        # itself was invoked from.
+        setsid bash ${./db-only-start.sh} "$PROJECT_ROOT" \
           >/tmp/cf-db-only.log 2>&1 < /dev/null &
         DB_STARTED_BY_US=1
         echo "⏳ Waiting for PostgreSQL to be ready (logs: /tmp/cf-db-only.log)..."
@@ -483,8 +491,38 @@ let
           sleep 1
         done
       else
-        echo "✅ PostgreSQL is already running."
+        echo "🔎 PostgreSQL is already running on port 3042; verifying the crystal_forge database is usable..."
       fi
+
+      # `pg_isready` only proves a PostgreSQL process answers on this port;
+      # it does not prove that process is this worktree's own crystal_forge
+      # dev database. Every worktree shares the same fixed dev database
+      # port, but each gets its own on-disk PostgreSQL data directory (see
+      # dbOnly.config.services.postgres.db.dataDir below), so a different
+      # worktree's leftover db-only PostgreSQL process can answer here
+      # instead, and a database whose public-schema objects are owned by an
+      # unrelated role can also answer here. db-usability-check.sh checks
+      # both — worktree identity (via the OS, not a database privilege, so
+      # it applies to databases created before this check existed too),
+      # then application usability — as independent conditions, and prints
+      # its own specific diagnostic and recovery command for whichever one
+      # fails. This never mutates the database or the foreign process; it
+      # only reads process and privilege metadata, so it is safe to run
+      # unconditionally on every start, including against a database a
+      # developer is actively using.
+      db_only_data_dir_config="${dbOnly.config.services.postgres.db.dataDir}"
+      case "$db_only_data_dir_config" in
+        /*) expected_data_dir="$db_only_data_dir_config" ;;
+        *) expected_data_dir="$PROJECT_ROOT/$db_only_data_dir_config" ;;
+      esac
+      expected_data_dir="$(readlink -m -- "$expected_data_dir")"
+      if ! bash ${./db-usability-check.sh} 127.0.0.1 3042 crystal_forge ${db_password} crystal_forge \
+        "$expected_data_dir"; then
+        echo "" >&2
+        echo "❌ run-ui-dev cannot safely reuse the PostgreSQL instance on 127.0.0.1:3042 (see above)." >&2
+        exit 1
+      fi
+      echo "✅ PostgreSQL is running and this worktree's crystal_forge database is usable."
 
       # ── 2. Ensure config and keys exist ──────────────────────────────
       if [ ! -f "''${CRYSTAL_FORGE_CONFIG:-}" ]; then
@@ -580,6 +618,28 @@ let
 
       cd "$WEB_UI_DIR"
       exec dx serve --platform web
+    '';
+  };
+
+  webUiTest = pkgs.writeShellApplication {
+    name = "web-ui-test";
+    runtimeInputs = with pkgs; [
+      coreutils
+      curl
+      git
+      gnugrep
+      gnused
+      # Visual baseline comparison stays optional. The harness only calls
+      # ImageMagick when CF_UI_BASELINES_DIR names approved baselines.
+      imagemagick
+      nodejs
+      playwright-driver
+      playwright-test
+    ];
+    text = ''
+      export NODE_PATH="${pkgs.playwright-test}/lib/node_modules"
+      export PLAYWRIGHT_BROWSERS_PATH="${pkgs.playwright-driver.browsers}"
+      exec ${pkgs.bash}/bin/bash ${../../checks/web-ui/tests/web-ui-test.sh} "$@"
     '';
   };
 
@@ -1312,7 +1372,7 @@ let
   };
 in full-stack.config.outputs.package // {
   inherit runServer runAgent runBuilder simulatePush startBuilderApi
-    runUiDev runUiFrontend bootstrapDevBuilder envExports;
+    runUiDev runUiFrontend webUiTest bootstrapDevBuilder envExports;
   cve-test = cveTest.config.outputs.package;
   state-machine-test = stateMachineTest.config.outputs.package;
   dashboard-visibility-test = dashboardVisibilityTest.config.outputs.package;
