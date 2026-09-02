@@ -1,11 +1,11 @@
 ---
 id: TASK-450.11.1
 title: Partition Web UI verification into independently reproducible checks
-status: Review
+status: Done
 assignee:
   - opencode-gpt-5.6-sol
 created_date: '2026-09-01 03:27'
-updated_date: '2026-09-02 02:39'
+updated_date: '2026-09-02 02:41'
 labels:
   - web-ui
   - testing
@@ -24,7 +24,7 @@ references:
 parent_task_id: TASK-450.11
 priority: high
 type: enhancement
-ordinal: 465000
+ordinal: 14000
 ---
 
 ## Description
