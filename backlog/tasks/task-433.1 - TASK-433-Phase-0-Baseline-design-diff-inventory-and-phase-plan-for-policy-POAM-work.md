@@ -3,11 +3,11 @@ id: TASK-433.1
 title: >-
   TASK-433 Phase 0: Baseline design-diff inventory and phase plan for
   policy/POA&M work
-status: Review
+status: Done
 assignee:
   - claude-agent
 created_date: '2026-08-23 01:42'
-updated_date: '2026-09-01 15:22'
+updated_date: '2026-09-02 02:41'
 labels:
   - design-parity
   - policy
@@ -31,7 +31,7 @@ documentation:
 parent_task_id: TASK-433
 priority: high
 type: spike
-ordinal: 433000
+ordinal: 19000
 ---
 
 ## Description

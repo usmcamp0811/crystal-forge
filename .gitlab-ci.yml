@@ -184,8 +184,10 @@ flake-check:
       - CHECK_NAME:
           - integration
           - oidc-auth
+          - run-ui-dev-db-check
           - server-regressions
           - web-ui
+          - web-ui-test-runner
   before_script:
     # Create .netrc using CI job token (more secure)
     - echo "machine ${CI_SERVER_HOST}" > ~/.netrc

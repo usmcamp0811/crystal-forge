@@ -1,10 +1,12 @@
 ---
+
 id: TASK-415
 title: Implement deployment approvals, signed running-state attestations, and attention UX
 status: In Progress
 assignee: []
 created_date: '2026-08-01 10:07'
 updated_date: '2026-08-01 10:07'
+
 labels:
 
 - design
@@ -21,10 +23,14 @@ labels:
 - attention
 - notifications
 - testing
-  dependencies:
+
+dependencies:
+
 - TASK-412
 - TASK-414
-  references:
+
+references:
+
 - 'design commit: 17d8ffe18e954824831543dc5b5684c5de4d30b9'
 - docs/design/CrystalForge/app.jsx
 - docs/design/CrystalForge/components/DashboardView.jsx
@@ -48,7 +54,9 @@ labels:
 - packages/web-ui/src/views/systems_list.rs
 - packages/web-ui/src/components/layout/
 - packages/web-ui/src/components/notifications/
-  modified_files:
+
+modified_files:
+
 - migrations/
 - packages/default/crates/cf-protocol/src/
 - packages/default/crates/cf-agent/src/
@@ -62,9 +70,13 @@ labels:
 - packages/web-ui/src/components/system/
 - packages/web-ui/src/views/
 - docs/
-  priority: high
-  type: feature
-  ordinal: 415000
+
+priority: high
+type: feature
+ordinal: 415000
+
+---
+
 
 ---
 

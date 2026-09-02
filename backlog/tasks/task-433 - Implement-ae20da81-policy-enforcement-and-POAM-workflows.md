@@ -1,11 +1,11 @@
 ---
 id: TASK-433
 title: Implement ae20da81 policy enforcement and POA&M workflows
-status: In Progress
+status: Done
 assignee:
   - claude-agent
 created_date: '2026-08-23 01:35'
-updated_date: '2026-09-01 15:22'
+updated_date: '2026-09-02 02:41'
 labels:
   - design-parity
   - policy
@@ -42,7 +42,7 @@ modified_files:
   - checks/web-ui/tests/integration-test.js
 priority: high
 type: feature
-ordinal: 1000
+ordinal: 21000
 ---
 
 ## Description

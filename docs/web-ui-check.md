@@ -19,6 +19,77 @@ approved baselines.
 
 ## Running locally
 
+### Fast development loop
+
+Enter the development shell and start the persistent development stack once:
+
+```bash
+nix develop
+run-ui-dev
+```
+
+In another terminal in the same development shell, run one or more supported
+workflows:
+
+```bash
+web-ui-test 12-systems
+web-ui-test 12-systems 12a-systems-empty-state
+```
+
+`CF_UI_TEST_STEPS` remains available when a calling tool already supplies the
+selection:
+
+```bash
+CF_UI_TEST_STEPS="12-systems" web-ui-test
+```
+
+The command prints the UI URL, selected workflows, and artifact directory.
+Artifacts are written below `.tmp/web-ui-test/` by default. The command uses
+the Nix-provided Playwright and Chromium versions from the development shell.
+It does not download a browser or restart PostgreSQL, the Crystal Forge server,
+or Dioxus.
+
+The host loop asserts semantics and captures screenshots, but it does not
+compare against approved baselines. Baseline comparison belongs to the
+authoritative check, which renders the packaged UI in a fixed environment. Set
+`CF_UI_BASELINES_DIR` to opt in locally, and expect environment-related
+differences.
+
+The `settings.devStackWorkflows` list in `coverage-manifest.json` contains the
+workflows that are repeat-safe against the persistent development stack. The
+initial list contains `12-systems` and `12a-systems-empty-state`. These
+workflows use a new browser context on each invocation and do not mutate
+persistent server state. A workflow that is not in this list fails with the
+command for the authoritative VM harness.
+Add a workflow only after confirming that it does not depend on VM services,
+ordered predecessor workflows, or state left by an earlier run.
+
+> `web-ui-test` is the fast development feedback loop. The NixOS Web UI check
+> remains the reproducible authoritative verification boundary.
+
+The runner's own contract (selection, rejection of VM-only workflows,
+readiness reporting, artifact creation, exit-status propagation) is covered by
+a separate lightweight check that starts no services:
+
+```bash
+nix build .#checks.x86_64-linux.web-ui-test-runner --no-link -L
+```
+
+### Authoritative verification
+
+Before claiming a Web UI implementation complete, run each relevant workflow
+through the authoritative NixOS check:
+
+```bash
+CF_UI_TEST_STEPS="12-systems" \
+  nix build --impure .#checks.x86_64-linux.web-ui --no-link -L
+```
+
+Run broader checks such as `nix flake check --keep-going -L` when the active
+task or repository verification policy requires them.
+
+### NixOS Web UI check
+
 ```bash
 nix build .#checks.x86_64-linux.web-ui -L
 ls result/screenshots/           # per-step PNGs + results.json + visual-report.json

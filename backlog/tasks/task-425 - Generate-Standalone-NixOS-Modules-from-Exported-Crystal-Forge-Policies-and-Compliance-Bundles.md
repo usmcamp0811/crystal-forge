@@ -3,11 +3,11 @@ id: TASK-425
 title: >-
   Generate Standalone NixOS Modules from Exported Crystal Forge Policies and
   Compliance Bundles
-status: In Progress
+status: Review
 assignee:
   - '@claude-opus-5'
 created_date: '2026-08-16 15:17'
-updated_date: '2026-08-24 14:04'
+updated_date: '2026-09-02 02:49'
 labels:
   - cli
   - nixos

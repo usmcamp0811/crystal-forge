@@ -1,11 +1,11 @@
 ---
 id: TASK-414
 title: Implement account notifications and active session management
-status: In Progress
+status: To Do
 assignee:
   - gpt-5.5
 created_date: '2026-08-01 04:04'
-updated_date: '2026-08-16 19:13'
+updated_date: '2026-09-02 03:11'
 labels:
   - frontend
   - web-ui

@@ -3,11 +3,11 @@ id: TASK-450.11
 title: >-
   Reduce authoritative web UI merge feedback below 20 minutes without weakening
   coverage
-status: In Progress
+status: Review
 assignee:
   - opencode-gpt-5.6-sol
 created_date: '2026-09-01 03:12'
-updated_date: '2026-09-01 18:45'
+updated_date: '2026-09-02 02:51'
 labels:
   - web-ui
   - testing
@@ -24,7 +24,7 @@ references:
 parent_task_id: TASK-450
 priority: high
 type: enhancement
-ordinal: 11000
+ordinal: 12000
 ---
 
 ## Description
@@ -78,6 +78,10 @@ Post-fleet correction: encode required versus advisory ownership for every ci_fa
 User-approved scope expansion: correct the production OSCAL Assessment Results generator so the real browser download passes the vendored NIST OSCAL 1.1.2 schema. Limit the production change to the three observed shape defects, add focused generator regression assertions, rerun the isolated blocking exports VM check, then continue the existing final verification and MR plan.
 
 Final review correction: make generated OSCAL control IDs NCName-safe and stable, cover names with punctuation, keep empty-scope exports schema-valid or explicitly constrained, and correct the documented AP/SSP reference guarantee. Add producer cache-state and queue metadata plus aggregate per-job timing, median, maximum, and blocking critical-path reporting before representative MR runs. Run the aggregate report through a flake-pinned Node/curl package instead of a mutable Alpine image. Correct stale baseline and SARIF fixture prose, remove local result links, then rerun focused Rust/schema and static CI/Nix verification.
+
+Review correction for MR !325 P1 blockers: (1) restore the TASK-433 imported-provenance SQL in the shared fresh-database fixture setup, add a relational fixture-chain assertion, and run the focused required governance workflow plus the full governance shard; (2) make `web-ui-evidence-report` artifact-only by removing persistent token access, curl uploads, MR note writes, related runtime inputs, tests, and runbook claims while preserving the complete exposed aggregate artifact; (3) replace the dangling OSCAL bundle/control references with a self-contained AR → embedded AP → embedded SSP → embedded Catalog chain, derive Catalog controls from real unscoped bundle policies, remove synthetic empty-scope control/component identifiers, add the official OSCAL 1.1.2 Catalog schema, and add recursive schema plus cross-document referential-integrity assertions; (4) rerun targeted static/Rust/browser checks and all blocking shards, then collect three successful representative current-head MR pipelines with required timing, queue, cache, critical-path, median, maximum, and VM phase evidence before review.
+
+User-approved governance isolation correction: constrain the 20af bulk-delete regression to policies created by that workflow, or restore equivalent fixture state before later strict captures. Preserve the intended partial-delete contract and committed strict baselines; do not approve post-deletion visuals. Add a regression contract for fixture preservation, rerun focused 20af plus affected strict workflows, then rerun the full governance shard before committing and pushing the P1 corrections.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -118,4 +122,22 @@ Committed as `5492997f` (`TASK-450.11: parallelize authoritative Web UI checks`)
 MR !325 pipeline 2810483644 exposed a CI-only runtime closure defect: all six Web UI producers exited 127 because the flake-pinned `web-ui-producer` wrapper executed `bash`, but `pkgs.bash` was absent from `runtimeInputs` in Alpine jobs. Added `pkgs.bash` to the producer package. `nix build path:.#web-ui-producer --no-link` passed, and a clean package invocation reached the producer script and returned its expected missing `CHECK_NAME` error instead of exit 127. The first pipeline is not representative timing evidence because no Web UI check reached realization.
 
 MR !325 pipeline 2810519617 reached and completed Web UI gate builds, then all completed producers failed during post-build verdict validation with `env: can't execute 'node': No such file or directory`. The producer runtime included Bash but not Node.js, which is required by `ci/check-web-ui-verdict.js`. Added `pkgs.nodejs` to `web-ui-producer.runtimeInputs`; the helper package build passed. This pipeline is not representative acceptance evidence because producer publication did not complete, although observed blocking job durations remained below 20 minutes (compatibility 846.126s, fleet 1035.032s, pipeline 264.874s) and the jobs retained artifacts.
+
+Rebased the shared branch onto `origin/dev` at `701151f4` after TASK-433 merged. Resolved the Web UI constructor, Playwright harness, GitLab CI, ownership manifest, tests, and runbook conflicts while preserving the parallel five-job blocking gate, advisory design parity, strict TASK-433 baselines, the manual governance baseline-candidate job, fatal browser diagnostics, and runtime closure fixes. The rebased commits are `0504bbd1`, `e7184518`, and `425684d7`. Ownership now validates 116 `ci_fast` steps as 44 required and 72 advisory across fleet (3/32), pipeline (5/28), and governance (36/12). Post-rebase verification passed: 28 Node tests; ownership validation; Bash syntax; GitLab YAML parse; six Web UI Nix parses and evaluations; helper package builds; `git diff --check`; and the targeted OSCAL Rust test after adapting its fixture to TASK-433's expanded `ComplianceControlEvidence` model. The fixture adaptation remains an uncommitted working-tree change pending the next commit/push step. The previously successful pipeline predates this TASK-433 integration, so three representative pipelines must be collected from the rebased MR head.
+
+Committed the post-rebase OSCAL fixture adaptation as `9d1eb180` and force-pushed the rewritten branch with an explicit lease. MR !325 now targets `origin/dev` at `701151f4`, reports `has_conflicts: false`, and started MR pipeline 2810793756 at head `9d1eb180`. The worktree is clean and matches the remote branch. Updated the MR description to replace stale 100/17/83 ownership counts with 116/44/72 and to distinguish earlier VM evidence from verification performed at the TASK-433-integrated head.
+
+MR !325 P1 correction verification: the focused fresh-database governance workflow passed (`CF_UI_TEST_STEPS=20ac-policy-editor-category-and-imported-provenance nix build --impure path:.#checks.x86_64-linux.web-ui-governance -L --show-trace --no-link`), including the restored imported-provenance chain. The full `web-ui-exports` blocking check passed in 38.605 seconds; populated and empty-scope AR/AP/SSP/Catalog documents passed all four OSCAL 1.1.2 schemas and cross-document reference assertions, and SARIF passed. Node CI/static tests passed 22/22, the targeted OSCAL Rust test passed 1/1, rustfmt check passed, helper package builds passed, and `git diff --check` passed.
+
+The full `nix build path:.#checks.x86_64-linux.web-ui-governance -L --show-trace --no-link` ran all 48 selected workflows. All required browser steps passed, including imported provenance, but the blocking outer gate failed on six strict visual mismatches for 20af-policy-catalog-selection-delete-regressions, task433-canonical-unmapped-nix-policy, and task433-canonical-multiline-dod (dark/light). Seven advisory semantic failures were also retained. Screenshot inspection shows the committed strict baselines include two POAM fixture policies that are absent after the full sequential workflow; 20af reports bulk deletion of 61 draft policies. Resolving this requires new test-state isolation or explicit baseline approval beyond the four P1 corrections, so commit/push and representative pipelines remain blocked pending scope direction.
 <!-- SECTION:NOTES:END -->
+
+## Comments
+
+<!-- COMMENTS:BEGIN -->
+author: review
+created: 2026-09-01 20:31
+---
+Review verdict rejected MR !325 with four P1 blockers: missing required governance provenance fixture, unsafe persistent API token exposure in MR-controlled report code, dangling OSCAL baseline/control references despite schema validity, and missing three-pipeline performance evidence. The correction plan uses shared fixture restoration, artifact-only reporting, a self-contained generated OSCAL Catalog chain with semantic validation, and fresh-head shard/pipeline evidence.
+---
+<!-- COMMENTS:END -->

@@ -1,11 +1,11 @@
 ---
 id: TASK-440
 title: Bring system configuration and flake exploration into full design parity
-status: In Progress
+status: Review
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-01 00:02'
+updated_date: '2026-09-02 02:44'
 labels:
   - design-parity
   - web-ui
@@ -23,6 +23,7 @@ references:
   - git commit 1b9a0594193a26da99b0935151b64323acf8f913
   - git commit 4e09d60a
   - git commit f4dbfad6
+  - git commit 4ddf19c6
 documentation:
   - docs/design/CrystalForge/app.jsx
   - docs/design/CrystalForge/components/SystemDetail.jsx
@@ -52,7 +53,7 @@ modified_files:
   - checks/web-ui/
 priority: high
 type: feature
-ordinal: 449000
+ordinal: 1000
 ---
 
 ## Description
@@ -414,6 +415,8 @@ Backend latest-review remediation committed and pushed as `4e09d60a` on 2026-08-
 Continuation preflight on 2026-08-31: TASK-440 remains In Progress in `/home/mcamp/code/crystal-forge/TASK-440-system-config-flake-parity` on branch `TASK-440-system-config-flake-parity` at pushed HEAD `4e09d60a`. Existing frontend/browser/docs changes remain dirty and are preserved. AC24 remains unchecked. Current scope is final P1/P2 review closure and exact verification; MR !323 remains stacked on !318.
 
 Committed and pushed the current final-review implementation as `f4dbfad6` (`TASK-440: Complete configuration and flake parity`) on 2026-08-31. The commit excludes untracked `result-task440-web-ui`. Focused backend/server-regression, frontend/WASM, design-target, and eight-step authoritative browser checks had passed in preceding review passes. A final evidence-remediation pass was interrupted before completion; outstanding audit concerns remain around making TASK-440 design generation/comparison failures strictly blocking and enforcing one shared exact semantic fixture contract. AC24 remains unchecked and the task remains In Progress.
+
+Reconciled TASK-440 with `origin/dev` at `701151f4`, which includes merged TASK-450 P0 build graph and final TASK-433. The branch is now linear with one TASK-440 commit `4ddf19c6` directly on `origin/dev`. Conflict resolution preserves TASK-450 fine-grained derivation dependencies, final TASK-433 POA&M/policy behavior, and TASK-440 snapshot/UI/browser contracts. Renumbered TASK-440 migrations after upstream's 0244 to `0245_evaluation_and_flake_output_snapshots.sql`, `0246_evaluation_module_source_count.sql`, and `0247_authoritative_snapshot_metrics.sql`. The rewritten branch is not pushed because updating the existing remote requires an explicit force push. Verification is in progress.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
