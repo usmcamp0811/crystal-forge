@@ -1,7 +1,7 @@
 ---
 id: TASK-435
 title: Implement System Agent Key Rotation from the Agent Identity Section
-status: Review
+status: In Progress
 assignee:
   - opencode
 created_date: '2026-08-25 03:12'
@@ -59,7 +59,7 @@ modified_files:
   - packages/web-ui/src/views/systems_mock_data.rs
 priority: high
 type: feature
-ordinal: 469000
+ordinal: 451000
 ---
 
 ## Description
