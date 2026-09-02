@@ -3,7 +3,7 @@ id: TASK-433.9
 title: >-
   TASK-433 Phase 8: Regression, browser E2E workflows, visual parity, and final
   verification
-status: Review
+status: Done
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:43'
@@ -42,7 +42,7 @@ modified_files:
 parent_task_id: TASK-433
 priority: high
 type: feature
-ordinal: 470000
+ordinal: 10000
 ---
 
 ## Description
