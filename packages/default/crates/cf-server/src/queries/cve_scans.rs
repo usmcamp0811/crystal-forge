@@ -52,6 +52,72 @@ fn truncate_for_varchar(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
 }
 
+/// Convert an execution UUID to a stable PostgreSQL advisory lock ID.
+///
+/// Uses the first 8 bytes of the UUID as a signed 64-bit integer.
+/// This ensures the same execution UUID always produces the same lock ID.
+fn execution_lock_id(execution_id: Uuid) -> i64 {
+    let bytes = execution_id.as_bytes();
+    i64::from_le_bytes([
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+    ])
+}
+
+/// Check if an execution lock is currently held by a live PostgreSQL backend.
+///
+/// Returns `true` if the lock exists and is held by an active session, `false` otherwise.
+/// This is used by recovery to distinguish a paused/stalled live process (lock still held)
+/// from a crashed process (lock released when its session ended).
+pub async fn execution_lock_is_held(pool: &PgPool, execution_id: Uuid) -> Result<bool> {
+    let lock_id = execution_lock_id(execution_id);
+    let is_held = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS(
+            SELECT 1 FROM pg_locks 
+            WHERE locktype = 'advisory'
+              AND objid = $1::bigint
+              AND granted = TRUE
+        )
+        "#,
+    )
+    .bind(lock_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(is_held)
+}
+
+/// Acquire a PostgreSQL session-level advisory lock for an execution.
+///
+/// This must be called on the same connection that will execute the scan.
+/// The lock is held for the lifetime of the connection and automatically released
+/// when the connection is returned to the pool or closed.
+///
+/// Returns `true` if the lock was acquired, `false` if it could not be acquired.
+pub async fn try_acquire_execution_lock(conn: &mut sqlx::PgConnection, execution_id: Uuid) -> Result<bool> {
+    let lock_id = execution_lock_id(execution_id);
+    let acquired = sqlx::query_scalar::<_, bool>(
+        "SELECT pg_try_advisory_lock($1::bigint)"
+    )
+    .bind(lock_id)
+    .fetch_one(conn)
+    .await?;
+    Ok(acquired)
+}
+
+/// Acquire a PostgreSQL session-level advisory lock for an execution (blocking).
+///
+/// This must be called on the same connection that will execute the scan.
+/// Blocks until the lock is acquired. The lock is held for the lifetime of the connection
+/// and automatically released when the connection is returned to the pool or closed.
+pub async fn acquire_execution_lock(conn: &mut sqlx::PgConnection, execution_id: Uuid) -> Result<()> {
+    let lock_id = execution_lock_id(execution_id);
+    sqlx::query("SELECT pg_advisory_lock($1::bigint)")
+        .bind(lock_id)
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
 /// Get derivations that need CVE scanning
 pub async fn get_targets_needing_cve_scan(
     pool: &PgPool,
@@ -1508,8 +1574,20 @@ pub async fn requeue_cve_scan_execution(
 /// Revoke scans stuck `in_progress` beyond the threshold without immediately
 /// releasing active-scan uniqueness. A live owner observes the revocation on
 /// its next heartbeat, cancels its scanner, and acknowledges the revocation as
-/// failed. If the owner crashed, a later pass finalizes revocations older than
-/// the cancellation grace period.
+/// failed. If the owner crashed, recovery finalizes revocations only when the
+/// execution lock is no longer held by any PostgreSQL backend session.
+///
+/// # Ownership Fencing
+///
+/// Each execution holds a PostgreSQL session-level advisory lock for its entire
+/// lifetime. Recovery revokes a scan only if:
+///
+/// 1. The heartbeat is stale (older than `stale_threshold`), AND
+/// 2. Either the scan has no execution token (legacy row), OR the advisory lock
+///    is no longer held by any live backend.
+///
+/// This prevents a paused Tokio runtime or delayed server process from being
+/// replaced while its scanner process still exists and holds the lock.
 ///
 /// Returns the number of scans that were recovered so callers can log the event.
 pub async fn recover_stale_scans(
@@ -1523,31 +1601,77 @@ pub async fn recover_stale_scans(
     // it out from under the worker running it. `execution_started_at` is written
     // by every current execution claim path. The `created_at` fallback remains
     // only for legacy in-progress rows created before execution leases existed.
-    const REVOCATION_GRACE_SECONDS: i64 = 60;
     let mut tx = pool.begin().await?;
-    let revoked_ids = sqlx::query_scalar::<_, Uuid>(
+    let candidates = sqlx::query_as::<_, (Uuid, Option<String>)>(
         r#"
-        UPDATE cve_scans
-        SET scan_metadata = COALESCE(scan_metadata, '{}'::jsonb)
-            || jsonb_build_object(
-                'execution_revoked_at', NOW(),
-                'stale_recovery_reason', 'stale-execution-revoked'
-            )
+        SELECT id, scan_metadata ->> 'execution_id' AS execution_id
+        FROM cve_scans
         WHERE status = 'in_progress'
-          AND scan_metadata ? 'execution_id'
-          AND NOT (scan_metadata ? 'execution_revoked_at')
+          AND NOT (COALESCE(scan_metadata, '{}'::jsonb) ? 'execution_revoked_at')
           AND COALESCE(
                   (scan_metadata ->> 'execution_heartbeat_at')::timestamptz,
                   (scan_metadata ->> 'execution_started_at')::timestamptz,
                   created_at
               ) < NOW() - ($1::bigint) * INTERVAL '1 second'
-        RETURNING id
         "#,
     )
     .bind(stale_threshold.as_secs() as i64)
     .fetch_all(&mut *tx)
     .await?;
 
+    tx.commit().await?;
+
+    // Check each candidate to see if its execution lock is still held by a live backend.
+    // Revoke only candidates whose locks are not held.
+    let mut revoked_ids = Vec::new();
+    for (scan_id, execution_id_opt) in candidates {
+        let should_revoke = if let Some(execution_id_str) = execution_id_opt {
+            // Parse the execution UUID and check if its lock is held.
+            match Uuid::parse_str(&execution_id_str) {
+                Ok(execution_id) => {
+                    // Lock is not held means the session crashed or ended.
+                    !execution_lock_is_held(pool, execution_id).await.unwrap_or(false)
+                }
+                Err(_) => {
+                    // Invalid UUID in metadata; revoke it.
+                    true
+                }
+            }
+        } else {
+            // Legacy row with no execution token; revoke if old enough.
+            true
+        };
+
+        if should_revoke {
+            let mut tx = pool.begin().await?;
+            let result = sqlx::query(
+                r#"
+                UPDATE cve_scans
+                SET scan_metadata = COALESCE(scan_metadata, '{}'::jsonb)
+                    || jsonb_build_object(
+                        'execution_revoked_at', NOW(),
+                        'stale_recovery_reason', 'stale-execution-revoked'
+                    )
+                WHERE id = $1
+                  AND status = 'in_progress'
+                  AND NOT (COALESCE(scan_metadata, '{}'::jsonb) ? 'execution_revoked_at')
+                "#,
+            )
+            .bind(scan_id)
+            .execute(&mut *tx)
+            .await?;
+
+            if result.rows_affected() > 0 {
+                revoked_ids.push(scan_id);
+            }
+            tx.commit().await?;
+        }
+    }
+
+    // Second pass: finalize revocations that are old enough to be confident
+    // the owner has observed them and either acknowledged or crashed.
+    const REVOCATION_ACKNOWLEDGMENT_GRACE_SECONDS: i64 = 60;
+    let mut tx = pool.begin().await?;
     let failed_ids = sqlx::query_scalar::<_, Uuid>(
         r#"
         UPDATE cve_scans
@@ -1572,7 +1696,7 @@ pub async fn recover_stale_scans(
         "#,
     )
     .bind(stale_threshold.as_secs() as i64)
-    .bind(REVOCATION_GRACE_SECONDS)
+    .bind(REVOCATION_ACKNOWLEDGMENT_GRACE_SECONDS)
     .fetch_all(&mut *tx)
     .await?;
 
