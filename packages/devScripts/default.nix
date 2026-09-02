@@ -438,6 +438,9 @@ let
       nix
       coreutils
       procps
+      # `ss`, used by db-usability-check.sh to find which OS process is
+      # listening on the dev database port for its worktree-identity check.
+      iproute2
       curl
       postgresql
       dioxus-cli-0_7_3
@@ -467,7 +470,12 @@ let
       DB_STARTED_BY_US=0
       if ! pg_isready -h 127.0.0.1 -p 3042 -U crystal_forge -d crystal_forge &>/dev/null; then
         echo "📦 PostgreSQL is not running. Starting db-only (detached)..."
-        setsid nix run "$PROJECT_ROOT#devScripts.db-only" -- up --tui=false \
+        # See db-only-start.sh: it starts db-only with $PROJECT_ROOT as its
+        # working directory, which its relative dataDir needs to resolve
+        # to the location the worktree-identity check below expects,
+        # regardless of which directory inside this worktree run-ui-dev
+        # itself was invoked from.
+        setsid bash ${./db-only-start.sh} "$PROJECT_ROOT" \
           >/tmp/cf-db-only.log 2>&1 < /dev/null &
         DB_STARTED_BY_US=1
         echo "⏳ Waiting for PostgreSQL to be ready (logs: /tmp/cf-db-only.log)..."
@@ -494,12 +502,14 @@ let
       # worktree's leftover db-only PostgreSQL process can answer here
       # instead, and a database whose public-schema objects are owned by an
       # unrelated role can also answer here. db-usability-check.sh checks
-      # both — worktree identity, then application usability — as
-      # independent conditions and prints its own specific diagnostic and
-      # recovery command for whichever one fails. This never mutates the
-      # database; it only reads identity and privilege metadata, so it is
-      # safe to run unconditionally on every start, including against a
-      # database a developer is actively using.
+      # both — worktree identity (via the OS, not a database privilege, so
+      # it applies to databases created before this check existed too),
+      # then application usability — as independent conditions, and prints
+      # its own specific diagnostic and recovery command for whichever one
+      # fails. This never mutates the database or the foreign process; it
+      # only reads process and privilege metadata, so it is safe to run
+      # unconditionally on every start, including against a database a
+      # developer is actively using.
       db_only_data_dir_config="${dbOnly.config.services.postgres.db.dataDir}"
       case "$db_only_data_dir_config" in
         /*) expected_data_dir="$db_only_data_dir_config" ;;
@@ -1084,13 +1094,6 @@ let
         CREATE USER crystal_forge LOGIN;
         CREATE DATABASE crystal_forge OWNER crystal_forge;
         GRANT ALL PRIVILEGES ON DATABASE crystal_forge TO crystal_forge;
-        -- run-ui-dev's db-usability-check.sh reads the data_directory
-        -- setting with this same role to confirm a listening PostgreSQL
-        -- instance is this worktree's own database rather than a
-        -- different worktree's leftover db-only process sharing the same
-        -- fixed dev port. That setting is otherwise readable only by
-        -- pg_read_all_settings.
-        GRANT pg_read_all_settings TO crystal_forge;
 
         CREATE USER root WITH SUPERUSER LOGIN;
         CREATE USER grafana LOGIN;
@@ -1157,8 +1160,6 @@ let
         CREATE USER crystal_forge LOGIN;
         CREATE DATABASE crystal_forge OWNER crystal_forge;
         GRANT ALL PRIVILEGES ON DATABASE crystal_forge TO crystal_forge;
-        -- See the matching grant and comment in db-module above.
-        GRANT pg_read_all_settings TO crystal_forge;
       '';
       initialDatabases = [ ];
     };
