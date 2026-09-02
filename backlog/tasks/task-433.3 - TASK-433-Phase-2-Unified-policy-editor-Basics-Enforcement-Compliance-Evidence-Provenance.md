@@ -3,7 +3,7 @@ id: TASK-433.3
 title: >-
   TASK-433 Phase 2: Unified policy editor
   (Basics/Enforcement/Compliance/Evidence/Provenance)
-status: Review
+status: Done
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:42'
@@ -25,7 +25,7 @@ documentation:
 parent_task_id: TASK-433
 priority: high
 type: feature
-ordinal: 472000
+ordinal: 8000
 ---
 
 ## Description
