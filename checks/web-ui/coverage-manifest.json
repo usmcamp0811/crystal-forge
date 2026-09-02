@@ -8,6 +8,10 @@
     },
     "timezoneId": "UTC",
     "locale": "en-US",
+    "devStackWorkflows": [
+      "12-systems",
+      "12a-systems-empty-state"
+    ],
     "visualThemes": [
       "dark",
       "light"

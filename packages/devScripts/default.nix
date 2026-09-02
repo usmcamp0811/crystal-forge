@@ -583,6 +583,28 @@ let
     '';
   };
 
+  webUiTest = pkgs.writeShellApplication {
+    name = "web-ui-test";
+    runtimeInputs = with pkgs; [
+      coreutils
+      curl
+      git
+      gnugrep
+      gnused
+      # Visual baseline comparison stays optional. The harness only calls
+      # ImageMagick when CF_UI_BASELINES_DIR names approved baselines.
+      imagemagick
+      nodejs
+      playwright-driver
+      playwright-test
+    ];
+    text = ''
+      export NODE_PATH="${pkgs.playwright-test}/lib/node_modules"
+      export PLAYWRIGHT_BROWSERS_PATH="${pkgs.playwright-driver.browsers}"
+      exec ${pkgs.bash}/bin/bash ${../../checks/web-ui/tests/web-ui-test.sh} "$@"
+    '';
+  };
+
   runBuilderMock = pkgs.writeShellApplication {
     name = "run-builder-mock";
     runtimeInputs = [ pkgs.nix pkgs.coreutils ];
@@ -1312,7 +1334,7 @@ let
   };
 in full-stack.config.outputs.package // {
   inherit runServer runAgent runBuilder simulatePush startBuilderApi
-    runUiDev runUiFrontend bootstrapDevBuilder envExports;
+    runUiDev runUiFrontend webUiTest bootstrapDevBuilder envExports;
   cve-test = cveTest.config.outputs.package;
   state-machine-test = stateMachineTest.config.outputs.package;
   dashboard-visibility-test = dashboardVisibilityTest.config.outputs.package;
