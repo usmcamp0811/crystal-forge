@@ -22,7 +22,7 @@ const { chromium } = process.env.CF_UI_STATIC_CONTRACTS === "1"
   : require("playwright");
 const fs = require("fs");
 const path = require("path");
-const { execSync } = require("child_process");
+const { execSync, execFileSync } = require("child_process");
 const { createHash } = require("crypto");
 const { isDeepStrictEqual } = require("util");
 
@@ -31,11 +31,45 @@ const outputDir = process.argv[3] || "/tmp/screenshots";
 const apiBaseUrl = process.env.CF_UI_API_BASE_URL || baseUrl;
 const baselinesDir = process.env.CF_UI_BASELINES_DIR || "";
 
+// SQL-backed fixture steps execute against whichever PostgreSQL instance is
+// running the target Crystal Forge database. Two deployments are supported:
+//
+// - The NixOS VM check: a system-local PostgreSQL reachable only through
+//   passwordless `sudo -u postgres`, on the cluster's default port. DB_HOST is
+//   not set in that environment, so this is the fallback path and its
+//   behavior is unchanged from before host-stack support existed.
+// - The host development stack (`run-ui-dev` inside `nix develop`): a
+//   password-authenticated `crystal_forge` role on the port the devshell
+//   already exports. DB_HOST/DB_PORT/DB_USER/DB_PASSWORD/DB_NAME reuse the
+//   exact connection convention `shells/default/default.nix` establishes for
+//   every other repository tool; this file does not define a second,
+//   independent PostgreSQL configuration.
+//
+// Arguments are passed as an argv array and the SQL text is passed over
+// stdin, never interpolated into a shell command string, so fixture SQL
+// cannot be reinterpreted by a shell.
 function runFixtureSql(sql) {
-  const encoded = Buffer.from(sql, "utf8").toString("base64");
-  return execSync(`printf %s ${encoded} | base64 -d | sudo -u postgres psql -d crystal_forge -v ON_ERROR_STOP=1 -A -t -F '|'`, {
-    encoding: "utf8",
-  }).trim();
+  const dbHost = process.env.DB_HOST;
+  if (dbHost) {
+    const dbPort = process.env.DB_PORT || "3042";
+    const dbUser = process.env.DB_USER || "crystal_forge";
+    const dbPassword = process.env.DB_PASSWORD || "password";
+    const dbName = process.env.DB_NAME || "crystal_forge";
+    return execFileSync(
+      "psql",
+      ["-h", dbHost, "-p", dbPort, "-U", dbUser, "-d", dbName, "-v", "ON_ERROR_STOP=1", "-A", "-t", "-F", "|"],
+      {
+        input: sql,
+        encoding: "utf8",
+        env: { ...process.env, PGPASSWORD: dbPassword },
+      },
+    ).trim();
+  }
+  return execFileSync(
+    "sudo",
+    ["-u", "postgres", "psql", "-d", "crystal_forge", "-v", "ON_ERROR_STOP=1", "-A", "-t", "-F", "|"],
+    { input: sql, encoding: "utf8" },
+  ).trim();
 }
 
 // ── Node.js 24 safety net ──────────────────────────────────────────────────

@@ -8,10 +8,11 @@
     },
     "timezoneId": "UTC",
     "locale": "en-US",
-    "devStackWorkflows": [
-      "12-systems",
-      "12a-systems-empty-state"
-    ],
+    "devStackWorkflows": {
+      "$note": "Workflows the host-side web-ui-test runner may execute against the persistent run-ui-dev stack, keyed by name. category 'mock' workflows read only page.route()-intercepted data and/or set their own account-preference precondition before asserting; they never touch persistent server state and need no reset. category 'fixture' workflows create new rows through runFixtureSql/the real REST API using fresh randomUUID identity on every invocation, so repeated runs never collide; the runner verifies a non-destructive precondition (base fixture data present) before each run instead of deleting rows, because several fixture tables use ON DELETE RESTRICT foreign keys as a deliberate compliance/audit-trail invariant that a generic delete-based reset would violate. Every other workflow remains VM-only.",
+      "12-systems": { "category": "mock" },
+      "12a-systems-empty-state": { "category": "mock" }
+    },
     "visualThemes": [
       "dark",
       "light"
