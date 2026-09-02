@@ -3,11 +3,11 @@ id: TASK-450.11
 title: >-
   Reduce authoritative web UI merge feedback below 20 minutes without weakening
   coverage
-status: Review
+status: Done
 assignee:
   - opencode-gpt-5.6-sol
 created_date: '2026-09-01 03:12'
-updated_date: '2026-09-02 02:39'
+updated_date: '2026-09-02 02:41'
 labels:
   - web-ui
   - testing
@@ -24,7 +24,7 @@ references:
 parent_task_id: TASK-450
 priority: high
 type: enhancement
-ordinal: 467000
+ordinal: 12000
 ---
 
 ## Description
