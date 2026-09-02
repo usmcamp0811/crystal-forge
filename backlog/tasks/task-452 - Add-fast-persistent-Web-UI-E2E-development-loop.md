@@ -1,11 +1,11 @@
 ---
 id: TASK-452
 title: Add fast persistent Web UI E2E development loop
-status: Done
+status: Review
 assignee:
   - openai-agent
 created_date: '2026-09-01 21:01'
-updated_date: '2026-09-02 02:41'
+updated_date: '2026-09-02 02:51'
 labels:
   - web-ui
   - developer-experience
