@@ -1,11 +1,11 @@
 ---
 id: TASK-450.11.2
 title: Run Web UI checks concurrently and aggregate their CI evidence
-status: Review
+status: Done
 assignee:
   - opencode-gpt-5.6-sol
 created_date: '2026-09-01 03:27'
-updated_date: '2026-09-02 02:39'
+updated_date: '2026-09-02 02:41'
 labels:
   - web-ui
   - testing
@@ -29,7 +29,7 @@ modified_files:
 parent_task_id: TASK-450.11
 priority: high
 type: enhancement
-ordinal: 464000
+ordinal: 15000
 ---
 
 ## Description
