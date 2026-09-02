@@ -445,14 +445,6 @@ let
       tailwindcss_4
       binaryen
       lld
-      # Backend watch mode (`--watch`) only. These stay off the packaged
-      # server's runtime path; they are build-time tooling for incremental
-      # Rust rebuilds.
-      cargo
-      rustc
-      pkg-config
-      openssl
-      cargo-watch
     ];
     text = ''
       set -euo pipefail
@@ -460,21 +452,6 @@ let
       PROJECT_ROOT="''${PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
       FIXTURE_PATH="$PROJECT_ROOT/docs/design/CrystalForge/fixtures/crystal-forge.fixtures.json"
       WEB_UI_DIR="$PROJECT_ROOT/packages/web-ui"
-      SERVER_MODE="packaged"
-      for arg in "$@"; do
-        case "$arg" in
-          --dev)
-            SERVER_MODE="dev"
-            ;;
-          --watch)
-            SERVER_MODE="watch"
-            ;;
-          *)
-            echo "❌ Unknown argument: $arg (expected --dev or --watch)"
-            exit 2
-            ;;
-        esac
-      done
       expected_dx_version="0.7.3"
       actual_dx_version="$(dx --version | awk 'NR == 1 { print $2 }')"
       echo "   Expected dx: $expected_dx_version"
@@ -510,37 +487,32 @@ let
       fi
 
       # `pg_isready` only proves a PostgreSQL process answers on this port;
-      # it does not prove that process is this repository's crystal_forge
-      # dev database. A stray or foreign instance can be listening there
-      # instead (for example a different worktree's leftover db-only
-      # process, since this port is a single shared constant while each
-      # worktree's data directory is separate). Probe usability with the
-      # exact credentials the server will use before trusting this
-      # instance, whether we just bootstrapped it above or found it already
-      # running. This never mutates the database; it only reads privilege
-      # metadata, so it is safe to run unconditionally on every start.
-      if ! bash ${./db-usability-check.sh} 127.0.0.1 3042 crystal_forge ${db_password} crystal_forge; then
-        cat >&2 <<'EOF'
-
-❌ PostgreSQL answers on 127.0.0.1:3042, but the crystal_forge role cannot
-   use the crystal_forge database there (see the error above). This
-   usually means something other than this repository's db-only bootstrap
-   is listening on that port, most commonly a different worktree's
-   leftover db-only PostgreSQL process that never shut down.
-
-   Recovery:
-     1. Find what is listening on port 3042 and confirm it is not a
-        database you still need:
-          lsof -iTCP:3042 -sTCP:LISTEN
-     2. Stop it (from the worktree that started it): db-only down
-     3. Re-run run-ui-dev; it will bootstrap a fresh db-only instance.
-
-   Never run a destructive reset against a database you have not verified
-   is this repository's own disposable local dev database.
-EOF
+      # it does not prove that process is this worktree's own crystal_forge
+      # dev database. Every worktree shares the same fixed dev database
+      # port, but each gets its own on-disk PostgreSQL data directory (see
+      # dbOnly.config.services.postgres.db.dataDir below), so a different
+      # worktree's leftover db-only PostgreSQL process can answer here
+      # instead, and a database whose public-schema objects are owned by an
+      # unrelated role can also answer here. db-usability-check.sh checks
+      # both — worktree identity, then application usability — as
+      # independent conditions and prints its own specific diagnostic and
+      # recovery command for whichever one fails. This never mutates the
+      # database; it only reads identity and privilege metadata, so it is
+      # safe to run unconditionally on every start, including against a
+      # database a developer is actively using.
+      db_only_data_dir_config="${dbOnly.config.services.postgres.db.dataDir}"
+      case "$db_only_data_dir_config" in
+        /*) expected_data_dir="$db_only_data_dir_config" ;;
+        *) expected_data_dir="$PROJECT_ROOT/$db_only_data_dir_config" ;;
+      esac
+      expected_data_dir="$(readlink -m -- "$expected_data_dir")"
+      if ! bash ${./db-usability-check.sh} 127.0.0.1 3042 crystal_forge ${db_password} crystal_forge \
+        "$expected_data_dir"; then
+        echo "" >&2
+        echo "❌ run-ui-dev cannot safely reuse the PostgreSQL instance on 127.0.0.1:3042 (see above)." >&2
         exit 1
       fi
-      echo "✅ PostgreSQL is running and the crystal_forge database is usable."
+      echo "✅ PostgreSQL is running and this worktree's crystal_forge database is usable."
 
       # ── 2. Ensure config and keys exist ──────────────────────────────
       if [ ! -f "''${CRYSTAL_FORGE_CONFIG:-}" ]; then
@@ -579,16 +551,7 @@ EOF
         echo ""
         echo "🛑 Shutting down..."
         if [ -n "''${SERVER_PID:-}" ]; then
-          if [ "$SERVER_MODE" == "watch" ]; then
-            # cargo-watch supervises the actual `cargo run` child and its
-            # server grandchild. Signal the whole process group cargo-watch
-            # was started in (negative PID) so a rebuild-in-progress child
-            # cannot outlive the wrapper; cargo-watch itself also forwards
-            # the signal to its current child on a normal TERM.
-            kill -TERM "-$SERVER_PID" 2>/dev/null || kill "$SERVER_PID" 2>/dev/null || true
-          else
-            kill "$SERVER_PID" 2>/dev/null || true
-          fi
+          kill "$SERVER_PID" 2>/dev/null || true
           wait "$SERVER_PID" 2>/dev/null || true
         fi
         if [ "$DB_STARTED_BY_US" -eq 1 ]; then
@@ -598,64 +561,26 @@ EOF
       }
       trap cleanup EXIT INT TERM
 
-      READY_TIMEOUT_ITERATIONS=60
-      case "$SERVER_MODE" in
-        dev)
-          echo "   (dev mode — building server from source)"
-          nix run "$PROJECT_ROOT#server" &
-          SERVER_PID=$!
-          ;;
-        watch)
-          # Rebuild and restart only the server binary on Rust source
-          # changes. PostgreSQL and the Dioxus dev server started elsewhere
-          # in this script are untouched by a backend rebuild. The
-          # supervisor PID (cargo-watch) stays constant across restarts;
-          # only its internal `cargo run` child changes identity on rebuild.
-          echo "   (watch mode — cargo-watch rebuilds and restarts the server on Rust changes)"
-          echo "   First compile can take several minutes; incremental rebuilds are fast."
-          export OPENSSL_DIR="${pkgs.openssl.out}"
-          export OPENSSL_LIB_DIR="${pkgs.openssl.out}/lib"
-          export OPENSSL_INCLUDE_DIR="${pkgs.openssl.dev}/include"
-          export PKG_CONFIG_PATH="${pkgs.openssl.dev}/lib/pkgconfig"
-          # Reuses the same dev-database connection convention exported by
-          # the default devshell (shells/default/default.nix), not a new
-          # independent configuration, so `cargo run`'s compile-time SQLx
-          # query checks hit the same PostgreSQL instance the packaged
-          # server path already validated above.
-          export DATABASE_URL="''${DATABASE_URL:-postgres://crystal_forge:password@127.0.0.1:3042/crystal_forge}"
-          setsid cargo watch \
-            --workdir "$PROJECT_ROOT/packages/default" \
-            --watch "$PROJECT_ROOT/packages/default/crates" \
-            --exec "run -p cf-server --bin server" \
-            >/tmp/cf-server-watch.log 2>&1 < /dev/null &
-          SERVER_PID=$!
-          READY_TIMEOUT_ITERATIONS=300
-          ;;
-        *)
-          # The Dioxus development server provides the UI in this workflow. Use
-          # the core backend so changing UI source does not rebuild an unused
-          # embedded copy of that same UI.
-          ${pkgs.crystal-forge.default.cf-server-core-drv}/bin/server &
-          SERVER_PID=$!
-          ;;
-      esac
+      if [ "''${1:-}" == "--dev" ]; then
+        echo "   (dev mode — building server from source)"
+        nix run "$PROJECT_ROOT#server" &
+      else
+        # The Dioxus development server provides the UI in this workflow. Use
+        # the core backend so changing UI source does not rebuild an unused
+        # embedded copy of that same UI.
+        ${pkgs.crystal-forge.default.cf-server-core-drv}/bin/server &
+      fi
+      SERVER_PID=$!
 
       echo "⏳ Waiting for server to be ready..."
-      for i in $(seq 1 "$READY_TIMEOUT_ITERATIONS"); do
+      for i in $(seq 1 60); do
         if curl -sf http://127.0.0.1:3445/status >/dev/null 2>&1; then
           echo "✅ Server is ready at http://127.0.0.1:3445"
           break
         fi
-        if [ "$i" -eq "$READY_TIMEOUT_ITERATIONS" ]; then
-          if [ "$SERVER_MODE" == "watch" ]; then
-            echo "❌ Server failed to start. See /tmp/cf-server-watch.log"
-          else
-            echo "❌ Server failed to start."
-          fi
+        if [ "$i" -eq 60 ]; then
+          echo "❌ Server failed to start."
           exit 1
-        fi
-        if [ "$SERVER_MODE" == "watch" ] && [ "$((i % 15))" -eq 0 ]; then
-          echo "   ...still waiting on the first cargo-watch build ($((i * 2))s, logs: /tmp/cf-server-watch.log)"
         fi
         sleep 2
       done
@@ -1159,6 +1084,13 @@ EOF
         CREATE USER crystal_forge LOGIN;
         CREATE DATABASE crystal_forge OWNER crystal_forge;
         GRANT ALL PRIVILEGES ON DATABASE crystal_forge TO crystal_forge;
+        -- run-ui-dev's db-usability-check.sh reads the data_directory
+        -- setting with this same role to confirm a listening PostgreSQL
+        -- instance is this worktree's own database rather than a
+        -- different worktree's leftover db-only process sharing the same
+        -- fixed dev port. That setting is otherwise readable only by
+        -- pg_read_all_settings.
+        GRANT pg_read_all_settings TO crystal_forge;
 
         CREATE USER root WITH SUPERUSER LOGIN;
         CREATE USER grafana LOGIN;
@@ -1225,6 +1157,8 @@ EOF
         CREATE USER crystal_forge LOGIN;
         CREATE DATABASE crystal_forge OWNER crystal_forge;
         GRANT ALL PRIVILEGES ON DATABASE crystal_forge TO crystal_forge;
+        -- See the matching grant and comment in db-module above.
+        GRANT pg_read_all_settings TO crystal_forge;
       '';
       initialDatabases = [ ];
     };
