@@ -1,7 +1,7 @@
 ---
 id: TASK-433.6
 title: 'TASK-433 Phase 5: POA&M database schema, API, auth/audit, and server tests'
-status: Review
+status: Done
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:43'
@@ -25,7 +25,7 @@ documentation:
 parent_task_id: TASK-433
 priority: high
 type: feature
-ordinal: 473000
+ordinal: 7000
 ---
 
 ## Description
