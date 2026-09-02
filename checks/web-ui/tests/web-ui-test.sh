@@ -286,6 +286,20 @@ run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 output_dir="${CF_UI_TEST_OUTPUT_DIR:-$output_root/$run_id}"
 mkdir -p "$output_dir"
 
+# CF_UI_TEST_OUTPUT_DIR lets a caller reuse a fixed directory across
+# invocations (the default run-id-suffixed path never collides, but a caller
+# is free to override it). A previous invocation's results.json in that same
+# directory must not be mistaken for this invocation's outcome: if the
+# browser harness this time exits 0 without producing a fresh results.json
+# (for example, a bug that skips the write on some early-return path), the
+# stale file would otherwise still read back as a passing result and this
+# command would report success for a run that never actually produced one.
+# Removing it up front, before the harness runs, makes that impossible
+# regardless of why the harness fails to write a new one. Only results.json
+# is removed; screenshots, logs, and other prior artifacts in the directory
+# are left alone since nothing else here is read to decide pass/fail.
+rm -f "$output_dir/results.json"
+
 # Browser pages load from the Dioxus development server, while harness-side
 # requests and the bootstrapped local account belong to the Crystal Forge
 # server that run-ui-dev starts.

@@ -282,6 +282,30 @@ assert_contains "$tmp_dir/missing-results.stderr" 'was not produced'
 MOCK_RESULTS_MALFORMED=1 run_failure malformed-results 12-systems
 assert_contains "$tmp_dir/malformed-results.stderr" 'could not parse'
 
+# CF_UI_TEST_OUTPUT_DIR lets a caller reuse a fixed directory across
+# invocations. A stale results.json left over from an earlier successful run
+# in that same directory must not be read back as this invocation's outcome
+# when the harness this time exits 0 without writing a fresh one. run_failure
+# always targets "$tmp_dir/<case_name>-output" for CF_UI_TEST_OUTPUT_DIR, so
+# pre-seeding that exact path reuses the helper instead of hand-rolling a
+# second invocation shape.
+mkdir -p "$tmp_dir/stale-results-output"
+cat >"$tmp_dir/stale-results-output/results.json" <<'JSON'
+[
+  {
+    "name": "12-systems",
+    "description": "mock 12-systems",
+    "ok": true,
+    "error": null,
+    "visuals": []
+  }
+]
+JSON
+
+MOCK_SKIP_RESULTS=1 run_failure stale-results 12-systems
+assert_contains "$tmp_dir/stale-results.stderr" 'was not produced'
+assert_absent "$tmp_dir/stale-results-output/results.json"
+
 # ── Browser-runner exit-status propagation ───────────────────────────────────
 
 if TEST_LOG="$tmp_dir/failing-runner.json" \
