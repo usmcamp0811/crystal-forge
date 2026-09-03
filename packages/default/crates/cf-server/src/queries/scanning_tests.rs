@@ -8,6 +8,8 @@ use crate::queries::scanning::{
     get_scan_queue_for_system, get_scan_schedule_policy, get_scan_stats, get_scan_systems,
     update_scan_schedule_policy,
 };
+use futures::FutureExt;
+use serial_test::serial;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -21,6 +23,7 @@ async fn test_pool_from_env() -> PgPool {
 
 #[tokio::test]
 #[ignore = "requires live database connection"]
+#[serial(scan_schedule_policy)]
 async fn schedule_policy_round_trips() {
     let pool = test_pool_from_env().await;
 
@@ -39,25 +42,54 @@ async fn schedule_policy_round_trips() {
         updated_at: chrono::Utc::now(),
     };
 
-    update_scan_schedule_policy(&pool, &updated)
-        .await
-        .expect("should update policy");
+    let assertions = std::panic::AssertUnwindSafe(async {
+        update_scan_schedule_policy(&pool, &updated)
+            .await
+            .expect("should update policy");
 
-    let read_back = get_scan_schedule_policy(&pool)
-        .await
-        .expect("should read updated policy");
+        let read_back = get_scan_schedule_policy(&pool)
+            .await
+            .expect("should read updated policy");
 
-    assert_eq!(read_back.on_build, updated.on_build);
-    assert_eq!(read_back.deployed_interval, "6h");
-    assert_eq!(read_back.recent_interval, "12h");
-    assert_eq!(read_back.archived_interval, "720h");
-    assert_eq!(read_back.archived_enabled, updated.archived_enabled);
-    assert_eq!(read_back.rebuild_to_scan, updated.rebuild_to_scan);
+        assert_eq!(read_back.on_build, updated.on_build);
+        assert_eq!(read_back.deployed_interval, "6h");
+        assert_eq!(read_back.recent_interval, "12h");
+        assert_eq!(read_back.archived_interval, "720h");
+        assert_eq!(read_back.archived_enabled, updated.archived_enabled);
+        assert_eq!(read_back.rebuild_to_scan, updated.rebuild_to_scan);
+    })
+    .catch_unwind()
+    .await;
 
-    // Restore the original policy to avoid leaking state across test runs.
-    update_scan_schedule_policy(&pool, &original)
-        .await
-        .expect("should restore original policy");
+    // Restore every persisted policy field exactly. The public update helper
+    // intentionally advances `updated_at`, so it cannot perform test cleanup.
+    sqlx::query(
+        r#"
+        UPDATE scan_schedule_policy
+        SET on_build = $1,
+            deployed_interval = $2,
+            recent_interval = $3,
+            archived_interval = $4,
+            archived_enabled = $5,
+            rebuild_to_scan = $6,
+            updated_at = $7
+        WHERE id = 1
+        "#,
+    )
+    .bind(original.on_build)
+    .bind(&original.deployed_interval)
+    .bind(&original.recent_interval)
+    .bind(&original.archived_interval)
+    .bind(original.archived_enabled)
+    .bind(original.rebuild_to_scan)
+    .bind(original.updated_at)
+    .execute(&pool)
+    .await
+    .expect("should restore exact original policy");
+
+    if let Err(panic) = assertions {
+        std::panic::resume_unwind(panic);
+    }
 }
 
 #[tokio::test]

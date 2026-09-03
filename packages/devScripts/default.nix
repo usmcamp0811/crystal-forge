@@ -4,6 +4,7 @@ with lib.crystal-forge;
 let
   namespace = "crystal-forge";
   db_port = 3042;
+  cve_test_db_port = 35432;
   db_password = "password";
   cf_port = 3445;
   oidc_port = 38080;
@@ -735,14 +736,18 @@ let
       set -euo pipefail
 
       REPO_ROOT="''${PROJECT_ROOT:-$PWD}"
-      DB_URL="''${CRYSTAL_FORGE_CVE_TEST_DATABASE_URL:-postgresql://crystal_forge:${db_password}@127.0.0.1:${toString db_port}/crystal_forge}"
+      DB_URL="''${CRYSTAL_FORGE_CVE_TEST_DATABASE_URL:?Set CRYSTAL_FORGE_CVE_TEST_DATABASE_URL to a dedicated CVE test database}"
 
       nix develop "$REPO_ROOT#sqlx" -c bash -euo pipefail -c "
         cd \"$REPO_ROOT/packages/default\"
+        export DATABASE_URL=\"$DB_URL\"
         DATABASE_URL=\"$DB_URL\" cargo sqlx migrate run --source crates/cf-server/migrations
         CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
           cargo test --manifest-path Cargo.toml \
           --lib builder::cve_worker::tests::scan_cycle_processes_target_with_fake_runner
+        CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
+          cargo test --manifest-path Cargo.toml \
+          --lib builder::cve_worker::tests::recovered_claim_cannot_start_scanner_during_execution_handoff
         CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
           cargo test --manifest-path Cargo.toml \
           --lib builder::cve_worker::tests::policy_scan_heartbeat_prevents_recovery_and_ownership_loss_cancels_execution
@@ -752,6 +757,12 @@ let
         CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
           cargo test --manifest-path Cargo.toml \
           --lib queries::cve_scans::tests::get_targets_needing_cve_rescan_selects_stale_scan
+        CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
+          cargo test --manifest-path Cargo.toml \
+          --lib queries::cve_scans::tests::stale_finalization_preserves_uniqueness_while_execution_lock_is_held
+        CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
+          cargo test --manifest-path Cargo.toml \
+          --lib queries::cve_scans::tests::legacy_stale_scan_is_counted_once_when_immediately_finalized
         CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
           cargo test --manifest-path Cargo.toml \
           --lib queries::cve_scans::tests::fleet_targets_track_running_generation_and_deduplicate
@@ -767,6 +778,9 @@ let
         CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
           cargo test --manifest-path Cargo.toml \
           --lib queries::cve_scans::tests::stale_recovery_uses_execution_start_not_queue_time
+        CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
+          cargo test --manifest-path Cargo.toml \
+          --lib queries::cve_scans::tests::stale_recovery_processes_bounded_batches
         CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
           cargo test --manifest-path Cargo.toml \
           --lib queries::cve_scans::tests::execution_heartbeat_and_owner_guards_survive_stale_recovery
@@ -799,6 +813,16 @@ let
           cargo test --manifest-path Cargo.toml \
           --lib queries::scanning_tests::system_scan_queue_normalizes_never_scanned_derivation \
           -- --ignored
+        DATABASE_URL=\"$DB_URL\" \
+          cargo test --manifest-path Cargo.toml \
+          --lib queries::scanning_tests::schedule_policy_round_trips \
+          -- --ignored
+        DATABASE_URL=\"$DB_URL\" \
+          cargo test --manifest-path Cargo.toml \
+          --test composite_policy scan_result_persistence_locks_poam_before_the_scan_row
+        DATABASE_URL=\"$DB_URL\" \
+          cargo test --manifest-path Cargo.toml \
+          --test composite_policy stale_finalization_locks_poam_before_the_scan_row
       "
     '';
   };
@@ -1335,11 +1359,24 @@ let
   };
 
   cve-test-module = {
+    services.postgres."db" = {
+      port = mkForce cve_test_db_port;
+      dataDir = mkForce "./data/cve-test-db";
+      initialScript.before = mkForce ''
+        CREATE USER crystal_forge CREATEDB LOGIN;
+        CREATE DATABASE crystal_forge OWNER crystal_forge;
+        GRANT ALL PRIVILEGES ON DATABASE crystal_forge TO crystal_forge;
+      '';
+    };
     settings.processes.cve-processing-test = {
       inherit namespace;
       command = runCveProcessingTest;
       availability.exit_on_end = true;
       depends_on."db".condition = "process_healthy";
+      environment.CRYSTAL_FORGE_CVE_TEST_DATABASE_URL =
+        "postgresql://crystal_forge:${db_password}@127.0.0.1:${
+          toString cve_test_db_port
+        }/crystal_forge";
     };
   };
 

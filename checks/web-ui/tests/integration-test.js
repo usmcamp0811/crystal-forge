@@ -7528,6 +7528,38 @@ const steps = [
         page.getByText("Queued 3 CVE scan(s)."),
         "Expected fleet rescan success feedback",
       );
+      const successToast = page
+        .getByRole("status")
+        .filter({ hasText: "Queued 3 CVE scan(s)." });
+      await assertVisible(successToast, "Expected success feedback to use status semantics");
+      await assertAttribute(
+        successToast,
+        "aria-live",
+        "polite",
+        "Success feedback should be announced politely",
+      );
+      await assertAttribute(
+        successToast,
+        "aria-atomic",
+        "true",
+        "Success feedback should be announced atomically",
+      );
+      await assertAttribute(
+        successToast.locator("svg").first(),
+        "aria-hidden",
+        "true",
+        "Toast status icon should be decorative",
+      );
+      await assertVisible(
+        successToast.getByRole("button", { name: "Dismiss notification" }),
+        "Expected the toast dismiss button to have an accessible name",
+      );
+      await assertAttribute(
+        successToast.locator("svg").last(),
+        "aria-hidden",
+        "true",
+        "Toast dismiss icon should be decorative",
+      );
       if (fleetRescanRequests !== 1) {
         throw new Error(`Expected exactly one fleet rescan request, got ${fleetRescanRequests}`);
       }
@@ -7566,6 +7598,43 @@ const steps = [
         page.getByText("Fleet rescan failed:"),
         "Expected fleet rescan API failure feedback",
       );
+      const failureToast = page
+        .getByRole("alert")
+        .filter({ hasText: "Fleet rescan failed:" });
+      await assertVisible(failureToast, "Expected failure feedback to use alert semantics");
+      await assertAttribute(
+        failureToast,
+        "aria-live",
+        "assertive",
+        "Failure feedback should be announced assertively",
+      );
+      await assertAttribute(
+        failureToast,
+        "aria-atomic",
+        "true",
+        "Failure feedback should be announced atomically",
+      );
+      await assertAttribute(
+        failureToast.locator("svg").first(),
+        "aria-hidden",
+        "true",
+        "Toast failure icon should be decorative",
+      );
+      const dismissFailureToast = failureToast.getByRole("button", {
+        name: "Dismiss notification",
+      });
+      await assertVisible(
+        dismissFailureToast,
+        "Expected persistent error feedback to be dismissible",
+      );
+      await assertAttribute(
+        failureToast.locator("svg").last(),
+        "aria-hidden",
+        "true",
+        "Toast dismiss icon should be decorative",
+      );
+      await dismissFailureToast.click();
+      await assertHidden(failureToast, "Expected manual dismissal to remove error feedback");
       if (fleetRescanRequests !== 5) {
         throw new Error(
           `Expected five fleet rescan response scenarios, got ${fleetRescanRequests}`,

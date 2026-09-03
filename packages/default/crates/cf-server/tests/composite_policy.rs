@@ -22,6 +22,7 @@ use crystal_forge::queries::cve_scans::{
     CreateCveScanOutcome, CveScanExecutionClaim, acknowledge_revoked_cve_scan_execution,
     claim_queued_cve_scans, complete_cve_scan_for_execution, create_cve_scan,
     mark_cve_scan_failed_by_id_for_execution, recover_stale_scans, requeue_cve_scan_execution,
+    save_scan_results_for_execution,
 };
 use crystal_forge::queries::deployment_policies::{
     create_deployment_policy, get_deployment_policy_by_version, update_deployment_policy,
@@ -2724,6 +2725,103 @@ async fn stale_finalization_and_owner_acknowledgment_never_deadlock(pool: PgPool
     );
 }
 
+/// Result persistence must wait for the POA&M lock before it locks or completes
+/// the scan row.
+///
+/// A holder takes the derivation lock, result persistence starts on a second
+/// connection, and a third connection probes the scan row with `NOWAIT`. The
+/// probe succeeds only when result persistence follows the global POA&M-before-
+/// row order. The former implementation completed `cve_scans` first and would
+/// make this probe fail with `55P03 lock_not_available`.
+#[sqlx::test]
+async fn scan_result_persistence_locks_poam_before_the_scan_row(pool: PgPool) {
+    let context = assessment_context(&pool).await;
+    persist_evaluation(&pool, &context, EnforcementOutcome::Pass).await;
+    let claim = match create_cve_scan(&pool, context.derivation_id, "vulnix", None)
+        .await
+        .unwrap()
+    {
+        CreateCveScanOutcome::Created(claim) => claim,
+        CreateCveScanOutcome::Existing(_) => panic!("fixture scan must be newly created"),
+    };
+
+    const POAM_DERIVATION_LOCK_NAMESPACE: i32 = 0x504F_414D;
+    let mut holder = pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock($1,$2)")
+        .bind(POAM_DERIVATION_LOCK_NAMESPACE)
+        .bind(context.derivation_id)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    let persistence_pool = pool.clone();
+    let persistence = tokio::spawn(async move {
+        save_scan_results_for_execution(
+            &persistence_pool,
+            claim.scan_id,
+            &Vec::new(),
+            Some(1),
+            claim.execution_id,
+        )
+        .await
+    });
+
+    let mut blocked = false;
+    for _ in 0..600 {
+        let waiting: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*)
+            FROM pg_locks
+            WHERE locktype = 'advisory'
+              AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+              AND classid::bigint = $1::bigint
+              AND objid::bigint = $2::bigint
+              AND objsubid = 2
+              AND NOT granted
+            "#,
+        )
+        .bind(POAM_DERIVATION_LOCK_NAMESPACE)
+        .bind(context.derivation_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        if waiting > 0 {
+            blocked = true;
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        blocked,
+        "result persistence must block on the POA&M lock before completion"
+    );
+
+    let mut probe = pool.acquire().await.unwrap();
+    let row_lock = sqlx::query("SELECT id FROM cve_scans WHERE id = $1 FOR UPDATE NOWAIT")
+        .bind(claim.scan_id)
+        .fetch_optional(&mut *probe)
+        .await;
+    let row_lock_error = row_lock.as_ref().err().map(|error| format!("{error:#}"));
+    drop(probe);
+
+    holder.rollback().await.unwrap();
+    persistence
+        .await
+        .expect("result persistence task should not panic")
+        .expect("result persistence should complete");
+
+    assert!(
+        row_lock_error.is_none(),
+        "result persistence locked cve_scans before the POA&M lock: {}",
+        row_lock_error.unwrap_or_default()
+    );
+    let status: String = sqlx::query_scalar("SELECT status FROM cve_scans WHERE id = $1")
+        .bind(claim.scan_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "completed");
+}
+
 /// Stale finalization must take the POA&M/composite lock *before* it locks the
 /// `cve_scans` row.
 ///
@@ -2801,11 +2899,6 @@ async fn stale_finalization_locks_poam_before_the_scan_row(pool: PgPool) {
         .execute(&mut *holder)
         .await
         .unwrap();
-    let holder_backend: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(&mut *holder)
-        .await
-        .unwrap();
-
     // 2. Start stale finalization; it must block on that POA&M lock.
     let recovery_pool = pool.clone();
     let recovery = tokio::spawn(async move {
@@ -2819,10 +2912,16 @@ async fn stale_finalization_locks_poam_before_the_scan_row(pool: PgPool) {
         let waiting: i64 = sqlx::query_scalar(
             r#"
             SELECT COUNT(*) FROM pg_locks
-            WHERE locktype = 'advisory' AND NOT granted AND pid <> $1
+            WHERE locktype = 'advisory'
+              AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+              AND classid::bigint = $1::bigint
+              AND objid::bigint = $2::bigint
+              AND objsubid = 2
+              AND NOT granted
             "#,
         )
-        .bind(holder_backend)
+        .bind(POAM_DERIVATION_LOCK_NAMESPACE)
+        .bind(context.derivation_id)
         .fetch_one(&pool)
         .await
         .unwrap();

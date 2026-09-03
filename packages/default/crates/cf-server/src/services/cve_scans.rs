@@ -188,6 +188,38 @@ where
         return Err(CveScanError::Internal(err));
     }
 
+    // CONCURRENCY: Recovery may revoke the claim before this path obtains its
+    // session lock. Confirm ownership while the lock is held and before the
+    // scanner future or runner is constructed.
+    match heartbeat_cve_scan_execution(&pool, scan_id, claim.execution_id).await {
+        Ok(true) => {}
+        Ok(false) => {
+            release_execution_lock_or_close(lock_conn, claim.execution_id).await;
+            let _ =
+                acknowledge_revoked_cve_scan_execution(&pool, scan_id, claim.execution_id).await;
+            return Ok(scan_id);
+        }
+        Err(err) => {
+            release_execution_lock_or_close(lock_conn, claim.execution_id).await;
+            let handoff_error =
+                err.context("Failed immediate CVE scan execution handoff heartbeat");
+            if let Err(cleanup_err) = mark_cve_scan_failed_by_id_for_execution(
+                &pool,
+                scan_id,
+                derivation_id,
+                &handoff_error.to_string(),
+                claim.execution_id,
+            )
+            .await
+            {
+                error!(
+                    "Failed to mark immediate CVE scan {scan_id} as failed after execution handoff error: {cleanup_err:#}"
+                );
+            }
+            return Err(CveScanError::Internal(handoff_error));
+        }
+    }
+
     let spawn_pool = pool.clone();
     tokio::spawn(async move {
         let execution = async {

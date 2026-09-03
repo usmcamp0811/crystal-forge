@@ -13,29 +13,41 @@ use sqlx::Row;
 use tracing::debug;
 use uuid::Uuid;
 
+/// Identifies a derivation that an API request can scan.
 #[derive(Debug, Clone)]
 pub struct CveScanEligibleTarget {
+    /// Identifies the derivation that owns the active-scan slot.
     pub derivation_id: i32,
+    /// Contains the NixOS configuration name shown to the caller.
     pub config_name: String,
+    /// Contains the associated hostname for a system-scoped target.
     pub hostname: Option<String>,
+    /// Explains why the target cannot run, or is `None` when eligible.
     pub blocked_reason: Option<String>,
 }
 
 /// Durable ownership for an active CVE scan execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CveScanExecutionClaim {
+    /// Identifies the durable `cve_scans` row.
     pub scan_id: Uuid,
+    /// Identifies the derivation whose active-scan uniqueness is owned.
     pub derivation_id: i32,
+    /// Fences this owner from stale and successor executions of the row.
     pub execution_id: Uuid,
 }
 
+/// Reports whether scan creation acquired ownership or reused active work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CreateCveScanOutcome {
+    /// Contains the token-owned claim created by this call.
     Created(CveScanExecutionClaim),
+    /// Identifies the pending or in-progress scan that already owns uniqueness.
     Existing(Uuid),
 }
 
 impl CreateCveScanOutcome {
+    /// Returns the new or existing scan identifier.
     pub fn id(self) -> Uuid {
         match self {
             Self::Created(claim) => claim.scan_id,
@@ -43,6 +55,7 @@ impl CreateCveScanOutcome {
         }
     }
 
+    /// Returns whether this outcome contains a newly owned execution claim.
     pub fn was_created(self) -> bool {
         matches!(self, Self::Created(_))
     }
@@ -68,6 +81,10 @@ fn execution_lock_id(execution_id: Uuid) -> i64 {
 /// Returns `true` if the lock exists and is held by an active session, `false` otherwise.
 /// This is used by recovery to distinguish a paused/stalled live process (lock still held)
 /// from a crashed process (lock released when its session ended).
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot inspect the advisory-lock catalog.
 ///
 /// # Advisory lock key reconstruction
 ///
@@ -110,11 +127,17 @@ pub async fn execution_lock_is_held(pool: &PgPool, execution_id: Uuid) -> Result
 
 /// Acquire a PostgreSQL session-level advisory lock for an execution.
 ///
-/// This must be called on the same connection that will execute the scan.
-/// The lock is held for the lifetime of the connection and automatically released
-/// when the connection is returned to the pool or closed.
+/// This must be called on the dedicated connection that represents the scan's
+/// execution lifetime. The lock remains attached to that PostgreSQL session
+/// until [`release_execution_lock`] succeeds or the session is closed. Dropping
+/// or returning a pooled connection does not close its PostgreSQL session and
+/// therefore does not release the lock.
 ///
 /// Returns `true` if the lock was acquired, `false` if it could not be acquired.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot attempt the advisory lock.
 pub async fn try_acquire_execution_lock(
     conn: &mut sqlx::PgConnection,
     execution_id: Uuid,
@@ -129,9 +152,15 @@ pub async fn try_acquire_execution_lock(
 
 /// Acquire a PostgreSQL session-level advisory lock for an execution (blocking).
 ///
-/// This must be called on the same connection that will execute the scan.
-/// Blocks until the lock is acquired. The lock is held for the lifetime of the connection
-/// and automatically released when the connection is returned to the pool or closed.
+/// This must be called on the dedicated connection that represents the scan's
+/// execution lifetime. The call blocks until the lock is acquired. The lock
+/// remains attached to that PostgreSQL session until
+/// [`release_execution_lock`] succeeds or the session is closed. Returning a
+/// pooled connection does not close its PostgreSQL session.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot acquire the advisory lock.
 pub async fn acquire_execution_lock(
     conn: &mut sqlx::PgConnection,
     execution_id: Uuid,
@@ -163,6 +192,10 @@ pub async fn acquire_execution_lock(
 /// error, because a pooled connection that still owns the lock could be
 /// handed to an unrelated execution and silently violate active-scan
 /// uniqueness.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot confirm the unlock operation.
 pub async fn release_execution_lock(
     conn: &mut sqlx::PgConnection,
     execution_id: Uuid,
@@ -193,6 +226,10 @@ pub async fn release_execution_lock(
 /// the connection is closed explicitly via
 /// [`sqlx::pool::PoolConnection::close`] so its session — and any lock it
 /// might still hold — cannot be reused.
+///
+/// Unlock and close failures are logged. This function consumes the connection
+/// and does not return an error, so an uncertain session cannot return to the
+/// pool accidentally.
 pub async fn release_execution_lock_or_close(
     mut conn: sqlx::pool::PoolConnection<sqlx::Postgres>,
     execution_id: Uuid,
@@ -230,7 +267,11 @@ pub async fn release_execution_lock_or_close(
     drop(conn);
 }
 
-/// Get derivations that need CVE scanning
+/// Returns completed derivations that need an initial CVE scan.
+///
+/// # Errors
+///
+/// Returns an error when the target query fails.
 pub async fn get_targets_needing_cve_scan(
     pool: &PgPool,
     limit: Option<i64>,
@@ -321,6 +362,13 @@ pub async fn get_targets_needing_cve_scan(
 /// never-recovered `pending` row. If a pending or in-progress scan already
 /// exists for the same derivation, this returns the existing scan's ID instead
 /// of creating a duplicate.
+///
+/// A created claim owns terminal writes through its `execution_id`. Callers
+/// MUST acquire its advisory lock and heartbeat the token before scanner work.
+///
+/// # Errors
+///
+/// Returns an error when claim creation or composite persistence fails.
 pub async fn create_cve_scan(
     pool: &PgPool,
     derivation_id: i32,
@@ -409,7 +457,12 @@ pub async fn create_cve_scan(
     Ok(CreateCveScanOutcome::Created(claim))
 }
 
-/// Complete a CVE scan with results
+/// Completes a legacy tokenless CVE scan with aggregate results.
+///
+/// # Errors
+///
+/// Returns an error when the row is token-owned, is no longer active, or a
+/// persistence step fails.
 pub async fn complete_cve_scan(
     pool: &PgPool,
     scan_id: Uuid,
@@ -440,6 +493,11 @@ pub async fn complete_cve_scan(
 
 /// Complete a token-owned CVE scan. The transition is rejected after the
 /// execution lease is revoked or replaced.
+///
+/// # Errors
+///
+/// Returns an error when `execution_id` no longer owns the active row or a
+/// persistence step fails.
 #[allow(clippy::too_many_arguments)]
 pub async fn complete_cve_scan_for_execution(
     pool: &PgPool,
@@ -537,6 +595,11 @@ async fn complete_cve_scan_for_owner(
 }
 
 /// Mark a specific CVE scan as failed.
+///
+/// # Errors
+///
+/// Returns an error when the row is token-owned, is no longer active, or a
+/// persistence step fails.
 pub async fn mark_cve_scan_failed(
     pool: &PgPool,
     scan_id: Uuid,
@@ -546,6 +609,12 @@ pub async fn mark_cve_scan_failed(
     mark_cve_scan_failed_for_owner(pool, scan_id, target, error_message, None).await
 }
 
+/// Marks a token-owned CVE scan failed and recomputes composite enforcement.
+///
+/// # Errors
+///
+/// Returns an error when `execution_id` no longer owns the active row or a
+/// persistence step fails.
 pub async fn mark_cve_scan_failed_for_execution(
     pool: &PgPool,
     scan_id: Uuid,
@@ -606,6 +675,11 @@ async fn mark_cve_scan_failed_for_owner(
 
 /// Mark a specific CVE scan as failed when the full derivation row is not
 /// available (for example, if loading the derivation itself failed).
+///
+/// # Errors
+///
+/// Returns an error when the row is token-owned, is no longer active, or a
+/// persistence step fails.
 pub async fn mark_cve_scan_failed_by_id(
     pool: &PgPool,
     scan_id: Uuid,
@@ -615,6 +689,12 @@ pub async fn mark_cve_scan_failed_by_id(
     mark_cve_scan_failed_by_id_for_owner(pool, scan_id, derivation_id, error_message, None).await
 }
 
+/// Marks a token-owned scan failed when only its derivation ID is available.
+///
+/// # Errors
+///
+/// Returns an error when `execution_id` no longer owns the active row or a
+/// persistence step fails.
 pub async fn mark_cve_scan_failed_by_id_for_execution(
     pool: &PgPool,
     scan_id: Uuid,
@@ -686,7 +766,12 @@ fn require_owned_transition(rows_affected: u64, scan_id: Uuid, transition: &str)
     anyhow::bail!("CVE scan {scan_id} lost execution ownership before it could {transition}")
 }
 
-/// Save complete scan results to database
+/// Persists findings for a legacy tokenless scan and completes it atomically.
+///
+/// # Errors
+///
+/// Returns an error when the row is token-owned, is no longer active, input
+/// resolution fails, or transactional persistence fails.
 pub async fn save_scan_results(
     pool: &PgPool,
     scan_id: Uuid,
@@ -696,6 +781,16 @@ pub async fn save_scan_results(
     save_scan_results_for_owner(pool, scan_id, vulnix_results, scan_duration_ms, None, None).await
 }
 
+/// Persists findings only while `execution_id` owns the active scan.
+///
+/// The function takes the POA&M/composite derivation lock before completing the
+/// scan row. Findings, attention state, completion, and composite enforcement
+/// commit atomically.
+///
+/// # Errors
+///
+/// Returns an error when ownership is lost, input resolution fails, or
+/// transactional persistence fails.
 pub async fn save_scan_results_for_execution(
     pool: &PgPool,
     scan_id: Uuid,
@@ -888,8 +983,22 @@ async fn save_scan_results_for_owner(
         .map(|(id, _)| id.clone())
         .collect();
 
+    // Resolve the derivation without locking the scan row. Every CVE writer
+    // must acquire the POA&M/composite lock before it mutates `cve_scans`.
+    // Selecting the row with `FOR UPDATE` here would invert that order.
+    let derivation_id =
+        sqlx::query_scalar::<_, i32>("SELECT derivation_id FROM cve_scans WHERE id = $1")
+            .bind(scan_id)
+            .fetch_one(pool)
+            .await?;
+
     // --- Step 3: single transaction with ~5 bulk statements ---
     let mut tx = pool.begin().await?;
+    crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx(
+        &mut tx,
+        derivation_id,
+    )
+    .await?;
 
     // 3a. Mark scan complete
     let completion = sqlx::query(
@@ -1122,7 +1231,11 @@ async fn save_scan_results_for_owner(
     Ok(())
 }
 
-/// Get latest CVE scan for a derivation
+/// Returns the newest CVE scan for a derivation, regardless of status.
+///
+/// # Errors
+///
+/// Returns an error when the scan query fails.
 pub async fn get_latest_scan(pool: &PgPool, derivation_id: i32) -> Result<Option<CveScan>> {
     let scan = sqlx::query_as!(
         CveScan,
@@ -1169,6 +1282,10 @@ pub async fn get_latest_scan(pool: &PgPool, derivation_id: i32) -> Result<Option
 /// 2. Counts only `package_vulnerabilities` rows joined through `scan_packages`
 ///    for that scan — scoping to the latest scan rather than all historical data.
 /// 3. Filters for high severity (CVSS 7.0 ≤ score < 9.0) and not whitelisted.
+///
+/// # Errors
+///
+/// Returns an error when either scan or vulnerability query fails.
 pub async fn count_unjustified_high_cves(pool: &PgPool, derivation_id: i32) -> Result<Option<i64>> {
     // First check whether any completed scan exists; if not, return None so
     // the caller can distinguish "no scan" from "scan with zero findings".
@@ -1212,6 +1329,11 @@ pub async fn count_unjustified_high_cves(pool: &PgPool, derivation_id: i32) -> R
     Ok(Some(count))
 }
 
+/// Returns one CVE scan by its durable identifier.
+///
+/// # Errors
+///
+/// Returns an error when the scan query fails.
 pub async fn get_scan_by_id(pool: &PgPool, scan_id: Uuid) -> Result<Option<CveScan>> {
     let scan = sqlx::query_as::<_, CveScan>(
         r#"
@@ -1244,6 +1366,11 @@ pub async fn get_scan_by_id(pool: &PgPool, scan_id: Uuid) -> Result<Option<CveSc
     Ok(scan)
 }
 
+/// Returns the pending or in-progress scan that owns a derivation's active slot.
+///
+/// # Errors
+///
+/// Returns an error when the active-scan query fails.
 pub async fn get_active_scan_for_derivation(
     pool: &PgPool,
     derivation_id: i32,
@@ -1265,6 +1392,14 @@ pub async fn get_active_scan_for_derivation(
     Ok(row.map(|r| r.get::<Uuid, _>("id")))
 }
 
+/// Resolves the preferred CVE scan target for one flake configuration.
+///
+/// The returned target can include `blocked_reason`; presence does not imply
+/// that the target is executable.
+///
+/// # Errors
+///
+/// Returns an error when target resolution fails.
 pub async fn resolve_flake_config_cve_scan_target(
     pool: &PgPool,
     flake_id: i32,
@@ -1325,6 +1460,14 @@ pub async fn resolve_flake_config_cve_scan_target(
     }))
 }
 
+/// Resolves the preferred CVE scan target for one active system.
+///
+/// The returned target can include `blocked_reason`; presence does not imply
+/// that the target is executable.
+///
+/// # Errors
+///
+/// Returns an error when target resolution fails.
 pub async fn resolve_system_cve_scan_target(
     pool: &PgPool,
     system_id: Uuid,
@@ -1437,6 +1580,10 @@ impl FleetEnqueueOutcome {
 }
 
 /// Resolve the distinct derivations currently running on active systems.
+///
+/// # Errors
+///
+/// Returns an error when the fleet target query fails.
 pub async fn get_fleet_cve_scan_targets(pool: &PgPool) -> Result<Vec<CveScanEligibleTarget>> {
     let rows = sqlx::query(FLEET_TARGET_SELECT).fetch_all(pool).await?;
 
@@ -1465,6 +1612,10 @@ pub async fn get_fleet_cve_scan_targets(pool: &PgPool) -> Result<Vec<CveScanElig
 /// a derivation with an active scan is skipped rather than duplicated. No
 /// scan is executed here; the worker drains queued rows at its own bounded
 /// rate.
+///
+/// # Errors
+///
+/// Returns an error when the atomic enqueue statement fails.
 pub async fn enqueue_fleet_cve_scans(
     pool: &PgPool,
     scanner_name: &str,
@@ -1570,6 +1721,64 @@ async fn revoke_stale_execution(
     Ok(result.rows_affected() == 1)
 }
 
+async fn refresh_locked_execution_liveness(
+    pool: &PgPool,
+    scan_id: Uuid,
+    snapshot_execution_token: &str,
+    stale_threshold: std::time::Duration,
+) -> Result<bool> {
+    let result = sqlx::query(
+        r#"
+        UPDATE cve_scans
+        SET scan_metadata = COALESCE(scan_metadata, '{}'::jsonb)
+            || jsonb_build_object('execution_heartbeat_at', NOW())
+        WHERE id = $1
+          AND status = 'in_progress'
+          AND NOT (COALESCE(scan_metadata, '{}'::jsonb) ? 'execution_revoked_at')
+          AND scan_metadata ->> 'execution_id' = $2::text
+          AND COALESCE(
+                  (scan_metadata ->> 'execution_heartbeat_at')::timestamptz,
+                  (scan_metadata ->> 'execution_started_at')::timestamptz,
+                  created_at
+              ) < NOW() - ($3::bigint) * INTERVAL '1 second'
+        "#,
+    )
+    .bind(scan_id)
+    .bind(snapshot_execution_token)
+    .bind(stale_threshold.as_secs() as i64)
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected() == 1)
+}
+
+async fn defer_locked_revocation(
+    pool: &PgPool,
+    scan_id: Uuid,
+    snapshot_execution_token: &str,
+    acknowledgment_grace_seconds: i64,
+) -> Result<bool> {
+    let result = sqlx::query(
+        r#"
+        UPDATE cve_scans
+        SET scan_metadata = COALESCE(scan_metadata, '{}'::jsonb)
+            || jsonb_build_object('execution_revoked_at', NOW())
+        WHERE id = $1
+          AND status = 'in_progress'
+          AND scan_metadata ->> 'execution_id' = $2::text
+          AND (scan_metadata ->> 'execution_revoked_at')::timestamptz
+              < NOW() - ($3::bigint) * INTERVAL '1 second'
+        "#,
+    )
+    .bind(scan_id)
+    .bind(snapshot_execution_token)
+    .bind(acknowledgment_grace_seconds)
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected() == 1)
+}
+
 /// How many `pending` candidates [`claim_queued_cve_scans`] inspects per
 /// requested claim before giving up for this cycle.
 ///
@@ -1593,11 +1802,9 @@ const CLAIM_CANDIDATE_OVERSCAN: i64 = 8;
 /// queued as `pending`. Persisting the claim and the composite recomputation
 /// separately would leave a window where a reader could observe the scan as
 /// `in_progress` while the composite assessment still reports the old Pass.
-/// This function calls [`persist_scan_phase_in_tx`][composite_persist] inside
+/// This function calls `persist_scan_phase_in_tx` inside
 /// the exact transaction that performs the claim so no such window is ever
 /// committed.
-///
-/// [composite_persist]: crate::services::composite_enforcement::persist_scan_phase_in_tx
 ///
 /// # Claim procedure and lock order
 ///
@@ -1611,7 +1818,7 @@ const CLAIM_CANDIDATE_OVERSCAN: i64 = 8;
 /// Each candidate is claimed in its own short transaction that:
 ///
 /// 1. Acquires the established POA&M/composite derivation lock via
-///    [`lock_poam_findings_for_derivation_tx`][lock_poam] — the same lock
+///    `lock_poam_findings_for_derivation_tx` — the same lock
 ///    every other CVE scan transition (create/complete/fail/revoke) acquires
 ///    before mutating `cve_scans`, preserving the repository's writer lock
 ///    order.
@@ -1641,7 +1848,7 @@ const CLAIM_CANDIDATE_OVERSCAN: i64 = 8;
 /// even while other `pending` rows were waiting. N workers would then drain the
 /// queue at roughly one scan per cycle in total instead of N.
 ///
-/// This function therefore inspects up to [`CLAIM_CANDIDATE_OVERSCAN`] times
+/// This function therefore inspects up to `CLAIM_CANDIDATE_OVERSCAN` times
 /// the requested limit and keeps attempting guarded claims until it either
 /// collects `limit` claims or exhausts that bounded candidate set. A loser on
 /// one row simply advances to the next candidate. The candidate set stays
@@ -1652,8 +1859,10 @@ const CLAIM_CANDIDATE_OVERSCAN: i64 = 8;
 /// Taking `cve_scans` row locks before the POA&M/composite lock would invert
 /// the global writer lock order documented above and reintroduce a deadlock
 /// against normal writers.
+/// # Errors
 ///
-/// [lock_poam]: crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx
+/// Returns an error when candidate selection, claim persistence, locking, or
+/// composite recomputation fails. No uncommitted claim is returned.
 pub async fn claim_queued_cve_scans(
     pool: &PgPool,
     limit: i64,
@@ -1743,6 +1952,10 @@ pub async fn claim_queued_cve_scans(
 
 /// Refresh a queued execution lease. A zero-row result means this worker no
 /// longer owns an active claim and must stop before persisting scan results.
+///
+/// # Errors
+///
+/// Returns an error when the ownership compare-and-set cannot execute.
 pub async fn heartbeat_cve_scan_execution(
     pool: &PgPool,
     scan_id: Uuid,
@@ -1835,6 +2048,12 @@ pub async fn acknowledge_revoked_cve_scan_execution(
 ///
 /// The execution metadata is removed so a future claim receives a new token.
 /// The attempt count remains as audit history for the aborted claim.
+///
+/// Returns `false` without mutation when `execution_id` is no longer the owner.
+///
+/// # Errors
+///
+/// Returns an error when the ownership compare-and-set cannot execute.
 pub async fn requeue_cve_scan_execution(
     pool: &PgPool,
     scan_id: Uuid,
@@ -1923,10 +2142,49 @@ pub async fn requeue_cve_scan_execution(
 /// persistence) inverts that order and can deadlock against a normal writer
 /// that already holds the POA&M lock and is waiting for the same scan row.
 ///
-/// Returns the number of scans that were recovered so callers can log the event.
+/// Recovery processes at most 32 candidates in each phase. Candidates are
+/// ordered by oldest relevant liveness timestamp and then scan ID. A session
+/// lock that proves an owner is alive refreshes that exact token's timestamp,
+/// so later calls advance through the remaining stale backlog.
+///
+/// Returns the number of distinct scans that were recovered so callers can log
+/// the event.
+///
+/// # Errors
+///
+/// Returns an error when candidate selection, advisory-lock inspection,
+/// revocation, finalization, or composite persistence fails. Lock inspection
+/// fails closed and does not release active uniqueness.
 pub async fn recover_stale_scans(
     pool: &PgPool,
     stale_threshold: std::time::Duration,
+) -> Result<i64> {
+    recover_stale_scans_with_options(
+        pool,
+        stale_threshold,
+        StaleRecoveryOptions {
+            batch_size: STALE_RECOVERY_BATCH_SIZE,
+            derivation_ids: None,
+        },
+    )
+    .await
+}
+
+/// Bounds each stale-recovery phase to keep a worker cycle responsive after a
+/// large outage. Thirty-two candidates permits steady cleanup without allowing
+/// lock probes and per-scan transactions to monopolize the cycle.
+const STALE_RECOVERY_BATCH_SIZE: i64 = 32;
+
+#[derive(Clone, Copy)]
+struct StaleRecoveryOptions<'a> {
+    batch_size: i64,
+    derivation_ids: Option<&'a [i32]>,
+}
+
+async fn recover_stale_scans_with_options(
+    pool: &PgPool,
+    stale_threshold: std::time::Duration,
+    options: StaleRecoveryOptions<'_>,
 ) -> Result<i64> {
     // Age from when execution actually started, not from when the row was
     // created. Operator-queued fleet scans can sit in the queue for a long time
@@ -1947,9 +2205,19 @@ pub async fn recover_stale_scans(
                   (scan_metadata ->> 'execution_started_at')::timestamptz,
                   created_at
               ) < NOW() - ($1::bigint) * INTERVAL '1 second'
+          AND ($3::int[] IS NULL OR derivation_id = ANY($3))
+        ORDER BY COALESCE(
+                     (scan_metadata ->> 'execution_heartbeat_at')::timestamptz,
+                     (scan_metadata ->> 'execution_started_at')::timestamptz,
+                     created_at
+                 ),
+                 id
+        LIMIT $2
         "#,
     )
     .bind(stale_threshold.as_secs() as i64)
+    .bind(options.batch_size)
+    .bind(options.derivation_ids)
     .fetch_all(&mut *tx)
     .await?;
 
@@ -1981,7 +2249,24 @@ pub async fn recover_stale_scans(
                                     e
                                 )
                             })?;
-                    !lock_is_held
+                    if lock_is_held {
+                        // CONCURRENCY: The session lock is authoritative proof
+                        // that this exact execution is still alive even when
+                        // its application heartbeat is delayed. Refreshing the
+                        // snapshotted token's heartbeat moves the live row out
+                        // of the stale front set without authorizing a terminal
+                        // write or touching a successor execution.
+                        refresh_locked_execution_liveness(
+                            pool,
+                            scan_id,
+                            &execution_id_str,
+                            stale_threshold,
+                        )
+                        .await?;
+                        false
+                    } else {
+                        true
+                    }
                 }
                 Err(_) => {
                     // Invalid UUID in metadata; revoke it.
@@ -2009,9 +2294,9 @@ pub async fn recover_stale_scans(
     // Second pass: finalize revocations that are old enough to be confident
     // the owner has observed them and either acknowledged or crashed.
     const REVOCATION_ACKNOWLEDGMENT_GRACE_SECONDS: i64 = 60;
-    let finalize_candidates = sqlx::query_as::<_, (Uuid, i32)>(
+    let finalize_candidates = sqlx::query_as::<_, (Uuid, i32, Option<String>)>(
         r#"
-        SELECT id, derivation_id
+        SELECT id, derivation_id, scan_metadata ->> 'execution_id' AS execution_id
         FROM cve_scans
         WHERE status = 'in_progress'
           AND (
@@ -2022,16 +2307,47 @@ pub async fn recover_stale_scans(
               OR (scan_metadata ->> 'execution_revoked_at')::timestamptz
                   < NOW() - ($2::bigint) * INTERVAL '1 second'
           )
-        ORDER BY id
+          AND ($4::int[] IS NULL OR derivation_id = ANY($4))
+        ORDER BY CASE
+                     WHEN scan_metadata ? 'execution_revoked_at'
+                     THEN (scan_metadata ->> 'execution_revoked_at')::timestamptz
+                     ELSE created_at
+                 END,
+                 id
+        LIMIT $3
         "#,
     )
     .bind(stale_threshold.as_secs() as i64)
     .bind(REVOCATION_ACKNOWLEDGMENT_GRACE_SECONDS)
+    .bind(options.batch_size)
+    .bind(options.derivation_ids)
     .fetch_all(pool)
     .await?;
 
     let mut failed_count = 0i64;
-    for (scan_id, derivation_id) in finalize_candidates {
+    for (scan_id, derivation_id, snapshot_execution_token) in finalize_candidates {
+        // CONCURRENCY: Probe the session lock before opening the transaction
+        // and taking the POA&M lock. Probing while holding that lock would
+        // invert the owner handoff order. A live owner keeps active uniqueness
+        // until it drops its scanner and releases this lock.
+        if let Some(snapshot_token) = snapshot_execution_token.as_deref()
+            && let Ok(execution_id) = Uuid::parse_str(snapshot_token)
+            && execution_lock_is_held(pool, execution_id).await?
+        {
+            // CONCURRENCY: A held session lock proves that this exact revoked
+            // owner has not disappeared. Restart its acknowledgment grace so a
+            // paused scanner retains active uniqueness, while the exact-token
+            // CAS prevents recovery from deferring a successor execution.
+            defer_locked_revocation(
+                pool,
+                scan_id,
+                snapshot_token,
+                REVOCATION_ACKNOWLEDGMENT_GRACE_SECONDS,
+            )
+            .await?;
+            continue;
+        }
+
         // CONCURRENCY: One short transaction per scan, taking the POA&M lock
         // before touching `cve_scans`. This is the repository's global CVE
         // writer order; a bulk `UPDATE ... RETURNING` followed by composite
@@ -2061,6 +2377,11 @@ pub async fn recover_stale_scans(
             WHERE id = $1
               AND status = 'in_progress'
               AND (
+                  ($4::text IS NULL
+                   AND NOT (COALESCE(scan_metadata, '{}'::jsonb) ? 'execution_id'))
+                  OR scan_metadata ->> 'execution_id' = $4::text
+              )
+              AND (
                   (
                       NOT (COALESCE(scan_metadata, '{}'::jsonb) ? 'execution_id')
                       AND created_at < NOW() - ($2::bigint) * INTERVAL '1 second'
@@ -2073,6 +2394,7 @@ pub async fn recover_stale_scans(
         .bind(scan_id)
         .bind(stale_threshold.as_secs() as i64)
         .bind(REVOCATION_ACKNOWLEDGMENT_GRACE_SECONDS)
+        .bind(snapshot_execution_token.as_deref())
         .execute(&mut *tx)
         .await?;
 
@@ -2086,7 +2408,9 @@ pub async fn recover_stale_scans(
         // scan whose composite assessment still reports the prior outcome.
         crate::services::composite_enforcement::persist_scan_phase_in_tx(&mut tx, scan_id).await?;
         tx.commit().await?;
-        failed_count += 1;
+        if !revoked_ids.contains(&scan_id) {
+            failed_count += 1;
+        }
     }
 
     Ok(revoked_ids.len() as i64 + failed_count)
@@ -2114,6 +2438,10 @@ pub async fn recover_stale_scans(
 ///
 /// Uses dynamic SQL (not `query!`) because interval strings are stored as text
 /// in the `scan_schedule_policy` singleton row.
+///
+/// # Errors
+///
+/// Returns an error when the policy or target query fails.
 pub async fn get_targets_needing_cve_rescan(
     pool: &PgPool,
     limit: Option<i64>,
@@ -2310,6 +2638,8 @@ mod tests {
     use crate::queries::commits::{get_commit_by_id, insert_commit};
     use crate::queries::derivations::{EvaluationStatus, insert_derivation};
     use crate::queries::flakes::insert_flake;
+    use futures::FutureExt;
+    use serial_test::serial;
 
     struct FleetFixture {
         flake_id: i32,
@@ -3392,6 +3722,203 @@ mod tests {
             .expect("stale-claim derivation should be deleted");
     }
 
+    /// A recovery pass moves lock-confirmed owners out of the stale front set
+    /// and processes the deterministic crashed remainder in bounded batches.
+    #[tokio::test]
+    async fn stale_recovery_processes_bounded_batches() {
+        let Ok(database_url) = std::env::var("CRYSTAL_FORGE_TEST_DATABASE_URL") else {
+            return;
+        };
+        let pool = PgPool::connect(&database_url)
+            .await
+            .expect("dedicated CVE test database should be reachable");
+        let prior_derivation_ids: Vec<i32> = sqlx::query_scalar(
+            "SELECT id FROM derivations WHERE derivation_name LIKE 'bounded-stale-recovery-%'",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("prior bounded-recovery derivations should resolve");
+        sqlx::query("DELETE FROM cve_scans WHERE derivation_id = ANY($1)")
+            .bind(&prior_derivation_ids)
+            .execute(&pool)
+            .await
+            .expect("prior bounded-recovery scans should be deleted");
+        sqlx::query("DELETE FROM derivations WHERE id = ANY($1)")
+            .bind(&prior_derivation_ids)
+            .execute(&pool)
+            .await
+            .expect("prior bounded-recovery derivations should be deleted");
+        let scan_ids = [
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        ];
+        let mut derivation_ids = Vec::new();
+
+        for (index, scan_id) in scan_ids.iter().enumerate() {
+            let derivation = insert_derivation(
+                &pool,
+                None,
+                &format!("bounded-stale-recovery-{scan_id}"),
+                "nixos",
+            )
+            .await
+            .expect("bounded recovery derivation should be inserted");
+            derivation_ids.push(derivation.id);
+            sqlx::query(
+                r#"
+                INSERT INTO cve_scans (
+                    id, derivation_id, scanner_name, status, attempts,
+                    total_packages, total_vulnerabilities,
+                    critical_count, high_count, medium_count, low_count,
+                    created_at, scan_metadata
+                )
+                VALUES ($1, $2, 'vulnix', 'in_progress', 0, 0, 0, 0, 0, 0, 0,
+                        NOW() - ($3::bigint) * INTERVAL '1 hour', '{}'::jsonb)
+                "#,
+            )
+            .bind(scan_id)
+            .bind(derivation.id)
+            .bind(6 - index as i64)
+            .execute(&pool)
+            .await
+            .expect("legacy stale scan should be inserted");
+        }
+
+        let live_execution_id = Uuid::new_v4();
+        sqlx::query(
+            r#"
+            UPDATE cve_scans
+            SET scan_metadata = jsonb_build_object(
+                    'execution_id', $2::uuid,
+                    'execution_started_at', NOW() - INTERVAL '5 hours',
+                    'execution_heartbeat_at', NOW() - INTERVAL '5 hours'
+                )
+            WHERE id = $1
+            "#,
+        )
+        .bind(scan_ids[0])
+        .bind(live_execution_id)
+        .execute(&pool)
+        .await
+        .expect("live bounded-recovery scan should be token-owned");
+        let mut live_lock = pool
+            .acquire()
+            .await
+            .expect("live execution lock connection");
+        acquire_execution_lock(&mut live_lock, live_execution_id)
+            .await
+            .expect("live execution lock should be acquired");
+
+        let revoked_execution_id = Uuid::new_v4();
+        sqlx::query(
+            r#"
+            UPDATE cve_scans
+            SET scan_metadata = jsonb_build_object(
+                    'execution_id', $2::uuid,
+                    'execution_started_at', NOW() - INTERVAL '5 hours',
+                    'execution_heartbeat_at', NOW() - INTERVAL '5 hours',
+                    'execution_revoked_at', NOW() - INTERVAL '5 hours'
+                )
+            WHERE id = $1
+            "#,
+        )
+        .bind(scan_ids[1])
+        .bind(revoked_execution_id)
+        .execute(&pool)
+        .await
+        .expect("revoked live scan should be token-owned");
+        let mut revoked_lock = pool
+            .acquire()
+            .await
+            .expect("revoked execution lock connection");
+        acquire_execution_lock(&mut revoked_lock, revoked_execution_id)
+            .await
+            .expect("revoked execution lock should be acquired");
+
+        let options = StaleRecoveryOptions {
+            batch_size: 2,
+            derivation_ids: Some(&derivation_ids),
+        };
+
+        let recovered =
+            recover_stale_scans_with_options(&pool, std::time::Duration::from_secs(1800), options)
+                .await
+                .expect("first bounded recovery should succeed");
+        assert_eq!(
+            recovered, 2,
+            "live front candidates must not consume all crashed progress"
+        );
+
+        let statuses: std::collections::HashMap<Uuid, String> =
+            sqlx::query_as("SELECT id, status FROM cve_scans WHERE id = ANY($1)")
+                .bind(&scan_ids)
+                .fetch_all(&pool)
+                .await
+                .expect("bounded recovery states should resolve")
+                .into_iter()
+                .collect();
+        assert_eq!(statuses[&scan_ids[0]], "in_progress");
+        assert_eq!(statuses[&scan_ids[1]], "in_progress");
+        assert_eq!(statuses[&scan_ids[2]], "in_progress");
+        assert_eq!(statuses[&scan_ids[3]], "failed");
+        assert_eq!(statuses[&scan_ids[4]], "in_progress");
+
+        for _ in 0..2 {
+            recover_stale_scans_with_options(&pool, std::time::Duration::from_secs(1800), options)
+                .await
+                .expect("later bounded recovery should succeed");
+        }
+        let failed: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM cve_scans WHERE id = ANY($1) AND status = 'failed'",
+        )
+        .bind(&scan_ids)
+        .fetch_one(&pool)
+        .await
+        .expect("final recovery states should resolve");
+        assert_eq!(failed, 3);
+        assert_eq!(
+            get_active_scan_for_derivation(&pool, derivation_ids[0])
+                .await
+                .expect("live scan should resolve"),
+            Some(scan_ids[0]),
+            "the held owner must retain active uniqueness"
+        );
+        assert_eq!(
+            get_active_scan_for_derivation(&pool, derivation_ids[1])
+                .await
+                .expect("revoked live scan should resolve"),
+            Some(scan_ids[1]),
+            "the held revoked owner must retain active uniqueness"
+        );
+
+        assert!(
+            release_execution_lock(&mut live_lock, live_execution_id)
+                .await
+                .expect("live execution lock release should resolve")
+        );
+        drop(live_lock);
+        assert!(
+            release_execution_lock(&mut revoked_lock, revoked_execution_id)
+                .await
+                .expect("revoked execution lock release should resolve")
+        );
+        drop(revoked_lock);
+
+        sqlx::query("DELETE FROM cve_scans WHERE id = ANY($1)")
+            .bind(&scan_ids)
+            .execute(&pool)
+            .await
+            .expect("bounded recovery scans should be deleted");
+        sqlx::query("DELETE FROM derivations WHERE id = ANY($1)")
+            .bind(&derivation_ids)
+            .execute(&pool)
+            .await
+            .expect("bounded recovery derivations should be deleted");
+    }
+
     /// A live heartbeat keeps a long-running execution out of stale recovery.
     /// Once recovery wins, the former owner cannot mutate the terminal row or
     /// persist any package/CVE side effects with its obsolete token.
@@ -3542,6 +4069,19 @@ mod tests {
                 .expect("released execution lock should be queryable"),
             "recovery may only treat the execution as crashed after its lock is released"
         );
+        sqlx::query(
+            r#"
+            UPDATE cve_scans
+            SET scan_metadata = scan_metadata || jsonb_build_object(
+                'execution_heartbeat_at', NOW() - INTERVAL '2 hours'
+            )
+            WHERE id = $1
+            "#,
+        )
+        .bind(scan_id)
+        .execute(&pool)
+        .await
+        .expect("released execution heartbeat should be aged without sleeping");
         assert_eq!(
             recover_stale_scans(&pool, std::time::Duration::from_secs(1800))
                 .await
@@ -3782,10 +4322,10 @@ mod tests {
         );
     }
 
-    /// A stale completed scan should be selected for rescan when the policy
-    /// interval has elapsed.
+    /// A tokenless legacy row can be revoked and finalized in one recovery
+    /// call, but it still represents one recovered scan.
     #[tokio::test]
-    async fn get_targets_needing_cve_rescan_selects_stale_scan() {
+    async fn legacy_stale_scan_is_counted_once_when_immediately_finalized() {
         let Ok(database_url) = std::env::var("CRYSTAL_FORGE_TEST_DATABASE_URL") else {
             return;
         };
@@ -3793,44 +4333,301 @@ mod tests {
             .await
             .expect("dedicated CVE test database should be reachable");
         let (derivation_id, _) = setup_test_derivation(&pool).await;
-
-        // Create a completed scan that is old enough to be stale.
         let scan_id = create_cve_scan(&pool, derivation_id, "vulnix", None)
             .await
-            .expect("scan should be created")
+            .expect("legacy scan fixture should be created")
             .id();
         sqlx::query(
             r#"
             UPDATE cve_scans
-            SET status = 'completed',
-                completed_at = NOW() - '48 hours'::INTERVAL,
-                created_at = NOW() - '48 hours'::INTERVAL
+            SET created_at = NOW() - INTERVAL '2 hours',
+                scan_metadata = COALESCE(scan_metadata, '{}'::jsonb)
+                    - 'execution_id'
+                    - 'execution_started_at'
+                    - 'execution_heartbeat_at'
             WHERE id = $1
             "#,
         )
         .bind(scan_id)
         .execute(&pool)
         .await
-        .expect("scan should be aged as completed");
+        .expect("legacy scan fixture should be aged");
 
-        // Rescan query should pick it up (deployed_interval is 24h, scan is 48h old).
-        let targets = get_targets_needing_cve_rescan(&pool, Some(10))
-            .await
-            .expect("should fetch rescan targets");
-        assert!(
-            targets.iter().any(|d| d.id == derivation_id),
-            "stale completed scan should be selected for rescan"
+        assert_eq!(
+            recover_stale_scans(&pool, std::time::Duration::from_secs(1800))
+                .await
+                .expect("legacy stale recovery should succeed"),
+            1,
+            "one legacy scan must be counted once even when both passes act on it"
         );
+        let status: String = sqlx::query_scalar("SELECT status FROM cve_scans WHERE id = $1")
+            .bind(scan_id)
+            .fetch_one(&pool)
+            .await
+            .expect("legacy scan status should resolve");
+        assert_eq!(status, "failed");
 
         sqlx::query("DELETE FROM cve_scans WHERE id = $1")
             .bind(scan_id)
             .execute(&pool)
             .await
-            .expect("stale rescan fixture scan should be deleted");
+            .expect("legacy scan fixture should be deleted");
         sqlx::query("DELETE FROM derivations WHERE id = $1")
             .bind(derivation_id)
             .execute(&pool)
             .await
-            .expect("stale rescan fixture derivation should be deleted");
+            .expect("legacy derivation fixture should be deleted");
+    }
+
+    /// Proves each lifecycle class uses its own cadence and that both forms of
+    /// policy suppression exclude only the intended targets.
+    #[tokio::test]
+    #[serial(scan_schedule_policy)]
+    async fn get_targets_needing_cve_rescan_selects_stale_scan() {
+        let Ok(database_url) = std::env::var("CRYSTAL_FORGE_TEST_DATABASE_URL") else {
+            return;
+        };
+        let pool = PgPool::connect(&database_url)
+            .await
+            .expect("dedicated CVE test database should be reachable");
+        let original_policy: (bool, String, String, String, bool) = sqlx::query_as(
+            "SELECT on_build, deployed_interval, recent_interval, archived_interval, archived_enabled FROM scan_schedule_policy WHERE id = 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("scan policy should exist");
+        let fleet = setup_fleet_fixture(&pool).await;
+        let deployed_id = fleet.running_id;
+        let recent_id = fleet.newer_id;
+        let (archived_id, _) = setup_test_derivation(&pool).await;
+        sqlx::query(
+            "UPDATE derivations SET completed_at = NOW() - INTERVAL '31 days' WHERE id = $1",
+        )
+        .bind(archived_id)
+        .execute(&pool)
+        .await
+        .expect("archived derivation should be aged");
+
+        let scan_ids = [Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()];
+        for ((scan_id, derivation_id), age) in scan_ids
+            .iter()
+            .zip([deployed_id, recent_id, archived_id])
+            .zip(["7 hours", "13 hours", "49 hours"])
+        {
+            sqlx::query(
+                r#"
+                INSERT INTO cve_scans (
+                    id, derivation_id, scanner_name, status, completed_at,
+                    total_packages, total_vulnerabilities,
+                    critical_count, high_count, medium_count, low_count
+                )
+                VALUES ($1, $2, 'vulnix', 'completed', NOW() - $3::interval,
+                        0, 0, 0, 0, 0, 0)
+                "#,
+            )
+            .bind(scan_id)
+            .bind(derivation_id)
+            .bind(age)
+            .execute(&pool)
+            .await
+            .expect("completed cadence scan should be inserted");
+        }
+
+        let assertions = std::panic::AssertUnwindSafe(async {
+            sqlx::query(
+                "UPDATE scan_schedule_policy SET deployed_interval = '6h', recent_interval = '12h', archived_interval = '48h', archived_enabled = TRUE WHERE id = 1",
+            )
+            .execute(&pool)
+            .await
+            .expect("distinct cadence policy should be stored");
+            let target_ids = |targets: Vec<Derivation>| {
+                targets
+                    .into_iter()
+                    .map(|target| target.id)
+                    .collect::<std::collections::HashSet<_>>()
+            };
+            let all_classes = target_ids(
+                get_targets_needing_cve_rescan(&pool, Some(100))
+                    .await
+                    .expect("all cadence targets should resolve"),
+            );
+            assert!(
+                all_classes.contains(&deployed_id),
+                "deployed cadence must apply"
+            );
+            assert!(
+                all_classes.contains(&recent_id),
+                "recent cadence must apply"
+            );
+            assert!(
+                all_classes.contains(&archived_id),
+                "archived cadence must apply"
+            );
+
+            sqlx::query("UPDATE scan_schedule_policy SET archived_enabled = FALSE WHERE id = 1")
+                .execute(&pool)
+                .await
+                .expect("archived scanning should be disabled");
+            let without_archived = target_ids(
+                get_targets_needing_cve_rescan(&pool, Some(100))
+                    .await
+                    .expect("disabled archived targets should resolve"),
+            );
+            assert!(without_archived.contains(&deployed_id));
+            assert!(without_archived.contains(&recent_id));
+            assert!(!without_archived.contains(&archived_id));
+
+            sqlx::query("UPDATE scan_schedule_policy SET recent_interval = 'never', archived_enabled = TRUE WHERE id = 1")
+                .execute(&pool)
+                .await
+                .expect("recent never policy should be stored");
+            let recent_never = target_ids(
+                get_targets_needing_cve_rescan(&pool, Some(100))
+                    .await
+                    .expect("never targets should resolve"),
+            );
+            assert!(recent_never.contains(&deployed_id));
+            assert!(!recent_never.contains(&recent_id));
+            assert!(recent_never.contains(&archived_id));
+
+            sqlx::query("UPDATE scan_schedule_policy SET deployed_interval = 'never', archived_interval = 'never' WHERE id = 1")
+                .execute(&pool)
+                .await
+                .expect("remaining never policies should be stored");
+            let all_never = target_ids(
+                get_targets_needing_cve_rescan(&pool, Some(100))
+                    .await
+                    .expect("all-never targets should resolve"),
+            );
+            assert!(!all_never.contains(&deployed_id));
+            assert!(!all_never.contains(&recent_id));
+            assert!(!all_never.contains(&archived_id));
+        })
+        .catch_unwind()
+        .await;
+
+        sqlx::query(
+            "UPDATE scan_schedule_policy SET on_build = $1, deployed_interval = $2, recent_interval = $3, archived_interval = $4, archived_enabled = $5 WHERE id = 1",
+        )
+        .bind(original_policy.0)
+        .bind(original_policy.1)
+        .bind(original_policy.2)
+        .bind(original_policy.3)
+        .bind(original_policy.4)
+        .execute(&pool)
+        .await
+        .expect("original scan policy should be restored");
+        fleet.cleanup(&pool).await;
+        sqlx::query("DELETE FROM cve_scans WHERE derivation_id = $1")
+            .bind(archived_id)
+            .execute(&pool)
+            .await
+            .expect("archived cadence scans should be deleted");
+        sqlx::query("DELETE FROM derivations WHERE id = $1")
+            .bind(archived_id)
+            .execute(&pool)
+            .await
+            .expect("archived cadence derivation should be deleted");
+
+        if let Err(panic) = assertions {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    /// A revoked row remains active while its snapshotted execution lock proves
+    /// the scanner owner is still alive. Recovery may finalize only after that
+    /// session lock is released.
+    #[tokio::test]
+    async fn stale_finalization_preserves_uniqueness_while_execution_lock_is_held() {
+        let Ok(database_url) = std::env::var("CRYSTAL_FORGE_TEST_DATABASE_URL") else {
+            return;
+        };
+        let pool = PgPool::connect(&database_url)
+            .await
+            .expect("dedicated CVE test database should be reachable");
+        let (derivation_id, _) = setup_test_derivation(&pool).await;
+        let claim = match create_cve_scan(&pool, derivation_id, "vulnix", None)
+            .await
+            .expect("lock-owned scan should be created")
+        {
+            CreateCveScanOutcome::Created(claim) => claim,
+            CreateCveScanOutcome::Existing(_) => panic!("lock-owned scan must be new"),
+        };
+        let mut lock_conn = pool.acquire().await.expect("lock connection");
+        acquire_execution_lock(&mut lock_conn, claim.execution_id)
+            .await
+            .expect("execution lock should be acquired");
+        sqlx::query(
+            "UPDATE cve_scans SET scan_metadata = scan_metadata || jsonb_build_object('execution_revoked_at', NOW() - INTERVAL '5 minutes') WHERE id = $1",
+        )
+        .bind(claim.scan_id)
+        .execute(&pool)
+        .await
+        .expect("revocation should be aged");
+
+        assert_eq!(
+            recover_stale_scans(&pool, std::time::Duration::from_secs(1800))
+                .await
+                .expect("locked recovery should succeed"),
+            0,
+            "a held execution lock must retain active uniqueness"
+        );
+        assert_eq!(
+            get_active_scan_for_derivation(&pool, derivation_id)
+                .await
+                .expect("active scan should resolve"),
+            Some(claim.scan_id)
+        );
+
+        let revocation_was_deferred: bool = sqlx::query_scalar(
+            "SELECT (scan_metadata ->> 'execution_revoked_at')::timestamptz > NOW() - INTERVAL '10 seconds' FROM cve_scans WHERE id = $1",
+        )
+        .bind(claim.scan_id)
+        .fetch_one(&pool)
+        .await
+        .expect("deferred revocation timestamp should resolve");
+        assert!(
+            revocation_was_deferred,
+            "a held execution lock must restart the acknowledgment grace"
+        );
+
+        assert!(
+            release_execution_lock(&mut lock_conn, claim.execution_id)
+                .await
+                .expect("execution lock release should resolve")
+        );
+        drop(lock_conn);
+        sqlx::query(
+            "UPDATE cve_scans SET scan_metadata = scan_metadata || jsonb_build_object('execution_revoked_at', NOW() - INTERVAL '5 minutes') WHERE id = $1",
+        )
+        .bind(claim.scan_id)
+        .execute(&pool)
+        .await
+        .expect("released revocation should be aged without sleeping");
+        assert_eq!(
+            recover_stale_scans(&pool, std::time::Duration::from_secs(1800))
+                .await
+                .expect("unlocked recovery should succeed"),
+            1
+        );
+        assert_eq!(
+            get_scan_by_id(&pool, claim.scan_id)
+                .await
+                .expect("finalized scan should resolve")
+                .expect("finalized scan should exist")
+                .status,
+            ScanStatus::Failed
+        );
+
+        sqlx::query("DELETE FROM cve_scans WHERE derivation_id = $1")
+            .bind(derivation_id)
+            .execute(&pool)
+            .await
+            .expect("lock-owned scan should be deleted");
+        sqlx::query("DELETE FROM derivations WHERE id = $1")
+            .bind(derivation_id)
+            .execute(&pool)
+            .await
+            .expect("lock-owned derivation should be deleted");
     }
 }

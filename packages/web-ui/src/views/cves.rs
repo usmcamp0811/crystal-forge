@@ -70,6 +70,42 @@ fn deployment_policy_status_color(policy: &str) -> &'static str {
     }
 }
 
+const SUCCESS_TOAST_DURATION_MS: u32 = 3000;
+
+#[derive(Clone, Copy)]
+struct ToastPublication {
+    generation: u64,
+    auto_dismiss: bool,
+}
+
+#[derive(Default)]
+struct ToastLifecycle {
+    generation: u64,
+}
+
+impl ToastLifecycle {
+    fn publish(&mut self, is_success: bool) -> ToastPublication {
+        self.generation = self.generation.wrapping_add(1);
+        ToastPublication {
+            generation: self.generation,
+            auto_dismiss: is_success,
+        }
+    }
+
+    fn dismiss(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+    }
+
+    fn expire(&mut self, publication: ToastPublication) -> bool {
+        if publication.auto_dismiss && self.generation == publication.generation {
+            self.dismiss();
+            true
+        } else {
+            false
+        }
+    }
+}
+
 fn sync_cve_url_query(
     severity: Option<&str>,
     fix_status: Option<&str>,
@@ -160,6 +196,9 @@ pub fn CvesView() -> Element {
     let mut view_mode = use_signal(move || initial_view.clone()); // "flat" or "grouped"
     let mut selected_cve_id = use_signal(move || initial_cve.clone());
     let mut toast_message: Signal<Option<(String, bool)>> = use_signal(|| None);
+    // CONCURRENCY: Publishing or dismissing feedback advances the lifecycle.
+    // A success timer can clear only the publication that created the timer.
+    let mut toast_lifecycle = use_signal(ToastLifecycle::default);
     let mut fleet_rescan_pending = use_signal(|| false);
 
     // Attention flash signal for the Critical stat card (set by the use_effect after stats resolves).
@@ -274,14 +313,16 @@ pub fn CvesView() -> Element {
                                     fleet_rescan_pending.set(false);
                                     match result {
                                         Ok(response) => {
+                                            let publication = toast_lifecycle.write().publish(true);
                                             toast_message.set(Some((response.message, true)));
-                                            gloo_timers::future::TimeoutFuture::new(4000).await;
-                                            toast_message.set(None);
+                                            gloo_timers::future::TimeoutFuture::new(SUCCESS_TOAST_DURATION_MS).await;
+                                            if toast_lifecycle.write().expire(publication) {
+                                                toast_message.set(None);
+                                            }
                                         }
                                         Err(err) => {
+                                            toast_lifecycle.write().publish(false);
                                             toast_message.set(Some((format!("Fleet rescan failed: {err}"), false)));
-                                            gloo_timers::future::TimeoutFuture::new(5000).await;
-                                            toast_message.set(None);
                                         }
                                     }
                                 });
@@ -305,6 +346,7 @@ pub fn CvesView() -> Element {
                         class: "btn btn-ghost focus-ring",
                         onclick: move |_| {
                             let mut toast_message = toast_message;
+                            let mut toast_lifecycle = toast_lifecycle;
                             spawn(async move {
                                 match client::export_cves_csv(&CveFilters {
                                     severity: severity_filter(),
@@ -316,14 +358,16 @@ pub fn CvesView() -> Element {
                                     limit: None,
                                 }).await {
                                     Ok(_) => {
+                                        let publication = toast_lifecycle.write().publish(true);
                                         toast_message.set(Some(("Export report started".to_string(), true)));
-                                        gloo_timers::future::TimeoutFuture::new(3000).await;
-                                        toast_message.set(None);
+                                        gloo_timers::future::TimeoutFuture::new(SUCCESS_TOAST_DURATION_MS).await;
+                                        if toast_lifecycle.write().expire(publication) {
+                                            toast_message.set(None);
+                                        }
                                     }
                                     Err(e) => {
+                                        toast_lifecycle.write().publish(false);
                                         toast_message.set(Some((format!("Export failed: {e}"), false)));
-                                        gloo_timers::future::TimeoutFuture::new(5000).await;
-                                        toast_message.set(None);
                                     }
                                 }
                             });
@@ -661,7 +705,10 @@ pub fn CvesView() -> Element {
                 Toast {
                     message: message.clone(),
                     is_success,
-                    on_dismiss: move |_| toast_message.set(None)
+                    on_dismiss: move |_| {
+                        toast_lifecycle.write().dismiss();
+                        toast_message.set(None);
+                    }
                 }
             }
         }
@@ -2473,5 +2520,29 @@ fn JustificationCard(justification: CveJustification) -> Element {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ToastLifecycle;
+
+    #[test]
+    fn toast_lifecycle_fences_timers_and_manual_dismissal() {
+        let mut lifecycle = ToastLifecycle::default();
+
+        let older = lifecycle.publish(true);
+        let newer = lifecycle.publish(true);
+        assert!(!lifecycle.expire(older));
+
+        lifecycle.dismiss();
+        assert!(!lifecycle.expire(newer));
+
+        let persistent_error = lifecycle.publish(false);
+        assert!(!lifecycle.expire(persistent_error));
+
+        let current_success = lifecycle.publish(true);
+        assert!(lifecycle.expire(current_success));
+        assert!(!lifecycle.expire(current_success));
     }
 }

@@ -15,7 +15,10 @@ fn parse_successful_vulnix_output(
     stdout: &str,
     stderr: &str,
 ) -> Result<VulnixScanOutput> {
-    if exit_code != Some(0) {
+    // vulnix uses exit 2 to report that the valid JSON result contains at
+    // least one unwhitelisted vulnerability. Exit 1 and all other statuses
+    // are process failures.
+    if !matches!(exit_code, Some(0 | 2)) {
         let stderr = stderr.trim();
         let stderr = if stderr.is_empty() {
             "vulnix produced no stderr output"
@@ -159,7 +162,7 @@ impl VulnixRunner {
                     info!("🔍 Stderr content: {}", stderr_msg);
                 }
 
-                if output.status.success() {
+                if matches!(output.status.code(), Some(0 | 2)) {
                     let vulnix_entries = parse_successful_vulnix_output(
                         output.status.code(),
                         &stdout_msg,
@@ -247,5 +250,28 @@ mod tests {
             .expect("successful valid output should parse");
 
         assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn valid_nonempty_json_from_vulnerability_exit_is_accepted() {
+        let json = r#"[{"name":"openssl-3.0.0","pname":"openssl","version":"3.0.0","derivation":"/nix/store/example-openssl.drv","affected_by":["CVE-2026-0001"],"whitelisted":[],"cvssv3_basescore":{"CVE-2026-0001":9.8}}]"#;
+
+        let entries = parse_successful_vulnix_output(Some(2), json, "")
+            .expect("exit 2 with valid vulnerability JSON must parse");
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].affected_by, ["CVE-2026-0001"]);
+    }
+
+    #[test]
+    fn malformed_json_from_vulnerability_exit_is_a_parse_error() {
+        let error = parse_successful_vulnix_output(Some(2), "not-json", "")
+            .expect_err("exit 2 does not make malformed JSON valid");
+
+        assert!(
+            error
+                .to_string()
+                .contains("Failed to parse vulnix JSON output")
+        );
     }
 }

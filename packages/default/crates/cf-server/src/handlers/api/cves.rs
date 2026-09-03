@@ -14,6 +14,7 @@ use crate::api::models::{
 };
 use crate::auth::extractors::{RequireAdmin, RequireAuth};
 use crate::handlers::agent_request::CFState;
+use crate::handlers::api::auth_session::RequireCsrf;
 use crate::queries::cve_scans::{FleetEnqueueOutcome, enqueue_fleet_cve_scans};
 use crate::queries::cves;
 
@@ -239,9 +240,13 @@ pub async fn list_justifications(
 /// vulnix availability is intentionally not checked here: execution is
 /// deferred, so the relevant question is whether vulnix exists when the worker
 /// runs the scan, not when the request is made.
+///
+/// The route requires an administrator session and matching double-submit CSRF
+/// cookie and header before it can enqueue work.
 pub async fn trigger_fleet_rescan(
     State(state): State<CFState>,
     _user: RequireAdmin,
+    _csrf: RequireCsrf,
 ) -> Result<(StatusCode, Json<FleetRescanResponse>), (StatusCode, String)> {
     let outcome = enqueue_fleet_cve_scans(&state.pool, "vulnix", None)
         .await
@@ -552,11 +557,16 @@ mod fleet_rescan_authorization_tests {
     //! not prove that the endpoint rejects unauthorized callers.
 
     use super::trigger_fleet_rescan;
-    use crate::auth::session::{SESSION_COOKIE_NAME, hash_token};
+    use crate::auth::session::{
+        CSRF_COOKIE_NAME, CSRF_HEADER_NAME, SESSION_COOKIE_NAME, hash_token,
+    };
     use crate::config::ServerConfig;
     use crate::handlers::agent_request::CFState;
     use crate::models::auth_identity::AuthRole;
     use crate::queries::auth_identity::{create_user_session, sync_user_role};
+    use crate::queries::commits::{get_commit_by_id, insert_commit};
+    use crate::queries::derivations::{EvaluationStatus, insert_derivation};
+    use crate::queries::flakes::insert_flake;
     use crate::queries::users::insert_user;
     use crate::queue::QueueNotifier;
     use axum::Router;
@@ -626,12 +636,160 @@ mod fleet_rescan_authorization_tests {
             .expect("test user and session should be deleted");
     }
 
-    async fn post_fleet_rescan(base: &str, token: Option<&str>) -> u16 {
-        let mut request = reqwest::Client::new().post(format!("{base}/api/v1/cves/rescan-fleet"));
-        if let Some(token) = token {
-            request = request.header("cookie", format!("{SESSION_COOKIE_NAME}={token}"));
+    struct FleetAuthFixture {
+        flake_id: i32,
+        environment_id: Uuid,
+        system_id: Uuid,
+        hostname: String,
+        derivation_id: i32,
+    }
+
+    impl FleetAuthFixture {
+        async fn create(pool: &PgPool) -> Self {
+            let suffix = Uuid::new_v4().simple().to_string();
+            let repo_url = format!("https://example.com/task-325-auth-{suffix}.git");
+            let flake = insert_flake(
+                pool,
+                &format!("task-325-auth-{suffix}"),
+                &repo_url,
+                "main",
+                "cf_systems_only",
+            )
+            .await
+            .expect("authorization fixture flake should be inserted");
+            insert_commit(pool, &suffix, &repo_url, Utc::now())
+                .await
+                .expect("authorization fixture commit should be inserted");
+            let commit_id: i32 = sqlx::query_scalar("SELECT id FROM commits WHERE flake_id = $1")
+                .bind(flake.id)
+                .fetch_one(pool)
+                .await
+                .expect("authorization fixture commit should resolve");
+            let commit = get_commit_by_id(pool, commit_id)
+                .await
+                .expect("authorization fixture commit model should resolve");
+            let config_name = format!("auth-config-{suffix}");
+            let store_path = format!("/nix/store/{suffix}-auth-running");
+            let derivation = insert_derivation(pool, Some(&commit), &config_name, "nixos")
+                .await
+                .expect("authorization fixture derivation should be inserted");
+            sqlx::query(
+                "UPDATE derivations SET status_id = $2, completed_at = NOW(), store_path = $3 WHERE id = $1",
+            )
+            .bind(derivation.id)
+            .bind(EvaluationStatus::BuildComplete.as_id())
+            .bind(&store_path)
+            .execute(pool)
+            .await
+            .expect("authorization fixture derivation should be build-complete");
+
+            let environment_id = Uuid::new_v4();
+            sqlx::query("INSERT INTO environments (id, name, is_active) VALUES ($1, $2, TRUE)")
+                .bind(environment_id)
+                .bind(format!("task-325-auth-env-{suffix}"))
+                .execute(pool)
+                .await
+                .expect("authorization fixture environment should be inserted");
+            let system_id = Uuid::new_v4();
+            let hostname = format!("task-325-auth-host-{suffix}");
+            sqlx::query(
+                r#"
+                INSERT INTO systems (
+                    id, hostname, environment_id, is_active, public_key, flake_id,
+                    derivation, system_configuration_name
+                )
+                VALUES ($1, $2, $3, TRUE, 'test-key', $4, 'test-derivation', $5)
+                "#,
+            )
+            .bind(system_id)
+            .bind(&hostname)
+            .bind(environment_id)
+            .bind(flake.id)
+            .bind(&config_name)
+            .execute(pool)
+            .await
+            .expect("authorization fixture system should be inserted");
+            sqlx::query(
+                "INSERT INTO system_states (hostname, store_path, change_reason, timestamp) VALUES ($1, $2, 'config_change', NOW())",
+            )
+            .bind(&hostname)
+            .bind(&store_path)
+            .execute(pool)
+            .await
+            .expect("authorization fixture system state should be inserted");
+
+            Self {
+                flake_id: flake.id,
+                environment_id,
+                system_id,
+                hostname,
+                derivation_id: derivation.id,
+            }
         }
-        request.send().await.expect("send").status().as_u16()
+
+        async fn cleanup(self, pool: &PgPool) {
+            sqlx::query("DELETE FROM cve_scans WHERE derivation_id = $1")
+                .bind(self.derivation_id)
+                .execute(pool)
+                .await
+                .expect("authorization fixture scan should be deleted");
+            sqlx::query("DELETE FROM system_states WHERE hostname = $1")
+                .bind(&self.hostname)
+                .execute(pool)
+                .await
+                .expect("authorization fixture system state should be deleted");
+            sqlx::query("DELETE FROM systems WHERE id = $1")
+                .bind(self.system_id)
+                .execute(pool)
+                .await
+                .expect("authorization fixture system should be deleted");
+            sqlx::query("DELETE FROM derivations WHERE id = $1")
+                .bind(self.derivation_id)
+                .execute(pool)
+                .await
+                .expect("authorization fixture derivation should be deleted");
+            sqlx::query("DELETE FROM commits WHERE flake_id = $1")
+                .bind(self.flake_id)
+                .execute(pool)
+                .await
+                .expect("authorization fixture commit should be deleted");
+            sqlx::query("DELETE FROM flakes WHERE id = $1")
+                .bind(self.flake_id)
+                .execute(pool)
+                .await
+                .expect("authorization fixture flake should be deleted");
+            sqlx::query("DELETE FROM environments WHERE id = $1")
+                .bind(self.environment_id)
+                .execute(pool)
+                .await
+                .expect("authorization fixture environment should be deleted");
+        }
+    }
+
+    async fn post_fleet_rescan(
+        base: &str,
+        token: Option<&str>,
+        csrf_cookie: Option<&str>,
+        csrf_header: Option<&str>,
+    ) -> (u16, serde_json::Value) {
+        let mut request = reqwest::Client::new().post(format!("{base}/api/v1/cves/rescan-fleet"));
+        let mut cookies = Vec::new();
+        if let Some(token) = token {
+            cookies.push(format!("{SESSION_COOKIE_NAME}={token}"));
+        }
+        if let Some(csrf) = csrf_cookie {
+            cookies.push(format!("{CSRF_COOKIE_NAME}={csrf}"));
+        }
+        if !cookies.is_empty() {
+            request = request.header("cookie", cookies.join("; "));
+        }
+        if let Some(csrf) = csrf_header {
+            request = request.header(CSRF_HEADER_NAME.as_str(), csrf);
+        }
+        let response = request.send().await.expect("send");
+        let status = response.status().as_u16();
+        let body = response.json().await.expect("JSON response");
+        (status, body)
     }
 
     #[tokio::test]
@@ -641,11 +799,12 @@ mod fleet_rescan_authorization_tests {
         };
         let base = spawn_fleet_server(pool.clone()).await;
 
+        let (status, body) = post_fleet_rescan(&base, None, None, None).await;
         assert_eq!(
-            post_fleet_rescan(&base, None).await,
-            401,
+            status, 401,
             "an unauthenticated caller must not reach the fleet enqueue"
         );
+        assert_eq!(body["error"], "unauthorized");
     }
 
     #[tokio::test]
@@ -657,8 +816,11 @@ mod fleet_rescan_authorization_tests {
         let (operator, operator_id) = session_token_for_role(&pool, AuthRole::Operator).await;
         let base = spawn_fleet_server(pool.clone()).await;
 
-        let viewer_status = post_fleet_rescan(&base, Some(&viewer)).await;
-        let operator_status = post_fleet_rescan(&base, Some(&operator)).await;
+        let csrf = "task-325-non-admin-csrf";
+        let (viewer_status, viewer_body) =
+            post_fleet_rescan(&base, Some(&viewer), Some(csrf), Some(csrf)).await;
+        let (operator_status, operator_body) =
+            post_fleet_rescan(&base, Some(&operator), Some(csrf), Some(csrf)).await;
         cleanup_test_user(&pool, viewer_id).await;
         cleanup_test_user(&pool, operator_id).await;
 
@@ -670,36 +832,49 @@ mod fleet_rescan_authorization_tests {
             operator_status, 403,
             "Operator must be forbidden from triggering a fleet rescan"
         );
+        assert_eq!(viewer_body["error"], "forbidden");
+        assert_eq!(operator_body["error"], "forbidden");
     }
 
     #[tokio::test]
-    async fn fleet_rescan_accepts_admin() {
+    async fn fleet_rescan_requires_matching_csrf_for_admin() {
         let Some(pool) = test_pool().await else {
             return;
         };
         let (admin, admin_id) = session_token_for_role(&pool, AuthRole::Admin).await;
         let base = spawn_fleet_server(pool.clone()).await;
 
-        let before: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM cve_scans")
-            .fetch_all(&pool)
-            .await
-            .expect("existing scan IDs should resolve");
-        let status = post_fleet_rescan(&base, Some(&admin)).await;
-        let after: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM cve_scans")
-            .fetch_all(&pool)
-            .await
-            .expect("post-request scan IDs should resolve");
-        let created: Vec<Uuid> = after
-            .into_iter()
-            .filter(|id| !before.contains(id))
-            .collect();
-        sqlx::query("DELETE FROM cve_scans WHERE id = ANY($1)")
-            .bind(&created)
-            .execute(&pool)
-            .await
-            .expect("admin route scan side effects should be deleted");
+        let (missing, missing_body) = post_fleet_rescan(&base, Some(&admin), None, None).await;
+        let (mismatched, mismatched_body) = post_fleet_rescan(
+            &base,
+            Some(&admin),
+            Some("cookie-token"),
+            Some("header-token"),
+        )
+        .await;
+        let fixture = FleetAuthFixture::create(&pool).await;
+        let csrf = "task-325-fleet-csrf";
+        let (status, _) = post_fleet_rescan(&base, Some(&admin), Some(csrf), Some(csrf)).await;
+        let fixture_scan: Option<Uuid> =
+            sqlx::query_scalar("SELECT id FROM cve_scans WHERE derivation_id = $1")
+                .bind(fixture.derivation_id)
+                .fetch_optional(&pool)
+                .await
+                .expect("authorization fixture scan should resolve");
+        fixture.cleanup(&pool).await;
         cleanup_test_user(&pool, admin_id).await;
 
+        assert!(
+            fixture_scan.is_some(),
+            "the successful admin request must enqueue the owned fleet fixture"
+        );
+        assert_eq!(missing, 403, "Admin without CSRF must be rejected");
+        assert_eq!(missing_body["error"], "csrf_validation_failed");
+        assert_eq!(
+            mismatched, 403,
+            "Admin with mismatched CSRF must be rejected"
+        );
+        assert_eq!(mismatched_body["error"], "csrf_validation_failed");
         assert_eq!(
             status, 202,
             "Admin must be accepted and the request acknowledged as queued"
