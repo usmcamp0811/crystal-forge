@@ -115,14 +115,15 @@ pub async fn execution_lock_is_held(pool: &PgPool, execution_id: Uuid) -> Result
 /// when the connection is returned to the pool or closed.
 ///
 /// Returns `true` if the lock was acquired, `false` if it could not be acquired.
-pub async fn try_acquire_execution_lock(conn: &mut sqlx::PgConnection, execution_id: Uuid) -> Result<bool> {
+pub async fn try_acquire_execution_lock(
+    conn: &mut sqlx::PgConnection,
+    execution_id: Uuid,
+) -> Result<bool> {
     let lock_id = execution_lock_id(execution_id);
-    let acquired = sqlx::query_scalar::<_, bool>(
-        "SELECT pg_try_advisory_lock($1::bigint)"
-    )
-    .bind(lock_id)
-    .fetch_one(conn)
-    .await?;
+    let acquired = sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_lock($1::bigint)")
+        .bind(lock_id)
+        .fetch_one(conn)
+        .await?;
     Ok(acquired)
 }
 
@@ -131,7 +132,10 @@ pub async fn try_acquire_execution_lock(conn: &mut sqlx::PgConnection, execution
 /// This must be called on the same connection that will execute the scan.
 /// Blocks until the lock is acquired. The lock is held for the lifetime of the connection
 /// and automatically released when the connection is returned to the pool or closed.
-pub async fn acquire_execution_lock(conn: &mut sqlx::PgConnection, execution_id: Uuid) -> Result<()> {
+pub async fn acquire_execution_lock(
+    conn: &mut sqlx::PgConnection,
+    execution_id: Uuid,
+) -> Result<()> {
     let lock_id = execution_lock_id(execution_id);
     sqlx::query("SELECT pg_advisory_lock($1::bigint)")
         .bind(lock_id)
@@ -1506,6 +1510,76 @@ pub async fn enqueue_fleet_cve_scans(
     })
 }
 
+/// Revokes one stale execution, but only if the row still matches the exact
+/// state the recovery pass observed.
+///
+/// This is the mutation half of [`recover_stale_scans`]. It is a single
+/// statement, so its guards and its write are evaluated atomically and no
+/// concurrent requeue or re-claim can slip between them.
+///
+/// `snapshot_execution_token` is the raw `scan_metadata.execution_id` text the
+/// recovery pass read, or `None` when it observed a legacy row with no token.
+/// Passing the token as text rather than a parsed [`Uuid`] keeps the comparison
+/// exact even for a malformed stored value.
+///
+/// # Returns
+///
+/// `Ok(true)` when this call revoked the execution. `Ok(false)` when the row
+/// moved on — it was already revoked, reached a terminal status, was re-claimed
+/// under a different execution token, or received a heartbeat that made it
+/// fresh again. A `false` result is normal and must not be treated as an error.
+///
+/// # Errors
+///
+/// Returns an error when the statement itself fails.
+async fn revoke_stale_execution(
+    pool: &PgPool,
+    scan_id: Uuid,
+    snapshot_execution_token: Option<&str>,
+    stale_threshold: std::time::Duration,
+) -> Result<bool> {
+    let result = sqlx::query(
+        r#"
+        UPDATE cve_scans
+        SET scan_metadata = COALESCE(scan_metadata, '{}'::jsonb)
+            || jsonb_build_object(
+                'execution_revoked_at', NOW(),
+                'stale_recovery_reason', 'stale-execution-revoked'
+            )
+        WHERE id = $1
+          AND status = 'in_progress'
+          AND NOT (COALESCE(scan_metadata, '{}'::jsonb) ? 'execution_revoked_at')
+          AND (
+              ($2::text IS NULL
+               AND NOT (COALESCE(scan_metadata, '{}'::jsonb) ? 'execution_id'))
+              OR scan_metadata ->> 'execution_id' = $2::text
+          )
+          AND COALESCE(
+                  (scan_metadata ->> 'execution_heartbeat_at')::timestamptz,
+                  (scan_metadata ->> 'execution_started_at')::timestamptz,
+                  created_at
+              ) < NOW() - ($3::bigint) * INTERVAL '1 second'
+        "#,
+    )
+    .bind(scan_id)
+    .bind(snapshot_execution_token)
+    .bind(stale_threshold.as_secs() as i64)
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected() == 1)
+}
+
+/// How many `pending` candidates [`claim_queued_cve_scans`] inspects per
+/// requested claim before giving up for this cycle.
+///
+/// This bounds the extra work one cycle performs while still letting a worker
+/// that loses a guarded claim race advance to another queued row instead of
+/// returning empty-handed. The value only needs to exceed the realistic number
+/// of concurrently draining workers; it is not a scan budget, because at most
+/// `limit` claims are ever returned.
+const CLAIM_CANDIDATE_OVERSCAN: i64 = 8;
+
 /// Atomically claim queued CVE scans for execution.
 ///
 /// # Composite-assessment atomicity
@@ -1554,11 +1628,41 @@ pub async fn enqueue_fleet_cve_scans(
 /// when it entered the queue. Those are the same instant for worker-created
 /// scans, but can be far apart for operator-queued fleet scans.
 ///
+/// # Multi-worker progress
+///
+/// Every server process spawns its own CVE worker; there is no leader election
+/// or global singleton. Two workers therefore drain the same queue
+/// concurrently and routinely inspect the same oldest rows.
+///
+/// Selecting exactly `limit` candidates would make that contention degrade
+/// throughput badly at the per-cycle budget this worker actually uses
+/// (`MAX_SCANS_PER_CYCLE = 1`): both workers would pick the same single oldest
+/// row, one would win the guarded claim, and the loser would return no work
+/// even while other `pending` rows were waiting. N workers would then drain the
+/// queue at roughly one scan per cycle in total instead of N.
+///
+/// This function therefore inspects up to [`CLAIM_CANDIDATE_OVERSCAN`] times
+/// the requested limit and keeps attempting guarded claims until it either
+/// collects `limit` claims or exhausts that bounded candidate set. A loser on
+/// one row simply advances to the next candidate. The candidate set stays
+/// bounded so a large backlog cannot make one cycle unbounded, and the ordering
+/// stays `created_at ASC, id ASC` so queue fairness is preserved.
+///
+/// Candidate selection deliberately does **not** use `FOR UPDATE SKIP LOCKED`.
+/// Taking `cve_scans` row locks before the POA&M/composite lock would invert
+/// the global writer lock order documented above and reintroduce a deadlock
+/// against normal writers.
+///
 /// [lock_poam]: crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx
 pub async fn claim_queued_cve_scans(
     pool: &PgPool,
     limit: i64,
 ) -> Result<Vec<CveScanExecutionClaim>> {
+    if limit <= 0 {
+        return Ok(Vec::new());
+    }
+
+    let candidate_budget = limit.saturating_mul(CLAIM_CANDIDATE_OVERSCAN);
     let candidates: Vec<(Uuid, i32)> = sqlx::query_as(
         r#"
         SELECT id, derivation_id
@@ -1568,12 +1672,15 @@ pub async fn claim_queued_cve_scans(
         LIMIT $1
         "#,
     )
-    .bind(limit)
+    .bind(candidate_budget)
     .fetch_all(pool)
     .await?;
 
-    let mut claims = Vec::with_capacity(candidates.len());
+    let mut claims = Vec::with_capacity(limit.min(candidates.len() as i64) as usize);
     for (scan_id, derivation_id) in candidates {
+        if claims.len() as i64 >= limit {
+            break;
+        }
         let mut tx = pool.begin().await?;
         // CONCURRENCY: Acquire the derivation's POA&M/composite lock before
         // the claim mutation, matching every other CVE scan writer. This
@@ -1780,6 +1887,42 @@ pub async fn requeue_cve_scan_execution(
 /// This prevents a paused Tokio runtime or delayed server process from being
 /// replaced while its scanner process still exists and holds the lock.
 ///
+/// # Compare-and-set against the snapshotted execution
+///
+/// Candidate selection, the advisory-lock probe, and the revoking mutation
+/// cannot be one atomic step: the lock probe must run outside the candidate
+/// transaction. Between the snapshot and the mutation the snapshotted owner
+/// `A` may legitimately requeue its scan and a worker may re-claim the same
+/// scan under a new token `B`. Matching only on scan id and
+/// `status = 'in_progress'` would then revoke `B` — an execution that is alive,
+/// correctly heartbeating, and was never examined by this recovery pass.
+///
+/// Every revoking and finalizing mutation below therefore re-asserts the exact
+/// state this pass observed, as a single-statement compare-and-set:
+///
+/// - the scan is still `in_progress` and not already revoked;
+/// - the execution token is still the snapshotted token (or, for legacy rows,
+///   the row still has no token at all, so a row that acquired one after the
+///   snapshot is left alone);
+/// - the lease is still stale by the same threshold, so a heartbeat that
+///   landed after the snapshot cancels the revocation.
+///
+/// A recovery pass that inspected token `A` can therefore never revoke a
+/// successor token `B`.
+///
+/// # Lock order
+///
+/// Finalization mutates `cve_scans` and then recomputes composite enforcement
+/// state, so it must obey the repository's global CVE writer order:
+/// POA&M/composite derivation lock, then the `cve_scans` mutation, then
+/// composite persistence. Each finalization runs in its own short transaction
+/// that takes the POA&M lock first, exactly like
+/// [`claim_queued_cve_scans`], [`complete_cve_scan_for_execution`], and
+/// [`acknowledge_revoked_cve_scan_execution`]. Taking the row lock first (for
+/// example via a bulk `UPDATE ... RETURNING` followed by composite
+/// persistence) inverts that order and can deadlock against a normal writer
+/// that already holds the POA&M lock and is waiting for the same scan row.
+///
 /// Returns the number of scans that were recovered so callers can log the event.
 pub async fn recover_stale_scans(
     pool: &PgPool,
@@ -1816,6 +1959,11 @@ pub async fn recover_stale_scans(
     // Revoke only candidates whose locks are not held.
     let mut revoked_ids = Vec::new();
     for (scan_id, execution_id_opt) in candidates {
+        // The snapshotted token is carried as raw metadata text rather than a
+        // parsed `Uuid` so the compare-and-set below matches exactly what the
+        // snapshot read, including a malformed token value. `None` means the
+        // snapshot observed a legacy row with no token at all.
+        let snapshot_execution_token = execution_id_opt.clone();
         let should_revoke = if let Some(execution_id_str) = execution_id_opt {
             // Parse the execution UUID and check if its lock is held.
             match Uuid::parse_str(&execution_id_str) {
@@ -1823,14 +1971,16 @@ pub async fn recover_stale_scans(
                     // Lock is not held means the session crashed or ended.
                     // If we cannot determine lock status, do NOT revoke —
                     // fail closed to preserve ownership fencing (P1-3 fix).
-                    let lock_is_held = execution_lock_is_held(pool, execution_id)
-                        .await
-                        .map_err(|e| {
-                            anyhow::anyhow!(
-                                "failed to inspect execution lock for scan {}: {}",
-                                scan_id, e
-                            )
-                        })?;
+                    let lock_is_held =
+                        execution_lock_is_held(pool, execution_id)
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!(
+                                    "failed to inspect execution lock for scan {}: {}",
+                                    scan_id,
+                                    e
+                                )
+                            })?;
                     !lock_is_held
                 }
                 Err(_) => {
@@ -1843,47 +1993,26 @@ pub async fn recover_stale_scans(
             true
         };
 
-        if should_revoke {
-            let mut tx = pool.begin().await?;
-            let result = sqlx::query(
-                r#"
-                UPDATE cve_scans
-                SET scan_metadata = COALESCE(scan_metadata, '{}'::jsonb)
-                    || jsonb_build_object(
-                        'execution_revoked_at', NOW(),
-                        'stale_recovery_reason', 'stale-execution-revoked'
-                    )
-                WHERE id = $1
-                  AND status = 'in_progress'
-                  AND NOT (COALESCE(scan_metadata, '{}'::jsonb) ? 'execution_revoked_at')
-                "#,
+        if should_revoke
+            && revoke_stale_execution(
+                pool,
+                scan_id,
+                snapshot_execution_token.as_deref(),
+                stale_threshold,
             )
-            .bind(scan_id)
-            .execute(&mut *tx)
-            .await?;
-
-            if result.rows_affected() > 0 {
-                revoked_ids.push(scan_id);
-            }
-            tx.commit().await?;
+            .await?
+        {
+            revoked_ids.push(scan_id);
         }
     }
 
     // Second pass: finalize revocations that are old enough to be confident
     // the owner has observed them and either acknowledged or crashed.
     const REVOCATION_ACKNOWLEDGMENT_GRACE_SECONDS: i64 = 60;
-    let mut tx = pool.begin().await?;
-    let failed_ids = sqlx::query_scalar::<_, Uuid>(
+    let finalize_candidates = sqlx::query_as::<_, (Uuid, i32)>(
         r#"
-        UPDATE cve_scans
-        SET status = 'failed',
-            completed_at = NOW(),
-            attempts = attempts + 1,
-            scan_metadata = COALESCE(scan_metadata, '{}'::jsonb)
-                || jsonb_build_object(
-                    'stale_recovered_at', NOW(),
-                    'stale_recovery_reason', 'server-crash-recovery'
-                )
+        SELECT id, derivation_id
+        FROM cve_scans
         WHERE status = 'in_progress'
           AND (
               (
@@ -1893,20 +2022,74 @@ pub async fn recover_stale_scans(
               OR (scan_metadata ->> 'execution_revoked_at')::timestamptz
                   < NOW() - ($2::bigint) * INTERVAL '1 second'
           )
-        RETURNING id
+        ORDER BY id
         "#,
     )
     .bind(stale_threshold.as_secs() as i64)
     .bind(REVOCATION_ACKNOWLEDGMENT_GRACE_SECONDS)
-    .fetch_all(&mut *tx)
+    .fetch_all(pool)
     .await?;
 
-    for scan_id in &failed_ids {
-        crate::services::composite_enforcement::persist_scan_phase_in_tx(&mut tx, *scan_id).await?;
+    let mut failed_count = 0i64;
+    for (scan_id, derivation_id) in finalize_candidates {
+        // CONCURRENCY: One short transaction per scan, taking the POA&M lock
+        // before touching `cve_scans`. This is the repository's global CVE
+        // writer order; a bulk `UPDATE ... RETURNING` followed by composite
+        // persistence would take the row lock first and can deadlock against a
+        // normal writer holding the POA&M lock for the same derivation.
+        let mut tx = pool.begin().await?;
+        crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx(
+            &mut tx,
+            derivation_id,
+        )
+        .await?;
+
+        // Re-assert the selection predicate inside the locked transaction. The
+        // owner may have acknowledged the revocation, or a terminal transition
+        // may have committed, while this loop waited for the lock.
+        let result = sqlx::query(
+            r#"
+            UPDATE cve_scans
+            SET status = 'failed',
+                completed_at = NOW(),
+                attempts = attempts + 1,
+                scan_metadata = COALESCE(scan_metadata, '{}'::jsonb)
+                    || jsonb_build_object(
+                        'stale_recovered_at', NOW(),
+                        'stale_recovery_reason', 'server-crash-recovery'
+                    )
+            WHERE id = $1
+              AND status = 'in_progress'
+              AND (
+                  (
+                      NOT (COALESCE(scan_metadata, '{}'::jsonb) ? 'execution_id')
+                      AND created_at < NOW() - ($2::bigint) * INTERVAL '1 second'
+                  )
+                  OR (scan_metadata ->> 'execution_revoked_at')::timestamptz
+                      < NOW() - ($3::bigint) * INTERVAL '1 second'
+              )
+            "#,
+        )
+        .bind(scan_id)
+        .bind(stale_threshold.as_secs() as i64)
+        .bind(REVOCATION_ACKNOWLEDGMENT_GRACE_SECONDS)
+        .execute(&mut *tx)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            tx.rollback().await?;
+            continue;
+        }
+
+        // INVARIANT: The terminal scan transition and its composite
+        // recomputation commit together, so no reader can observe a failed
+        // scan whose composite assessment still reports the prior outcome.
+        crate::services::composite_enforcement::persist_scan_phase_in_tx(&mut tx, scan_id).await?;
+        tx.commit().await?;
+        failed_count += 1;
     }
 
-    tx.commit().await?;
-    Ok((revoked_ids.len() + failed_ids.len()) as i64)
+    Ok(revoked_ids.len() as i64 + failed_count)
 }
 
 /// Get derivations whose most recent completed CVE scan is stale according to
@@ -2706,6 +2889,386 @@ mod tests {
                 .expect("lock status should be queryable after release"),
             "the lock must no longer be observed as held once explicitly released"
         );
+    }
+
+    /// Stale recovery must not revoke a successor execution.
+    ///
+    /// Recovery cannot snapshot a candidate, probe its advisory lock, and
+    /// revoke it in one atomic step, so this exact interleaving is reachable in
+    /// production:
+    ///
+    /// ```text
+    /// recovery snapshots scan S as stale under execution token A
+    /// owner A requeues S
+    /// a worker claims S again under a new execution token B
+    /// recovery finally issues its revoking mutation for its snapshot of A
+    /// ```
+    ///
+    /// The mutation carries the snapshotted token, so this drives
+    /// [`revoke_stale_execution`] — the exact statement recovery issues — with
+    /// token `A` against the state the race produces. No sleeps are involved:
+    /// the post-race state is constructed directly and then the stale mutation
+    /// is replayed against it.
+    #[tokio::test]
+    async fn stale_revocation_cannot_revoke_a_successor_execution() {
+        let Ok(database_url) = std::env::var("CRYSTAL_FORGE_TEST_DATABASE_URL") else {
+            return;
+        };
+        let pool = PgPool::connect(&database_url)
+            .await
+            .expect("dedicated CVE test database should be reachable");
+        let derivation = insert_derivation(
+            &pool,
+            None,
+            &format!("successor-token-{}", Uuid::new_v4().simple()),
+            "nixos",
+        )
+        .await
+        .expect("successor-token derivation should be inserted");
+        let scan_id = insert_pending_test_scan(&pool, derivation.id).await;
+
+        // The execution recovery would have snapshotted.
+        let claim_a = claim_queued_cve_scans(&pool, 1)
+            .await
+            .expect("pending scan should be claimable")
+            .into_iter()
+            .find(|claim| claim.scan_id == scan_id)
+            .expect("worker A should own the scan");
+
+        // Age the lease so recovery would legitimately select token A.
+        sqlx::query(
+            r#"
+            UPDATE cve_scans
+            SET scan_metadata = scan_metadata || jsonb_build_object(
+                'execution_started_at', NOW() - INTERVAL '2 hours',
+                'execution_heartbeat_at', NOW() - INTERVAL '2 hours'
+            )
+            WHERE id = $1
+            "#,
+        )
+        .bind(scan_id)
+        .execute(&pool)
+        .await
+        .expect("token A lease should be aged");
+
+        // The race: A returns the scan to the queue and a worker re-claims it.
+        assert!(
+            requeue_cve_scan_execution(&pool, scan_id, claim_a.execution_id, "test-requeue")
+                .await
+                .expect("owner requeue should execute"),
+            "owner A must be able to requeue its own claim"
+        );
+        let claim_b = claim_queued_cve_scans(&pool, 1)
+            .await
+            .expect("requeued scan should be re-claimable")
+            .into_iter()
+            .find(|claim| claim.scan_id == scan_id)
+            .expect("worker B should own the scan");
+        assert_ne!(
+            claim_a.execution_id, claim_b.execution_id,
+            "re-claiming must rotate the execution token"
+        );
+
+        // Age B's lease too, so the staleness predicate alone cannot carry this
+        // assertion. Only the token comparison can distinguish the snapshotted
+        // execution from its successor, which is precisely the guard under
+        // test. Leaving B alone is still correct: this recovery pass never
+        // probed B's advisory lock, so it has no evidence that B is dead. A
+        // later pass will snapshot B, probe B's lock, and revoke it if it has
+        // genuinely crashed.
+        sqlx::query(
+            r#"
+            UPDATE cve_scans
+            SET scan_metadata = scan_metadata || jsonb_build_object(
+                'execution_started_at', NOW() - INTERVAL '2 hours',
+                'execution_heartbeat_at', NOW() - INTERVAL '2 hours'
+            )
+            WHERE id = $1
+            "#,
+        )
+        .bind(scan_id)
+        .execute(&pool)
+        .await
+        .expect("token B lease should be aged");
+
+        // Recovery's mutation finally lands, still carrying token A.
+        let revoked = revoke_stale_execution(
+            &pool,
+            scan_id,
+            Some(&claim_a.execution_id.to_string()),
+            std::time::Duration::from_secs(1800),
+        )
+        .await
+        .expect("stale revocation should execute");
+        assert!(
+            !revoked,
+            "a revocation snapshotted under token A must not affect successor token B"
+        );
+
+        let (status, revoked_flag, owner): (String, bool, Option<String>) = sqlx::query_as(
+            r#"
+            SELECT status,
+                   scan_metadata ? 'execution_revoked_at',
+                   scan_metadata ->> 'execution_id'
+            FROM cve_scans WHERE id = $1
+            "#,
+        )
+        .bind(scan_id)
+        .fetch_one(&pool)
+        .await
+        .expect("successor scan state should resolve");
+        assert_eq!(status, "in_progress", "successor B must remain active");
+        assert!(!revoked_flag, "successor B must not be revoked");
+        assert_eq!(
+            owner.as_deref(),
+            Some(claim_b.execution_id.to_string().as_str()),
+            "successor B must retain ownership"
+        );
+
+        // The live successor must still be able to heartbeat and finish.
+        assert!(
+            heartbeat_cve_scan_execution(&pool, scan_id, claim_b.execution_id)
+                .await
+                .expect("successor heartbeat should execute"),
+            "successor B must still own a heartbeatable lease"
+        );
+
+        // A revocation that does carry B's own token still applies, so the
+        // guard fences stale snapshots rather than disabling recovery.
+        sqlx::query(
+            r#"
+            UPDATE cve_scans
+            SET scan_metadata = scan_metadata || jsonb_build_object(
+                'execution_heartbeat_at', NOW() - INTERVAL '2 hours'
+            )
+            WHERE id = $1
+            "#,
+        )
+        .bind(scan_id)
+        .execute(&pool)
+        .await
+        .expect("token B lease should be aged again");
+        assert!(
+            revoke_stale_execution(
+                &pool,
+                scan_id,
+                Some(&claim_b.execution_id.to_string()),
+                std::time::Duration::from_secs(1800),
+            )
+            .await
+            .expect("current-owner revocation should execute"),
+            "a revocation carrying the current token must still revoke a stale execution"
+        );
+
+        sqlx::query("DELETE FROM cve_scans WHERE derivation_id = $1")
+            .bind(derivation.id)
+            .execute(&pool)
+            .await
+            .expect("fixture scans should be deleted");
+        sqlx::query("DELETE FROM derivations WHERE id = $1")
+            .bind(derivation.id)
+            .execute(&pool)
+            .await
+            .expect("fixture derivation should be deleted");
+    }
+
+    /// A heartbeat that lands after the recovery snapshot must cancel the
+    /// revocation, even when the execution token is unchanged.
+    #[tokio::test]
+    async fn stale_revocation_is_cancelled_by_a_later_heartbeat() {
+        let Ok(database_url) = std::env::var("CRYSTAL_FORGE_TEST_DATABASE_URL") else {
+            return;
+        };
+        let pool = PgPool::connect(&database_url)
+            .await
+            .expect("dedicated CVE test database should be reachable");
+        let derivation = insert_derivation(
+            &pool,
+            None,
+            &format!("late-heartbeat-{}", Uuid::new_v4().simple()),
+            "nixos",
+        )
+        .await
+        .expect("late-heartbeat derivation should be inserted");
+        let scan_id = insert_pending_test_scan(&pool, derivation.id).await;
+        let claim = claim_queued_cve_scans(&pool, 1)
+            .await
+            .expect("pending scan should be claimable")
+            .into_iter()
+            .find(|claim| claim.scan_id == scan_id)
+            .expect("worker should own the scan");
+
+        sqlx::query(
+            r#"
+            UPDATE cve_scans
+            SET scan_metadata = scan_metadata || jsonb_build_object(
+                'execution_started_at', NOW() - INTERVAL '2 hours',
+                'execution_heartbeat_at', NOW() - INTERVAL '2 hours'
+            )
+            WHERE id = $1
+            "#,
+        )
+        .bind(scan_id)
+        .execute(&pool)
+        .await
+        .expect("lease should be aged");
+
+        // The owner proves liveness after recovery snapshotted it.
+        assert!(
+            heartbeat_cve_scan_execution(&pool, scan_id, claim.execution_id)
+                .await
+                .expect("owner heartbeat should execute")
+        );
+
+        let revoked = revoke_stale_execution(
+            &pool,
+            scan_id,
+            Some(&claim.execution_id.to_string()),
+            std::time::Duration::from_secs(1800),
+        )
+        .await
+        .expect("stale revocation should execute");
+        assert!(
+            !revoked,
+            "a fresh heartbeat must cancel a revocation snapshotted while stale"
+        );
+
+        let revoked_flag: bool = sqlx::query_scalar(
+            "SELECT scan_metadata ? 'execution_revoked_at' FROM cve_scans WHERE id = $1",
+        )
+        .bind(scan_id)
+        .fetch_one(&pool)
+        .await
+        .expect("scan state should resolve");
+        assert!(!revoked_flag, "the live owner must remain unrevoked");
+
+        sqlx::query("DELETE FROM cve_scans WHERE derivation_id = $1")
+            .bind(derivation.id)
+            .execute(&pool)
+            .await
+            .expect("fixture scans should be deleted");
+        sqlx::query("DELETE FROM derivations WHERE id = $1")
+            .bind(derivation.id)
+            .execute(&pool)
+            .await
+            .expect("fixture derivation should be deleted");
+    }
+
+    /// Two independent workers draining the same queue must both make progress.
+    ///
+    /// Every server process spawns its own CVE worker and the per-cycle budget
+    /// is one scan, so selecting exactly `limit` candidates made both workers
+    /// contend for the single oldest row: one won and the other returned empty
+    /// while other `pending` rows waited. Claims must still be exclusive.
+    #[tokio::test]
+    async fn concurrent_workers_each_claim_distinct_queued_scans() {
+        let Ok(database_url) = std::env::var("CRYSTAL_FORGE_TEST_DATABASE_URL") else {
+            return;
+        };
+        let worker_a = PgPool::connect(&database_url)
+            .await
+            .expect("worker A pool should connect");
+        let worker_b = PgPool::connect(&database_url)
+            .await
+            .expect("worker B pool should connect");
+
+        // Two distinct derivations, so the active-scan uniqueness index does
+        // not itself serialize the two claims.
+        let first = insert_derivation(
+            &worker_a,
+            None,
+            &format!("two-worker-a-{}", Uuid::new_v4().simple()),
+            "nixos",
+        )
+        .await
+        .expect("first derivation should be inserted");
+        let second = insert_derivation(
+            &worker_a,
+            None,
+            &format!("two-worker-b-{}", Uuid::new_v4().simple()),
+            "nixos",
+        )
+        .await
+        .expect("second derivation should be inserted");
+        let first_scan = insert_pending_test_scan(&worker_a, first.id).await;
+        let second_scan = insert_pending_test_scan(&worker_a, second.id).await;
+
+        // Align both workers on the same instant so they genuinely contend.
+        let gate = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let gate_a = gate.clone();
+        let gate_b = gate.clone();
+        let pool_a = worker_a.clone();
+        let pool_b = worker_b.clone();
+        let (claims_a, claims_b) = tokio::join!(
+            tokio::spawn(async move {
+                gate_a.wait().await;
+                claim_queued_cve_scans(&pool_a, 1).await
+            }),
+            tokio::spawn(async move {
+                gate_b.wait().await;
+                claim_queued_cve_scans(&pool_b, 1).await
+            })
+        );
+        let claims_a = claims_a
+            .expect("worker A task should not panic")
+            .expect("worker A claim should succeed");
+        let claims_b = claims_b
+            .expect("worker B task should not panic")
+            .expect("worker B claim should succeed");
+
+        let mut claimed: Vec<Uuid> = claims_a
+            .iter()
+            .chain(claims_b.iter())
+            .map(|claim| claim.scan_id)
+            .collect();
+        claimed.sort();
+        let unique: std::collections::HashSet<Uuid> = claimed.iter().copied().collect();
+        assert_eq!(
+            claimed.len(),
+            unique.len(),
+            "two workers must never receive the same claim"
+        );
+        assert_eq!(
+            claimed.len(),
+            2,
+            "both workers must make progress when two queued scans are available; \
+             got A={:?} B={:?}",
+            claims_a.len(),
+            claims_b.len()
+        );
+        assert!(unique.contains(&first_scan) && unique.contains(&second_scan));
+
+        // Both rows must be exclusively owned and in progress.
+        let owned: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*) FROM cve_scans
+            WHERE id = ANY($1)
+              AND status = 'in_progress'
+              AND scan_metadata ? 'execution_id'
+            "#,
+        )
+        .bind(&claimed)
+        .fetch_one(&worker_a)
+        .await
+        .expect("claimed scan states should resolve");
+        assert_eq!(
+            owned, 2,
+            "each claimed scan must be token-owned in_progress"
+        );
+
+        for derivation_id in [first.id, second.id] {
+            sqlx::query("DELETE FROM cve_scans WHERE derivation_id = $1")
+                .bind(derivation_id)
+                .execute(&worker_a)
+                .await
+                .expect("fixture scans should be deleted");
+            sqlx::query("DELETE FROM derivations WHERE id = $1")
+                .bind(derivation_id)
+                .execute(&worker_a)
+                .await
+                .expect("fixture derivation should be deleted");
+        }
+        worker_b.close().await;
     }
 
     /// Queue age is not execution age: a row may wait longer than the stale

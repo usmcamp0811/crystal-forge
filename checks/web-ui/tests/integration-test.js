@@ -7572,29 +7572,27 @@ const steps = [
         );
       }
 
-      // Exercise authorization presentation in an isolated browser context so
-      // the admin page and its screenshot remain unchanged.
-      const browser = page.context().browser();
-      if (!browser) {
-        throw new Error("Expected browser instance for isolated Viewer CVE check");
-      }
-      const viewerContext = await browser.newContext({ viewport: VIEWPORTS.desktop });
-      const viewerPage = await viewerContext.newPage();
-      try {
-        await viewerPage.goto(`${baseUrl}/cves?ui_check_auth=1&ui_check_role=viewer`, {
-          timeout: LOAD_TIMEOUT,
-        });
-        await assertVisible(
-          viewerPage.getByRole("heading", { name: "Access Denied" }),
-          "Expected Viewer CVE page to enforce its administrator-only route policy",
-        );
-        await assertHidden(
-          viewerPage.getByRole("button", { name: "Rescan fleet" }),
-          "Expected Viewer role to have no fleet rescan action",
-        );
-      } finally {
-        await viewerContext.close();
-      }
+      // Non-admin CVE authorization is intentionally NOT asserted here.
+      //
+      // The `ui_check_auth` / `ui_check_role` query-parameter harness in
+      // `app_shell.rs` is gated behind `#[cfg(debug_assertions)]` so a
+      // production bundle can never be role-spoofed from a URL. This check
+      // serves the release bundle built by `dx bundle --platform web
+      // --release`, so both helpers compile to constants (`false` and
+      // `Role::Admin`) and a `ui_check_role=viewer` navigation is served as
+      // the ordinary session, not as a Viewer. Asserting Viewer denial here
+      // would therefore be unsatisfiable by construction rather than a real
+      // regression signal.
+      //
+      // The same behavior is covered where it is actually decidable:
+      //   - `app_shell::tests::cve_route_denied_for_non_admin` and
+      //     `cve_route_allowed_for_admin` pin the route-level admin policy
+      //     that renders the "Access Denied" panel instead of `CvesView`.
+      //   - `handlers::api::cves::fleet_rescan_authorization_tests` drives the
+      //     real `RequireAdmin` extractor over the actual route and asserts
+      //     401 unauthenticated, 403 Viewer, 403 Operator, and 202 Admin.
+      // Server-side rejection is the authoritative control; hiding the button
+      // is presentation only.
 
       // Assert summary stat cards are rendered.
       const patchableCard = page.locator("main").getByText("Patchable now");

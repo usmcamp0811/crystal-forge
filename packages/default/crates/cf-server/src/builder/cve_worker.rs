@@ -693,9 +693,12 @@ async fn execute_scan<R: CveScanRunner + Sync>(
     // Acquire a connection from the pool that will hold the execution lock.
     // The lock must be released before this connection is returned to the pool,
     // otherwise the pool would return a connection still owning an advisory lock.
-    let mut lock_conn = pool.acquire().await
+    let mut lock_conn = pool
+        .acquire()
+        .await
         .context("Failed to acquire connection for CVE scan execution lock")?;
-    acquire_execution_lock(&mut lock_conn, execution_id).await
+    acquire_execution_lock(&mut lock_conn, execution_id)
+        .await
         .context("Failed to acquire session-level execution lock")?;
 
     let mut execution = Box::pin(execute_scan_inner(
@@ -812,55 +815,88 @@ async fn execute_scan_inner<R: CveScanRunner + Sync>(
         return Ok(());
     };
 
-    // 1. Check local presence.
-    let locally_present = match fs::try_exists(path).await {
-        Ok(exists) => exists,
+    // Ensure the paths vulnix needs are available before invoking it.
+    //
+    // Gating this on output presence alone is not sufficient: vulnix resolves
+    // an output's derivation when it scans that output, so an output that
+    // survived garbage collection while its `.drv` did not would reach vulnix
+    // and fail with a deriver lookup error even though an eligible cache still
+    // holds the `.drv`. Output and derivation availability are therefore
+    // established independently and only the missing path is restored, so a
+    // locally complete pair costs no cache traffic.
+    //
+    // A missing output is fatal: there is nothing to scan. A missing or
+    // unnameable derivation is not treated as fatal here, because vulnix is the
+    // authoritative judge of what it can resolve. Failing the scan locally in
+    // that case would newly fail scans that previously ran.
+    let action = match observe_scan_inputs(path).await {
+        Ok((action, _)) => action,
         Err(e) => {
-            error!("❌ Error checking derivation path {}: {}", path, e);
-            // Treat as not present — try cache materialization below.
-            false
+            warn!("Could not inspect scan inputs for {path}: {e:#}");
+            ScanInputAction::DeriverUnresolvable
         }
     };
 
-    // 2. Materialize from cache if not present locally.
-    if !locally_present {
-        warn!(
-            "Store path {} not found locally — attempting cache materialization",
-            path
-        );
-        match materialize_store_path_from_cache(pool, derivation, path).await {
-            Ok(true) => {
-                info!("✅ Successfully materialized {} from cache", path);
-            }
-            Ok(false) => {
+    match action {
+        ScanInputAction::Ready => {}
+        ScanInputAction::DeriverUnresolvable => {
+            warn!(
+                "Store path {path} is present but its deriver cannot be named locally; \
+                 running the scan anyway so vulnix reports the authoritative result"
+            );
+        }
+        ScanInputAction::RestoreOutput | ScanInputAction::RestoreDeriver => {
+            let output_missing = matches!(action, ScanInputAction::RestoreOutput);
+            if output_missing {
+                warn!("Store path {path} not found locally — attempting cache materialization");
+            } else {
                 warn!(
-                    "❌ Could not materialize {} from any cache — marking scan as failed",
-                    path
+                    "Store path {path} is present but its recorded derivation is missing — \
+                     attempting to restore the derivation from cache"
                 );
-                mark_scan_failed_for_owner(
-                    pool,
-                    scan_id,
-                    derivation,
-                    &format!(
-                        "Store path {} not present locally and no cache could provide it",
-                        path
-                    ),
-                    execution_id,
-                )
-                .await?;
-                return Ok(());
             }
-            Err(e) => {
-                error!("❌ Error materializing {} from cache: {}", path, e);
-                mark_scan_failed_for_owner(
-                    pool,
-                    scan_id,
-                    derivation,
-                    &format!("Cache materialization error: {}", e),
-                    execution_id,
-                )
-                .await?;
-                return Ok(());
+
+            let restored = materialize_store_path_from_cache(pool, derivation, path).await;
+            match restored {
+                Ok(true) => info!("✅ Successfully materialized scan inputs for {path}"),
+                Ok(false) if output_missing => {
+                    warn!(
+                        "❌ Could not materialize {path} from any cache — marking scan as failed"
+                    );
+                    mark_scan_failed_for_owner(
+                        pool,
+                        scan_id,
+                        derivation,
+                        &format!(
+                            "Store path {path} not present locally and no cache could provide it"
+                        ),
+                        execution_id,
+                    )
+                    .await?;
+                    return Ok(());
+                }
+                Err(e) if output_missing => {
+                    error!("❌ Error materializing {path} from cache: {e}");
+                    mark_scan_failed_for_owner(
+                        pool,
+                        scan_id,
+                        derivation,
+                        &format!("Cache materialization error: {e}"),
+                        execution_id,
+                    )
+                    .await?;
+                    return Ok(());
+                }
+                // The output is usable; only the derivation could not be
+                // restored. Let vulnix produce the authoritative error.
+                Ok(false) => warn!(
+                    "Could not restore the missing derivation for {path} from any cache; \
+                     running the scan anyway"
+                ),
+                Err(e) => warn!(
+                    "Error restoring the missing derivation for {path}: {e:#}; \
+                     running the scan anyway"
+                ),
             }
         }
     }
@@ -922,18 +958,101 @@ async fn mark_scan_failed_for_owner(
     mark_cve_scan_failed_for_execution(pool, scan_id, derivation, error_message, execution_id).await
 }
 
-/// Try to copy a store path from a configured cache destination.
+/// What a scan still needs locally before vulnix can run.
 ///
-/// Queries for completed `cache_push_jobs` for this derivation, resolves the
-/// cache destination's `push_to` URL, and copies both the output path and its
-/// recorded `.drv` from the same source. Vulnix requires both paths. Returns
-/// `Ok(true)` if materialization succeeded, `Ok(false)` if no cache could
-/// provide both paths, or `Err` on a fatal error.
+/// Vulnix resolves an output path's derivation when it scans that output, so a
+/// scan needs **both** the output store path and the `.drv` the local store
+/// records as its deriver. These two are independently missing: a garbage
+/// collector can reap the `.drv` while keeping a still-referenced output, and a
+/// binary-cache copy imports an output closure without necessarily importing
+/// the derivation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScanInputAction {
+    /// Both the output and its recorded derivation are present locally.
+    Ready,
+    /// The output itself is absent. Its deriver is not knowable until the
+    /// output has been restored, so the output must be restored first.
+    RestoreOutput,
+    /// The output is present and its deriver is known, but the `.drv` is
+    /// absent. Only the derivation needs restoring; recopying the output would
+    /// be wasted transfer.
+    RestoreDeriver,
+    /// The output is present but the local store cannot name its deriver, so
+    /// no `.drv` path exists to restore. This happens when a cache omitted
+    /// `Deriver` from its narinfo.
+    DeriverUnresolvable,
+}
+
+/// Decides what a scan still needs, from observed local availability.
+///
+/// Kept pure and separate from the subprocess work so the decision table can be
+/// asserted exhaustively without a Nix store or a cache.
+fn scan_input_action(
+    output_present: bool,
+    deriver_path: Option<&str>,
+    deriver_present: bool,
+) -> ScanInputAction {
+    if !output_present {
+        return ScanInputAction::RestoreOutput;
+    }
+    match deriver_path {
+        None => ScanInputAction::DeriverUnresolvable,
+        Some(_) if deriver_present => ScanInputAction::Ready,
+        Some(_) => ScanInputAction::RestoreDeriver,
+    }
+}
+
+/// Reports whether both paths a vulnix scan requires are present locally.
+///
+/// Returns the resolved deriver path alongside the decision so the caller does
+/// not have to query the store twice.
+async fn observe_scan_inputs(store_path: &str) -> Result<(ScanInputAction, Option<String>)> {
+    let output_present = fs::try_exists(store_path).await.unwrap_or(false);
+    if !output_present {
+        return Ok((ScanInputAction::RestoreOutput, None));
+    }
+
+    let deriver_path = deriver_for_store_path(store_path).await?;
+    let deriver_present = match deriver_path.as_deref() {
+        Some(path) => fs::try_exists(path).await.unwrap_or(false),
+        None => false,
+    };
+    let action = scan_input_action(output_present, deriver_path.as_deref(), deriver_present);
+    Ok((action, deriver_path))
+}
+
+/// Ensures the output path and its recorded derivation are both available
+/// locally, restoring only what is missing from a configured cache.
+///
+/// Queries completed `cache_push_jobs` for this derivation and resolves each
+/// cache destination's `push_to` URL, preserving that destination's
+/// authentication, signature, and `NIX_CONFIG` handling.
+///
+/// # Behavior
+///
+/// - A locally complete pair is accepted without contacting any cache, so a
+///   present output is never recopied.
+/// - A present output whose `.drv` is missing restores only the `.drv`.
+/// - A missing output restores the output first, because its deriver cannot be
+///   named until the output exists locally, then restores the `.drv`.
+/// - Success is reported only after the required paths are confirmed present,
+///   not merely because `nix copy` exited zero.
+///
+/// # Errors
+///
+/// Returns an error when the cache-destination query fails, a `nix` process
+/// cannot be spawned or awaited, or the deriver query fails.
 async fn materialize_store_path_from_cache(
     pool: &PgPool,
     derivation: &crate::derivations::Derivation,
     store_path: &str,
 ) -> Result<bool> {
+    // Fast path: nothing is missing, so no cache round trip is needed.
+    let (initial_action, initial_deriver) = observe_scan_inputs(store_path).await?;
+    if initial_action == ScanInputAction::Ready {
+        debug!("Scan inputs for {store_path} are already present locally");
+        return Ok(true);
+    }
     // Resolve completed cache pushes for this derivation. `cache_destination`
     // may hold either a DB destination name or a legacy/server.toml URL, so we
     // match on both `cd.name` and `cd.push_to`.
@@ -1035,17 +1154,36 @@ async fn materialize_store_path_from_cache(
     const NIX_COPY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
     for source in &sources {
-        if !copy_path_from_cache(source, store_path, NIX_COPY_TIMEOUT).await? {
-            continue;
+        // Re-observe per source: an earlier source may have restored the
+        // output but failed on its `.drv`, and the output must not be recopied.
+        let (action, deriver_path) = observe_scan_inputs(store_path).await?;
+        match action {
+            ScanInputAction::Ready => return Ok(true),
+            ScanInputAction::RestoreOutput => {
+                if !copy_path_from_cache(source, store_path, NIX_COPY_TIMEOUT).await? {
+                    continue;
+                }
+            }
+            ScanInputAction::RestoreDeriver | ScanInputAction::DeriverUnresolvable => {
+                // The output is already local; only the derivation is in doubt.
+                let _ = deriver_path;
+            }
         }
 
+        // The deriver is only knowable once the output exists locally, so it is
+        // resolved (or re-resolved) after any output restore above.
         let Some(deriver_path) = deriver_for_store_path(store_path).await? else {
             warn!(
-                "nix copy from {} restored {} but did not expose its deriver",
+                "Cache source {} left {} without a resolvable deriver; \
+                 the cache likely omitted Deriver metadata",
                 source.from_url, store_path
             );
             continue;
         };
+
+        if fs::try_exists(&deriver_path).await.unwrap_or(false) {
+            return Ok(true);
+        }
 
         // Vulnix resolves the output's derivation when it scans an output path.
         // A binary-cache copy imports the output closure but does not guarantee
@@ -1057,8 +1195,17 @@ async fn materialize_store_path_from_cache(
         }
 
         warn!(
-            "nix copy from {} restored {} but could not restore deriver {}",
-            source.from_url, store_path, deriver_path
+            "nix copy from {} could not restore deriver {} for {}",
+            source.from_url, deriver_path, store_path
+        );
+    }
+
+    // Report the terminal reason rather than a bare false so the scan failure
+    // message distinguishes "no cache had it" from "cache never recorded it".
+    if matches!(initial_action, ScanInputAction::DeriverUnresolvable) {
+        warn!(
+            "Output {store_path} is present locally but its deriver is unknown \
+             (initial deriver probe: {initial_deriver:?})"
         );
     }
 
@@ -1200,6 +1347,83 @@ mod tests {
     use tempfile::tempdir;
     use tokio::sync::Semaphore;
     use uuid::Uuid;
+
+    /// A vulnix scan needs the output path *and* its recorded `.drv`. Gating
+    /// preparation on output presence alone let an output that outlived its
+    /// derivation reach vulnix and fail with a deriver lookup error, so the
+    /// output-present / `.drv`-missing case must ask for a derivation restore
+    /// rather than reporting the inputs ready.
+    #[test]
+    fn scan_input_action_covers_independent_output_and_deriver_availability() {
+        const DRV: &str = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-example.drv";
+
+        // The regression: output survived, derivation did not.
+        assert_eq!(
+            scan_input_action(true, Some(DRV), false),
+            ScanInputAction::RestoreDeriver,
+            "a present output with a missing .drv must restore only the .drv"
+        );
+
+        assert_eq!(
+            scan_input_action(true, Some(DRV), true),
+            ScanInputAction::Ready,
+            "a complete local pair must not trigger any cache traffic"
+        );
+        assert_eq!(
+            scan_input_action(true, None, false),
+            ScanInputAction::DeriverUnresolvable,
+            "a present output whose deriver the store cannot name is not scannable"
+        );
+
+        // A missing output is restored first because its deriver is not
+        // knowable until the output exists locally.
+        assert_eq!(
+            scan_input_action(false, None, false),
+            ScanInputAction::RestoreOutput
+        );
+        assert_eq!(
+            scan_input_action(false, Some(DRV), false),
+            ScanInputAction::RestoreOutput
+        );
+        assert_eq!(
+            scan_input_action(false, Some(DRV), true),
+            ScanInputAction::RestoreOutput,
+            "a locally present .drv cannot substitute for a missing output"
+        );
+    }
+
+    /// Proves the real preparation path treats a present output with a missing
+    /// derivation as work to do rather than as ready, using real filesystem
+    /// paths so the observation logic is exercised end to end.
+    #[tokio::test]
+    async fn observe_scan_inputs_requires_a_restorable_deriver_for_a_present_output() {
+        let dir = tempdir().expect("temp store dir");
+        let output = dir.path().join("output");
+        tokio::fs::write(&output, b"present output")
+            .await
+            .expect("output fixture should be written");
+        let output_path = output.to_string_lossy().to_string();
+
+        // A path outside a real Nix store has no recorded deriver, so the
+        // store cannot name a `.drv` for it.
+        let (action, deriver) = observe_scan_inputs(&output_path)
+            .await
+            .expect("observation should not fail for a present output");
+        assert_eq!(
+            action,
+            ScanInputAction::DeriverUnresolvable,
+            "a present output with no resolvable deriver must not be reported ready"
+        );
+        assert!(deriver.is_none());
+
+        // An absent output is always reported as needing the output first.
+        let missing = dir.path().join("absent-output");
+        let (missing_action, missing_deriver) = observe_scan_inputs(&missing.to_string_lossy())
+            .await
+            .expect("observation should not fail for a missing output");
+        assert_eq!(missing_action, ScanInputAction::RestoreOutput);
+        assert!(missing_deriver.is_none());
+    }
 
     #[test]
     fn parse_deriver_path_accepts_only_derivation_paths() {

@@ -2576,3 +2576,312 @@ async fn assessment_identity_rejects_mismatched_derivation_path_and_duplicate_co
     .await;
     assert!(inconsistent_scan_source.is_err());
 }
+
+/// Stale finalization must obey the same writer lock order as every other CVE
+/// scan writer, so it cannot deadlock against a live owner.
+///
+/// The repository's global CVE writer order is: POA&M/composite derivation
+/// lock, then the `cve_scans` mutation, then composite persistence. Stale
+/// finalization previously ran a bulk `UPDATE cve_scans ... RETURNING` and only
+/// then reached the POA&M lock through `persist_scan_phase_in_tx`. That is the
+/// reverse order, so a normal writer holding the POA&M lock and waiting for the
+/// same scan row could deadlock against recovery holding that row and waiting
+/// for the POA&M lock.
+///
+/// This races recovery's finalization against the live owner's revocation
+/// acknowledgment on two connections, aligned by a barrier so both genuinely
+/// contend for the same derivation and the same scan row.
+#[sqlx::test]
+async fn stale_finalization_and_owner_acknowledgment_never_deadlock(pool: PgPool) {
+    let context = assessment_context(&pool).await;
+    persist_evaluation(&pool, &context, EnforcementOutcome::Pass).await;
+
+    // Establish a genuine composite Pass baseline from a clean completed scan.
+    completed_scan(&pool, &context, 0).await;
+
+    // Queue and claim a retry so there is a live token-owned execution.
+    let pending_scan_id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO cve_scans (
+            id, derivation_id, scanner_name, status, attempts,
+            total_packages, total_vulnerabilities,
+            critical_count, high_count, medium_count, low_count
+        )
+        VALUES ($1, $2, 'vulnix', 'pending', 0, 0, 0, 0, 0, 0, 0)
+        "#,
+    )
+    .bind(pending_scan_id)
+    .bind(context.derivation_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let claim = claim_queued_cve_scans(&pool, 10)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|claim| claim.scan_id == pending_scan_id)
+        .expect("the queued retry must be claimed");
+
+    // Mark the lease revoked long enough ago that recovery's second pass will
+    // finalize it, which is exactly when it contends with the owner's
+    // acknowledgment of that same revocation.
+    sqlx::query(
+        r#"
+        UPDATE cve_scans
+        SET scan_metadata = scan_metadata || jsonb_build_object(
+            'execution_started_at', NOW() - INTERVAL '2 hours',
+            'execution_heartbeat_at', NOW() - INTERVAL '2 hours',
+            'execution_revoked_at', NOW() - INTERVAL '5 minutes',
+            'stale_recovery_reason', 'stale-execution-revoked'
+        )
+        WHERE id = $1
+        "#,
+    )
+    .bind(pending_scan_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let gate = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let recovery_gate = gate.clone();
+    let owner_gate = gate.clone();
+    let recovery_pool = pool.clone();
+    let owner_pool = pool.clone();
+    let execution_id = claim.execution_id;
+
+    let (recovery, owner) = tokio::join!(
+        tokio::spawn(async move {
+            recovery_gate.wait().await;
+            recover_stale_scans(&recovery_pool, Duration::from_secs(1800)).await
+        }),
+        tokio::spawn(async move {
+            owner_gate.wait().await;
+            acknowledge_revoked_cve_scan_execution(&owner_pool, pending_scan_id, execution_id).await
+        })
+    );
+
+    let recovery = recovery.expect("recovery task should not panic");
+    let owner = owner.expect("owner task should not panic");
+
+    for (label, message) in [
+        (
+            "stale finalization",
+            recovery.as_ref().err().map(|e| format!("{e:#}")),
+        ),
+        (
+            "owner acknowledgment",
+            owner.as_ref().err().map(|e| format!("{e:#}")),
+        ),
+    ] {
+        if let Some(message) = message {
+            assert!(
+                !message.to_ascii_lowercase().contains("deadlock"),
+                "{label} must not deadlock against the other writer: {message}"
+            );
+            panic!("{label} failed unexpectedly: {message}");
+        }
+    }
+
+    // Exactly one writer may perform the terminal transition.
+    let recovered = recovery.unwrap();
+    let acknowledged = owner.unwrap();
+    assert_eq!(
+        i64::from(acknowledged) + recovered,
+        1,
+        "exactly one of stale finalization and owner acknowledgment may win \
+         (recovered={recovered}, acknowledged={acknowledged})"
+    );
+
+    // The committed scan state must be terminal and consistent.
+    let (status, revoked): (String, bool) = sqlx::query_as(
+        "SELECT status, scan_metadata ? 'execution_revoked_at' FROM cve_scans WHERE id = $1",
+    )
+    .bind(pending_scan_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(status, "failed", "the revoked execution must end failed");
+    assert!(revoked, "the revocation marker must be retained");
+
+    // Composite enforcement must agree with the committed scan state: a failed
+    // newest scan must not leave the prior Pass authorizing deployment.
+    let rule_outcome: String = sqlx::query_scalar(
+        r#"
+        SELECT result.outcome
+        FROM composite_policy_assessments assessment
+        JOIN composite_policy_rule_results result ON result.assessment_id = assessment.id
+        WHERE assessment.system_id = $1 AND result.kind = 'cve_block'
+        "#,
+    )
+    .bind(context.system_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_ne!(
+        rule_outcome, "pass",
+        "a failed newest scan must not expose a stale composite Pass"
+    );
+}
+
+/// Stale finalization must take the POA&M/composite lock *before* it locks the
+/// `cve_scans` row.
+///
+/// This is the discriminating assertion for the lock-order fix. The previous
+/// implementation ran a bulk `UPDATE cve_scans ... RETURNING` first and only
+/// reached the POA&M lock afterwards through `persist_scan_phase_in_tx`, which
+/// is the reverse of the order every other CVE writer uses.
+///
+/// The ordering is observed directly rather than by trying to provoke a
+/// deadlock, which is timing dependent and therefore not a reliable signal:
+///
+/// 1. A holder transaction takes the POA&M lock for the derivation and keeps it.
+/// 2. Stale finalization runs on another connection and must block.
+/// 3. While it is blocked, a third connection takes the scan row with
+///    `FOR UPDATE NOWAIT`.
+///
+/// With the correct order the blocked pass holds no row lock, so `NOWAIT`
+/// succeeds. With the inverted order it already holds a row-exclusive lock on
+/// that scan, so `NOWAIT` fails with `55P03 lock_not_available`.
+#[sqlx::test]
+async fn stale_finalization_locks_poam_before_the_scan_row(pool: PgPool) {
+    let context = assessment_context(&pool).await;
+    persist_evaluation(&pool, &context, EnforcementOutcome::Pass).await;
+    completed_scan(&pool, &context, 0).await;
+
+    let pending_scan_id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO cve_scans (
+            id, derivation_id, scanner_name, status, attempts,
+            total_packages, total_vulnerabilities,
+            critical_count, high_count, medium_count, low_count
+        )
+        VALUES ($1, $2, 'vulnix', 'pending', 0, 0, 0, 0, 0, 0, 0)
+        "#,
+    )
+    .bind(pending_scan_id)
+    .bind(context.derivation_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    claim_queued_cve_scans(&pool, 10)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|claim| claim.scan_id == pending_scan_id)
+        .expect("the queued retry must be claimed");
+
+    // Make the row eligible for the finalization pass.
+    sqlx::query(
+        r#"
+        UPDATE cve_scans
+        SET scan_metadata = scan_metadata || jsonb_build_object(
+            'execution_started_at', NOW() - INTERVAL '2 hours',
+            'execution_heartbeat_at', NOW() - INTERVAL '2 hours',
+            'execution_revoked_at', NOW() - INTERVAL '5 minutes',
+            'stale_recovery_reason', 'stale-execution-revoked'
+        )
+        WHERE id = $1
+        "#,
+    )
+    .bind(pending_scan_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // 1. Hold the POA&M derivation lock, exactly as a normal writer would.
+    //    `pg_advisory_xact_lock` is released when this transaction ends.
+    // `POAM_DERIVATION_LOCK_NAMESPACE` in `services::composite_enforcement`.
+    const POAM_DERIVATION_LOCK_NAMESPACE: i32 = 0x504F_414D;
+    let mut holder = pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock($1,$2)")
+        .bind(POAM_DERIVATION_LOCK_NAMESPACE)
+        .bind(context.derivation_id)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    let holder_backend: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *holder)
+        .await
+        .unwrap();
+
+    // 2. Start stale finalization; it must block on that POA&M lock.
+    let recovery_pool = pool.clone();
+    let recovery = tokio::spawn(async move {
+        recover_stale_scans(&recovery_pool, Duration::from_secs(1800)).await
+    });
+
+    // Wait for the condition (a second backend waiting on an advisory lock),
+    // not for a fixed duration.
+    let mut blocked = false;
+    for _ in 0..600 {
+        let waiting: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*) FROM pg_locks
+            WHERE locktype = 'advisory' AND NOT granted AND pid <> $1
+            "#,
+        )
+        .bind(holder_backend)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        if waiting > 0 {
+            blocked = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(
+        blocked,
+        "stale finalization must block on the POA&M lock before mutating the scan"
+    );
+
+    // 3. The blocked pass must not already hold the scan row.
+    let mut probe = pool.acquire().await.unwrap();
+    let row_lock = sqlx::query("SELECT id FROM cve_scans WHERE id = $1 FOR UPDATE NOWAIT")
+        .bind(pending_scan_id)
+        .fetch_optional(&mut *probe)
+        .await;
+    let row_lock_error = row_lock.as_ref().err().map(|e| format!("{e:#}"));
+    drop(probe);
+
+    // Release the POA&M lock so finalization can complete either way.
+    holder.rollback().await.unwrap();
+    let recovered = recovery
+        .await
+        .expect("recovery task should not panic")
+        .expect("recovery should not error");
+
+    assert!(
+        row_lock_error.is_none(),
+        "stale finalization took the cve_scans row lock before the POA&M lock, \
+         which is the inverted order that can deadlock against a normal writer: {}",
+        row_lock_error.unwrap_or_default()
+    );
+
+    // Once unblocked the pass still completes its work correctly.
+    assert_eq!(recovered, 1, "the revoked execution must be finalized");
+    let status: String = sqlx::query_scalar("SELECT status FROM cve_scans WHERE id = $1")
+        .bind(pending_scan_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "failed");
+    let rule_outcome: String = sqlx::query_scalar(
+        r#"
+        SELECT result.outcome
+        FROM composite_policy_assessments assessment
+        JOIN composite_policy_rule_results result ON result.assessment_id = assessment.id
+        WHERE assessment.system_id = $1 AND result.kind = 'cve_block'
+        "#,
+    )
+    .bind(context.system_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_ne!(
+        rule_outcome, "pass",
+        "a failed newest scan must not expose a stale composite Pass"
+    );
+}

@@ -779,6 +779,15 @@ let
         CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
           cargo test --manifest-path Cargo.toml \
           --lib builder::cve_worker::tests::stale_execution_lock_prevents_recovery_paused_process_race
+        CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
+          cargo test --manifest-path Cargo.toml \
+          --lib queries::cve_scans::tests::stale_revocation_cannot_revoke_a_successor_execution
+        CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
+          cargo test --manifest-path Cargo.toml \
+          --lib queries::cve_scans::tests::stale_revocation_is_cancelled_by_a_later_heartbeat
+        CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
+          cargo test --manifest-path Cargo.toml \
+          --lib queries::cve_scans::tests::concurrent_workers_each_claim_distinct_queued_scans
         DATABASE_URL=\"$DB_URL\" \
           cargo test --manifest-path Cargo.toml \
           --lib queries::cve_scans_tests::create_cve_scan_reuses_existing_active_scan
