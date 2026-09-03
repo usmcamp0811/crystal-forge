@@ -5,9 +5,11 @@
 
 use crate::queries::scanning::{
     ScanSchedulePolicyRow, get_scan_activity, get_scan_deployed, get_scan_queue,
-    get_scan_schedule_policy, get_scan_stats, get_scan_systems, update_scan_schedule_policy,
+    get_scan_queue_for_system, get_scan_schedule_policy, get_scan_stats, get_scan_systems,
+    update_scan_schedule_policy,
 };
 use sqlx::PgPool;
+use uuid::Uuid;
 
 async fn test_pool_from_env() -> PgPool {
     let db_url =
@@ -106,4 +108,93 @@ async fn deployed_query_runs_against_current_schema() {
 
     assert!(result.rows.len() <= 5);
     assert!(result.total >= result.rows.len() as i64);
+}
+
+async fn insert_never_scanned_system_fixture(pool: &PgPool) -> (Uuid, String, i32) {
+    let suffix = Uuid::new_v4().simple().to_string();
+    let hostname = format!("never-scanned-{suffix}");
+    let system_id = Uuid::new_v4();
+    let derivation_id: i32 = sqlx::query_scalar(
+        r#"
+        INSERT INTO derivations (derivation_type, derivation_name, status_id, attempt_count)
+        VALUES ('nixos', $1, 5, 0)
+        RETURNING id
+        "#,
+    )
+    .bind(&hostname)
+    .fetch_one(pool)
+    .await
+    .expect("never-scanned derivation should be inserted");
+
+    sqlx::query(
+        r#"
+        INSERT INTO systems (
+            id, hostname, is_active, public_key, derivation,
+            system_configuration_name, deployment_policy
+        )
+        VALUES ($1, $2, TRUE, 'test-key', '', $2, 'manual')
+        "#,
+    )
+    .bind(system_id)
+    .bind(&hostname)
+    .execute(pool)
+    .await
+    .expect("never-scanned system should be inserted");
+
+    (system_id, hostname, derivation_id)
+}
+
+async fn cleanup_never_scanned_system_fixture(pool: &PgPool, system_id: Uuid, derivation_id: i32) {
+    sqlx::query("DELETE FROM systems WHERE id = $1")
+        .bind(system_id)
+        .execute(pool)
+        .await
+        .expect("never-scanned system should be deleted");
+    sqlx::query("DELETE FROM derivations WHERE id = $1")
+        .bind(derivation_id)
+        .execute(pool)
+        .await
+        .expect("never-scanned derivation should be deleted");
+}
+
+/// Ensures the fleet queue normalizes absent `cve_scans` values for a derivation.
+#[tokio::test]
+#[ignore = "requires live database connection"]
+async fn scan_queue_normalizes_never_scanned_derivation() {
+    let pool = test_pool_from_env().await;
+    let (system_id, hostname, derivation_id) = insert_never_scanned_system_fixture(&pool).await;
+
+    let result = get_scan_queue(&pool, 500).await;
+    cleanup_never_scanned_system_fixture(&pool, system_id, derivation_id).await;
+    let rows = result.expect("queue query should return a never-scanned derivation");
+    let row = rows
+        .into_iter()
+        .find(|row| row.hostname == hostname)
+        .expect("queue should include the never-scanned derivation");
+
+    assert_eq!(row.status, "never_scanned");
+    assert_eq!(row.critical_count, 0);
+    assert_eq!(row.high_count, 0);
+    assert_eq!(row.medium_count, 0);
+}
+
+/// Ensures the system queue normalizes absent `cve_scans` values for a derivation.
+#[tokio::test]
+#[ignore = "requires live database connection"]
+async fn system_scan_queue_normalizes_never_scanned_derivation() {
+    let pool = test_pool_from_env().await;
+    let (system_id, hostname, derivation_id) = insert_never_scanned_system_fixture(&pool).await;
+
+    let result = get_scan_queue_for_system(&pool, system_id, 500).await;
+    cleanup_never_scanned_system_fixture(&pool, system_id, derivation_id).await;
+    let rows = result.expect("system queue query should return a never-scanned derivation");
+    let row = rows
+        .into_iter()
+        .find(|row| row.hostname == hostname)
+        .expect("system queue should include the never-scanned derivation");
+
+    assert_eq!(row.status, "never_scanned");
+    assert_eq!(row.critical_count, 0);
+    assert_eq!(row.high_count, 0);
+    assert_eq!(row.medium_count, 0);
 }

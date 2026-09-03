@@ -2836,6 +2836,19 @@ mod tests {
             .into_iter()
             .find(|claim| claim.scan_id == scan_id)
             .expect("worker should own the test scan");
+        let mut lock_holder = pool
+            .acquire()
+            .await
+            .expect("live execution should acquire a dedicated lock connection");
+        acquire_execution_lock(&mut lock_holder, claim.execution_id)
+            .await
+            .expect("live execution should acquire its advisory lock");
+        assert!(
+            execution_lock_is_held(&pool, claim.execution_id)
+                .await
+                .expect("live execution lock should be queryable"),
+            "a token-owned live execution must hold the production advisory lock"
+        );
 
         let wrong_execution_id = Uuid::new_v4();
         assert!(
@@ -2915,49 +2928,44 @@ mod tests {
         .execute(&pool)
         .await
         .expect("heartbeat should be aged");
-        let heartbeat_pool = PgPool::connect(&database_url)
-            .await
-            .expect("heartbeat race pool should connect");
-        let recovery_pool = PgPool::connect(&database_url)
-            .await
-            .expect("recovery race pool should connect");
-        let (heartbeat, recovered) = tokio::join!(
-            heartbeat_cve_scan_execution(&heartbeat_pool, scan_id, claim.execution_id),
-            recover_stale_scans(&recovery_pool, std::time::Duration::from_secs(1800))
+        assert_eq!(
+            recover_stale_scans(&pool, std::time::Duration::from_secs(1800))
+                .await
+                .expect("live stale recovery should execute"),
+            0,
+            "recovery must not revoke a heartbeat-stale execution while its production lock is held"
         );
-        let heartbeat = heartbeat.expect("racing heartbeat should execute");
-        let recovered = recovered.expect("racing recovery should execute");
         let (status, revoked): (String, bool) = sqlx::query_as(
             "SELECT status, scan_metadata ? 'execution_revoked_at' FROM cve_scans WHERE id = $1",
         )
         .bind(scan_id)
         .fetch_one(&pool)
         .await
-        .expect("raced scan status should resolve");
-        match (status.as_str(), revoked) {
-            ("in_progress", false) => {
-                assert!(heartbeat, "heartbeat must own an in-progress race winner");
-                assert_eq!(recovered, 0);
-                sqlx::query(
-                    "UPDATE cve_scans SET scan_metadata = scan_metadata || jsonb_build_object('execution_heartbeat_at', NOW() - INTERVAL '2 hours') WHERE id = $1",
-                )
-                .bind(scan_id)
-                .execute(&pool)
+        .expect("live scan status should resolve");
+        assert_eq!(status, "in_progress");
+        assert!(
+            !revoked,
+            "recovery must leave a locked live execution unrevoked"
+        );
+
+        assert!(
+            release_execution_lock(&mut lock_holder, claim.execution_id)
                 .await
-                .expect("winning heartbeat should be aged again");
-                assert_eq!(
-                    recover_stale_scans(&pool, std::time::Duration::from_secs(1800))
-                        .await
-                        .expect("aged race winner should be recovered"),
-                    1
-                );
-            }
-            ("in_progress", true) => {
-                assert!(!heartbeat, "heartbeat must lose after revocation commits");
-                assert_eq!(recovered, 1);
-            }
-            other => panic!("unexpected heartbeat/recovery race state: {other:?}"),
-        }
+                .expect("live execution unlock should execute"),
+            "the production unlock path must confirm release"
+        );
+        assert!(
+            !execution_lock_is_held(&pool, claim.execution_id)
+                .await
+                .expect("released execution lock should be queryable"),
+            "recovery may only treat the execution as crashed after its lock is released"
+        );
+        assert_eq!(
+            recover_stale_scans(&pool, std::time::Duration::from_secs(1800))
+                .await
+                .expect("unlocked stale execution should be recovered"),
+            1
+        );
 
         let suffix = Uuid::new_v4().simple().to_string();
         let package_name = format!("lost-owner-package-{suffix}");

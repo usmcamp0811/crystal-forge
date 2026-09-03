@@ -202,12 +202,12 @@ pub async fn get_scan_queue(pool: &PgPool, limit: i64) -> Result<Vec<ScanQueueRo
                 c.git_commit_hash AS commit_hash,
                 c.flake_id,
                 c.id AS commit_db_id,
-                cs.status,
+                COALESCE(cs.status, 'never_scanned') AS status,
                 cs.completed_at,
                 cs.scheduled_at,
-                cs.critical_count,
-                cs.high_count,
-                cs.medium_count,
+                COALESCE(cs.critical_count, 0)::int AS critical_count,
+                COALESCE(cs.high_count, 0)::int AS high_count,
+                COALESCE(cs.medium_count, 0)::int AS medium_count,
                 COALESCE(cs.completed_at, cs.scheduled_at, cs.created_at) AS lifecycle_at
             FROM derivations d
             LEFT JOIN cve_scans cs ON cs.derivation_id = d.id
@@ -513,12 +513,12 @@ pub async fn get_scan_queue_for_system(
                 c.git_commit_hash AS commit_hash,
                 c.flake_id,
                 c.id AS commit_db_id,
-                cs.status,
+                COALESCE(cs.status, 'never_scanned') AS status,
                 cs.completed_at,
                 cs.scheduled_at,
-                cs.critical_count,
-                cs.high_count,
-                cs.medium_count,
+                COALESCE(cs.critical_count, 0)::int AS critical_count,
+                COALESCE(cs.high_count, 0)::int AS high_count,
+                COALESCE(cs.medium_count, 0)::int AS medium_count,
                 COALESCE(cs.completed_at, cs.scheduled_at, cs.created_at) AS lifecycle_at
             FROM derivations d
             JOIN systems s

@@ -7585,12 +7585,12 @@ const steps = [
           timeout: LOAD_TIMEOUT,
         });
         await assertVisible(
-          viewerPage.locator("main h1:has-text('CVEs')"),
-          "Expected Viewer CVE page to finish rendering",
+          viewerPage.getByRole("heading", { name: "Access Denied" }),
+          "Expected Viewer CVE page to enforce its administrator-only route policy",
         );
         await assertHidden(
           viewerPage.getByRole("button", { name: "Rescan fleet" }),
-          "Expected Viewer role to hide the fleet rescan action",
+          "Expected Viewer role to have no fleet rescan action",
         );
       } finally {
         await viewerContext.close();
