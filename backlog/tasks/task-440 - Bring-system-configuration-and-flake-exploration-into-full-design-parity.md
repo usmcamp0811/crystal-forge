@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-03 03:59'
+updated_date: '2026-09-03 06:36'
 labels:
   - design-parity
   - web-ui
@@ -427,6 +427,8 @@ Reconciled TASK-440 with `origin/dev` at `701151f4`, which includes merged TASK-
 Rebase onto updated origin/dev (2026-09-02): amended pending 14d/commits.rs/systems.rs/flakes_list.rs/system_detail.rs/generate-design-targets.js fixups into the single TASK-440 commit, then `git rebase origin/dev` (cbc1d503, which now includes merged TASK-452 fast web-ui e2e loop) succeeded with zero conflicts. New HEAD is 3d773a6d directly on origin/dev. Verified: node --check on integration-test.js passes and both TASK-452's runFixtureSql host/VM dual-mode change and our 13j/14d notification fixes are intact; `SQLX_OFFLINE=true cargo check -p cf-server` passes (pre-existing warnings only); `cargo check -p crystal-forge-ui --target wasm32-unknown-unknown` passes (pre-existing warnings only). Remote branch still points to the pre-rebase commit; a force push has not been authorized. Next: rerun the 13j/14d focused browser workflows (TASK-452's new `web-ui-test STEP` dev command may allow this against the persistent run-ui-dev stack faster than a full VM build), then the full 15 focused workflows, then required broader verification before closing AC24.
 
 2026-09-03 preflight: Local TASK-440 HEAD is `c66b537b60e57cc1c1febbe1f7500096265c2eaa`, not the earlier `3d773a6d`, because focused browser fixture corrections were amended. `origin/dev` remains `cbc1d5039ed88adcfb55c298ba361d48c9466ce3` and is an ancestor of local HEAD. Remote MR branch remains stale at `f4dbfad604cdc8280679f1f51a6533d8974b6747`. The only TASK-440 worktree dirt is untracked Nix result symlink `result-task440-web-ui`; no reset/rebase was performed. Independent audit confirmed mutable retained-generation artifacts, non-transactional Config reads without option continuation tokens, per-option SQL amplification, and stale/incomplete visual parity evidence. The focused authoritative Web UI Nix command on c66b537b was user-aborted and is not evidence.
+
+2026-09-03 backend immutable-artifact remediation verification: `nix develop ../.. -c env SQLX_OFFLINE=true cargo check --offline --package cf-server` passed from `packages/default`; `nix develop ../.. -c cargo fmt --package cf-server -- --check` passed; scoped `git diff --check` passed; `nix build .#checks.x86_64-linux.server-regressions -L` passed with checkPhase completed in 7m38s. The server regression gate includes clean migration application, a populated pre-0248 upgrade rehearsal, immutable artifact/retention/GC/rollback contracts, bounded query checks, large-corpus host-delta behavior, and deployment concurrency. During verification, corrected snapshot recovery columns, forced deferred lineage validation before index creation, updated fixed query budgets for baseline authority checks, and repaired the large-corpus fixture to avoid a cross-connection ALTER TABLE lock wait and create production-equivalent current selectors. No files were staged or committed; `result-task440-web-ui` remained untouched.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
