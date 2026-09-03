@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-03 08:33'
+updated_date: '2026-09-03 09:26'
 labels:
   - design-parity
   - web-ui
@@ -446,5 +446,11 @@ author: @openai-agent
 created: 2026-09-03 08:23
 ---
 Second immutable-artifact audit remediation verified on 2026-09-03. Fixed exact deployment-artifact retention in both finalization directions, protected deployment-bound artifacts from GC, made pre-0248 retained lineage queryable but rollback-ineligible through `lineage_verified`, preserved upgrade compatibility when derivation store metadata is null, and made stale snapshot tokens authoritative over failed, unavailable, or absent replacement state for Config options, summary, and module-source reads. Expanded the populated pre-0248 rehearsal and migration-backed immutable retention/GC/rollback regression. Updated `docs/evaluation-flake-snapshots.md` and `docs/specs/02-backend-api.md`. Verification passed: `nix develop ../.. -c env SQLX_OFFLINE=true cargo check --offline --package cf-server`; `nix develop ../.. -c cargo fmt --package cf-server -- --check`; `nix build .#checks.x86_64-linux.server-regressions -L` (7m42s); scoped `git diff --check`. Existing repository warnings remain; no new warning from this remediation. TASK-440 remains In Progress because AC #24 and final MR workflow are outside this backend remediation pass.
+---
+
+author: @openai-agent
+created: 2026-09-03 09:26
+---
+Final backend audit verification completed on 2026-09-03. The final audit regressions now cover fail-closed migrated legacy generation reads and reciprocal binding, Available-only deployment binding, unavailable/oversized finalization without generation retention, and source-reset preservation of deployment-bound snapshot/derivation lineage. Verification passed: `nix build .#checks.x86_64-linux.server-regressions -L`; `nix develop ../.. -c env SQLX_OFFLINE=true cargo check --offline --package cf-server`; `nix develop ../.. -c cargo fmt --package cf-server -- --check`; and scoped `git diff --check -- packages/default/crates/cf-server checks/server-regressions/default.nix docs/evaluation-flake-snapshots.md docs/specs/02-backend-api.md`. Cargo check completed with existing warnings. Final scope review found no unresolved backend issue. No frontend files were edited during this audit, and no files were staged, committed, or pushed.
 ---
 <!-- COMMENTS:END -->
