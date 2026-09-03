@@ -46,7 +46,7 @@ fn status_meta(status: &str) -> StatusMeta {
             color: "#fbbf24",
             label: "stale",
         },
-        "unscanned" => StatusMeta {
+        "never_scanned" | "unscanned" => StatusMeta {
             cls: "chip-unknown",
             color: "#6b7280",
             label: "never scanned",
@@ -263,7 +263,7 @@ pub fn ScanningView() -> Element {
                                                         "{meta.label}"
                                                     }
                                                 }
-                                                td { { findings_cell(row.critical_count, row.high_count, row.medium_count, row.completed_at.is_some()) } }
+                                                td { { findings_cell(row.critical_count, row.high_count, row.medium_count, &row.status) } }
                                                 td { style: "font-size:12px; color:var(--cf-text-muted);", "{last_scan(row)}" }
                                             }
                                         }
@@ -365,7 +365,7 @@ pub fn ScanningView() -> Element {
                                                             "{meta.label}"
                                                         }
                                                     }
-                                                    td { { findings_cell(row.critical_count, row.high_count, row.medium_count, row.completed_at.is_some()) } }
+                                                    td { { findings_cell(row.critical_count, row.high_count, row.medium_count, &row.status) } }
                                                     td { style: "font-size:12px; color:var(--cf-text-muted);", "{last_scan(row)}" }
                                                     td {
                                                         match trigger {
@@ -616,7 +616,7 @@ pub fn ScanningView() -> Element {
                                                                                                             "{meta.label}"
                                                                                                         }
                                                                                                     }
-                                                                                                    td { style: "padding:7px 8px;", { findings_cell(row.critical_count, row.high_count, row.medium_count, row.completed_at.is_some()) } }
+                                                                                                    td { style: "padding:7px 8px;", { findings_cell(row.critical_count, row.high_count, row.medium_count, &row.status) } }
                                                                                                     td { style: "padding:7px 8px; color:var(--cf-text-muted);", "{last_scan(row)}" }
                                                                                     td { style: "padding:7px 8px; text-align:right;",
                                                                                         if needs_build {
@@ -894,8 +894,12 @@ fn fresh_chip(freshness: &str) -> Element {
     }
 }
 
-fn findings_cell(crit: i32, high: i32, med: i32, scanned: bool) -> Element {
-    if !scanned {
+fn can_assert_clean(status: &str, crit: i32, high: i32, med: i32) -> bool {
+    status == "completed" && crit == 0 && high == 0 && med == 0
+}
+
+fn findings_cell(crit: i32, high: i32, med: i32, status: &str) -> Element {
+    if status != "completed" {
         return rsx! { span { style: "font-size:11px; color:var(--cf-text-muted);", "—" } };
     }
     rsx! {
@@ -903,8 +907,23 @@ fn findings_cell(crit: i32, high: i32, med: i32, scanned: bool) -> Element {
             if crit > 0 { span { class: "chip chip-critical", style: "font-size:10px;", "{crit}C" } }
             if high > 0 { span { class: "chip chip-warning", style: "font-size:10px;", "{high}H" } }
             if med > 0 { span { class: "chip chip-info", style: "font-size:10px;", "{med}M" } }
-            if crit == 0 && high == 0 && med == 0 { span { class: "chip chip-healthy", style: "font-size:10px; display:inline-flex; align-items:center; gap:4px;", Icon { name: IconName::Check, size: 9 } " clean" } }
+            if can_assert_clean(status, crit, high, med) { span { class: "chip chip-healthy", style: "font-size:10px; display:inline-flex; align-items:center; gap:4px;", Icon { name: IconName::Check, size: 9 } " clean" } }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::can_assert_clean;
+
+    #[test]
+    fn only_completed_zero_finding_scans_are_clean() {
+        assert!(can_assert_clean("completed", 0, 0, 0));
+        assert!(!can_assert_clean("completed", 1, 0, 0));
+        assert!(!can_assert_clean("failed", 0, 0, 0));
+        assert!(!can_assert_clean("pending", 0, 0, 0));
+        assert!(!can_assert_clean("in_progress", 0, 0, 0));
+        assert!(!can_assert_clean("never_scanned", 0, 0, 0));
     }
 }
 

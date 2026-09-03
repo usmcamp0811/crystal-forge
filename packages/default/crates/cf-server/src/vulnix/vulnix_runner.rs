@@ -10,6 +10,31 @@ use tracing::{error, info};
 /// Array of VulnixEntry - this is what vulnix outputs as JSON
 pub type VulnixScanOutput = Vec<VulnixEntry>;
 
+fn parse_successful_vulnix_output(
+    exit_code: Option<i32>,
+    stdout: &str,
+    stderr: &str,
+) -> Result<VulnixScanOutput> {
+    if exit_code != Some(0) {
+        let stderr = stderr.trim();
+        let stderr = if stderr.is_empty() {
+            "vulnix produced no stderr output"
+        } else {
+            stderr
+        };
+        return Err(anyhow!(
+            "Vulnix scan process failed with exit code {}: {}",
+            exit_code
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "terminated by signal".to_string()),
+            stderr
+        ));
+    }
+
+    serde_json::from_str(stdout)
+        .map_err(|error| anyhow!("Failed to parse vulnix JSON output: {error}"))
+}
+
 #[derive(Debug)]
 pub struct VulnixRunner {
     config: VulnixConfig,
@@ -134,15 +159,12 @@ impl VulnixRunner {
                     info!("🔍 Stderr content: {}", stderr_msg);
                 }
 
-                // Vulnix exit codes:
-                // 0 = success, no vulnerabilities found
-                // 2 = success, vulnerabilities found
-                // other = actual failure
-                let exit_code = output.status.code().unwrap_or(-1);
-                if output.status.success() || exit_code == 2 {
-                    // Parse vulnix JSON output directly
-                    let vulnix_entries: VulnixScanOutput = serde_json::from_str(&stdout_msg)
-                        .map_err(|e| anyhow!("Failed to parse vulnix JSON output: {}", e))?;
+                if output.status.success() {
+                    let vulnix_entries = parse_successful_vulnix_output(
+                        output.status.code(),
+                        &stdout_msg,
+                        &stderr_msg,
+                    )?;
                     info!(
                         "✅ Vulnix scan completed successfully with {} entries",
                         vulnix_entries.len()
@@ -151,7 +173,7 @@ impl VulnixRunner {
                 } else {
                     error!("❌ Vulnix scan failed with exit code: {}", output.status);
                     error!("❌ stderr: {}", stderr_msg);
-                    Err(anyhow!("Vulnix scan failed: {}", stderr_msg))
+                    parse_successful_vulnix_output(output.status.code(), &stdout_msg, &stderr_msg)
                 }
             }
             Ok(Err(e)) => {
@@ -186,5 +208,44 @@ impl VulnixRunner {
 impl Default for VulnixRunner {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_successful_vulnix_output;
+
+    #[test]
+    fn nonzero_vulnix_exit_returns_stderr_without_parsing_json() {
+        let error = parse_successful_vulnix_output(
+            Some(1),
+            "",
+            "vulnix.nix.DeriverLookupError: Cannot determine deriver",
+        )
+        .expect_err("a nonzero vulnix exit must fail before JSON parsing");
+
+        let message = error.to_string();
+        assert!(message.contains("DeriverLookupError"));
+        assert!(!message.contains("EOF while parsing"));
+    }
+
+    #[test]
+    fn malformed_json_from_successful_vulnix_exit_is_a_parse_error() {
+        let error = parse_successful_vulnix_output(Some(0), "not-json", "")
+            .expect_err("successful malformed output must fail parsing");
+
+        assert!(
+            error
+                .to_string()
+                .contains("Failed to parse vulnix JSON output")
+        );
+    }
+
+    #[test]
+    fn valid_json_from_successful_vulnix_exit_is_accepted() {
+        let entries = parse_successful_vulnix_output(Some(0), "[]", "")
+            .expect("successful valid output should parse");
+
+        assert!(entries.is_empty());
     }
 }

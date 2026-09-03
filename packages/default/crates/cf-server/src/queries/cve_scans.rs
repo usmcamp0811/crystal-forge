@@ -852,6 +852,25 @@ async fn save_scan_results_for_owner(
         }
     }
 
+    // PostgreSQL must receive at most one row for each
+    // `(package derivation, CVE)` conflict key. A vulnix result can repeat an
+    // affected CVE or list the same CVE as both affected and whitelisted. Keep
+    // the distinct package/CVE evidence while merging duplicate observations;
+    // a whitelist is the authoritative state when observations disagree.
+    let mut unique_pkg_vulns: HashMap<(String, String), PkgVuln> = HashMap::new();
+    for pkg_vuln in pkg_vulns {
+        unique_pkg_vulns
+            .entry((pkg_vuln.pkg_name.clone(), pkg_vuln.cve_id.clone()))
+            .and_modify(|existing| {
+                if pkg_vuln.is_whitelisted {
+                    existing.is_whitelisted = true;
+                    existing.whitelist_reason = pkg_vuln.whitelist_reason.clone();
+                }
+            })
+            .or_insert(pkg_vuln);
+    }
+    let pkg_vulns: Vec<PkgVuln> = unique_pkg_vulns.into_values().collect();
+
     // Collect critical CVE IDs before the transaction so we can open attention
     // occurrences after the commit.  A CVE is considered critical when its CVSS
     // v3 base score is >= 9.0.

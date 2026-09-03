@@ -925,10 +925,10 @@ async fn mark_scan_failed_for_owner(
 /// Try to copy a store path from a configured cache destination.
 ///
 /// Queries for completed `cache_push_jobs` for this derivation, resolves the
-/// cache destination's `push_to` URL, and runs `nix copy --from <url> <path>`
-/// for the first eligible cache.  Returns `Ok(true)` if materialization
-/// succeeded, `Ok(false)` if no cache could provide the path, or `Err` on a
-/// fatal error.
+/// cache destination's `push_to` URL, and copies both the output path and its
+/// recorded `.drv` from the same source. Vulnix requires both paths. Returns
+/// `Ok(true)` if materialization succeeded, `Ok(false)` if no cache could
+/// provide both paths, or `Err` on a fatal error.
 async fn materialize_store_path_from_cache(
     pool: &PgPool,
     derivation: &crate::derivations::Derivation,
@@ -1035,86 +1035,137 @@ async fn materialize_store_path_from_cache(
     const NIX_COPY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
     for source in &sources {
-        debug!(
-            "Trying nix copy --from {} {} (source: {})",
-            source.from_url, store_path, source.label
-        );
-
-        // Spawn with kill_on_drop(true) so the child is guaranteed to be
-        // terminated if the child handle is dropped.
-        let mut command = TokioCommand::new("nix");
-        command.arg("copy").arg("--from").arg(&source.from_url);
-
-        if let Some(cache_config) = &source.cache_config {
-            if matches!(cache_config.cache_type, CacheType::Attic) {
-                command.args(["--option", "http2", "false"]);
-            }
-
-            if let Some(public_key) = source.trusted_public_key.as_deref() {
-                command.args(["--option", "trusted-public-keys", public_key]);
-            }
-
-            apply_cache_config_env_to_command(&mut command, cache_config);
+        if !copy_path_from_cache(source, store_path, NIX_COPY_TIMEOUT).await? {
+            continue;
         }
 
-        if !source.nix_config_lines.is_empty() {
-            command.env("NIX_CONFIG", source.nix_config_lines.join("\n") + "\n");
-        }
-
-        let mut child = command
-            .arg(store_path)
-            .kill_on_drop(true)
-            .spawn()
-            .with_context(|| format!("Failed to spawn nix copy from {}", source.from_url))?;
-
-        // Use `child.wait()` (borrows `&mut self`) instead of
-        // `wait_with_output()` (consumes `self`) so we can still kill the
-        // child if the timeout fires.
-        let wait_result = match timeout(NIX_COPY_TIMEOUT, child.wait()).await {
-            Ok(result) => result?,
-            Err(_elapsed) => {
-                warn!(
-                    "nix copy from {} timed out after {}s for {} — killing process",
-                    source.from_url,
-                    NIX_COPY_TIMEOUT.as_secs(),
-                    store_path
-                );
-                // Kill and reap to avoid zombies.
-                let _ = child.kill().await;
-                let _ = child.wait().await;
-                continue; // Try the next cache URL.
-            }
+        let Some(deriver_path) = deriver_for_store_path(store_path).await? else {
+            warn!(
+                "nix copy from {} restored {} but did not expose its deriver",
+                source.from_url, store_path
+            );
+            continue;
         };
 
-        if wait_result.success() {
-            // Verify the path is now present.
-            match fs::try_exists(store_path).await {
-                Ok(true) => return Ok(true),
-                Ok(false) => {
-                    warn!(
-                        "nix copy from {} reported success but {} is still absent",
-                        source.from_url, store_path
-                    );
-                    // Continue trying other caches.
-                }
-                Err(e) => {
-                    warn!(
-                        "nix copy from {} succeeded but path check failed: {}",
-                        source.from_url, e
-                    );
-                }
-            }
-        } else {
-            warn!(
-                "nix copy from {} failed for {} (exit code: {:?})",
-                source.from_url,
-                store_path,
-                wait_result.code()
-            );
+        // Vulnix resolves the output's derivation when it scans an output path.
+        // A binary-cache copy imports the output closure but does not guarantee
+        // that the `.drv` itself is present locally, so restore it explicitly.
+        if copy_path_from_cache(source, &deriver_path, NIX_COPY_TIMEOUT).await?
+            && fs::try_exists(&deriver_path).await.unwrap_or(false)
+        {
+            return Ok(true);
         }
+
+        warn!(
+            "nix copy from {} restored {} but could not restore deriver {}",
+            source.from_url, store_path, deriver_path
+        );
     }
 
     Ok(false)
+}
+
+/// Copies one store path from a configured cache source within the worker timeout.
+async fn copy_path_from_cache(
+    source: &MaterializationSource,
+    store_path: &str,
+    copy_timeout: std::time::Duration,
+) -> Result<bool> {
+    debug!(
+        "Trying nix copy --from {} {} (source: {})",
+        source.from_url, store_path, source.label
+    );
+
+    let mut command = TokioCommand::new("nix");
+    command.arg("copy").arg("--from").arg(&source.from_url);
+
+    if let Some(cache_config) = &source.cache_config {
+        if matches!(cache_config.cache_type, CacheType::Attic) {
+            command.args(["--option", "http2", "false"]);
+        }
+
+        if let Some(public_key) = source.trusted_public_key.as_deref() {
+            command.args(["--option", "trusted-public-keys", public_key]);
+        }
+
+        apply_cache_config_env_to_command(&mut command, cache_config);
+    }
+
+    if !source.nix_config_lines.is_empty() {
+        command.env("NIX_CONFIG", source.nix_config_lines.join("\n") + "\n");
+    }
+
+    // `kill_on_drop` prevents a timed-out cache copy from outliving the worker.
+    let mut child = command
+        .arg(store_path)
+        .kill_on_drop(true)
+        .spawn()
+        .with_context(|| format!("Failed to spawn nix copy from {}", source.from_url))?;
+
+    let wait_result = match timeout(copy_timeout, child.wait()).await {
+        Ok(result) => result?,
+        Err(_elapsed) => {
+            warn!(
+                "nix copy from {} timed out after {}s for {} — killing process",
+                source.from_url,
+                copy_timeout.as_secs(),
+                store_path
+            );
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Ok(false);
+        }
+    };
+
+    if !wait_result.success() {
+        warn!(
+            "nix copy from {} failed for {} (exit code: {:?})",
+            source.from_url,
+            store_path,
+            wait_result.code()
+        );
+        return Ok(false);
+    }
+
+    match fs::try_exists(store_path).await {
+        Ok(true) => Ok(true),
+        Ok(false) => {
+            warn!(
+                "nix copy from {} reported success but {} is still absent",
+                source.from_url, store_path
+            );
+            Ok(false)
+        }
+        Err(error) => {
+            warn!(
+                "nix copy from {} succeeded but path check failed: {}",
+                source.from_url, error
+            );
+            Ok(false)
+        }
+    }
+}
+
+/// Returns the locally recorded derivation path for a restored output path.
+async fn deriver_for_store_path(store_path: &str) -> Result<Option<String>> {
+    let output = TokioCommand::new("nix-store")
+        .args(["--query", "--deriver"])
+        .arg(store_path)
+        .output()
+        .await
+        .context("Failed to query the restored store path's deriver")?;
+
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    Ok(parse_deriver_path(&output.stdout))
+}
+
+/// Returns a derivation path only when Nix reported a concrete `.drv` path.
+fn parse_deriver_path(output: &[u8]) -> Option<String> {
+    let deriver_path = String::from_utf8_lossy(output).trim().to_string();
+    deriver_path.ends_with(".drv").then_some(deriver_path)
 }
 
 async fn set_cve_status_working(task: &str) {
@@ -1149,6 +1200,16 @@ mod tests {
     use tempfile::tempdir;
     use tokio::sync::Semaphore;
     use uuid::Uuid;
+
+    #[test]
+    fn parse_deriver_path_accepts_only_derivation_paths() {
+        assert_eq!(
+            parse_deriver_path(b"/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-example.drv\n"),
+            Some("/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-example.drv".to_string())
+        );
+        assert_eq!(parse_deriver_path(b"unknown\n"), None);
+        assert_eq!(parse_deriver_path(b""), None);
+    }
 
     #[derive(Clone)]
     struct FakeRunner {

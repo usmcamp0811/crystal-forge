@@ -168,6 +168,117 @@ async fn create_cve_scan_reuses_existing_active_scan() {
         .expect("active-scan derivation should be deleted");
 }
 
+/// Ensures duplicate vulnix observations do not send duplicate package/CVE
+/// conflict keys to the bulk `package_vulnerabilities` upsert.
+#[tokio::test]
+async fn save_scan_results_merges_duplicate_package_cve_observations() {
+    let Some(pool) = test_pool_from_env().await else {
+        return;
+    };
+    let suffix = Uuid::new_v4().simple().to_string();
+    let target = insert_derivation(
+        &pool,
+        None,
+        &format!("duplicate-vulnix-target-{suffix}"),
+        "nixos",
+    )
+    .await
+    .expect("target derivation should be inserted");
+    let CreateCveScanOutcome::Created(claim) =
+        create_cve_scan(&pool, target.id, "vulnix", Some("test".to_string()))
+            .await
+            .expect("scan should be created")
+    else {
+        panic!("new target should receive an execution claim");
+    };
+
+    let package_name = format!("duplicate-vulnix-package-{suffix}");
+    let cve_id = format!("CVE-2099-{}", &suffix[..8]);
+    let entries = vec![
+        VulnixEntry {
+            name: package_name.clone(),
+            pname: package_name.clone(),
+            version: "1.0.0".to_string(),
+            affected_by: vec![cve_id.clone(), cve_id.clone()],
+            whitelisted: vec![],
+            derivation: format!("/nix/store/{suffix}-{package_name}.drv"),
+            cvssv3_basescore: HashMap::from([(cve_id.clone(), 9.8)]),
+        },
+        VulnixEntry {
+            name: package_name.clone(),
+            pname: package_name.clone(),
+            version: "1.0.0".to_string(),
+            affected_by: vec![cve_id.clone()],
+            whitelisted: vec![cve_id.clone()],
+            derivation: format!("/nix/store/{suffix}-{package_name}.drv"),
+            cvssv3_basescore: HashMap::from([(cve_id.clone(), 9.8)]),
+        },
+    ];
+
+    save_scan_results_with_store_path_override(
+        &pool,
+        claim.scan_id,
+        &entries,
+        Some(123),
+        Some(&format!("/nix/store/{suffix}-target")),
+        claim.execution_id,
+    )
+    .await
+    .expect("duplicate observations must not trigger an upsert cardinality error");
+
+    let (status, row_count, is_whitelisted): (String, i64, bool) = sqlx::query_as(
+        r#"
+        SELECT
+            (SELECT status FROM cve_scans WHERE id = $1),
+            COUNT(*),
+            BOOL_AND(pv.is_whitelisted)
+        FROM package_vulnerabilities pv
+        JOIN derivations d ON d.id = pv.derivation_id
+        WHERE d.derivation_name = $2 AND pv.cve_id = $3
+        "#,
+    )
+    .bind(claim.scan_id)
+    .bind(&package_name)
+    .bind(&cve_id)
+    .fetch_one(&pool)
+    .await
+    .expect("merged package/CVE row should resolve");
+    assert_eq!(status, "completed");
+    assert_eq!(row_count, 1, "one package/CVE conflict key must persist");
+    assert!(
+        is_whitelisted,
+        "whitelist evidence must win when observations disagree"
+    );
+
+    let _ = sqlx::query(
+        "DELETE FROM attention_occurrences WHERE category = 'cves' AND subject_id = $1",
+    )
+    .bind(&cve_id)
+    .execute(&pool)
+    .await;
+    let _ = sqlx::query("DELETE FROM package_vulnerabilities WHERE cve_id = $1")
+        .bind(&cve_id)
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("DELETE FROM cves WHERE id = $1")
+        .bind(&cve_id)
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("DELETE FROM scan_packages WHERE scan_id = $1")
+        .bind(claim.scan_id)
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("DELETE FROM cve_scans WHERE id = $1")
+        .bind(claim.scan_id)
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("DELETE FROM derivations WHERE derivation_name = $1 OR id = $2")
+        .bind(&package_name)
+        .bind(target.id)
+        .execute(&pool)
+        .await;
+}
+
 #[tokio::test]
 async fn save_scan_results_sets_fleet_relevant_since_atomically_with_cve_attention() {
     // Regression test / crash-boundary test for round 17 issue 2:
