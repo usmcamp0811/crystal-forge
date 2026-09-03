@@ -1112,6 +1112,14 @@ async function assertAttribute(locator, name, expected, message) {
   }
 }
 
+async function assertAttachedAttribute(locator, name, expected, message) {
+  await locator.waitFor({ state: "attached", timeout: 5000 });
+  const actual = await locator.getAttribute(name);
+  if (actual !== expected) {
+    throw new Error(`${message} (expected ${name}=${expected}, got ${actual})`);
+  }
+}
+
 async function assertValue(locator, expected, message) {
   await locator.waitFor({ state: "visible", timeout: 5000 });
   const actual = await locator.inputValue();
@@ -7544,7 +7552,7 @@ const steps = [
         "true",
         "Success feedback should be announced atomically",
       );
-      await assertAttribute(
+      await assertAttachedAttribute(
         successToast.locator("svg").first(),
         "aria-hidden",
         "true",
@@ -7554,7 +7562,7 @@ const steps = [
         successToast.getByRole("button", { name: "Dismiss notification" }),
         "Expected the toast dismiss button to have an accessible name",
       );
-      await assertAttribute(
+      await assertAttachedAttribute(
         successToast.locator("svg").last(),
         "aria-hidden",
         "true",
@@ -7614,7 +7622,7 @@ const steps = [
         "true",
         "Failure feedback should be announced atomically",
       );
-      await assertAttribute(
+      await assertAttachedAttribute(
         failureToast.locator("svg").first(),
         "aria-hidden",
         "true",
@@ -7627,7 +7635,7 @@ const steps = [
         dismissFailureToast,
         "Expected persistent error feedback to be dismissible",
       );
-      await assertAttribute(
+      await assertAttachedAttribute(
         failureToast.locator("svg").last(),
         "aria-hidden",
         "true",
