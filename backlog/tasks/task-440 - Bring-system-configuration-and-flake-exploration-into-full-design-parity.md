@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-03 03:08'
+updated_date: '2026-09-03 03:58'
 labels:
   - design-parity
   - web-ui
@@ -271,6 +271,8 @@ Latest visual/browser P1/P2 closure (2026-08-31): restrict writes to `checks/web
 Final AC24 review closure (2026-08-31): preserve the existing dirty frontend/browser/documentation work and current pushed backend commits. Resolve each independent-review P1/P2 without fabricating unavailable data: correct Config deployed-revision semantics and source presentation; make Flake lifecycle/revision identity and pane-local continuation stable, retryable, and replacement-safe; expose exact delta totals without unbounded payloads; remove quadratic finalization and synchronous historical migration work; bound external Nix processes; correct real application theme capture and canonical narrow screenshot state; and strengthen visual assertions/evidence. Run focused frontend/backend tests first, then server regressions, authoritative web-ui, and the required full flake check. Re-audit documentation and screenshots before checking AC24. Do not merge or retarget MR !323 while MR !318 remains open.
 
 2026-09-03 independent review remediation: Preserve local rebased HEAD `c66b537b` atop `origin/dev` `cbc1d503`; do not reset to stale MR head. Add migration 0248 using the repository immutable-version/current-selector pattern so retained generations bind immutable successful artifacts and later success/failure only advances current attempt state. Backfill existing snapshots and generation references safely. Refactor Config option/summary/module-source reads into one read-only REPEATABLE READ boundary with one resolved artifact token and typed stale-token recovery. Replace per-option SQL executions with bounded set-oriented batches while retaining pre-persistence redaction, limits, digest verification, and deduplication. Add isolated PostgreSQL retention/failure/rollback/GC/dedup/redaction/scale regressions. Expose exact generation/commit comparison baseline labels with full-SHA accessibility metadata. Then independently inspect all design surfaces/viewports/states, compare Cargo.lock behavior against clean `origin/dev`, run documented targeted and broad Nix gates on the exact final head, perform a fresh seven-pass P0/P1/P2 review, and only then force-with-lease push/update MR !323 without merging.
+
+Continuation plan (2026-09-02): independently review the uncommitted immutable-artifact remediation before accepting it. First make migration 0248 upgrade-safe and ensure its final unstaged form is the only form committed; correct artifact authority, baseline token identity, lineage, GC progress, indexes, and migration-backed regressions. Then align Web UI evaluated-options and summary snapshot tokens, coordinated 409 restart behavior, retained-generation rollback identity, and exact mode-specific baseline labels. Update server/browser fixtures and run targeted PostgreSQL, Rust/WASM, browser, server-regressions, web-ui, and required flake checks on the exact final tree. Do not push until those checks pass; do not merge MR !323.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
