@@ -1,13 +1,7 @@
-{
-  mkShell,
-  system,
-  inputs,
-  pkgs,
-  lib,
-  ...
-}:
+{ mkShell, system, inputs, pkgs, lib, ... }:
 with lib;
-with lib.crystal-forge; let
+with lib.crystal-forge;
+let
   namespace = "crystal-forge";
   db_port = 3042;
   db_password = "password";
@@ -20,10 +14,11 @@ with lib.crystal-forge; let
   pgweb_port = 12084;
 
   # Internal (local) issuer for health checks
-  oidc_issuer_internal = "http://127.0.0.1:${toString oidc_port}/realms/${oidc_realm}";
+  oidc_issuer_internal =
+    "http://127.0.0.1:${toString oidc_port}/realms/${oidc_realm}";
 
   oidc_realm_import = ./oidc/realm-crystal-forge.json;
-  tomlFormat = pkgs.formats.toml {};
+  tomlFormat = pkgs.formats.toml { };
   dioxus-cli-0_7_3 = inputs.nixpkgs-dioxus-cli.legacyPackages.${system}.dioxus-cli;
 
   agent-sim = pkgs.writeShellApplication {
@@ -140,7 +135,7 @@ with lib.crystal-forge; let
       flake_polling_interval = "10m";
       commit_evaluation_interval = "10m";
       build_processing_interval = "10m";
-      watched = [];
+      watched = [ ];
     };
   };
 
@@ -181,35 +176,30 @@ with lib.crystal-forge; let
       private_key = "$CF_KEY_DIR/agent.key";
     };
     # Pre-populated mock data for development/demo
-    environments = [
-      {
-        name = "mockenv";
-        description = "An environment full of agents created from shell scripts for testing purposes";
-        is_active = true;
-        risk_profile = "LOW";
-        compliance_level = "NONE";
-      }
-    ];
-    systems = [
-      {
-        hostname = "test.gray";
-        public_key = pkgs.crystal-forge.testAgents.test-gray.publicKey;
-        environment = "mockenv";
-        flake_name = "dotfiles";
-      }
-    ];
+    environments = [{
+      name = "mockenv";
+      description =
+        "An environment full of agents created from shell scripts for testing purposes";
+      is_active = true;
+      risk_profile = "LOW";
+      compliance_level = "NONE";
+    }];
+    systems = [{
+      hostname = "test.gray";
+      public_key = pkgs.crystal-forge.testAgents.test-gray.publicKey;
+      environment = "mockenv";
+      flake_name = "dotfiles";
+    }];
     flakes = {
       flake_polling_interval = "10m";
       commit_evaluation_interval = "10m";
       build_processing_interval = "10m";
-      watched = [
-        {
-          name = "dotfiles";
-          repo_url = "https://gitlab.com/usmcamp0811/dotfiles";
-          auto_poll = false;
-          initial_commit_depth = 10;
-        }
-      ];
+      watched = [{
+        name = "dotfiles";
+        repo_url = "https://gitlab.com/usmcamp0811/dotfiles";
+        auto_poll = false;
+        initial_commit_depth = 10;
+      }];
     };
   };
 
@@ -218,7 +208,7 @@ with lib.crystal-forge; let
 
   simulatePush = pkgs.writeShellApplication {
     name = "simulate-push";
-    runtimeInputs = with pkgs; [git curl jq hostname];
+    runtimeInputs = with pkgs; [ git curl jq hostname ];
     text = ''
       set -euo pipefail
 
@@ -256,7 +246,7 @@ with lib.crystal-forge; let
 
   runAgent = pkgs.writeShellApplication {
     name = "run-agent";
-    runtimeInputs = [pkgs.nix];
+    runtimeInputs = [ pkgs.nix ];
     text = ''
       CRYSTAL_FORGE_CONFIG="$(${generateConfig}/bin/generate-config)"
       export CRYSTAL_FORGE_CONFIG
@@ -270,7 +260,7 @@ with lib.crystal-forge; let
 
   runServer = pkgs.writeShellApplication {
     name = "run-server";
-    runtimeInputs = [pkgs.nix pkgs.git pkgs.vulnix pkgs.coreutils];
+    runtimeInputs = [ pkgs.nix pkgs.git pkgs.vulnix pkgs.coreutils ];
     text = ''
       CRYSTAL_FORGE_CONFIG="$(${generateConfig}/bin/generate-config)"
       export CRYSTAL_FORGE_CONFIG
@@ -311,8 +301,8 @@ with lib.crystal-forge; let
       # Wait up to 60 seconds for the builders table to exist
       for i in {1..60}; do
         if psql -h 127.0.0.1 -p ${
-        toString db_port
-      } -U crystal_forge -d crystal_forge \
+          toString db_port
+        } -U crystal_forge -d crystal_forge \
                -c "SELECT 1 FROM builders LIMIT 1;" >/dev/null 2>&1; then
           break
         fi
@@ -352,7 +342,7 @@ with lib.crystal-forge; let
 
   runBuilder = pkgs.writeShellApplication {
     name = "run-builder";
-    runtimeInputs = [pkgs.nix pkgs.coreutils];
+    runtimeInputs = [ pkgs.nix pkgs.coreutils ];
     text = ''
       CRYSTAL_FORGE_CONFIG="$(${generateConfig}/bin/generate-config)"
       export CRYSTAL_FORGE_CONFIG
@@ -374,7 +364,7 @@ with lib.crystal-forge; let
   # Mock variants that use pre-populated config template
   runServerMock = pkgs.writeShellApplication {
     name = "run-server-mock";
-    runtimeInputs = [pkgs.nix pkgs.git pkgs.vulnix pkgs.coreutils];
+    runtimeInputs = [ pkgs.nix pkgs.git pkgs.vulnix pkgs.coreutils ];
     text = ''
       CRYSTAL_FORGE_CONFIG="$(${generateConfigMock}/bin/generate-config)"
       export CRYSTAL_FORGE_CONFIG
@@ -655,7 +645,7 @@ with lib.crystal-forge; let
 
   runBuilderMock = pkgs.writeShellApplication {
     name = "run-builder-mock";
-    runtimeInputs = [pkgs.nix pkgs.coreutils];
+    runtimeInputs = [ pkgs.nix pkgs.coreutils ];
     text = ''
       CRYSTAL_FORGE_CONFIG="$(${generateConfigMock}/bin/generate-config)"
       export CRYSTAL_FORGE_CONFIG
@@ -676,7 +666,7 @@ with lib.crystal-forge; let
 
   runStateMachineTests = pkgs.writeShellApplication {
     name = "run-state-machine-tests";
-    runtimeInputs = with pkgs; [nix coreutils];
+    runtimeInputs = with pkgs; [ nix coreutils ];
     text = ''
       set -euo pipefail
 
@@ -716,7 +706,7 @@ with lib.crystal-forge; let
 
   runDashboardVisibilityTests = pkgs.writeShellApplication {
     name = "run-dashboard-visibility-tests";
-    runtimeInputs = with pkgs; [nix coreutils];
+    runtimeInputs = with pkgs; [ nix coreutils ];
     text = ''
       set -euo pipefail
 
@@ -740,7 +730,7 @@ with lib.crystal-forge; let
 
   runCveProcessingTest = pkgs.writeShellApplication {
     name = "run-cve-processing-test";
-    runtimeInputs = with pkgs; [nix coreutils];
+    runtimeInputs = with pkgs; [ nix coreutils ];
     text = ''
       set -euo pipefail
 
@@ -792,13 +782,21 @@ with lib.crystal-forge; let
         DATABASE_URL=\"$DB_URL\" \
           cargo test --manifest-path Cargo.toml \
           --lib queries::cve_scans_tests::create_cve_scan_reuses_existing_active_scan
+        DATABASE_URL=\"$DB_URL\" \
+          cargo test --manifest-path Cargo.toml \
+          --lib queries::scanning_tests::scan_queue_normalizes_never_scanned_derivation \
+          -- --ignored
+        DATABASE_URL=\"$DB_URL\" \
+          cargo test --manifest-path Cargo.toml \
+          --lib queries::scanning_tests::system_scan_queue_normalizes_never_scanned_derivation \
+          -- --ignored
       "
     '';
   };
 
   seedCveMock = pkgs.writeShellApplication {
     name = "seed-cve-mock";
-    runtimeInputs = with pkgs; [postgresql coreutils];
+    runtimeInputs = with pkgs; [ postgresql coreutils ];
     text = ''
       set -euo pipefail
 
@@ -1036,7 +1034,7 @@ with lib.crystal-forge; let
 
   startBuilderApi = pkgs.writeShellApplication {
     name = "start-builder-api";
-    runtimeInputs = with pkgs; [nix python3 coreutils hostname];
+    runtimeInputs = with pkgs; [ nix python3 coreutils hostname ];
     text = ''
       set -euo pipefail
 
@@ -1126,12 +1124,13 @@ with lib.crystal-forge; let
     settings.processes.pgweb = {
       inherit namespace;
       command = "${pkgs.pgweb}/bin/pgweb --listen=${
-        toString pgweb_port
-      } --bind=0.0.0.0";
+          toString pgweb_port
+        } --bind=0.0.0.0";
       depends_on."db".condition = "process_healthy";
-      environment.PGWEB_DATABASE_URL = "postgres://crystal_forge:${db_password}@127.0.0.1:${
-        toString db_port
-      }/crystal_forge";
+      environment.PGWEB_DATABASE_URL =
+        "postgres://crystal_forge:${db_password}@127.0.0.1:${
+          toString db_port
+        }/crystal_forge";
     };
     services.postgres."db" = {
       inherit namespace;
@@ -1148,7 +1147,7 @@ with lib.crystal-forge; let
         CREATE DATABASE grafana_db OWNER grafana;
         GRANT ALL PRIVILEGES ON DATABASE grafana_db TO grafana;
       '';
-      initialDatabases = [];
+      initialDatabases = [ ];
     };
     settings.processes.postgres-jobs = {
       inherit namespace;
@@ -1171,33 +1170,29 @@ with lib.crystal-forge; let
       # NOTE: grafana's "domain" affects generated links; keep it reachable remotely.
       domain = "0.0.0.0";
 
-      datasources = [
-        {
-          name = "Crystal Forge PostgreSQL";
-          uid = "crystal-forge-postgres";
-          type = "postgres";
-          access = "proxy";
+      datasources = [{
+        name = "Crystal Forge PostgreSQL";
+        uid = "crystal-forge-postgres";
+        type = "postgres";
+        access = "proxy";
 
-          # Postgres is local to the same machine running grafana here.
-          url = "127.0.0.1:${toString db_port}";
+        # Postgres is local to the same machine running grafana here.
+        url = "127.0.0.1:${toString db_port}";
 
-          database = "crystal_forge";
-          user = "crystal_forge";
-          secureJsonData = {password = db_password;};
-          jsonData = {sslmode = "disable";};
-          isDefault = false;
-          editable = true;
-        }
-      ];
-      providers = [
-        {
-          name = "Crystal Forge";
-          type = "file";
-          disableDeletion = true;
-          updateIntervalSeconds = 60;
-          options = {path = "${pkgs.crystal-forge.dashboards}/dashboards";};
-        }
-      ];
+        database = "crystal_forge";
+        user = "crystal_forge";
+        secureJsonData = { password = db_password; };
+        jsonData = { sslmode = "disable"; };
+        isDefault = false;
+        editable = true;
+      }];
+      providers = [{
+        name = "Crystal Forge";
+        type = "file";
+        disableDeletion = true;
+        updateIntervalSeconds = 60;
+        options = { path = "${pkgs.crystal-forge.dashboards}/dashboards"; };
+      }];
     };
     settings.processes."grafana".depends_on."db".condition = "process_healthy";
   };
@@ -1213,7 +1208,7 @@ with lib.crystal-forge; let
         CREATE DATABASE crystal_forge OWNER crystal_forge;
         GRANT ALL PRIVILEGES ON DATABASE crystal_forge TO crystal_forge;
       '';
-      initialDatabases = [];
+      initialDatabases = [ ];
     };
   };
 
@@ -1240,11 +1235,11 @@ with lib.crystal-forge; let
       inherit namespace;
       command = runServer;
       depends_on."db".condition = "process_healthy";
-      environment = {AUTH_MODE = "local";};
+      environment = { AUTH_MODE = "local"; };
       readiness_probe = {
         exec.command = "${pkgs.postgresql}/bin/pg_isready -h 127.0.0.1 -p ${
-          toString db_port
-        } -U crystal_forge -d crystal_forge";
+            toString db_port
+          } -U crystal_forge -d crystal_forge";
         initial_delay_seconds = 2;
         period_seconds = 5;
         timeout_seconds = 3;
@@ -1266,7 +1261,8 @@ with lib.crystal-forge; let
       '';
       readiness_probe = {
         # Probe locally so it works regardless of LAN DNS
-        exec.command = "${pkgs.curl}/bin/curl -fsS ${oidc_issuer_internal}/.well-known/openid-configuration >/dev/null";
+        exec.command =
+          "${pkgs.curl}/bin/curl -fsS ${oidc_issuer_internal}/.well-known/openid-configuration >/dev/null";
         initial_delay_seconds = 5;
         period_seconds = 5;
         timeout_seconds = 3;
@@ -1282,16 +1278,16 @@ with lib.crystal-forge; let
 
       # 👇 issuer that remote browsers/clients can resolve
       CRYSTAL_FORGE_OIDC_ISSUER_URL = "http://HOSTNAME_PLACEHOLDER:${
-        toString oidc_port
-      }/realms/${oidc_realm}";
+          toString oidc_port
+        }/realms/${oidc_realm}";
 
       CRYSTAL_FORGE_OIDC_CLIENT_ID = oidc_client_id;
       CRYSTAL_FORGE_OIDC_CLIENT_SECRET = oidc_client_secret;
 
       # 👇 callback that matches the host you're visiting from your laptop
       CRYSTAL_FORGE_OIDC_REDIRECT_URI = "http://HOSTNAME_PLACEHOLDER:${
-        toString cf_port
-      }/api/auth/oidc/callback";
+          toString cf_port
+        }/api/auth/oidc/callback";
 
       CRYSTAL_FORGE_OIDC_BOOTSTRAP_ADMIN_GROUP = "admin";
     };
@@ -1315,8 +1311,10 @@ with lib.crystal-forge; let
       AUTH_MODE = mkForce "local";
       CRYSTAL_FORGE__SERVER__EXECUTION_MODE = "mock";
       CRYSTAL_FORGE__BUILDER__ENABLE_API_MODE = "true";
-      CRYSTAL_FORGE__BUILDER__BUILDER_ID = "00000000-0000-0000-0000-000000000001";
-      CRYSTAL_FORGE__BUILDER__SERVER_URL = "http://127.0.0.1:${toString cf_port}";
+      CRYSTAL_FORGE__BUILDER__BUILDER_ID =
+        "00000000-0000-0000-0000-000000000001";
+      CRYSTAL_FORGE__BUILDER__SERVER_URL =
+        "http://127.0.0.1:${toString cf_port}";
     };
 
     settings.processes.seed-cve-mock = {
@@ -1383,7 +1381,7 @@ with lib.crystal-forge; let
   };
 
   dbOnly = pkgs.process-compose-flake.evalModules {
-    modules = [inputs.services-flake.processComposeModules.default db-module];
+    modules = [ inputs.services-flake.processComposeModules.default db-module ];
   };
 
   cveTest = pkgs.process-compose-flake.evalModules {
@@ -1419,27 +1417,15 @@ with lib.crystal-forge; let
       server-oidc-module
     ];
   };
-in
-  full-stack.config.outputs.package
-  // {
-    inherit
-      runServer
-      runAgent
-      runBuilder
-      simulatePush
-      startBuilderApi
-      runUiDev
-      runUiFrontend
-      webUiTest
-      runCveProcessingTest
-      bootstrapDevBuilder
-      envExports
-      ;
-    cve-test = cveTest.config.outputs.package;
-    state-machine-test = stateMachineTest.config.outputs.package;
-    dashboard-visibility-test = dashboardVisibilityTest.config.outputs.package;
-    db-only = dbOnly.config.outputs.package;
-    server-only = server-only.config.outputs.package;
-    server-stack-mock = server-stack-mock.config.outputs.package;
-    oidc-stack = oidc-stack.config.outputs.package;
-  }
+in full-stack.config.outputs.package // {
+  inherit runServer runAgent runBuilder simulatePush startBuilderApi
+    runUiDev runUiFrontend webUiTest runCveProcessingTest bootstrapDevBuilder
+    envExports;
+  cve-test = cveTest.config.outputs.package;
+  state-machine-test = stateMachineTest.config.outputs.package;
+  dashboard-visibility-test = dashboardVisibilityTest.config.outputs.package;
+  db-only = dbOnly.config.outputs.package;
+  server-only = server-only.config.outputs.package;
+  server-stack-mock = server-stack-mock.config.outputs.package;
+  oidc-stack = oidc-stack.config.outputs.package;
+}
