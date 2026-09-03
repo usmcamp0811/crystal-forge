@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-03 09:45'
+updated_date: '2026-09-03 10:15'
 labels:
   - design-parity
   - web-ui
@@ -431,6 +431,8 @@ Rebase onto updated origin/dev (2026-09-02): amended pending 14d/commits.rs/syst
 2026-09-03 preflight: Local TASK-440 HEAD is `c66b537b60e57cc1c1febbe1f7500096265c2eaa`, not the earlier `3d773a6d`, because focused browser fixture corrections were amended. `origin/dev` remains `cbc1d5039ed88adcfb55c298ba361d48c9466ce3` and is an ancestor of local HEAD. Remote MR branch remains stale at `f4dbfad604cdc8280679f1f51a6533d8974b6747`. The only TASK-440 worktree dirt is untracked Nix result symlink `result-task440-web-ui`; no reset/rebase was performed. Independent audit confirmed mutable retained-generation artifacts, non-transactional Config reads without option continuation tokens, per-option SQL amplification, and stale/incomplete visual parity evidence. The focused authoritative Web UI Nix command on c66b537b was user-aborted and is not evidence.
 
 2026-09-03 backend immutable-artifact remediation verification: `nix develop ../.. -c env SQLX_OFFLINE=true cargo check --offline --package cf-server` passed from `packages/default`; `nix develop ../.. -c cargo fmt --package cf-server -- --check` passed; scoped `git diff --check` passed; `nix build .#checks.x86_64-linux.server-regressions -L` passed with checkPhase completed in 7m38s. The server regression gate includes clean migration application, a populated pre-0248 upgrade rehearsal, immutable artifact/retention/GC/rollback contracts, bounded query checks, large-corpus host-delta behavior, and deployment concurrency. During verification, corrected snapshot recovery columns, forced deferred lineage validation before index creation, updated fixed query budgets for baseline authority checks, and repaired the large-corpus fixture to avoid a cross-connection ALTER TABLE lock wait and create production-equivalent current selectors. No files were staged or committed; `result-task440-web-ui` remained untouched.
+
+Final independent audits after the targeted authoritative browser pass found remaining P1 closure work. Backend: prevent heartbeat/deployment lock-order inversion; bind rollback-created deployments to retained artifacts; validate complete selected artifacts for options reads; define release semantics for deployment artifact bindings. Frontend/checks: retain visible stale rows during pending Config queries and add realistic optional-store-path rollback coverage. Additional P2 consistency, accessibility, fixture, and documentation findings will be addressed in the same final remediation pass. The targeted authoritative command `CF_UI_TEST_STEPS="12m-task440-config-explorer-keyboard-wide,12o-task440-rollback-notification-auto-latest,12p-task440-config-canonical-wide-expanded" nix build --impure .#checks.x86_64-linux.web-ui --no-link -L` passed on 2026-09-03 after the RSX parse fix; all three selected workflows passed and TASK-440 design drift was 0.0703 dark / 0.0661 light. This evidence predates the final audit fixes and must be rerun.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
