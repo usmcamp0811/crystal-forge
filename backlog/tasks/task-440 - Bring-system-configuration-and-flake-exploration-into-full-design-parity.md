@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-03 06:36'
+updated_date: '2026-09-03 08:23'
 labels:
   - design-parity
   - web-ui
@@ -438,5 +438,11 @@ author: openai-agent
 created: 2026-08-28 16:42
 ---
 Parallel-work coordination (2026-08-28): TASK-440 may be implemented in parallel with TASK-433, but TASK-440 must not merge until TASK-433 is merged. Before TASK-440 adds any database migration or refreshes SQLx metadata, inspect TASK-433's latest branch state and migration numbers, then rebase/update from post-TASK-433 `dev` and allocate new additive migration numbers. Known overlap includes System Detail/Compliance UI, server models/queries/handlers, migrations, SQLx metadata, and browser checks. Preserve TASK-433's POA&M behavior when resolving overlap.
+---
+
+author: @openai-agent
+created: 2026-09-03 08:23
+---
+Second immutable-artifact audit remediation verified on 2026-09-03. Fixed exact deployment-artifact retention in both finalization directions, protected deployment-bound artifacts from GC, made pre-0248 retained lineage queryable but rollback-ineligible through `lineage_verified`, preserved upgrade compatibility when derivation store metadata is null, and made stale snapshot tokens authoritative over failed, unavailable, or absent replacement state for Config options, summary, and module-source reads. Expanded the populated pre-0248 rehearsal and migration-backed immutable retention/GC/rollback regression. Updated `docs/evaluation-flake-snapshots.md` and `docs/specs/02-backend-api.md`. Verification passed: `nix develop ../.. -c env SQLX_OFFLINE=true cargo check --offline --package cf-server`; `nix develop ../.. -c cargo fmt --package cf-server -- --check`; `nix build .#checks.x86_64-linux.server-regressions -L` (7m42s); scoped `git diff --check`. Existing repository warnings remain; no new warning from this remediation. TASK-440 remains In Progress because AC #24 and final MR workflow are outside this backend remediation pass.
 ---
 <!-- COMMENTS:END -->
