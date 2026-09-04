@@ -21,6 +21,8 @@ use crate::components::layout::Card;
 use crate::components::notifications::Toast;
 use crate::environments::adapter::load_environment_colors_with_fallback;
 use crate::routes::Route;
+use crate::state::app_state::AppState;
+use crate::state::auth;
 use crate::theme;
 
 /// Derive fg / bg / border for an environment name from the live color map.
@@ -65,6 +67,42 @@ fn deployment_policy_status_color(policy: &str) -> &'static str {
         "scheduled" => "#60a5fa",
         "manual" => "#fbbf24",
         _ => "#9ca3af",
+    }
+}
+
+const SUCCESS_TOAST_DURATION_MS: u32 = 3000;
+
+#[derive(Clone, Copy)]
+struct ToastPublication {
+    generation: u64,
+    auto_dismiss: bool,
+}
+
+#[derive(Default)]
+struct ToastLifecycle {
+    generation: u64,
+}
+
+impl ToastLifecycle {
+    fn publish(&mut self, is_success: bool) -> ToastPublication {
+        self.generation = self.generation.wrapping_add(1);
+        ToastPublication {
+            generation: self.generation,
+            auto_dismiss: is_success,
+        }
+    }
+
+    fn dismiss(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+    }
+
+    fn expire(&mut self, publication: ToastPublication) -> bool {
+        if publication.auto_dismiss && self.generation == publication.generation {
+            self.dismiss();
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -137,6 +175,8 @@ fn sync_cve_url_query(
 
 #[component]
 pub fn CvesView() -> Element {
+    let app_state = use_context::<Signal<AppState>>();
+    let is_admin_user = auth::is_admin(&app_state.read().auth);
     let initial_severity = query_param("severity");
     let initial_fix = query_param("fix_status").or_else(|| query_param("fix"));
     let initial_triage = query_param("triage_status").or_else(|| query_param("triage"));
@@ -156,6 +196,10 @@ pub fn CvesView() -> Element {
     let mut view_mode = use_signal(move || initial_view.clone()); // "flat" or "grouped"
     let mut selected_cve_id = use_signal(move || initial_cve.clone());
     let mut toast_message: Signal<Option<(String, bool)>> = use_signal(|| None);
+    // CONCURRENCY: Publishing or dismissing feedback advances the lifecycle.
+    // A success timer can clear only the publication that created the timer.
+    let mut toast_lifecycle = use_signal(ToastLifecycle::default);
+    let mut fleet_rescan_pending = use_signal(|| false);
 
     // Attention flash signal for the Critical stat card (set by the use_effect after stats resolves).
     let mut flash_crit_signal = use_signal(|| false);
@@ -255,29 +299,54 @@ pub fn CvesView() -> Element {
                 }
                 div {
                     style: "display: flex; gap: 8px;",
-                    button {
-                        class: "btn btn-ghost focus-ring",
-                        disabled: true,
-                        title: "Fleet rescan enqueue path is not wired yet",
-                        style: "opacity: 0.6; cursor: not-allowed;",
-                        // Sync icon
-                        svg {
-                            width: "14",
-                            height: "14",
-                            view_box: "0 0 24 24",
-                            fill: "none",
-                            stroke: "currentColor",
-                            stroke_width: "2",
-                            stroke_linecap: "round",
-                            stroke_linejoin: "round",
-                            path { d: "M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2" }
+                    if is_admin_user {
+                        button {
+                            class: "btn btn-ghost focus-ring",
+                            disabled: fleet_rescan_pending(),
+                            onclick: move |_| {
+                                if fleet_rescan_pending() {
+                                    return;
+                                }
+                                fleet_rescan_pending.set(true);
+                                spawn(async move {
+                                    let result = client::trigger_cve_fleet_rescan().await;
+                                    fleet_rescan_pending.set(false);
+                                    match result {
+                                        Ok(response) => {
+                                            let publication = toast_lifecycle.write().publish(true);
+                                            toast_message.set(Some((response.message, true)));
+                                            gloo_timers::future::TimeoutFuture::new(SUCCESS_TOAST_DURATION_MS).await;
+                                            if toast_lifecycle.write().expire(publication) {
+                                                toast_message.set(None);
+                                            }
+                                        }
+                                        Err(err) => {
+                                            toast_lifecycle.write().publish(false);
+                                            toast_message.set(Some((format!("Fleet rescan failed: {err}"), false)));
+                                        }
+                                    }
+                                });
+                            },
+                            // Sync icon
+                            svg {
+                                width: "14",
+                                height: "14",
+                                view_box: "0 0 24 24",
+                                fill: "none",
+                                stroke: "currentColor",
+                                stroke_width: "2",
+                                stroke_linecap: "round",
+                                stroke_linejoin: "round",
+                                path { d: "M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2" }
+                            }
+                            if fleet_rescan_pending() { " Rescanning…" } else { " Rescan fleet" }
                         }
-                        " Rescan fleet"
                     }
                     button {
                         class: "btn btn-ghost focus-ring",
                         onclick: move |_| {
                             let mut toast_message = toast_message;
+                            let mut toast_lifecycle = toast_lifecycle;
                             spawn(async move {
                                 match client::export_cves_csv(&CveFilters {
                                     severity: severity_filter(),
@@ -289,14 +358,16 @@ pub fn CvesView() -> Element {
                                     limit: None,
                                 }).await {
                                     Ok(_) => {
+                                        let publication = toast_lifecycle.write().publish(true);
                                         toast_message.set(Some(("Export report started".to_string(), true)));
-                                        gloo_timers::future::TimeoutFuture::new(3000).await;
-                                        toast_message.set(None);
+                                        gloo_timers::future::TimeoutFuture::new(SUCCESS_TOAST_DURATION_MS).await;
+                                        if toast_lifecycle.write().expire(publication) {
+                                            toast_message.set(None);
+                                        }
                                     }
                                     Err(e) => {
+                                        toast_lifecycle.write().publish(false);
                                         toast_message.set(Some((format!("Export failed: {e}"), false)));
-                                        gloo_timers::future::TimeoutFuture::new(5000).await;
-                                        toast_message.set(None);
                                     }
                                 }
                             });
@@ -634,7 +705,10 @@ pub fn CvesView() -> Element {
                 Toast {
                     message: message.clone(),
                     is_success,
-                    on_dismiss: move |_| toast_message.set(None)
+                    on_dismiss: move |_| {
+                        toast_lifecycle.write().dismiss();
+                        toast_message.set(None);
+                    }
                 }
             }
         }
@@ -2446,5 +2520,29 @@ fn JustificationCard(justification: CveJustification) -> Element {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ToastLifecycle;
+
+    #[test]
+    fn toast_lifecycle_fences_timers_and_manual_dismissal() {
+        let mut lifecycle = ToastLifecycle::default();
+
+        let older = lifecycle.publish(true);
+        let newer = lifecycle.publish(true);
+        assert!(!lifecycle.expire(older));
+
+        lifecycle.dismiss();
+        assert!(!lifecycle.expire(newer));
+
+        let persistent_error = lifecycle.publish(false);
+        assert!(!lifecycle.expire(persistent_error));
+
+        let current_success = lifecycle.publish(true);
+        assert!(lifecycle.expire(current_success));
+        assert!(!lifecycle.expire(current_success));
     }
 }

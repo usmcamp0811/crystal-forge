@@ -1474,22 +1474,22 @@ pub fn spawn_background_tasks(
     // tab (TASK-336.5) can list it, toggle enabled/disabled, and trigger run-now.
     // vulnix poll_interval comes from [vulnix] config (default: 60 s).
     let vulnix_poll_interval = cfg.get_vulnix_config().poll_interval;
-    // The CVE scan worker starts DISABLED by default so that a first deployment
-    // against an established database does not immediately begin an unbounded
-    // historical backfill. An operator must explicitly enable it via the
-    // Admin → Background Jobs tab (TASK-336.5) or the scanning schedule API.
-    let (cve_job_handle, cve_run_now_rx) = BackgroundJobHandle::new(
-        "cve_scan",
-        "CVE Scan",
-        vulnix_poll_interval,
-        false, // disabled by default — operator must enable
-    );
+    // The worker starts enabled because the persisted scan schedule policy is
+    // the operational control for post-build and cadence-driven scans. Runtime
+    // controls remain available for the future Admin Background Jobs surface.
+    let (cve_job_handle, cve_run_now_rx) = new_cve_scan_background_job(vulnix_poll_interval);
     let cve_job_for_task = cve_job_handle.clone();
     let registry_for_spawn = job_registry.clone();
     tokio::spawn(async move {
         registry_for_spawn.register(cve_job_handle).await;
         run_cve_scan_loop(cve_pool, cve_job_for_task, cve_run_now_rx).await;
     });
+}
+
+fn new_cve_scan_background_job(
+    poll_interval: std::time::Duration,
+) -> (BackgroundJobHandle, tokio::sync::watch::Receiver<u64>) {
+    BackgroundJobHandle::new("cve_scan", "CVE Scan", poll_interval, true)
 }
 
 async fn run_session_retention_loop(pool: PgPool, retention_days: i64) {
@@ -2229,9 +2229,9 @@ fn select_next_pending_commit_id_for_cycle(
 mod tests {
     use super::{
         EnforcedPolicyLoadSafetyError, builder_stale_timeout_secs, classify_policy_loader_failure,
-        evaluation_due_delay, evaluation_policy_digest, normalize_custom_policy_expression,
-        parse_deployment_policy_record, parse_enforced_policy_record,
-        select_next_pending_commit_id_for_cycle,
+        evaluation_due_delay, evaluation_policy_digest, new_cve_scan_background_job,
+        normalize_custom_policy_expression, parse_deployment_policy_record,
+        parse_enforced_policy_record, select_next_pending_commit_id_for_cycle,
     };
     use crate::models::deployment_policies::{
         AssignedPolicy, DeploymentPolicy, DeploymentPolicyRecord, PolicyRule, RuleMode,
@@ -2239,6 +2239,18 @@ mod tests {
     use chrono::Utc;
     use serde_json::json;
     use uuid::Uuid;
+
+    #[tokio::test]
+    async fn registered_cve_scan_job_starts_enabled() {
+        let (handle, _run_now_rx) = new_cve_scan_background_job(std::time::Duration::from_secs(60));
+
+        let status = handle.status().await;
+        assert_eq!(status.id, "cve_scan");
+        assert!(
+            status.enabled,
+            "persisted scan policy should gate an active worker"
+        );
+    }
 
     fn policy_record(policy_type: &str, config: serde_json::Value) -> DeploymentPolicyRecord {
         DeploymentPolicyRecord {
