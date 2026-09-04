@@ -522,9 +522,28 @@ pub struct NixEvalJobResult {
     pub cache_status: Option<String>,
     pub outputs: Option<serde_json::Value>,
 
+    /// Value emitted by the `nix-eval-jobs --apply` policy extractor.
+    #[serde(rename = "extraValue")]
+    pub extra_value: Option<serde_json::Value>,
+
     /// Meta field (only present with --meta flag)
-    /// Contains our policy check results in meta.policies
+    /// Retains compatibility with evaluator versions that expose custom
+    /// derivation metadata directly.
     pub meta: Option<serde_json::Value>,
+}
+
+fn normalize_policy_metadata(result: &mut NixEvalJobResult) {
+    // COMPATIBILITY: Current nix-eval-jobs versions emit the explicit apply
+    // result as `extraValue`. Older evaluator output that already contains
+    // `meta.policies` remains accepted.
+    if let Some(policies) = result.extra_value.take() {
+        let meta = result.meta.get_or_insert_with(|| serde_json::json!({}));
+        if let Some(fields) = meta.as_object_mut() {
+            fields.insert("policies".to_string(), policies);
+        } else {
+            result.meta = Some(serde_json::json!({ "policies": policies }));
+        }
+    }
 }
 
 fn parse_expected_store_path_from_outputs(outputs: &serde_json::Value) -> Option<String> {
@@ -1335,12 +1354,37 @@ pub struct EvaluationPlan {
     /// failure is an observability gap, not a Nix system evaluation failure,
     /// so it must not block builds or deployments.
     pub snapshot_capture_failures: HashMap<String, String>,
-    /// Revision-scoped flake outputs extracted once during bulk evaluation.
+    /// Exploration artifact from a separate targeted inspection.
+    ///
+    /// PRIMARY does not populate this field. It remains `None` until targeted
+    /// inspection provides an artifact, and finalization records the flake
+    /// output snapshot as unavailable.
     pub flake_output_snapshot: Option<serde_json::Value>,
     /// True when any result has a Nix evaluation error.
     pub had_system_eval_errors: bool,
     #[cfg(test)]
     pub force_build_job_insert_failure: bool,
+}
+
+fn record_missing_snapshot_captures(
+    successful_results: &[SuccessfulSystemResult],
+    evaluation_snapshots: &HashMap<String, Vec<EvaluatedOption>>,
+    snapshot_capture_failures: &mut HashMap<String, String>,
+) {
+    // INVARIANT: Every successful system advances snapshot selection. The
+    // primary evaluator does not capture Config data, and fallback results do
+    // not pass through the streaming metadata parser. Mark every success that
+    // lacks a separately captured artifact unavailable so an older available
+    // snapshot cannot remain selected for this evaluation attempt.
+    for successful in successful_results {
+        if !evaluation_snapshots.contains_key(&successful.system_name) {
+            snapshot_capture_failures
+                .entry(successful.system_name.clone())
+                .or_insert_with(|| {
+                    "Configuration snapshot was not captured separately".to_string()
+                });
+        }
+    }
 }
 
 /// Outcome of `finalize_evaluation_attempt`.
@@ -2563,6 +2607,12 @@ pub async fn finalize_evaluation_attempt(
         )
         .await
         .context("Failed to persist flake output snapshot")?;
+    } else {
+        crate::queries::evaluation_snapshots::persist_unavailable_flake_output_snapshot_tx(
+            &mut tx, commit_id,
+        )
+        .await
+        .context("Failed to mark flake output snapshot unavailable")?;
     }
 
     #[cfg(test)]
@@ -3018,7 +3068,10 @@ async fn evaluate_with_nix_eval_jobs_inner(
     info!("Expected system names: {:?}", known_systems);
     info!("Build-scope excluded systems: {:?}", excluded_systems);
 
-    // Run nix-eval-jobs with --meta flag to get policy results.
+    // Run nix-eval-jobs with an explicit apply function to get policy results.
+    // Nixpkgs derivations can sanitize custom `meta` fields before
+    // nix-eval-jobs serializes them. `extraValue` preserves the policy payload
+    // while the returned value remains the unchanged system derivation.
     // --impure is required because the Nix expression uses builtins.getFlake with a
     // remote git+ssh ref (e.g. git+git@github.com:...?rev=<hash>), which is only
     // permitted in impure evaluation mode.
@@ -3061,7 +3114,9 @@ async fn evaluate_with_nix_eval_jobs_inner(
         "--expr",
         &nix_expr,
         "--impure", // Required: builtins.getFlake with remote git refs needs impure mode
-        "--meta",   // CRITICAL: Include meta so we get policies in output!
+        "--meta",
+        "--apply",
+        "derivation: derivation.meta.policies",
         "--workers",
         &server_config.eval_workers.to_string(),
         "--max-memory-size",
@@ -3188,6 +3243,7 @@ async fn evaluate_with_nix_eval_jobs_inner(
                                         &error,
                                     )
                                 });
+                                normalize_policy_metadata(&mut result);
                                 let system_name = result
                                     .attr_path
                                     .last()
@@ -3290,19 +3346,19 @@ async fn evaluate_with_nix_eval_jobs_inner(
                                     // so every branch here records observability
                                     // state only and never a system failure.
                                     //
-                                    // COMPATIBILITY: An evaluator that predates
-                                    // evaluationSnapshotCaptured omits the flag.
-                                    // Treat the snapshot as captured so a
-                                    // deployed older evaluator keeps its
-                                    // existing available-snapshot behaviour.
+                                    // The primary evaluator intentionally does
+                                    // not capture snapshots. Missing snapshot
+                                    // metadata therefore means unavailable,
+                                    // not an empty available snapshot and not a
+                                    // failed system evaluation.
                                     let captured = meta
                                         .get("evaluationSnapshotCaptured")
                                         .and_then(serde_json::Value::as_bool)
-                                        .unwrap_or(true);
+                                        .unwrap_or(false);
                                     if !captured {
                                         snapshot_capture_failures.insert(
                                             system_name.clone(),
-                                            "Configuration snapshot extraction did not complete"
+                                            "Configuration snapshot was not captured separately"
                                                 .to_string(),
                                         );
                                     } else if let Some(snapshot) =
@@ -4326,6 +4382,7 @@ async fn evaluate_with_nix_eval_jobs_inner(
                                 error: None,
                                 cache_status: None,
                                 outputs: None,
+                                extra_value: None,
                                 meta: None,
                             };
                             // Re-resolve this configuration's assigned policies so the
@@ -4440,6 +4497,7 @@ async fn evaluate_with_nix_eval_jobs_inner(
                 error: Some(failure.error.clone()),
                 cache_status: None,
                 outputs: None,
+                extra_value: None,
                 meta: None,
             });
 
@@ -4468,6 +4526,7 @@ async fn evaluate_with_nix_eval_jobs_inner(
                 error: Some(failure.error.clone()),
                 cache_status: None,
                 outputs: None,
+                extra_value: None,
                 meta: None,
             });
         }
@@ -4796,6 +4855,11 @@ async fn evaluate_with_nix_eval_jobs_inner(
         commit_id = commit.id,
         expected_attempt, "build_preparation_drain_completed"
     );
+    record_missing_snapshot_captures(
+        &successful_results,
+        &evaluation_snapshots,
+        &mut snapshot_capture_failures,
+    );
     // Release the cross-process advisory lock now that all build preparations
     // are drained.  Committing the transaction releases the lock atomically.
     // The hardening worker can begin its next scan only after this commit.
@@ -5000,6 +5064,7 @@ async fn evaluate_with_mock_eval_jobs_inner(
             error: None,
             cache_status: Some("unknown".to_string()),
             outputs: None,
+            extra_value: None,
             meta: None,
         });
 
@@ -5351,7 +5416,8 @@ mod tests {
         NixEvalJobResult, NixEvalProcessGuard, SuccessfulSystemResult,
         SystemBuildActivationOutcome, SystemFinalizeOutcome, SystemNotQueuedReason,
         SystemPersistenceOutcome, activate_evaluated_system_build, finalize_evaluated_system,
-        finalize_evaluation_attempt, mock_eval_stage_delay, persist_evaluated_system, read_capped,
+        finalize_evaluation_attempt, mock_eval_stage_delay, normalize_policy_metadata,
+        persist_evaluated_system, read_capped, record_missing_snapshot_captures,
         resolve_mock_systems, run_nix_command_bounded, should_mock_policy_fail,
         summarize_commit_metadata,
     };
@@ -5369,6 +5435,33 @@ mod tests {
     use std::collections::BTreeMap;
     use std::process::Stdio;
     use tokio::process::Command;
+
+    #[test]
+    fn apply_result_normalizes_into_policy_metadata() {
+        let mut result: NixEvalJobResult = serde_json::from_value(serde_json::json!({
+            "attr": "chesty",
+            "attrPath": ["chesty"],
+            "name": "chesty",
+            "drvPath": "/nix/store/example.drv",
+            "error": null,
+            "cacheStatus": null,
+            "outputs": null,
+            "extraValue": { "architectureGate": true },
+            "meta": { "description": "system" }
+        }))
+        .expect("nix-eval-jobs output should deserialize");
+
+        normalize_policy_metadata(&mut result);
+
+        assert!(result.extra_value.is_none());
+        assert_eq!(
+            result.meta,
+            Some(serde_json::json!({
+                "description": "system",
+                "policies": { "architectureGate": true }
+            }))
+        );
+    }
 
     // ── NixEvalProcessGuard regression tests ────────────────────────────
     //
@@ -5789,6 +5882,7 @@ mod tests {
                 error: None,
                 cache_status: None,
                 outputs: None,
+                extra_value: None,
                 meta: None,
             });
             policy_checks.push(check(&success.system_name, true));
@@ -5805,6 +5899,7 @@ mod tests {
                 error: Some(failure.error.clone()),
                 cache_status: None,
                 outputs: None,
+                extra_value: None,
                 meta: None,
             });
             policy_checks.push(check(&failure.system_name, false));
@@ -5820,6 +5915,37 @@ mod tests {
             had_system_eval_errors: false,
             force_build_job_insert_failure: false,
         }
+    }
+
+    #[test]
+    fn successful_bulk_and_fallback_results_without_snapshots_become_unavailable() {
+        let successes = vec![
+            successful_system("bulk-success"),
+            successful_system("fallback-success"),
+            successful_system("captured-success"),
+        ];
+        let evaluation_snapshots =
+            std::collections::HashMap::from([("captured-success".to_string(), Vec::new())]);
+        let mut failures = std::collections::HashMap::from([(
+            "fallback-success".to_string(),
+            "Targeted inspector returned no artifact".to_string(),
+        )]);
+
+        record_missing_snapshot_captures(&successes, &evaluation_snapshots, &mut failures);
+
+        assert_eq!(
+            failures.get("bulk-success").map(String::as_str),
+            Some("Configuration snapshot was not captured separately")
+        );
+        assert_eq!(
+            failures.get("fallback-success").map(String::as_str),
+            Some("Targeted inspector returned no artifact"),
+            "a more specific capture diagnostic must be preserved"
+        );
+        assert!(
+            !failures.contains_key("captured-success"),
+            "an empty captured snapshot is available and must not be downgraded"
+        );
     }
 
     async fn derivation_count(pool: &PgPool, commit_id: i32) -> i64 {
@@ -6117,6 +6243,84 @@ mod tests {
         assert_eq!(metrics.len(), 2);
         assert!(metrics.iter().all(Option::is_some));
         assert_eq!(metrics.iter().flatten().sum::<i64>(), 1);
+
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn finalization_replaces_missing_snapshot_artifacts_with_unavailable_lifecycle() {
+        let pool = test_pool().await;
+        cleanup_throwaway_flakes(&pool).await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+
+        let mut seed_tx = pool.begin().await.expect("seed transaction should begin");
+        crate::queries::evaluation_snapshots::persist_available_snapshot_deferred_tx(
+            &mut seed_tx,
+            commit_id,
+            "chesty",
+            vec![EvaluatedOption {
+                path: "services.example.enable".to_string(),
+                declared_type: "boolean".to_string(),
+                value: SafeOptionValue::Scalar(serde_json::json!(true)),
+                definitions: Vec::new(),
+                overridden: false,
+            }],
+        )
+        .await
+        .expect("available configuration fixture should persist");
+        crate::queries::evaluation_snapshots::persist_flake_output_snapshot_tx(
+            &mut seed_tx,
+            commit_id,
+            &serde_json::json!({"declared_systems": ["chesty"]}),
+        )
+        .await
+        .expect("available flake output fixture should persist");
+        seed_tx.commit().await.expect("seed data should commit");
+
+        let attempt = start_eval(&pool, commit_id).await;
+        let mut evaluation = plan(vec![successful_system("chesty")], Vec::new());
+        evaluation.snapshot_capture_failures.insert(
+            "chesty".to_string(),
+            "Configuration snapshot was not captured separately".to_string(),
+        );
+        let outcome = finalize_evaluation_attempt(&pool, commit_id, attempt, &evaluation)
+            .await
+            .expect("finalization should persist unavailable lifecycle states");
+        assert!(matches!(
+            outcome,
+            EvaluationFinalizeOutcome::Completed { .. }
+        ));
+
+        let configuration: (String, i64) = sqlx::query_as(
+            "SELECT snapshot.lifecycle, COUNT(item.snapshot_id)::bigint \
+             FROM evaluation_snapshot_selections selection \
+             JOIN evaluation_snapshots snapshot \
+               ON snapshot.id = selection.current_snapshot_id \
+             LEFT JOIN evaluation_snapshot_options item \
+               ON item.snapshot_id = snapshot.id \
+             WHERE selection.commit_id = $1 \
+               AND selection.configuration_name = 'chesty' \
+             GROUP BY snapshot.id, snapshot.lifecycle",
+        )
+        .bind(commit_id)
+        .fetch_one(&pool)
+        .await
+        .expect("configuration lifecycle should load");
+        assert_eq!(configuration, ("unavailable".to_string(), 0));
+
+        let flake_output: (String, Option<Vec<u8>>) = sqlx::query_as(
+            "SELECT lifecycle, content_digest FROM flake_output_snapshots WHERE commit_id = $1",
+        )
+        .bind(commit_id)
+        .fetch_one(&pool)
+        .await
+        .expect("flake output lifecycle should load");
+        assert_eq!(flake_output, ("unavailable".to_string(), None));
 
         let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
             .bind(flake_id)

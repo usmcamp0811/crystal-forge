@@ -96,9 +96,10 @@ Current system state compared against latest evaluated configuration to detect u
 
 #### 4. Evaluation and Flake Snapshot Flow
 
-The authorized commit evaluation path extracts redacted, content-addressed
-NixOS options and flake-output read models. Config and flake explorer reads use
-PostgreSQL only and never launch Nix, Git, network, or queue work. See
+PRIMARY evaluates system derivations and policies without extracting exploration
+artifacts. Targeted inspection is separate and does not yet provide an artifact,
+so Config and flake explorer lifecycle is unavailable. Reads use PostgreSQL only
+and never launch Nix, Git, network, or queue work. See
 [Evaluation and Flake Snapshot Architecture](./evaluation-flake-snapshots.md)
 for ownership, lifecycle, comparison, retention, redaction, authorization, and
 compatibility contracts.
@@ -186,8 +187,9 @@ Eval Complete → create_build_jobs() → notify_build_queue() → Build Workers
 3. **Rust implementation**: Memory safety and performance for security-critical deployment
 4. **Event-driven queues**: Immediate processing with coalesced wakeups and fallback polling
 5. **Flake-native**: Direct integration with modern Nix ecosystem
-6. **Side-effect-free snapshot reads**: Revision exploration uses persisted,
-   bounded read models extracted by the authorized evaluation path
+6. **Isolated snapshot exploration**: PRIMARY does not extract exploration
+   artifacts. Targeted inspection is separate and not yet implemented, so the
+   snapshot lifecycle is unavailable without blocking builds or deployments.
 7. **Option metadata authority**: Packaged NixOS option metadata is an authoring baseline, while each target flake's evaluation remains authoritative. See [NixOS Option Metadata Authority](./nixos-option-metadata.md).
 
 ### Observability Points

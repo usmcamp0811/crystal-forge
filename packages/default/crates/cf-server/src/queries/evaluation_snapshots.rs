@@ -681,6 +681,48 @@ pub async fn persist_flake_output_snapshot_tx(
     Ok(())
 }
 
+/// Marks flake exploration data unavailable for one completed evaluation.
+///
+/// The primary evaluator does not inspect flake modules or output details. This
+/// transition prevents a payload from an older evaluation attempt from
+/// remaining visible as current data. It does not change system evaluation,
+/// policy, build, or deployment state.
+///
+/// # Errors
+///
+/// Returns an error when the commit does not exist or PostgreSQL rejects the
+/// insert or update.
+pub(crate) async fn persist_unavailable_flake_output_snapshot_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    commit_id: i32,
+) -> Result<()> {
+    let result = sqlx::query(
+        r#"
+        INSERT INTO flake_output_snapshots (
+            commit_id, lifecycle, first_parent_sha, content_digest, error,
+            completed_at
+        )
+        SELECT $1, 'unavailable', c.first_parent_sha, NULL, NULL, now()
+        FROM commits c
+        WHERE c.id = $1
+        ON CONFLICT (commit_id) DO UPDATE
+        SET lifecycle = 'unavailable',
+            first_parent_sha = EXCLUDED.first_parent_sha,
+            content_digest = NULL,
+            error = NULL,
+            completed_at = now()
+        "#,
+    )
+    .bind(commit_id)
+    .execute(&mut **tx)
+    .await?;
+    anyhow::ensure!(
+        result.rows_affected() == 1,
+        "flake output snapshot commit does not exist"
+    );
+    Ok(())
+}
+
 /// Retains the snapshot that produced one observed system generation.
 ///
 /// The lookup uses the deployment request's authoritative commit identity and

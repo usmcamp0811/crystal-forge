@@ -2310,18 +2310,19 @@ fn build_policy_fields_for_config_indented(
 
     lines
 }
-/// Nix prelude that defines failure-isolated configuration snapshot extraction.
+/// Legacy Nix prelude for configuration snapshot extraction.
 ///
-/// The fragment is shared by [`build_nix_eval_expression`] and by the evaluator
-/// snapshot-isolation regression check, so both exercise the same traversal
-/// text. It defines `safeValue`, `walkOptions`, `optionSnapshot`, and
-/// `safeOptionSnapshot`, and deliberately contains no format placeholders.
+/// This fragment is not part of [`build_nix_eval_expression`]. A future
+/// targeted inspector can move the useful value and provenance logic behind a
+/// separate process boundary after the primary evaluator rollback is proven in
+/// production.
 ///
-/// INVARIANT: Every binding in this prelude is total with respect to Nix
-/// evaluation errors. Snapshot extraction represents an uninspectable option
-/// as explicit failed data and never raises an evaluation error into the
-/// surrounding derivation expression. Callers rely on that property to keep a
-/// successful `system.build.toplevel` evaluation successful.
+/// INVARIANT: Nix errors such as missing attributes can escape `tryEval`.
+/// Therefore this fragment MUST NOT be embedded in the primary evaluator.
+#[allow(
+    dead_code,
+    reason = "retained only as input to the post-deployment targeted inspector design"
+)]
 pub(crate) const SNAPSHOT_EXTRACTION_PRELUDE: &str = r#"
   min = left: right: if left < right then left else right;
   take = count: values: builtins.genList
@@ -2549,7 +2550,6 @@ pub(crate) const SNAPSHOT_EXTRACTION_PRELUDE: &str = r#"
     };
 "#;
 
-
 /// Build the complete Nix expression for `nix-eval-jobs` with per-configuration
 /// policy checks derived from the `PoliciesByConfiguration` map.
 ///
@@ -2558,20 +2558,22 @@ pub(crate) const SNAPSHOT_EXTRACTION_PRELUDE: &str = r#"
 /// Configurations that are unregistered or have no assigned policies receive
 /// only the unconditional `cfAgentEnabled` metadata.
 ///
+/// INVARIANT: This primary evaluator must not inspect configuration options,
+/// module graphs, or exported modules. Those observability concerns have a
+/// different failure boundary. Expanding this expression's search space can
+/// turn a lazy metadata defect into a failed system evaluation and prevent an
+/// otherwise valid derivation from being built.
+///
 /// The expression structure:
 /// ```nix
-/// let
-///   flake = builtins.getFlake "<flakeRef>";
+/// (import ./primary_evaluation.nix) {
+///   flakeRef = "<flakeRef>";
 ///   policyCheckers = {
 ///     "<config>" = config: { policy_<id> = <expr>; ... };
 ///     ...
 ///   };
-/// in builtins.mapAttrs (name: cfg:
-///   let
-///     drv = cfg.config.system.build.toplevel;
-///     checker = policyCheckers.${name} or (_: {});
-///   in drv // { meta = (drv.meta or {}) // { policies = (checker cfg.config) // { cfAgentEnabled = cfAgentEnabledExpr cfg.config; }; }; }
-/// ) flake.nixosConfigurations
+///   requestedRevision = "<full revision>";
+/// }
 /// ```
 pub fn build_nix_eval_expression(
     flake_ref: &str,
@@ -2597,348 +2599,14 @@ pub fn build_nix_eval_expression(
         format!("{{\n{}\n      }}", checker_entries.join("\n"))
     };
 
+    let requested_revision =
+        nix_string(crate::derivations::utils::flake_reference_revision(flake_ref).unwrap_or(""));
     format!(
-        r#"
-let
-  flake = builtins.getFlake {flake_ref};
-  policyCheckers = {checkers};
-  cfAgentEnabledExpr = config:
-    (config.systemd.services.crystal-forge-agent.enable or false)
-    || ((config.services.crystal-forge.enable or false)
-        && (config.services.crystal-forge.client.enable or false));
-{prelude}
-  configurationNames = builtins.attrNames (flake.nixosConfigurations or {{}});
-  exportedModuleNames = builtins.attrNames (flake.nixosModules or {{}});
-  carrierLibInputNames = builtins.filter
-    (inputName: flake.inputs.${{inputName}} ? lib)
-    (builtins.attrNames (flake.inputs or {{}}));
-  carrierLibInput =
-    if flake.inputs ? nixpkgs && flake.inputs.nixpkgs ? lib then flake.inputs.nixpkgs
-    else if carrierLibInputNames != [] then
-      flake.inputs.${{builtins.head carrierLibInputNames}}
-    else null;
-  carrierConfigurationLibAttempt =
-    if configurationNames == [] then {{ success = false; value = null; }}
-    else builtins.tryEval
-      (builtins.getAttr (builtins.head configurationNames) flake.nixosConfigurations).pkgs.lib;
-  carrierLib =
-    if carrierConfigurationLibAttempt.success then carrierConfigurationLibAttempt.value
-    else if carrierLibInput != null then carrierLibInput.lib
-    else null;
-  carrierLibSource =
-    if carrierConfigurationLibAttempt.success then "configuration"
-    else if carrierLibInput != null then "input"
-    else null;
-  carrierUnique = values: builtins.foldl'
-    (result: value: if builtins.elem value result then result else result ++ [ value ])
-    [] values;
-  carrierPkgs =
-    if carrierConfigurationLibAttempt.success then
-      (builtins.getAttr (builtins.head configurationNames) flake.nixosConfigurations).pkgs
-    else if carrierLibInput != null && carrierLibInput ? legacyPackages
-      && builtins.hasAttr builtins.currentSystem carrierLibInput.legacyPackages
-    then builtins.getAttr builtins.currentSystem carrierLibInput.legacyPackages
-    else null;
-  carrierLockPath = flake.outPath + "/flake.lock";
-  carrierLockAttempt = if builtins.pathExists carrierLockPath
-    then builtins.tryEval (let
-      parsed = builtins.fromJSON (builtins.readFile carrierLockPath);
-      in builtins.deepSeq parsed parsed)
-    else {{ success = false; value = null; }};
-  carrierLock = if carrierLockAttempt.success then carrierLockAttempt.value
-    else {{ nodes = {{}}; root = "root"; }};
-  carrierLockNodes = carrierLock.nodes or {{}};
-  carrierRootNodeId = carrierLock.root or "root";
-  carrierRootInputs = (carrierLockNodes.${{carrierRootNodeId}} or {{}}).inputs or {{}};
-  carrierResolvePath = path: builtins.foldl' (nodeId: inputName:
-    let reference = (carrierLockNodes.${{nodeId}}.inputs or {{}}).${{inputName}};
-    in if builtins.isList reference then carrierResolvePath reference else reference
-  ) carrierRootNodeId path;
-  carrierResolveReference = reference:
-    if builtins.isList reference then carrierResolvePath reference else reference;
-  carrierNodeChildren = nodeId: carrierUnique (builtins.filter
-    (child: child != null && builtins.hasAttr child carrierLockNodes)
-    (map carrierResolveReference
-      (builtins.attrValues ((carrierLockNodes.${{nodeId}} or {{}}).inputs or {{}}))));
-  # INVARIANT: Raw lock JSON can contain a cyclic node graph before carrier
-  # validation. genericClosure tracks visited keys, so traversal terminates.
-  # Removing the start node gives exact distinct-descendant semantics for both
-  # cyclic graphs and shared subgraphs.
-  carrierDescendantsByNode = builtins.mapAttrs (nodeId: _node:
-    builtins.filter (item: item.key != nodeId) (builtins.genericClosure {{
-      startSet = [ {{ key = nodeId; }} ];
-      operator = item: map (child: {{ key = child; }})
-        (carrierNodeChildren item.key);
-    }}))
-    carrierLockNodes;
-  carrierInput = nodeId: node:
-    let
-      locked = node.locked or {{}};
-      original = node.original or {{}};
-      directNames = builtins.filter (inputName:
-        carrierResolveReference carrierRootInputs.${{inputName}} == nodeId)
-        (builtins.attrNames carrierRootInputs);
-      followsPaths = map (inputName: carrierRootInputs.${{inputName}})
-        (builtins.filter (inputName: builtins.isList carrierRootInputs.${{inputName}})
-          directNames);
-      transitiveDescendantCount = if directNames == [] then null
-        else builtins.length carrierDescendantsByNode.${{nodeId}};
-      directDescendantCount = if directNames == [] then null
-        else builtins.length (carrierNodeChildren nodeId);
-    in {{
-      node = nodeId;
-      names = directNames;
-      direct = directNames != [];
-      transitive = directNames == [];
-      follows = followsPaths;
-      inherit original locked;
-      source_type = locked.type or (original.type or "unknown");
-      source = locked.url or (original.url or null);
-      locked_revision = locked.rev or null;
-      last_modified = locked.lastModified or null;
-      channel = (original.type or null) == "indirect";
-      tracked = builtins.elem (locked.type or null)
-        [ "git" "github" "gitlab" "sourcehut" ];
-      # Both counts come from the complete lock graph, not the bounded API page.
-      # direct_descendant_count remains as a compatibility field for consumers
-      # that have not migrated to the transitive count; it now reports only the
-      # immediate children its name promises.
-      transitive_descendant_count = transitiveDescendantCount;
-      direct_descendant_count = directDescendantCount;
-    }};
-  carrierInputs = map (nodeId: carrierInput nodeId carrierLockNodes.${{nodeId}})
-    (builtins.filter (nodeId: nodeId != carrierRootNodeId)
-      (builtins.attrNames carrierLockNodes));
-  carrierInputOrigins = (builtins.mapAttrs (_inputName: input: {{
-    path = if input ? outPath then builtins.toString input.outPath
-      else if input ? sourceInfo && input.sourceInfo ? outPath
-      then builtins.toString input.sourceInfo.outPath else null;
-    revision = input.rev or (input.sourceInfo.rev or null);
-  }}) (flake.inputs or {{}})) // {{ self = {{
-    path = if flake ? outPath then builtins.toString flake.outPath else null;
-    revision = flake.rev or (flake.sourceInfo.rev or null);
-  }}; }};
-  carrierHasPathPrefix = root: path:
-    root != null && (path == root || builtins.substring 0
-      (builtins.stringLength root + 1) path == root + "/");
-  # Module-level source identifies only the nixosModules export binding. It is
-  # not value provenance and must not imply that navigation reaches the module
-  # implementation. Option declarations retain their own source paths.
-  carrierSourceOrigin = moduleName:
-    let
-      positionAttempt = builtins.tryEval
-        (builtins.unsafeGetAttrPos moduleName (flake.nixosModules or {{}}));
-      position = positionAttempt.value or null;
-      file = if position == null || !(position ? file) then null
-        else builtins.toString position.file;
-      matchingInputs = if file == null then [] else builtins.filter
-        (inputName: carrierHasPathPrefix carrierInputOrigins.${{inputName}}.path file)
-        (builtins.attrNames carrierInputOrigins);
-      longestRootLength = builtins.foldl' (maximum: value:
-        if value > maximum then value else maximum) 0 (map
-        (inputName: builtins.stringLength carrierInputOrigins.${{inputName}}.path)
-        matchingInputs);
-      sourceInputs = builtins.filter (inputName:
-        builtins.stringLength carrierInputOrigins.${{inputName}}.path == longestRootLength)
-        matchingInputs;
-      # SECURITY: Equal longest roots are ambiguous. Do not select one by
-      # attribute ordering because that would manufacture navigable provenance.
-      sourceInput = if builtins.length sourceInputs == 1 then builtins.head sourceInputs else null;
-      root = if sourceInput == null then null else carrierInputOrigins.${{sourceInput}}.path;
-      sourcePath = if root == null || file == null then null
-        else if file == root then "."
-        else builtins.substring (builtins.stringLength root + 1)
-          (builtins.stringLength file) file;
-    in {{
-      source_input = sourceInput;
-      source_revision = if sourceInput == null then null
-        else carrierInputOrigins.${{sourceInput}}.revision;
-      source_path = sourcePath;
-    }};
-  carrierConfigurationSources = builtins.mapAttrs (_configName: configuration:
-    let attempted = builtins.tryEval (builtins.deepSeq
-      (carrierUnique (builtins.concatLists (map (item:
-        map (definition: builtins.toString (definition.file or "untracked"))
-          (item.option.definitionsWithLocations or []))
-        (builtins.filter (item: !(item.over_depth or false))
-          (walkOptions 0 [] configuration.options)))))
-      (carrierUnique (builtins.concatLists (map (item:
-        map (definition: builtins.toString (definition.file or "untracked"))
-          (item.option.definitionsWithLocations or []))
-        (builtins.filter (item: !(item.over_depth or false))
-          (walkOptions 0 [] configuration.options))))));
-    in attempted.value or []) (flake.nixosConfigurations or {{}});
-  carrierModuleSnapshot = moduleName: module:
-    let
-      moduleOrigin = carrierSourceOrigin moduleName;
-      attemptedDeclarations = if carrierLib == null then {{ success = false; value = []; }}
-      else builtins.tryEval (let
-        evaluated = carrierLib.evalModules {{
-          # INVARIANT: Common NixOS modules set config paths whose declarations
-          # live in the full NixOS module graph. Ignore only those unmatched
-          # definitions while extracting the exported module's own options.
-          modules = [ module {{ _module.check = false; }} ];
-          specialArgs = {{ inputs = flake.inputs or {{}}; pkgs = carrierPkgs; }};
-        }};
-        declarations = map (item:
-          if item.over_depth or false then {{
-            path = builtins.concatStringsSep "." item.path;
-            declared_type = "unknown";
-            has_default = false;
-            default = null;
-            source_paths = [];
-            error = "Option subtree exceeds the traversal depth limit";
-          }} else let
-            declaredType = item.option.type.description or (item.option.type.name or "unknown");
-          in {{
-            path = builtins.concatStringsSep "." item.path;
-            declared_type = declaredType;
-            has_default = item.option ? default;
-            default = if item.option ? default then safeValue 0 item.option.default else null;
-            source_paths = map (definition: builtins.toString (definition.file or "untracked"))
-              (item.option.definitionsWithLocations or []);
-          }}) (builtins.filter
-          (item: item.path != [] && builtins.head item.path != "_module")
-          (walkOptions 0 [] evaluated.options));
-      in declarations);
-      declarations = attemptedDeclarations.value or [];
-      descriptionAttempt = builtins.tryEval (builtins.deepSeq
-        (if builtins.isAttrs module then module.description or (module.meta.description or null)
-         else null)
-        (if builtins.isAttrs module then module.description or (module.meta.description or null)
-         else null));
-      moduleSources = carrierUnique (builtins.concatLists
-        (map (declaration: declaration.source_paths) declarations));
-      consumers = builtins.attrNames (builtins.listToAttrs (builtins.filter
-        (entry: entry.value)
-        (map (configName: {{ name = configName; value =
-          let sources = carrierConfigurationSources.${{configName}};
-          in builtins.any (source: builtins.elem source sources) moduleSources; }})
-          (builtins.attrNames carrierConfigurationSources))));
-    in {{
-      name = moduleName;
-      description = descriptionAttempt.value or null;
-      inherit (moduleOrigin) source_input source_revision source_path;
-      inherit declarations consumers;
-      declaration_count = builtins.length declarations;
-      consumer_count = builtins.length consumers;
-      error = if attemptedDeclarations.success then null
-        else if carrierLib == null
-        then "Module evaluation unavailable: no configuration or input provides nixpkgs lib"
-        else "Exported module could not be evaluated";
-    }};
-  safeCarrierModuleSnapshot = moduleName: module:
-    let
-      snapshot = carrierModuleSnapshot moduleName module;
-      attempted = builtins.tryEval (builtins.deepSeq snapshot snapshot);
-    in attempted.value or {{
-      name = moduleName;
-      description = null;
-      source_input = null;
-      source_revision = null;
-      source_path = null;
-      declarations = [];
-      consumers = [];
-      declaration_count = 0;
-      consumer_count = 0;
-      error = "Exported module could not be evaluated";
-    }};
-  carrierNixpkgsRevisions = carrierUnique (builtins.filter (revision: revision != null)
-    (map (input: input.locked_revision)
-      (builtins.filter (input:
-        builtins.any (inputName: builtins.match ".*[nN][iI][xX][pP][kK][gG][sS].*" inputName != null)
-          (input.names ++ [ input.node ])) carrierInputs)));
-  flakeOutputCarrierSnapshot = {{
-    declared_systems = configurationNames;
-    exported_modules = map
-      (moduleName: safeCarrierModuleSnapshot moduleName flake.nixosModules.${{moduleName}})
-      exportedModuleNames;
-    inputs = carrierInputs;
-    direct_input_count = builtins.length
-      (builtins.filter (input: input.direct) carrierInputs);
-    resolved_input_count = builtins.length carrierInputs;
-    lock_error = if carrierLockAttempt.success then null else "flake.lock could not be read";
-    module_evaluation = {{
-      available = carrierLib != null;
-      source = carrierLibSource;
-      error = if carrierLib == null
-        then "Module evaluation unavailable: no configuration or input provides nixpkgs lib"
-        else null;
-    }};
-    nixpkgsRevisions = carrierNixpkgsRevisions;
-    multiple_nixpkgs_revisions = builtins.length carrierNixpkgsRevisions > 1;
-  }};
-  flakeOutputCarrier = builtins.derivation {{
-    name = "crystal-forge-flake-output-snapshot";
-    system = builtins.currentSystem;
-    builder = "/bin/false";
-  }};
-in
-  {{ __crystalForgeFlakeOutput = flakeOutputCarrier // {{
-    meta = (flakeOutputCarrier.meta or {{}}) // {{
-      flakeOutputSnapshot = flakeOutputCarrierSnapshot;
-    }};
-  }}; }} // builtins.mapAttrs (name: cfg:
-    let
-      drv     = cfg.config.system.build.toplevel;
-      checker = policyCheckers.${{name}} or (_: {{}});
-      lib = cfg.pkgs.lib;
-      inputOrigins = (builtins.mapAttrs (_inputName: input: {{
-        path = if input ? outPath then builtins.toString input.outPath
-          else if input ? sourceInfo && input.sourceInfo ? outPath
-          then builtins.toString input.sourceInfo.outPath else null;
-        revision = input.rev or (input.sourceInfo.rev or null);
-      }}) (flake.inputs or {{}})) // {{ self = {{
-        path = if flake ? outPath then builtins.toString flake.outPath else null;
-        revision = flake.rev or (flake.sourceInfo.rev or null);
-      }}; }};
-      flattenGraph = nodes: builtins.concatLists (map
-        (node: [ node.module ] ++ flattenGraph (node.imports or [])) nodes);
-      # The module graph is evaluator metadata, not part of the derivation. A
-      # discarded or lazily broken raw definition must not abort the primary
-      # evaluation, so the graph spine is forced inside a guard. An unreadable
-      # graph degrades override provenance instead of failing the system.
-      rawModulesAttempt = builtins.tryEval
-        (let flattened = flattenGraph (cfg._module.graph or []);
-         in builtins.seq (builtins.length flattened) flattened);
-      rawModules = if rawModulesAttempt.success
-        then rawModulesAttempt.value else [];
-      # INVARIANT: Snapshot extraction is subordinate to the primary
-      # evaluation. This outer boundary is the last defence for a value that
-      # escapes the node-level guards in walkOptions and safeOptionSnapshot.
-      # The result is bound once so deepSeq does not repeat the traversal.
-      snapshotAttempt = builtins.tryEval
-        (let items = map (safeOptionSnapshot lib inputOrigins rawModules)
-           (walkOptions 0 [] cfg.options);
-         in builtins.deepSeq items items);
-    in
-      drv // {{
-        meta = (drv.meta or {{}}) // {{
-          policies = (checker cfg.config) // {{
-            cfAgentEnabled = cfAgentEnabledExpr cfg.config;
-            requestedSourceRevision = {requested_revision};
-            resolvedSourceRevision = flake.sourceInfo.rev or null;
-          }};
-          # An empty list is a truthful snapshot only when capture succeeded.
-          # This flag lets the server separate "this configuration declares no
-          # options" from "no trustworthy snapshot artifact could be produced".
-          evaluationSnapshotCaptured = snapshotAttempt.success;
-          evaluationSnapshot =
-            if snapshotAttempt.success then snapshotAttempt.value else [];
-          # Override provenance is reconstructed from the raw module graph.
-          # Report degraded provenance rather than implying that no option was
-          # ever overridden.
-          evaluationSnapshotModulesCaptured = rawModulesAttempt.success;
-        }};
-      }}
-  ) (flake.nixosConfigurations or {{}})
-"#,
-        flake_ref = nix_string(flake_ref),
-        checkers = checkers_block,
-        prelude = SNAPSHOT_EXTRACTION_PRELUDE,
-        requested_revision = nix_string(
-            crate::derivations::utils::flake_reference_revision(flake_ref).unwrap_or("")
-        ),
+        "({}) {{ flakeRef = {}; policyCheckers = {}; requestedRevision = {}; }}",
+        include_str!("primary_evaluation.nix"),
+        nix_string(flake_ref),
+        checkers_block,
+        requested_revision,
     )
 }
 
@@ -4123,141 +3791,26 @@ in {{ {fields} }}"#
         // must still be emitted unconditionally so builds can be queued.
         assert!(expr.contains("policyCheckers"));
         assert!(expr.contains("cfAgentEnabled"));
-        assert!(expr.contains("cfAgentEnabledExpr"));
-        assert!(expr.contains("evaluationSnapshot"));
-        assert!(expr.contains("cfg.options"));
-        assert!(expr.contains("flakeOutputSnapshot"));
-        assert!(expr.contains("walkOptions 0 [] cfg.options"));
-        assert!(expr.contains("definitionsWithLocations"));
-        assert!(expr.contains("attemptedDeclarations"));
-        assert!(expr.contains("descriptionAttempt"));
-        assert!(expr.contains("status = \"overridden\""));
-        assert!(expr.contains("inherit priority"));
-        assert!(expr.contains("consumer_count"));
-        assert!(expr.contains("carrierResolveReference"));
-        assert!(expr.contains("carrierConfigurationLibAttempt"));
-        assert!(expr.contains("carrierLibInput != null"));
-        assert!(expr.contains("module_evaluation"));
-        assert!(expr.contains("multiple_nixpkgs_revisions"));
+        assert!(expr.contains("configuration.config.system.build.toplevel"));
 
-        // Snapshot extraction must stay subordinate to the primary evaluation.
-        // The generated expression therefore has to keep the outer boundary and
-        // the capture flag that lets the server tell "no options" apart from
-        // "no trustworthy snapshot". Removing either would silently reintroduce
-        // the failure mode where snapshot extraction fails a working system.
-        assert!(expr.contains("evaluationSnapshotCaptured = snapshotAttempt.success;"));
-        assert!(expr.contains("snapshotAttempt = builtins.tryEval"));
-        assert!(expr.contains("rawModulesAttempt = builtins.tryEval"));
-        assert!(expr.contains("evaluationSnapshotModulesCaptured"));
-        // Traversal itself must be guarded. `walkOptions` forces arbitrary
-        // option declarations, which can throw for a configuration whose
-        // toplevel evaluates successfully.
-        assert!(expr.contains("namesAttempt = builtins.tryEval (builtins.attrNames attrs);"));
-        assert!(expr.contains("currentAttempt = builtins.tryEval"));
-        assert!(expr.contains("unreadable = true;"));
-    }
-
-    #[test]
-    fn snapshot_extraction_is_complete_and_forces_only_retained_values() {
-        let expr = build_nix_eval_expression("github:user/repo", &PoliciesByConfiguration::new());
-
-        for truncated_collection in [
-            "take 10000 (walkOptions",
-            "take 5000 (walkOptions",
-            "take 100 (builtins.attrNames flake.nixosConfigurations)",
-            "take 100 (builtins.attrNames (flake.nixosModules",
-            "boundedNames attrs",
+        for forbidden in [
+            "cfg.options",
+            "configuration.options",
+            "_module.graph",
+            "lib.evalModules",
+            "carrierConfigurationSources",
+            "carrierModuleSnapshot",
+            "safeCarrierModuleSnapshot",
+            "flake.nixosModules",
+            "evaluationSnapshot",
+            "flakeOutputSnapshot",
+            "__crystalForgeFlakeOutput",
         ] {
             assert!(
-                !expr.contains(truncated_collection),
-                "persisted extraction must not truncate {truncated_collection}"
+                !expr.contains(forbidden),
+                "primary evaluator must not contain {forbidden}"
             );
         }
-        assert!(!expr.contains("attempted = builtins.tryEval (builtins.deepSeq raw raw)"));
-        assert!(expr.contains("scalarAttempt = builtins.tryEval (builtins.deepSeq raw raw)"));
-        assert!(expr.contains("list_over_limit"));
-        assert!(expr.contains("attribute_set_over_limit"));
-        assert!(!expr.contains("(min 100 lengthAttempt.value)"));
-        assert!(expr.contains("safeValue (depth + 1) (builtins.elemAt raw index)"));
-        assert!(expr.contains("safeOptionSnapshot"));
-        assert!(expr.contains("safeCarrierModuleSnapshot"));
-        assert!(expr.contains("over_depth = true"));
-        assert!(expr.contains("code = \"over_depth\""));
-        assert!(expr.contains("Option subtree exceeds the traversal depth limit"));
-    }
-
-    #[test]
-    fn flake_output_snapshot_has_a_configuration_independent_carrier() {
-        let expr = build_nix_eval_expression("github:user/repo", &PoliciesByConfiguration::new());
-
-        assert!(expr.contains("__crystalForgeFlakeOutput"));
-        assert!(expr.contains("flakeOutputCarrierSnapshot"));
-        assert!(expr.contains("flake.nixosConfigurations or {}"));
-        assert!(expr.contains("} // builtins.mapAttrs (name: cfg:"));
-        assert!(expr.contains(") (flake.nixosConfigurations or {})"));
-        assert_eq!(
-            expr.matches("flakeOutputSnapshot").count(),
-            1,
-            "only the independent carrier may emit flake output metadata"
-        );
-        assert!(expr.contains("carrierModuleSnapshot"));
-        assert!(expr.contains("_module.check = false"));
-        assert!(expr.contains("carrierConfigurationSources"));
-        assert!(expr.contains("carrierNixpkgsRevisions"));
-        assert!(expr.contains("carrierResolveReference"));
-        assert!(expr.contains("builtins.genericClosure"));
-        assert!(expr.contains("item.key != nodeId"));
-        assert!(
-            !expr.contains("name == builtins.head"),
-            "flake metadata must not depend on the first configuration"
-        );
-    }
-
-    #[test]
-    fn lock_descendant_closure_terminates_on_cycles_when_nix_is_available() {
-        if std::env::var_os("NIX_BUILD_TOP").is_some() {
-            return;
-        }
-        let expression = r#"
-          let
-            children = { a = [ "b" ]; b = [ "a" "c" ]; c = []; };
-            descendants = nodeId: builtins.map (item: item.key)
-              (builtins.filter (item: item.key != nodeId) (builtins.genericClosure {
-                startSet = [ { key = nodeId; } ];
-                operator = item: map (child: { key = child; }) children.${item.key};
-              }));
-          in descendants "a"
-        "#;
-        let output = match std::process::Command::new("nix-instantiate")
-            .args(["--eval", "--strict", "--json", "--expr", expression])
-            .output()
-        {
-            Ok(output) => output,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
-            Err(error) => panic!("failed to run nix-instantiate: {error}"),
-        };
-        assert!(
-            output.status.success(),
-            "cycle-safe closure evaluation failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(&output.stdout)
-                .expect("closure output should be JSON"),
-            serde_json::json!(["b", "c"])
-        );
-    }
-
-    #[test]
-    fn exported_module_binding_rejects_equal_longest_source_roots() {
-        let expression =
-            build_nix_eval_expression("path:/tmp/fixture", &PoliciesByConfiguration::new());
-        assert!(expression.contains(
-            "sourceInput = if builtins.length sourceInputs == 1 then builtins.head sourceInputs else null"
-        ));
-        assert!(expression.contains(
-            "builtins.stringLength carrierInputOrigins.${inputName}.path == longestRootLength"
-        ));
     }
 
     #[test]
@@ -4284,277 +3837,6 @@ in {{ {fields} }}"#
             output.status.success(),
             "generated Nix expression did not parse: {}",
             String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    #[test]
-    fn independent_carrier_survives_a_flake_without_nixpkgs_lib() {
-        // A Nix build sandbox cannot recursively access the daemon. `nix
-        // develop` also sets NIX_BUILD_TOP, so IN_NIX_SHELL distinguishes the
-        // developer regression environment where this must execute for real.
-        if std::env::var_os("NIX_BUILD_TOP").is_some() && std::env::var_os("IN_NIX_SHELL").is_none()
-        {
-            return;
-        }
-        if std::process::Command::new("nix")
-            .arg("--version")
-            .output()
-            .is_err()
-        {
-            return;
-        }
-        let directory = std::env::temp_dir().join(format!(
-            "crystal-forge-carrier-no-lib-{}",
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir(&directory).expect("temporary flake directory should be created");
-        std::fs::create_dir(directory.join("raw"))
-            .expect("temporary input directory should be created");
-        std::fs::create_dir(directory.join("nested"))
-            .expect("temporary nested input directory should be created");
-        std::fs::create_dir(directory.join("sibling"))
-            .expect("temporary sibling input directory should be created");
-        std::fs::create_dir(directory.join("leaf"))
-            .expect("temporary leaf input directory should be created");
-        std::fs::write(
-            directory.join("leaf/flake.nix"),
-            r#"{ outputs = { self }: { marker = "leaf-input"; }; }"#,
-        )
-        .expect("temporary leaf input flake should be written");
-        std::fs::write(
-            directory.join("nested/flake.nix"),
-            r#"{
-  inputs.leaf.url = "path:../leaf";
-  outputs = { self, leaf }: { marker = "nested-input"; };
-}"#,
-        )
-        .expect("temporary nested input flake should be written");
-        std::fs::write(
-            directory.join("sibling/flake.nix"),
-            r#"{
-  inputs.leaf.url = "path:../leaf";
-  outputs = { self, leaf }: { marker = "sibling-input"; };
-}"#,
-        )
-        .expect("temporary sibling input flake should be written");
-        std::fs::write(
-            directory.join("raw/flake.nix"),
-            r#"{
-  inputs.nested.url = "path:../nested";
-  inputs.sibling.url = "path:../sibling";
-  inputs.sibling.inputs.leaf.follows = "nested/leaf";
-  outputs = { self, nested, sibling }: {
-    marker = "raw-input";
-    nixosModules.fromInput = { ... }: { options = {}; };
-  };
-}"#,
-        )
-        .expect("temporary input flake should be written");
-        std::fs::write(
-            directory.join("flake.nix"),
-            r#"{
-  inputs.raw.url = "path:./raw";
-  outputs = { self, raw }: {
-    nixosModules = raw.nixosModules;
-  };
-}"#,
-        )
-        .expect("temporary flake should be written");
-        let lock = std::process::Command::new("nix")
-            .args([
-                "--extra-experimental-features",
-                "nix-command flakes",
-                "flake",
-                "lock",
-            ])
-            .current_dir(&directory)
-            .output()
-            .expect("nix flake lock should start");
-        assert!(
-            lock.status.success(),
-            "temporary flake lock failed: {}",
-            String::from_utf8_lossy(&lock.stderr)
-        );
-        let expression = build_nix_eval_expression(
-            &format!("path:{}", directory.display()),
-            &PoliciesByConfiguration::new(),
-        );
-        let selector = format!("({expression}).__crystalForgeFlakeOutput.meta.flakeOutputSnapshot");
-        let output = std::process::Command::new("nix")
-            .args([
-                "--extra-experimental-features",
-                "nix-command flakes",
-                "eval",
-                "--impure",
-                "--json",
-                "--expr",
-                &selector,
-            ])
-            .output()
-            .expect("nix eval should start");
-        let _ = std::fs::remove_dir_all(&directory);
-        assert!(
-            output.status.success(),
-            "configuration-independent carrier failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let payload: serde_json::Value =
-            serde_json::from_slice(&output.stdout).expect("carrier output should be JSON");
-        assert_eq!(payload["declared_systems"], serde_json::json!([]));
-        let modules = payload["exported_modules"]
-            .as_array()
-            .expect("exported modules should be an array");
-        let from_input = modules
-            .iter()
-            .find(|module| module["name"] == "fromInput")
-            .expect("input module should be extracted");
-        // unsafeGetAttrPos reports only the root flake's export binding. This
-        // does not claim that the module value or option declarations originate
-        // in self, and the API must not present the field as value navigation.
-        assert_eq!(from_input["source_input"], "self");
-        assert_eq!(from_input["source_revision"], serde_json::Value::Null);
-        assert_eq!(from_input["source_path"], "raw/flake.nix");
-        assert_eq!(payload["resolved_input_count"], 4);
-        let raw = payload["inputs"]
-            .as_array()
-            .and_then(|inputs| {
-                inputs.iter().find(|input| {
-                    input["names"]
-                        .as_array()
-                        .is_some_and(|names| names.iter().any(|name| name == "raw"))
-                })
-            })
-            .expect("direct raw input should be present");
-        assert_eq!(raw["direct_descendant_count"], 2);
-        assert_eq!(
-            raw["transitive_descendant_count"], 3,
-            "the leaf shared by both branches must be counted once"
-        );
-        assert_eq!(payload["module_evaluation"]["available"], false);
-        assert!(
-            payload["module_evaluation"]["error"].as_str().is_some_and(
-                |error| error.contains("no configuration or input provides nixpkgs lib")
-            )
-        );
-    }
-
-    #[test]
-    fn exported_module_declarations_ignore_unmatched_nixos_definitions() {
-        if std::env::var_os("NIX_BUILD_TOP").is_some() {
-            return;
-        }
-        if std::process::Command::new("nix")
-            .arg("--version")
-            .output()
-            .is_err()
-        {
-            return;
-        }
-        let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .ancestors()
-            .nth(4)
-            .expect("cf-server must remain under the repository packages directory");
-        let archive = std::process::Command::new("nix")
-            .args([
-                "--extra-experimental-features",
-                "nix-command flakes",
-                "flake",
-                "archive",
-                "--json",
-                "--no-write-lock-file",
-            ])
-            .arg(repository)
-            .output()
-            .expect("repository flake archive should start");
-        assert!(
-            archive.status.success(),
-            "repository flake archive failed: {}",
-            String::from_utf8_lossy(&archive.stderr)
-        );
-        let archive: serde_json::Value =
-            serde_json::from_slice(&archive.stdout).expect("flake archive output should be JSON");
-        let nixpkgs_path = archive["inputs"]["nixpkgs"]["path"]
-            .as_str()
-            .expect("repository archive should contain the locked nixpkgs path");
-        let directory = std::env::temp_dir().join(format!(
-            "crystal-forge-exported-module-check-{}",
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir(&directory).expect("temporary flake directory should be created");
-        std::fs::write(
-            directory.join("flake.nix"),
-            format!(
-                r#"{{
-  inputs.nixpkgs.url = "path:{nixpkgs_path}";
-  outputs = {{ self, nixpkgs }}: {{
-    nixosModules.demo = {{ lib, ... }}: {{
-      options.crystalForgeFixture.message = lib.mkOption {{
-        type = lib.types.str;
-        default = "declared";
-      }};
-      config.services.unmatchedForDeclarationExtraction.enable = true;
-    }};
-  }};
-}}"#
-            ),
-        )
-        .expect("temporary flake should be written");
-        let lock = std::process::Command::new("nix")
-            .args([
-                "--extra-experimental-features",
-                "nix-command flakes",
-                "flake",
-                "lock",
-            ])
-            .current_dir(&directory)
-            .output()
-            .expect("nix flake lock should start");
-        assert!(
-            lock.status.success(),
-            "temporary flake lock failed: {}",
-            String::from_utf8_lossy(&lock.stderr)
-        );
-        let expression = build_nix_eval_expression(
-            &format!("path:{}", directory.display()),
-            &PoliciesByConfiguration::new(),
-        );
-        let selector = format!("({expression}).__crystalForgeFlakeOutput.meta.flakeOutputSnapshot");
-        let output = std::process::Command::new("nix")
-            .args([
-                "--extra-experimental-features",
-                "nix-command flakes",
-                "eval",
-                "--impure",
-                "--json",
-                "--expr",
-                &selector,
-            ])
-            .output()
-            .expect("nix eval should start");
-        let _ = std::fs::remove_dir_all(&directory);
-        assert!(
-            output.status.success(),
-            "exported module extraction failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let payload: serde_json::Value =
-            serde_json::from_slice(&output.stdout).expect("carrier output should be JSON");
-        let module = &payload["exported_modules"][0];
-        assert_eq!(module["name"], "demo");
-        assert_eq!(module["error"], serde_json::Value::Null);
-        assert_eq!(module["declaration_count"], 1);
-        assert_eq!(
-            module["declarations"][0]["path"],
-            "crystalForgeFixture.message"
-        );
-        assert!(
-            module["declarations"]
-                .as_array()
-                .expect("module declarations should be an array")
-                .iter()
-                .all(|declaration| declaration["path"]
-                    != "services.unmatchedForDeclarationExtraction.enable"),
-            "unmatched config definitions must not become declarations"
         );
     }
 

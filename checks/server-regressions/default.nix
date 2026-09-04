@@ -545,6 +545,9 @@ SQL
     cargo test --offline --package cf-server --lib \
       snapshot_capture_failure_persists_unavailable_with_durable_diagnostic \
       -- --ignored --test-threads=1
+    cargo test --offline --package cf-server --lib \
+      finalization_replaces_missing_snapshot_artifacts_with_unavailable_lifecycle \
+      -- --ignored --test-threads=1
 
     echo "=== Immutable evaluation artifact and exact-page contracts ==="
     cargo test --offline --package cf-server --lib \
