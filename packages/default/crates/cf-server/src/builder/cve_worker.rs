@@ -879,6 +879,27 @@ async fn execute_scan_inner<R: CveScanRunner + Sync>(
     scan_id: uuid::Uuid,
     execution_id: uuid::Uuid,
 ) -> Result<()> {
+    execute_scan_inner_with_nix_program(
+        pool,
+        vulnix_runner,
+        vulnix_version,
+        derivation,
+        scan_id,
+        execution_id,
+        std::ffi::OsStr::new("nix"),
+    )
+    .await
+}
+
+async fn execute_scan_inner_with_nix_program<R: CveScanRunner + Sync>(
+    pool: &PgPool,
+    vulnix_runner: &R,
+    vulnix_version: Option<String>,
+    derivation: &crate::derivations::Derivation,
+    scan_id: uuid::Uuid,
+    execution_id: uuid::Uuid,
+    nix_program: &std::ffi::OsStr,
+) -> Result<()> {
     let Some(ref path) = derivation.store_path else {
         warn!(
             "❌ No store_path set for derivation {}",
@@ -895,88 +916,71 @@ async fn execute_scan_inner<R: CveScanRunner + Sync>(
         return Ok(());
     };
 
-    // Ensure the paths vulnix needs are available before invoking it.
-    //
-    // Gating this on output presence alone is not sufficient: vulnix resolves
-    // an output's derivation when it scans that output, so an output that
-    // survived garbage collection while its `.drv` did not would reach vulnix
-    // and fail with a deriver lookup error even though an eligible cache still
-    // holds the `.drv`. Output and derivation availability are therefore
-    // established independently and only the missing path is restored, so a
-    // locally complete pair costs no cache traffic.
-    //
-    // A missing output is fatal: there is nothing to scan. A missing or
-    // unnameable derivation is not treated as fatal here, because vulnix is the
-    // authoritative judge of what it can resolve. Failing the scan locally in
-    // that case would newly fail scans that previously ran.
-    let action = match observe_scan_inputs(path).await {
-        Ok((action, _)) => action,
-        Err(e) => {
-            warn!("Could not inspect scan inputs for {path}: {e:#}");
-            ScanInputAction::DeriverUnresolvable
-        }
+    let Some(derivation_path) = derivation
+        .derivation_path
+        .as_deref()
+        .filter(|derivation_path| !derivation_path.trim().is_empty())
+    else {
+        mark_scan_failed_for_owner(
+            pool,
+            scan_id,
+            derivation,
+            "No derivation_path set for derivation",
+            execution_id,
+        )
+        .await?;
+        return Ok(());
     };
 
-    match action {
-        ScanInputAction::Ready => {}
-        ScanInputAction::DeriverUnresolvable => {
+    // INVARIANT: `Derivation.derivation_path` is the authoritative `.drv`
+    // identity recorded when Crystal Forge evaluated the configuration. A
+    // substituted output can legitimately report `unknown-deriver`, so asking
+    // the local Nix store to reconstruct this relationship rejects valid
+    // deployed outputs. Check and restore the recorded output and derivation
+    // paths independently before preserving the established vulnix invocation
+    // on `store_path`.
+    let inputs = observe_scan_inputs(path, derivation_path).await;
+    if !inputs.ready() {
+        if !inputs.output_present {
+            warn!("Store path {path} not found locally — attempting cache materialization");
+        }
+        if !inputs.derivation_present {
             warn!(
-                "Store path {path} is present but its deriver cannot be named locally; \
-                 running the scan anyway so vulnix reports the authoritative result"
+                "Recorded derivation {derivation_path} is missing — attempting cache materialization"
             );
         }
-        ScanInputAction::RestoreOutput | ScanInputAction::RestoreDeriver => {
-            let output_missing = matches!(action, ScanInputAction::RestoreOutput);
-            if output_missing {
-                warn!("Store path {path} not found locally — attempting cache materialization");
-            } else {
-                warn!(
-                    "Store path {path} is present but its recorded derivation is missing — \
-                     attempting to restore the derivation from cache"
-                );
-            }
 
-            let restored = materialize_store_path_from_cache(pool, derivation, path).await;
-            match restored {
-                Ok(true) => info!("✅ Successfully materialized scan inputs for {path}"),
-                Ok(false) if output_missing => {
-                    warn!(
-                        "❌ Could not materialize {path} from any cache — marking scan as failed"
-                    );
-                    mark_scan_failed_for_owner(
-                        pool,
-                        scan_id,
-                        derivation,
-                        &format!(
-                            "Store path {path} not present locally and no cache could provide it"
-                        ),
-                        execution_id,
-                    )
+        match materialize_store_path_from_cache(
+            pool,
+            derivation,
+            path,
+            derivation_path,
+            nix_program,
+        )
+        .await
+        {
+            Ok(true) => info!("✅ Successfully materialized scan inputs for {path}"),
+            Ok(false) => {
+                let message = format!(
+                    "Scan inputs unavailable: output {path} and recorded derivation \
+                     {derivation_path} must both exist locally"
+                );
+                warn!("❌ {message}");
+                mark_scan_failed_for_owner(pool, scan_id, derivation, &message, execution_id)
                     .await?;
-                    return Ok(());
-                }
-                Err(e) if output_missing => {
-                    error!("❌ Error materializing {path} from cache: {e}");
-                    mark_scan_failed_for_owner(
-                        pool,
-                        scan_id,
-                        derivation,
-                        &format!("Cache materialization error: {e}"),
-                        execution_id,
-                    )
-                    .await?;
-                    return Ok(());
-                }
-                // The output is usable; only the derivation could not be
-                // restored. Let vulnix produce the authoritative error.
-                Ok(false) => warn!(
-                    "Could not restore the missing derivation for {path} from any cache; \
-                     running the scan anyway"
-                ),
-                Err(e) => warn!(
-                    "Error restoring the missing derivation for {path}: {e:#}; \
-                     running the scan anyway"
-                ),
+                return Ok(());
+            }
+            Err(error) => {
+                error!("❌ Error materializing scan inputs for {path}: {error:#}");
+                mark_scan_failed_for_owner(
+                    pool,
+                    scan_id,
+                    derivation,
+                    &format!("Cache materialization error: {error}"),
+                    execution_id,
+                )
+                .await?;
+                return Ok(());
             }
         }
     }
@@ -1038,74 +1042,27 @@ async fn mark_scan_failed_for_owner(
     mark_cve_scan_failed_for_execution(pool, scan_id, derivation, error_message, execution_id).await
 }
 
-/// What a scan still needs locally before vulnix can run.
-///
-/// Vulnix resolves an output path's derivation when it scans that output, so a
-/// scan needs **both** the output store path and the `.drv` the local store
-/// records as its deriver. These two are independently missing: a garbage
-/// collector can reap the `.drv` while keeping a still-referenced output, and a
-/// binary-cache copy imports an output closure without necessarily importing
-/// the derivation.
+/// Reports the independent local availability of a scan output and its
+/// recorded derivation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ScanInputAction {
-    /// Both the output and its recorded derivation are present locally.
-    Ready,
-    /// The output itself is absent. Its deriver is not knowable until the
-    /// output has been restored, so the output must be restored first.
-    RestoreOutput,
-    /// The output is present and its deriver is known, but the `.drv` is
-    /// absent. Only the derivation needs restoring; recopying the output would
-    /// be wasted transfer.
-    RestoreDeriver,
-    /// The output is present but the local store cannot name its deriver, so
-    /// no `.drv` path exists to restore. This happens when a cache omitted
-    /// `Deriver` from its narinfo.
-    DeriverUnresolvable,
-}
-
-/// Decides what a scan still needs, from observed local availability.
-///
-/// Kept pure and separate from the subprocess work so the decision table can be
-/// asserted exhaustively without a Nix store or a cache.
-fn scan_input_action(
+struct ScanInputAvailability {
     output_present: bool,
-    deriver_path: Option<&str>,
-    deriver_present: bool,
-) -> ScanInputAction {
-    if !output_present {
-        return ScanInputAction::RestoreOutput;
-    }
-    match deriver_path {
-        None => ScanInputAction::DeriverUnresolvable,
-        Some(_) if deriver_present => ScanInputAction::Ready,
-        Some(_) => ScanInputAction::RestoreDeriver,
+    derivation_present: bool,
+}
+
+impl ScanInputAvailability {
+    fn ready(self) -> bool {
+        self.output_present && self.derivation_present
     }
 }
 
-/// Reports whether both paths a vulnix scan requires are present locally.
-///
-/// Returns the resolved deriver path alongside the decision so the caller does
-/// not have to query the store twice.
-async fn observe_scan_inputs(store_path: &str) -> Result<(ScanInputAction, Option<String>)> {
-    observe_scan_inputs_with_program(store_path, std::ffi::OsStr::new("nix-store")).await
-}
-
-async fn observe_scan_inputs_with_program(
-    store_path: &str,
-    nix_store_program: &std::ffi::OsStr,
-) -> Result<(ScanInputAction, Option<String>)> {
-    let output_present = fs::try_exists(store_path).await.unwrap_or(false);
-    if !output_present {
-        return Ok((ScanInputAction::RestoreOutput, None));
+async fn observe_scan_inputs(store_path: &str, derivation_path: &str) -> ScanInputAvailability {
+    let (output_present, derivation_present) =
+        tokio::join!(fs::try_exists(store_path), fs::try_exists(derivation_path));
+    ScanInputAvailability {
+        output_present: output_present.unwrap_or(false),
+        derivation_present: derivation_present.unwrap_or(false),
     }
-
-    let deriver_path = deriver_for_store_path_with_program(store_path, nix_store_program).await?;
-    let deriver_present = match deriver_path.as_deref() {
-        Some(path) => fs::try_exists(path).await.unwrap_or(false),
-        None => false,
-    };
-    let action = scan_input_action(output_present, deriver_path.as_deref(), deriver_present);
-    Ok((action, deriver_path))
 }
 
 /// Ensures the output path and its recorded derivation are both available
@@ -1120,23 +1077,26 @@ async fn observe_scan_inputs_with_program(
 /// - A locally complete pair is accepted without contacting any cache, so a
 ///   present output is never recopied.
 /// - A present output whose `.drv` is missing restores only the `.drv`.
-/// - A missing output restores the output first, because its deriver cannot be
-///   named until the output exists locally, then restores the `.drv`.
+/// - Missing output and recorded-derivation paths are restored independently.
 /// - Success is reported only after the required paths are confirmed present,
 ///   not merely because `nix copy` exited zero.
 ///
 /// # Errors
 ///
-/// Returns an error when the cache-destination query fails, a `nix` process
-/// cannot be spawned or awaited, or the deriver query fails.
+/// Returns an error when the cache-destination query fails or a `nix` process
+/// cannot be spawned or awaited.
 async fn materialize_store_path_from_cache(
     pool: &PgPool,
     derivation: &crate::derivations::Derivation,
     store_path: &str,
+    derivation_path: &str,
+    nix_program: &std::ffi::OsStr,
 ) -> Result<bool> {
     // Fast path: nothing is missing, so no cache round trip is needed.
-    let (initial_action, initial_deriver) = observe_scan_inputs(store_path).await?;
-    if initial_action == ScanInputAction::Ready {
+    if observe_scan_inputs(store_path, derivation_path)
+        .await
+        .ready()
+    {
         debug!("Scan inputs for {store_path} are already present locally");
         return Ok(true);
     }
@@ -1244,23 +1204,14 @@ async fn materialize_store_path_from_cache(
         if restore_scan_inputs_from_source(
             source,
             store_path,
+            derivation_path,
             NIX_COPY_TIMEOUT,
-            std::ffi::OsStr::new("nix"),
-            std::ffi::OsStr::new("nix-store"),
+            nix_program,
         )
         .await?
         {
             return Ok(true);
         }
-    }
-
-    // Report the terminal reason rather than a bare false so the scan failure
-    // message distinguishes "no cache had it" from "cache never recorded it".
-    if matches!(initial_action, ScanInputAction::DeriverUnresolvable) {
-        warn!(
-            "Output {store_path} is present locally but its deriver is unknown \
-             (initial deriver probe: {initial_deriver:?})"
-        );
     }
 
     Ok(false)
@@ -1269,61 +1220,35 @@ async fn materialize_store_path_from_cache(
 /// Restores one scan input pair from one cache source.
 ///
 /// The executable parameters form a narrow process seam for regression tests.
-/// Production passes `nix` and `nix-store`. The function observes the output
-/// first and invokes `nix copy` only for a missing path. It completes all copy
-/// work before returning, so callers cannot start vulnix before preparation.
+/// Production passes `nix`. The function observes both paths and invokes
+/// `nix copy` only for each missing path. It attempts both paths even when the
+/// source lacks one of them, because separate eligible caches can collectively
+/// provide the pair. It completes all copy work before returning, so callers
+/// cannot start vulnix before preparation.
 async fn restore_scan_inputs_from_source(
     source: &MaterializationSource,
     store_path: &str,
+    derivation_path: &str,
     copy_timeout: std::time::Duration,
     nix_program: &std::ffi::OsStr,
-    nix_store_program: &std::ffi::OsStr,
 ) -> Result<bool> {
-    // Re-observe per source: an earlier source may have restored the output but
-    // failed on its `.drv`, and the output must not be recopied.
-    let (action, _) = observe_scan_inputs_with_program(store_path, nix_store_program).await?;
-    match action {
-        ScanInputAction::Ready => return Ok(true),
-        ScanInputAction::RestoreOutput => {
-            if !copy_path_from_cache_with_program(source, store_path, copy_timeout, nix_program)
-                .await?
-            {
-                return Ok(false);
-            }
-        }
-        ScanInputAction::RestoreDeriver | ScanInputAction::DeriverUnresolvable => {}
-    }
-
-    // The deriver is only knowable once the output exists locally, so resolve
-    // it again after any output restore.
-    let Some(deriver_path) =
-        deriver_for_store_path_with_program(store_path, nix_store_program).await?
-    else {
-        warn!(
-            "Cache source {} left {} without a resolvable deriver; \
-             the cache likely omitted Deriver metadata",
-            source.from_url, store_path
-        );
-        return Ok(false);
-    };
-
-    if fs::try_exists(&deriver_path).await.unwrap_or(false) {
+    // Re-observe per source: an earlier source can restore only one path, and
+    // an already-present output or derivation must never be recopied.
+    let inputs = observe_scan_inputs(store_path, derivation_path).await;
+    if inputs.ready() {
         return Ok(true);
     }
-
-    // Vulnix resolves the output's derivation when it scans an output path. A
-    // binary-cache copy does not guarantee that the `.drv` itself is present.
-    if copy_path_from_cache_with_program(source, &deriver_path, copy_timeout, nix_program).await?
-        && fs::try_exists(&deriver_path).await.unwrap_or(false)
-    {
-        return Ok(true);
+    if !inputs.output_present {
+        copy_path_from_cache_with_program(source, store_path, copy_timeout, nix_program).await?;
+    }
+    if !inputs.derivation_present {
+        copy_path_from_cache_with_program(source, derivation_path, copy_timeout, nix_program)
+            .await?;
     }
 
-    warn!(
-        "nix copy from {} could not restore deriver {} for {}",
-        source.from_url, deriver_path, store_path
-    );
-    Ok(false)
+    Ok(observe_scan_inputs(store_path, derivation_path)
+        .await
+        .ready())
 }
 
 async fn copy_path_from_cache_with_program(
@@ -1407,30 +1332,6 @@ async fn copy_path_from_cache_with_program(
     }
 }
 
-async fn deriver_for_store_path_with_program(
-    store_path: &str,
-    nix_store_program: &std::ffi::OsStr,
-) -> Result<Option<String>> {
-    let output = TokioCommand::new(nix_store_program)
-        .args(["--query", "--deriver"])
-        .arg(store_path)
-        .output()
-        .await
-        .context("Failed to query the restored store path's deriver")?;
-
-    if !output.status.success() {
-        return Ok(None);
-    }
-
-    Ok(parse_deriver_path(&output.stdout))
-}
-
-/// Returns a derivation path only when Nix reported a concrete `.drv` path.
-fn parse_deriver_path(output: &[u8]) -> Option<String> {
-    let deriver_path = String::from_utf8_lossy(output).trim().to_string();
-    deriver_path.ends_with(".drv").then_some(deriver_path)
-}
-
 async fn set_cve_status_working(task: &str) {
     let mut status = get_cve_status().write().await;
     *status = Some(WorkerStatus {
@@ -1467,158 +1368,29 @@ mod tests {
     use tokio::sync::Semaphore;
     use uuid::Uuid;
 
-    /// A vulnix scan needs the output path *and* its recorded `.drv`. Gating
-    /// preparation on output presence alone let an output that outlived its
-    /// derivation reach vulnix and fail with a deriver lookup error, so the
-    /// output-present / `.drv`-missing case must ask for a derivation restore
-    /// rather than reporting the inputs ready.
-    #[test]
-    fn scan_input_action_covers_independent_output_and_deriver_availability() {
-        const DRV: &str = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-example.drv";
-
-        // The regression: output survived, derivation did not.
-        assert_eq!(
-            scan_input_action(true, Some(DRV), false),
-            ScanInputAction::RestoreDeriver,
-            "a present output with a missing .drv must restore only the .drv"
-        );
-
-        assert_eq!(
-            scan_input_action(true, Some(DRV), true),
-            ScanInputAction::Ready,
-            "a complete local pair must not trigger any cache traffic"
-        );
-        assert_eq!(
-            scan_input_action(true, None, false),
-            ScanInputAction::DeriverUnresolvable,
-            "a present output whose deriver the store cannot name is not scannable"
-        );
-
-        // A missing output is restored first because its deriver is not
-        // knowable until the output exists locally.
-        assert_eq!(
-            scan_input_action(false, None, false),
-            ScanInputAction::RestoreOutput
-        );
-        assert_eq!(
-            scan_input_action(false, Some(DRV), false),
-            ScanInputAction::RestoreOutput
-        );
-        assert_eq!(
-            scan_input_action(false, Some(DRV), true),
-            ScanInputAction::RestoreOutput,
-            "a locally present .drv cannot substitute for a missing output"
-        );
-    }
-
-    /// Proves the process boundary used by production copies only the known
-    /// missing `.drv` when the output exists, and completes that copy before
-    /// control can advance to vulnix.
+    /// Proves output and recorded-derivation availability are independent.
     #[tokio::test]
-    async fn present_output_missing_deriver_restores_only_deriver_before_vulnix() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let temp = tempdir().expect("temporary process-seam directory");
-        let output_path = temp.path().join("output");
-        let deriver_path = temp.path().join("output.drv");
-        let copy_log = temp.path().join("copy.log");
-        let fake_nix = temp.path().join("nix");
-        let fake_nix_store = temp.path().join("nix-store");
-        std::fs::write(&output_path, "present output").expect("output fixture");
-        std::fs::write(
-            &fake_nix_store,
-            format!("#!/bin/sh\nprintf '%s\\n' '{}'\n", deriver_path.display()),
-        )
-        .expect("fake nix-store");
-        std::fs::write(
-            &fake_nix,
-            format!(
-                "#!/bin/sh\nfor last do :; done\nprintf '%s\\n' \"$last\" >> '{}'\ntouch \"$last\"\n",
-                copy_log.display()
-            ),
-        )
-        .expect("fake nix");
-        for program in [&fake_nix, &fake_nix_store] {
-            let mut permissions = std::fs::metadata(program)
-                .expect("fake program metadata")
-                .permissions();
-            permissions.set_mode(0o700);
-            std::fs::set_permissions(program, permissions).expect("fake program permissions");
-        }
-
-        let source = MaterializationSource {
-            label: "process-seam".to_string(),
-            from_url: "file:///unused-test-cache".to_string(),
-            cache_config: None,
-            trusted_public_key: None,
-            nix_config_lines: Vec::new(),
-        };
-        let restored = restore_scan_inputs_from_source(
-            &source,
-            output_path.to_str().expect("UTF-8 output path"),
-            std::time::Duration::from_secs(5),
-            fake_nix.as_os_str(),
-            fake_nix_store.as_os_str(),
-        )
-        .await
-        .expect("scan preparation should complete");
-        // This marker represents the next statement in `execute_scan_inner`,
-        // where the scanner future is awaited only after preparation returns.
-        std::fs::write(temp.path().join("vulnix-started"), "started").expect("scanner marker");
-
-        assert!(restored);
-        assert!(deriver_path.exists(), "the missing .drv must be restored");
-        let copied = std::fs::read_to_string(copy_log).expect("copy log");
-        assert_eq!(copied.lines().count(), 1, "only one path may be copied");
-        assert_eq!(copied.trim(), deriver_path.to_string_lossy());
-        assert!(
-            output_path.exists(),
-            "the existing output must remain present"
-        );
-        assert!(temp.path().join("vulnix-started").exists());
-    }
-
-    /// Proves the real preparation path treats a present output with a missing
-    /// derivation as work to do rather than as ready, using real filesystem
-    /// paths so the observation logic is exercised end to end.
-    #[tokio::test]
-    async fn observe_scan_inputs_requires_a_restorable_deriver_for_a_present_output() {
+    async fn observe_scan_inputs_requires_both_recorded_paths() {
         let dir = tempdir().expect("temp store dir");
         let output = dir.path().join("output");
+        let derivation = dir.path().join("recorded.drv");
         tokio::fs::write(&output, b"present output")
             .await
             .expect("output fixture should be written");
-        let output_path = output.to_string_lossy().to_string();
+        let inputs =
+            observe_scan_inputs(&output.to_string_lossy(), &derivation.to_string_lossy()).await;
+        assert!(inputs.output_present);
+        assert!(!inputs.derivation_present);
+        assert!(!inputs.ready());
 
-        // A path outside a real Nix store has no recorded deriver, so the
-        // store cannot name a `.drv` for it.
-        let (action, deriver) = observe_scan_inputs(&output_path)
+        tokio::fs::write(&derivation, b"present derivation")
             .await
-            .expect("observation should not fail for a present output");
-        assert_eq!(
-            action,
-            ScanInputAction::DeriverUnresolvable,
-            "a present output with no resolvable deriver must not be reported ready"
+            .expect("derivation fixture should be written");
+        assert!(
+            observe_scan_inputs(&output.to_string_lossy(), &derivation.to_string_lossy())
+                .await
+                .ready()
         );
-        assert!(deriver.is_none());
-
-        // An absent output is always reported as needing the output first.
-        let missing = dir.path().join("absent-output");
-        let (missing_action, missing_deriver) = observe_scan_inputs(&missing.to_string_lossy())
-            .await
-            .expect("observation should not fail for a missing output");
-        assert_eq!(missing_action, ScanInputAction::RestoreOutput);
-        assert!(missing_deriver.is_none());
-    }
-
-    #[test]
-    fn parse_deriver_path_accepts_only_derivation_paths() {
-        assert_eq!(
-            parse_deriver_path(b"/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-example.drv\n"),
-            Some("/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-example.drv".to_string())
-        );
-        assert_eq!(parse_deriver_path(b"unknown\n"), None);
-        assert_eq!(parse_deriver_path(b""), None);
     }
 
     #[derive(Clone)]
@@ -1637,6 +1409,242 @@ mod tests {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(vec![])
         }
+    }
+
+    /// Proves a deployed output that reports `unknown-deriver` still uses the
+    /// `.drv` recorded by Crystal Forge, restores only that missing path, and
+    /// reaches the unchanged scan runner successfully.
+    #[tokio::test]
+    async fn recorded_derivation_path_restores_when_output_deriver_is_unknown() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let Some(pool) = db_test_pool().await else {
+            return;
+        };
+        let temp = tempdir().expect("temporary process-seam directory");
+        let output_path = temp.path().join("output");
+        let derivation_path = temp.path().join("recorded.drv");
+        let copy_log = temp.path().join("copy.log");
+        let fake_nix = temp.path().join("nix");
+        let fake_nix_store = temp.path().join("nix-store");
+        std::fs::write(&output_path, "present output").expect("output fixture");
+        std::fs::write(&fake_nix_store, "#!/bin/sh\nprintf 'unknown-deriver\\n'\n")
+            .expect("fake nix-store");
+        std::fs::write(
+            &fake_nix,
+            format!(
+                "#!/bin/sh\nfor last do :; done\nprintf '%s\\n' \"$last\" >> '{}'\ntouch \"$last\"\n",
+                copy_log.display()
+            ),
+        )
+        .expect("fake nix");
+        for program in [&fake_nix, &fake_nix_store] {
+            let mut permissions = std::fs::metadata(program)
+                .expect("fake program metadata")
+                .permissions();
+            permissions.set_mode(0o700);
+            std::fs::set_permissions(program, permissions).expect("fake program permissions");
+        }
+
+        let deriver_query = TokioCommand::new(&fake_nix_store)
+            .args(["--query", "--deriver"])
+            .arg(&output_path)
+            .output()
+            .await
+            .expect("fake deriver query");
+        assert_eq!(
+            String::from_utf8_lossy(&deriver_query.stdout).trim(),
+            "unknown-deriver",
+            "the fixture must reproduce the deployed Nix response"
+        );
+
+        let mut derivation = insert_derivation(
+            &pool,
+            None,
+            &format!("task-325-recorded-path-{}", Uuid::new_v4()),
+            "nixos",
+        )
+        .await
+        .expect("recorded-path derivation should be inserted");
+        derivation.store_path = Some(output_path.to_string_lossy().into_owned());
+        derivation.derivation_path = Some(derivation_path.to_string_lossy().into_owned());
+        sqlx::query(
+            r#"
+            UPDATE derivations
+            SET status_id = $2, completed_at = NOW(), store_path = $3,
+                derivation_path = $4
+            WHERE id = $1
+            "#,
+        )
+        .bind(derivation.id)
+        .bind(EvaluationStatus::BuildComplete.as_id())
+        .bind(derivation.store_path.as_deref())
+        .bind(derivation.derivation_path.as_deref())
+        .execute(&pool)
+        .await
+        .expect("recorded-path derivation should be build-complete");
+        sqlx::query(
+            r#"
+            INSERT INTO cache_push_jobs (
+                derivation_id, store_path, cache_destination, status,
+                completed_at
+            )
+            VALUES ($1, $2, 'file:///unused-test-cache', 'completed', NOW())
+            "#,
+        )
+        .bind(derivation.id)
+        .bind(derivation.store_path.as_deref())
+        .execute(&pool)
+        .await
+        .expect("completed cache push should be inserted");
+        let claim = match create_cve_scan(&pool, derivation.id, "vulnix", None)
+            .await
+            .expect("recorded-path scan should be created")
+        {
+            CreateCveScanOutcome::Created(claim) => claim,
+            CreateCveScanOutcome::Existing(_) => panic!("recorded-path scan must be new"),
+        };
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let runner = FakeRunner {
+            calls: calls.clone(),
+        };
+        execute_scan_inner_with_nix_program(
+            &pool,
+            &runner,
+            None,
+            &derivation,
+            claim.scan_id,
+            claim.execution_id,
+            fake_nix.as_os_str(),
+        )
+        .await
+        .expect("the prepared scan should succeed");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(
+            derivation_path.exists(),
+            "the recorded .drv must be restored"
+        );
+        let copied = std::fs::read_to_string(copy_log).expect("copy log");
+        assert_eq!(copied.lines().count(), 1, "only one path may be copied");
+        assert_eq!(copied.trim(), derivation_path.to_string_lossy());
+        assert!(
+            output_path.exists(),
+            "the existing output must not be recopied"
+        );
+        let status: String = sqlx::query_scalar("SELECT status FROM cve_scans WHERE id = $1")
+            .bind(claim.scan_id)
+            .fetch_one(&pool)
+            .await
+            .expect("recorded-path scan status should resolve");
+        assert_eq!(status, "completed");
+
+        sqlx::query("DELETE FROM cve_scans WHERE derivation_id = $1")
+            .bind(derivation.id)
+            .execute(&pool)
+            .await
+            .expect("recorded-path scans should be deleted");
+        sqlx::query("DELETE FROM cache_push_jobs WHERE derivation_id = $1")
+            .bind(derivation.id)
+            .execute(&pool)
+            .await
+            .expect("recorded-path cache pushes should be deleted");
+        sqlx::query("DELETE FROM derivations WHERE id = $1")
+            .bind(derivation.id)
+            .execute(&pool)
+            .await
+            .expect("recorded-path derivation should be deleted");
+    }
+
+    /// Proves separate eligible caches can collectively restore the output and
+    /// recorded derivation without recopying the path restored first.
+    #[tokio::test]
+    async fn scan_inputs_restore_independently_across_cache_sources() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempdir().expect("temporary split-cache directory");
+        let output_path = temp.path().join("output");
+        let derivation_path = temp.path().join("recorded.drv");
+        let copy_log = temp.path().join("copy.log");
+        let derivation_cache_nix = temp.path().join("derivation-cache-nix");
+        let output_cache_nix = temp.path().join("output-cache-nix");
+        std::fs::write(
+            &derivation_cache_nix,
+            format!(
+                "#!/bin/sh\nfor last do :; done\nprintf 'derivation %s\\n' \"$last\" >> '{}'\nif [ \"$last\" = '{}' ]; then touch \"$last\"; exit 0; fi\nexit 1\n",
+                copy_log.display(),
+                derivation_path.display()
+            ),
+        )
+        .expect("derivation-cache fake nix");
+        std::fs::write(
+            &output_cache_nix,
+            format!(
+                "#!/bin/sh\nfor last do :; done\nprintf 'output %s\\n' \"$last\" >> '{}'\nif [ \"$last\" = '{}' ]; then touch \"$last\"; exit 0; fi\nexit 1\n",
+                copy_log.display(),
+                output_path.display()
+            ),
+        )
+        .expect("output-cache fake nix");
+        for program in [&derivation_cache_nix, &output_cache_nix] {
+            let mut permissions = std::fs::metadata(program)
+                .expect("fake program metadata")
+                .permissions();
+            permissions.set_mode(0o700);
+            std::fs::set_permissions(program, permissions).expect("fake program permissions");
+        }
+
+        let derivation_source = MaterializationSource {
+            label: "derivation-cache".to_string(),
+            from_url: "file:///derivation-cache".to_string(),
+            cache_config: None,
+            trusted_public_key: None,
+            nix_config_lines: Vec::new(),
+        };
+        assert!(
+            !restore_scan_inputs_from_source(
+                &derivation_source,
+                &output_path.to_string_lossy(),
+                &derivation_path.to_string_lossy(),
+                std::time::Duration::from_secs(5),
+                derivation_cache_nix.as_os_str(),
+            )
+            .await
+            .expect("first cache attempt should complete")
+        );
+        assert!(!output_path.exists());
+        assert!(derivation_path.exists());
+
+        let output_source = MaterializationSource {
+            label: "output-cache".to_string(),
+            from_url: "file:///output-cache".to_string(),
+            cache_config: None,
+            trusted_public_key: None,
+            nix_config_lines: Vec::new(),
+        };
+        assert!(
+            restore_scan_inputs_from_source(
+                &output_source,
+                &output_path.to_string_lossy(),
+                &derivation_path.to_string_lossy(),
+                std::time::Duration::from_secs(5),
+                output_cache_nix.as_os_str(),
+            )
+            .await
+            .expect("second cache attempt should complete")
+        );
+
+        let copied = std::fs::read_to_string(copy_log).expect("copy log");
+        assert_eq!(
+            copied.lines().collect::<Vec<_>>(),
+            vec![
+                format!("derivation {}", output_path.display()),
+                format!("derivation {}", derivation_path.display()),
+                format!("output {}", output_path.display()),
+            ],
+            "the second source must not recopy the restored derivation"
+        );
     }
 
     #[derive(Clone)]
@@ -1830,7 +1838,7 @@ mod tests {
             commit_id: None,
             derivation_type: crate::derivations::DerivationType::NixOS,
             derivation_name: "test-nonexistent".into(),
-            derivation_path: None,
+            derivation_path: Some("/nix/store/00000000000000000000000000000000-test.drv".into()),
             derivation_target: None,
             scheduled_at: None,
             completed_at: None,
@@ -1855,6 +1863,8 @@ mod tests {
             &pool,
             &derivation,
             derivation.store_path.as_ref().unwrap(),
+            derivation.derivation_path.as_ref().unwrap(),
+            std::ffi::OsStr::new("nix"),
         )
         .await;
 
@@ -1921,7 +1931,10 @@ mod tests {
             .expect("original scan schedule policy should resolve");
         let tempdir = tempdir().expect("tempdir should be created");
         let store_path = tempdir.path().join("task-396-scan-cycle-store-path");
+        let derivation_path = tempdir.path().join("task-396-scan-cycle.drv");
         std::fs::create_dir_all(&store_path).expect("store path dir should be created");
+        std::fs::write(&derivation_path, "test derivation")
+            .expect("derivation path should be created");
 
         // This test uses the dedicated shared test database rather than a
         // per-test database. Retire leftovers from interrupted prior runs so
@@ -1951,11 +1964,14 @@ mod tests {
         .await
         .expect("scan schedule policy should be inserted");
 
-        let assertions = std::panic::AssertUnwindSafe(
-            scan_cycle_processes_target_with_fake_runner_assertions(&pool, &store_path),
-        )
-        .catch_unwind()
-        .await;
+        let assertions =
+            std::panic::AssertUnwindSafe(scan_cycle_processes_target_with_fake_runner_assertions(
+                &pool,
+                &store_path,
+                &derivation_path,
+            ))
+            .catch_unwind()
+            .await;
 
         restore_scan_schedule_policy(&pool, &original_policy).await;
         if let Err(panic) = assertions {
@@ -1966,6 +1982,7 @@ mod tests {
     async fn scan_cycle_processes_target_with_fake_runner_assertions(
         pool: &PgPool,
         store_path: &std::path::Path,
+        derivation_path: &std::path::Path,
     ) {
         let derivation_name = format!("task-396-cycle-{}", Uuid::new_v4());
         let derivation = insert_derivation(pool, None, &derivation_name, "nixos")
@@ -1977,13 +1994,15 @@ mod tests {
             UPDATE derivations
             SET status_id = $2,
                 completed_at = '1900-01-01 00:00:00+00'::timestamptz,
-                store_path = $3
+                store_path = $3,
+                derivation_path = $4
             WHERE id = $1
             "#,
         )
         .bind(derivation.id)
         .bind(EvaluationStatus::BuildComplete.as_id())
         .bind(store_path.to_string_lossy().to_string())
+        .bind(derivation_path.to_string_lossy().to_string())
         .execute(pool)
         .await
         .expect("derivation should be marked build-complete");
@@ -2102,6 +2121,9 @@ mod tests {
             return;
         };
         let temp = tempdir().expect("handoff store path");
+        let derivation_path = temp.path().join("task-325-handoff.drv");
+        std::fs::write(&derivation_path, "test derivation")
+            .expect("handoff derivation path should be created");
         let derivation = insert_derivation(
             &pool,
             None,
@@ -2111,11 +2133,12 @@ mod tests {
         .await
         .expect("handoff derivation should be inserted");
         sqlx::query(
-            "UPDATE derivations SET status_id = $2, completed_at = NOW(), store_path = $3 WHERE id = $1",
+            "UPDATE derivations SET status_id = $2, completed_at = NOW(), store_path = $3, derivation_path = $4 WHERE id = $1",
         )
         .bind(derivation.id)
         .bind(EvaluationStatus::BuildComplete.as_id())
         .bind(temp.path().to_string_lossy().to_string())
+        .bind(derivation_path.to_string_lossy().to_string())
         .execute(&pool)
         .await
         .expect("handoff derivation should be build-complete");
@@ -2228,7 +2251,10 @@ mod tests {
         .expect("independent stale-recovery pool should connect");
         let tempdir = tempdir().expect("tempdir should be created");
         let store_path = tempdir.path().join("task-325-policy-lease-store-path");
+        let derivation_path = tempdir.path().join("task-325-policy-lease.drv");
         std::fs::create_dir_all(&store_path).expect("store path dir should be created");
+        std::fs::write(&derivation_path, "test derivation")
+            .expect("derivation path should be created");
 
         let mut derivation = insert_derivation(
             &pool,
@@ -2239,6 +2265,7 @@ mod tests {
         .await
         .expect("policy lease derivation should be inserted");
         derivation.store_path = Some(store_path.to_string_lossy().to_string());
+        derivation.derivation_path = Some(derivation_path.to_string_lossy().to_string());
         let derivation = Arc::new(derivation);
 
         let runner = BlockingRunner {
@@ -2437,7 +2464,10 @@ mod tests {
             .expect("original scan schedule policy should resolve");
         let tempdir = tempdir().expect("tempdir should be created");
         let store_path = tempdir.path().join("task-325-requeued-scan-store-path");
+        let derivation_path = tempdir.path().join("task-325-requeued-scan.drv");
         std::fs::create_dir_all(&store_path).expect("store path dir should be created");
+        std::fs::write(&derivation_path, "test derivation")
+            .expect("derivation path should be created");
 
         sqlx::query(
             r#"
@@ -2460,7 +2490,11 @@ mod tests {
         .expect("scan policy should suppress non-queued phases");
 
         let assertions = std::panic::AssertUnwindSafe(
-            disabled_queued_claim_is_requeued_then_executed_once_assertions(&pool, &store_path),
+            disabled_queued_claim_is_requeued_then_executed_once_assertions(
+                &pool,
+                &store_path,
+                &derivation_path,
+            ),
         )
         .catch_unwind()
         .await;
@@ -2474,6 +2508,7 @@ mod tests {
     async fn disabled_queued_claim_is_requeued_then_executed_once_assertions(
         pool: &PgPool,
         store_path: &std::path::Path,
+        derivation_path: &std::path::Path,
     ) {
         let derivation = insert_derivation(
             pool,
@@ -2486,13 +2521,15 @@ mod tests {
         sqlx::query(
             r#"
             UPDATE derivations
-            SET status_id = $2, completed_at = NOW(), store_path = $3
+            SET status_id = $2, completed_at = NOW(), store_path = $3,
+                derivation_path = $4
             WHERE id = $1
             "#,
         )
         .bind(derivation.id)
         .bind(EvaluationStatus::BuildComplete.as_id())
         .bind(store_path.to_string_lossy().to_string())
+        .bind(derivation_path.to_string_lossy().to_string())
         .execute(pool)
         .await
         .expect("requeue-cycle derivation should be build-complete");

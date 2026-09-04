@@ -747,6 +747,12 @@ let
           --lib builder::cve_worker::tests::scan_cycle_processes_target_with_fake_runner
         CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
           cargo test --manifest-path Cargo.toml \
+          --lib builder::cve_worker::tests::recorded_derivation_path_restores_when_output_deriver_is_unknown
+        CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
+          cargo test --manifest-path Cargo.toml \
+          --lib builder::cve_worker::tests::scan_inputs_restore_independently_across_cache_sources
+        CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
+          cargo test --manifest-path Cargo.toml \
           --lib builder::cve_worker::tests::recovered_claim_cannot_start_scanner_during_execution_handoff
         CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
           cargo test --manifest-path Cargo.toml \
