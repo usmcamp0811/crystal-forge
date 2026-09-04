@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-04 17:48'
+updated_date: '2026-09-04 17:55'
 labels:
   - design-parity
   - web-ui
@@ -443,6 +443,8 @@ Final TASK-440 visual evidence passed after harness remediation: the complete TA
 A final `nix flake check --keep-going -L` attempt did not pass. TASK-440 semantic coverage initially exposed missing Inputs contracts; the fixture was corrected and the complete TASK-440 selection subsequently passed 15/15 workflows and 16/16 comparisons. `web-ui-test-runner` and `web-ui-reconciliation` harness failures were also fixed and passed individually. Remaining full-suite failures `05`, `29k`, and `30d` reproduce on clean `origin/dev`; `30d` is tracked by TASK-431 and `05`/`29k` are tracked by TASK-454. TASK-440-attributable Compliance and derivation-persistence regressions were fixed; focused Compliance/TASK-433/TASK-440 workflows and server regressions passed. AC #27 was unchecked because the broader flake check remains red on these unrelated pre-existing workflows.
 
 Final remediation was committed as `046f46f14797aef5741fe7b27843db64a6133f76` and pushed to MR !323 with `git push --force-with-lease origin HEAD:TASK-440-system-config-flake-parity`. The exact final commit passed the complete TASK-440 browser selection: 15/15 workflows, 16/16 semantic/design comparisons, and the authoritative Web UI VM check. Final backend audit reported no P0/P1/P2 findings after immutable integrity, lock-order, rollback-lineage, delayed-ingestion, source-reset/history-rewrite, cleanup, and derivation-idempotency remediation. Cargo.lock matches `origin/dev`. MR !323 targets `dev`, has no reported conflicts, remains Draft, and started pipeline 2818836100 for exact SHA `046f46f1`. The task remains In Progress because AC #27 and the full broader gate remain blocked by unrelated clean-dev Web UI failures tracked in TASK-431 and TASK-454.
+
+Resume review of 649e3787 found unresolved lock-order races: worker claim and cancellation finalization can lock evaluation_attempts before commits while retry/finalization locks commits before attempts. The 12l VM fixture also uses an unreachable example.invalid repository although the authoritative VM uses standard evaluation. These are verification-blocking and will be corrected before live workflow execution. The deployed HTTP 500 immediate cause remains confirmed from server logs as evaluation_attempts_one_active_per_commit; full deployed row diagnostics remain unavailable.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
