@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-04 22:41'
+updated_date: '2026-09-04 23:15'
 labels:
   - design-parity
   - web-ui
@@ -500,6 +500,8 @@ Resume review of 649e3787 found unresolved lock-order races: worker claim and ca
 P1 production evidence: deployed `dba646fe` failed previously working campground commit `cb67fcae6e713a21aba85b9a5b8b9efd52f6d93f` across many systems. The stack is `evaluationSnapshot -> snapshotAttempt -> builtins.tryEval`; forcing lazy module definitions reaches `with lib.namespace-change-me` and emits an uncaught missing-attribute error. A direct local check also confirmed `builtins.tryEval ({}.missingAttr)` does not catch this error class. The approved corrective action is to remove all Config/Modules exploration from the primary evaluator before any replacement exploration design.
 
 Continuation audit confirmed that `nix-eval-jobs --meta` supports custom nested derivation metadata. The isolation check is being strengthened to assert `meta.policies` directly from the same JSONL shape consumed by production instead of validating policies in a separate `nix eval` command. Configured remote evaluation emits repeated `/nix/store/.links/... has maximum number of links`; use `--builders ''` for the isolated local Nix check and report the infrastructure condition separately.
+
+2026-09-04 PRIMARY-boundary checkpoint: committed and pushed `c099cd13` (`TASK-440: Restore primary evaluation boundary`) to MR !323. PRIMARY now evaluates only `nixosConfigurations`, `config.system.build.toplevel`, assigned policy expressions, `cfAgentEnabled`, and revision metadata. It does not inspect option trees, module graphs, exported modules, or original derivation metadata. Policy transport uses `nix-eval-jobs --apply 'derivation: derivation.meta.policies'`; Rust normalizes `extraValue` into the existing parser shape. Missing separate configuration and flake-output artifacts advance to `unavailable` without changing successful system/build/deployment outcomes. Verification passed: four focused Rust tests (expression boundary, Nix parse, extraValue normalization, missing-capture classification), migrated PostgreSQL regression `finalization_replaces_missing_snapshot_artifacts_with_unavailable_lifecycle`, `cargo fmt`, and `git diff --check`. A direct real `nix-eval-jobs` fixture passed all jq assertions while lazy duplicate options, a missing namespace module, an aborting module graph, and aborting original derivation metadata remained unforced. The packaged `nix build path:.#checks.x86_64-linux.evaluator-snapshot-isolation --no-link -L --builders ''` did not complete because this host repeatedly reported `/nix/store/.links/... has maximum number of links`; no assertion failure appeared. Do not move to Review until required broader verification and deployed campground acceptance are complete. Next step is deploy checkpoint `c099cd13`, validate campground commit `cb67fcae6e713a21aba85b9a5b8b9efd52f6d93f` (and optionally `111575f79e329bb9ccbf509eac99847ae8523a57`), then stop before implementing the targeted Config Inspector.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
