@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-04 17:55'
+updated_date: '2026-09-04 20:31'
 labels:
   - design-parity
   - web-ui
@@ -445,6 +445,45 @@ A final `nix flake check --keep-going -L` attempt did not pass. TASK-440 semanti
 Final remediation was committed as `046f46f14797aef5741fe7b27843db64a6133f76` and pushed to MR !323 with `git push --force-with-lease origin HEAD:TASK-440-system-config-flake-parity`. The exact final commit passed the complete TASK-440 browser selection: 15/15 workflows, 16/16 semantic/design comparisons, and the authoritative Web UI VM check. Final backend audit reported no P0/P1/P2 findings after immutable integrity, lock-order, rollback-lineage, delayed-ingestion, source-reset/history-rewrite, cleanup, and derivation-idempotency remediation. Cargo.lock matches `origin/dev`. MR !323 targets `dev`, has no reported conflicts, remains Draft, and started pipeline 2818836100 for exact SHA `046f46f1`. The task remains In Progress because AC #27 and the full broader gate remain blocked by unrelated clean-dev Web UI failures tracked in TASK-431 and TASK-454.
 
 Resume review of 649e3787 found unresolved lock-order races: worker claim and cancellation finalization can lock evaluation_attempts before commits while retry/finalization locks commits before attempts. The 12l VM fixture also uses an unreachable example.invalid repository although the authoritative VM uses standard evaluation. These are verification-blocking and will be corrected before live workflow execution. The deployed HTTP 500 immediate cause remains confirmed from server logs as evaluation_attempts_one_active_per_commit; full deployed row diagnostics remain unavailable.
+
+## P1 regression fix: snapshot extraction could fail system evaluation (commit dba646fe)
+
+**Reported symptom.** Flake `campground`, commit `111575f79e329bb9ccbf509eac99847ae8523a57`. Previously evaluable configurations (chesty, butler, blue-ridge, daly, edson, ermy, glenn) failed with `The option 'crystal-forge.stig.active' ... is already declared in ...`, via `evaluationSnapshot` -> `walkOptions` -> `builtins.concatLists`.
+
+**Confirmed root cause.** `walkOptions` forced `builtins.attrNames attrs`, `attrs.${name}`, and `_type` with no `tryEval`. A duplicate option declaration is a lazy module-system throw deferred into the merged `options` node, so `config` and `system.build.toplevel` evaluate successfully while the option metadata is poisoned. Because production runs `nix-eval-jobs --meta`, `meta.evaluationSnapshot` is forced during ordinary system evaluation. `safeOptionSnapshot` could not intercept it: `map` must force the `walkOptions` list spine before any per-item guard runs.
+
+**Evidence (real Nix, against head 36ac6f92).**
+- Forcing only `builtins.length (walkOptions 0 [] options)` with no snapshot function present: exit 1, trace on the verbatim `walkOptions` line. Conclusive.
+- Same shape with a maximally defensive per-item wrapper (`tryEval` + `deepSeq`): exit 1. Per-item guards cannot help.
+- Ordinary `config` evaluation: exit 0.
+- `nix-eval-jobs --meta` on two attributes differing only by snapshot extraction: control returned `drvPath`, snapshot variant returned `"error"`.
+- Rust confirmation: `evaluate_with_policies.rs` sets `has_error = result.error.is_some()` and then skips policy/snapshot parsing, so snapshot failure was routed into confirmed system failures. State C was indistinguishable from state D.
+
+**Fix.**
+1. `walkOptions` guards every forcing point and emits an explicit `unreadable` marker per node.
+2. `optionSnapshot` renders `unreadable` as `declared_type = "unknown"`, `value.kind = "failed"`, `code = "not_evaluated"`; never omitted.
+3. Raw module graph spine guarded; degraded provenance is reported, not fatal.
+4. Outer `tryEval` boundary binds the snapshot once; `evaluationSnapshotCaptured` and `evaluationSnapshotModulesCaptured` added to meta so an empty list is never mistaken for a zero-option configuration.
+5. Traversal extracted to `SNAPSHOT_EXTRACTION_PRELUDE` so production and the regression check evaluate the same text.
+6. Server separates states A/B/C/D. Capture failure and unparsable snapshot metadata no longer abort the commit (the previous `?` on the parse was a second C-to-D route) and never set `has_nix_eval_error`. Missing flag defaults to captured for deployed older evaluators.
+7. Capture failure persists as `lifecycle='unavailable'` with a redacted diagnostic, zero counts, selection advanced, and no deployment or generation bindings.
+8. Migration `0249` widens the `evaluation_snapshots` CHECK so `unavailable` can carry `error`. Constraint resolved through `pg_constraint` rather than a guessed generated name. Lifecycle meanings unchanged.
+
+**Verification run locally.**
+- `nix build .#checks.x86_64-linux.evaluator-snapshot-isolation` exit 0.
+- Negative control: same check with the pre-fix `walkOptions` restored exits 1. The regression test is proven sensitive.
+- `nix-instantiate --parse` on the full generated expression: exit 0.
+- `queries::evaluation_snapshots::tests::snapshot_capture_failure_persists_unavailable_with_durable_diagnostic` against isolated PostgreSQL 17 (unix socket only, no TCP): 1 passed.
+- `models::deployment_policies::`: 58 passed.
+- `nix build .#server` exit 0.
+- `diff` of the old unescaped prelude against the new constant shows only the intended edits, so the extraction was mechanically faithful.
+
+**Repository hygiene.** Commit 36ac6f92 had wrongly tracked three local `nix build` result symlinks. They are now untracked (working-tree links preserved) and `result-*` is ignored.
+
+**Still outstanding.**
+- Campground smoke test not run: the repository URL is not present in this repo and was not guessed.
+- Deployed acceptance test on `111575f7` pending.
+- 12l host workflow, server-regressions, and the authoritative web-ui check deliberately deferred until the deployed reproduction is confirmed.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
