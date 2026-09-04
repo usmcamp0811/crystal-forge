@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-04 20:31'
+updated_date: '2026-09-04 21:05'
 labels:
   - design-parity
   - web-ui
@@ -281,6 +281,16 @@ Immutable-artifact audit correction (2026-09-02): Restrict writes to cf-server, 
 Final three-P1 backend audit remediation (2026-09-03): extend migration 0248 with a fail-closed marker that distinguishes legacy unbound deployments from post-0248 deployment/snapshot finalization races. Generation selection will expose no option, summary, or module data for `lineage_verified = false` rows, while still returning explicit unavailable lifecycle state. Runtime deployment binding and reciprocal generation retention will require the post-0248 marker. Source reset will preserve and archive commits and exact derivations owned by deployment-bound evaluation artifacts as well as generation-retained lineage. Available snapshot finalization alone will bind deployments and retain reciprocal generations; oversized snapshots will remain persisted as unavailable without binding. Expand the populated upgrade rehearsal and the focused migration-backed immutable retention regression, update backend/API documentation, then run exact offline cargo check, rustfmt check, server-regressions, and scoped diff checks. Preserve frontend/checks-web-ui changes and do not stage, commit, or push.
 
 2026-09-04 resume from MR head 649e3787: preserve the existing dedicated worktree and untracked result links; independently review the canonical evaluation queue/finalization changes, legacy-generation provenance behavior, and fixture-backed 12l workflow; start the documented host development stack and stabilize the real browser-to-handler-to-PostgreSQL-to-evaluator snapshot path before running focused backend, frontend, WASM, browser, and applicable Nix verification; record only final-head evidence and keep the task In Progress while required checks remain incomplete.
+
+## P1 primary evaluator rollback (2026-09-04)
+
+Production campground commit `cb67fcae6e713a21aba85b9a5b8b9efd52f6d93f` proved that TASK-440 widened the primary `nix-eval-jobs` failure surface. Missing-attribute failures from lazy unrelated module content escape `builtins.tryEval` and now poison otherwise successful system derivations. The first widening commit was `c011da2b44fe2aaa4b612204ee47b8e587fd2659`; known-good evaluator reference `a602c19a738609c2664f70053c24aa599ca47d51` contains only system derivation and policy metadata evaluation.
+
+1. Surgically restore `build_nix_eval_expression` to the pre-TASK-440 primary contract. Preserve UI, persistence, APIs, migrations, and unrelated TASK-440 work. Remove all option/module/flake-output extraction from this expression; absent snapshots remain unavailable.
+2. Add a source-contract regression that rejects option trees, module graphs, exported-module evaluation, and snapshot metadata in the primary expression.
+3. Replace/adjust the focused real-Nix check so it runs the generated primary expression through `nix-eval-jobs --meta` against lazy missing-namespace and duplicate-option content, and proves drvPath plus policy metadata remain available without forcing unrelated metadata.
+4. Run only focused expression/unit and real-Nix checks, then server-regressions if focused checks pass. Do not run web-ui.
+5. Commit and push the evaluator rollback separately for deployment. Reevaluate campground `cb67fcae6e713a21aba85b9a5b8b9efd52f6d93f` (and optionally `111575f79e329bb9ccbf509eac99847ae8523a57`). Do not design or implement a replacement exploration evaluator until deployed primary evaluation again returns drvPaths without TASK-440 snapshot errors.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -484,6 +494,8 @@ Resume review of 649e3787 found unresolved lock-order races: worker claim and ca
 - Campground smoke test not run: the repository URL is not present in this repo and was not guessed.
 - Deployed acceptance test on `111575f7` pending.
 - 12l host workflow, server-regressions, and the authoritative web-ui check deliberately deferred until the deployed reproduction is confirmed.
+
+P1 production evidence: deployed `dba646fe` failed previously working campground commit `cb67fcae6e713a21aba85b9a5b8b9efd52f6d93f` across many systems. The stack is `evaluationSnapshot -> snapshotAttempt -> builtins.tryEval`; forcing lazy module definitions reaches `with lib.namespace-change-me` and emits an uncaught missing-attribute error. A direct local check also confirmed `builtins.tryEval ({}.missingAttr)` does not catch this error class. The approved corrective action is to remove all Config/Modules exploration from the primary evaluator before any replacement exploration design.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
