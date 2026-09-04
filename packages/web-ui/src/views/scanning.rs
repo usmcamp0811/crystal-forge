@@ -182,7 +182,7 @@ pub fn ScanningView() -> Element {
 
             div { class: "stat-strip",
                 if let Some(Ok(s)) = stats.read().as_ref() {
-                    { stat_card("Scanning now", &s.scanning.to_string(), Some(&format!("{} queued", s.queued)), "#60a5fa") }
+                    { stat_card("Scanning now", &s.scanning.to_string(), Some(&format!("{} waiting", s.queued)), "#60a5fa") }
                     { stat_card("Stale", &s.stale.to_string(), Some("past rescan interval"), "#fbbf24") }
                     { stat_card("Never scanned", &s.never_scanned.to_string(), None, "#9ca3af") }
                     { stat_card("Failed", &s.failed.to_string(), None, if s.failed > 0 { "#f87171" } else { "#34d399" }) }

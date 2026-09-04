@@ -2,6 +2,7 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row};
+use std::collections::HashSet;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -18,6 +19,8 @@ pub struct ScanSchedulePolicyRow {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanStatsRow {
     pub scanning: i64,
+    /// Derivations waiting for a scan through either the persisted operator
+    /// queue or the worker's dynamic post-build and stale-rescan selectors.
     pub queued: i64,
     pub stale: i64,
     pub never_scanned: i64,
@@ -157,8 +160,11 @@ pub async fn get_scan_stats(pool: &PgPool) -> Result<ScanStatsRow> {
             ORDER BY d.id, cs.completed_at DESC
         )
         SELECT
-            COUNT(*) FILTER (WHERE ll.status = 'in_progress')::BIGINT AS scanning,
-            COUNT(*) FILTER (WHERE ll.status = 'pending')::BIGINT AS queued,
+            (
+                SELECT COUNT(DISTINCT derivation_id)::BIGINT
+                FROM cve_scans
+                WHERE status = 'in_progress'
+            ) AS scanning,
             COUNT(*) FILTER (WHERE ll.status = 'failed')::BIGINT AS failed,
             COUNT(*) FILTER (WHERE lc.completed_at IS NULL)::BIGINT AS never_scanned,
             COUNT(*) FILTER (
@@ -178,12 +184,57 @@ pub async fn get_scan_stats(pool: &PgPool) -> Result<ScanStatsRow> {
 
     Ok(ScanStatsRow {
         scanning: row.get("scanning"),
-        queued: row.get("queued"),
+        queued: get_waiting_scan_count(pool).await?,
         stale: row.get("stale"),
         never_scanned: row.get("never_scanned"),
         failed: row.get("failed"),
         coverage_percent: row.get("coverage_percent"),
     })
+}
+
+/// Returns the deduplicated number of derivations that the CVE worker can
+/// select next.
+///
+/// The persisted `pending` rows represent Phase 0 operator requests. Phases 1
+/// and 2 intentionally discover post-build and stale work dynamically, so
+/// those derivations do not have pending rows while they wait. This function
+/// calls the same selectors as the worker rather than restating their status,
+/// failure-backoff, lifecycle, and policy predicates.
+///
+/// # Errors
+///
+/// Returns an error when the policy, pending-row, or worker-selector query
+/// fails.
+async fn get_waiting_scan_count(pool: &PgPool) -> Result<i64> {
+    let mut waiting: HashSet<i32> =
+        sqlx::query_scalar("SELECT DISTINCT derivation_id FROM cve_scans WHERE status = 'pending'")
+            .fetch_all(pool)
+            .await?
+            .into_iter()
+            .collect();
+
+    let policy = get_scan_schedule_policy(pool).await?;
+    if policy.on_build {
+        waiting.extend(
+            crate::queries::cve_scans::get_targets_needing_cve_scan(
+                pool,
+                Some(i64::MAX),
+                &[],
+                None,
+            )
+            .await?
+            .into_iter()
+            .map(|derivation| derivation.id),
+        );
+    }
+    waiting.extend(
+        crate::queries::cve_scans::get_targets_needing_cve_rescan(pool, Some(i64::MAX))
+            .await?
+            .into_iter()
+            .map(|derivation| derivation.id),
+    );
+
+    Ok(waiting.len() as i64)
 }
 
 pub async fn get_scan_queue(pool: &PgPool, limit: i64) -> Result<Vec<ScanQueueRow>> {

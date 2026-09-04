@@ -189,6 +189,134 @@ async fn cleanup_never_scanned_system_fixture(pool: &PgPool, system_id: Uuid, de
         .expect("never-scanned derivation should be deleted");
 }
 
+async fn insert_waiting_stats_derivation(pool: &PgPool, name: &str) -> i32 {
+    sqlx::query_scalar(
+        r#"
+        INSERT INTO derivations (
+            derivation_type, derivation_name, derivation_path, store_path,
+            status_id, completed_at, attempt_count
+        )
+        SELECT 'nixos', $1, $2, $3, id, NOW(), 0
+        FROM derivation_statuses
+        WHERE name = 'build-complete'
+        RETURNING id
+        "#,
+    )
+    .bind(name)
+    .bind(format!("/nix/store/{name}.drv"))
+    .bind(format!("/nix/store/{name}"))
+    .fetch_one(pool)
+    .await
+    .expect("waiting stats derivation should be inserted")
+}
+
+/// Ensures scan statistics include every worker-eligible waiting source and
+/// move a persisted request out of that count when its execution starts.
+#[tokio::test]
+#[ignore = "requires live database connection"]
+#[serial(scan_schedule_policy)]
+async fn scan_stats_count_worker_eligible_waiting_targets() {
+    let pool = test_pool_from_env().await;
+    let original_policy = get_scan_schedule_policy(&pool)
+        .await
+        .expect("should read existing policy");
+    let test_policy = ScanSchedulePolicyRow {
+        on_build: true,
+        deployed_interval: "1h".to_string(),
+        recent_interval: "1h".to_string(),
+        archived_interval: "720h".to_string(),
+        archived_enabled: false,
+        rebuild_to_scan: original_policy.rebuild_to_scan,
+        updated_at: chrono::Utc::now(),
+    };
+    let suffix = Uuid::new_v4().simple().to_string();
+    let pending_id =
+        insert_waiting_stats_derivation(&pool, &format!("waiting-pending-{suffix}")).await;
+    let initial_id =
+        insert_waiting_stats_derivation(&pool, &format!("waiting-initial-{suffix}")).await;
+    let stale_id = insert_waiting_stats_derivation(&pool, &format!("waiting-stale-{suffix}")).await;
+    let active_id =
+        insert_waiting_stats_derivation(&pool, &format!("waiting-active-{suffix}")).await;
+    let failed_id =
+        insert_waiting_stats_derivation(&pool, &format!("waiting-failed-{suffix}")).await;
+
+    let assertions = std::panic::AssertUnwindSafe(async {
+        update_scan_schedule_policy(&pool, &test_policy)
+            .await
+            .expect("should set test policy");
+        for (derivation_id, status, completed_at) in [
+            (pending_id, "pending", None),
+            (stale_id, "completed", Some("NOW() - INTERVAL '2 hours'")),
+            (active_id, "in_progress", None),
+        ] {
+            let completed_at_sql = completed_at.unwrap_or("NULL");
+            sqlx::query(&format!(
+                "INSERT INTO cve_scans (derivation_id, scanner_name, status, completed_at) \
+                 VALUES ($1, 'test', $2, {completed_at_sql})"
+            ))
+            .bind(derivation_id)
+            .bind(status)
+            .execute(&pool)
+            .await
+            .expect("scan fixture should be inserted");
+        }
+        for _ in 0..5 {
+            sqlx::query(
+                "INSERT INTO cve_scans (derivation_id, scanner_name, status) VALUES ($1, 'test', 'failed')",
+            )
+            .bind(failed_id)
+            .execute(&pool)
+            .await
+            .expect("failed scan fixture should be inserted");
+        }
+
+        let stats = get_scan_stats(&pool).await.expect("should read scan stats");
+        assert!(stats.queued >= 3, "pending, initial, and stale targets must wait");
+        assert!(stats.scanning >= 1, "in-progress target must scan now");
+
+        sqlx::query("UPDATE cve_scans SET status = 'in_progress' WHERE derivation_id = $1 AND status = 'pending'")
+            .bind(pending_id)
+            .execute(&pool)
+            .await
+            .expect("pending scan should start");
+        let started = get_scan_stats(&pool).await.expect("should update scan stats");
+        assert_eq!(started.queued, stats.queued - 1);
+        assert_eq!(started.scanning, stats.scanning + 1);
+
+        sqlx::query("UPDATE cve_scans SET status = 'completed', completed_at = NOW() WHERE derivation_id = $1 AND status = 'in_progress'")
+            .bind(pending_id)
+            .execute(&pool)
+            .await
+            .expect("in-progress scan should complete");
+        let completed = get_scan_stats(&pool).await.expect("should update scan stats");
+        assert_eq!(completed.scanning, stats.scanning);
+
+        // The failed target has five recent failures, and the active target has
+        // an active execution. Neither is eligible for the waiting backlog.
+        assert!(completed.queued >= 2);
+        assert_ne!(initial_id, stale_id);
+    })
+    .catch_unwind()
+    .await;
+
+    for derivation_id in [pending_id, initial_id, stale_id, active_id, failed_id] {
+        sqlx::query("DELETE FROM cve_scans WHERE derivation_id = $1")
+            .bind(derivation_id)
+            .execute(&pool)
+            .await
+            .expect("scan fixtures should be deleted");
+        sqlx::query("DELETE FROM derivations WHERE id = $1")
+            .bind(derivation_id)
+            .execute(&pool)
+            .await
+            .expect("derivation fixtures should be deleted");
+    }
+    update_scan_schedule_policy(&pool, &original_policy)
+        .await
+        .expect("should restore policy");
+    assertions.expect("waiting scan assertions should not panic");
+}
+
 /// Ensures the fleet queue normalizes absent `cve_scans` values for a derivation.
 #[tokio::test]
 #[ignore = "requires live database connection"]
