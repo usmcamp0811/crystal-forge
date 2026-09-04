@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-04 21:05'
+updated_date: '2026-09-04 22:41'
 labels:
   - design-parity
   - web-ui
@@ -291,6 +291,8 @@ Production campground commit `cb67fcae6e713a21aba85b9a5b8b9efd52f6d93f` proved t
 3. Replace/adjust the focused real-Nix check so it runs the generated primary expression through `nix-eval-jobs --meta` against lazy missing-namespace and duplicate-option content, and proves drvPath plus policy metadata remain available without forcing unrelated metadata.
 4. Run only focused expression/unit and real-Nix checks, then server-regressions if focused checks pass. Do not run web-ui.
 5. Commit and push the evaluator rollback separately for deployment. Reevaluate campground `cb67fcae6e713a21aba85b9a5b8b9efd52f6d93f` (and optionally `111575f79e329bb9ccbf509eac99847ae8523a57`). Do not design or implement a replacement exploration evaluator until deployed primary evaluation again returns drvPaths without TASK-440 snapshot errors.
+
+Primary evaluator rollback checkpoint (2026-09-04): restore the pre-TASK-440 PRIMARY boundary by evaluating only `nixosConfigurations`, each `config.system.build.toplevel`, assigned policy checks, `cfAgentEnabled`, and revision metadata. Keep Config and flake exploration out of the PRIMARY expression. Verify the exact production transport through `nix-eval-jobs --meta`, including `meta.policies`, against lazy duplicate-option and missing-namespace fixtures. Treat absent separately captured configuration and flake-output artifacts as durable `unavailable` lifecycle states without changing successful system evaluation, policy, build, or deployment outcomes. Add pure bulk/fallback classification coverage and a migration-backed finalization regression, then run focused Rust, Nix, formatting, and diff checks before creating a separate checkpoint commit.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -496,6 +498,8 @@ Resume review of 649e3787 found unresolved lock-order races: worker claim and ca
 - 12l host workflow, server-regressions, and the authoritative web-ui check deliberately deferred until the deployed reproduction is confirmed.
 
 P1 production evidence: deployed `dba646fe` failed previously working campground commit `cb67fcae6e713a21aba85b9a5b8b9efd52f6d93f` across many systems. The stack is `evaluationSnapshot -> snapshotAttempt -> builtins.tryEval`; forcing lazy module definitions reaches `with lib.namespace-change-me` and emits an uncaught missing-attribute error. A direct local check also confirmed `builtins.tryEval ({}.missingAttr)` does not catch this error class. The approved corrective action is to remove all Config/Modules exploration from the primary evaluator before any replacement exploration design.
+
+Continuation audit confirmed that `nix-eval-jobs --meta` supports custom nested derivation metadata. The isolation check is being strengthened to assert `meta.policies` directly from the same JSONL shape consumed by production instead of validating policies in a separate `nix eval` command. Configured remote evaluation emits repeated `/nix/store/.links/... has maximum number of links`; use `--builders ''` for the isolated local Nix check and report the infrastructure condition separately.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
