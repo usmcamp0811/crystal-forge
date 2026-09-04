@@ -2,9 +2,14 @@
 //!
 //! This module provides [`run_cve_scan_loop`], the background task that:
 //!
-//! 1. **Post-build scans** — picks up build-complete derivations that have
+//! 1. **Stale recovery** — examines bounded batches of abandoned executions and
+//!    old revocations so recovery cannot monopolize a worker cycle.
+//! 2. **Operator-queued scans** — runs explicit fleet-rescan requests before
+//!    loading scan policy. This phase is independent of `on_build` and still
+//!    runs when policy loading fails.
+//! 3. **Post-build scans** — picks up build-complete derivations that have
 //!    never been successfully scanned and runs vulnix on them.
-//! 2. **Periodic rescans** — picks up derivations whose last completed scan is
+//! 4. **Periodic rescans** — picks up derivations whose last completed scan is
 //!    older than the configured interval in `scan_schedule_policy`, so newly
 //!    published NVD advisories are picked up automatically (vulnix fetches the
 //!    latest NVD data on every invocation).
@@ -15,10 +20,11 @@
 //!
 //! ## Scheduling
 //!
-//! Post-build and rescan targets are processed in separate phases within each
-//! poll cycle.  Post-build scans take priority so newly built configurations get
-//! their first scan quickly.  The `on_build` flag in `scan_schedule_policy`
-//! controls whether the post-build phase runs at all.
+//! After bounded stale recovery, Phase 0 processes operator-queued scans before
+//! the worker loads `scan_schedule_policy`. Phase 1 processes post-build scans
+//! only when `on_build` is enabled. Phase 2 processes periodic rescans. Each
+//! scan phase runs at most [`MAX_SCANS_PER_CYCLE`] scans, and each recovery
+//! phase applies its own conservative query-layer batch limit.
 
 use crate::config::{CacheConfig, CacheType, CrystalForgeConfig};
 use crate::derivations::utils::{
@@ -28,9 +34,14 @@ use crate::log::{WorkerState, WorkerStatus, get_cve_status};
 use crate::models::cache_destination::CacheDestination;
 use crate::queries::cache_destinations::get_cache_destination;
 use crate::queries::cve_scans::{
-    create_cve_scan, get_targets_needing_cve_rescan, get_targets_needing_cve_scan,
-    mark_cve_scan_failed, recover_stale_scans, save_scan_results,
+    CreateCveScanOutcome, CveScanExecutionClaim, acknowledge_revoked_cve_scan_execution,
+    acquire_execution_lock, claim_queued_cve_scans, create_cve_scan,
+    get_targets_needing_cve_rescan, get_targets_needing_cve_scan, heartbeat_cve_scan_execution,
+    mark_cve_scan_failed_by_id_for_execution, mark_cve_scan_failed_for_execution,
+    recover_stale_scans, release_execution_lock_or_close, requeue_cve_scan_execution,
+    save_scan_results_for_execution,
 };
+use crate::queries::derivations::get_derivation_by_id;
 use crate::queries::scanning::get_scan_schedule_policy;
 use crate::server::jobs::BackgroundJobHandle;
 use crate::vulnix::vulnix_runner::VulnixRunner;
@@ -162,10 +173,12 @@ fn materialization_nix_config_lines(
 /// Run the CVE scan background loop.
 ///
 /// Pass a `BackgroundJobHandle` created by [`BackgroundJobHandle::new`] and
-/// the matching `watch::Receiver<bool>` returned from that call.  The handle is
-/// registered in the server's [`BackgroundJobRegistry`] before this function is
-/// called; the receiver lets the loop respond to run-now signals from HTTP
-/// handlers.
+/// the matching `watch::Receiver<u64>` returned from that call. The receiver's
+/// increasing value signals explicit run-now requests. The handle is
+/// registered in the server's
+/// [`BackgroundJobRegistry`](crate::server::jobs::BackgroundJobRegistry) before
+/// this function is called; the receiver lets the loop respond to run-now
+/// signals from HTTP handlers.
 ///
 /// The loop runs indefinitely.  When vulnix is unavailable it sleeps and
 /// retries so that installing or restoring vulnix does not require a server
@@ -288,7 +301,7 @@ pub async fn run_cve_scan_loop(
     }
 }
 
-/// Maximum derivations scanned per cycle phase (post-build or rescan).
+/// Maximum derivations scanned per cycle phase.
 ///
 /// Processing is bounded per cycle so that a large historical backlog does not
 /// monopolise the database for an extended period. At 1 scan/cycle with a
@@ -297,15 +310,17 @@ pub async fn run_cve_scan_loop(
 /// the write amplification per scan is addressed.
 const MAX_SCANS_PER_CYCLE: i64 = 1;
 
-/// One full scan cycle: post-build scans followed by periodic rescans.
+/// Runs one bounded stale-recovery pass and three scan phases.
 ///
-/// Phase 1 (post-build) processes at most [`MAX_SCANS_PER_CYCLE`] derivations
-/// and returns — it does **not** loop until the queue is empty. The remaining
-/// backlog is processed across subsequent poll cycles, which prevents a large
-/// historical backlog from monopolising the database for many minutes.
+/// Stale recovery first processes bounded candidate and finalization batches.
+/// Phase 0 then processes at most [`MAX_SCANS_PER_CYCLE`] operator-queued scans
+/// before policy loading. Explicit requests therefore run independently of
+/// `scan_schedule_policy` availability and the `on_build` setting.
 ///
-/// Phase 2 (rescan) likewise processes at most [`MAX_SCANS_PER_CYCLE`] stale
-/// derivations per cycle.
+/// Phase 1 processes at most [`MAX_SCANS_PER_CYCLE`] post-build targets when
+/// `on_build` is enabled. Phase 2 processes at most
+/// [`MAX_SCANS_PER_CYCLE`] periodic rescan targets. No phase loops until its
+/// backlog is empty; later poll cycles continue each backlog.
 async fn scan_cycle(
     pool: &PgPool,
     vulnix_config: &crate::config::VulnixConfig,
@@ -345,6 +360,109 @@ async fn scan_cycle_with_runner<R: CveScanRunner + Sync>(
         Err(e) => error!("Failed to recover stale CVE scans: {e}"),
     }
 
+    // --- Phase 0: operator-queued scans (bounded) ---
+    //
+    // Fleet rescan requests enqueue `pending` claims rather than executing
+    // scans inline, so this phase is what actually runs them. It is bounded by
+    // the same per-cycle budget as the other phases, which is the mechanism
+    // that prevents a single fleet-wide request from starting an unbounded
+    // number of concurrent vulnix processes.
+    //
+    // This runs before the policy load on purpose: a queued scan is an explicit
+    // operator request and should not be suppressed by a scan-policy read
+    // failure or by `on_build` being disabled.
+    match claim_queued_cve_scans(pool, MAX_SCANS_PER_CYCLE).await {
+        Ok(queued) if !queued.is_empty() => {
+            info!(
+                "📥 [queued] Draining {} operator-requested scan(s) this cycle (limit {})",
+                queued.len(),
+                MAX_SCANS_PER_CYCLE
+            );
+            for claim in queued {
+                if requeue_claim_if_disabled(pool, claim, enabled_rx).await? {
+                    info!("🛑 CVE scan loop disabled — stopping queued phase");
+                    return Ok(());
+                }
+
+                let derivation = match get_derivation_by_id(pool, claim.derivation_id).await {
+                    Ok(derivation) => derivation,
+                    Err(e) => {
+                        error!(
+                            "❌ [queued] Could not load derivation {}: {e}",
+                            claim.derivation_id
+                        );
+                        if let Err(mark_err) = mark_cve_scan_failed_by_id_for_execution(
+                            pool,
+                            claim.scan_id,
+                            claim.derivation_id,
+                            &format!("Could not load derivation: {e}"),
+                            claim.execution_id,
+                        )
+                        .await
+                        {
+                            error!(
+                                "❌ [queued] Failed to mark scan {} failed: {mark_err}",
+                                claim.scan_id
+                            );
+                        }
+                        continue;
+                    }
+                };
+
+                set_cve_status_working(&format!("scanning {}", derivation.derivation_name)).await;
+                // This final read is the execution handoff: there is no await
+                // between observing enabled and starting `execute_scan`. Drop
+                // the guard immediately so disabling does not block for the
+                // full materialization/vulnix/persistence window.
+                let enabled_guard = enabled_rx.read().await;
+                if !*enabled_guard {
+                    drop(enabled_guard);
+                    let requeued = requeue_cve_scan_execution(
+                        pool,
+                        claim.scan_id,
+                        claim.execution_id,
+                        "worker-disabled-before-execution",
+                    )
+                    .await?;
+                    if !requeued {
+                        warn!(
+                            "Queued CVE scan {} lost ownership before it could be requeued",
+                            claim.scan_id
+                        );
+                    }
+                    info!("🛑 CVE scan loop disabled — stopping queued phase");
+                    return Ok(());
+                }
+                drop(enabled_guard);
+                info!(
+                    "📥 [queued] Scanning operator-requested derivation: {}",
+                    derivation.derivation_name
+                );
+                if let Err(e) = execute_scan(
+                    pool,
+                    vulnix_runner,
+                    vulnix_version.clone(),
+                    &derivation,
+                    claim.scan_id,
+                    claim.execution_id,
+                )
+                .await
+                {
+                    error!(
+                        "❌ [queued] Scan failed for {}: {e}",
+                        derivation.derivation_name
+                    );
+                }
+            }
+        }
+        Ok(_) => {
+            debug!("📥 No queued scan targets this cycle");
+        }
+        Err(e) => {
+            error!("❌ Failed to get queued scan targets: {e}");
+        }
+    }
+
     // Read scan schedule policy. Fail closed: if the policy cannot be loaded
     // we skip this cycle rather than applying aggressive hardcoded defaults.
     // This prevents a database configuration failure from silently triggering
@@ -356,8 +474,6 @@ async fn scan_cycle_with_runner<R: CveScanRunner + Sync>(
             return Ok(());
         }
     };
-    let mut scans_remaining = MAX_SCANS_PER_CYCLE;
-
     // --- Phase 1: post-build scans (bounded — at most MAX_SCANS_PER_CYCLE per cycle) ---
     //
     // We intentionally do NOT loop until the queue is empty. A large historical
@@ -408,7 +524,6 @@ async fn scan_cycle_with_runner<R: CveScanRunner + Sync>(
                             derivation.derivation_name
                         );
                     }
-                    scans_remaining = scans_remaining.saturating_sub(1);
                 }
             }
             Ok(_) => {
@@ -422,11 +537,6 @@ async fn scan_cycle_with_runner<R: CveScanRunner + Sync>(
         debug!("🔍 on_build = false — skipping post-build phase");
     }
 
-    if scans_remaining == 0 {
-        debug!("🔍 Per-cycle CVE scan budget exhausted — deferring rescans");
-        return Ok(());
-    }
-
     // Check enabled before entering Phase 2.
     if !*enabled_rx.read().await {
         info!("🛑 CVE scan loop disabled — skipping periodic rescan phase");
@@ -434,7 +544,7 @@ async fn scan_cycle_with_runner<R: CveScanRunner + Sync>(
     }
 
     // --- Phase 2: periodic rescan (stale completed scans, bounded) ---
-    match get_targets_needing_cve_rescan(pool, Some(scans_remaining)).await {
+    match get_targets_needing_cve_rescan(pool, Some(MAX_SCANS_PER_CYCLE)).await {
         Ok(targets) if !targets.is_empty() => {
             info!(
                 "🔄 [rescan] Re-scanning {} stale derivation(s)",
@@ -474,6 +584,31 @@ async fn scan_cycle_with_runner<R: CveScanRunner + Sync>(
     Ok(())
 }
 
+async fn requeue_claim_if_disabled(
+    pool: &PgPool,
+    claim: CveScanExecutionClaim,
+    enabled_rx: &tokio::sync::RwLock<bool>,
+) -> Result<bool> {
+    if *enabled_rx.read().await {
+        return Ok(false);
+    }
+
+    let requeued = requeue_cve_scan_execution(
+        pool,
+        claim.scan_id,
+        claim.execution_id,
+        "worker-disabled-before-execution",
+    )
+    .await?;
+    if !requeued {
+        warn!(
+            "Queued CVE scan {} lost ownership before it could be requeued",
+            claim.scan_id
+        );
+    }
+    Ok(true)
+}
+
 /// Scan a single derivation: create a scan record, run vulnix, save results.
 ///
 /// If the store path is not present in the local Nix store, the function
@@ -499,7 +634,7 @@ async fn scan_one<R: CveScanRunner + Sync>(
     // waiting for the write lock, no new read guard can be acquired.  This
     // ensures that any scan_one() call begun after set_enabled(false) returns
     // will see enabled=false and exit without creating a claim.
-    let scan_id = {
+    let claim = {
         let enabled_guard = enabled_rx.read().await;
         if !*enabled_guard {
             debug!(
@@ -511,80 +646,338 @@ async fn scan_one<R: CveScanRunner + Sync>(
 
         let scan_claim =
             create_cve_scan(pool, derivation.id, "vulnix", vulnix_version.clone()).await?;
-        let scan_id = scan_claim.id();
         // Release the guard as soon as the claim is committed.  From here the
         // scan is authorized and runs to completion even if disable fires later.
         drop(enabled_guard);
 
-        if !scan_claim.was_created() {
-            info!(
-                "⏭️ Skipping duplicate CVE scan for {} — active scan {scan_id} already exists",
-                derivation.derivation_name
-            );
-            return Ok(());
+        match scan_claim {
+            CreateCveScanOutcome::Created(claim) => claim,
+            CreateCveScanOutcome::Existing(scan_id) => {
+                info!(
+                    "⏭️ Skipping duplicate CVE scan for {} — active scan {scan_id} already exists",
+                    derivation.derivation_name
+                );
+                return Ok(());
+            }
         }
-        scan_id
     };
 
+    execute_scan(
+        pool,
+        vulnix_runner,
+        vulnix_version,
+        derivation,
+        claim.scan_id,
+        claim.execution_id,
+    )
+    .await
+}
+
+/// Execute a CVE scan for an already-claimed `cve_scans` row.
+///
+/// Shared by worker-initiated scans (via [`scan_one`], which creates the claim
+/// itself) and by queued scans created by an operator fleet request (which
+/// adopt a pre-existing `pending` claim). Both therefore inherit the same
+/// lifecycle: local store-path presence check, cache materialization fallback,
+/// vulnix invocation, and result persistence.
+///
+/// Keeps a PostgreSQL session-level advisory lock held for the entire execution
+/// duration. This allows recovery to distinguish a paused live process (lock held)
+/// from a crashed process (lock released). The lock is explicitly released before
+/// the connection is returned to the pool. The connection must NOT be returned
+/// to the pool while still owning an advisory lock, because a pooled connection
+/// could be reused by another worker and silently violate active-scan uniqueness.
+///
+/// Keeping this as the single execution path is deliberate. A caller that
+/// invokes vulnix directly would skip cache materialization and fail for
+/// derivations whose store path has been garbage-collected locally but is still
+/// available from a completed cache push.
+async fn execute_scan<R: CveScanRunner + Sync>(
+    pool: &PgPool,
+    vulnix_runner: &R,
+    vulnix_version: Option<String>,
+    derivation: &crate::derivations::Derivation,
+    scan_id: uuid::Uuid,
+    execution_id: uuid::Uuid,
+) -> Result<()> {
+    execute_scan_with_handoff_gate(
+        pool,
+        vulnix_runner,
+        vulnix_version,
+        derivation,
+        scan_id,
+        execution_id,
+        None,
+    )
+    .await
+}
+
+#[cfg(test)]
+struct ExecutionHandoffGate {
+    arrived: std::sync::Arc<tokio::sync::Semaphore>,
+    resume: std::sync::Arc<tokio::sync::Semaphore>,
+}
+
+async fn execute_scan_with_handoff_gate<R: CveScanRunner + Sync>(
+    pool: &PgPool,
+    vulnix_runner: &R,
+    vulnix_version: Option<String>,
+    derivation: &crate::derivations::Derivation,
+    scan_id: uuid::Uuid,
+    execution_id: uuid::Uuid,
+    #[cfg(test)] handoff_gate: Option<&ExecutionHandoffGate>,
+    #[cfg(not(test))] _handoff_gate: Option<&()>,
+) -> Result<()> {
+    #[cfg(test)]
+    if let Some(gate) = handoff_gate {
+        gate.arrived.add_permits(1);
+        let permit = gate
+            .resume
+            .acquire()
+            .await
+            .context("execution handoff test gate closed")?;
+        permit.forget();
+    }
+
+    // Acquire a connection from the pool that will hold the execution lock.
+    // The lock must be released before this connection is returned to the pool,
+    // otherwise the pool would return a connection still owning an advisory lock.
+    let mut lock_conn = pool
+        .acquire()
+        .await
+        .context("Failed to acquire connection for CVE scan execution lock")?;
+    acquire_execution_lock(&mut lock_conn, execution_id)
+        .await
+        .context("Failed to acquire session-level execution lock")?;
+
+    // CONCURRENCY: Close the claim-to-lock gap before constructing the scanner
+    // future. Recovery can revoke a claim while it is waiting for this session
+    // lock. The immediate CAS proves this token still owns the row; otherwise
+    // no cache process or vulnix process may start.
+    match heartbeat_cve_scan_execution(pool, scan_id, execution_id).await {
+        Ok(true) => {}
+        Ok(false) => {
+            release_execution_lock_or_close(lock_conn, execution_id).await;
+            let _ = acknowledge_revoked_cve_scan_execution(pool, scan_id, execution_id).await;
+            anyhow::bail!("CVE scan {scan_id} lost execution ownership before execution handoff");
+        }
+        Err(err) => {
+            release_execution_lock_or_close(lock_conn, execution_id).await;
+            let handoff_error = err.context("Failed CVE scan execution handoff heartbeat");
+            if let Err(cleanup_err) = mark_cve_scan_failed_by_id_for_execution(
+                pool,
+                scan_id,
+                derivation.id,
+                &handoff_error.to_string(),
+                execution_id,
+            )
+            .await
+            {
+                error!(
+                    "Failed to mark CVE scan {scan_id} as failed after execution handoff error: {cleanup_err:#}"
+                );
+            }
+            return Err(handoff_error);
+        }
+    }
+
+    let mut execution = Box::pin(execute_scan_inner(
+        pool,
+        vulnix_runner,
+        vulnix_version,
+        derivation,
+        scan_id,
+        execution_id,
+    ));
+    // Heartbeat the entire materialization/vulnix/persistence window. Terminal
+    // writes still verify the token, so heartbeat is liveness rather than the
+    // final authorization boundary.
+    #[cfg(not(test))]
+    const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+    #[cfg(test)]
+    const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+    const HEARTBEAT_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+    let start = tokio::time::Instant::now() + HEARTBEAT_INTERVAL;
+    let mut heartbeat = tokio::time::interval_at(start, HEARTBEAT_INTERVAL);
+    loop {
+        tokio::select! {
+            biased;
+            result = &mut execution => {
+                // Release the advisory lock (or discard the connection if
+                // release cannot be confirmed) before returning it to the
+                // pool, so a pooled connection never re-enters general use
+                // while still owning an execution lock.
+                release_execution_lock_or_close(lock_conn, execution_id).await;
+                return result;
+            }
+            _ = heartbeat.tick() => {
+                match tokio::time::timeout(
+                    HEARTBEAT_QUERY_TIMEOUT,
+                    heartbeat_cve_scan_execution(pool, scan_id, execution_id),
+                )
+                .await
+                {
+                    Ok(Ok(true)) => {}
+                    Ok(Ok(false)) => {
+                        // Cancel the scanner before releasing the lock or
+                        // acknowledging revocation. Until this future is
+                        // dropped the row remains in_progress, preserving
+                        // active-scan uniqueness.
+                        drop(execution);
+                        release_execution_lock_or_close(lock_conn, execution_id).await;
+                        let _ = acknowledge_revoked_cve_scan_execution(
+                            pool,
+                            scan_id,
+                            execution_id,
+                        )
+                        .await;
+                        anyhow::bail!("CVE scan {scan_id} lost execution ownership");
+                    }
+                    Ok(Err(err)) => {
+                        drop(execution);
+                        release_execution_lock_or_close(lock_conn, execution_id).await;
+                        let heartbeat_error = err.context(
+                            "Failed to refresh CVE scan execution heartbeat",
+                        );
+                        let _ = mark_cve_scan_failed_by_id_for_execution(
+                            pool,
+                            scan_id,
+                            derivation.id,
+                            &heartbeat_error.to_string(),
+                            execution_id,
+                        )
+                        .await;
+                        return Err(heartbeat_error);
+                    }
+                    Err(_) => {
+                        drop(execution);
+                        release_execution_lock_or_close(lock_conn, execution_id).await;
+                        let heartbeat_error = anyhow::anyhow!(
+                            "Timed out refreshing CVE scan {scan_id} execution heartbeat"
+                        );
+                        let _ = mark_cve_scan_failed_by_id_for_execution(
+                            pool,
+                            scan_id,
+                            derivation.id,
+                            &heartbeat_error.to_string(),
+                            execution_id,
+                        )
+                        .await;
+                        return Err(heartbeat_error);
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn execute_scan_inner<R: CveScanRunner + Sync>(
+    pool: &PgPool,
+    vulnix_runner: &R,
+    vulnix_version: Option<String>,
+    derivation: &crate::derivations::Derivation,
+    scan_id: uuid::Uuid,
+    execution_id: uuid::Uuid,
+) -> Result<()> {
+    execute_scan_inner_with_nix_program(
+        pool,
+        vulnix_runner,
+        vulnix_version,
+        derivation,
+        scan_id,
+        execution_id,
+        std::ffi::OsStr::new("nix"),
+    )
+    .await
+}
+
+async fn execute_scan_inner_with_nix_program<R: CveScanRunner + Sync>(
+    pool: &PgPool,
+    vulnix_runner: &R,
+    vulnix_version: Option<String>,
+    derivation: &crate::derivations::Derivation,
+    scan_id: uuid::Uuid,
+    execution_id: uuid::Uuid,
+    nix_program: &std::ffi::OsStr,
+) -> Result<()> {
     let Some(ref path) = derivation.store_path else {
         warn!(
             "❌ No store_path set for derivation {}",
             derivation.derivation_name
         );
-        mark_cve_scan_failed(
+        mark_scan_failed_for_owner(
             pool,
             scan_id,
             derivation,
             "No store_path set for derivation",
+            execution_id,
         )
         .await?;
         return Ok(());
     };
 
-    // 1. Check local presence.
-    let locally_present = match fs::try_exists(path).await {
-        Ok(exists) => exists,
-        Err(e) => {
-            error!("❌ Error checking derivation path {}: {}", path, e);
-            // Treat as not present — try cache materialization below.
-            false
-        }
+    let Some(derivation_path) = derivation
+        .derivation_path
+        .as_deref()
+        .filter(|derivation_path| !derivation_path.trim().is_empty())
+    else {
+        mark_scan_failed_for_owner(
+            pool,
+            scan_id,
+            derivation,
+            "No derivation_path set for derivation",
+            execution_id,
+        )
+        .await?;
+        return Ok(());
     };
 
-    // 2. Materialize from cache if not present locally.
-    if !locally_present {
-        warn!(
-            "Store path {} not found locally — attempting cache materialization",
-            path
-        );
-        match materialize_store_path_from_cache(pool, derivation, path).await {
-            Ok(true) => {
-                info!("✅ Successfully materialized {} from cache", path);
-            }
+    // INVARIANT: `Derivation.derivation_path` is the authoritative `.drv`
+    // identity recorded when Crystal Forge evaluated the configuration. A
+    // substituted output can legitimately report `unknown-deriver`, so asking
+    // the local Nix store to reconstruct this relationship rejects valid
+    // deployed outputs. Check and restore the recorded output and derivation
+    // paths independently before preserving the established vulnix invocation
+    // on `store_path`.
+    let inputs = observe_scan_inputs(path, derivation_path).await;
+    if !inputs.ready() {
+        if !inputs.output_present {
+            warn!("Store path {path} not found locally — attempting cache materialization");
+        }
+        if !inputs.derivation_present {
+            warn!(
+                "Recorded derivation {derivation_path} is missing — attempting cache materialization"
+            );
+        }
+
+        match materialize_store_path_from_cache(
+            pool,
+            derivation,
+            path,
+            derivation_path,
+            nix_program,
+        )
+        .await
+        {
+            Ok(true) => info!("✅ Successfully materialized scan inputs for {path}"),
             Ok(false) => {
-                warn!(
-                    "❌ Could not materialize {} from any cache — marking scan as failed",
-                    path
+                let message = format!(
+                    "Scan inputs unavailable: output {path} and recorded derivation \
+                     {derivation_path} must both exist locally"
                 );
-                mark_cve_scan_failed(
-                    pool,
-                    scan_id,
-                    derivation,
-                    &format!(
-                        "Store path {} not present locally and no cache could provide it",
-                        path
-                    ),
-                )
-                .await?;
+                warn!("❌ {message}");
+                mark_scan_failed_for_owner(pool, scan_id, derivation, &message, execution_id)
+                    .await?;
                 return Ok(());
             }
-            Err(e) => {
-                error!("❌ Error materializing {} from cache: {}", path, e);
-                mark_cve_scan_failed(
+            Err(error) => {
+                error!("❌ Error materializing scan inputs for {path}: {error:#}");
+                mark_scan_failed_for_owner(
                     pool,
                     scan_id,
                     derivation,
-                    &format!("Cache materialization error: {}", e),
+                    &format!("Cache materialization error: {error}"),
+                    execution_id,
                 )
                 .await?;
                 return Ok(());
@@ -600,8 +993,18 @@ async fn scan_one<R: CveScanRunner + Sync>(
         Ok(entries) => {
             let elapsed_ms = Some(start.elapsed().as_millis() as i32);
             let stats = crate::vulnix::vulnix_parser::VulnixParser::calculate_stats(&entries);
-            if let Err(err) = save_scan_results(pool, scan_id, &entries, elapsed_ms).await {
-                mark_cve_scan_failed(pool, scan_id, derivation, &err.to_string()).await?;
+            if let Err(err) =
+                save_scan_results_for_execution(pool, scan_id, &entries, elapsed_ms, execution_id)
+                    .await
+            {
+                mark_scan_failed_for_owner(
+                    pool,
+                    scan_id,
+                    derivation,
+                    &err.to_string(),
+                    execution_id,
+                )
+                .await?;
                 return Err(err);
             }
             info!(
@@ -614,29 +1017,89 @@ async fn scan_one<R: CveScanRunner + Sync>(
                 "❌ CVE scan failed for {}: {}",
                 derivation.derivation_name, e
             );
-            if let Err(save_err) =
-                mark_cve_scan_failed(pool, scan_id, derivation, &e.to_string()).await
-            {
-                error!("❌ Failed to mark CVE scan as failed: {save_err}");
-            }
+            mark_cve_scan_failed_for_execution(
+                pool,
+                scan_id,
+                derivation,
+                &e.to_string(),
+                execution_id,
+            )
+            .await
+            .context("Failed to persist CVE scanner failure")?;
         }
     }
 
     Ok(())
 }
 
-/// Try to copy a store path from a configured cache destination.
+async fn mark_scan_failed_for_owner(
+    pool: &PgPool,
+    scan_id: uuid::Uuid,
+    derivation: &crate::derivations::Derivation,
+    error_message: &str,
+    execution_id: uuid::Uuid,
+) -> Result<()> {
+    mark_cve_scan_failed_for_execution(pool, scan_id, derivation, error_message, execution_id).await
+}
+
+/// Reports the independent local availability of a scan output and its
+/// recorded derivation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ScanInputAvailability {
+    output_present: bool,
+    derivation_present: bool,
+}
+
+impl ScanInputAvailability {
+    fn ready(self) -> bool {
+        self.output_present && self.derivation_present
+    }
+}
+
+async fn observe_scan_inputs(store_path: &str, derivation_path: &str) -> ScanInputAvailability {
+    let (output_present, derivation_present) =
+        tokio::join!(fs::try_exists(store_path), fs::try_exists(derivation_path));
+    ScanInputAvailability {
+        output_present: output_present.unwrap_or(false),
+        derivation_present: derivation_present.unwrap_or(false),
+    }
+}
+
+/// Ensures the output path and its recorded derivation are both available
+/// locally, restoring only what is missing from a configured cache.
 ///
-/// Queries for completed `cache_push_jobs` for this derivation, resolves the
-/// cache destination's `push_to` URL, and runs `nix copy --from <url> <path>`
-/// for the first eligible cache.  Returns `Ok(true)` if materialization
-/// succeeded, `Ok(false)` if no cache could provide the path, or `Err` on a
-/// fatal error.
+/// Queries completed `cache_push_jobs` for this derivation and resolves each
+/// cache destination's `push_to` URL, preserving that destination's
+/// authentication, signature, and `NIX_CONFIG` handling.
+///
+/// # Behavior
+///
+/// - A locally complete pair is accepted without contacting any cache, so a
+///   present output is never recopied.
+/// - A present output whose `.drv` is missing restores only the `.drv`.
+/// - Missing output and recorded-derivation paths are restored independently.
+/// - Success is reported only after the required paths are confirmed present,
+///   not merely because `nix copy` exited zero.
+///
+/// # Errors
+///
+/// Returns an error when the cache-destination query fails or a `nix` process
+/// cannot be spawned or awaited.
 async fn materialize_store_path_from_cache(
     pool: &PgPool,
     derivation: &crate::derivations::Derivation,
     store_path: &str,
+    derivation_path: &str,
+    nix_program: &std::ffi::OsStr,
 ) -> Result<bool> {
+    // Fast path: nothing is missing, so no cache round trip is needed.
+    if observe_scan_inputs(store_path, derivation_path)
+        .await
+        .ready()
+    {
+        debug!("Scan inputs for {store_path} are already present locally");
+        return Ok(true);
+    }
     // Resolve completed cache pushes for this derivation. `cache_destination`
     // may hold either a DB destination name or a legacy/server.toml URL, so we
     // match on both `cd.name` and `cd.push_to`.
@@ -738,86 +1201,135 @@ async fn materialize_store_path_from_cache(
     const NIX_COPY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
     for source in &sources {
-        debug!(
-            "Trying nix copy --from {} {} (source: {})",
-            source.from_url, store_path, source.label
-        );
-
-        // Spawn with kill_on_drop(true) so the child is guaranteed to be
-        // terminated if the child handle is dropped.
-        let mut command = TokioCommand::new("nix");
-        command.arg("copy").arg("--from").arg(&source.from_url);
-
-        if let Some(cache_config) = &source.cache_config {
-            if matches!(cache_config.cache_type, CacheType::Attic) {
-                command.args(["--option", "http2", "false"]);
-            }
-
-            if let Some(public_key) = source.trusted_public_key.as_deref() {
-                command.args(["--option", "trusted-public-keys", public_key]);
-            }
-
-            apply_cache_config_env_to_command(&mut command, cache_config);
-        }
-
-        if !source.nix_config_lines.is_empty() {
-            command.env("NIX_CONFIG", source.nix_config_lines.join("\n") + "\n");
-        }
-
-        let mut child = command
-            .arg(store_path)
-            .kill_on_drop(true)
-            .spawn()
-            .with_context(|| format!("Failed to spawn nix copy from {}", source.from_url))?;
-
-        // Use `child.wait()` (borrows `&mut self`) instead of
-        // `wait_with_output()` (consumes `self`) so we can still kill the
-        // child if the timeout fires.
-        let wait_result = match timeout(NIX_COPY_TIMEOUT, child.wait()).await {
-            Ok(result) => result?,
-            Err(_elapsed) => {
-                warn!(
-                    "nix copy from {} timed out after {}s for {} — killing process",
-                    source.from_url,
-                    NIX_COPY_TIMEOUT.as_secs(),
-                    store_path
-                );
-                // Kill and reap to avoid zombies.
-                let _ = child.kill().await;
-                let _ = child.wait().await;
-                continue; // Try the next cache URL.
-            }
-        };
-
-        if wait_result.success() {
-            // Verify the path is now present.
-            match fs::try_exists(store_path).await {
-                Ok(true) => return Ok(true),
-                Ok(false) => {
-                    warn!(
-                        "nix copy from {} reported success but {} is still absent",
-                        source.from_url, store_path
-                    );
-                    // Continue trying other caches.
-                }
-                Err(e) => {
-                    warn!(
-                        "nix copy from {} succeeded but path check failed: {}",
-                        source.from_url, e
-                    );
-                }
-            }
-        } else {
-            warn!(
-                "nix copy from {} failed for {} (exit code: {:?})",
-                source.from_url,
-                store_path,
-                wait_result.code()
-            );
+        if restore_scan_inputs_from_source(
+            source,
+            store_path,
+            derivation_path,
+            NIX_COPY_TIMEOUT,
+            nix_program,
+        )
+        .await?
+        {
+            return Ok(true);
         }
     }
 
     Ok(false)
+}
+
+/// Restores one scan input pair from one cache source.
+///
+/// The executable parameters form a narrow process seam for regression tests.
+/// Production passes `nix`. The function observes both paths and invokes
+/// `nix copy` only for each missing path. It attempts both paths even when the
+/// source lacks one of them, because separate eligible caches can collectively
+/// provide the pair. It completes all copy work before returning, so callers
+/// cannot start vulnix before preparation.
+async fn restore_scan_inputs_from_source(
+    source: &MaterializationSource,
+    store_path: &str,
+    derivation_path: &str,
+    copy_timeout: std::time::Duration,
+    nix_program: &std::ffi::OsStr,
+) -> Result<bool> {
+    // Re-observe per source: an earlier source can restore only one path, and
+    // an already-present output or derivation must never be recopied.
+    let inputs = observe_scan_inputs(store_path, derivation_path).await;
+    if inputs.ready() {
+        return Ok(true);
+    }
+    if !inputs.output_present {
+        copy_path_from_cache_with_program(source, store_path, copy_timeout, nix_program).await?;
+    }
+    if !inputs.derivation_present {
+        copy_path_from_cache_with_program(source, derivation_path, copy_timeout, nix_program)
+            .await?;
+    }
+
+    Ok(observe_scan_inputs(store_path, derivation_path)
+        .await
+        .ready())
+}
+
+async fn copy_path_from_cache_with_program(
+    source: &MaterializationSource,
+    store_path: &str,
+    copy_timeout: std::time::Duration,
+    nix_program: &std::ffi::OsStr,
+) -> Result<bool> {
+    debug!(
+        "Trying nix copy --from {} {} (source: {})",
+        source.from_url, store_path, source.label
+    );
+
+    let mut command = TokioCommand::new(nix_program);
+    command.arg("copy").arg("--from").arg(&source.from_url);
+
+    if let Some(cache_config) = &source.cache_config {
+        if matches!(cache_config.cache_type, CacheType::Attic) {
+            command.args(["--option", "http2", "false"]);
+        }
+
+        if let Some(public_key) = source.trusted_public_key.as_deref() {
+            command.args(["--option", "trusted-public-keys", public_key]);
+        }
+
+        apply_cache_config_env_to_command(&mut command, cache_config);
+    }
+
+    if !source.nix_config_lines.is_empty() {
+        command.env("NIX_CONFIG", source.nix_config_lines.join("\n") + "\n");
+    }
+
+    // `kill_on_drop` prevents a timed-out cache copy from outliving the worker.
+    let mut child = command
+        .arg(store_path)
+        .kill_on_drop(true)
+        .spawn()
+        .with_context(|| format!("Failed to spawn nix copy from {}", source.from_url))?;
+
+    let wait_result = match timeout(copy_timeout, child.wait()).await {
+        Ok(result) => result?,
+        Err(_elapsed) => {
+            warn!(
+                "nix copy from {} timed out after {}s for {} — killing process",
+                source.from_url,
+                copy_timeout.as_secs(),
+                store_path
+            );
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Ok(false);
+        }
+    };
+
+    if !wait_result.success() {
+        warn!(
+            "nix copy from {} failed for {} (exit code: {:?})",
+            source.from_url,
+            store_path,
+            wait_result.code()
+        );
+        return Ok(false);
+    }
+
+    match fs::try_exists(store_path).await {
+        Ok(true) => Ok(true),
+        Ok(false) => {
+            warn!(
+                "nix copy from {} reported success but {} is still absent",
+                source.from_url, store_path
+            );
+            Ok(false)
+        }
+        Err(error) => {
+            warn!(
+                "nix copy from {} succeeded but path check failed: {}",
+                source.from_url, error
+            );
+            Ok(false)
+        }
+    }
 }
 
 async fn set_cve_status_working(task: &str) {
@@ -844,13 +1356,42 @@ async fn set_cve_status_idle() {
 mod tests {
     use super::*;
     use crate::queries::derivations::{EvaluationStatus, insert_derivation};
+    use crate::queries::scanning::ScanSchedulePolicyRow;
+    use futures::FutureExt;
+    use serial_test::serial;
     use sqlx::PgPool;
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
     use tempfile::tempdir;
+    use tokio::sync::Semaphore;
     use uuid::Uuid;
+
+    /// Proves output and recorded-derivation availability are independent.
+    #[tokio::test]
+    async fn observe_scan_inputs_requires_both_recorded_paths() {
+        let dir = tempdir().expect("temp store dir");
+        let output = dir.path().join("output");
+        let derivation = dir.path().join("recorded.drv");
+        tokio::fs::write(&output, b"present output")
+            .await
+            .expect("output fixture should be written");
+        let inputs =
+            observe_scan_inputs(&output.to_string_lossy(), &derivation.to_string_lossy()).await;
+        assert!(inputs.output_present);
+        assert!(!inputs.derivation_present);
+        assert!(!inputs.ready());
+
+        tokio::fs::write(&derivation, b"present derivation")
+            .await
+            .expect("derivation fixture should be written");
+        assert!(
+            observe_scan_inputs(&output.to_string_lossy(), &derivation.to_string_lossy())
+                .await
+                .ready()
+        );
+    }
 
     #[derive(Clone)]
     struct FakeRunner {
@@ -870,6 +1411,304 @@ mod tests {
         }
     }
 
+    /// Proves a deployed output that reports `unknown-deriver` still uses the
+    /// `.drv` recorded by Crystal Forge, restores only that missing path, and
+    /// reaches the unchanged scan runner successfully.
+    #[tokio::test]
+    async fn recorded_derivation_path_restores_when_output_deriver_is_unknown() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let Some(pool) = db_test_pool().await else {
+            return;
+        };
+        let temp = tempdir().expect("temporary process-seam directory");
+        let output_path = temp.path().join("output");
+        let derivation_path = temp.path().join("recorded.drv");
+        let copy_log = temp.path().join("copy.log");
+        let fake_nix = temp.path().join("nix");
+        let fake_nix_store = temp.path().join("nix-store");
+        std::fs::write(&output_path, "present output").expect("output fixture");
+        std::fs::write(&fake_nix_store, "#!/bin/sh\nprintf 'unknown-deriver\\n'\n")
+            .expect("fake nix-store");
+        std::fs::write(
+            &fake_nix,
+            format!(
+                "#!/bin/sh\nfor last do :; done\nprintf '%s\\n' \"$last\" >> '{}'\ntouch \"$last\"\n",
+                copy_log.display()
+            ),
+        )
+        .expect("fake nix");
+        for program in [&fake_nix, &fake_nix_store] {
+            let mut permissions = std::fs::metadata(program)
+                .expect("fake program metadata")
+                .permissions();
+            permissions.set_mode(0o700);
+            std::fs::set_permissions(program, permissions).expect("fake program permissions");
+        }
+
+        let deriver_query = TokioCommand::new(&fake_nix_store)
+            .args(["--query", "--deriver"])
+            .arg(&output_path)
+            .output()
+            .await
+            .expect("fake deriver query");
+        assert_eq!(
+            String::from_utf8_lossy(&deriver_query.stdout).trim(),
+            "unknown-deriver",
+            "the fixture must reproduce the deployed Nix response"
+        );
+
+        let mut derivation = insert_derivation(
+            &pool,
+            None,
+            &format!("task-325-recorded-path-{}", Uuid::new_v4()),
+            "nixos",
+        )
+        .await
+        .expect("recorded-path derivation should be inserted");
+        derivation.store_path = Some(output_path.to_string_lossy().into_owned());
+        derivation.derivation_path = Some(derivation_path.to_string_lossy().into_owned());
+        sqlx::query(
+            r#"
+            UPDATE derivations
+            SET status_id = $2, completed_at = NOW(), store_path = $3,
+                derivation_path = $4
+            WHERE id = $1
+            "#,
+        )
+        .bind(derivation.id)
+        .bind(EvaluationStatus::BuildComplete.as_id())
+        .bind(derivation.store_path.as_deref())
+        .bind(derivation.derivation_path.as_deref())
+        .execute(&pool)
+        .await
+        .expect("recorded-path derivation should be build-complete");
+        sqlx::query(
+            r#"
+            INSERT INTO cache_push_jobs (
+                derivation_id, store_path, cache_destination, status,
+                completed_at
+            )
+            VALUES ($1, $2, 'file:///unused-test-cache', 'completed', NOW())
+            "#,
+        )
+        .bind(derivation.id)
+        .bind(derivation.store_path.as_deref())
+        .execute(&pool)
+        .await
+        .expect("completed cache push should be inserted");
+        let claim = match create_cve_scan(&pool, derivation.id, "vulnix", None)
+            .await
+            .expect("recorded-path scan should be created")
+        {
+            CreateCveScanOutcome::Created(claim) => claim,
+            CreateCveScanOutcome::Existing(_) => panic!("recorded-path scan must be new"),
+        };
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let runner = FakeRunner {
+            calls: calls.clone(),
+        };
+        execute_scan_inner_with_nix_program(
+            &pool,
+            &runner,
+            None,
+            &derivation,
+            claim.scan_id,
+            claim.execution_id,
+            fake_nix.as_os_str(),
+        )
+        .await
+        .expect("the prepared scan should succeed");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(
+            derivation_path.exists(),
+            "the recorded .drv must be restored"
+        );
+        let copied = std::fs::read_to_string(copy_log).expect("copy log");
+        assert_eq!(copied.lines().count(), 1, "only one path may be copied");
+        assert_eq!(copied.trim(), derivation_path.to_string_lossy());
+        assert!(
+            output_path.exists(),
+            "the existing output must not be recopied"
+        );
+        let status: String = sqlx::query_scalar("SELECT status FROM cve_scans WHERE id = $1")
+            .bind(claim.scan_id)
+            .fetch_one(&pool)
+            .await
+            .expect("recorded-path scan status should resolve");
+        assert_eq!(status, "completed");
+
+        sqlx::query("DELETE FROM cve_scans WHERE derivation_id = $1")
+            .bind(derivation.id)
+            .execute(&pool)
+            .await
+            .expect("recorded-path scans should be deleted");
+        sqlx::query("DELETE FROM cache_push_jobs WHERE derivation_id = $1")
+            .bind(derivation.id)
+            .execute(&pool)
+            .await
+            .expect("recorded-path cache pushes should be deleted");
+        sqlx::query("DELETE FROM derivations WHERE id = $1")
+            .bind(derivation.id)
+            .execute(&pool)
+            .await
+            .expect("recorded-path derivation should be deleted");
+    }
+
+    /// Proves separate eligible caches can collectively restore the output and
+    /// recorded derivation without recopying the path restored first.
+    #[tokio::test]
+    async fn scan_inputs_restore_independently_across_cache_sources() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempdir().expect("temporary split-cache directory");
+        let output_path = temp.path().join("output");
+        let derivation_path = temp.path().join("recorded.drv");
+        let copy_log = temp.path().join("copy.log");
+        let derivation_cache_nix = temp.path().join("derivation-cache-nix");
+        let output_cache_nix = temp.path().join("output-cache-nix");
+        std::fs::write(
+            &derivation_cache_nix,
+            format!(
+                "#!/bin/sh\nfor last do :; done\nprintf 'derivation %s\\n' \"$last\" >> '{}'\nif [ \"$last\" = '{}' ]; then touch \"$last\"; exit 0; fi\nexit 1\n",
+                copy_log.display(),
+                derivation_path.display()
+            ),
+        )
+        .expect("derivation-cache fake nix");
+        std::fs::write(
+            &output_cache_nix,
+            format!(
+                "#!/bin/sh\nfor last do :; done\nprintf 'output %s\\n' \"$last\" >> '{}'\nif [ \"$last\" = '{}' ]; then touch \"$last\"; exit 0; fi\nexit 1\n",
+                copy_log.display(),
+                output_path.display()
+            ),
+        )
+        .expect("output-cache fake nix");
+        for program in [&derivation_cache_nix, &output_cache_nix] {
+            let mut permissions = std::fs::metadata(program)
+                .expect("fake program metadata")
+                .permissions();
+            permissions.set_mode(0o700);
+            std::fs::set_permissions(program, permissions).expect("fake program permissions");
+        }
+
+        let derivation_source = MaterializationSource {
+            label: "derivation-cache".to_string(),
+            from_url: "file:///derivation-cache".to_string(),
+            cache_config: None,
+            trusted_public_key: None,
+            nix_config_lines: Vec::new(),
+        };
+        assert!(
+            !restore_scan_inputs_from_source(
+                &derivation_source,
+                &output_path.to_string_lossy(),
+                &derivation_path.to_string_lossy(),
+                std::time::Duration::from_secs(5),
+                derivation_cache_nix.as_os_str(),
+            )
+            .await
+            .expect("first cache attempt should complete")
+        );
+        assert!(!output_path.exists());
+        assert!(derivation_path.exists());
+
+        let output_source = MaterializationSource {
+            label: "output-cache".to_string(),
+            from_url: "file:///output-cache".to_string(),
+            cache_config: None,
+            trusted_public_key: None,
+            nix_config_lines: Vec::new(),
+        };
+        assert!(
+            restore_scan_inputs_from_source(
+                &output_source,
+                &output_path.to_string_lossy(),
+                &derivation_path.to_string_lossy(),
+                std::time::Duration::from_secs(5),
+                output_cache_nix.as_os_str(),
+            )
+            .await
+            .expect("second cache attempt should complete")
+        );
+
+        let copied = std::fs::read_to_string(copy_log).expect("copy log");
+        assert_eq!(
+            copied.lines().collect::<Vec<_>>(),
+            vec![
+                format!("derivation {}", output_path.display()),
+                format!("derivation {}", derivation_path.display()),
+                format!("output {}", output_path.display()),
+            ],
+            "the second source must not recopy the restored derivation"
+        );
+    }
+
+    #[derive(Clone)]
+    struct BlockingRunner {
+        calls: Arc<AtomicUsize>,
+        active: Arc<AtomicUsize>,
+        max_active: Arc<AtomicUsize>,
+        cancelled: Arc<AtomicUsize>,
+        release: Arc<Semaphore>,
+    }
+
+    struct ActiveCallGuard {
+        active: Arc<AtomicUsize>,
+        cancelled: Arc<AtomicUsize>,
+        completed: bool,
+    }
+
+    impl Drop for ActiveCallGuard {
+        fn drop(&mut self) {
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            if !self.completed {
+                self.cancelled.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    #[async_trait]
+    impl CveScanRunner for BlockingRunner {
+        async fn scan_derivation(
+            &self,
+            _pool: &PgPool,
+            _derivation_id: i32,
+            _vulnix_version: Option<String>,
+        ) -> Result<crate::vulnix::vulnix_parser::VulnixScanOutput> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_active.fetch_max(active, Ordering::SeqCst);
+            let mut guard = ActiveCallGuard {
+                active: self.active.clone(),
+                cancelled: self.cancelled.clone(),
+                completed: false,
+            };
+
+            let permit = self
+                .release
+                .acquire()
+                .await
+                .context("blocking test runner semaphore closed")?;
+            permit.forget();
+            guard.completed = true;
+            Ok(vec![])
+        }
+    }
+
+    async fn wait_for_counter(counter: &AtomicUsize, expected: usize, description: &str) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while counter.load(Ordering::SeqCst) < expected {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {description}"));
+    }
+
     async fn db_test_pool() -> Option<PgPool> {
         let Ok(db_url) = std::env::var("CRYSTAL_FORGE_TEST_DATABASE_URL") else {
             return None;
@@ -879,6 +1718,32 @@ mod tests {
                 .await
                 .expect("failed to connect to CRYSTAL_FORGE_TEST_DATABASE_URL"),
         )
+    }
+
+    async fn restore_scan_schedule_policy(pool: &PgPool, policy: &ScanSchedulePolicyRow) {
+        sqlx::query(
+            r#"
+            UPDATE scan_schedule_policy
+            SET on_build = $1,
+                deployed_interval = $2,
+                recent_interval = $3,
+                archived_interval = $4,
+                archived_enabled = $5,
+                rebuild_to_scan = $6,
+                updated_at = $7
+            WHERE id = 1
+            "#,
+        )
+        .bind(policy.on_build)
+        .bind(&policy.deployed_interval)
+        .bind(&policy.recent_interval)
+        .bind(&policy.archived_interval)
+        .bind(policy.archived_enabled)
+        .bind(policy.rebuild_to_scan)
+        .bind(policy.updated_at)
+        .execute(pool)
+        .await
+        .expect("original scan schedule policy should be restored");
     }
 
     /// Confirms that [`run_cve_scan_loop`] exits cleanly when vulnix is not on
@@ -973,7 +1838,7 @@ mod tests {
             commit_id: None,
             derivation_type: crate::derivations::DerivationType::NixOS,
             derivation_name: "test-nonexistent".into(),
-            derivation_path: None,
+            derivation_path: Some("/nix/store/00000000000000000000000000000000-test.drv".into()),
             derivation_target: None,
             scheduled_at: None,
             completed_at: None,
@@ -998,6 +1863,8 @@ mod tests {
             &pool,
             &derivation,
             derivation.store_path.as_ref().unwrap(),
+            derivation.derivation_path.as_ref().unwrap(),
+            std::ffi::OsStr::new("nix"),
         )
         .await;
 
@@ -1054,13 +1921,20 @@ mod tests {
     /// The test is skipped when the variable is absent; CI should provision a
     /// dedicated database and set this variable to ensure the check always runs.
     #[tokio::test]
+    #[serial(scan_schedule_policy)]
     async fn scan_cycle_processes_target_with_fake_runner() {
         let Some(pool) = db_test_pool().await else {
             return;
         };
+        let original_policy = get_scan_schedule_policy(&pool)
+            .await
+            .expect("original scan schedule policy should resolve");
         let tempdir = tempdir().expect("tempdir should be created");
         let store_path = tempdir.path().join("task-396-scan-cycle-store-path");
+        let derivation_path = tempdir.path().join("task-396-scan-cycle.drv");
         std::fs::create_dir_all(&store_path).expect("store path dir should be created");
+        std::fs::write(&derivation_path, "test derivation")
+            .expect("derivation path should be created");
 
         // This test uses the dedicated shared test database rather than a
         // per-test database. Retire leftovers from interrupted prior runs so
@@ -1090,8 +1964,28 @@ mod tests {
         .await
         .expect("scan schedule policy should be inserted");
 
+        let assertions =
+            std::panic::AssertUnwindSafe(scan_cycle_processes_target_with_fake_runner_assertions(
+                &pool,
+                &store_path,
+                &derivation_path,
+            ))
+            .catch_unwind()
+            .await;
+
+        restore_scan_schedule_policy(&pool, &original_policy).await;
+        if let Err(panic) = assertions {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    async fn scan_cycle_processes_target_with_fake_runner_assertions(
+        pool: &PgPool,
+        store_path: &std::path::Path,
+        derivation_path: &std::path::Path,
+    ) {
         let derivation_name = format!("task-396-cycle-{}", Uuid::new_v4());
-        let derivation = insert_derivation(&pool, None, &derivation_name, "nixos")
+        let derivation = insert_derivation(pool, None, &derivation_name, "nixos")
             .await
             .expect("derivation should be inserted");
 
@@ -1100,14 +1994,16 @@ mod tests {
             UPDATE derivations
             SET status_id = $2,
                 completed_at = '1900-01-01 00:00:00+00'::timestamptz,
-                store_path = $3
+                store_path = $3,
+                derivation_path = $4
             WHERE id = $1
             "#,
         )
         .bind(derivation.id)
         .bind(EvaluationStatus::BuildComplete.as_id())
         .bind(store_path.to_string_lossy().to_string())
-        .execute(&pool)
+        .bind(derivation_path.to_string_lossy().to_string())
+        .execute(pool)
         .await
         .expect("derivation should be marked build-complete");
 
@@ -1118,7 +2014,7 @@ mod tests {
         let enabled_rx = tokio::sync::RwLock::new(true);
 
         scan_cycle_with_runner(
-            &pool,
+            pool,
             &vulnix_config,
             &runner,
             Some("test".to_string()),
@@ -1127,7 +2023,7 @@ mod tests {
         .await
         .expect("scan cycle should succeed");
         scan_cycle_with_runner(
-            &pool,
+            pool,
             &vulnix_config,
             &runner,
             Some("test".to_string()),
@@ -1153,12 +2049,572 @@ mod tests {
             "#,
             )
             .bind(derivation.id)
-            .fetch_one(&pool)
+            .fetch_one(pool)
             .await
             .expect("scan row should exist");
 
         assert_eq!(status, Some("completed".to_string()));
         assert!(completed_at.is_some(), "scan should be terminal");
+
+        sqlx::query("UPDATE scan_schedule_policy SET on_build = FALSE WHERE id = 1")
+            .execute(pool)
+            .await
+            .expect("on-build scanning should be disabled");
+        let disabled_derivation = insert_derivation(
+            pool,
+            None,
+            &format!("task-325-disabled-cycle-{}", Uuid::new_v4()),
+            "nixos",
+        )
+        .await
+        .expect("disabled-cycle derivation should be inserted");
+        sqlx::query(
+            r#"
+            UPDATE derivations
+            SET status_id = $2,
+                completed_at = NOW(),
+                store_path = $3
+            WHERE id = $1
+            "#,
+        )
+        .bind(disabled_derivation.id)
+        .bind(EvaluationStatus::BuildComplete.as_id())
+        .bind(store_path.to_string_lossy().to_string())
+        .execute(pool)
+        .await
+        .expect("disabled-cycle derivation should be marked build-complete");
+
+        scan_cycle_with_runner(
+            pool,
+            &vulnix_config,
+            &runner,
+            Some("test".to_string()),
+            &enabled_rx,
+        )
+        .await
+        .expect("disabled on-build scan cycle should succeed");
+        assert_eq!(
+            runner.calls.load(Ordering::SeqCst),
+            1,
+            "on_build=false must not process a new post-build target"
+        );
+
+        let derivation_ids = vec![derivation.id, disabled_derivation.id];
+        sqlx::query("DELETE FROM cve_scans WHERE derivation_id = ANY($1)")
+            .bind(&derivation_ids)
+            .execute(pool)
+            .await
+            .expect("scan-cycle scans should be deleted");
+        sqlx::query("DELETE FROM derivations WHERE id = ANY($1)")
+            .bind(&derivation_ids)
+            .execute(pool)
+            .await
+            .expect("scan-cycle derivations should be deleted");
+    }
+
+    /// Proves a claim recovered before it obtains its execution lock cannot
+    /// launch a scanner, and active uniqueness prevents a replacement until
+    /// the resumed owner observes the lost token and acknowledges revocation.
+    #[tokio::test]
+    async fn recovered_claim_cannot_start_scanner_during_execution_handoff() {
+        let Some(pool) = db_test_pool().await else {
+            return;
+        };
+        let temp = tempdir().expect("handoff store path");
+        let derivation_path = temp.path().join("task-325-handoff.drv");
+        std::fs::write(&derivation_path, "test derivation")
+            .expect("handoff derivation path should be created");
+        let derivation = insert_derivation(
+            &pool,
+            None,
+            &format!("task-325-handoff-{}", Uuid::new_v4()),
+            "nixos",
+        )
+        .await
+        .expect("handoff derivation should be inserted");
+        sqlx::query(
+            "UPDATE derivations SET status_id = $2, completed_at = NOW(), store_path = $3, derivation_path = $4 WHERE id = $1",
+        )
+        .bind(derivation.id)
+        .bind(EvaluationStatus::BuildComplete.as_id())
+        .bind(temp.path().to_string_lossy().to_string())
+        .bind(derivation_path.to_string_lossy().to_string())
+        .execute(&pool)
+        .await
+        .expect("handoff derivation should be build-complete");
+        let derivation = crate::queries::derivations::get_derivation_by_id(&pool, derivation.id)
+            .await
+            .expect("handoff derivation should reload");
+        let claim = match create_cve_scan(&pool, derivation.id, "vulnix", None)
+            .await
+            .expect("handoff claim should be created")
+        {
+            CreateCveScanOutcome::Created(claim) => claim,
+            CreateCveScanOutcome::Existing(_) => panic!("handoff claim must be new"),
+        };
+        sqlx::query(
+            "UPDATE cve_scans SET scan_metadata = scan_metadata || jsonb_build_object('execution_started_at', NOW() - INTERVAL '2 hours', 'execution_heartbeat_at', NOW() - INTERVAL '2 hours') WHERE id = $1",
+        )
+        .bind(claim.scan_id)
+        .execute(&pool)
+        .await
+        .expect("handoff claim should be aged");
+
+        let runner = FakeRunner {
+            calls: Arc::new(AtomicUsize::new(0)),
+        };
+        let gate = ExecutionHandoffGate {
+            arrived: Arc::new(Semaphore::new(0)),
+            resume: Arc::new(Semaphore::new(0)),
+        };
+        let execution = execute_scan_with_handoff_gate(
+            &pool,
+            &runner,
+            None,
+            &derivation,
+            claim.scan_id,
+            claim.execution_id,
+            Some(&gate),
+        );
+        tokio::pin!(execution);
+        tokio::select! {
+            biased;
+            result = &mut execution => panic!("handoff unexpectedly completed: {result:?}"),
+            permit = gate.arrived.acquire() => permit.expect("arrival gate").forget(),
+        }
+
+        assert_eq!(
+            recover_stale_scans(&pool, std::time::Duration::from_secs(1800))
+                .await
+                .expect("stale handoff claim should be recovered"),
+            1
+        );
+        assert!(matches!(
+            create_cve_scan(&pool, derivation.id, "vulnix", None)
+                .await
+                .expect("replacement probe should succeed"),
+            CreateCveScanOutcome::Existing(id) if id == claim.scan_id
+        ));
+        assert_eq!(runner.calls.load(Ordering::SeqCst), 0);
+
+        gate.resume.add_permits(1);
+        let error = execution
+            .await
+            .expect_err("recovered owner must fail its handoff CAS");
+        assert!(error.to_string().contains("lost execution ownership"));
+        assert_eq!(runner.calls.load(Ordering::SeqCst), 0);
+
+        let replacement = match create_cve_scan(&pool, derivation.id, "vulnix", None)
+            .await
+            .expect("replacement claim should be created after acknowledgment")
+        {
+            CreateCveScanOutcome::Created(claim) => claim,
+            CreateCveScanOutcome::Existing(_) => panic!("replacement must be new"),
+        };
+        execute_scan(
+            &pool,
+            &runner,
+            None,
+            &derivation,
+            replacement.scan_id,
+            replacement.execution_id,
+        )
+        .await
+        .expect("replacement execution should complete");
+        assert_eq!(runner.calls.load(Ordering::SeqCst), 1);
+
+        sqlx::query("DELETE FROM cve_scans WHERE derivation_id = $1")
+            .bind(derivation.id)
+            .execute(&pool)
+            .await
+            .expect("handoff scans should be deleted");
+        sqlx::query("DELETE FROM derivations WHERE id = $1")
+            .bind(derivation.id)
+            .execute(&pool)
+            .await
+            .expect("handoff derivation should be deleted");
+    }
+
+    /// A policy-created execution uses the same renewable ownership lease as a
+    /// queued execution. Healthy heartbeats prevent stale recovery; losing the
+    /// token cancels the running scanner before a replacement starts.
+    #[tokio::test]
+    async fn policy_scan_heartbeat_prevents_recovery_and_ownership_loss_cancels_execution() {
+        let Some(pool) = db_test_pool().await else {
+            return;
+        };
+        let recovery_pool = PgPool::connect(
+            &std::env::var("CRYSTAL_FORGE_TEST_DATABASE_URL")
+                .expect("dedicated CVE database URL should remain available"),
+        )
+        .await
+        .expect("independent stale-recovery pool should connect");
+        let tempdir = tempdir().expect("tempdir should be created");
+        let store_path = tempdir.path().join("task-325-policy-lease-store-path");
+        let derivation_path = tempdir.path().join("task-325-policy-lease.drv");
+        std::fs::create_dir_all(&store_path).expect("store path dir should be created");
+        std::fs::write(&derivation_path, "test derivation")
+            .expect("derivation path should be created");
+
+        let mut derivation = insert_derivation(
+            &pool,
+            None,
+            &format!("task-325-policy-lease-{}", Uuid::new_v4()),
+            "nixos",
+        )
+        .await
+        .expect("policy lease derivation should be inserted");
+        derivation.store_path = Some(store_path.to_string_lossy().to_string());
+        derivation.derivation_path = Some(derivation_path.to_string_lossy().to_string());
+        let derivation = Arc::new(derivation);
+
+        let runner = BlockingRunner {
+            calls: Arc::new(AtomicUsize::new(0)),
+            active: Arc::new(AtomicUsize::new(0)),
+            max_active: Arc::new(AtomicUsize::new(0)),
+            cancelled: Arc::new(AtomicUsize::new(0)),
+            release: Arc::new(Semaphore::new(0)),
+        };
+        let enabled = Arc::new(tokio::sync::RwLock::new(true));
+
+        let first_pool = pool.clone();
+        let first_runner = runner.clone();
+        let first_derivation = derivation.clone();
+        let first_enabled = enabled.clone();
+        let first = tokio::spawn(async move {
+            scan_one(
+                &first_pool,
+                &first_runner,
+                Some("test".to_string()),
+                &first_derivation,
+                &first_enabled,
+            )
+            .await
+        });
+        wait_for_counter(&runner.calls, 1, "first policy scanner invocation").await;
+
+        let (scan_id, execution_id, initial_heartbeat): (
+            Uuid,
+            Uuid,
+            chrono::DateTime<chrono::Utc>,
+        ) = sqlx::query_as(
+            r#"
+            SELECT
+                id,
+                (scan_metadata ->> 'execution_id')::uuid,
+                (scan_metadata ->> 'execution_heartbeat_at')::timestamptz
+            FROM cve_scans
+            WHERE derivation_id = $1 AND status = 'in_progress'
+            "#,
+        )
+        .bind(derivation.id)
+        .fetch_one(&pool)
+        .await
+        .expect("policy-created execution should have lease metadata");
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let heartbeat: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+                    "SELECT (scan_metadata ->> 'execution_heartbeat_at')::timestamptz FROM cve_scans WHERE id = $1",
+                )
+                .bind(scan_id)
+                .fetch_one(&pool)
+                .await
+                .expect("policy heartbeat should resolve");
+                if heartbeat > initial_heartbeat {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("policy execution should refresh its heartbeat");
+
+        sqlx::query(
+            r#"
+            UPDATE cve_scans
+            SET scan_metadata = scan_metadata || jsonb_build_object(
+                'execution_started_at', NOW() - INTERVAL '2 hours',
+                'execution_heartbeat_at', NOW() - INTERVAL '2 hours'
+            )
+            WHERE id = $1 AND scan_metadata ->> 'execution_id' = $2::uuid::text
+            "#,
+        )
+        .bind(scan_id)
+        .bind(execution_id)
+        .execute(&pool)
+        .await
+        .expect("policy execution should be artificially aged");
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let heartbeat: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+                    "SELECT (scan_metadata ->> 'execution_heartbeat_at')::timestamptz FROM cve_scans WHERE id = $1",
+                )
+                .bind(scan_id)
+                .fetch_one(&pool)
+                .await
+                .expect("refreshed policy heartbeat should resolve");
+                if heartbeat > Utc::now() - chrono::Duration::minutes(1) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("policy execution should renew its artificially aged lease");
+
+        assert_eq!(
+            recover_stale_scans(&recovery_pool, std::time::Duration::from_secs(1800))
+                .await
+                .expect("concurrent stale recovery should succeed"),
+            0,
+            "a healthy policy heartbeat must prevent stale recovery"
+        );
+
+        sqlx::query(
+            r#"
+            UPDATE cve_scans
+            SET scan_metadata = scan_metadata || jsonb_build_object(
+                'execution_revoked_at', NOW(),
+                'stale_recovery_reason', 'test-intentional-revocation'
+            )
+            WHERE id = $1
+              AND status = 'in_progress'
+              AND scan_metadata ->> 'execution_id' = $2::uuid::text
+            "#,
+        )
+        .bind(scan_id)
+        .bind(execution_id)
+        .execute(&recovery_pool)
+        .await
+        .expect("test should intentionally revoke the first policy execution");
+
+        let first_result = tokio::time::timeout(std::time::Duration::from_secs(5), first)
+            .await
+            .expect("revoked policy execution should stop promptly")
+            .expect("first policy task should not panic");
+        assert!(
+            first_result
+                .expect_err("revoked policy execution should report ownership loss")
+                .to_string()
+                .contains("lost execution ownership")
+        );
+        assert_eq!(runner.cancelled.load(Ordering::SeqCst), 1);
+        assert_eq!(runner.active.load(Ordering::SeqCst), 0);
+
+        let second_pool = pool.clone();
+        let second_runner = runner.clone();
+        let second_derivation = derivation.clone();
+        let second_enabled = enabled.clone();
+        let second = tokio::spawn(async move {
+            scan_one(
+                &second_pool,
+                &second_runner,
+                Some("test".to_string()),
+                &second_derivation,
+                &second_enabled,
+            )
+            .await
+        });
+        wait_for_counter(&runner.calls, 2, "replacement policy scanner invocation").await;
+        assert_eq!(
+            runner.max_active.load(Ordering::SeqCst),
+            1,
+            "replacement must not overlap the revoked execution"
+        );
+        runner.release.add_permits(1);
+        second
+            .await
+            .expect("replacement policy task should not panic")
+            .expect("replacement policy execution should complete");
+
+        let statuses: Vec<String> = sqlx::query_scalar(
+            "SELECT status FROM cve_scans WHERE derivation_id = $1 ORDER BY created_at, id",
+        )
+        .bind(derivation.id)
+        .fetch_all(&pool)
+        .await
+        .expect("policy scan statuses should resolve");
+        assert_eq!(statuses, vec!["failed", "completed"]);
+
+        sqlx::query("DELETE FROM cve_scans WHERE derivation_id = $1")
+            .bind(derivation.id)
+            .execute(&pool)
+            .await
+            .expect("policy lease scans should be deleted");
+        sqlx::query("DELETE FROM derivations WHERE id = $1")
+            .bind(derivation.id)
+            .execute(&pool)
+            .await
+            .expect("policy lease derivation should be deleted");
+    }
+
+    /// Disabling the worker after Phase 0 claims a queued row must return that
+    /// row to `pending`. Re-enabling on the next cycle then executes it once
+    /// under a newly issued ownership token.
+    #[tokio::test]
+    #[serial(scan_schedule_policy)]
+    async fn disabled_queued_claim_is_requeued_then_executed_once() {
+        let Some(pool) = db_test_pool().await else {
+            return;
+        };
+        let original_policy = get_scan_schedule_policy(&pool)
+            .await
+            .expect("original scan schedule policy should resolve");
+        let tempdir = tempdir().expect("tempdir should be created");
+        let store_path = tempdir.path().join("task-325-requeued-scan-store-path");
+        let derivation_path = tempdir.path().join("task-325-requeued-scan.drv");
+        std::fs::create_dir_all(&store_path).expect("store path dir should be created");
+        std::fs::write(&derivation_path, "test derivation")
+            .expect("derivation path should be created");
+
+        sqlx::query(
+            r#"
+            INSERT INTO scan_schedule_policy (
+                id, on_build, deployed_interval, recent_interval,
+                archived_interval, archived_enabled
+            )
+            VALUES (1, false, '876000h', '876000h', '876000h', false)
+            ON CONFLICT (id) DO UPDATE
+            SET on_build = EXCLUDED.on_build,
+                deployed_interval = EXCLUDED.deployed_interval,
+                recent_interval = EXCLUDED.recent_interval,
+                archived_interval = EXCLUDED.archived_interval,
+                archived_enabled = EXCLUDED.archived_enabled,
+                updated_at = NOW()
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("scan policy should suppress non-queued phases");
+
+        let assertions = std::panic::AssertUnwindSafe(
+            disabled_queued_claim_is_requeued_then_executed_once_assertions(
+                &pool,
+                &store_path,
+                &derivation_path,
+            ),
+        )
+        .catch_unwind()
+        .await;
+
+        restore_scan_schedule_policy(&pool, &original_policy).await;
+        if let Err(panic) = assertions {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    async fn disabled_queued_claim_is_requeued_then_executed_once_assertions(
+        pool: &PgPool,
+        store_path: &std::path::Path,
+        derivation_path: &std::path::Path,
+    ) {
+        let derivation = insert_derivation(
+            pool,
+            None,
+            &format!("task-325-requeue-cycle-{}", Uuid::new_v4()),
+            "nixos",
+        )
+        .await
+        .expect("requeue-cycle derivation should be inserted");
+        sqlx::query(
+            r#"
+            UPDATE derivations
+            SET status_id = $2, completed_at = NOW(), store_path = $3,
+                derivation_path = $4
+            WHERE id = $1
+            "#,
+        )
+        .bind(derivation.id)
+        .bind(EvaluationStatus::BuildComplete.as_id())
+        .bind(store_path.to_string_lossy().to_string())
+        .bind(derivation_path.to_string_lossy().to_string())
+        .execute(pool)
+        .await
+        .expect("requeue-cycle derivation should be build-complete");
+        let scan_id = Uuid::new_v4();
+        sqlx::query(
+            r#"
+            INSERT INTO cve_scans (
+                id, derivation_id, scanner_name, status, attempts,
+                total_packages, total_vulnerabilities,
+                critical_count, high_count, medium_count, low_count
+            )
+            VALUES ($1, $2, 'vulnix', 'pending', 0, 0, 0, 0, 0, 0, 0)
+            "#,
+        )
+        .bind(scan_id)
+        .bind(derivation.id)
+        .execute(pool)
+        .await
+        .expect("queued scan should be inserted");
+
+        let runner = FakeRunner {
+            calls: Arc::new(AtomicUsize::new(0)),
+        };
+        let vulnix_config = crate::config::VulnixConfig::default();
+        let enabled_rx = tokio::sync::RwLock::new(true);
+        let claim = claim_queued_cve_scans(pool, 1)
+            .await
+            .expect("enabled worker should claim the queued scan")
+            .into_iter()
+            .find(|claim| claim.scan_id == scan_id)
+            .expect("the test scan should be claimed");
+        *enabled_rx.write().await = false;
+        assert!(
+            requeue_claim_if_disabled(pool, claim, &enabled_rx)
+                .await
+                .expect("disable after claim should safely requeue it")
+        );
+
+        let (status, attempts, has_execution_id): (String, i32, bool) = sqlx::query_as(
+            "SELECT status, attempts, scan_metadata ? 'execution_id' FROM cve_scans WHERE id = $1",
+        )
+        .bind(scan_id)
+        .fetch_one(pool)
+        .await
+        .expect("requeued scan should resolve");
+        assert_eq!(status, "pending");
+        assert_eq!(attempts, 1);
+        assert!(!has_execution_id);
+        assert_eq!(runner.calls.load(Ordering::SeqCst), 0);
+
+        *enabled_rx.write().await = true;
+        scan_cycle_with_runner(
+            pool,
+            &vulnix_config,
+            &runner,
+            Some("test".to_string()),
+            &enabled_rx,
+        )
+        .await
+        .expect("re-enabled cycle should execute the queued scan");
+
+        let (status, attempts): (String, i32) =
+            sqlx::query_as("SELECT status, attempts FROM cve_scans WHERE id = $1")
+                .bind(scan_id)
+                .fetch_one(pool)
+                .await
+                .expect("executed scan should resolve");
+        assert_eq!(status, "completed");
+        assert_eq!(attempts, 2, "each durable claim remains in audit history");
+        assert_eq!(
+            runner.calls.load(Ordering::SeqCst),
+            1,
+            "the re-enabled worker must execute the queued scan exactly once"
+        );
+
+        sqlx::query("DELETE FROM cve_scans WHERE id = $1")
+            .bind(scan_id)
+            .execute(pool)
+            .await
+            .expect("requeue-cycle scan should be deleted");
+        sqlx::query("DELETE FROM derivations WHERE id = $1")
+            .bind(derivation.id)
+            .execute(pool)
+            .await
+            .expect("requeue-cycle derivation should be deleted");
     }
 
     /// Confirms that [`BackgroundJobHandle`] state machine correctly reports
@@ -1205,5 +2661,216 @@ mod tests {
         let status = handle.status().await;
         assert!(status.last_run_at.is_some(), "last_run_at should be set");
         assert!(status.next_run_at.is_some(), "next_run_at should be set");
+    }
+
+    /// Proves the complete stale-owner fencing invariant against a real
+    /// PostgreSQL session, in four stages:
+    ///
+    /// 1. A stale heartbeat with a still-held execution lock (a paused live
+    ///    process) must leave the row completely untouched — recovery must
+    ///    revoke nothing while the owning session could still be alive.
+    /// 2. Explicitly releasing the lock (never merely dropping the pooled
+    ///    connection, which does not terminate the backend session) makes the
+    ///    scan look like a crashed process, so the next recovery pass revokes
+    ///    it while still retaining active-scan uniqueness.
+    /// 3. Before the acknowledgment grace period elapses, revocation alone
+    ///    does not finalize the row.
+    /// 4. Once the grace period has elapsed, recovery finalizes the
+    ///    revocation to `failed`.
+    #[tokio::test]
+    async fn stale_execution_lock_prevents_recovery_paused_process_race() {
+        use crate::queries::cve_scans::{
+            acquire_execution_lock, execution_lock_is_held, release_execution_lock,
+        };
+
+        let Some(pool) = db_test_pool().await else {
+            return;
+        };
+        let recovery_pool = PgPool::connect(
+            &std::env::var("CRYSTAL_FORGE_TEST_DATABASE_URL")
+                .expect("dedicated CVE database URL should remain available"),
+        )
+        .await
+        .expect("independent stale-recovery pool should connect");
+
+        // 1. Create a token-owned in_progress scan.
+        let derivation = insert_derivation(
+            &pool,
+            None,
+            &format!("task-325-lock-race-{}", Uuid::new_v4()),
+            "nixos",
+        )
+        .await
+        .expect("test derivation should be inserted");
+
+        let claim = create_cve_scan(&pool, derivation.id, "test-vulnix", None)
+            .await
+            .expect("execution claim should be created");
+        let CreateCveScanOutcome::Created(claim) = claim else {
+            panic!("expected a newly created execution claim");
+        };
+
+        // 2. Acquire its execution advisory lock on a dedicated connection,
+        // simulating a paused/stalled live process that still holds its
+        // backend session.
+        let mut lock_holder = pool
+            .acquire()
+            .await
+            .expect("lock-holder connection should be acquired");
+        acquire_execution_lock(&mut lock_holder, claim.execution_id)
+            .await
+            .expect("advisory lock should be acquired by the simulated paused execution");
+
+        // 3. The lock must be observably held.
+        assert!(
+            execution_lock_is_held(&pool, claim.execution_id)
+                .await
+                .expect("lock status should be queryable"),
+            "execution lock must be held after acquisition"
+        );
+
+        // 4. Artificially age the heartbeat past the stale threshold.
+        sqlx::query(
+            r#"
+            UPDATE cve_scans
+            SET scan_metadata = scan_metadata || jsonb_build_object(
+                'execution_heartbeat_at', NOW() - INTERVAL '2 hours'
+            )
+            WHERE id = $1
+            "#,
+        )
+        .bind(claim.scan_id)
+        .execute(&pool)
+        .await
+        .expect("heartbeat should be aged");
+
+        // 5/6. A stale heartbeat with a still-held execution lock must not
+        // revoke the row. Recovery refreshes its lease instead of treating a
+        // paused live process as crashed.
+        let recovered_while_held =
+            recover_stale_scans(&recovery_pool, std::time::Duration::from_secs(1800))
+                .await
+                .expect("recovery attempt while lock is held should succeed");
+        assert_eq!(
+            recovered_while_held, 0,
+            "recovery must not act on a stale heartbeat while its advisory lock is still held"
+        );
+        let (status, is_revoked): (String, bool) = sqlx::query_as(
+            "SELECT status, scan_metadata ? 'execution_revoked_at' FROM cve_scans WHERE id = $1",
+        )
+        .bind(claim.scan_id)
+        .fetch_one(&pool)
+        .await
+        .expect("execution state should be queryable");
+        assert_eq!(
+            status, "in_progress",
+            "a live paused process must remain in_progress"
+        );
+        assert!(
+            !is_revoked,
+            "a live paused process must not be revoked while its lock is held"
+        );
+
+        // 7. Explicitly release the advisory lock. Dropping the pooled
+        // connection is intentionally NOT used here: returning a connection
+        // to the pool does not terminate its backend session, so the lock
+        // would remain held from PostgreSQL's perspective.
+        assert!(
+            release_execution_lock(&mut lock_holder, claim.execution_id)
+                .await
+                .expect("explicit unlock should execute"),
+            "pg_advisory_unlock must confirm the lock was released"
+        );
+        drop(lock_holder);
+
+        // 8. The lock must now be observably released.
+        assert!(
+            !execution_lock_is_held(&pool, claim.execution_id)
+                .await
+                .expect("lock status should be queryable after release"),
+            "execution lock must be released after explicit unlock"
+        );
+
+        sqlx::query(
+            r#"
+            UPDATE cve_scans
+            SET scan_metadata = scan_metadata || jsonb_build_object(
+                'execution_heartbeat_at', NOW() - INTERVAL '2 hours'
+            )
+            WHERE id = $1
+            "#,
+        )
+        .bind(claim.scan_id)
+        .execute(&pool)
+        .await
+        .expect("released execution heartbeat should be aged without sleeping");
+
+        // 9/10. Recovery may now revoke the still heartbeat-stale execution,
+        // but must retain active-scan uniqueness until the acknowledgment
+        // grace period elapses.
+        let recovered_after_release =
+            recover_stale_scans(&recovery_pool, std::time::Duration::from_secs(1800))
+                .await
+                .expect("recovery after lock release should succeed");
+        assert_eq!(
+            recovered_after_release, 1,
+            "recovery must revoke a stale execution once its lock is released"
+        );
+        let (status, is_revoked): (String, bool) = sqlx::query_as(
+            "SELECT status, scan_metadata ? 'execution_revoked_at' FROM cve_scans WHERE id = $1",
+        )
+        .bind(claim.scan_id)
+        .fetch_one(&pool)
+        .await
+        .expect("revoked execution state should be queryable");
+        assert_eq!(
+            status, "in_progress",
+            "revocation retains active-scan uniqueness until the grace period elapses"
+        );
+        assert!(
+            is_revoked,
+            "a crashed process must be revoked once its lock is gone"
+        );
+
+        // 11. Age execution_revoked_at beyond the acknowledgment grace period
+        // instead of sleeping in real time.
+        sqlx::query(
+            "UPDATE cve_scans SET scan_metadata = scan_metadata || jsonb_build_object('execution_revoked_at', NOW() - INTERVAL '2 minutes') WHERE id = $1",
+        )
+        .bind(claim.scan_id)
+        .execute(&pool)
+        .await
+        .expect("revocation should be artificially aged beyond its grace period");
+
+        // 12/13. Recovery now finalizes the expired revocation to failed.
+        let recovered_final =
+            recover_stale_scans(&recovery_pool, std::time::Duration::from_secs(1800))
+                .await
+                .expect("finalization recovery should succeed");
+        assert_eq!(
+            recovered_final, 1,
+            "an expired revocation must be finalized exactly once"
+        );
+        let final_status: String = sqlx::query_scalar("SELECT status FROM cve_scans WHERE id = $1")
+            .bind(claim.scan_id)
+            .fetch_one(&pool)
+            .await
+            .expect("final execution state should be queryable");
+        assert_eq!(
+            final_status, "failed",
+            "execution must be finalized to 'failed' after the grace period elapses"
+        );
+
+        // 14. Clean up.
+        sqlx::query("DELETE FROM cve_scans WHERE id = $1")
+            .bind(claim.scan_id)
+            .execute(&pool)
+            .await
+            .expect("cleanup: cve scan should be deleted");
+        sqlx::query("DELETE FROM derivations WHERE id = $1")
+            .bind(derivation.id)
+            .execute(&pool)
+            .await
+            .expect("cleanup: derivation should be deleted");
     }
 }

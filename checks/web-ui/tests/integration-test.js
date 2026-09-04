@@ -1112,6 +1112,14 @@ async function assertAttribute(locator, name, expected, message) {
   }
 }
 
+async function assertAttachedAttribute(locator, name, expected, message) {
+  await locator.waitFor({ state: "attached", timeout: 5000 });
+  const actual = await locator.getAttribute(name);
+  if (actual !== expected) {
+    throw new Error(`${message} (expected ${name}=${expected}, got ${actual})`);
+  }
+}
+
 async function assertValue(locator, expected, message) {
   await locator.waitFor({ state: "visible", timeout: 5000 });
   const actual = await locator.inputValue();
@@ -7444,6 +7452,63 @@ const steps = [
           body: JSON.stringify([cveRowFixture]),
         });
       });
+      let fleetRescanRequests = 0;
+      let releaseFleetRescan;
+      const fleetRescanRelease = new Promise((resolve) => {
+        releaseFleetRescan = resolve;
+      });
+      // The endpoint enqueues work rather than executing it, and distinguishes
+      // "queued N" from "everything already had an active scan". Both are 202
+      // successes, so the UI must render them differently from an error.
+      const fleetRescanResponses = [
+        {
+          status: 202,
+          payload: { enqueued_count: 3, message: "Queued 3 CVE scan(s)." },
+        },
+        {
+          status: 202,
+          payload: {
+            enqueued_count: 0,
+            message:
+              "All 4 eligible system configuration(s) already have a scan pending or in progress.",
+          },
+        },
+        {
+          status: 202,
+          payload: {
+            enqueued_count: 2,
+            message: "Queued 2 CVE scan(s); 1 already had an active scan.",
+          },
+        },
+        {
+          status: 202,
+          payload: {
+            enqueued_count: 0,
+            message: "No active systems are reporting a running configuration to scan.",
+          },
+        },
+        {
+          status: 503,
+          payload: { error: "CVE scan queue is unavailable" },
+        },
+      ];
+      await page.route("**/api/v1/cves/rescan-fleet", async (route) => {
+        const response =
+          fleetRescanResponses[
+            Math.min(fleetRescanRequests, fleetRescanResponses.length - 1)
+          ];
+        fleetRescanRequests += 1;
+        // Only the first request is held open, so the in-flight disabled state
+        // can be observed deterministically.
+        if (fleetRescanRequests === 1) {
+          await fleetRescanRelease;
+        }
+        await route.fulfill({
+          status: response.status,
+          contentType: "application/json",
+          body: JSON.stringify(response.payload),
+        });
+      });
 
       await page.goto(`${baseUrl}/cves`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000);
@@ -7452,6 +7517,159 @@ const steps = [
       // Assert the page heading is present.
       const heading = page.locator("main h1:has-text('CVEs')");
       await assertVisible(heading, "Expected CVEs heading");
+
+      const fleetRescanButton = page.getByRole("button", { name: "Rescan fleet" });
+      await assertVisible(fleetRescanButton, "Expected admin fleet rescan action");
+      const fleetRescanRequest = page.waitForRequest(
+        (request) =>
+          request.url().includes("/api/v1/cves/rescan-fleet") &&
+          request.method() === "POST",
+      );
+      await fleetRescanButton.click();
+      await fleetRescanRequest;
+      await assertDisabled(
+        page.getByRole("button", { name: "Rescanning…" }),
+        "Fleet rescan action should be disabled while its request is pending",
+      );
+      releaseFleetRescan();
+      await assertVisible(
+        page.getByText("Queued 3 CVE scan(s)."),
+        "Expected fleet rescan success feedback",
+      );
+      const successToast = page
+        .getByRole("status")
+        .filter({ hasText: "Queued 3 CVE scan(s)." });
+      await assertVisible(successToast, "Expected success feedback to use status semantics");
+      await assertAttribute(
+        successToast,
+        "aria-live",
+        "polite",
+        "Success feedback should be announced politely",
+      );
+      await assertAttribute(
+        successToast,
+        "aria-atomic",
+        "true",
+        "Success feedback should be announced atomically",
+      );
+      await assertAttachedAttribute(
+        successToast.locator("svg").first(),
+        "aria-hidden",
+        "true",
+        "Toast status icon should be decorative",
+      );
+      await assertVisible(
+        successToast.getByRole("button", { name: "Dismiss notification" }),
+        "Expected the toast dismiss button to have an accessible name",
+      );
+      await assertAttachedAttribute(
+        successToast.locator("svg").last(),
+        "aria-hidden",
+        "true",
+        "Toast dismiss icon should be decorative",
+      );
+      if (fleetRescanRequests !== 1) {
+        throw new Error(`Expected exactly one fleet rescan request, got ${fleetRescanRequests}`);
+      }
+
+      // A no-op result is still a success and must not be reported as a
+      // failure: every eligible target already had an active scan.
+      await fleetRescanButton.click();
+      await assertVisible(
+        page.getByText("already have a scan pending or in progress"),
+        "Expected fleet rescan no-op feedback to be distinct from an error",
+      );
+      if (fleetRescanRequests !== 2) {
+        throw new Error(
+          `Expected exactly two fleet rescan requests, got ${fleetRescanRequests}`,
+        );
+      }
+
+      // A partial result must preserve both the newly queued count and the
+      // already-active count rather than presenting the request as all-new.
+      await fleetRescanButton.click();
+      await assertVisible(
+        page.getByText("Queued 2 CVE scan(s); 1 already had an active scan."),
+        "Expected partial fleet enqueue/reuse feedback",
+      );
+
+      // An empty active fleet is a successful no-op with a different reason
+      // from the all-already-active result above.
+      await fleetRescanButton.click();
+      await assertVisible(
+        page.getByText("No active systems are reporting a running configuration to scan."),
+        "Expected zero-eligible fleet feedback",
+      );
+
+      await fleetRescanButton.click();
+      await assertVisible(
+        page.getByText("Fleet rescan failed:"),
+        "Expected fleet rescan API failure feedback",
+      );
+      const failureToast = page
+        .getByRole("alert")
+        .filter({ hasText: "Fleet rescan failed:" });
+      await assertVisible(failureToast, "Expected failure feedback to use alert semantics");
+      await assertAttribute(
+        failureToast,
+        "aria-live",
+        "assertive",
+        "Failure feedback should be announced assertively",
+      );
+      await assertAttribute(
+        failureToast,
+        "aria-atomic",
+        "true",
+        "Failure feedback should be announced atomically",
+      );
+      await assertAttachedAttribute(
+        failureToast.locator("svg").first(),
+        "aria-hidden",
+        "true",
+        "Toast failure icon should be decorative",
+      );
+      const dismissFailureToast = failureToast.getByRole("button", {
+        name: "Dismiss notification",
+      });
+      await assertVisible(
+        dismissFailureToast,
+        "Expected persistent error feedback to be dismissible",
+      );
+      await assertAttachedAttribute(
+        failureToast.locator("svg").last(),
+        "aria-hidden",
+        "true",
+        "Toast dismiss icon should be decorative",
+      );
+      await dismissFailureToast.click();
+      await assertHidden(failureToast, "Expected manual dismissal to remove error feedback");
+      if (fleetRescanRequests !== 5) {
+        throw new Error(
+          `Expected five fleet rescan response scenarios, got ${fleetRescanRequests}`,
+        );
+      }
+
+      // Non-admin CVE authorization is intentionally NOT asserted here.
+      //
+      // The `ui_check_auth` / `ui_check_role` query-parameter harness in
+      // `app_shell.rs` is gated behind `#[cfg(debug_assertions)]` so a
+      // production bundle can never be role-spoofed from a URL. This check
+      // serves the release bundle built by `dx bundle --platform web
+      // --release`, so both helpers compile to constants (`false` and
+      // `Role::Admin`) and a `ui_check_role=viewer` navigation is served as
+      // the ordinary session, not as a Viewer. Asserting Viewer denial here
+      // would therefore be unsatisfiable by construction rather than a real
+      // regression signal.
+      //
+      // The same behavior is covered where it is actually decidable:
+      //   - `app_shell::tests::cve_route_denied_for_non_admin` and
+      //     `cve_route_allowed_for_admin` pin the route-level admin policy
+      //     that renders the "Access Denied" panel instead of `CvesView`.
+      //   - `handlers::api::cves::fleet_rescan_authorization_tests` drives the
+      //     real `RequireAdmin` extractor over the actual route and asserts
+      //     401 unauthenticated, 403 Viewer, 403 Operator, and 202 Admin.
+      // Server-side rejection is the authoritative control; hiding the button
+      // is presentation only.
 
       // Assert summary stat cards are rendered.
       const patchableCard = page.locator("main").getByText("Patchable now");
@@ -7520,6 +7738,7 @@ const steps = [
       await page.unroute(/\/api\/v1\/cves\/CVE-2024-1234\/systems$/);
       await page.unroute(/\/api\/v1\/cves\/CVE-2024-1234\/justifications$/);
       await page.unroute(/\/api\/v1\/cves(?:\?.*)?$/);
+      await page.unroute("**/api/v1/cves/rescan-fleet");
     },
   },
   {

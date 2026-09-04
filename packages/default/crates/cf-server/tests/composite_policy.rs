@@ -19,7 +19,10 @@ use crystal_forge::models::deployment_policies::{
     UpdateDeploymentPolicyRequest, composite_rule_result_key, policy_results_json,
 };
 use crystal_forge::queries::cve_scans::{
-    complete_cve_scan, create_cve_scan, mark_cve_scan_failed_by_id,
+    CreateCveScanOutcome, CveScanExecutionClaim, acknowledge_revoked_cve_scan_execution,
+    claim_queued_cve_scans, complete_cve_scan_for_execution, create_cve_scan,
+    mark_cve_scan_failed_by_id_for_execution, recover_stale_scans, requeue_cve_scan_execution,
+    save_scan_results_for_execution,
 };
 use crystal_forge::queries::deployment_policies::{
     create_deployment_policy, get_deployment_policy_by_version, update_deployment_policy,
@@ -43,6 +46,7 @@ use crystal_forge::services::composite_enforcement::{
 };
 use sqlx::PgPool;
 use std::collections::BTreeMap;
+use std::time::Duration;
 use uuid::Uuid;
 
 fn composite_config() -> serde_json::Value {
@@ -1033,15 +1037,40 @@ async fn persisted_kind_evidence(pool: &PgPool, system_id: Uuid, kind: &str) -> 
     .unwrap()
 }
 
-async fn completed_scan(pool: &PgPool, context: &AssessmentContext, critical: i32) -> Uuid {
-    let scan_id = create_cve_scan(pool, context.derivation_id, "ac3-matrix", None)
+async fn created_scan(
+    pool: &PgPool,
+    derivation_id: i32,
+    scanner_name: &str,
+) -> CveScanExecutionClaim {
+    match create_cve_scan(pool, derivation_id, scanner_name, None)
         .await
         .unwrap()
-        .id();
-    complete_cve_scan(pool, scan_id, 1, critical, critical, 0, 0, 0, Some(1), None)
-        .await
-        .unwrap();
-    scan_id
+    {
+        CreateCveScanOutcome::Created(claim) => claim,
+        CreateCveScanOutcome::Existing(scan_id) => {
+            panic!("test derivation unexpectedly reused active CVE scan {scan_id}")
+        }
+    }
+}
+
+async fn completed_scan(pool: &PgPool, context: &AssessmentContext, critical: i32) -> Uuid {
+    let claim = created_scan(pool, context.derivation_id, "ac3-matrix").await;
+    complete_cve_scan_for_execution(
+        pool,
+        claim.scan_id,
+        1,
+        critical,
+        critical,
+        0,
+        0,
+        0,
+        Some(1),
+        None,
+        claim.execution_id,
+    )
+    .await
+    .unwrap();
+    claim.scan_id
 }
 
 #[sqlx::test]
@@ -1106,15 +1135,13 @@ async fn ac3_mixed_lifecycle_failure_permutations_preserve_earlier_outcomes_and_
 
     let cve_error = assessment_context(&pool).await;
     persist_evaluation(&pool, &cve_error, EnforcementOutcome::Pass).await;
-    let failed_scan = create_cve_scan(&pool, cve_error.derivation_id, "ac3-matrix", None)
-        .await
-        .unwrap()
-        .id();
-    mark_cve_scan_failed_by_id(
+    let failed_scan = created_scan(&pool, cve_error.derivation_id, "ac3-matrix").await;
+    mark_cve_scan_failed_by_id_for_execution(
         &pool,
-        failed_scan,
+        failed_scan.scan_id,
         cve_error.derivation_id,
         "scanner failed",
+        failed_scan.execution_id,
     )
     .await
     .unwrap();
@@ -1275,13 +1302,7 @@ async fn phase_lifecycle_persists_ordered_placeholders_and_authorizes_only_after
     .unwrap();
     assert_eq!(before_scan.outcome, EnforcementOutcome::NotChecked);
 
-    let scan_id = create_cve_scan(&pool, context.derivation_id, "test", None)
-        .await
-        .unwrap()
-        .id();
-    complete_cve_scan(&pool, scan_id, 1, 0, 0, 0, 0, 0, Some(1), None)
-        .await
-        .unwrap();
+    completed_scan(&pool, &context, 0).await;
     let authorized = authorize_deployment_at(
         &pool,
         context.system_id,
@@ -1298,35 +1319,77 @@ async fn phase_lifecycle_persists_ordered_placeholders_and_authorizes_only_after
 async fn newer_pending_and_failed_scan_cannot_be_reversed_by_older_completion(pool: PgPool) {
     let context = assessment_context(&pool).await;
     persist_evaluation(&pool, &context, EnforcementOutcome::Pass).await;
-    let first = create_cve_scan(&pool, context.derivation_id, "test", None)
-        .await
-        .unwrap()
-        .id();
-    complete_cve_scan(&pool, first, 1, 0, 0, 0, 0, 0, Some(1), None)
-        .await
-        .unwrap();
-    let second = create_cve_scan(&pool, context.derivation_id, "test", None)
-        .await
-        .unwrap()
-        .id();
+    let first = created_scan(&pool, context.derivation_id, "test").await;
+    complete_cve_scan_for_execution(
+        &pool,
+        first.scan_id,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        Some(1),
+        None,
+        first.execution_id,
+    )
+    .await
+    .unwrap();
+    let second = created_scan(&pool, context.derivation_id, "test").await;
 
-    complete_cve_scan(&pool, first, 1, 1, 1, 0, 0, 0, Some(1), None)
+    assert!(
+        complete_cve_scan_for_execution(
+            &pool,
+            first.scan_id,
+            1,
+            1,
+            1,
+            0,
+            0,
+            0,
+            Some(1),
+            None,
+            first.execution_id,
+        )
         .await
-        .unwrap();
+        .is_err(),
+        "a completed execution must reject obsolete terminal writes"
+    );
     let current: (Option<Uuid>, String) = sqlx::query_as(
         "SELECT source_scan_id, outcome FROM composite_policy_rule_results WHERE phase = 'scan'",
     )
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(current, (Some(second), "not_checked".to_string()));
+    assert_eq!(current, (Some(second.scan_id), "not_checked".to_string()));
 
-    mark_cve_scan_failed_by_id(&pool, second, context.derivation_id, "scanner failed")
+    mark_cve_scan_failed_by_id_for_execution(
+        &pool,
+        second.scan_id,
+        context.derivation_id,
+        "scanner failed",
+        second.execution_id,
+    )
+    .await
+    .unwrap();
+    assert!(
+        complete_cve_scan_for_execution(
+            &pool,
+            second.scan_id,
+            1,
+            1,
+            1,
+            0,
+            0,
+            0,
+            Some(1),
+            None,
+            second.execution_id,
+        )
         .await
-        .unwrap();
-    complete_cve_scan(&pool, second, 1, 1, 1, 0, 0, 0, Some(1), None)
-        .await
-        .unwrap();
+        .is_err(),
+        "a failed execution must reject obsolete terminal writes"
+    );
     let terminal: (String, Option<Uuid>, String) = sqlx::query_as(
         r#"
         SELECT scan.status, result.source_scan_id, result.outcome
@@ -1335,11 +1398,281 @@ async fn newer_pending_and_failed_scan_cannot_be_reversed_by_older_completion(po
         WHERE scan.id = $1
         "#,
     )
-    .bind(second)
+    .bind(second.scan_id)
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(terminal, ("failed".into(), Some(second), "error".into()));
+    assert_eq!(
+        terminal,
+        ("failed".into(), Some(second.scan_id), "error".into())
+    );
+    let blocked = authorize_deployment_at(
+        &pool,
+        context.system_id,
+        context.derivation_id,
+        &context.store_path,
+        Utc.with_ymd_and_hms(2026, 8, 24, 12, 0, 0).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(blocked.outcome, EnforcementOutcome::Error);
+}
+
+/// Proves that a queued retry claim atomically invalidates the prior
+/// completed scan's composite Pass: the `pending -> in_progress` transition
+/// and the composite recomputation that turns `cve_block` from `pass` to
+/// `not_checked`/blocking commit in the exact same transaction, so no
+/// observer can see the retry `in_progress` while the composite assessment
+/// still reports stale Pass evidence.
+#[sqlx::test]
+async fn queued_retry_claim_atomically_invalidates_prior_pass_composite(pool: PgPool) {
+    let context = assessment_context(&pool).await;
+    persist_evaluation(&pool, &context, EnforcementOutcome::Pass).await;
+
+    // A prior completed scan with zero critical CVEs satisfies
+    // `phase_config()`'s `cve_block` rule (max_allowed = 0), so the composite
+    // assessment starts out Pass for that rule. `phase_config()` also has a
+    // `time_window` deployment-phase rule that only becomes Pass once
+    // deployment authorization actually evaluates it, so authorize once here
+    // to establish a genuine full-composite Pass baseline.
+    completed_scan(&pool, &context, 0).await;
+    let baseline = authorize_deployment_at(
+        &pool,
+        context.system_id,
+        context.derivation_id,
+        &context.store_path,
+        Utc.with_ymd_and_hms(2026, 8, 24, 12, 0, 0).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        baseline.outcome,
+        EnforcementOutcome::Pass,
+        "the baseline must authorize deployment before the retry is enqueued"
+    );
+    let (overall_before, rule_before): (String, String) = sqlx::query_as(
+        r#"
+        SELECT assessment.overall_outcome, result.outcome
+        FROM composite_policy_assessments assessment
+        JOIN composite_policy_rule_results result ON result.assessment_id = assessment.id
+        WHERE assessment.system_id = $1 AND result.kind = 'cve_block'
+        "#,
+    )
+    .bind(context.system_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        rule_before, "pass",
+        "a clean completed scan must pass cve_block"
+    );
+    assert_eq!(
+        overall_before, "pass",
+        "the full composite must authorize deployment"
+    );
+
+    // An operator enqueues a retry. Merely queuing it does not invalidate the
+    // prior evidence: the derivation's most recent *executing* evidence is
+    // still the completed scan until the retry actually starts.
+    let pending_scan_id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO cve_scans (
+            id, derivation_id, scanner_name, status, attempts,
+            total_packages, total_vulnerabilities,
+            critical_count, high_count, medium_count, low_count
+        )
+        VALUES ($1, $2, 'vulnix', 'pending', 0, 0, 0, 0, 0, 0, 0)
+        "#,
+    )
+    .bind(pending_scan_id)
+    .bind(context.derivation_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let rule_while_pending: String = sqlx::query_scalar(
+        r#"
+        SELECT result.outcome
+        FROM composite_policy_assessments assessment
+        JOIN composite_policy_rule_results result ON result.assessment_id = assessment.id
+        WHERE assessment.system_id = $1 AND result.kind = 'cve_block'
+        "#,
+    )
+    .bind(context.system_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        rule_while_pending, "pass",
+        "a merely queued retry must not invalidate prior terminal evidence"
+    );
+
+    // The worker claims the queued retry. The claim transition and the
+    // composite invalidation must be visible together as soon as this call
+    // returns: there is no separate committed state where the scan is
+    // in_progress while the composite assessment still reports Pass.
+    let claimed = claim_queued_cve_scans(&pool, 10).await.unwrap();
+    let claim = claimed
+        .into_iter()
+        .find(|claim| claim.scan_id == pending_scan_id)
+        .expect("the queued retry must be claimed");
+
+    let (scan_status, overall_after, rule_after, blocking_after, source_scan_id): (
+        String,
+        String,
+        String,
+        bool,
+        Option<Uuid>,
+    ) = sqlx::query_as(
+        r#"
+        SELECT scan.status, assessment.overall_outcome, result.outcome, result.blocking,
+               result.source_scan_id
+        FROM cve_scans scan
+        JOIN composite_policy_assessments assessment
+          ON assessment.derivation_id = scan.derivation_id
+        JOIN composite_policy_rule_results result ON result.assessment_id = assessment.id
+        WHERE scan.id = $1 AND result.kind = 'cve_block'
+        "#,
+    )
+    .bind(pending_scan_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(scan_status, "in_progress", "the claim must start the retry");
+    assert_eq!(
+        rule_after, "not_checked",
+        "an in_progress retry must immediately invalidate the prior Pass"
+    );
+    assert!(
+        blocking_after,
+        "an invalidated cve_block rule must block deployment"
+    );
+    assert_eq!(
+        overall_after, "not_checked",
+        "the full composite must stop authorizing deployment once the retry starts"
+    );
+    assert_eq!(
+        source_scan_id,
+        Some(pending_scan_id),
+        "the claimed retry must be the current evidence source, not the old completed scan"
+    );
+
+    // Requeuing an already-started retry (for example, because execution was
+    // disabled before the scanner ran) must not accidentally restore the
+    // stale Pass: the composite invalidation already committed at claim time
+    // and requeuing only resets the scan row's own status.
+    assert!(
+        requeue_cve_scan_execution(
+            &pool,
+            claim.scan_id,
+            claim.execution_id,
+            "test-requeue-before-scanner-start",
+        )
+        .await
+        .unwrap(),
+        "the claim owner must be able to requeue its own execution"
+    );
+    let (requeued_status, rule_after_requeue): (String, String) = sqlx::query_as(
+        r#"
+        SELECT scan.status, result.outcome
+        FROM cve_scans scan
+        JOIN composite_policy_assessments assessment
+          ON assessment.derivation_id = scan.derivation_id
+        JOIN composite_policy_rule_results result ON result.assessment_id = assessment.id
+        WHERE scan.id = $1 AND result.kind = 'cve_block'
+        "#,
+    )
+    .bind(pending_scan_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        requeued_status, "pending",
+        "requeue returns the scan to pending"
+    );
+    assert_eq!(
+        rule_after_requeue, "not_checked",
+        "requeuing a previously-started retry must not restore the stale Pass"
+    );
+}
+
+#[sqlx::test]
+async fn revoked_scan_acknowledgment_atomically_recomputes_composite_assessment(pool: PgPool) {
+    let context = assessment_context(&pool).await;
+    persist_evaluation(&pool, &context, EnforcementOutcome::Pass).await;
+    let claim = created_scan(&pool, context.derivation_id, "revoked-composite").await;
+
+    let initial: (String, String, serde_json::Value) = sqlx::query_as(
+        r#"
+        SELECT assessment.overall_outcome, result.outcome, result.evidence
+        FROM composite_policy_assessments assessment
+        JOIN composite_policy_rule_results result ON result.assessment_id = assessment.id
+        WHERE assessment.system_id = $1 AND result.kind = 'cve_block'
+        "#,
+    )
+    .bind(context.system_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(initial.0, "not_checked");
+    assert_eq!(initial.1, "not_checked");
+    assert_eq!(initial.2["status"], "in_progress");
+
+    sqlx::query(
+        r#"
+        UPDATE cve_scans
+        SET scan_metadata = scan_metadata || jsonb_build_object(
+            'execution_heartbeat_at', NOW() - INTERVAL '2 hours'
+        )
+        WHERE id = $1
+        "#,
+    )
+    .bind(claim.scan_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        recover_stale_scans(&pool, Duration::from_secs(60))
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT status FROM cve_scans WHERE id = $1")
+            .bind(claim.scan_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        "in_progress",
+        "revocation must retain active-scan uniqueness until owner acknowledgment"
+    );
+
+    assert!(
+        acknowledge_revoked_cve_scan_execution(&pool, claim.scan_id, claim.execution_id)
+            .await
+            .unwrap()
+    );
+    let terminal: (String, String, String, Option<Uuid>, serde_json::Value) = sqlx::query_as(
+        r#"
+        SELECT scan.status, assessment.overall_outcome, result.outcome,
+               result.source_scan_id, result.evidence
+        FROM cve_scans scan
+        JOIN composite_policy_assessments assessment
+          ON assessment.derivation_id = scan.derivation_id
+        JOIN composite_policy_rule_results result ON result.assessment_id = assessment.id
+        WHERE scan.id = $1 AND result.kind = 'cve_block'
+        "#,
+    )
+    .bind(claim.scan_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(terminal.0, "failed");
+    assert_eq!(terminal.1, "error");
+    assert_eq!(terminal.2, "error");
+    assert_eq!(terminal.3, Some(claim.scan_id));
+    assert_eq!(terminal.4["status"], "failed");
+
     let blocked = authorize_deployment_at(
         &pool,
         context.system_id,
@@ -1358,13 +1691,7 @@ async fn final_authorization_is_exact_and_target_update_is_guarded_by_all_phase_
 ) {
     let context = assessment_context(&pool).await;
     persist_evaluation(&pool, &context, EnforcementOutcome::Fail).await;
-    let scan_id = create_cve_scan(&pool, context.derivation_id, "test", None)
-        .await
-        .unwrap()
-        .id();
-    complete_cve_scan(&pool, scan_id, 1, 0, 0, 0, 0, 0, Some(1), None)
-        .await
-        .unwrap();
+    completed_scan(&pool, &context, 0).await;
     let blocked = authorize_and_set_system_target(
         &pool,
         context.system_id,
@@ -1743,13 +2070,7 @@ async fn known_uncached_target_is_blocked_without_composite_policy(pool: PgPool)
 async fn heartbeat_claim_requires_unchanged_desired_target_and_live_pending_delivery(pool: PgPool) {
     let context = assessment_context(&pool).await;
     persist_evaluation(&pool, &context, EnforcementOutcome::Pass).await;
-    let scan_id = create_cve_scan(&pool, context.derivation_id, "test", None)
-        .await
-        .unwrap()
-        .id();
-    complete_cve_scan(&pool, scan_id, 1, 0, 0, 0, 0, 0, Some(1), None)
-        .await
-        .unwrap();
+    completed_scan(&pool, &context, 0).await;
     authorize_and_set_system_target(
         &pool,
         context.system_id,
@@ -1791,13 +2112,7 @@ async fn heartbeat_claim_requires_unchanged_desired_target_and_live_pending_deli
 async fn upgrade_target_gets_pending_delivery_only_after_exact_authorization(pool: PgPool) {
     let context = assessment_context(&pool).await;
     persist_evaluation(&pool, &context, EnforcementOutcome::Pass).await;
-    let scan_id = create_cve_scan(&pool, context.derivation_id, "test", None)
-        .await
-        .unwrap()
-        .id();
-    complete_cve_scan(&pool, scan_id, 1, 0, 0, 0, 0, 0, Some(1), None)
-        .await
-        .unwrap();
+    completed_scan(&pool, &context, 0).await;
     sqlx::query("UPDATE systems SET desired_target = $1 WHERE id = $2")
         .bind(&context.store_path)
         .bind(context.system_id)
@@ -2069,13 +2384,7 @@ fn pin_required_is_not_checked_while_evaluation_is_pending() {
 #[sqlx::test]
 async fn scan_before_evaluation_is_merged_and_later_evaluation_preserves_newest_scan(pool: PgPool) {
     let context = assessment_context(&pool).await;
-    let scan_id = create_cve_scan(&pool, context.derivation_id, "test", None)
-        .await
-        .unwrap()
-        .id();
-    complete_cve_scan(&pool, scan_id, 1, 0, 0, 0, 0, 0, Some(1), None)
-        .await
-        .unwrap();
+    let scan_id = completed_scan(&pool, &context, 0).await;
 
     persist_evaluation(&pool, &context, EnforcementOutcome::Fail).await;
     let after_first_eval: (String, Option<Uuid>) = sqlx::query_as(
@@ -2136,13 +2445,7 @@ async fn final_authorization_aggregates_multiple_exact_policy_versions_atomicall
     .await
     .unwrap();
     tx.commit().await.unwrap();
-    let scan_id = create_cve_scan(&pool, context.derivation_id, "test", None)
-        .await
-        .unwrap()
-        .id();
-    complete_cve_scan(&pool, scan_id, 1, 0, 0, 0, 0, 0, Some(1), None)
-        .await
-        .unwrap();
+    completed_scan(&pool, &context, 0).await;
 
     let blocked = authorize_and_set_system_target(
         &pool,
@@ -2273,4 +2576,411 @@ async fn assessment_identity_rejects_mismatched_derivation_path_and_duplicate_co
     .execute(&pool)
     .await;
     assert!(inconsistent_scan_source.is_err());
+}
+
+/// Stale finalization must obey the same writer lock order as every other CVE
+/// scan writer, so it cannot deadlock against a live owner.
+///
+/// The repository's global CVE writer order is: POA&M/composite derivation
+/// lock, then the `cve_scans` mutation, then composite persistence. Stale
+/// finalization previously ran a bulk `UPDATE cve_scans ... RETURNING` and only
+/// then reached the POA&M lock through `persist_scan_phase_in_tx`. That is the
+/// reverse order, so a normal writer holding the POA&M lock and waiting for the
+/// same scan row could deadlock against recovery holding that row and waiting
+/// for the POA&M lock.
+///
+/// This races recovery's finalization against the live owner's revocation
+/// acknowledgment on two connections, aligned by a barrier so both genuinely
+/// contend for the same derivation and the same scan row.
+#[sqlx::test]
+async fn stale_finalization_and_owner_acknowledgment_never_deadlock(pool: PgPool) {
+    let context = assessment_context(&pool).await;
+    persist_evaluation(&pool, &context, EnforcementOutcome::Pass).await;
+
+    // Establish a genuine composite Pass baseline from a clean completed scan.
+    completed_scan(&pool, &context, 0).await;
+
+    // Queue and claim a retry so there is a live token-owned execution.
+    let pending_scan_id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO cve_scans (
+            id, derivation_id, scanner_name, status, attempts,
+            total_packages, total_vulnerabilities,
+            critical_count, high_count, medium_count, low_count
+        )
+        VALUES ($1, $2, 'vulnix', 'pending', 0, 0, 0, 0, 0, 0, 0)
+        "#,
+    )
+    .bind(pending_scan_id)
+    .bind(context.derivation_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let claim = claim_queued_cve_scans(&pool, 10)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|claim| claim.scan_id == pending_scan_id)
+        .expect("the queued retry must be claimed");
+
+    // Mark the lease revoked long enough ago that recovery's second pass will
+    // finalize it, which is exactly when it contends with the owner's
+    // acknowledgment of that same revocation.
+    sqlx::query(
+        r#"
+        UPDATE cve_scans
+        SET scan_metadata = scan_metadata || jsonb_build_object(
+            'execution_started_at', NOW() - INTERVAL '2 hours',
+            'execution_heartbeat_at', NOW() - INTERVAL '2 hours',
+            'execution_revoked_at', NOW() - INTERVAL '5 minutes',
+            'stale_recovery_reason', 'stale-execution-revoked'
+        )
+        WHERE id = $1
+        "#,
+    )
+    .bind(pending_scan_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let gate = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let recovery_gate = gate.clone();
+    let owner_gate = gate.clone();
+    let recovery_pool = pool.clone();
+    let owner_pool = pool.clone();
+    let execution_id = claim.execution_id;
+
+    let (recovery, owner) = tokio::join!(
+        tokio::spawn(async move {
+            recovery_gate.wait().await;
+            recover_stale_scans(&recovery_pool, Duration::from_secs(1800)).await
+        }),
+        tokio::spawn(async move {
+            owner_gate.wait().await;
+            acknowledge_revoked_cve_scan_execution(&owner_pool, pending_scan_id, execution_id).await
+        })
+    );
+
+    let recovery = recovery.expect("recovery task should not panic");
+    let owner = owner.expect("owner task should not panic");
+
+    for (label, message) in [
+        (
+            "stale finalization",
+            recovery.as_ref().err().map(|e| format!("{e:#}")),
+        ),
+        (
+            "owner acknowledgment",
+            owner.as_ref().err().map(|e| format!("{e:#}")),
+        ),
+    ] {
+        if let Some(message) = message {
+            assert!(
+                !message.to_ascii_lowercase().contains("deadlock"),
+                "{label} must not deadlock against the other writer: {message}"
+            );
+            panic!("{label} failed unexpectedly: {message}");
+        }
+    }
+
+    // Exactly one writer may perform the terminal transition.
+    let recovered = recovery.unwrap();
+    let acknowledged = owner.unwrap();
+    assert_eq!(
+        i64::from(acknowledged) + recovered,
+        1,
+        "exactly one of stale finalization and owner acknowledgment may win \
+         (recovered={recovered}, acknowledged={acknowledged})"
+    );
+
+    // The committed scan state must be terminal and consistent.
+    let (status, revoked): (String, bool) = sqlx::query_as(
+        "SELECT status, scan_metadata ? 'execution_revoked_at' FROM cve_scans WHERE id = $1",
+    )
+    .bind(pending_scan_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(status, "failed", "the revoked execution must end failed");
+    assert!(revoked, "the revocation marker must be retained");
+
+    // Composite enforcement must agree with the committed scan state: a failed
+    // newest scan must not leave the prior Pass authorizing deployment.
+    let rule_outcome: String = sqlx::query_scalar(
+        r#"
+        SELECT result.outcome
+        FROM composite_policy_assessments assessment
+        JOIN composite_policy_rule_results result ON result.assessment_id = assessment.id
+        WHERE assessment.system_id = $1 AND result.kind = 'cve_block'
+        "#,
+    )
+    .bind(context.system_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_ne!(
+        rule_outcome, "pass",
+        "a failed newest scan must not expose a stale composite Pass"
+    );
+}
+
+/// Result persistence must wait for the POA&M lock before it locks or completes
+/// the scan row.
+///
+/// A holder takes the derivation lock, result persistence starts on a second
+/// connection, and a third connection probes the scan row with `NOWAIT`. The
+/// probe succeeds only when result persistence follows the global POA&M-before-
+/// row order. The former implementation completed `cve_scans` first and would
+/// make this probe fail with `55P03 lock_not_available`.
+#[sqlx::test]
+async fn scan_result_persistence_locks_poam_before_the_scan_row(pool: PgPool) {
+    let context = assessment_context(&pool).await;
+    persist_evaluation(&pool, &context, EnforcementOutcome::Pass).await;
+    let claim = match create_cve_scan(&pool, context.derivation_id, "vulnix", None)
+        .await
+        .unwrap()
+    {
+        CreateCveScanOutcome::Created(claim) => claim,
+        CreateCveScanOutcome::Existing(_) => panic!("fixture scan must be newly created"),
+    };
+
+    const POAM_DERIVATION_LOCK_NAMESPACE: i32 = 0x504F_414D;
+    let mut holder = pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock($1,$2)")
+        .bind(POAM_DERIVATION_LOCK_NAMESPACE)
+        .bind(context.derivation_id)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    let persistence_pool = pool.clone();
+    let persistence = tokio::spawn(async move {
+        save_scan_results_for_execution(
+            &persistence_pool,
+            claim.scan_id,
+            &Vec::new(),
+            Some(1),
+            claim.execution_id,
+        )
+        .await
+    });
+
+    let mut blocked = false;
+    for _ in 0..600 {
+        let waiting: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*)
+            FROM pg_locks
+            WHERE locktype = 'advisory'
+              AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+              AND classid::bigint = $1::bigint
+              AND objid::bigint = $2::bigint
+              AND objsubid = 2
+              AND NOT granted
+            "#,
+        )
+        .bind(POAM_DERIVATION_LOCK_NAMESPACE)
+        .bind(context.derivation_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        if waiting > 0 {
+            blocked = true;
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        blocked,
+        "result persistence must block on the POA&M lock before completion"
+    );
+
+    let mut probe = pool.acquire().await.unwrap();
+    let row_lock = sqlx::query("SELECT id FROM cve_scans WHERE id = $1 FOR UPDATE NOWAIT")
+        .bind(claim.scan_id)
+        .fetch_optional(&mut *probe)
+        .await;
+    let row_lock_error = row_lock.as_ref().err().map(|error| format!("{error:#}"));
+    drop(probe);
+
+    holder.rollback().await.unwrap();
+    persistence
+        .await
+        .expect("result persistence task should not panic")
+        .expect("result persistence should complete");
+
+    assert!(
+        row_lock_error.is_none(),
+        "result persistence locked cve_scans before the POA&M lock: {}",
+        row_lock_error.unwrap_or_default()
+    );
+    let status: String = sqlx::query_scalar("SELECT status FROM cve_scans WHERE id = $1")
+        .bind(claim.scan_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "completed");
+}
+
+/// Stale finalization must take the POA&M/composite lock *before* it locks the
+/// `cve_scans` row.
+///
+/// This is the discriminating assertion for the lock-order fix. The previous
+/// implementation ran a bulk `UPDATE cve_scans ... RETURNING` first and only
+/// reached the POA&M lock afterwards through `persist_scan_phase_in_tx`, which
+/// is the reverse of the order every other CVE writer uses.
+///
+/// The ordering is observed directly rather than by trying to provoke a
+/// deadlock, which is timing dependent and therefore not a reliable signal:
+///
+/// 1. A holder transaction takes the POA&M lock for the derivation and keeps it.
+/// 2. Stale finalization runs on another connection and must block.
+/// 3. While it is blocked, a third connection takes the scan row with
+///    `FOR UPDATE NOWAIT`.
+///
+/// With the correct order the blocked pass holds no row lock, so `NOWAIT`
+/// succeeds. With the inverted order it already holds a row-exclusive lock on
+/// that scan, so `NOWAIT` fails with `55P03 lock_not_available`.
+#[sqlx::test]
+async fn stale_finalization_locks_poam_before_the_scan_row(pool: PgPool) {
+    let context = assessment_context(&pool).await;
+    persist_evaluation(&pool, &context, EnforcementOutcome::Pass).await;
+    completed_scan(&pool, &context, 0).await;
+
+    let pending_scan_id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO cve_scans (
+            id, derivation_id, scanner_name, status, attempts,
+            total_packages, total_vulnerabilities,
+            critical_count, high_count, medium_count, low_count
+        )
+        VALUES ($1, $2, 'vulnix', 'pending', 0, 0, 0, 0, 0, 0, 0)
+        "#,
+    )
+    .bind(pending_scan_id)
+    .bind(context.derivation_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    claim_queued_cve_scans(&pool, 10)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|claim| claim.scan_id == pending_scan_id)
+        .expect("the queued retry must be claimed");
+
+    // Make the row eligible for the finalization pass.
+    sqlx::query(
+        r#"
+        UPDATE cve_scans
+        SET scan_metadata = scan_metadata || jsonb_build_object(
+            'execution_started_at', NOW() - INTERVAL '2 hours',
+            'execution_heartbeat_at', NOW() - INTERVAL '2 hours',
+            'execution_revoked_at', NOW() - INTERVAL '5 minutes',
+            'stale_recovery_reason', 'stale-execution-revoked'
+        )
+        WHERE id = $1
+        "#,
+    )
+    .bind(pending_scan_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // 1. Hold the POA&M derivation lock, exactly as a normal writer would.
+    //    `pg_advisory_xact_lock` is released when this transaction ends.
+    // `POAM_DERIVATION_LOCK_NAMESPACE` in `services::composite_enforcement`.
+    const POAM_DERIVATION_LOCK_NAMESPACE: i32 = 0x504F_414D;
+    let mut holder = pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock($1,$2)")
+        .bind(POAM_DERIVATION_LOCK_NAMESPACE)
+        .bind(context.derivation_id)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    // 2. Start stale finalization; it must block on that POA&M lock.
+    let recovery_pool = pool.clone();
+    let recovery = tokio::spawn(async move {
+        recover_stale_scans(&recovery_pool, Duration::from_secs(1800)).await
+    });
+
+    // Wait for the condition (a second backend waiting on an advisory lock),
+    // not for a fixed duration.
+    let mut blocked = false;
+    for _ in 0..600 {
+        let waiting: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*) FROM pg_locks
+            WHERE locktype = 'advisory'
+              AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+              AND classid::bigint = $1::bigint
+              AND objid::bigint = $2::bigint
+              AND objsubid = 2
+              AND NOT granted
+            "#,
+        )
+        .bind(POAM_DERIVATION_LOCK_NAMESPACE)
+        .bind(context.derivation_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        if waiting > 0 {
+            blocked = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(
+        blocked,
+        "stale finalization must block on the POA&M lock before mutating the scan"
+    );
+
+    // 3. The blocked pass must not already hold the scan row.
+    let mut probe = pool.acquire().await.unwrap();
+    let row_lock = sqlx::query("SELECT id FROM cve_scans WHERE id = $1 FOR UPDATE NOWAIT")
+        .bind(pending_scan_id)
+        .fetch_optional(&mut *probe)
+        .await;
+    let row_lock_error = row_lock.as_ref().err().map(|e| format!("{e:#}"));
+    drop(probe);
+
+    // Release the POA&M lock so finalization can complete either way.
+    holder.rollback().await.unwrap();
+    let recovered = recovery
+        .await
+        .expect("recovery task should not panic")
+        .expect("recovery should not error");
+
+    assert!(
+        row_lock_error.is_none(),
+        "stale finalization took the cve_scans row lock before the POA&M lock, \
+         which is the inverted order that can deadlock against a normal writer: {}",
+        row_lock_error.unwrap_or_default()
+    );
+
+    // Once unblocked the pass still completes its work correctly.
+    assert_eq!(recovered, 1, "the revoked execution must be finalized");
+    let status: String = sqlx::query_scalar("SELECT status FROM cve_scans WHERE id = $1")
+        .bind(pending_scan_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "failed");
+    let rule_outcome: String = sqlx::query_scalar(
+        r#"
+        SELECT result.outcome
+        FROM composite_policy_assessments assessment
+        JOIN composite_policy_rule_results result ON result.assessment_id = assessment.id
+        WHERE assessment.system_id = $1 AND result.kind = 'cve_block'
+        "#,
+    )
+    .bind(context.system_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_ne!(
+        rule_outcome, "pass",
+        "a failed newest scan must not expose a stale composite Pass"
+    );
 }
