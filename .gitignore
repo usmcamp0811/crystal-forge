@@ -1,4 +1,6 @@
 result
+# `nix build --out-link result-<name>` artifacts are local /nix/store symlinks.
+result-*
 mcamp
 modules/home/apps/rofi/config.rasi
 modules/home/cli/ranger/configs/plugins/__pycache__
