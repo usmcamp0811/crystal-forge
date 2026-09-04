@@ -427,7 +427,9 @@ use crate::models::deployment_policies::{
     AssignedPolicy, EvaluationTerminalOutcome, PoliciesByConfiguration, PolicyCheckResult,
     build_nix_eval_expression, policies_for_config, policy_requirements_met, policy_results_json,
 };
-use crate::models::evaluation_snapshots::EvaluatedOption;
+use crate::models::evaluation_snapshots::{
+    EvaluatedOption, OptionDefinitionProvenance, SafeOptionValue,
+};
 use crate::models::flakes::Flake;
 use crate::models::retry_policy::RetryFailureClass;
 use crate::queries::build_jobs::{
@@ -2418,9 +2420,45 @@ pub async fn finalize_evaluation_attempt(
         return Ok(EvaluationFinalizeOutcome::Superseded);
     }
 
+    // INVARIANT: A commit can be finalized only by its one matching active
+    // attempt. Lock it before publishing snapshots so missing or stale worker
+    // lineage cannot leave a terminal commit with an active attempt row.
+    let active_attempt_id: Option<uuid::Uuid> = sqlx::query_scalar(
+        r#"
+        SELECT id
+        FROM evaluation_attempts
+        WHERE commit_id = $1 AND attempt_number = $2 AND status = 'in_progress'
+        FOR UPDATE
+        "#,
+    )
+    .bind(commit_id)
+    .bind(expected_attempt)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if active_attempt_id.is_none() {
+        tx.rollback().await?;
+        return Ok(EvaluationFinalizeOutcome::Superseded);
+    }
+
     // Cancellation won the race — finalize as cancelled inside this tx.
     if cancellation || status == "cancelling" {
-        sqlx::query(
+        let attempt_rows = sqlx::query(
+            r#"
+            UPDATE evaluation_attempts
+            SET status = 'cancelled', completed_at = COALESCE(completed_at, NOW()),
+                updated_at = NOW()
+            WHERE commit_id = $1 AND attempt_number = $2 AND status = 'in_progress'
+            "#,
+        )
+        .bind(commit_id)
+        .bind(expected_attempt)
+        .execute(&mut *tx)
+        .await?;
+        anyhow::ensure!(
+            attempt_rows.rows_affected() == 1,
+            "cancellation finalization did not terminalize exactly one evaluation attempt"
+        );
+        let commit_rows = sqlx::query(
             r#"
             UPDATE commits
             SET evaluation_status = 'cancelled',
@@ -2433,6 +2471,10 @@ pub async fn finalize_evaluation_attempt(
         .bind(commit_id)
         .execute(&mut *tx)
         .await?;
+        anyhow::ensure!(
+            commit_rows.rows_affected() == 1,
+            "cancellation finalization did not terminalize exactly one commit"
+        );
         tx.commit().await?;
         return Ok(EvaluationFinalizeOutcome::Cancelled);
     }
@@ -2579,6 +2621,24 @@ pub async fn finalize_evaluation_attempt(
         tx.rollback().await?;
         return Ok(EvaluationFinalizeOutcome::Superseded);
     }
+
+    let attempt_rows = sqlx::query(
+        r#"
+        UPDATE evaluation_attempts
+        SET status = 'complete', completed_at = NOW(), error_message = NULL,
+            updated_at = NOW()
+        WHERE commit_id = $1 AND attempt_number = $2 AND status = 'in_progress'
+        "#,
+    )
+    .bind(commit_id)
+    .bind(expected_attempt)
+    .execute(&mut *tx)
+    .await
+    .context("Failed to mark evaluation attempt complete")?;
+    anyhow::ensure!(
+        attempt_rows.rows_affected() == 1,
+        "successful finalization did not terminalize exactly one evaluation attempt"
+    );
 
     tx.commit().await?;
     Ok(EvaluationFinalizeOutcome::Completed {
@@ -4886,6 +4946,48 @@ async fn evaluate_with_mock_eval_jobs_inner(
         }
     }
 
+    // The development evaluator must exercise the same snapshot finalization
+    // boundary as production. These deterministic options are evaluator output,
+    // not browser fixtures, and are redacted and persisted by the ordinary
+    // finalizer before the commit becomes complete.
+    let evaluation_snapshots = systems
+        .iter()
+        .map(|system_name| {
+            let source = OptionDefinitionProvenance {
+                source_path: "/nix/store/mock-source/crystal-forge-module.nix".to_string(),
+                source_input: Some("self".to_string()),
+                source_revision: Some(commit_hash.to_string()),
+                value: None,
+                winning: true,
+                priority: Some(100),
+                status: Some("winning".to_string()),
+                winner_note: Some(
+                    "Selected by the deterministic development evaluator".to_string(),
+                ),
+                tracked_flake: None,
+            };
+            (
+                system_name.clone(),
+                vec![
+                    EvaluatedOption {
+                        path: "services.crystal-forge-agent.enable".to_string(),
+                        declared_type: "boolean".to_string(),
+                        value: SafeOptionValue::Scalar(serde_json::json!(true)),
+                        definitions: vec![source.clone()],
+                        overridden: false,
+                    },
+                    EvaluatedOption {
+                        path: "system.stateVersion".to_string(),
+                        declared_type: "string".to_string(),
+                        value: SafeOptionValue::Scalar(serde_json::json!("26.05")),
+                        definitions: vec![source],
+                        overridden: false,
+                    },
+                ],
+            )
+        })
+        .collect();
+
     // Mock evaluations never have system eval errors, so had_system_eval_errors is false.
     let had_system_eval_errors = false;
     Ok(EvaluationPlan {
@@ -4893,7 +4995,7 @@ async fn evaluate_with_mock_eval_jobs_inner(
         policy_checks: checks,
         successful_systems,
         confirmed_failures: Vec::new(),
-        evaluation_snapshots: HashMap::new(),
+        evaluation_snapshots,
         flake_output_snapshot: None,
         had_system_eval_errors,
         #[cfg(test)]

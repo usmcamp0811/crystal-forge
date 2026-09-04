@@ -198,7 +198,7 @@ assert_contains "$tmp_dir/vm-only.stderr" 'nix build --impure .#checks.x86_64-li
 # selection covers every real host-compatible workflow plus the synthetic
 # member and exercises its precondition check.
 run_success default-selection
-assert_contains "$tmp_dir/default-selection.json" '"steps":"12-systems,12a-systems-empty-state,13j-task440-flake-states-panes-navigation,14d-task440-cross-surface-auth-navigation,13-flakes"'
+assert_contains "$tmp_dir/default-selection.json" '"steps":"12-systems,12a-systems-empty-state,12l-task440-config-lifecycle,13j-task440-flake-states-panes-navigation,14d-task440-cross-surface-auth-navigation,13-flakes"'
 assert_contains "$tmp_dir/default-selection.psql-calls" "-h 127.0.0.1 -p 3042 -U crystal_forge -d crystal_forge"
 
 # ── --list / --help ──────────────────────────────────────────────────────────

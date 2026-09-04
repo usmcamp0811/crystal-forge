@@ -9,7 +9,7 @@ use crate::models::retry_policy::{
 };
 use crate::queries::attention;
 use anyhow::{Context, Result, bail};
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, Postgres, Row, Transaction};
 use std::collections::{BTreeSet, HashSet};
 use tracing::{debug, error, info, warn};
 
@@ -652,7 +652,8 @@ pub enum EvalFailureOutcome {
 /// - Attempt 3: after 5 minutes (from attempt 2)
 ///
 /// After 3 failed attempts, marks as permanently 'failed'.
-/// Manual re-evaluation can be triggered via API (resets attempt count).
+/// Manual re-evaluation can be triggered through the API. It preserves attempt
+/// lineage and assigns a strictly newer attempt number.
 /// Terminally fail the active evaluation attempt and schedule at most one child.
 pub async fn mark_commit_evaluation_failed(
     pool: &PgPool,
@@ -666,8 +667,11 @@ pub async fn mark_commit_evaluation_failed(
     let error = crate::security::snapshot_redaction::redact_evaluation_error(error);
     let mut tx = pool.begin().await?;
     // CONCURRENCY: Terminal failure publishes failed artifacts and can take
-    // attempt, POA&M, commit, derivation, system, and deployment locks later.
+    // queue, attempt, POA&M, commit, derivation, system, and deployment locks
+    // later. Acquire the queue lock before row locks so manual retry cannot
+    // deadlock with automatic retry while both update the same lineage.
     crate::queries::evaluation_snapshots::lock_snapshot_writer_tx(&mut tx).await?;
+    lock_eval_queue_order_tx(&mut tx).await?;
     #[derive(sqlx::FromRow)]
     struct FailedAttempt {
         id: uuid::Uuid,
@@ -744,13 +748,11 @@ pub async fn mark_commit_evaluation_failed(
         .execute(&mut *tx)
         .await?;
 
-        // Bump eval_queue_position to front under the advisory lock.
+        // Bump eval_queue_position to the front while the transaction holds
+        // the queue advisory lock acquired before the attempt row.
         sqlx::query(
             r#"
-            WITH queue_lock AS (
-                SELECT pg_advisory_xact_lock($2)
-            ),
-            next_position AS (
+            WITH next_position AS (
                 SELECT COALESCE(MAX(eval_queue_position), 0) + 1 AS position
                 FROM commits
                 WHERE COALESCE(evaluation_status, 'pending')
@@ -758,12 +760,11 @@ pub async fn mark_commit_evaluation_failed(
             )
             UPDATE commits
             SET eval_queue_position = next_position.position
-            FROM queue_lock, next_position
+            FROM next_position
             WHERE id = $1
             "#,
         )
         .bind(commit_id)
-        .bind(EVAL_QUEUE_ADVISORY_LOCK_KEY)
         .execute(&mut *tx)
         .await?;
         crate::queries::evaluation_snapshots::recompute_host_deltas_tx(&mut tx, commit_id).await?;
@@ -933,71 +934,114 @@ async fn open_eval_attention_if_current(
     }
 }
 
-/// Reset commit evaluation status to allow manual retry
+/// Describes the canonical queue-or-reuse transition for one commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvalQueueTransition {
+    /// A new lineage-preserving queued attempt was inserted.
+    QueuedNew,
+    /// An existing queued attempt remains authoritative.
+    QueuedExisting,
+    /// An existing in-progress attempt remains authoritative.
+    Running,
+}
+
+/// Acquires the lock that serializes evaluation queue position changes.
 ///
-/// This resets:
-/// - evaluation_status → 'pending'
-/// - evaluation_attempt_count → 0
-/// - evaluation_error_message → NULL
-/// - cancellation_requested → FALSE (so stale finalizer cannot cancel the reset evaluation)
-/// - stale active attempt rows on terminal commits → `cancelled`
+/// # Errors
 ///
-/// Use this for manual re-evaluation after fixing issues.
-pub async fn reset_commit_evaluation(pool: &PgPool, commit_id: i32) -> Result<()> {
-    #[derive(sqlx::FromRow)]
-    struct ResetResult {
-        id: i32,
-        git_commit_hash: String,
+/// Returns an error when PostgreSQL cannot acquire the transaction lock.
+pub(crate) async fn lock_eval_queue_order_tx(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(EVAL_QUEUE_ADVISORY_LOCK_KEY)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+/// Queues or reuses evaluation work while holding the commit row lock.
+///
+/// A pending commit is queued only when one queued attempt exists. A running
+/// commit is running only when one in-progress attempt exists. A terminal retry
+/// retires any stale active attempt before it inserts one child. A pending row
+/// without an active attempt is repaired only when prior lineage exists.
+///
+/// CONCURRENCY: The queue advisory lock is acquired before the commit row lock,
+/// matching queue reordering. The commit row lock then serializes every caller
+/// for one commit. The partial unique index on active attempts is defense in
+/// depth; correctness does not depend on a unique-constraint race.
+///
+/// # Errors
+///
+/// Returns an error when the commit does not exist, lifecycle and active attempt
+/// disagree, attempt lineage is absent, an insert affects other than one row, or
+/// PostgreSQL cannot persist the transition.
+pub(crate) async fn queue_or_reuse_commit_evaluation_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    commit_id: i32,
+) -> Result<EvalQueueTransition> {
+    lock_eval_queue_order_tx(tx).await?;
+    let status: Option<String> = sqlx::query_scalar(
+        "SELECT COALESCE(evaluation_status, 'pending') FROM commits WHERE id = $1 FOR UPDATE",
+    )
+    .bind(commit_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let status = status.with_context(|| format!("commit {commit_id} does not exist"))?;
+
+    let active_statuses: Vec<String> = sqlx::query_scalar(
+        "SELECT status FROM evaluation_attempts WHERE commit_id = $1 AND status IN ('queued', 'in_progress')",
+    )
+    .bind(commit_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    anyhow::ensure!(
+        active_statuses.len() <= 1,
+        "commit {commit_id} has multiple active evaluation attempts"
+    );
+    let active_status = active_statuses.first().map(String::as_str);
+
+    match status.as_str() {
+        "pending" if active_status == Some("queued") => {
+            return Ok(EvalQueueTransition::QueuedExisting);
+        }
+        "pending" if active_status == Some("in_progress") => {
+            bail!("pending commit {commit_id} has an in-progress evaluation attempt");
+        }
+        "in_progress" | "cancelling" if active_status == Some("in_progress") => {
+            return Ok(EvalQueueTransition::Running);
+        }
+        "in_progress" | "cancelling" => {
+            bail!("running commit {commit_id} has no in-progress evaluation attempt");
+        }
+        "complete" | "failed" | "cancelled" => {
+            // LIFECYCLE: A terminal commit can retain a stale worker row when a
+            // prior finalizer partially failed. The new child follows that row.
+            sqlx::query(
+                r#"
+                UPDATE evaluation_attempts
+                SET status = 'cancelled',
+                    completed_at = COALESCE(completed_at, NOW()),
+                    error_message = COALESCE(error_message, 'Superseded by manual re-evaluation'),
+                    failure_class = COALESCE(failure_class, 'cancelled'),
+                    updated_at = NOW()
+                WHERE commit_id = $1 AND status IN ('queued', 'in_progress')
+                "#,
+            )
+            .bind(commit_id)
+            .execute(&mut **tx)
+            .await?;
+        }
+        "pending" => {}
+        other => bail!("commit {commit_id} has unknown evaluation status {other}"),
     }
 
-    let mut tx = pool.begin().await?;
-    // CONCURRENCY: A worker can fail the commit after it claims an attempt but
-    // before it marks that attempt terminal. Retire only these orphaned rows.
-    // An active attempt on a non-terminal commit remains authoritative.
-    sqlx::query(
-        r#"
-        UPDATE evaluation_attempts attempt
-        SET status = 'cancelled',
-            completed_at = COALESCE(completed_at, NOW()),
-            error_message = COALESCE(error_message, 'Superseded by manual re-evaluation'),
-            failure_class = COALESCE(failure_class, 'cancelled'),
-            updated_at = NOW()
-        FROM commits commit_row
-        WHERE attempt.commit_id = commit_row.id
-          AND commit_row.id = $1
-          AND commit_row.evaluation_status IN ('complete', 'failed', 'cancelled')
-          AND attempt.status IN ('queued', 'in_progress')
-        "#,
-    )
-    .bind(commit_id)
-    .execute(&mut *tx)
-    .await?;
-    let result = sqlx::query_as::<_, ResetResult>(
-        r#"
-        UPDATE commits
-        SET 
-            evaluation_status = 'pending',
-            evaluation_attempt_count = 0,
-            evaluation_started_at = NULL,
-            evaluation_completed_at = NULL,
-            evaluation_error_message = NULL,
-            cancellation_requested = FALSE
-        WHERE id = $1
-        RETURNING id, git_commit_hash
-        "#,
-    )
-    .bind(commit_id)
-    .fetch_one(&mut *tx)
-    .await?;
-
-    // Insert a fresh evaluation attempt.
-    sqlx::query(
+    let inserted = sqlx::query(
         r#"
         WITH source AS (
             SELECT id, COALESCE(root_attempt_id, id) AS root_attempt_id, attempt_number
             FROM evaluation_attempts
             WHERE commit_id = $1
-            ORDER BY attempt_number DESC, created_at DESC
+            ORDER BY attempt_number DESC, created_at DESC, id DESC
             LIMIT 1
         )
         INSERT INTO evaluation_attempts (
@@ -1009,42 +1053,57 @@ pub async fn reset_commit_evaluation(pool: &PgPool, commit_id: i32) -> Result<()
         "#,
     )
     .bind(commit_id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
+    anyhow::ensure!(
+        inserted.rows_affected() == 1,
+        "commit {commit_id} has no evaluation attempt lineage"
+    );
 
-    // Bump eval_queue_position to front (LIFO) under the advisory lock.
-    sqlx::query(
+    let updated = sqlx::query(
         r#"
-        WITH queue_lock AS (
-            SELECT pg_advisory_xact_lock($2)
-        ),
-        next_position AS (
+        WITH next_position AS (
             SELECT COALESCE(MAX(eval_queue_position), 0) + 1 AS position
             FROM commits
             WHERE COALESCE(evaluation_status, 'pending')
                 IN ('pending', 'in_progress', 'cancelling')
         )
         UPDATE commits
-        SET eval_queue_position = next_position.position
-        FROM queue_lock, next_position
+        SET evaluation_status = 'pending',
+            evaluation_started_at = NULL,
+            evaluation_completed_at = NULL,
+            evaluation_error_message = NULL,
+            cancellation_requested = FALSE,
+            eval_queue_position = next_position.position
+        FROM next_position
         WHERE id = $1
         "#,
     )
     .bind(commit_id)
-    .bind(EVAL_QUEUE_ADVISORY_LOCK_KEY)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
+    anyhow::ensure!(
+        updated.rows_affected() == 1,
+        "commit {commit_id} queue transition did not update exactly one row"
+    );
+    Ok(EvalQueueTransition::QueuedNew)
+}
 
+/// Queues manual commit re-evaluation or reuses its active attempt.
+///
+/// # Errors
+///
+/// Returns an error when the canonical lifecycle transition fails.
+pub async fn reset_commit_evaluation(pool: &PgPool, commit_id: i32) -> Result<EvalQueueTransition> {
+    let mut tx = pool.begin().await?;
+    let outcome = queue_or_reuse_commit_evaluation_tx(&mut tx, commit_id).await?;
     tx.commit().await?;
 
-    info!(
-        "🔄 Reset evaluation for commit {} ({})",
-        result.id, result.git_commit_hash
-    );
-
-    resolve_eval_attention_unless_failed(pool, commit_id).await;
-
-    Ok(())
+    if outcome == EvalQueueTransition::QueuedNew {
+        info!("🔄 Queued re-evaluation for commit {commit_id}");
+        resolve_eval_attention_unless_failed(pool, commit_id).await;
+    }
+    Ok(outcome)
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -1476,6 +1535,20 @@ pub async fn force_cancel_commit_evaluation_attempt(
     attempt_id: uuid::Uuid,
 ) -> Result<bool> {
     let mut tx = pool.begin().await?;
+    // CONCURRENCY: Finalization locks the commit before its active attempt.
+    // Force-cancellation uses the same order so the two terminal transitions
+    // cannot deadlock while they race.
+    let cancelling: Option<i32> = sqlx::query_scalar(
+        "SELECT id FROM commits WHERE id = $1 AND evaluation_status = 'cancelling' FOR UPDATE",
+    )
+    .bind(commit_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if cancelling.is_none() {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+
     let attempt = sqlx::query(
         "UPDATE evaluation_attempts SET status = 'cancelled', completed_at = COALESCE(completed_at, NOW()), updated_at = NOW() WHERE id = $1 AND commit_id = $2 AND status = 'in_progress'",
     )
@@ -2708,9 +2781,9 @@ mod tests {
     }
 
     // ── Test 4: stale typed cancellation does not affect newer attempt ────
-    // Attempt 1 is force-cancelled. Manual reset intentionally resets the
-    // attempt counter, then a new attempt starts. The old finalizer (still
-    // carrying expected_attempt=1) must not cancel the reset evaluation.
+    // Attempt 1 is force-cancelled. Manual reset inserts a newer lineage child.
+    // The old finalizer (still carrying expected_attempt=1) must not cancel the
+    // reset evaluation.
     #[tokio::test]
     #[ignore = "requires live database connection"]
     async fn stale_cancellation_finalizer_does_not_affect_newer_attempt() {
@@ -2732,13 +2805,11 @@ mod tests {
             .await
             .expect("reset should not error");
 
-        // A new attempt starts. Because manual reset resets the attempt
-        // counter, this may reuse attempt number 1; stale cancellation is
-        // still prevented by status/cancellation_requested guards.
+        // A new lineage child starts with a strictly newer attempt number.
         let attempt2 = start_eval(&pool, commit_id).await;
-        assert_eq!(
-            attempt1, attempt2,
-            "manual reset intentionally resets attempts"
+        assert!(
+            attempt2 > attempt1,
+            "manual retry must preserve monotonically increasing lineage"
         );
 
         // The stale worker for attempt 1 calls the finalizer with the old attempt.
