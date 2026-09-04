@@ -536,6 +536,9 @@ SQL
     cargo test --offline --package cf-server --lib \
       finalization_populates_host_metrics_for_complete_configuration_corpus \
       -- --ignored --test-threads=1
+    cargo test --offline --package cf-server --lib \
+      canonical_evaluation_queue_transition_preserves_lineage_and_finalization \
+      -- --ignored --test-threads=1
 
     echo "=== Immutable evaluation artifact and exact-page contracts ==="
     cargo test --offline --package cf-server --lib \

@@ -711,13 +711,21 @@ pub async fn re_evaluate_commit(
     }
 
     match crate::queries::commits::reset_commit_evaluation(&state.pool, commit_id).await {
-        Ok(_) => {
-            state.queue_notifier.notify_eval_queue();
+        Ok(outcome) => {
+            let queued_new = outcome == crate::queries::commits::EvalQueueTransition::QueuedNew;
+            if queued_new {
+                state.queue_notifier.notify_eval_queue();
+            }
             (
                 axum::http::StatusCode::OK,
                 axum::Json(serde_json::json!({
                     "status": "ok",
-                    "message": format!("Commit {} queued for re-evaluation", commit_id)
+                    "queued": queued_new,
+                    "message": if queued_new {
+                        format!("Commit {} queued for re-evaluation", commit_id)
+                    } else {
+                        format!("Commit {} evaluation already active", commit_id)
+                    }
                 })),
             )
                 .into_response()

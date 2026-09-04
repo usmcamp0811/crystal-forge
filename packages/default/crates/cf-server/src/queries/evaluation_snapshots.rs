@@ -800,8 +800,10 @@ pub async fn select_commit_snapshot(
                CASE
                WHEN es.lifecycle = 'available' AND es.schema_version = 1
                     AND es.integrity_version = 1 THEN 'available'
-               WHEN c.evaluation_status = 'pending' THEN 'queued'
-               WHEN c.evaluation_status IN ('in_progress', 'cancelling') THEN 'running'
+               WHEN c.evaluation_status = 'pending'
+                    AND active_attempt.status = 'queued' THEN 'queued'
+               WHEN c.evaluation_status IN ('in_progress', 'cancelling')
+                    AND active_attempt.status = 'in_progress' THEN 'running'
                WHEN es.lifecycle = 'available' THEN 'unavailable'
                ELSE es.lifecycle END AS lifecycle,
                CASE
@@ -826,6 +828,13 @@ pub async fn select_commit_snapshot(
           ON selection.commit_id = c.id
          AND selection.configuration_name = COALESCE(NULLIF(btrim(s.system_configuration_name), ''), s.hostname)
         JOIN evaluation_snapshots es ON es.id = selection.current_snapshot_id
+         LEFT JOIN LATERAL (
+           SELECT attempt.status
+           FROM evaluation_attempts attempt
+           WHERE attempt.commit_id = c.id
+             AND attempt.status IN ('queued', 'in_progress')
+           LIMIT 1
+         ) active_attempt ON true
          LEFT JOIN commits parent_commit
            ON parent_commit.flake_id = c.flake_id
           AND parent_commit.git_commit_hash = c.first_parent_sha
@@ -1245,9 +1254,17 @@ pub async fn missing_snapshot_lifecycle(
 ) -> Result<Option<(SnapshotLifecycle, Option<String>)>> {
     let row = sqlx::query(
         r#"
-        SELECT c.evaluation_status, c.evaluation_error_message
+        SELECT c.evaluation_status, c.evaluation_error_message,
+               active_attempt.status AS active_attempt_status
         FROM systems s
         JOIN commits c ON c.flake_id = s.flake_id
+        LEFT JOIN LATERAL (
+            SELECT attempt.status
+            FROM evaluation_attempts attempt
+            WHERE attempt.commit_id = c.id
+              AND attempt.status IN ('queued', 'in_progress')
+            LIMIT 1
+        ) active_attempt ON true
         WHERE s.id = $1 AND c.git_commit_hash = $2
           AND c.source_archived = false
         "#,
@@ -1260,10 +1277,11 @@ pub async fn missing_snapshot_lifecycle(
     row.map(|row| {
         let status: String = row.try_get("evaluation_status")?;
         let error: Option<String> = row.try_get("evaluation_error_message")?;
-        let lifecycle = match status.as_str() {
-            "pending" => SnapshotLifecycle::Queued,
-            "in_progress" => SnapshotLifecycle::Running,
-            "failed" => SnapshotLifecycle::Failed,
+        let active_status: Option<String> = row.try_get("active_attempt_status")?;
+        let lifecycle = match (status.as_str(), active_status.as_deref()) {
+            ("pending", Some("queued")) => SnapshotLifecycle::Queued,
+            ("in_progress" | "cancelling", Some("in_progress")) => SnapshotLifecycle::Running,
+            ("failed", _) => SnapshotLifecycle::Failed,
             _ => SnapshotLifecycle::Unavailable,
         };
         Ok((
@@ -1289,9 +1307,13 @@ pub async fn queue_or_reuse_evaluation(
     revision: &str,
 ) -> Result<Option<QueueEvaluationResponse>> {
     let mut tx = pool.begin().await?;
+    // CONCURRENCY: Acquire queue order before the commit row. This matches the
+    // canonical transition and keeps snapshot availability stable until the
+    // decision commits.
+    crate::queries::commits::lock_eval_queue_order_tx(&mut tx).await?;
     let row = sqlx::query(
         r#"
-        SELECT c.id, c.evaluation_status,
+        SELECT c.id,
                 EXISTS (
                     SELECT 1
                     FROM evaluation_snapshot_selections selection
@@ -1321,58 +1343,23 @@ pub async fn queue_or_reuse_evaluation(
     };
 
     let commit_id: i32 = row.try_get("id")?;
-    let status: String = row.try_get("evaluation_status")?;
     let snapshot_available: bool = row.try_get("snapshot_available")?;
     let (lifecycle, queued) = if snapshot_available {
         (SnapshotLifecycle::Available, false)
-    } else if status == "pending" {
-        (SnapshotLifecycle::Queued, false)
-    } else if matches!(status.as_str(), "in_progress" | "cancelling") {
-        (SnapshotLifecycle::Running, false)
     } else {
-        // LIFECYCLE: A retry creates a new lineage row in the same transaction
-        // as the commit transition. Setting only commits.evaluation_status
-        // would advertise queued work that no evaluator can claim.
-        sqlx::query(
-            r#"
-            UPDATE commits
-            SET evaluation_status = 'pending',
-                evaluation_started_at = NULL,
-                evaluation_completed_at = NULL,
-                evaluation_error_message = NULL,
-                cancellation_requested = false
-            WHERE id = $1
-            "#,
-        )
-        .bind(commit_id)
-        .execute(&mut *tx)
-        .await?;
-        let attempt = sqlx::query(
-            r#"
-            WITH source AS (
-                SELECT id, COALESCE(root_attempt_id, id) AS root_attempt_id,
-                       attempt_number
-                FROM evaluation_attempts
-                WHERE commit_id = $1
-                ORDER BY attempt_number DESC, created_at DESC
-                LIMIT 1
-            )
-            INSERT INTO evaluation_attempts (
-                commit_id, parent_attempt_id, root_attempt_id, attempt_number,
-                automatic_retry_count, available_at
-            )
-            SELECT $1, id, root_attempt_id, attempt_number + 1, 0, NOW()
-            FROM source
-            "#,
-        )
-        .bind(commit_id)
-        .execute(&mut *tx)
-        .await?;
-        anyhow::ensure!(
-            attempt.rows_affected() == 1,
-            "commit {commit_id} has no evaluation attempt lineage"
-        );
-        (SnapshotLifecycle::Queued, true)
+        match crate::queries::commits::queue_or_reuse_commit_evaluation_tx(&mut tx, commit_id)
+            .await?
+        {
+            crate::queries::commits::EvalQueueTransition::QueuedNew => {
+                (SnapshotLifecycle::Queued, true)
+            }
+            crate::queries::commits::EvalQueueTransition::QueuedExisting => {
+                (SnapshotLifecycle::Queued, false)
+            }
+            crate::queries::commits::EvalQueueTransition::Running => {
+                (SnapshotLifecycle::Running, false)
+            }
+        }
     };
     tx.commit().await?;
 
@@ -3829,6 +3816,211 @@ mod tests {
             .expect("snapshot row should remain selected");
         assert_eq!(selected.lifecycle, SnapshotLifecycle::Queued);
         assert!(selected.error.is_none());
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn canonical_evaluation_queue_transition_preserves_lineage_and_finalization(
+        pool: PgPool,
+    ) {
+        use crate::queries::commits::{EvalQueueTransition, reset_commit_evaluation};
+
+        let suffix = Uuid::new_v4().simple().to_string();
+        let repo_url = format!("https://example.test/queue-transition-{suffix}.git");
+        let flake = insert_flake(
+            &pool,
+            &format!("queue-transition-{suffix}"),
+            &repo_url,
+            "main",
+            "cf_systems_only",
+        )
+        .await
+        .expect("flake insert should succeed");
+        let commit = insert_test_commit(&pool, &repo_url, &"7".repeat(40)).await;
+        let system = insert_test_system(&pool, flake.id, &suffix).await;
+
+        let (first, second) = tokio::join!(
+            queue_or_reuse_evaluation(&pool, system.id, &commit.git_commit_hash),
+            queue_or_reuse_evaluation(&pool, system.id, &commit.git_commit_hash),
+        );
+        for response in [first, second] {
+            let response = response
+                .expect("repeated queue should succeed")
+                .expect("revision should exist");
+            assert_eq!(response.lifecycle, SnapshotLifecycle::Queued);
+            assert!(
+                !response.queued,
+                "the initial queued attempt must be reused"
+            );
+        }
+        let active_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM evaluation_attempts WHERE commit_id = $1 AND status IN ('queued', 'in_progress')",
+        )
+        .bind(commit.id)
+        .fetch_one(&pool)
+        .await
+        .expect("active attempts should count");
+        assert_eq!(active_count, 1);
+
+        let attempt = match mark_commit_evaluation_started(&pool, commit.id)
+            .await
+            .expect("worker claim should succeed")
+        {
+            EvalStartOutcome::Started { attempt } => attempt,
+            EvalStartOutcome::NoLongerPending => panic!("queued work should be claimable"),
+        };
+        let running = queue_or_reuse_evaluation(&pool, system.id, &commit.git_commit_hash)
+            .await
+            .expect("running work should be reusable")
+            .expect("revision should exist");
+        assert_eq!(running.lifecycle, SnapshotLifecycle::Running);
+        assert!(!running.queued);
+
+        let mut snapshots = std::collections::HashMap::new();
+        snapshots.insert(
+            "host".to_string(),
+            vec![option("services.queue.visible", json!(true))],
+        );
+        let plan = EvaluationPlan {
+            results: Vec::new(),
+            policy_checks: Vec::new(),
+            successful_systems: Vec::new(),
+            confirmed_failures: Vec::new(),
+            evaluation_snapshots: snapshots,
+            flake_output_snapshot: None,
+            had_system_eval_errors: false,
+            force_build_job_insert_failure: false,
+        };
+        let finalized = finalize_evaluation_attempt(&pool, commit.id, attempt, &plan)
+            .await
+            .expect("finalization should succeed");
+        assert!(matches!(
+            finalized,
+            EvaluationFinalizeOutcome::Completed { .. }
+        ));
+        let attempt_status: String = sqlx::query_scalar(
+            "SELECT status FROM evaluation_attempts WHERE commit_id = $1 AND attempt_number = $2",
+        )
+        .bind(commit.id)
+        .bind(attempt)
+        .fetch_one(&pool)
+        .await
+        .expect("finalized attempt should load");
+        assert_eq!(attempt_status, "complete");
+        let selected = select_commit_snapshot(&pool, system.id, &commit.git_commit_hash)
+            .await
+            .expect("snapshot selection should succeed")
+            .expect("finalized snapshot should be visible");
+        assert_eq!(selected.lifecycle, SnapshotLifecycle::Available);
+
+        let completed_id: Uuid = sqlx::query_scalar(
+            "SELECT id FROM evaluation_attempts WHERE commit_id = $1 AND attempt_number = $2",
+        )
+        .bind(commit.id)
+        .bind(attempt)
+        .fetch_one(&pool)
+        .await
+        .expect("completed attempt should load");
+        let stale_id: Uuid = sqlx::query_scalar(
+            r#"
+            INSERT INTO evaluation_attempts (
+                commit_id, parent_attempt_id, root_attempt_id, attempt_number
+            )
+            SELECT $1, id, COALESCE(root_attempt_id, id), attempt_number + 1
+            FROM evaluation_attempts WHERE id = $2
+            RETURNING id
+            "#,
+        )
+        .bind(commit.id)
+        .bind(completed_id)
+        .fetch_one(&pool)
+        .await
+        .expect("stale terminal attempt fixture should insert");
+        assert_eq!(
+            reset_commit_evaluation(&pool, commit.id)
+                .await
+                .expect("terminal retry should succeed"),
+            EvalQueueTransition::QueuedNew
+        );
+        let stale_status: String =
+            sqlx::query_scalar("SELECT status FROM evaluation_attempts WHERE id = $1")
+                .bind(stale_id)
+                .fetch_one(&pool)
+                .await
+                .expect("stale attempt should load");
+        assert_eq!(stale_status, "cancelled");
+
+        sqlx::query(
+            "UPDATE evaluation_attempts SET status = 'failed', completed_at = NOW() WHERE commit_id = $1 AND status = 'queued'",
+        )
+        .bind(commit.id)
+        .execute(&pool)
+        .await
+        .expect("phantom pending fixture should retire active attempt");
+        let (repair_one, repair_two) = tokio::join!(
+            reset_commit_evaluation(&pool, commit.id),
+            reset_commit_evaluation(&pool, commit.id),
+        );
+        let outcomes = [repair_one.unwrap(), repair_two.unwrap()];
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| **outcome == EvalQueueTransition::QueuedNew)
+                .count(),
+            1
+        );
+        assert!(outcomes.contains(&EvalQueueTransition::QueuedExisting));
+        let active_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM evaluation_attempts WHERE commit_id = $1 AND status = 'queued'",
+        )
+        .bind(commit.id)
+        .fetch_one(&pool)
+        .await
+        .expect("repaired active attempts should count");
+        assert_eq!(active_count, 1);
+
+        let cancelled = insert_test_commit(&pool, &repo_url, &"8".repeat(40)).await;
+        let cancelled_attempt = match mark_commit_evaluation_started(&pool, cancelled.id)
+            .await
+            .expect("cancellation fixture should be claimable")
+        {
+            EvalStartOutcome::Started { attempt } => attempt,
+            EvalStartOutcome::NoLongerPending => panic!("cancellation fixture should start"),
+        };
+        assert_eq!(
+            crate::queries::commits::cancel_commit_evaluation(&pool, cancelled.id)
+                .await
+                .expect("cancellation request should succeed"),
+            crate::api::models::CancelEvalOutcome::CancellingInProgress
+        );
+        let cancelled_outcome =
+            finalize_evaluation_attempt(&pool, cancelled.id, cancelled_attempt, &plan)
+                .await
+                .expect("cancellation finalization should succeed");
+        assert!(matches!(
+            cancelled_outcome,
+            EvaluationFinalizeOutcome::Cancelled
+        ));
+        let cancelled_attempt_status: String = sqlx::query_scalar(
+            "SELECT status FROM evaluation_attempts WHERE commit_id = $1 AND attempt_number = $2",
+        )
+        .bind(cancelled.id)
+        .bind(cancelled_attempt)
+        .fetch_one(&pool)
+        .await
+        .expect("cancelled attempt should load");
+        assert_eq!(cancelled_attempt_status, "cancelled");
+
+        let missing = insert_test_commit(&pool, &repo_url, &"9".repeat(40)).await;
+        sqlx::query("DELETE FROM evaluation_attempts WHERE commit_id = $1")
+            .bind(missing.id)
+            .execute(&pool)
+            .await
+            .expect("missing lineage fixture should delete attempts");
+        let error = reset_commit_evaluation(&pool, missing.id)
+            .await
+            .expect_err("entirely missing lineage must fail closed");
+        assert!(error.to_string().contains("no evaluation attempt lineage"));
     }
 
     #[sqlx::test(migrations = "./migrations")]

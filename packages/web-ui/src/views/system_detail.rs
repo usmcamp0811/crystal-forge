@@ -1510,7 +1510,7 @@ pub fn SystemDetailView(
                     },
                     Tab::Config => rsx! {
                         ConfigTab {
-                            key: "{navigation_state.read().config_revision:?}-{deploy_commit_history.iter().find(|commit| commit.is_current).map(|commit| commit.hash.as_str()).unwrap_or_default()}",
+                            key: "{navigation_state.read().config_revision:?}-{deploy_commit_history.iter().find(|commit| commit.is_current).map(|commit| commit.hash.as_str()).unwrap_or_default()}-{generations_result.generations.len()}",
                             system: system.clone(),
                             commits: deploy_commit_history.clone(),
                             generations: generations_result.generations.clone(),
@@ -4894,6 +4894,25 @@ fn config_selection_is_historical(
     }
 }
 
+fn unavailable_generation_commit(
+    mode: SnapshotRevisionMode,
+    selected_generation: Option<i32>,
+    lifecycle: Option<SnapshotLifecycle>,
+    generations: &[SystemGeneration],
+) -> Option<String> {
+    if mode != SnapshotRevisionMode::Generation || lifecycle != Some(SnapshotLifecycle::Unavailable)
+    {
+        return None;
+    }
+    let selected_generation = selected_generation?;
+    generations
+        .iter()
+        .find(|generation| generation.generation == selected_generation)
+        .and_then(|generation| generation.commit_hash.as_deref())
+        .filter(|sha| sha.len() == 40 && sha.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .map(str::to_string)
+}
+
 const SOURCE_TEXT_UNAVAILABLE_MESSAGE: &str = "Crystal Forge retained the authoritative winning or overridden definition provenance, not arbitrary Nix source text. Source text can contain secrets, so no source code is inferred from the persisted safe value.";
 
 fn refresh_scope_is_current(
@@ -5169,6 +5188,7 @@ fn ConfigTab(
     let mut module_request_sequence = use_signal(|| 0_u64);
     let mut module_scope = use_signal(|| None::<ModuleSourcesScope>);
     let mut config_snapshot_token = use_signal(|| None::<String>);
+    let mut reevaluated_commit = use_signal(|| None::<String>);
 
     #[cfg(target_arch = "wasm32")]
     {
@@ -5605,6 +5625,19 @@ fn ConfigTab(
     let active_page_size = *page_size.read();
     let range_end = (page_offset + active_page_size).min(total);
     let lifecycle = loaded_response.as_ref().map(|value| value.lifecycle);
+    let module_lifecycle_hint = module_sources
+        .read()
+        .as_ref()
+        .map(|collection| collection.lifecycle);
+    let unavailable_generation_commit = unavailable_generation_commit(
+        selected_mode,
+        selected_generation,
+        lifecycle.or(module_lifecycle_hint),
+        &generations,
+    );
+    let show_commit_reevaluation = selected_mode == SnapshotRevisionMode::Commit
+        && lifecycle == Some(SnapshotLifecycle::Available)
+        && reevaluated_commit.read().as_deref() == selected_revision.as_deref();
     let comparison_available = loaded_response
         .as_ref()
         .is_some_and(|value| value.comparison_available);
@@ -5966,11 +5999,43 @@ fn ConfigTab(
                         }
                     }
                 }
+                if show_commit_reevaluation {
+                    div {
+                        class: "cfg-comparison-note",
+                        "Reevaluation of commit "
+                        span {
+                            class: "mono",
+                            title: selected_revision.clone().unwrap_or_default(),
+                            "{selected_revision_label}"
+                        }
+                        ". This commit-scoped result is not a retained historical generation configuration."
+                    }
+                }
                 if selected_revision.is_none() {
                     if revision_known {
                         ConfigState { kind: "unavailable", message: "This retained generation is known, but it has no tracked commit. No evaluation snapshot can be selected." }
                     } else {
                         ConfigState { kind: "unavailable", message: "This generation is unknown or is no longer retained." }
+                    }
+                } else if let Some(commit) = unavailable_generation_commit.clone() {
+                    div { class: "cfg-state cfg-state-unavailable", role: "status",
+                        div {
+                            "data-testid": "legacy-generation-provenance",
+                            strong { "Historical generation configuration not retained" }
+                            p {
+                                "Crystal Forge retained the association between generation #"
+                                "{selected_generation.unwrap_or_default()}"
+                                " and commit "
+                                span { class: "mono", title: "{commit}", "{short_revision(&commit)}" }
+                                ", but it did not retain the exact evaluated configuration for that generation."
+                            }
+                            p { "Inspecting or reevaluating the associated commit creates commit-scoped data. It does not restore or recreate the historical generation configuration." }
+                        }
+                        button {
+                            class: "btn btn-primary focus-ring xs",
+                            onclick: move |_| on_revision_change.call(ConfigRevision::Commit(commit.clone())),
+                            "Inspect associated commit"
+                        }
                     }
                 } else if let Some(error) = load_error {
                     div { class: "cfg-state cfg-state-failed", role: "alert",
@@ -6007,7 +6072,9 @@ fn ConfigTab(
                                     strong { "{snapshot_lifecycle_label(state)}" }
                                     p { "{message}" }
                                 }
-                                if allow_mutations && (state == SnapshotLifecycle::Unavailable || state == SnapshotLifecycle::Failed) {
+                                if allow_mutations
+                                    && (state == SnapshotLifecycle::Unavailable || state == SnapshotLifecycle::Failed)
+                                {
                                     button {
                                         class: "btn btn-primary focus-ring xs",
                                         disabled: queueing,
@@ -6028,7 +6095,10 @@ fn ConfigTab(
                                                 }
                                                 queueing_scope.set(None);
                                                 match result {
-                                                    Ok(_) => refresh_generation.set(request_scope.generation.saturating_add(1)),
+                                                    Ok(_) => {
+                                                        reevaluated_commit.set(Some(revision_for_queue));
+                                                        refresh_generation.set(request_scope.generation.saturating_add(1));
+                                                    }
                                                     Err(error) => options.set(Some(Err(error))),
                                                 }
                                             });
@@ -10556,15 +10626,16 @@ fn map_agent_events_to_logs(events: Vec<SystemAgentEvent>) -> Vec<DeploymentLogE
 #[cfg(test)]
 mod tests {
     use super::{
-        EvaluatedOptionsPage, HistoryEventKind, SafeOptionValue, SnapshotLifecycle, Tab,
-        build_history_events, classify_history_entry, fitted_config_page_size,
-        map_agent_events_to_logs, map_history_entries_to_commit_history,
+        EvaluatedOptionsPage, HistoryEventKind, SafeOptionValue, SnapshotLifecycle,
+        SnapshotRevisionMode, Tab, build_history_events, classify_history_entry,
+        fitted_config_page_size, map_agent_events_to_logs, map_history_entries_to_commit_history,
         natural_config_side_height, package_identities, query_value, query_with_parameter,
         render_safe_option_value, snapshot_lifecycle_message, tab_from_query, tab_from_route,
-        visible_config_response,
+        unavailable_generation_commit, visible_config_response,
     };
     use crate::api::models::{
-        SafeEvaluationError, SafePackageValue, SystemAgentEvent, SystemHistoryEntry,
+        SafeEvaluationError, SafePackageValue, SystemAgentEvent, SystemGeneration,
+        SystemHistoryEntry,
     };
     use chrono::{Duration, Utc};
 
@@ -10905,6 +10976,61 @@ mod tests {
         assert_eq!(
             snapshot_lifecycle_message(SnapshotLifecycle::Failed, Some("safe error")),
             "safe error"
+        );
+    }
+
+    #[test]
+    fn only_unavailable_generation_with_full_commit_offers_commit_inspection() {
+        let full_sha = "abcdef0123456789abcdef0123456789abcdef01";
+        let generation = SystemGeneration {
+            generation: 73,
+            store_path: None,
+            commit_hash: Some(full_sha.to_string()),
+            timestamp: Utc::now(),
+            is_current: false,
+            generation_snapshot_id: None,
+            rollback_eligible: false,
+        };
+
+        assert_eq!(
+            unavailable_generation_commit(
+                SnapshotRevisionMode::Generation,
+                Some(73),
+                Some(SnapshotLifecycle::Unavailable),
+                std::slice::from_ref(&generation),
+            )
+            .as_deref(),
+            Some(full_sha)
+        );
+        assert_eq!(
+            unavailable_generation_commit(
+                SnapshotRevisionMode::Commit,
+                None,
+                Some(SnapshotLifecycle::Unavailable),
+                std::slice::from_ref(&generation),
+            ),
+            None
+        );
+        assert_eq!(
+            unavailable_generation_commit(
+                SnapshotRevisionMode::Generation,
+                Some(73),
+                Some(SnapshotLifecycle::Available),
+                std::slice::from_ref(&generation),
+            ),
+            None
+        );
+
+        let mut abbreviated = generation;
+        abbreviated.commit_hash = Some("abcdef0".to_string());
+        assert_eq!(
+            unavailable_generation_commit(
+                SnapshotRevisionMode::Generation,
+                Some(73),
+                Some(SnapshotLifecycle::Unavailable),
+                &[abbreviated],
+            ),
+            None
         );
     }
 

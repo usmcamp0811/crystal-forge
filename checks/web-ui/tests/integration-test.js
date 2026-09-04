@@ -73,13 +73,6 @@ function runFixtureSql(sql) {
   ).trim();
 }
 
-function runFixtureSql(sql) {
-  const encoded = Buffer.from(sql, "utf8").toString("base64");
-  return execSync(`printf %s ${encoded} | base64 -d | sudo -u postgres psql -d crystal_forge -v ON_ERROR_STOP=1 -A -t -F '|'`, {
-    encoding: "utf8",
-  }).trim();
-}
-
 // ── Node.js 24 safety net ──────────────────────────────────────────────────
 // Preserve diagnostics for detached Playwright failures without allowing an
 // uncaught exception or rejection to produce a successful browser process.
@@ -3293,6 +3286,7 @@ async function routeTask440SystemData(page, overrides = {}) {
     moduleRequests: [],
     optionRequests: [],
     summaryRequests: [],
+    evaluationRequests: [],
     rollbackRequests: [],
     requestOrdinal: 0,
     sevenDayDrift: "no_observed_drift",
@@ -3620,9 +3614,28 @@ async function routeTask440SystemData(page, overrides = {}) {
     }) });
   });
 
-  await page.route(new RegExp(`/api/v1/systems/${TASK_440_SYSTEM_ID}/evaluations/[0-9a-f]+$`), async (route) => {
+  await page.route(new RegExp(`/api/v1/systems/${TASK_440_SYSTEM_ID}/evaluations/([^/?]+)$`), async (route) => {
+    const request = route.request();
+    if (request.method() !== "POST") {
+      await route.fulfill({ status: 405, contentType: "application/json", body: JSON.stringify({ error: "method_not_allowed", message: "Method not allowed", details: null }) });
+      return;
+    }
+    const match = new URL(request.url()).pathname.match(/\/evaluations\/([^/]+)$/);
+    const revision = match ? decodeURIComponent(match[1]) : "";
+    const knownRevisions = new Set([
+      currentRevision,
+      TASK_440_NEVER_DEPLOYED_SHA,
+      TASK_440_HISTORICAL_SHA,
+      TASK_440_ROOT_SHA,
+      TASK_440_DESIGN_PARENT_SHA,
+    ]);
+    if (!/^[0-9a-f]{40}$/.test(revision) || !knownRevisions.has(revision)) {
+      await route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ error: "invalid_revision", message: "An exact known full commit SHA is required", details: null }) });
+      return;
+    }
+    state.evaluationRequests.push({ method: request.method(), revision });
     state.lifecycle = state.queueLifecycle;
-    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ revision: TASK_440_HISTORICAL_SHA, lifecycle: state.lifecycle, queued: true }) });
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ revision, lifecycle: state.lifecycle, queued: true }) });
   });
 
   await page.route(new RegExp(`/api/v1/systems/${TASK_440_SYSTEM_ID}/deploy$`), async (route) => {
@@ -4701,6 +4714,164 @@ async function runTask433ProductionEvaluation(page, { commitId, systemId, policy
     )::text FROM commits WHERE id=${Number(commitId)};
   `);
   throw new Error(`Production commit re-evaluation did not persist the TASK-433 assessment: ${status}`);
+}
+
+function createTask440LiveEvaluationFixture() {
+  const suffix = crypto.randomUUID();
+  const revision = createHash("sha1").update(`task440-live-${suffix}`).digest("hex");
+  const hostname = `task440-live-${suffix.slice(0, 8)}`;
+  const result = runFixtureSql(`
+    WITH selected_environment AS (
+      SELECT id FROM environments ORDER BY created_at, id LIMIT 1
+    ), inserted_flake AS (
+      INSERT INTO flakes (name, repo_url, branch, build_scope, sync_status)
+      VALUES (
+        $name$TASK-440 live ${suffix}$name$,
+        $repo$https://example.invalid/task440-${suffix}.git$repo$,
+        'main', 'cf_systems_only', 'synced'
+      )
+      RETURNING id
+    ), inserted_commit AS (
+      INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp, message, author)
+      SELECT id, '${revision}', now(), 'TASK-440 live queue regression', 'Web UI test'
+      FROM inserted_flake
+      RETURNING id, flake_id
+    ), inserted_system AS (
+      INSERT INTO systems (
+        hostname, environment_id, is_active, public_key, flake_id, derivation,
+        deployment_policy, system_configuration_name
+      )
+      SELECT
+        '${hostname}', selected_environment.id, TRUE,
+        'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITASK440LIVE${suffix}',
+        inserted_commit.flake_id,
+        '/nix/store/00000000000000000000000000000000-task440-live',
+        'manual', '${hostname}'
+      FROM selected_environment, inserted_commit
+      RETURNING id
+    ), stale_attempt AS (
+      UPDATE evaluation_attempts
+      SET status = 'in_progress', started_at = now(), updated_at = now()
+      WHERE commit_id = (SELECT id FROM inserted_commit)
+      RETURNING id, root_attempt_id, attempt_number
+    ), terminal_commit AS (
+      UPDATE commits
+      SET evaluation_status = 'complete',
+          evaluation_started_at = now() - interval '1 minute',
+          evaluation_completed_at = now(),
+          evaluation_attempt_count = (SELECT attempt_number FROM stale_attempt),
+          evaluation_error_message = NULL,
+          cancellation_requested = FALSE
+      WHERE id = (SELECT id FROM inserted_commit)
+      RETURNING id
+    )
+    SELECT json_build_object(
+      'systemId', (SELECT id FROM inserted_system),
+      'commitId', (SELECT id FROM terminal_commit),
+      'revision', '${revision}',
+      'hostname', '${hostname}',
+      'staleAttemptId', (SELECT id FROM stale_attempt),
+      'rootAttemptId', (SELECT root_attempt_id FROM stale_attempt),
+      'attemptNumber', (SELECT attempt_number FROM stale_attempt)
+    )::text;
+  `);
+  return JSON.parse(result);
+}
+
+async function runTask440LiveSnapshotEvaluation(page) {
+  const fixture = createTask440LiveEvaluationFixture();
+  await page.unrouteAll({ behavior: "wait" });
+  await ensureAuthenticated(page);
+  await page.goto(
+    `${baseUrl}/systems/${fixture.systemId}?tab=config&config_mode=commit&revision=${fixture.revision}`,
+    { timeout: LOAD_TIMEOUT },
+  );
+  await assertVisible(
+    page.getByText("Snapshot unavailable", { exact: true }),
+    "Expected live commit to begin without a reusable snapshot",
+    15000,
+  );
+  await page.getByRole("button", { name: "Evaluate this revision" }).click();
+
+  let completed = null;
+  for (let attempt = 0; attempt < 180; attempt += 1) {
+    const state = runFixtureSql(`
+      SELECT json_build_object(
+        'commitStatus', commit_row.evaluation_status,
+        'activeAttempts', COUNT(*) FILTER (
+          WHERE evaluation_attempt.status IN ('queued', 'in_progress')
+        ),
+        'attempts', json_agg(json_build_object(
+          'id', evaluation_attempt.id,
+          'status', evaluation_attempt.status,
+          'attemptNumber', evaluation_attempt.attempt_number,
+          'rootAttemptId', evaluation_attempt.root_attempt_id,
+          'parentAttemptId', evaluation_attempt.parent_attempt_id
+        ) ORDER BY evaluation_attempt.attempt_number),
+        'snapshotCount', (
+          SELECT COUNT(*)
+          FROM evaluation_snapshot_selections selection
+          JOIN evaluation_snapshots snapshot ON snapshot.id = selection.current_snapshot_id
+          WHERE selection.commit_id = commit_row.id
+            AND selection.configuration_name = '${fixture.hostname}'
+            AND snapshot.lifecycle = 'available'
+            AND snapshot.integrity_version = 1
+        )
+      )::text
+      FROM commits commit_row
+      JOIN evaluation_attempts evaluation_attempt ON evaluation_attempt.commit_id = commit_row.id
+      WHERE commit_row.id = ${Number(fixture.commitId)}
+      GROUP BY commit_row.id;
+    `);
+    const parsed = JSON.parse(state);
+    if (Number(parsed.activeAttempts) > 1) {
+      throw new Error(`TASK-440 live retry created multiple active attempts: ${state}`);
+    }
+    if (parsed.commitStatus === "complete" && Number(parsed.snapshotCount) === 1) {
+      completed = parsed;
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+  if (!completed) {
+    const state = runFixtureSql(`
+      SELECT json_build_object(
+        'commit', row_to_json(commit_row),
+        'attempts', COALESCE(json_agg(row_to_json(evaluation_attempt)
+          ORDER BY evaluation_attempt.attempt_number), '[]'::json)
+      )::text
+      FROM commits commit_row
+      LEFT JOIN evaluation_attempts evaluation_attempt ON evaluation_attempt.commit_id = commit_row.id
+      WHERE commit_row.id = ${Number(fixture.commitId)}
+      GROUP BY commit_row.id;
+    `);
+    throw new Error(`TASK-440 live evaluation did not persist a snapshot: ${state}`);
+  }
+
+  const stale = completed.attempts.find((attempt) => attempt.id === fixture.staleAttemptId);
+  const retry = completed.attempts.find(
+    (attempt) => Number(attempt.attemptNumber) === Number(fixture.attemptNumber) + 1,
+  );
+  if (stale?.status !== "cancelled") {
+    throw new Error(`Expected stale production attempt to be retired: ${JSON.stringify(completed)}`);
+  }
+  if (
+    !retry ||
+    retry.status !== "complete" ||
+    retry.parentAttemptId !== fixture.staleAttemptId ||
+    retry.rootAttemptId !== fixture.rootAttemptId
+  ) {
+    throw new Error(`Expected preserved retry lineage and completed worker attempt: ${JSON.stringify(completed)}`);
+  }
+  if (Number(completed.activeAttempts) !== 0) {
+    throw new Error(`Completed evaluation retained active attempts: ${JSON.stringify(completed)}`);
+  }
+
+  await assertVisible(
+    page.getByText("services.crystal-forge-agent.enable", { exact: true }),
+    "Expected Config to render the snapshot persisted by evaluator finalization",
+    15000,
+  );
 }
 
 async function createPhase6PoamFixture(page, label, systemCount = 1, options = {}) {
@@ -15793,8 +15964,9 @@ security.audit.enable = true;</fixtext>
   },
   {
     name: "12l-task440-config-lifecycle",
-    description: "TASK-440 Config mocked API states (not live integration): current, historical, never-deployed, unavailable, queued, running, failed, API-error, module transport retry, and local generation",
+    description: "TASK-440 live queue/evaluator/snapshot regression plus mocked auxiliary Config lifecycle and legacy-generation states",
     action: async (page) => {
+      await runTask440LiveSnapshotEvaluation(page);
       await routeSystemsWarningData(page);
       const state = await routeTask440SystemData(page);
       const configUrl = `${baseUrl}/systems/${TASK_440_SYSTEM_ID}?tab=config&config_mode=commit&revision=${TASK_440_NEVER_DEPLOYED_SHA}`;
@@ -15868,8 +16040,29 @@ security.audit.enable = true;</fixtext>
       }
       await page.goto(`${baseUrl}/systems/${TASK_440_SYSTEM_ID}?tab=config&config_mode=generation&generation=999`, { timeout: LOAD_TIMEOUT });
       await assertVisible(page.getByText(/generation is unknown or is no longer retained/i), "Expected unknown generation to differ from retained untracked generation", 15000);
+      state.lifecycle = "unavailable";
       await page.goto(`${baseUrl}/systems/${TASK_440_SYSTEM_ID}?tab=config&config_mode=generation&generation=73`, { timeout: LOAD_TIMEOUT });
       await assertVisible(page.locator(".cfg-hist-note").filter({ hasText: "generation #73" }), "Expected historical generation warning", 15000);
+      const legacyGeneration = page.getByTestId("legacy-generation-provenance");
+      await assertVisible(legacyGeneration.getByText("Historical generation configuration not retained", { exact: true }), "Expected explicit missing historical generation provenance", 15000);
+      await assertVisible(legacyGeneration.getByText(/did not retain the exact evaluated configuration for that generation/i), "Expected exact generation retention warning");
+      await assertVisible(legacyGeneration.getByText(/does not restore or recreate the historical generation configuration/i), "Expected commit reevaluation boundary");
+      await assertHidden(page.getByRole("button", { name: "Evaluate this revision" }), "Generation mode must not imply reevaluation repairs historical provenance");
+      await page.getByRole("button", { name: "Inspect associated commit" }).click();
+      await page.waitForURL((url) => url.searchParams.get("config_mode") === "commit" && url.searchParams.get("revision") === TASK_440_HISTORICAL_SHA);
+      await assertVisible(page.getByRole("button", { name: "Evaluate this revision" }), "Commit mode must permit authorized reevaluation");
+      state.queueLifecycle = "available";
+      await page.getByRole("button", { name: "Evaluate this revision" }).click();
+      await assertVisible(page.locator(".cfg-comparison-note").filter({ hasText: `Reevaluation of commit ${TASK_440_HISTORICAL_SHA.slice(0, 7)}` }), "Expected fresh result to be labeled as commit reevaluation", 15000);
+      await assertVisible(page.locator(".cfg-table tbody .cfg-row").first(), "Expected commit data after successful reevaluation");
+      const evaluationRequest = state.evaluationRequests.at(-1);
+      if (evaluationRequest?.method !== "POST" || evaluationRequest?.revision !== TASK_440_HISTORICAL_SHA) {
+        throw new Error(`Expected exact associated-commit POST, got ${JSON.stringify(evaluationRequest)}`);
+      }
+      state.lifecycle = "unavailable";
+      await page.goBack({ waitUntil: "domcontentloaded" });
+      await assertVisible(page.getByTestId("legacy-generation-provenance"), "Generation must remain unavailable after commit reevaluation", 15000);
+      if (new URL(page.url()).searchParams.get("generation") !== "73") throw new Error("Legacy generation deep link was not restored");
       await page.getByRole("button", { name: "Back to current" }).click();
       await assertVisible(page.getByRole("button", { name: "Generations" }), "Expected current generation Config state");
       if (page.url().includes("generation=73")) throw new Error("Back to current retained stale generation context");
@@ -17177,6 +17370,7 @@ function runStaticHarnessContracts() {
 
   validateManifest(MANIFEST);
   for (const name of [
+    "12l-task440-config-lifecycle",
     "task433-canonical-large-catalog",
     "20af-policy-catalog-selection-delete-regressions",
     "task433-canonical-unmapped-nix-policy",
