@@ -816,7 +816,8 @@ in pkgs.testers.runNixOSTest {
     if machine.execute("test -f /tmp/design-parity/design-parity-matrix.png")[0] == 0:
         machine.copy_from_vm("/tmp/design-parity/design-parity-matrix.png", "screenshots")
     machine.copy_from_vm("/tmp/design-targets", "screenshots")
-    machine.copy_from_vm("/tmp/screenshots/design-parity", "screenshots")
+    if machine.execute("test -d /tmp/screenshots/design-parity")[0] == 0:
+        machine.copy_from_vm("/tmp/screenshots/design-parity", "screenshots")
 
     ok_count = sum(1 for r in results if r.get("ok"))
     intermediate_count = sum(

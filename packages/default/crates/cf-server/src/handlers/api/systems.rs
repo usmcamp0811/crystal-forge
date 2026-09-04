@@ -288,6 +288,9 @@ pub async fn get_system_evaluated_options(
     if params.mode == SnapshotRevisionMode::Commit && !is_full_commit_sha(&params.revision) {
         return bad_request("revision must be a full 40- or 64-character commit SHA");
     }
+    if let Err(message) = validate_evaluated_options_params(&params) {
+        return bad_request(message);
+    }
     let selected = match params.mode {
         SnapshotRevisionMode::Commit => {
             crate::queries::evaluation_snapshots::select_commit_snapshot(
@@ -309,6 +312,11 @@ pub async fn get_system_evaluated_options(
     };
     let selected = match selected {
         Ok(Some(value)) => value,
+        Ok(None) if params.snapshot_token.is_some() => {
+            return evaluation_snapshot_changed(
+                "Evaluation snapshot changed; reload options from offset 0",
+            );
+        }
         Ok(None) if params.mode == SnapshotRevisionMode::Commit => {
             let lifecycle = match crate::queries::evaluation_snapshots::missing_snapshot_lifecycle(
                 &pool,
@@ -339,19 +347,25 @@ pub async fn get_system_evaluated_options(
         }
     };
 
-    match crate::queries::evaluation_snapshots::query_options_page(
+    match crate::queries::evaluation_snapshots::query_options_page_with_token(
         &pool,
         system_id,
         &selected,
         (caller_role != Role::Admin).then_some(user_id),
         &params.search,
         params.filter,
+        params.snapshot_token.as_deref(),
         params.limit.unwrap_or(50),
         params.offset.unwrap_or(0),
     )
     .await
     {
-        Ok(page) => (StatusCode::OK, Json(page)).into_response(),
+        Ok(crate::queries::evaluation_snapshots::EvaluatedOptionsQuery::Page(page)) => {
+            (StatusCode::OK, Json(page)).into_response()
+        }
+        Ok(crate::queries::evaluation_snapshots::EvaluatedOptionsQuery::SnapshotChanged) => {
+            evaluation_snapshot_changed("Evaluation snapshot changed; reload options from offset 0")
+        }
         Err(error) => {
             tracing::error!(system_id = %system_id, error = %error, "failed to query evaluated options");
             internal_error("Failed to load evaluated options")
@@ -391,6 +405,11 @@ pub async fn get_system_evaluation_summary(
     if params.mode == SnapshotRevisionMode::Commit && !is_full_commit_sha(&params.revision) {
         return bad_request("revision must be a full 40- or 64-character commit SHA");
     }
+    if params.snapshot_token.as_deref().is_some_and(|token| {
+        token.len() != 64 || !token.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }) {
+        return bad_request("snapshot_token must be a 64-character hexadecimal digest");
+    }
     let selected = match params.mode {
         SnapshotRevisionMode::Commit => {
             crate::queries::evaluation_snapshots::select_commit_snapshot(
@@ -412,6 +431,9 @@ pub async fn get_system_evaluation_summary(
     };
     let selected = match selected {
         Ok(Some(value)) => value,
+        Ok(None) if params.snapshot_token.is_some() => {
+            return evaluation_snapshot_changed("Evaluation snapshot changed; reload Config data");
+        }
         Ok(None) if params.mode == SnapshotRevisionMode::Commit => {
             let lifecycle = match crate::queries::evaluation_snapshots::missing_snapshot_lifecycle(
                 &pool,
@@ -446,12 +468,20 @@ pub async fn get_system_evaluation_summary(
         }
     };
 
-    match crate::queries::evaluation_snapshots::get_selected_evaluation_summary(
-        &pool, system_id, &selected,
+    match crate::queries::evaluation_snapshots::get_selected_evaluation_summary_with_token(
+        &pool,
+        system_id,
+        &selected,
+        params.snapshot_token.as_deref(),
     )
     .await
     {
-        Ok(summary) => (StatusCode::OK, Json(summary)).into_response(),
+        Ok(crate::queries::evaluation_snapshots::SelectedEvaluationSummaryQuery::Summary(
+            summary,
+        )) => (StatusCode::OK, Json(summary)).into_response(),
+        Ok(
+            crate::queries::evaluation_snapshots::SelectedEvaluationSummaryQuery::SnapshotChanged,
+        ) => evaluation_snapshot_changed("Evaluation snapshot changed; reload Config data"),
         Err(error) => {
             tracing::error!(system_id = %system_id, error = %error, "failed to load evaluation summary");
             internal_error("Failed to load evaluation summary")
@@ -516,6 +546,11 @@ pub async fn get_system_evaluation_module_sources(
     };
     let selected = match selected {
         Ok(Some(value)) => value,
+        Ok(None) if params.snapshot_token.is_some() => {
+            return evaluation_snapshot_changed(
+                "Evaluation snapshot changed; reload module sources from offset 0",
+            );
+        }
         Ok(None) if params.mode == SnapshotRevisionMode::Commit => {
             let lifecycle = match crate::queries::evaluation_snapshots::missing_snapshot_lifecycle(
                 &pool,
@@ -565,22 +600,27 @@ pub async fn get_system_evaluation_module_sources(
             (StatusCode::OK, Json(page)).into_response()
         }
         Ok(crate::queries::evaluation_snapshots::EvaluationModuleSourcesQuery::SnapshotChanged) => {
-            (
-                StatusCode::CONFLICT,
-                Json(ApiError {
-                    error: "snapshot_changed".to_string(),
-                    message: "Evaluation snapshot changed; reload module sources from offset 0"
-                        .to_string(),
-                    details: None,
-                }),
+            evaluation_snapshot_changed(
+                "Evaluation snapshot changed; reload module sources from offset 0",
             )
-                .into_response()
         }
         Err(error) => {
             tracing::error!(system_id = %system_id, error = %error, "failed to query evaluation module sources");
             internal_error("Failed to load evaluation module sources")
         }
     }
+}
+
+fn evaluation_snapshot_changed(message: &str) -> axum::response::Response {
+    (
+        StatusCode::CONFLICT,
+        Json(ApiError {
+            error: "snapshot_changed".to_string(),
+            message: message.to_string(),
+            details: None,
+        }),
+    )
+        .into_response()
 }
 
 /// Explicitly queues missing revision evaluation or reuses existing work.
@@ -653,7 +693,9 @@ fn empty_options_page(
         revision: params.revision.clone(),
         generation: params.generation,
         generation_snapshot_id: None,
+        snapshot_token: None,
         baseline_revision: None,
+        baseline_generation: None,
         comparison_available: false,
         error,
         module_count: 0,
@@ -675,6 +717,8 @@ fn empty_evaluation_summary(
         revision: params.revision.clone(),
         generation: params.generation,
         error,
+        snapshot_token: None,
+        baseline_generation: None,
         module_source_total: 0,
         completed_at: None,
         evaluation_duration_ms: None,
@@ -711,6 +755,18 @@ fn empty_evaluation_module_sources(
 fn validate_evaluation_module_sources_params(
     params: &EvaluationModuleSourcesParams,
 ) -> Result<(), &'static str> {
+    if params.offset.unwrap_or(0) > 0 && params.snapshot_token.is_none() {
+        return Err("snapshot_token is required when offset is greater than 0");
+    }
+    if params.snapshot_token.as_deref().is_some_and(|token| {
+        token.len() != 64 || !token.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }) {
+        return Err("snapshot_token must be a 64-character hexadecimal digest");
+    }
+    Ok(())
+}
+
+fn validate_evaluated_options_params(params: &EvaluatedOptionsParams) -> Result<(), &'static str> {
     if params.offset.unwrap_or(0) > 0 && params.snapshot_token.is_none() {
         return Err("snapshot_token is required when offset is greater than 0");
     }
@@ -1509,6 +1565,29 @@ pub async fn rollback_system(
         .into_response()
 }
 
+/// Requests rollback to an exact retained generation artifact.
+///
+/// `system_id` establishes the ownership boundary. Within that system, the
+/// server-issued `generation_snapshot_id` or the system-local `generation`
+/// selects retained identity. The handler resolves the deployment store path
+/// from verified lineage. A supplied `store_path` is only a narrowing predicate
+/// and never grants authority.
+///
+/// The caller must have an authenticated system-mutator role, a valid CSRF
+/// token, and visibility of the system's environment. Hidden and foreign systems
+/// use the same not-found response, so this endpoint does not disclose their
+/// existence. A Config-readable retained artifact can still be ineligible for
+/// rollback when its deployment, derivation, or store lineage is unverified.
+///
+/// # Errors
+///
+/// Returns `403 Forbidden` for missing authentication, an insufficient role, or
+/// failed CSRF validation. Returns `404 Not Found` for an absent or invisible
+/// system without distinguishing those cases. Returns `400 Bad Request` when no
+/// retained identity is supplied, retained lineage is absent or ineligible, or
+/// composite policy denies deployment. Returns `409 Conflict` when the target
+/// is not cached. Returns `500 Internal Server Error` for database,
+/// policy-evaluation, deployment-queue, or audit persistence failures.
 pub async fn rollback_system_generation(
     State(pool): State<PgPool>,
     headers: HeaderMap,
@@ -1530,11 +1609,6 @@ pub async fn rollback_system_generation(
         return response;
     }
 
-    let store_path = payload.store_path.trim();
-    if store_path.is_empty() {
-        return bad_request("store_path is required");
-    }
-
     let environment_memberships = match load_membership_environment_ids(&pool, user_id).await {
         Ok(value) => value,
         Err(_) => return internal_error("Failed to load environment memberships"),
@@ -1549,12 +1623,36 @@ pub async fn rollback_system_generation(
     if !caller_role.can_access_system_environment(row.environment_id, &environment_memberships) {
         return not_found();
     }
+    if payload.generation_snapshot_id.is_none() && payload.generation.is_none() {
+        return bad_request("generation_snapshot_id or generation is required");
+    }
 
-    match crate::services::composite_enforcement::authorize_and_set_system_target(
+    // SECURITY: Resolve the deployment path from retained server-side lineage.
+    // The legacy path can only match an artifact already owned by this system.
+    let target = match crate::queries::systems::resolve_retained_generation_deployment_target(
         &pool,
         system_id,
-        store_path,
+        payload.generation_snapshot_id,
+        payload.generation,
+        payload.store_path.as_deref(),
+    )
+    .await
+    {
+        Ok(Some(target)) => target,
+        Ok(None) => return bad_request("retained generation artifact was not found"),
+        Err(error) => {
+            tracing::error!(system_id = %system_id, error = %error, "failed to resolve retained rollback target");
+            return internal_error("Failed to resolve retained rollback target");
+        }
+    };
+
+    match crate::services::composite_enforcement::authorize_and_set_system_target_with_artifact(
+        &pool,
+        system_id,
+        &target.store_path,
         "manual_rollback_generation",
+        target.evaluation_snapshot_id,
+        target.derivation_id,
     )
     .await
     {
@@ -1566,7 +1664,7 @@ pub async fn rollback_system_generation(
             }
             tracing::warn!(
                 system_id = %system_id,
-                target = %store_path,
+                target = %target.store_path,
                 "Composite generation rollback authorization failed closed: {error:#}"
             );
             return internal_error("Composite deployment authorization failed");
@@ -1579,7 +1677,11 @@ pub async fn rollback_system_generation(
         AuditAction::SystemRollbackRequested,
         format!("{} ({})", row.hostname, row.id),
         extract_request_origin(&headers),
-        serde_json::json!({ "operation": "rollback_generation", "store_path": store_path }),
+        serde_json::json!({
+            "operation": "rollback_generation",
+            "generation_snapshot_id": payload.generation_snapshot_id,
+            "generation": payload.generation
+        }),
     )
     .await
     .is_err()
@@ -2827,6 +2929,8 @@ pub async fn get_system_generations(
             commit_hash: row.commit_hash,
             timestamp: row.timestamp,
             is_current: Some(row.generation) == current_generation,
+            generation_snapshot_id: row.generation_snapshot_id,
+            rollback_eligible: row.rollback_eligible,
         })
         .collect::<Vec<_>>();
 
@@ -3272,7 +3376,10 @@ mod tests {
     use crate::models::public_key::PublicKey;
     use crate::models::systems::System;
     use crate::queries::auth_identity::{create_user_session, sync_user_role};
+    use crate::queries::commits::{get_commit_by_hash, insert_commit_with_metadata};
+    use crate::queries::derivations::insert_derivation;
     use crate::queries::environments::create_environment;
+    use crate::queries::evaluation_snapshots::persist_available_snapshot_tx;
     use crate::queries::flakes::insert_flake;
     use crate::queries::systems::insert_system;
     use crate::queries::users::insert_user;
@@ -3922,7 +4029,9 @@ mod tests {
             HeaderMap::new(),
             Path(Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("uuid")),
             Json(SystemRollbackGenerationRequest {
-                store_path: "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-system".to_string(),
+                generation_snapshot_id: None,
+                generation: None,
+                store_path: None,
             }),
         )
         .await
@@ -3976,13 +4085,23 @@ mod tests {
 
         let signing_key = SigningKey::from_bytes(&[9u8; 32]);
         let public_key = PublicKey::from_verifying_key(signing_key.verifying_key());
+        let repo_url = format!("https://example.test/rollback-{suffix}.git");
+        let flake = insert_flake(
+            &pool,
+            &format!("rollback-{suffix}"),
+            &repo_url,
+            "main",
+            "cf_systems_only",
+        )
+        .await
+        .expect("rollback flake should persist");
         let system = System {
             id: Uuid::new_v4(),
             hostname: hostname.clone(),
             environment_id: None,
             is_active: true,
             public_key,
-            flake_id: None,
+            flake_id: Some(flake.id),
             derivation: String::new(),
             system_configuration_name: Some(hostname.clone()),
             created_at: Utc::now(),
@@ -3994,6 +4113,57 @@ mod tests {
         insert_system(&pool, &system)
             .await
             .expect("insert_system should succeed");
+
+        let revision = "a".repeat(40);
+        insert_commit_with_metadata(
+            &pool,
+            &revision,
+            &repo_url,
+            Utc::now(),
+            Some("retained rollback fixture"),
+            Some("test"),
+        )
+        .await
+        .expect("rollback commit should persist");
+        let commit = get_commit_by_hash(&pool, &revision)
+            .await
+            .expect("rollback commit should load");
+        let derivation = insert_derivation(&pool, Some(&commit), &hostname, "nixos")
+            .await
+            .expect("rollback derivation should persist");
+        sqlx::query(
+            "UPDATE derivations SET store_path = $2, expected_store_path = $2, \
+             policy_requirements_met = true WHERE id = $1",
+        )
+        .bind(derivation.id)
+        .bind(&store_path)
+        .execute(&pool)
+        .await
+        .expect("rollback derivation target should persist");
+        let mut snapshot_tx = pool
+            .begin()
+            .await
+            .expect("snapshot transaction should begin");
+        let snapshot_id =
+            persist_available_snapshot_tx(&mut snapshot_tx, commit.id, &hostname, Vec::new())
+                .await
+                .expect("rollback snapshot should persist");
+        snapshot_tx.commit().await.expect("snapshot should commit");
+        let generation_snapshot_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO evaluation_generation_snapshots (\
+                 system_id, generation, snapshot_id, derivation_id, commit_id, \
+                 source_store_path, configuration_name\
+             ) VALUES ($1, 7, $2, $3, $4, $5, $6) RETURNING id",
+        )
+        .bind(system.id)
+        .bind(snapshot_id)
+        .bind(derivation.id)
+        .bind(commit.id)
+        .bind(&store_path)
+        .bind(&hostname)
+        .fetch_one(&pool)
+        .await
+        .expect("retained rollback generation should persist");
 
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -4008,7 +4178,9 @@ mod tests {
             headers,
             Path(system.id),
             Json(SystemRollbackGenerationRequest {
-                store_path: store_path.clone(),
+                generation_snapshot_id: Some(generation_snapshot_id),
+                generation: Some(7),
+                store_path: Some(store_path.clone()),
             }),
         )
         .await

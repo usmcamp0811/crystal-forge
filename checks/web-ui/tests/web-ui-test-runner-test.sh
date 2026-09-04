@@ -194,11 +194,11 @@ run_failure vm-only 01-login-page
 assert_contains "$tmp_dir/vm-only.stderr" 'requires the authoritative NixOS VM harness'
 assert_contains "$tmp_dir/vm-only.stderr" 'nix build --impure .#checks.x86_64-linux.web-ui'
 
-# The isolated test manifest adds a third (fixture-category) workflow, so a
-# no-argument selection here covers all three, including the precondition
-# check for the fixture-category member.
+# The isolated test manifest adds a fixture-category workflow, so a no-argument
+# selection covers every real host-compatible workflow plus the synthetic
+# member and exercises its precondition check.
 run_success default-selection
-assert_contains "$tmp_dir/default-selection.json" '"steps":"12-systems,12a-systems-empty-state,13-flakes"'
+assert_contains "$tmp_dir/default-selection.json" '"steps":"12-systems,12a-systems-empty-state,13j-task440-flake-states-panes-navigation,14d-task440-cross-surface-auth-navigation,13-flakes"'
 assert_contains "$tmp_dir/default-selection.psql-calls" "-h 127.0.0.1 -p 3042 -U crystal_forge -d crystal_forge"
 
 # ── --list / --help ──────────────────────────────────────────────────────────

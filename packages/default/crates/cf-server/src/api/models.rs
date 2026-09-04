@@ -2307,10 +2307,18 @@ pub struct SystemRollbackRequest {
     pub target_commit: String,
 }
 
-/// Request payload for rolling a system back to a specific deployed store path.
+/// Request payload for rolling a system back to an exactly retained generation artifact.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemRollbackGenerationRequest {
-    pub store_path: String,
+    /// Durable retained generation-artifact identity preferred by new clients.
+    #[serde(default)]
+    pub generation_snapshot_id: Option<Uuid>,
+    /// System-local retained generation identity.
+    #[serde(default)]
+    pub generation: Option<i32>,
+    /// Optional legacy narrowing hint. This field cannot authorize rollback by itself.
+    #[serde(default)]
+    pub store_path: Option<String>,
 }
 
 /// Selects how a manual deployment request treats an `auto_latest` policy.
@@ -2429,11 +2437,22 @@ pub struct SystemGenerationsResponse {
 /// Information about a NixOS generation available for rollback.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemGeneration {
+    /// System-local NixOS generation number.
     pub generation: i32,
+    /// First observed store path, when the agent reported one.
     pub store_path: Option<String>,
+    /// Full producing commit identity, when derivation lineage is available.
     pub commit_hash: Option<String>,
+    /// Time when the server first observed this generation.
     pub timestamp: DateTime<Utc>,
+    /// True when this generation is the latest agent-reported generation.
     pub is_current: bool,
+    /// Durable retained generation identity accepted by the rollback endpoint.
+    #[serde(default)]
+    pub generation_snapshot_id: Option<Uuid>,
+    /// True only when exact retained artifact and derivation lineage can resolve rollback.
+    #[serde(default)]
+    pub rollback_eligible: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

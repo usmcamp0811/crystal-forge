@@ -227,6 +227,17 @@ conversion. If conversion succeeds but queueing fails, the response reports the
 persisted manual policy separately from the failed deployment state. Legacy
 clients that omit `request_id` use a server-derived 24-hour replay window.
 
+A deployment target expires after two hours if no matching agent state report
+arrives. For 24 hours after terminal completion, an `expired` deployment remains
+eligible for exact evaluation-generation retention when system, store path,
+derivation, commit, configuration, artifact, and report timestamp all match. A
+delayed successful activation does not change the deployment row from `expired`
+to `succeeded`; it records a correlated `cf_deployment_succeeded` state event.
+Failed and superseded deployments are not eligible for this delayed correlation
+or retention. Matching selects the newest same-path deployment issued no later
+than the report before it checks status, so a newer failed or superseded request
+cannot fall back to older work.
+
 **Response:**
 ```json
 {
@@ -301,20 +312,55 @@ Query parameters:
 | `filter` | `all`, `overridden`, or `changed`. |
 | `limit` | Clamped to 1-100; defaults to 50. |
 | `offset` | Clamped to 0-100,000; defaults to 0. |
+| `snapshot_token` | Optional on offset 0; required and a 64-character hexadecimal digest when `offset` is greater than 0. |
 
 The response lifecycle is `queued`, `running`, `failed`, `available`, or
 `unavailable`. `counts` is revision-global and independent of search/filter.
+Generation-mode Config validity is independent of rollback lineage. A complete
+pre-0248 retained artifact remains readable after migration even though its
+unverified deployment/store lineage makes rollback ineligible.
 `total` is the number of rows for the active search/filter. Changed data and
 `counts.changed` are absent when no valid first-parent or preceding retained
 generation snapshot exists. `module_count` is the exact count of distinct
 `(source_input, source_revision, source_path)` tuples after redaction and
 per-option bounding; it is not derived from the bounded option page.
+An available response includes an opaque `snapshot_token` bound to the exact
+selected artifact and exact comparison baseline identity. Generation responses
+also return `baseline_generation` when comparison is available. Continuations
+send page one's token. A replaced selected artifact, replaced baseline, or
+removed retained identity returns HTTP 409 `snapshot_changed`; counts, total,
+rows, baseline, and provenance are read from one read-only `REPEATABLE READ`
+transaction.
+A request revalidates the system-local selected generation or exact commit and
+selects its first-parent or nearest preceding usable-generation baseline inside
+that transaction. It requires the immutable integrity marker computed by
+recursive full-artifact validation before publication, then decodes only the
+bounded page. Malformed content outside the requested search, offset, or limit
+prevents certification and returns lifecycle `unavailable`, zero counts and
+total, no token, and no rows. The response limit remains 100 rows.
+The scalar safe-value variant accepts JSON strings, numbers, Booleans, and null.
+It rejects arrays and objects; collections require their declared structured
+variant.
+A supplied token also returns `snapshot_changed` when the replacement is
+failed, unavailable, or absent. The endpoint does not return replacement
+lifecycle data before it rejects the stale token.
 
 ### GET `/systems/:id/evaluation-summary`
 
 This endpoint uses the same `revision`, `mode`, and `generation` selection and
 non-disclosing system authorization as evaluated-options. The response is
 scalar. It does not contain module-source or definition rows.
+Unverified retained generation lineage does not affect a valid Config summary;
+it affects rollback eligibility only.
+The optional `snapshot_token` query parameter binds the summary to an artifact
+selected by another Config response. An available response returns the same
+token. The token also binds the exact comparison baseline. Generation responses
+return `baseline_generation` when comparison is available. A stale token or
+replaced selected/baseline identity returns HTTP 409 `snapshot_changed`.
+A supplied stale token takes precedence over failed, unavailable, or absent
+replacement lifecycle responses.
+Snapshot integrity, derivation facts, latest state, and
+seven-day observations use one read-only `REPEATABLE READ` transaction.
 
 The response returns lifecycle, safe error, persisted completion time,
 evaluation duration, option total, `module_source_total`, exact selected NixOS
@@ -372,6 +418,8 @@ The response lifecycle is `queued`, `running`, `failed`, `available`, or
 zero total. An available response returns one bounded page and a
 snapshot-version token. `total` is the exact complete-snapshot tuple count even
 when `sources` is empty because the offset is past the final row.
+Unverified retained generation lineage does not affect module-source reads from
+a valid artifact; it affects rollback eligibility only.
 
 Rows are ordered by `won_count` descending, `defined_count` descending, then
 `source_input`, `source_revision`, and `source_path` in ascending bytewise
@@ -383,6 +431,32 @@ The first request omits `snapshot_token`. Every continuation request sends the
 token from the first page. If the persisted snapshot is replaced, the endpoint
 returns HTTP 409 with `snapshot_changed` and no rows. The client discards all
 loaded rows and restarts at offset 0.
+
+The module-source token uses the same selected-and-baseline identity as the
+options and summary endpoints. A baseline replacement therefore also returns
+HTTP 409 instead of mixing Config data from different comparisons.
+Failed, unavailable, and absent replacements use the same precedence when the
+request supplies a stale token.
+
+### GET `/systems/:id/generations`
+
+Each generation row includes `generation_snapshot_id` and `rollback_eligible`.
+Eligibility is true only when the retained row resolves an available immutable
+artifact, exact derivation lineage, and non-empty server-side source store path.
+Legacy retained rows with unverifiable deployment/store lineage remain
+queryable but are not rollback-eligible.
+Clients MUST NOT advertise rollback for an ineligible row.
+
+### POST `/systems/:id/rollback-generation`
+
+The request MUST contain `generation_snapshot_id` or the system-local
+`generation`. `store_path` is optional and, when present, only narrows the
+retained lookup. A store path alone never authorizes rollback. The server carries
+the retained derivation identity into
+composite authorization; a newer derivation with the same store path cannot
+replace it. Foreign retained
+identities, failed artifacts, and mismatched artifact/derivation lineage fail
+closed.
 
 `tracked_flake` is response-only and is never persisted in evaluator content.
 For `self`, the source revision must equal the page's exact active context

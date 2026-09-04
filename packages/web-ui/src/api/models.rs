@@ -958,6 +958,8 @@ pub struct EvaluatedOptionsRequest {
     pub limit: i64,
     /// Requested bounded zero-based offset.
     pub offset: i64,
+    /// Opaque token that binds the request to one selected artifact and baseline.
+    pub snapshot_token: Option<String>,
 }
 
 /// Reports revision-global option counts.
@@ -984,8 +986,14 @@ pub struct EvaluatedOptionsPage {
     /// Durable retained-generation snapshot identity.
     #[serde(default)]
     pub generation_snapshot_id: Option<Uuid>,
+    /// Opaque token for the exact selected artifact and comparison baseline.
+    #[serde(default)]
+    pub snapshot_token: Option<String>,
     /// Full baseline SHA when comparison is available.
     pub baseline_revision: Option<String>,
+    /// Preceding retained generation used as the generation-mode baseline.
+    #[serde(default)]
+    pub baseline_generation: Option<i32>,
     /// Whether Changed has a valid baseline.
     pub comparison_available: bool,
     /// Safe evaluation diagnostic for a failed snapshot.
@@ -1083,6 +1091,12 @@ pub struct SelectedEvaluationSummary {
     pub generation: Option<i32>,
     /// Safe lifecycle or integrity diagnostic.
     pub error: Option<String>,
+    /// Opaque token for the exact selected artifact and comparison baseline.
+    #[serde(default)]
+    pub snapshot_token: Option<String>,
+    /// Preceding retained generation used as the generation-mode baseline.
+    #[serde(default)]
+    pub baseline_generation: Option<i32>,
     /// Authoritative number of module sources in the complete snapshot.
     pub module_source_total: i64,
     /// Snapshot completion timestamp.
@@ -3696,9 +3710,20 @@ pub struct SystemRollbackRequest {
     pub target_commit: String,
 }
 
+/// Requests rollback to an exact retained generation artifact.
+///
+/// Either the retained artifact identity or the system-local generation
+/// authorizes target resolution. [`Self::store_path`] can only narrow that
+/// server-side identity.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemRollbackGenerationRequest {
-    pub store_path: String,
+    /// Identifies the durable retained generation artifact.
+    pub generation_snapshot_id: Option<Uuid>,
+    /// Identifies the retained generation within its system.
+    pub generation: Option<i32>,
+    /// Narrows artifact resolution without granting rollback authority.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub store_path: Option<String>,
 }
 
 /// Selects how a manual deployment request treats an `auto_latest` policy.
@@ -3798,13 +3823,28 @@ pub struct SystemGenerationsResponse {
     pub current_generation: Option<i32>,
 }
 
+/// Describes one system-local generation retained by the server.
+///
+/// Rollback eligibility depends on retained snapshot identity. A store path is
+/// optional metadata and cannot authorize rollback.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SystemGeneration {
+    /// Identifies the generation within its system.
     pub generation: i32,
+    /// Provides an optional store-path narrowing hint.
     pub store_path: Option<String>,
+    /// Identifies the full commit associated with the generation, when known.
     pub commit_hash: Option<String>,
+    /// Records when the server first observed the generation.
     pub timestamp: DateTime<Utc>,
+    /// Indicates whether this generation is currently active.
     pub is_current: bool,
+    /// Identifies the durable retained artifact that authorizes exact rollback.
+    #[serde(default)]
+    pub generation_snapshot_id: Option<Uuid>,
+    /// Indicates whether the server can resolve exact retained rollback lineage.
+    #[serde(default)]
+    pub rollback_eligible: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

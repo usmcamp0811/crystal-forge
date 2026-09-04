@@ -85,9 +85,17 @@ struct PersistedRule {
 }
 
 enum AuthorizationAction<'a> {
-    Check { expected_derivation_id: Option<i32> },
-    SetDesired { source: &'a str },
-    ClaimDelivery { expected_target: &'a str },
+    Check {
+        expected_derivation_id: Option<i32>,
+    },
+    SetDesired {
+        source: &'a str,
+        evaluation_snapshot_id: Option<Uuid>,
+        expected_derivation_id: Option<i32>,
+    },
+    ClaimDelivery {
+        expected_target: &'a str,
+    },
 }
 
 fn outcome_str(outcome: EnforcementOutcome) -> &'static str {
@@ -1445,10 +1453,20 @@ async fn authorize_target_at(
     now: DateTime<Utc>,
     action: AuthorizationAction<'_>,
 ) -> Result<TargetDeliveryAuthorization> {
+    let constrained_derivation_id = match &action {
+        AuthorizationAction::SetDesired {
+            expected_derivation_id,
+            ..
+        } => *expected_derivation_id,
+        AuthorizationAction::Check { .. } | AuthorizationAction::ClaimDelivery { .. } => None,
+    };
     let mut tx = pool.begin().await?;
     sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
         .execute(&mut *tx)
         .await?;
+    // CONCURRENCY: This global lock precedes every POA&M, system, deployment,
+    // and snapshot row lock used by deployment and agent-ingestion paths.
+    crate::queries::evaluation_snapshots::lock_snapshot_writer_tx(&mut tx).await?;
     // Closure uses this same deterministic key order. Acquire it before the
     // system, assessment, or rule rows so neither path can invert lock order.
     lock_poam_system_key_tx(&mut tx, system_id).await?;
@@ -1481,9 +1499,9 @@ async fn authorize_target_at(
         }
     }
 
-    let exact_target = sqlx::query_as::<_, (i32, String)>(
+    let exact_target = sqlx::query_as::<_, (i32, String, i32, String)>(
         r#"
-        SELECT d.id, d.store_path
+        SELECT d.id, d.store_path, c.id, d.derivation_name
         FROM systems s
         JOIN commits c ON c.flake_id = s.flake_id
         JOIN derivations d ON d.commit_id = c.id
@@ -1503,6 +1521,7 @@ async fn authorize_target_at(
           )
           AND ((LEFT($2, 11) = '/nix/store/' AND d.store_path = $2)
             OR (LEFT($2, 11) <> '/nix/store/' AND LOWER(c.git_commit_hash) = LOWER($2)))
+          AND ($3::integer IS NULL OR d.id = $3)
         ORDER BY d.id DESC
         LIMIT 1
         FOR SHARE OF d, c
@@ -1510,6 +1529,7 @@ async fn authorize_target_at(
     )
     .bind(system_id)
     .bind(target)
+    .bind(constrained_derivation_id)
     .fetch_optional(&mut *tx)
     .await?;
 
@@ -1622,7 +1642,7 @@ async fn authorize_target_at(
                     },
                 });
             }
-            (-1, target.to_string())
+            (-1, target.to_string(), -1, String::new())
         }
         None => {
             bail!("Composite authorization could not resolve exact system target {target:?}")
@@ -1785,7 +1805,40 @@ async fn authorize_target_at(
     if authorization.allowed() {
         match action {
             AuthorizationAction::Check { .. } => {}
-            AuthorizationAction::SetDesired { source } => {
+            AuthorizationAction::SetDesired {
+                source,
+                evaluation_snapshot_id,
+                ..
+            } => {
+                let bound_snapshot_id: Option<Uuid> = if exact_target.0 == -1 {
+                    None
+                } else {
+                    sqlx::query_scalar(
+                        r#"
+                    SELECT snapshot.id
+                    FROM evaluation_snapshots snapshot
+                    LEFT JOIN evaluation_snapshot_selections selection
+                      ON selection.current_snapshot_id = snapshot.id
+                     AND selection.commit_id = snapshot.commit_id
+                     AND selection.configuration_name = snapshot.configuration_name
+                    WHERE snapshot.commit_id = $1
+                      AND snapshot.configuration_name = $2
+                       AND snapshot.lifecycle = 'available'
+                       AND snapshot.integrity_version = 1
+                      AND (($3::uuid IS NOT NULL AND snapshot.id = $3)
+                        OR ($3::uuid IS NULL AND selection.current_snapshot_id IS NOT NULL))
+                    LIMIT 1
+                    "#,
+                    )
+                    .bind(exact_target.2)
+                    .bind(&exact_target.3)
+                    .bind(evaluation_snapshot_id)
+                    .fetch_optional(&mut *tx)
+                    .await?
+                };
+                if evaluation_snapshot_id.is_some() && bound_snapshot_id != evaluation_snapshot_id {
+                    bail!("Retained deployment artifact does not match the exact target lineage");
+                }
                 sqlx::query(
                     "UPDATE systems SET desired_target = $1, desired_target_set_at = NOW(), updated_at = NOW() WHERE id = $2",
                 )
@@ -1793,8 +1846,60 @@ async fn authorize_target_at(
                 .bind(system_id)
                 .execute(&mut *tx)
                 .await?;
-                set_pending_deployment_target_tx(&mut tx, system_id, Some(&exact_target.1), source)
+                // IDENTITY: Equal store paths can come from different commits.
+                // End incompatible pending work before the generic target helper
+                // performs its path-based deduplication.
+                if exact_target.0 != -1 {
+                    sqlx::query(
+                        "UPDATE pending_system_deployments
+                         SET status = 'superseded', completed_at = NOW()
+                         WHERE system_id = $1 AND target_store_path = $2 AND status = 'pending'
+                           AND (requested_commit_id IS DISTINCT FROM $3
+                             OR requested_derivation_id IS DISTINCT FROM $5
+                             OR ($4::uuid IS NOT NULL
+                                AND evaluation_snapshot_id IS DISTINCT FROM $4))",
+                    )
+                    .bind(system_id)
+                    .bind(&exact_target.1)
+                    .bind(exact_target.2)
+                    .bind(bound_snapshot_id)
+                    .bind(exact_target.0)
+                    .execute(&mut *tx)
                     .await?;
+                }
+                let deployment_id = set_pending_deployment_target_tx(
+                    &mut tx,
+                    system_id,
+                    Some(&exact_target.1),
+                    source,
+                )
+                .await?
+                .context("authorized deployment target did not create or reuse pending work")?;
+                if exact_target.0 != -1 {
+                    let bound = sqlx::query(
+                        "UPDATE pending_system_deployments
+                         SET requested_commit_id = $2, evaluation_snapshot_id = $3,
+                             requested_derivation_id = $4
+                         WHERE id = $1
+                           AND (requested_commit_id IS NULL OR requested_commit_id = $2)
+                           AND (evaluation_snapshot_id IS NULL OR evaluation_snapshot_id = $3)
+                           AND (requested_derivation_id IS NULL OR requested_derivation_id = $4)",
+                    )
+                    .bind(deployment_id)
+                    .bind(exact_target.2)
+                    .bind(bound_snapshot_id)
+                    .bind(exact_target.0)
+                    .execute(&mut *tx)
+                    .await?;
+                    if bound.rows_affected() != 1 {
+                        bail!("Pending deployment already has different immutable lineage");
+                    }
+                    crate::queries::evaluation_snapshots::retain_bound_deployment_observations_tx(
+                        &mut tx,
+                        deployment_id,
+                    )
+                    .await?;
+                }
             }
             AuthorizationAction::ClaimDelivery { expected_target } => {
                 // Upgrade bridge: only targets captured by migration may gain a
@@ -1901,7 +2006,44 @@ pub async fn authorize_and_set_system_target(
         system_id,
         target,
         Utc::now(),
-        AuthorizationAction::SetDesired { source },
+        AuthorizationAction::SetDesired {
+            source,
+            evaluation_snapshot_id: None,
+            expected_derivation_id: None,
+        },
+    )
+    .await?
+    .authorization)
+}
+
+/// Authorizes and sets a desired target with an exact retained artifact.
+///
+/// The artifact and derivation must match the retained NixOS lineage. The
+/// pending deployment stores the immutable artifact and commit identities so
+/// later agent generation ingestion does not consult the current selector.
+///
+/// # Errors
+///
+/// Returns an error when authorization fails, the artifact lineage differs
+/// from the target, or PostgreSQL cannot commit the guarded update.
+pub async fn authorize_and_set_system_target_with_artifact(
+    pool: &PgPool,
+    system_id: Uuid,
+    target: &str,
+    source: &str,
+    evaluation_snapshot_id: Uuid,
+    derivation_id: i32,
+) -> Result<CompositeAuthorization> {
+    Ok(authorize_target_at(
+        pool,
+        system_id,
+        target,
+        Utc::now(),
+        AuthorizationAction::SetDesired {
+            source,
+            evaluation_snapshot_id: Some(evaluation_snapshot_id),
+            expected_derivation_id: Some(derivation_id),
+        },
     )
     .await?
     .authorization)

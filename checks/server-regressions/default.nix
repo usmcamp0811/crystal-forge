@@ -213,6 +213,222 @@ SQL
       $$;
 SQL
 
+    echo "=== Populated pre-0248 immutable-artifact upgrade rehearsal ==="
+    createdb cf_snapshot_upgrade
+    snapshotUpgradeUrl="postgresql://$PGUSER@127.0.0.1/cf_snapshot_upgrade"
+    pre0248="$TMPDIR/migrations-through-0247"
+    mkdir -p "$pre0248"
+    for migration in crates/cf-server/migrations/*.sql; do
+      base="''${migration##*/}"
+      version="''${base%%_*}"
+      if (( 10#$version <= 247 )); then
+        cp "$migration" "$pre0248/"
+      fi
+    done
+    DATABASE_URL="$snapshotUpgradeUrl" cargo sqlx migrate run --source "$pre0248"
+    psql "$snapshotUpgradeUrl" -v ON_ERROR_STOP=1 <<'SQL'
+      INSERT INTO flakes(id,name,repo_url,branch)
+      VALUES(440248,'Snapshot upgrade','https://example.invalid/snapshot-upgrade.git','main');
+      INSERT INTO commits(id,flake_id,git_commit_hash,commit_timestamp,evaluation_status)
+      VALUES(440248,440248,repeat('a',40),NOW()-INTERVAL '2 days','failed');
+      INSERT INTO systems(id,hostname,public_key,derivation,flake_id,system_configuration_name)
+      VALUES('44024800-0000-0000-0000-000000000001','snapshot-upgrade-host',
+        'snapshot-upgrade-key','snapshot-upgrade-key',440248,'snapshot-upgrade-host');
+      INSERT INTO derivations(
+        id,commit_id,derivation_type,derivation_name,derivation_path,status_id,
+        expected_store_path,store_path,cf_agent_enabled,policy_requirements_met,
+        completed_at,policy_results)
+      VALUES(440248,440248,'nixos','snapshot-upgrade-host',
+        '/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-snapshot-upgrade.drv',
+        (SELECT id FROM derivation_statuses ORDER BY id LIMIT 1),
+        '/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-snapshot-upgrade',
+        '/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-snapshot-upgrade',TRUE,TRUE,
+        NOW()-INTERVAL '1 day','{}'::jsonb);
+      INSERT INTO evaluation_option_contents(digest,payload,search_text)
+      VALUES(decode(repeat('01',32),'hex'),
+        '{"declared_type":"string","value":{"kind":"scalar","value":"safe"},"definitions":[],"overridden":false}'::jsonb,
+        'safe');
+      INSERT INTO evaluation_snapshots(
+        id,commit_id,configuration_name,lifecycle,option_count,module_count,
+        content_bytes,completed_at)
+      VALUES('44024800-0000-0000-0000-000000000002',440248,
+        'snapshot-upgrade-host','available',1,0,100,NOW()-INTERVAL '1 day');
+      INSERT INTO evaluation_snapshot_options(
+        snapshot_id,option_path,content_digest,is_overridden)
+      VALUES('44024800-0000-0000-0000-000000000002','services.safe',
+        decode(repeat('01',32),'hex'),FALSE);
+      INSERT INTO evaluation_generation_snapshots(
+        system_id,generation,snapshot_id,derivation_id,commit_id,source_store_path)
+      VALUES('44024800-0000-0000-0000-000000000001',7,
+        '44024800-0000-0000-0000-000000000002',440248,440248,
+        '/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-snapshot-upgrade');
+      UPDATE evaluation_snapshots
+      SET lifecycle='failed',error='later retry failed',option_count=0,module_count=0,
+          content_bytes=0,completed_at=NOW()
+      WHERE id='44024800-0000-0000-0000-000000000002';
+
+      INSERT INTO commits(id,flake_id,git_commit_hash,commit_timestamp,evaluation_status)
+      VALUES(440249,440248,repeat('b',40),NOW()-INTERVAL '1 day','complete');
+      INSERT INTO systems(id,hostname,public_key,derivation,flake_id,system_configuration_name)
+      VALUES('44024800-0000-0000-0000-000000000003','ambiguous-upgrade-host',
+        'ambiguous-upgrade-key','ambiguous-upgrade-key',440248,'ambiguous-upgrade-host');
+      INSERT INTO derivations(
+        id,commit_id,derivation_type,derivation_name,derivation_path,status_id,
+        expected_store_path,store_path,cf_agent_enabled,policy_requirements_met,
+        completed_at,policy_results)
+      VALUES(440249,440249,'nixos','ambiguous-upgrade-host',
+        '/nix/store/dddddddddddddddddddddddddddddddd-ambiguous-upgrade.drv',
+        (SELECT id FROM derivation_statuses ORDER BY id LIMIT 1),
+        '/nix/store/cccccccccccccccccccccccccccccccc-ambiguous-upgrade',
+        '/nix/store/cccccccccccccccccccccccccccccccc-ambiguous-upgrade',TRUE,TRUE,
+        NOW()-INTERVAL '12 hours','{}'::jsonb);
+      INSERT INTO evaluation_option_contents(digest,payload,search_text)
+      VALUES(decode(repeat('02',32),'hex'),
+        '{"declared_type":"string","value":{"kind":"scalar","value":"replacement"},"definitions":[],"overridden":false}'::jsonb,
+        'replacement');
+      INSERT INTO evaluation_snapshots(
+        id,commit_id,configuration_name,lifecycle,option_count,module_count,
+        content_bytes,completed_at)
+      VALUES('44024800-0000-0000-0000-000000000004',440249,
+        'ambiguous-upgrade-host','available',1,0,100,NOW()-INTERVAL '12 hours');
+      INSERT INTO evaluation_snapshot_options(
+        snapshot_id,option_path,content_digest,is_overridden)
+      VALUES('44024800-0000-0000-0000-000000000004','services.safe',
+        decode(repeat('01',32),'hex'),FALSE);
+      INSERT INTO evaluation_generation_snapshots(
+        system_id,generation,snapshot_id,derivation_id,commit_id,source_store_path)
+      VALUES('44024800-0000-0000-0000-000000000003',8,
+        '44024800-0000-0000-0000-000000000004',440249,440249,
+        '/nix/store/cccccccccccccccccccccccccccccccc-ambiguous-upgrade');
+      INSERT INTO pending_system_deployments(
+        id,system_id,target_store_path,status,source,requested_commit_id)
+      VALUES('44024800-0000-0000-0000-000000000005',
+        '44024800-0000-0000-0000-000000000003',
+        '/nix/store/cccccccccccccccccccccccccccccccc-ambiguous-upgrade',
+        'succeeded','manual',440249);
+      UPDATE evaluation_snapshot_options
+      SET content_digest=decode(repeat('02',32),'hex')
+      WHERE snapshot_id='44024800-0000-0000-0000-000000000004'
+        AND option_path='services.safe';
+      UPDATE evaluation_snapshots
+      SET completed_at=NOW()
+      WHERE id='44024800-0000-0000-0000-000000000004';
+      UPDATE derivations
+      SET store_path=NULL,expected_store_path=NULL
+      WHERE id=440249;
+
+      INSERT INTO evaluation_option_contents(digest,payload,search_text)
+      VALUES
+        (decode(repeat('03',32),'hex'),
+         '{"declared_type":"boolean","value":{"kind":"scalar","value":true},"definitions":[{"source_path":"modules/count.nix","winning":true}],"overridden":false}'::jsonb,
+         'module count mismatch'),
+        (decode(repeat('04',32),'hex'),
+         '{"declared_type":"boolean","value":{"kind":"scalar","value":true},"definitions":[],"overridden":true}'::jsonb,
+         'override mismatch');
+      INSERT INTO evaluation_snapshots(
+        id,commit_id,configuration_name,lifecycle,option_count,module_count,
+        content_bytes,completed_at)
+      VALUES
+        ('44024800-0000-0000-0000-000000000007',440249,
+         'module-count-mismatch','available',1,0,100,NOW()),
+        ('44024800-0000-0000-0000-000000000008',440249,
+         'override-mismatch','available',1,0,100,NOW());
+      INSERT INTO evaluation_snapshot_options(
+        snapshot_id,option_path,content_digest,is_overridden)
+      VALUES
+        ('44024800-0000-0000-0000-000000000007','services.count',
+         decode(repeat('03',32),'hex'),FALSE),
+        ('44024800-0000-0000-0000-000000000008','services.override',
+         decode(repeat('04',32),'hex'),FALSE);
+SQL
+    DATABASE_URL="$snapshotUpgradeUrl" cargo sqlx migrate run --source crates/cf-server/migrations
+    psql "$snapshotUpgradeUrl" -v ON_ERROR_STOP=1 <<'SQL'
+      DO $$
+      DECLARE
+        recovered uuid;
+        certification_bypass_accepted boolean := false;
+      BEGIN
+        SELECT snapshot_id INTO recovered
+        FROM evaluation_generation_snapshots
+        WHERE system_id='44024800-0000-0000-0000-000000000001' AND generation=7;
+        IF recovered='44024800-0000-0000-0000-000000000002' OR NOT EXISTS (
+          SELECT 1 FROM evaluation_snapshots snapshot
+          WHERE snapshot.id=recovered AND snapshot.lifecycle='available'
+            AND snapshot.option_count=1 AND snapshot.integrity_version=1
+        ) OR NOT EXISTS (
+          SELECT 1 FROM evaluation_snapshot_options item
+          WHERE item.snapshot_id=recovered AND item.option_path='services.safe'
+        ) OR NOT EXISTS (
+          SELECT 1 FROM evaluation_snapshot_selections selection
+          JOIN evaluation_snapshots snapshot ON snapshot.id=selection.current_snapshot_id
+          WHERE selection.commit_id=440248
+            AND selection.configuration_name='snapshot-upgrade-host'
+            AND snapshot.lifecycle='failed'
+        ) OR NOT EXISTS (
+          SELECT 1 FROM evaluation_generation_snapshots retained
+          WHERE retained.system_id='44024800-0000-0000-0000-000000000001'
+            AND retained.generation=7 AND NOT retained.lineage_verified
+        ) THEN
+          RAISE EXCEPTION '0248 did not preserve failed current and recover retained success';
+        END IF;
+        IF NOT EXISTS (
+          SELECT 1
+          FROM evaluation_generation_snapshots retained
+          JOIN evaluation_snapshots snapshot ON snapshot.id=retained.snapshot_id
+          JOIN derivations derivation ON derivation.id=retained.derivation_id
+          WHERE retained.system_id='44024800-0000-0000-0000-000000000003'
+            AND retained.generation=8
+            AND snapshot.lifecycle='available'
+            AND snapshot.integrity_version=1
+            AND NOT retained.lineage_verified
+            AND derivation.store_path IS NULL
+            AND derivation.expected_store_path IS NULL
+        ) OR NOT EXISTS (
+          SELECT 1 FROM pending_system_deployments
+          WHERE id='44024800-0000-0000-0000-000000000005'
+            AND evaluation_snapshot_id IS NULL
+            AND NOT evaluation_snapshot_binding_expected
+        ) THEN
+          RAISE EXCEPTION '0248 overclaimed ambiguous legacy deployment or retained lineage';
+        END IF;
+        IF to_regclass('evaluation_snapshot_selections_snapshot_idx') IS NULL
+          OR to_regclass('evaluation_generation_snapshots_snapshot_idx') IS NULL
+          OR to_regclass('evaluation_generation_snapshots_derivation_idx') IS NULL
+          OR to_regclass('pending_system_deployments_evaluation_snapshot_idx') IS NULL THEN
+          RAISE EXCEPTION '0248 reverse foreign-key indexes are incomplete';
+        END IF;
+        BEGIN
+          INSERT INTO evaluation_snapshots(
+            id,commit_id,configuration_name,lifecycle,integrity_version)
+          VALUES('44024800-0000-0000-0000-000000000006',440249,
+            'direct-certification-bypass','unavailable',1);
+          certification_bypass_accepted := true;
+        EXCEPTION WHEN OTHERS THEN
+          NULL;
+        END;
+        IF certification_bypass_accepted THEN
+          RAISE EXCEPTION '0248 allowed integrity certification during artifact insertion';
+        END IF;
+        IF EXISTS (
+          SELECT 1 FROM evaluation_snapshots
+          WHERE id IN (
+            '44024800-0000-0000-0000-000000000007',
+            '44024800-0000-0000-0000-000000000008'
+          ) AND integrity_version <> 0
+        ) THEN
+          RAISE EXCEPTION '0248 certified mismatched module or override metadata';
+        END IF;
+        IF evaluation_safe_option_value_valid(
+             '{"kind":"scalar","value":[]}'::jsonb
+           ) OR evaluation_safe_option_value_valid(
+             '{"kind":"scalar","value":{}}'::jsonb
+           ) THEN
+          RAISE EXCEPTION '0248 accepted a collection tagged as scalar';
+        END IF;
+      END
+      $$;
+SQL
+
     echo "=== Critical cf-server integration targets ==="
     cargo test --offline --package cf-server \
       --test assignment_semantics \
@@ -319,6 +535,41 @@ SQL
       -- --ignored --test-threads=1
     cargo test --offline --package cf-server --lib \
       finalization_populates_host_metrics_for_complete_configuration_corpus \
+      -- --ignored --test-threads=1
+
+    echo "=== Immutable evaluation artifact and exact-page contracts ==="
+    cargo test --offline --package cf-server --lib \
+      immutable_artifact_selection_retention_gc_and_rollback_are_isolated \
+      -- --ignored --test-threads=1
+    cargo test --offline --package cf-server --lib \
+      final_audit_lineage_lifecycle_and_source_reset_fail_closed \
+      -- --ignored --test-threads=1
+    cargo test --offline --package cf-server --lib \
+      source_reset_and_history_rewrite_preserve_durable_commit_identities \
+      -- --ignored --test-threads=1
+    cargo test --offline --package cf-server --lib \
+      deployment_creation_and_snapshot_finalization_serialize_exact_binding_and_retention \
+      -- --ignored --test-threads=1
+    cargo test --offline --package cf-server --lib \
+      successful_system_persistence_waits_for_snapshot_writer_lock \
+      -- --ignored --test-threads=1
+    cargo test --offline --package cf-server --lib \
+      cross_commit_shared_path_keeps_distinct_idempotent_rows \
+      -- --ignored --test-threads=1
+    cargo test --offline --package cf-server --lib \
+      options_page_rejects_every_malformed_variant_outside_requested_page \
+      -- --ignored --test-threads=1
+    cargo test --offline --package cf-server --lib \
+      terminal_deployment_artifact_bindings_release_after_ingestion_window \
+      -- --ignored --test-threads=1
+    cargo test --offline --package cf-server --lib \
+      delayed_activation_after_two_hour_expiry_retains_and_correlates_lineage \
+      -- --ignored --test-threads=1
+    cargo test --offline --package cf-server --lib \
+      secrets_are_absent_while_safe_values_remain_searchable_in_storage_and_api \
+      -- --ignored --test-threads=1
+    cargo test --offline --package cf-server --lib \
+      changed_query_is_symmetric_bounded_and_side_effect_free \
       -- --ignored --test-threads=1
 
     echo "=== TASK-440 manual and auto-latest deployment contracts ==="

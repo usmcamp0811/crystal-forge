@@ -665,6 +665,9 @@ pub async fn mark_commit_evaluation_failed(
     // evaluator diagnostics must not cross this boundary.
     let error = crate::security::snapshot_redaction::redact_evaluation_error(error);
     let mut tx = pool.begin().await?;
+    // CONCURRENCY: Terminal failure publishes failed artifacts and can take
+    // attempt, POA&M, commit, derivation, system, and deployment locks later.
+    crate::queries::evaluation_snapshots::lock_snapshot_writer_tx(&mut tx).await?;
     #[derive(sqlx::FromRow)]
     struct FailedAttempt {
         id: uuid::Uuid,
@@ -793,7 +796,7 @@ pub async fn mark_commit_evaluation_failed(
         // PERSISTENCE: A terminal commit failure records an explicit lifecycle
         // for each known configuration instead of collapsing every Config read
         // into one commit-global error.
-        sqlx::query(
+        let configuration_names = sqlx::query_scalar::<_, String>(
             r#"
             WITH configuration_names AS (
                 SELECT DISTINCT unnest(cac.nixos_configurations) AS name
@@ -803,24 +806,22 @@ pub async fn mark_commit_evaluation_failed(
                 FROM derivations d
                 WHERE d.commit_id = $1 AND d.derivation_type = 'nixos'
             )
-            INSERT INTO evaluation_snapshots (
-                commit_id, configuration_name, lifecycle, first_parent_sha,
-                error, completed_at
-            )
-            SELECT $1, names.name, 'failed', c.first_parent_sha, $2, now()
-            FROM configuration_names names
-            JOIN commits c ON c.id = $1
-            WHERE btrim(names.name) <> ''
-            ON CONFLICT (commit_id, configuration_name) DO UPDATE
-            SET lifecycle = 'failed', error = EXCLUDED.error,
-                option_count = 0, module_count = 0, content_bytes = 0,
-                completed_at = now()
+            SELECT name FROM configuration_names WHERE btrim(name) <> ''
             "#,
         )
         .bind(commit_id)
-        .bind(&error)
-        .execute(&mut *tx)
+        .fetch_all(&mut *tx)
         .await?;
+        for configuration_name in configuration_names {
+            crate::queries::evaluation_snapshots::persist_failed_snapshot_deferred_tx(
+                &mut tx,
+                commit_id,
+                &configuration_name,
+                &error,
+            )
+            .await?;
+        }
+        crate::queries::evaluation_snapshots::recompute_host_deltas_tx(&mut tx, commit_id).await?;
     }
 
     let completed_at: Option<chrono::DateTime<chrono::Utc>> =

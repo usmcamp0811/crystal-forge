@@ -3026,6 +3026,16 @@ const TASK_440_EXTERNAL_SHA = "2222222222222222222222222222222222222222";
 const TASK_440_DESIGN_SHA = "a3f8c12000000000000000000000000000000000";
 const TASK_440_DESIGN_PARENT_SHA = "f1d902200000000000000000000000000000000";
 const TASK_440_CONFIG_SHA = TASK_440_FIXTURE.canonicalConfig.revision;
+const TASK_440_CURRENT_GENERATION_SNAPSHOT_ID = "44000000-0000-4000-8000-000000000174";
+const TASK_440_PREVIOUS_GENERATION_SNAPSHOT_ID = "44000000-0000-4000-8000-000000000173";
+const TASK_440_BASELINE_GENERATION_SNAPSHOT_ID = "44000000-0000-4000-8000-000000000171";
+
+function task440GenerationBaseline(generation) {
+  if (generation === 73) return { generation: 71, revision: TASK_440_ROOT_SHA };
+  if (generation === 74) return { generation: 73, revision: TASK_440_HISTORICAL_SHA };
+  if (generation === 160) return { generation: 159, revision: TASK_440_DESIGN_PARENT_SHA };
+  return null;
+}
 
 function task440TrackedFlake(sourceInput, revision) {
   if (sourceInput === "self") {
@@ -3241,8 +3251,15 @@ function task440ModuleSources(revision = TASK_440_CURRENT_SHA, canonicalDesign =
   ];
 }
 
-function task440ModuleSnapshotToken(revision, replacement = 0) {
-  return createHash("sha256").update(`task440:${revision}:${replacement}`).digest("hex");
+function task440ConfigSnapshotToken(revision, replacement = 0, mode = "commit", generation = null) {
+  const baselineGeneration = mode === "generation" ? task440GenerationBaseline(generation)?.generation ?? "none" : "none";
+  const selectedIdentity = mode === "generation"
+    ? `${generation ?? "none"}:generation-snapshot-${generation ?? "none"}`
+    : revision;
+  const baselineArtifact = revision === TASK_440_ROOT_SHA
+    ? "none"
+    : createHash("sha256").update(`task440:baseline:${mode}:${revision}:${baselineGeneration}`).digest("hex");
+  return createHash("sha256").update(`task440:${selectedIdentity}:${replacement}:${mode}:${baselineArtifact}`).digest("hex");
 }
 
 function task440FlakeSnapshotToken(revision) {
@@ -3262,24 +3279,33 @@ async function routeTask440SystemData(page, overrides = {}) {
     handledRequests: [],
     heldSearchResolvers: [],
     heldSummaryResolvers: [],
+    heldSummaryRevisionResolvers: new Map(),
     heldModuleResolvers: new Map(),
     heldDeployResolvers: [],
     holdModuleRevisions: new Set(),
+    holdSummaryRevisions: new Set(),
     moduleFailureCounts: new Map(),
     moduleTransportFailureCounts: new Map(),
     moduleReplacementConflictCounts: new Map(),
+    optionReplacementConflictCounts: new Map(),
+    summaryReplacementConflictCount: 0,
     moduleReplacement: 0,
     moduleRequests: [],
     optionRequests: [],
+    summaryRequests: [],
+    rollbackRequests: [],
+    requestOrdinal: 0,
     sevenDayDrift: "no_observed_drift",
     agentFingerprint: null,
     evaluationDrift: null,
     ...overrides,
   };
   state.holdModuleRevisions = new Set(overrides.holdModuleRevisions || state.holdModuleRevisions);
+  state.holdSummaryRevisions = new Set(overrides.holdSummaryRevisions || state.holdSummaryRevisions);
   state.moduleFailureCounts = new Map(overrides.moduleFailureCounts || state.moduleFailureCounts);
   state.moduleTransportFailureCounts = new Map(overrides.moduleTransportFailureCounts || state.moduleTransportFailureCounts);
   state.moduleReplacementConflictCounts = new Map(overrides.moduleReplacementConflictCounts || state.moduleReplacementConflictCounts);
+  state.optionReplacementConflictCounts = new Map(overrides.optionReplacementConflictCounts || state.optionReplacementConflictCounts);
   const canonicalDesign = state.canonicalDesign === true;
   const currentRevision = canonicalDesign ? TASK_440_CONFIG_SHA : TASK_440_CURRENT_SHA;
   const currentGeneration = canonicalDesign ? 160 : 74;
@@ -3294,6 +3320,11 @@ async function routeTask440SystemData(page, overrides = {}) {
   state.releaseHeldSummary = () => {
     state.holdSummary = false;
     for (const resolve of state.heldSummaryResolvers.splice(0)) resolve();
+  };
+  state.releaseHeldSummaryRevision = (revision) => {
+    state.holdSummaryRevisions.delete(revision);
+    for (const resolve of state.heldSummaryRevisionResolvers.get(revision) || []) resolve();
+    state.heldSummaryRevisionResolvers.delete(revision);
   };
   state.releaseHeldModules = (revision) => {
     state.holdModuleRevisions.delete(revision);
@@ -3357,9 +3388,10 @@ async function routeTask440SystemData(page, overrides = {}) {
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
       current_generation: currentGeneration,
       generations: [
-        { generation: currentGeneration, store_path: canonicalDesign ? "/nix/store/design-atlas-01-system" : "/nix/store/task440-current-system", commit_hash: currentRevision, timestamp: "2026-08-28T18:00:00Z", is_current: true },
-        { generation: currentGeneration - 1, store_path: "/nix/store/task440-old-system", commit_hash: canonicalDesign ? TASK_440_DESIGN_PARENT_SHA : TASK_440_HISTORICAL_SHA, timestamp: "2026-08-27T18:00:00Z", is_current: false },
-        { generation: currentGeneration - 2, store_path: "/nix/store/task440-local-system", commit_hash: null, timestamp: "2026-08-26T18:00:00Z", is_current: false },
+        { generation: currentGeneration, store_path: canonicalDesign ? "/nix/store/design-atlas-01-system" : "/nix/store/task440-current-system", commit_hash: currentRevision, timestamp: "2026-08-28T18:00:00Z", is_current: true, generation_snapshot_id: TASK_440_CURRENT_GENERATION_SNAPSHOT_ID, rollback_eligible: false },
+        { generation: currentGeneration - 1, store_path: canonicalDesign ? "/nix/store/task440-old-system" : null, commit_hash: canonicalDesign ? TASK_440_DESIGN_PARENT_SHA : TASK_440_HISTORICAL_SHA, timestamp: "2026-08-27T18:00:00Z", is_current: false, generation_snapshot_id: TASK_440_PREVIOUS_GENERATION_SNAPSHOT_ID, rollback_eligible: true },
+        { generation: currentGeneration - 2, store_path: "/nix/store/task440-local-system", commit_hash: null, timestamp: "2026-08-26T18:00:00Z", is_current: false, generation_snapshot_id: null, rollback_eligible: false },
+        { generation: currentGeneration - 3, store_path: "/nix/store/task440-baseline-system", commit_hash: TASK_440_ROOT_SHA, timestamp: "2026-08-25T18:00:00Z", is_current: false, generation_snapshot_id: TASK_440_BASELINE_GENERATION_SNAPSHOT_ID, rollback_eligible: false },
       ],
     }) });
   });
@@ -3376,7 +3408,31 @@ async function routeTask440SystemData(page, overrides = {}) {
     const offset = Number(url.searchParams.get("offset") || 0);
     const limit = Number(url.searchParams.get("limit") || 24);
     const revision = url.searchParams.get("revision") || currentRevision;
-    state.optionRequests.push({ revision, search, filter, offset, limit });
+    const mode = url.searchParams.get("mode") || "commit";
+    const generation = url.searchParams.get("generation") ? Number(url.searchParams.get("generation")) : null;
+    const generationBaseline = mode === "generation" ? task440GenerationBaseline(generation) : null;
+    const suppliedToken = url.searchParams.get("snapshot_token");
+    if (suppliedToken && !/^[0-9a-fA-F]{64}$/.test(suppliedToken)) {
+      await route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ message: "snapshot_token must be a 64-character hexadecimal digest" }) });
+      return;
+    }
+    if (offset > 0 && !suppliedToken) {
+      await route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ message: "snapshot_token is required when offset is greater than 0" }) });
+      return;
+    }
+    state.optionRequests.push({ revision, search, filter, offset, limit, snapshotToken: suppliedToken, ordinal: state.requestOrdinal++ });
+    const remainingConflicts = state.optionReplacementConflictCounts.get(offset) || 0;
+    if (remainingConflicts > 0) {
+      state.optionReplacementConflictCounts.set(offset, remainingConflicts - 1);
+      state.moduleReplacement += 1;
+      await route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ error: "snapshot_changed", message: "Evaluation snapshot changed; reload Config from offset 0" }) });
+      return;
+    }
+    const token = task440ConfigSnapshotToken(revision, state.moduleReplacement, mode, generation);
+    if (suppliedToken && suppliedToken !== token) {
+      await route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ error: "snapshot_changed", message: "Evaluation snapshot changed; reload Config from offset 0" }) });
+      return;
+    }
     const typedOptions = canonicalDesign ? task440CanonicalOptions(revision) : task440TypedOptions(revision);
     if (state.holdSearch === search) {
       await new Promise((resolve) => {
@@ -3397,9 +3453,11 @@ async function routeTask440SystemData(page, overrides = {}) {
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
       lifecycle: state.lifecycle,
       revision,
-      generation: url.searchParams.get("generation") ? Number(url.searchParams.get("generation")) : null,
-      generation_snapshot_id: null,
-      baseline_revision: state.lifecycle === "available" && revision !== TASK_440_ROOT_SHA ? TASK_440_ROOT_SHA : null,
+      generation,
+      generation_snapshot_id: mode === "generation" && generation != null ? (generation === currentGeneration ? TASK_440_CURRENT_GENERATION_SNAPSHOT_ID : generation === currentGeneration - 1 ? TASK_440_PREVIOUS_GENERATION_SNAPSHOT_ID : TASK_440_BASELINE_GENERATION_SNAPSHOT_ID) : null,
+      snapshot_token: state.lifecycle === "available" ? token : null,
+      baseline_revision: state.lifecycle === "available" && revision !== TASK_440_ROOT_SHA ? (mode === "generation" ? generationBaseline?.revision ?? null : TASK_440_ROOT_SHA) : null,
+      baseline_generation: state.lifecycle === "available" ? generationBaseline?.generation ?? null : null,
       comparison_available: state.lifecycle === "available" && revision !== TASK_440_ROOT_SHA,
       error: state.lifecycle === "failed" ? "safe deterministic evaluation failure" : null,
       module_count: canonicalDesign ? 27 : 14,
@@ -3422,19 +3480,48 @@ async function routeTask440SystemData(page, overrides = {}) {
     }
     const url = new URL(route.request().url());
     const revision = url.searchParams.get("revision") || currentRevision;
+    const suppliedToken = url.searchParams.get("snapshot_token");
+    if (suppliedToken && !/^[0-9a-fA-F]{64}$/.test(suppliedToken)) {
+      await route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ message: "snapshot_token must be a 64-character hexadecimal digest" }) });
+      return;
+    }
+    const mode = url.searchParams.get("mode") || "commit";
+    const generation = url.searchParams.get("generation") ? Number(url.searchParams.get("generation")) : null;
+    state.summaryRequests.push({ revision, generation, mode, snapshotToken: suppliedToken, ordinal: state.requestOrdinal++ });
     if (state.holdSummary) {
       await new Promise((resolve) => state.heldSummaryResolvers.push(resolve));
+    }
+    if (state.holdSummaryRevisions.has(revision)) {
+      await new Promise((resolve) => {
+        const resolvers = state.heldSummaryRevisionResolvers.get(revision) || [];
+        resolvers.push(resolve);
+        state.heldSummaryRevisionResolvers.set(revision, resolvers);
+      });
+    }
+    if (suppliedToken && state.summaryReplacementConflictCount > 0) {
+      state.summaryReplacementConflictCount -= 1;
+      state.moduleReplacement += 1;
+      await route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ error: "snapshot_changed", message: "Evaluation snapshot changed; reload Config from offset 0" }) });
+      return;
+    }
+    const token = task440ConfigSnapshotToken(revision, state.moduleReplacement, mode, generation);
+    if (suppliedToken && suppliedToken !== token) {
+      await route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ error: "snapshot_changed", message: "Evaluation snapshot changed; reload Config from offset 0" }) });
+      return;
     }
     const selectedStore = revision === currentRevision
       ? canonicalDesign ? "/nix/store/design-atlas-01-system" : "/nix/store/task440-current-system"
       : revision === TASK_440_HISTORICAL_SHA
         ? "/nix/store/task440-old-system"
         : null;
+    const generationBaseline = mode === "generation" ? task440GenerationBaseline(generation) : null;
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
       lifecycle: state.lifecycle,
       revision,
-      generation: url.searchParams.get("generation") ? Number(url.searchParams.get("generation")) : null,
+      generation,
       error: state.lifecycle === "failed" ? "safe deterministic evaluation failure" : null,
+      snapshot_token: state.lifecycle === "available" ? token : null,
+      baseline_generation: state.lifecycle === "available" ? generationBaseline?.generation ?? null : null,
       module_source_total: state.lifecycle === "available" ? task440ModuleSources(revision, canonicalDesign).length : 0,
       completed_at: state.lifecycle === "available" ? "2026-08-28T18:00:00Z" : null,
        evaluation_duration_ms: state.lifecycle === "available" ? canonicalDesign ? TASK_440_FIXTURE.canonicalConfig.evaluationDurationMs : 845 : null,
@@ -3457,6 +3544,7 @@ async function routeTask440SystemData(page, overrides = {}) {
     const rawLimit = url.searchParams.get("limit") || "50";
     const rawOffset = url.searchParams.get("offset") || "0";
     const generation = url.searchParams.get("generation") ? Number(url.searchParams.get("generation")) : null;
+    const mode = url.searchParams.get("mode") || "commit";
     const suppliedToken = url.searchParams.get("snapshot_token");
     if (!/^-?\d+$/.test(rawLimit) || !/^-?\d+$/.test(rawOffset)) {
       await route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ message: "limit and offset must be integers" }) });
@@ -3472,7 +3560,7 @@ async function routeTask440SystemData(page, overrides = {}) {
       await route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ message: "snapshot_token is required when offset is greater than 0" }) });
       return;
     }
-    state.moduleRequests.push({ revision, limit, offset, snapshotToken: suppliedToken });
+    state.moduleRequests.push({ revision, limit, offset, snapshotToken: suppliedToken, ordinal: state.requestOrdinal++ });
     if (state.holdModuleRevisions.has(revision)) {
       await new Promise((resolve) => {
         const resolvers = state.heldModuleResolvers.get(revision) || [];
@@ -3506,8 +3594,8 @@ async function routeTask440SystemData(page, overrides = {}) {
       await route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ error: "snapshot_changed", message: "Evaluation snapshot changed; reload module sources from offset 0" }) });
       return;
     }
-    const token = task440ModuleSnapshotToken(revision, state.moduleReplacement);
-    if (offset > 0 && suppliedToken !== token) {
+    const token = task440ConfigSnapshotToken(revision, state.moduleReplacement, mode, generation);
+    if (suppliedToken && suppliedToken !== token) {
       await route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ error: "snapshot_changed", message: "Evaluation snapshot changed; reload module sources from offset 0" }) });
       return;
     }
@@ -3549,6 +3637,35 @@ async function routeTask440SystemData(page, overrides = {}) {
     };
     if (response.body.policy === "manual") state.deploymentPolicy = "manual";
     await route.fulfill({ status: response.status, contentType: "application/json", body: JSON.stringify(response.body) });
+  });
+  await page.route(new RegExp(`/api/v1/systems/${TASK_440_SYSTEM_ID}/rollback-generation$`), async (route) => {
+    const routedRequest = route.request();
+    if (routedRequest.method() !== "POST") {
+      await route.fulfill({ status: 405, contentType: "application/json", body: JSON.stringify({ error: "method_not_allowed", message: "Method not allowed", details: null }) });
+      return;
+    }
+    const headers = await routedRequest.allHeaders();
+    const csrfCookie = (headers.cookie || "")
+      .split(";")
+      .map((cookie) => cookie.trim())
+      .find((cookie) => cookie.startsWith("__Host-cf-csrf="))
+      ?.slice("__Host-cf-csrf=".length);
+    if (!csrfCookie || headers["x-csrf-token"] !== csrfCookie) {
+      await route.fulfill({ status: 403, contentType: "application/json", body: JSON.stringify({ error: "csrf_validation_failed", message: "CSRF validation failed", details: null }) });
+      return;
+    }
+    const request = routedRequest.postDataJSON();
+    state.rollbackRequests.push(request);
+    const valid = request.generation === currentGeneration - 1
+      && request.generation_snapshot_id === TASK_440_PREVIOUS_GENERATION_SNAPSHOT_ID
+      && !Object.hasOwn(request, "store_path");
+    await route.fulfill({
+      status: valid ? 202 : 400,
+      contentType: "application/json",
+      body: JSON.stringify(valid
+        ? { status: "accepted", message: "Generation rollback requested for warning-system-01" }
+        : { error: "validation_error", message: "retained generation artifact was not found", details: null }),
+    });
   });
   const provenanceCommits = (flakeId) => flakeId === 42
     ? [{ id: 4421, hash: TASK_440_EXTERNAL_SHA, message: "tracked external input", author: "Fixture Bot", committed_at: "2026-08-28T18:00:00Z", system_count: 0, commits_behind: 0, systems: [], system_paths: [], build_status: "complete", evaluation_status: "complete", evaluation_error_message: null }]
@@ -4283,7 +4400,7 @@ async function prepareTask440CanonicalCapture(page, step) {
       if ((await row.getByRole("button").getAttribute("aria-expanded")) !== "true") throw new Error("Canonical Flake Modules capture lost its expanded module");
       await assertVisible(tray.getByText("cf.system.enable", { exact: true }), "Canonical Flake Modules capture lost its declaration");
     } else if (step.name.includes("inputs-canonical")) {
-      await assertVisible(tray.getByRole("tab", { name: /Inputs 47/, selected: true }), "Canonical Flake Inputs capture lost its active pane/count");
+      await assertVisible(tray.getByRole("tab", { name: /Inputs 8/, selected: true }), "Canonical Flake Inputs capture lost its active pane/direct count");
       await assertExactTextOrder(tray.locator(".fx-stat .fx-stat-n"), ["8", "47", "3", "1"], "Canonical Flake Inputs metrics");
       await assertVisible(tray.getByText("multiple nixpkgs revisions", { exact: false }), "Canonical Flake Inputs capture lost its revision warning");
     }
@@ -15769,10 +15886,13 @@ security.audit.enable = true;</fixtext>
     action: async (page) => {
       await page.setViewportSize({ width: 1920, height: 1080 });
       await routeSystemsWarningData(page);
-      const state = await routeTask440SystemData(page, { holdModuleRevisions: [TASK_440_CURRENT_SHA] });
+      const state = await routeTask440SystemData(page, {
+        holdModuleRevisions: [TASK_440_CURRENT_SHA],
+        summaryReplacementConflictCount: 1,
+      });
       state.holdSummary = true;
       await page.goto(`${baseUrl}/systems/${TASK_440_SYSTEM_ID}?tab=config&config_mode=commit&revision=${TASK_440_CURRENT_SHA}`, { timeout: LOAD_TIMEOUT });
-      await assertVisible(page.getByText("1–24 of 38"), `Expected bounded first page; fixture requests: ${state.handledRequests.join(",")}`, 15000);
+      await assertVisible(page.getByText(/^1–\d+ of 38$/), `Expected bounded first page; fixture requests: ${state.handledRequests.join(",")}`, 15000);
       const unresolvedSource = page.getByText("services.openssh.enable", { exact: true }).locator("xpath=ancestor::tr[1]").locator(".cfg-src");
       if (await unresolvedSource.isDisabled()) throw new Error("Direct option provenance incorrectly depends on evaluation summary or module-page loading");
       await unresolvedSource.click();
@@ -15785,10 +15905,24 @@ security.audit.enable = true;</fixtext>
       state.releaseHeldSummary();
       const evaluationCard = page.locator(".sd-card").filter({ has: page.getByRole("heading", { name: "Evaluation" }) });
       await assertVisible(evaluationCard.getByText("/nix/store/task440-current-system", { exact: true }), "Expected authoritative selected toplevel after summary resolves", 15000);
+      const summaryConflictRequest = state.summaryRequests.find((request) => request.snapshotToken);
+      const optionRestartAfterSummaryConflict = summaryConflictRequest
+        && state.optionRequests.some((request) => request.ordinal > summaryConflictRequest.ordinal && request.offset === 0);
+      const summaryRestartAfterConflict = summaryConflictRequest
+        && state.summaryRequests.some((request) => request.ordinal > summaryConflictRequest.ordinal);
+      if (!summaryConflictRequest || !summaryRestartAfterConflict || !optionRestartAfterSummaryConflict) {
+        throw new Error(`Summary token conflict did not restart Config at offset zero: ${JSON.stringify({ summaryRequests: state.summaryRequests, optionRequests: state.optionRequests })}`);
+      }
       await assertVisible(page.getByText("Loading module sources…", { exact: true }), "Summary resolution incorrectly completed the independent module-source request");
       state.releaseHeldModules(TASK_440_CURRENT_SHA);
       const modulesCard = page.locator(".sd-card").filter({ has: page.getByRole("heading", { name: "Modules" }) });
       await assertVisible(modulesCard.getByText("Loaded 40 of 86 module sources", { exact: true }), "Expected deterministic first module-source page", 15000);
+      const stableConfigToken = state.optionRequests.findLast((request) => request.snapshotToken)?.snapshotToken;
+      const stableSummaryToken = state.summaryRequests.findLast((request) => request.snapshotToken)?.snapshotToken;
+      const stableModuleToken = state.moduleRequests.findLast((request) => request.snapshotToken)?.snapshotToken;
+      if (!/^[0-9a-f]{64}$/.test(stableConfigToken || "") || stableConfigToken !== stableSummaryToken || stableConfigToken !== stableModuleToken) {
+        throw new Error(`Config surfaces did not converge on one stable 64-hex snapshot token: ${JSON.stringify({ stableConfigToken, stableSummaryToken, stableModuleToken })}`);
+      }
       if (await modulesCard.locator("button[title='shared/exact-identity.nix']").count() !== 2) {
         throw new Error("Expected the same source path under two distinct input/revision tuple identities");
       }
@@ -15817,8 +15951,8 @@ security.audit.enable = true;</fixtext>
       await assertVisible(modulesCard.getByText("Loaded 40 of 86 module sources", { exact: true }), "Expected replacement conflict to discard stale rows and restart at page zero", 15000);
       const replacementPageZero = state.moduleRequests.filter((request) => request.revision === TASK_440_CURRENT_SHA && request.offset === 0).at(-1);
       const offset80Requests = state.moduleRequests.filter((request) => request.revision === TASK_440_CURRENT_SHA && request.offset === 80);
-      if (offset80Requests.length !== 1 || !replacementPageZero || replacementPageZero.snapshotToken !== null) {
-        throw new Error(`Expected one rejected continuation followed by an unbound page-zero restart, got ${JSON.stringify({ offset80Requests, replacementPageZero })}`);
+      if (offset80Requests.length !== 1 || !replacementPageZero) {
+        throw new Error(`Expected one rejected continuation followed by a page-zero restart, got ${JSON.stringify({ offset80Requests, replacementPageZero })}`);
       }
       await modulesCard.getByRole("button", { name: "Load more evaluation module sources" }).click();
       await assertVisible(modulesCard.getByText("Loaded 80 of 86 module sources", { exact: true }), "Expected replacement snapshot second page", 15000);
@@ -15842,6 +15976,34 @@ security.audit.enable = true;</fixtext>
       }
       const optionPageLimit = state.optionRequests.at(-1)?.limit;
       if (!Number.isInteger(optionPageLimit)) throw new Error(`Missing current bounded option-page limit: ${JSON.stringify(state.optionRequests)}`);
+      const optionValidation = await page.evaluate(async ({ systemId, revision }) => {
+        const root = `/api/v1/systems/${systemId}/evaluated-options?mode=commit&revision=${revision}&filter=all`;
+        const missingToken = await fetch(`${root}&limit=24&offset=24`);
+        const malformedToken = await fetch(`${root}&limit=24&offset=24&snapshot_token=bad`);
+        const mismatchedToken = await fetch(`${root}&limit=24&offset=24&snapshot_token=${"f".repeat(64)}`);
+        const summaryMismatch = await fetch(`/api/v1/systems/${systemId}/evaluation-summary?mode=commit&revision=${revision}&snapshot_token=${"e".repeat(64)}`);
+        return { missingToken: missingToken.status, malformedToken: malformedToken.status, mismatchedToken: mismatchedToken.status, summaryMismatch: summaryMismatch.status };
+      }, { systemId: TASK_440_SYSTEM_ID, revision: TASK_440_CURRENT_SHA });
+      if (optionValidation.missingToken !== 400 || optionValidation.malformedToken !== 400 || optionValidation.mismatchedToken !== 409 || optionValidation.summaryMismatch !== 409) {
+        throw new Error(`Config token fixture validation diverged from the server contract: ${JSON.stringify(optionValidation)}`);
+      }
+      state.optionReplacementConflictCounts.set(optionPageLimit, 1);
+      const optionRequestCountBeforeConflict = state.optionRequests.length;
+      const moduleRequestCountBeforeConflict = state.moduleRequests.length;
+      const summaryRequestCountBeforeConflict = state.summaryRequests.length;
+      const optionConflictRestart = page.waitForRequest((request) => {
+        const url = new URL(request.url());
+        return url.pathname.endsWith("/evaluated-options") && url.searchParams.get("offset") === "0" && !url.searchParams.has("snapshot_token");
+      });
+      await page.getByTitle("Next page").click();
+      await optionConflictRestart;
+      await assertVisible(page.getByText(`1–${optionPageLimit} of 38`), "Expected options conflict to restart at offset zero", 15000);
+      const moduleRestartAfterOptionConflict = state.moduleRequests.slice(moduleRequestCountBeforeConflict).some((request) => request.offset === 0);
+      const summaryRestartAfterOptionConflict = state.summaryRequests.length > summaryRequestCountBeforeConflict;
+      const optionRestartAfterOptionConflict = state.optionRequests.slice(optionRequestCountBeforeConflict).some((request) => request.offset === 0);
+      if (!optionRestartAfterOptionConflict || !moduleRestartAfterOptionConflict || !summaryRestartAfterOptionConflict) {
+        throw new Error(`Options token conflict did not restart every Config surface: ${JSON.stringify({ moduleRequests: state.moduleRequests, summaryRequests: state.summaryRequests })}`);
+      }
       await page.getByTitle("Next page").click();
       await assertVisible(page.getByText(`${optionPageLimit + 1}–38 of 38`), "Expected bounded second page");
       await page.getByTitle("Previous page").click();
@@ -15861,7 +16023,10 @@ security.audit.enable = true;</fixtext>
       await search.fill("open");
       await search.pressSequentially("ssh");
       await oldRequest;
-      await assertVisible(page.locator(".cfg-count").getByText("Querying…", { exact: true }), "Expected exact stale-query status while the replacement request is pending");
+      await assertVisible(page.locator(".cfg-count").getByText(new RegExp(`^Querying… showing 1–${optionPageLimit} of 38$`)), "Expected stale-query status to retain the valid range while the replacement request is pending");
+      await assertVisible(page.getByRole("button", { name: /All 38/ }), "Pending search discarded the prior revision-global count");
+      await assertVisible(page.getByText("services.openssh.enable", { exact: true }), "Pending search discarded the prior valid option rows");
+      if ((await page.locator(".cfg-table-wrap").getAttribute("aria-busy")) !== "true") throw new Error("Pending option query did not expose aria-busy state");
       if (!(await mountedSearch.evaluate((element) => element.isConnected && element.value === "openssh"))) throw new Error("Config search input was replaced or lost continuous typing during the pending query");
       await assertVisible(modulesCard.getByText("Loaded 40 of 86 module sources", { exact: true }), "Expected the independent first module page to remain stable during option search");
       const replacementResponse = page.waitForResponse((response) => response.url().includes("search=broken"));
@@ -15884,6 +16049,10 @@ security.audit.enable = true;</fixtext>
       await assertVisible(page.getByText("boolean", { exact: true }), "Expected keyboard row expansion with declared type");
       await assertVisible(page.getByText(/- false/), "Expected typed before value");
       await assertVisible(page.getByText(/\+ true/), "Expected typed after value");
+      const optionDetail = optionRow.locator("xpath=following-sibling::tr[1]");
+      const commitChangedBaseline = optionDetail.locator(".cfg-diff-note").filter({ hasText: "Compared with 1111111." });
+      await assertVisible(commitChangedBaseline, "Expected changed commit row to display the short first-parent SHA");
+      if ((await commitChangedBaseline.getAttribute("title")) !== `Git first parent ${TASK_440_ROOT_SHA}`) throw new Error("Changed commit row omitted the full immutable baseline SHA metadata");
       await assertVisible(page.getByText("winning", { exact: true }).first(), "Expected winning provenance");
       await assertVisible(page.getByText("overridden", { exact: true }).first(), "Expected overridden provenance");
 
@@ -15934,6 +16103,13 @@ security.audit.enable = true;</fixtext>
       await assertVisible(fingerprintRow.getByText("matches", { exact: true }), "Expected exact agent fingerprint status");
       await assertVisible(driftCard.getByText("No configuration drift was observed in the last 7 days.", { exact: true }), "Expected authoritative seven-day drift status");
 
+      const unchangedCommitRow = page.getByText("services.untracked.enable", { exact: true }).locator("xpath=ancestor::tr[1]");
+      await unchangedCommitRow.locator(".cfg-row-toggle").click();
+      const unchangedCommitDetail = unchangedCommitRow.locator("xpath=following-sibling::tr[1]");
+      const commitUnchangedBaseline = unchangedCommitDetail.locator(".cfg-diff-line").filter({ hasText: "Unchanged vs 1111111." });
+      await assertVisible(commitUnchangedBaseline, "Expected unchanged commit row to display the short first-parent SHA");
+      if ((await commitUnchangedBaseline.getAttribute("title")) !== `Git first parent ${TASK_440_ROOT_SHA}`) throw new Error("Unchanged commit row omitted the full immutable baseline SHA metadata");
+
       const tableOverflow = await page.locator(".cfg-table-wrap").evaluate((element) => getComputedStyle(element).overflowY);
       if (tableOverflow === "auto" || tableOverflow === "scroll") throw new Error(`Unexpected Config inner scroller: ${tableOverflow}`);
       for (const theme of ["dark", "light"]) {
@@ -15960,20 +16136,53 @@ security.audit.enable = true;</fixtext>
       }
 
       state.holdModuleRevisions.add(TASK_440_HISTORICAL_SHA);
+      state.holdSummaryRevisions.add(TASK_440_HISTORICAL_SHA);
       const revisionSelect = page.locator("select.cfg-revselect");
       const historicalModuleRequest = page.waitForRequest((request) => request.url().includes("evaluation-module-sources") && request.url().includes(TASK_440_HISTORICAL_SHA));
+      const historicalSummaryRequest = page.waitForRequest((request) => request.url().includes("evaluation-summary") && request.url().includes(TASK_440_HISTORICAL_SHA));
+      const historicalSummaryResponse = page.waitForResponse((response) => response.url().includes("evaluation-summary") && response.url().includes(TASK_440_HISTORICAL_SHA));
       await revisionSelect.selectOption(TASK_440_HISTORICAL_SHA);
-      await historicalModuleRequest;
+      await Promise.all([historicalModuleRequest, historicalSummaryRequest]);
       const currentModuleRequest = page.waitForResponse((response) => response.url().includes("evaluation-module-sources") && response.url().includes(TASK_440_CURRENT_SHA));
+      const currentSummaryRequest = page.waitForResponse((response) => response.url().includes("evaluation-summary") && response.url().includes(TASK_440_CURRENT_SHA));
       await revisionSelect.selectOption(TASK_440_CURRENT_SHA);
-      await currentModuleRequest;
+      await Promise.all([currentModuleRequest, currentSummaryRequest]);
       await assertVisible(modulesCard.getByText("Loaded 40 of 86 module sources", { exact: true }), "Expected current module page after changing selection", 15000);
-      await page.waitForFunction((title) => Boolean(document.querySelector(`[title='${title}']`)), `nixos/revisions/${TASK_440_CURRENT_SHA.slice(0, 12)}.nix`, { timeout: 15000 });
+      const currentModuleTitle = state.moduleReplacement > 0
+        ? `nixos/revisions/${TASK_440_CURRENT_SHA.slice(0, 12)}-replacement-${state.moduleReplacement}.nix`
+        : `nixos/revisions/${TASK_440_CURRENT_SHA.slice(0, 12)}.nix`;
+      await page.waitForFunction((title) => Boolean(document.querySelector(`[title='${title}']`)), currentModuleTitle, { timeout: 15000 });
       state.releaseHeldModules(TASK_440_HISTORICAL_SHA);
-      await page.getByTitle(`nixos/revisions/${TASK_440_CURRENT_SHA.slice(0, 12)}.nix`).first().waitFor({ state: "visible", timeout: 3000 });
-      if (await page.getByTitle(`nixos/revisions/${TASK_440_HISTORICAL_SHA.slice(0, 12)}.nix`).first().isVisible()) {
+      await page.getByTitle(currentModuleTitle).first().waitFor({ state: "visible", timeout: 3000 });
+      const historicalModuleTitle = state.moduleReplacement > 0
+        ? `nixos/revisions/${TASK_440_HISTORICAL_SHA.slice(0, 12)}-replacement-${state.moduleReplacement}.nix`
+        : `nixos/revisions/${TASK_440_HISTORICAL_SHA.slice(0, 12)}.nix`;
+      if (await page.getByTitle(historicalModuleTitle).first().isVisible()) {
         throw new Error("A delayed historical module-source response replaced the current revision");
       }
+      state.releaseHeldSummaryRevision(TASK_440_HISTORICAL_SHA);
+      await historicalSummaryResponse;
+      await assertVisible(evaluationCard.getByText("/nix/store/task440-current-system", { exact: true }), "A delayed historical summary replaced the current Evaluation state");
+      await assertVisible(driftCard.getByText("in sync", { exact: true }), "A delayed historical summary replaced the current Drift state");
+      const postRaceOptionRequest = state.optionRequests.at(-1);
+      if (postRaceOptionRequest?.revision !== TASK_440_CURRENT_SHA || postRaceOptionRequest.snapshotToken !== task440ConfigSnapshotToken(TASK_440_CURRENT_SHA, state.moduleReplacement, "commit", null)) {
+        throw new Error(`A delayed historical summary replaced the current Config token state: ${JSON.stringify(postRaceOptionRequest)}`);
+      }
+
+      await page.getByRole("button", { name: "Generations" }).click();
+      await page.locator("select.cfg-revselect").selectOption("73");
+      const generationChangedRow = page.getByText("services.openssh.enable", { exact: true }).locator("xpath=ancestor::tr[1]");
+      await generationChangedRow.locator(".cfg-row-toggle").click();
+      const generationChangedDetail = generationChangedRow.locator("xpath=following-sibling::tr[1]");
+      const generationChangedBaseline = generationChangedDetail.locator(".cfg-diff-note").filter({ hasText: "Compared with generation #71." });
+      await assertVisible(generationChangedBaseline, "Expected generation comparison to skip the unusable immediate numeric predecessor", 15000);
+      if ((await generationChangedBaseline.getAttribute("title")) !== `Generation #71 at ${TASK_440_ROOT_SHA}`) throw new Error("Changed generation row omitted the nearest earlier usable retained baseline metadata");
+      const generationUnchangedRow = page.getByText("services.untracked.enable", { exact: true }).locator("xpath=ancestor::tr[1]");
+      await generationUnchangedRow.locator(".cfg-row-toggle").click();
+      const generationUnchangedDetail = generationUnchangedRow.locator("xpath=following-sibling::tr[1]");
+      const generationUnchangedBaseline = generationUnchangedDetail.locator(".cfg-diff-line").filter({ hasText: "Unchanged vs generation #71." });
+      await assertVisible(generationUnchangedBaseline, "Expected unchanged generation row to use the nearest earlier usable retained generation");
+      if ((await generationUnchangedBaseline.getAttribute("title")) !== `Generation #71 at ${TASK_440_ROOT_SHA}`) throw new Error("Unchanged generation row omitted exact retained baseline metadata");
     },
   },
   {
@@ -15987,11 +16196,15 @@ security.audit.enable = true;</fixtext>
       await page.goto(`${baseUrl}/systems/${TASK_440_SYSTEM_ID}?tab=config&config_mode=commit&revision=${TASK_440_CURRENT_SHA}`, { timeout: LOAD_TIMEOUT });
       await assertVisible(page.getByRole("heading", { name: "Evaluated options" }), "Expected narrow Config explorer", 15000);
       await assertTask440SelectedConfigRevision(page, "Narrow Config");
-      await page.getByRole("button", { name: "Generations" }).focus();
-      await page.keyboard.press("Tab");
-      const tabTarget = await page.evaluate(() => document.activeElement?.textContent?.trim() || document.activeElement?.getAttribute("aria-label"));
-      if (!tabTarget?.includes("Commits")) throw new Error(`Expected Commits next in revision tab order, got ${tabTarget}`);
+      const generationsMode = page.getByRole("button", { name: "Generations" });
+      const commitsMode = page.getByRole("button", { name: "Commits" });
+      if ((await generationsMode.getAttribute("aria-pressed")) !== "false" || (await commitsMode.getAttribute("aria-pressed")) !== "true") throw new Error("Initial revision-mode selected state is unavailable to assistive technology");
+      await generationsMode.focus();
       await page.keyboard.press("Enter");
+      if ((await generationsMode.getAttribute("aria-pressed")) !== "true" || (await commitsMode.getAttribute("aria-pressed")) !== "false") throw new Error("Keyboard activation did not select Generations semantically");
+      await commitsMode.focus();
+      await page.keyboard.press("Enter");
+      if ((await commitsMode.getAttribute("aria-pressed")) !== "true" || (await generationsMode.getAttribute("aria-pressed")) !== "false") throw new Error("Keyboard activation did not restore Commits semantically");
       const revisionSelect = page.locator("select.cfg-revselect");
       await revisionSelect.focus();
       await page.keyboard.press("ArrowDown");
@@ -16629,10 +16842,42 @@ security.audit.enable = true;</fixtext>
       if (state.deployRequests[2].action !== state.deployRequests[1].action) throw new Error("Retry changed the original deployment action after policy conversion");
 
       await page.getByRole("tab", { name: "History" }).click();
+      const currentGenerationCard = page.locator(".tl-card").filter({ has: page.locator(".tl-gen strong", { hasText: "#74" }) });
+      if (await currentGenerationCard.getByTitle("Rollback to this generation").count()) {
+        throw new Error("History advertised rollback for the current server-ineligible generation");
+      }
       const rollback = page.locator(".tl-card").filter({ has: page.locator(".tl-gen strong", { hasText: "#73" }) }).getByTitle("Rollback to this generation");
       await rollback.click();
       await assertVisible(page.getByRole("tab", { name: "Deploy", selected: true }), "Expected History rollback to route into Deploy");
       if (new URL(page.url()).searchParams.get("deploy_generation") !== "73") throw new Error(`Rollback did not preselect generation 73: ${page.url()}`);
+      await assertVisible(page.getByRole("button", { name: "Previous generation" }), "Expected generation rollback mode after History navigation");
+      const invalidRollback = await page.evaluate(async ({ systemId }) => {
+        const csrf = document.cookie
+          .split(";")
+          .map((cookie) => cookie.trim())
+          .find((cookie) => cookie.startsWith("__Host-cf-csrf="))
+          ?.slice("__Host-cf-csrf=".length);
+        if (!csrf) throw new Error("Authenticated browser session omitted its CSRF cookie");
+        const response = await fetch(`/api/v1/systems/${systemId}/rollback-generation`, {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf },
+          body: JSON.stringify({ generation_snapshot_id: "44000000-0000-4000-8000-000000000199", generation: 99 }),
+        });
+        return { status: response.status, body: await response.json() };
+      }, { systemId: TASK_440_SYSTEM_ID });
+      if (invalidRollback.status !== 400 || invalidRollback.body.error !== "validation_error" || invalidRollback.body.message !== "retained generation artifact was not found") {
+        throw new Error(`Rollback fixture invalid-artifact contract diverged from production: ${JSON.stringify(invalidRollback)}`);
+      }
+      const rollbackSubmission = page.waitForResponse((response) => response.url().endsWith(`/api/v1/systems/${TASK_440_SYSTEM_ID}/rollback-generation`) && response.request().postDataJSON().generation === 73);
+      await page.getByRole("button", { name: "Switch to gen #73" }).click();
+      const rollbackResponse = await rollbackSubmission;
+      if (rollbackResponse.status() !== 202) throw new Error(`Expected accepted rollback HTTP 202, got ${rollbackResponse.status()}`);
+      const rollbackRequest = state.rollbackRequests.at(-1);
+      if (!rollbackRequest || rollbackRequest.generation_snapshot_id !== TASK_440_PREVIOUS_GENERATION_SNAPSHOT_ID || rollbackRequest.generation !== 73 || Object.hasOwn(rollbackRequest, "store_path") || Object.hasOwn(rollbackRequest, "path")) {
+        throw new Error(`Generation rollback did not use retained identity plus exact generation without store_path: ${JSON.stringify(rollbackRequest)}`);
+      }
+      await assertVisible(page.locator(".sd-callout-info").filter({ hasText: "Generation rollback requested for warning-system-01" }), "Accepted rollback did not render its successful result state");
     },
   },
   {

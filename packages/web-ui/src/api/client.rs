@@ -622,6 +622,12 @@ pub async fn fetch_system_evaluated_options(
     if !request.search.is_empty() {
         parts.push(format!("search={}", encode_query_value(&request.search)));
     }
+    if let Some(snapshot_token) = request.snapshot_token.as_deref() {
+        parts.push(format!(
+            "snapshot_token={}",
+            encode_query_value(snapshot_token)
+        ));
+    }
     let url = format!(
         "{}/systems/{}/evaluated-options?{}",
         base_url(),
@@ -642,6 +648,7 @@ pub async fn fetch_system_evaluation_summary(
     revision: &str,
     generation: Option<i32>,
     mode: SnapshotRevisionMode,
+    snapshot_token: Option<&str>,
 ) -> Result<SelectedEvaluationSummary, ApiClientError> {
     let mut parts = vec![
         format!("revision={}", encode_query_value(revision)),
@@ -649,6 +656,12 @@ pub async fn fetch_system_evaluation_summary(
     ];
     if let Some(generation) = generation {
         parts.push(format!("generation={generation}"));
+    }
+    if let Some(snapshot_token) = snapshot_token {
+        parts.push(format!(
+            "snapshot_token={}",
+            encode_query_value(snapshot_token)
+        ));
     }
     let url = format!(
         "{}/systems/{}/evaluation-summary?{}",

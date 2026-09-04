@@ -249,6 +249,7 @@ pub fn BundleHeader(props: BundleHeaderProps) -> Element {
                     if props.is_admin {
                         button {
                             class: "btn btn-ghost focus-ring",
+                            "data-testid": "compliance-edit-bundle",
                             onclick: move |_| props.on_edit.call(()),
                             Icon { name: IconName::Edit, size: 13 }
                             " Edit bundle"

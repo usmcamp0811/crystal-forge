@@ -2182,6 +2182,10 @@ async fn process_pending_commits(
 
                         for check in policy_checks.iter().filter(|c| !c.meets_requirements) {
                             for warning in &check.warnings {
+                                // SECURITY: Evaluator support diagnostics can contain
+                                // raw values or source URLs. Sanitize before the first log.
+                                let warning =
+                                    crate::security::snapshot_redaction::redact_text(warning);
                                 warn!("⚠️  {}: {}", check.system_name, warning);
                             }
                         }
@@ -2209,7 +2213,11 @@ async fn process_pending_commits(
                 }
             }
             Err(e) => {
-                let error_text = e.to_string();
+                // SECURITY: The support error can contain evaluator-controlled
+                // values and URLs. Redact before failure handling can log,
+                // persist, or broadcast the diagnostic.
+                let error_text =
+                    crate::security::snapshot_redaction::redact_evaluation_error(&e.to_string());
                 return handle_evaluation_attempt_failure(
                     pool,
                     &cf_state,

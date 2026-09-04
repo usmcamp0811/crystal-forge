@@ -15,11 +15,11 @@ use std::collections::HashSet;
 #[cfg(target_arch = "wasm32")]
 use std::rc::Rc;
 use uuid::Uuid;
-#[cfg(target_arch = "wasm32")]
-use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsCast;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsValue;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::closure::Closure;
 
 use crate::api::client::{
     ApiClientError, fetch_compliance_system_evidence, fetch_flake_timeline_for_tray,
@@ -1410,7 +1410,7 @@ pub fn SystemDetailView(
                                 let hostname = system.hostname.clone();
                                 let toast_message = toast_message.clone();
                                 let mut deploy_action_notice = deploy_action_notice.clone();
-                                move |store_path: String| {
+                                move |generation: SystemGeneration| {
                                     let hostname = hostname.clone();
                                     let toast_message = toast_message.clone();
                                     let mut deploy_action_notice = deploy_action_notice.clone();
@@ -1422,7 +1422,9 @@ pub fn SystemDetailView(
                                         let (message, success) = match request_system_generation_rollback(
                                             &system_id,
                                             &SystemRollbackGenerationRequest {
-                                                store_path: store_path.clone(),
+                                                generation_snapshot_id: generation.generation_snapshot_id,
+                                                generation: Some(generation.generation),
+                                                store_path: generation.store_path.clone(),
                                             },
                                         )
                                         .await
@@ -1453,6 +1455,7 @@ pub fn SystemDetailView(
                         HistoryTab {
                             entries: effective_history_entries.clone(),
                             commits: deploy_commit_history.clone(),
+                            generations: generations_result.generations.clone(),
                             current_generation: system.generation,
                             deployment_policy: system.deployment_policy.clone(),
                             allow_mutations: can_mutate,
@@ -1675,7 +1678,7 @@ pub fn SystemDetailView(
                     let system_id = system.id;
                     let hostname = system.hostname.clone();
                     let toast_message = toast_message.clone();
-                    move |store_path: String| {
+                    move |generation: SystemGeneration| {
                         show_generation_rollback_modal.set(false);
                         let hostname = hostname.clone();
                         let toast_message = toast_message.clone();
@@ -1683,7 +1686,9 @@ pub fn SystemDetailView(
                             let message = match request_system_generation_rollback(
                                 &system_id,
                                 &SystemRollbackGenerationRequest {
-                                    store_path: store_path.clone(),
+                                    generation_snapshot_id: generation.generation_snapshot_id,
+                                    generation: Some(generation.generation),
+                                    store_path: generation.store_path.clone(),
                                 },
                             )
                             .await
@@ -2497,18 +2502,11 @@ fn GenerationRollbackModal(
     generations: Vec<SystemGeneration>,
     current_generation: Option<i32>,
     on_close: EventHandler<()>,
-    on_confirm: EventHandler<String>,
+    on_confirm: EventHandler<SystemGeneration>,
 ) -> Element {
     let rollback_candidates = generations
         .iter()
-        .filter(|generation| {
-            !generation.is_current
-                && generation
-                    .store_path
-                    .as_ref()
-                    .map(|path| !path.is_empty())
-                    .unwrap_or(false)
-        })
+        .filter(|generation| !generation.is_current && generation.rollback_eligible)
         .cloned()
         .collect::<Vec<_>>();
     let mut selected_generation = use_signal(|| {
@@ -2522,7 +2520,10 @@ fn GenerationRollbackModal(
             .find(|item| item.generation == generation_number)
             .cloned()
     });
-    let selected_store_path = selected.as_ref().and_then(|item| item.store_path.clone());
+    let selected_store_path_label = selected
+        .as_ref()
+        .and_then(|item| item.store_path.clone())
+        .unwrap_or_else(|| "Resolved from retained artifact".to_string());
     let environment_name = environment.unwrap_or_else(|| "unknown".to_string());
     let is_production = matches!(
         environment_name.to_ascii_lowercase().as_str(),
@@ -2530,7 +2531,7 @@ fn GenerationRollbackModal(
     );
     let mut confirm_text = use_signal(String::new);
     let confirm_enabled =
-        selected_store_path.is_some() && (!is_production || *confirm_text.read() == hostname);
+        selected.is_some() && (!is_production || *confirm_text.read() == hostname);
 
     rsx! {
         div { class: "modal-backdrop", onclick: move |_| on_close.call(()),
@@ -2553,7 +2554,7 @@ fn GenerationRollbackModal(
                     if rollback_candidates.is_empty() {
                         div { class: "empty", style: "margin:0;",
                             h3 { "No rollback generations available" }
-                            div { "This host has no prior generation with a recorded store path." }
+                            div { "This host has no prior generation with retained rollback lineage." }
                         }
                     } else {
                         div { class: "sd-commit-list", style: "max-height:280px;",
@@ -2592,7 +2593,7 @@ fn GenerationRollbackModal(
                                 dt { "Target" } dd { class: "mono", "{hostname}" }
                                 dt { "To" } dd { class: "mono", "gen #{selected.generation}" }
                                 dt { "Store path" }
-                                dd { class: "mono", style: "font-size:11px;white-space:normal;word-break:break-all;", "{selected.store_path.clone().unwrap_or_default()}" }
+                                dd { class: "mono", style: "font-size:11px;white-space:normal;word-break:break-all;", "{selected_store_path_label}" }
                             }
                         }
 
@@ -2616,8 +2617,8 @@ fn GenerationRollbackModal(
                         class: "btn btn-primary focus-ring",
                         disabled: !confirm_enabled,
                         onclick: move |_| {
-                            if let Some(store_path) = selected_store_path.clone() {
-                                on_confirm.call(store_path);
+                            if let Some(selected) = selected.clone() {
+                                on_confirm.call(selected);
                             }
                         },
                         Icon { name: IconName::Rollback, size: 13 }
@@ -3349,7 +3350,7 @@ fn DeployTab(
     on_clear_deploy_notice: EventHandler<()>,
     on_open_flake_commit: EventHandler<FlakeCommitPeekTarget>,
     on_deploy_commit: EventHandler<DeploySystemRequest>,
-    on_deploy_generation: EventHandler<String>,
+    on_deploy_generation: EventHandler<SystemGeneration>,
 ) -> Element {
     let flake_name = system
         .flake
@@ -3723,7 +3724,7 @@ fn DeployTab(
                     // Determine what to deploy (generation or commit)
                     if mode() == "generation" {
                         if let Some(generation_data) = selected_generation_data {
-                        let can_rollback = generation_data.store_path.is_some();
+                        let can_rollback = generation_data.rollback_eligible;
                         let gen_num = generation_data.generation;
                         let store_path_full = generation_data.store_path.clone().unwrap_or_default();
                         let deploy_label = if allow_mutations {
@@ -3733,8 +3734,8 @@ fn DeployTab(
                         };
                         let policy_for_callout = policy_name.clone();
                         let current_gen_display = current_generation.map(|g| format!("gen #{}", g)).unwrap_or_else(|| "—".to_string());
-                        let store_path_for_deploy = generation_data.store_path.clone().unwrap_or_default();
-                        let verify_store_path = store_path_for_deploy.clone();
+                        let generation_for_deploy = generation_data.clone();
+                        let verify_store_path = store_path_full.clone();
                         let commit_full = generation_data
                             .commit_hash
                             .clone()
@@ -3862,7 +3863,7 @@ fn DeployTab(
                                 button {
                                     class: "btn btn-primary focus-ring",
                                     disabled: !allow_mutations || !can_rollback,
-                                    onclick: move |_| on_deploy_generation.call(store_path_for_deploy.clone()),
+                                    onclick: move |_| on_deploy_generation.call(generation_for_deploy.clone()),
                                     Icon { name: IconName::Rollback, size: 13 }
                                     "{deploy_label}"
                                 }
@@ -5167,6 +5168,7 @@ fn ConfigTab(
     let mut module_loading_more = use_signal(|| false);
     let mut module_request_sequence = use_signal(|| 0_u64);
     let mut module_scope = use_signal(|| None::<ModuleSourcesScope>);
+    let mut config_snapshot_token = use_signal(|| None::<String>);
 
     #[cfg(target_arch = "wasm32")]
     {
@@ -5291,6 +5293,7 @@ fn ConfigTab(
             module_initial_error.set(None);
             module_continuation_error.set(None);
             module_loading_more.set(false);
+            config_snapshot_token.set(None);
             queueing_scope.set(None);
         });
     }
@@ -5321,6 +5324,7 @@ fn ConfigTab(
             let request_offset = *offset.read();
             let request_limit = *page_size.read();
             let request_generation = *refresh_generation.read();
+            let request_snapshot_token = config_snapshot_token.read().clone();
             let sequence = *request_sequence.peek() + 1;
             request_sequence.set(sequence);
             let Some(scope) = request_scope.clone() else {
@@ -5341,6 +5345,7 @@ fn ConfigTab(
                         filter: active_filter,
                         limit: request_limit,
                         offset: request_offset,
+                        snapshot_token: request_snapshot_token.clone(),
                     },
                 )
                 .await;
@@ -5355,7 +5360,46 @@ fn ConfigTab(
                     && *page_size.peek() == request_limit
                 {
                     loading_options.set(false);
-                    options.set(Some(result));
+                    match result {
+                        Err(ApiClientError::Status { code: 409, .. }) => {
+                            // CONCURRENCY: A token conflict means that one Config
+                            // surface selected a different immutable artifact or
+                            // baseline. Discard every surface before restarting.
+                            config_snapshot_token.set(None);
+                            options.set(None);
+                            summary.set(None);
+                            module_sources.set(None);
+                            offset.set(0);
+                            refresh_generation.set(request_generation.saturating_add(1));
+                        }
+                        Ok(page) if page.lifecycle == SnapshotLifecycle::Available => {
+                            let Some(page_token) = page.snapshot_token.clone() else {
+                                options.set(Some(Err(ApiClientError::Deserialize(
+                                    "available evaluated-options response omitted snapshot_token"
+                                        .to_string(),
+                                ))));
+                                return;
+                            };
+                            if config_snapshot_token
+                                .peek()
+                                .as_deref()
+                                .is_some_and(|current| current != page_token)
+                            {
+                                config_snapshot_token.set(None);
+                                options.set(None);
+                                summary.set(None);
+                                module_sources.set(None);
+                                offset.set(0);
+                                refresh_generation.set(request_generation.saturating_add(1));
+                            } else {
+                                if config_snapshot_token.peek().is_none() {
+                                    config_snapshot_token.set(Some(page_token));
+                                }
+                                options.set(Some(Ok(page)));
+                            }
+                        }
+                        other => options.set(Some(other)),
+                    }
                 }
             });
         });
@@ -5366,6 +5410,7 @@ fn ConfigTab(
         let system_id = system.id;
         use_effect(move || {
             let request_generation = *refresh_generation.read();
+            let request_snapshot_token = config_snapshot_token.read().clone();
             let sequence = *module_request_sequence.peek() + 1;
             module_request_sequence.set(sequence);
             module_scope.set(request_scope.clone());
@@ -5386,7 +5431,7 @@ fn ConfigTab(
                     scope.mode,
                     MODULE_PAGE_SIZE,
                     0,
-                    None,
+                    request_snapshot_token.as_deref(),
                 )
                 .await;
                 // CONCURRENCY: Only the request for the current exact selection may
@@ -5400,10 +5445,48 @@ fn ConfigTab(
                 }
                 module_loading.set(false);
                 match result {
-                    Ok(page) => match module_source_collection_from_page(scope, page) {
-                        Ok(collection) => module_sources.set(Some(collection)),
-                        Err(error) => module_initial_error.set(Some(error)),
-                    },
+                    Ok(page) => {
+                        if page.lifecycle == SnapshotLifecycle::Available
+                            && page.snapshot_token.as_deref().is_some_and(|token| {
+                                config_snapshot_token
+                                    .peek()
+                                    .as_deref()
+                                    .is_some_and(|current| current != token)
+                            })
+                        {
+                            config_snapshot_token.set(None);
+                            options.set(None);
+                            summary.set(None);
+                            module_sources.set(None);
+                            offset.set(0);
+                            refresh_generation.set(request_generation.saturating_add(1));
+                            return;
+                        }
+                        if page.lifecycle == SnapshotLifecycle::Available {
+                            let Some(page_token) = page.snapshot_token.clone() else {
+                                module_initial_error.set(Some(
+                                    "Available module-source response omitted snapshot_token"
+                                        .to_string(),
+                                ));
+                                return;
+                            };
+                            if config_snapshot_token.peek().is_none() {
+                                config_snapshot_token.set(Some(page_token));
+                            }
+                        }
+                        match module_source_collection_from_page(scope, page) {
+                            Ok(collection) => module_sources.set(Some(collection)),
+                            Err(error) => module_initial_error.set(Some(error)),
+                        }
+                    }
+                    Err(ApiClientError::Status { code: 409, .. }) => {
+                        config_snapshot_token.set(None);
+                        options.set(None);
+                        summary.set(None);
+                        module_sources.set(None);
+                        offset.set(0);
+                        refresh_generation.set(request_generation.saturating_add(1));
+                    }
                     Err(error) => module_initial_error.set(Some(snapshot_request_error(&error))),
                 }
             });
@@ -5415,6 +5498,7 @@ fn ConfigTab(
         let system_id = system.id;
         use_effect(move || {
             let request_generation = *refresh_generation.read();
+            let request_snapshot_token = config_snapshot_token.read().clone();
             let sequence = *summary_request_sequence.peek() + 1;
             summary_request_sequence.set(sequence);
             summary.set(None);
@@ -5429,6 +5513,7 @@ fn ConfigTab(
                     &scope.revision,
                     scope.generation,
                     scope.mode,
+                    request_snapshot_token.as_deref(),
                 )
                 .await;
                 if *summary_request_sequence.peek() == sequence
@@ -5436,7 +5521,43 @@ fn ConfigTab(
                     && active_selection.peek().as_ref() == Some(&scope)
                 {
                     loading_summary.set(false);
-                    summary.set(Some(result));
+                    match result {
+                        Err(ApiClientError::Status { code: 409, .. }) => {
+                            config_snapshot_token.set(None);
+                            options.set(None);
+                            summary.set(None);
+                            module_sources.set(None);
+                            offset.set(0);
+                            refresh_generation.set(request_generation.saturating_add(1));
+                        }
+                        Ok(value) if value.lifecycle == SnapshotLifecycle::Available => {
+                            let Some(summary_token) = value.snapshot_token.clone() else {
+                                summary.set(Some(Err(ApiClientError::Deserialize(
+                                    "available evaluation-summary response omitted snapshot_token"
+                                        .to_string(),
+                                ))));
+                                return;
+                            };
+                            if config_snapshot_token
+                                .peek()
+                                .as_deref()
+                                .is_some_and(|current| current != summary_token)
+                            {
+                                config_snapshot_token.set(None);
+                                options.set(None);
+                                summary.set(None);
+                                module_sources.set(None);
+                                offset.set(0);
+                                refresh_generation.set(request_generation.saturating_add(1));
+                            } else {
+                                if config_snapshot_token.peek().is_none() {
+                                    config_snapshot_token.set(Some(summary_token));
+                                }
+                                summary.set(Some(Ok(value)));
+                            }
+                        }
+                        other => summary.set(Some(other)),
+                    }
                 }
             });
         });
@@ -5447,7 +5568,7 @@ fn ConfigTab(
         .as_ref()
         .and_then(|result| result.as_ref().ok())
         .cloned();
-    let response = visible_config_response(loaded_response.clone(), loading_options());
+    let response = visible_config_response(loaded_response.clone());
     let load_error = (!loading_options())
         .then(|| {
             options
@@ -5490,6 +5611,9 @@ fn ConfigTab(
     let baseline = response
         .as_ref()
         .and_then(|value| value.baseline_revision.clone());
+    let baseline_generation = response
+        .as_ref()
+        .and_then(|value| value.baseline_generation);
     let flake_name = system
         .flake
         .as_ref()
@@ -5575,6 +5699,10 @@ fn ConfigTab(
     let module_lifecycle = module_collection
         .as_ref()
         .map(|collection| collection.lifecycle);
+    let module_total_mismatch = summary_response
+        .as_ref()
+        .filter(|_| summary_available && module_lifecycle == Some(SnapshotLifecycle::Available))
+        .is_some_and(|value| value.module_source_total != module_total);
     let module_has_more = module_collection.as_ref().is_some_and(|collection| {
         collection.lifecycle == SnapshotLifecycle::Available
             && collection.next_offset < collection.total
@@ -5733,8 +5861,12 @@ fn ConfigTab(
                         // CONCURRENCY: A continuation token identifies one immutable
                         // snapshot version. Discard that version's rows and restart at
                         // page zero instead of retrying a token that can never succeed.
+                        config_snapshot_token.set(None);
+                        options.set(None);
+                        summary.set(None);
                         module_sources.set(None);
                         module_continuation_error.set(None);
+                        offset.set(0);
                         refresh_generation.set(request_generation.saturating_add(1));
                     }
                     Err(error) => {
@@ -5756,11 +5888,13 @@ fn ConfigTab(
                     div { class: "seg cfg-revseg",
                         button {
                             class: if selected_mode == SnapshotRevisionMode::Generation { "active focus-ring" } else { "focus-ring" },
+                            "aria-pressed": selected_mode == SnapshotRevisionMode::Generation,
                             onclick: move |_| on_revision_change.call(ConfigRevision::Current),
                             "Generations"
                         }
                         button {
                             class: if selected_mode == SnapshotRevisionMode::Commit { "active focus-ring" } else { "focus-ring" },
+                            "aria-pressed": selected_mode == SnapshotRevisionMode::Commit,
                             onclick: move |_| {
                                 if let Some(commit) = commits.first() {
                                     on_revision_change.call(ConfigRevision::Commit(commit.hash.clone()));
@@ -5909,9 +6043,9 @@ fn ConfigTab(
                     div { class: "cfg-toolbar",
                         div { class: "seg",
                             for (value, label, count) in [
-                                (EvaluatedOptionFilter::All, "All", (!loading_options()).then_some(counts.all)),
-                                (EvaluatedOptionFilter::Overridden, "Overridden", (!loading_options()).then_some(counts.overridden)),
-                                (EvaluatedOptionFilter::Changed, "Changed", (!loading_options()).then_some(counts.changed).flatten()),
+                                (EvaluatedOptionFilter::All, "All", Some(counts.all)),
+                                (EvaluatedOptionFilter::Overridden, "Overridden", Some(counts.overridden)),
+                                (EvaluatedOptionFilter::Changed, "Changed", counts.changed),
                             ] {
                                 button {
                                     class: if *filter.read() == value { "active focus-ring" } else { "focus-ring" },
@@ -5940,7 +6074,12 @@ fn ConfigTab(
                                 }
                             }
                         }
-                        span { class: "cfg-count", if loading_options() { "Querying…" } else { "{range_start}–{range_end} of {total}" } }
+                        span {
+                            class: "cfg-count",
+                            role: "status",
+                            "aria-live": "polite",
+                            if loading_options() { "Querying… showing {range_start}–{range_end} of {total}" } else { "{range_start}–{range_end} of {total}" }
+                        }
                         if total > active_page_size {
                         div { class: "cfg-pager",
                             button {
@@ -5963,7 +6102,10 @@ fn ConfigTab(
                     if !comparison_available {
                         div { class: "cfg-comparison-note", "No comparison is available for this revision." }
                     }
-                    div { class: if loading_options() { "cfg-table-wrap loading" } else { "cfg-table-wrap" }, id: "{table_id}",
+                    div {
+                        class: if loading_options() { "cfg-table-wrap loading" } else { "cfg-table-wrap" },
+                        id: "{table_id}",
+                        "aria-busy": loading_options(),
                         table { class: "sys-table compact cfg-table",
                             colgroup { col { style: "width:46%" } col { style: "width:26%" } col { style: "width:28%" } }
                             thead { tr { th { "Option" } th { "Value" } th { "Set by" } } }
@@ -5976,6 +6118,8 @@ fn ConfigTab(
                                             row: row.clone(),
                                             open: expanded.read().as_deref() == Some(row_path.as_str()),
                                             baseline: baseline.clone(),
+                                            baseline_generation,
+                                            comparison_mode: selected_mode,
                                             on_toggle: move |path: String| {
                                                 if expanded.read().as_deref() == Some(path.as_str()) { expanded.set(None); } else { expanded.set(Some(path)); }
                                             },
@@ -5999,7 +6143,7 @@ fn ConfigTab(
                         h2 { "Modules" }
                         span { class: "sd-card-meta",
                             if module_loading() { "loading" }
-                            else if module_initial_error.read().is_some() { "error" }
+                            else if module_initial_error.read().is_some() || module_total_mismatch { "error" }
                             else if module_lifecycle == Some(SnapshotLifecycle::Available) { "{module_total} modules · won / defined" }
                             else { "{summary_lifecycle_short(module_lifecycle.unwrap_or(SnapshotLifecycle::Unavailable))}" }
                         }
@@ -6018,6 +6162,21 @@ fn ConfigTab(
                                         bump_refresh_generation(refresh_generation);
                                     },
                                     "Retry module sources"
+                                }
+                            }
+                        } else if module_total_mismatch {
+                            div { class: "cfg-summary-state cfg-summary-error", role: "alert",
+                                strong { "Module source data is inconsistent" }
+                                p { "The summary and module page report different authoritative totals. Reload Config before using module provenance." }
+                                button {
+                                    class: "btn btn-ghost focus-ring xs",
+                                    "aria-label": "Reload inconsistent Config snapshot",
+                                    onclick: move |_| {
+                                        config_snapshot_token.set(None);
+                                        offset.set(0);
+                                        bump_refresh_generation(refresh_generation);
+                                    },
+                                    "Reload Config"
                                 }
                             }
                         } else if module_lifecycle == Some(SnapshotLifecycle::Available) && module_loaded == 0 {
@@ -6052,7 +6211,7 @@ fn ConfigTab(
                             }
                         }
                     }
-                    if module_lifecycle == Some(SnapshotLifecycle::Available) && module_loaded > 0 {
+                    if module_lifecycle == Some(SnapshotLifecycle::Available) && module_loaded > 0 && !module_total_mismatch {
                         div {
                             class: "cfg-module-footer",
                             span {
@@ -6167,11 +6326,8 @@ fn ConfigTab(
     }
 }
 
-fn visible_config_response(
-    response: Option<EvaluatedOptionsPage>,
-    loading: bool,
-) -> Option<EvaluatedOptionsPage> {
-    (!loading).then_some(response).flatten()
+fn visible_config_response(response: Option<EvaluatedOptionsPage>) -> Option<EvaluatedOptionsPage> {
+    response
 }
 
 #[component]
@@ -6200,6 +6356,8 @@ fn ConfigOptionRows(
     row: EvaluatedOptionRow,
     open: bool,
     baseline: Option<String>,
+    baseline_generation: Option<i32>,
+    comparison_mode: SnapshotRevisionMode,
     on_toggle: EventHandler<String>,
     on_source: EventHandler<OptionDefinitionProvenance>,
 ) -> Element {
@@ -6261,7 +6419,15 @@ fn ConfigOptionRows(
                     div { class: "cfg-detail-row", span { class: "cfg-detail-label", "Type" } span { class: "mono cfg-detail-v", "{displayed_option.declared_type}" } }
                     div { class: "cfg-detail-row",
                         span { class: "cfg-detail-label", "Comparison" }
-                        ConfigValueDiff { before: row.before.clone(), after: row.option.clone(), changed: row.changed, diff: row.diff.clone(), baseline }
+                        ConfigValueDiff {
+                            before: row.before.clone(),
+                            after: row.option.clone(),
+                            changed: row.changed,
+                            diff: row.diff.clone(),
+                            baseline,
+                            baseline_generation,
+                            comparison_mode,
+                        }
                     }
                     div { class: "cfg-detail-row",
                         span { class: "cfg-detail-label", "Definitions" }
@@ -6326,6 +6492,8 @@ fn ConfigValueDiff(
     changed: Option<bool>,
     diff: Option<TypedOptionDiff>,
     baseline: Option<String>,
+    baseline_generation: Option<i32>,
+    comparison_mode: SnapshotRevisionMode,
 ) -> Element {
     let before_text = before
         .as_ref()
@@ -6333,10 +6501,33 @@ fn ConfigValueDiff(
     let after_text = after
         .as_ref()
         .map(|value| render_safe_option_value(&value.value));
-    let baseline_label = baseline
-        .as_deref()
-        .map(short_revision)
-        .unwrap_or_else(|| "baseline".into());
+    let baseline_label = match comparison_mode {
+        SnapshotRevisionMode::Generation => baseline_generation
+            .map(|generation| format!("generation #{generation}"))
+            .unwrap_or_else(|| "preceding retained generation".to_string()),
+        SnapshotRevisionMode::Commit => baseline
+            .as_deref()
+            .map(short_revision)
+            .unwrap_or_else(|| "first parent".to_string()),
+    };
+    let baseline_title = match (comparison_mode, baseline_generation, baseline.as_deref()) {
+        (SnapshotRevisionMode::Generation, Some(generation), Some(revision)) => {
+            format!("Generation #{generation} at {revision}")
+        }
+        (SnapshotRevisionMode::Generation, Some(generation), None) => {
+            format!("Generation #{generation}")
+        }
+        (SnapshotRevisionMode::Commit, _, Some(revision)) => {
+            format!("Git first parent {revision}")
+        }
+        (SnapshotRevisionMode::Commit, _, None) => "Git first parent".to_string(),
+        (SnapshotRevisionMode::Generation, None, Some(revision)) => {
+            format!("Preceding retained generation at {revision}")
+        }
+        (SnapshotRevisionMode::Generation, None, None) => {
+            "Preceding retained generation".to_string()
+        }
+    };
     let unchanged_packages = match (before.as_ref(), after.as_ref()) {
         (Some(before), Some(after)) => {
             let before = package_identities(&before.value);
@@ -6353,8 +6544,9 @@ fn ConfigValueDiff(
         if changed.is_none() {
             div { class: "cfg-diff-line cfg-diff-opaque", "No comparison is available." }
         } else if changed == Some(false) {
-            div { class: "cfg-diff-line cfg-diff-opaque", "Unchanged vs {baseline_label}." }
+            div { class: "cfg-diff-line cfg-diff-opaque", title: "{baseline_title}", "Unchanged vs {baseline_label}." }
         } else if let Some(diff) = diff {
+            div { class: "cfg-diff-note", title: "{baseline_title}", "Compared with {baseline_label}." }
             if diff.kind == OptionChangeKind::Removed { div { class: "cfg-diff-line cfg-diff-from", "Option removed" } }
             else if diff.kind == OptionChangeKind::Added { div { class: "cfg-diff-line cfg-diff-to", "Option added" } }
             if diff.value_kind == "failed" {
@@ -6367,6 +6559,7 @@ fn ConfigValueDiff(
                 if diff.value_kind == "package" && unchanged_packages > 0 { div { class: "cfg-diff-note", "{unchanged_package_label}" } }
             }
         } else {
+            div { class: "cfg-diff-note", title: "{baseline_title}", "Compared with {baseline_label}." }
             if let Some(before_text) = before_text { div { class: "cfg-diff-line cfg-diff-from mono", "- {before_text}" } }
             if let Some(after_text) = after_text { div { class: "cfg-diff-line cfg-diff-to mono", "+ {after_text}" } }
         }
@@ -7259,6 +7452,7 @@ mod fold_tests {
 fn HistoryTab(
     entries: Vec<SystemHistoryEntry>,
     commits: Vec<SystemCommitHistory>,
+    generations: Vec<SystemGeneration>,
     current_generation: Option<i32>,
     deployment_policy: String,
     allow_mutations: bool,
@@ -7267,6 +7461,15 @@ fn HistoryTab(
 ) -> Element {
     let events = build_history_events(&entries, &commits, current_generation);
     let items = fold_restart_clusters(&events);
+    let rollback_generations = generations
+        .iter()
+        .filter(|generation| {
+            generation.rollback_eligible
+                && !generation.is_current
+                && generation.generation_snapshot_id.is_some()
+        })
+        .map(|generation| generation.generation)
+        .collect::<HashSet<_>>();
 
     let deploy_count = events
         .iter()
@@ -7380,6 +7583,9 @@ fn HistoryTab(
                                             key: "{event.id}",
                                             event: event.clone(),
                                             allow_mutations,
+                                            rollback_eligible: event
+                                                .generation
+                                                .is_some_and(|generation| rollback_generations.contains(&generation)),
                                             on_rollback: {
                                                 let generation = event.generation;
                                                 move |_| {
@@ -7541,6 +7747,7 @@ fn RestartLine(event: HistoryEvent) -> Element {
 fn DeployRow(
     event: HistoryEvent,
     allow_mutations: bool,
+    rollback_eligible: bool,
     on_rollback: EventHandler<()>,
     on_view_logs: EventHandler<()>,
 ) -> Element {
@@ -7586,7 +7793,7 @@ fn DeployRow(
         .and_then(|p| p.rsplit('/').next())
         .map(|s| s.to_string());
     let when = relative_time(event.timestamp);
-    let can_rollback = allow_mutations && event.commit.is_some() && !failed;
+    let can_rollback = allow_mutations && rollback_eligible && !failed;
 
     rsx! {
         div { class: "tl-row",
@@ -10746,7 +10953,7 @@ mod tests {
     }
 
     #[test]
-    fn config_loading_hides_the_previous_response() {
+    fn config_loading_preserves_the_previous_response() {
         let page: EvaluatedOptionsPage = serde_json::from_value(serde_json::json!({
             "lifecycle": "available",
             "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -10766,9 +10973,10 @@ mod tests {
         .expect("evaluated options page");
 
         assert_eq!(
-            visible_config_response(Some(page.clone()), false),
+            visible_config_response(Some(page.clone())),
             Some(page.clone())
         );
-        assert_eq!(visible_config_response(Some(page), true), None);
+        assert_eq!(visible_config_response(Some(page.clone())), Some(page));
+        assert_eq!(visible_config_response(None), None);
     }
 }

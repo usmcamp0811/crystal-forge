@@ -2259,7 +2259,7 @@
     },
     {
       "name": "12m-task440-config-explorer-keyboard-wide",
-      "description": "TASK-440 mocked API Config explorer at 1920x1080 with scalar summary metadata, deterministic 40-of-N module-source pagination, same-offset failure/conflict retries, in-flight revision isolation, option provenance, stale option responses, and keyboard coverage; not live integration",
+      "description": "TASK-440 mocked API Config explorer at 1920x1080 with one cross-surface snapshot token, options/summary 409 restart, token-bound pagination, retained rows and counts during background requests, nearest usable retained-generation and commit baselines, delayed summary isolation, option provenance, stale responses, and keyboard coverage; not live integration",
       "route": "/systems/:id",
       "designRef": "docs/design/CrystalForge/components/SystemDetail.jsx",
       "profiles": ["ci_fast", "full"],
@@ -2271,7 +2271,7 @@
     },
     {
       "name": "12n-task440-config-narrow-keyboard",
-      "description": "TASK-440 mocked API Config narrow 900x900 layout, revision controls, and keyboard-accessible module-source load-more/failure retry; not live integration",
+      "description": "TASK-440 mocked API Config narrow 900x900 layout, aria-pressed revision controls with keyboard activation, and keyboard-accessible module-source load-more/failure retry; not live integration",
       "route": "/systems/:id",
       "designRef": "docs/design/CrystalForge/components/SystemDetail.jsx",
       "profiles": ["ci_fast", "full"],
@@ -2403,7 +2403,7 @@
     },
     {
       "name": "12o-task440-rollback-notification-auto-latest",
-      "description": "TASK-440 rollback preselection, selector labels, and typed auto_latest outcomes with idempotent retry",
+      "description": "TASK-440 rollback preselection and accepted retained identity/generation submission without store_path, unresolved-artifact error contract, selector labels, and typed auto_latest outcomes with idempotent retry",
       "route": "/systems/:id",
       "designRef": "docs/design/CrystalForge/components/SystemDetail.jsx",
       "profiles": ["ci_fast", "full"],

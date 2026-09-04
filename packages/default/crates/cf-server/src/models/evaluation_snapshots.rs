@@ -75,6 +75,8 @@ pub struct EvaluatedOptionsParams {
     pub limit: Option<i64>,
     /// Zero-based result offset. The server clamps this value to 100,000.
     pub offset: Option<i64>,
+    /// Opaque immutable artifact token returned with page one.
+    pub snapshot_token: Option<String>,
 }
 
 /// Selects the database-only summary for one system revision.
@@ -88,6 +90,8 @@ pub struct SelectedEvaluationSummaryParams {
     /// Revision selection mode.
     #[serde(default)]
     pub mode: SnapshotRevisionMode,
+    /// Opaque artifact token from another Config response for this selection.
+    pub snapshot_token: Option<String>,
 }
 
 /// Selects a bounded page of module sources for one system revision.
@@ -172,8 +176,14 @@ pub struct EvaluatedOptionsPage {
     /// Durable generation-snapshot identity, when the generation is retained.
     #[serde(default)]
     pub generation_snapshot_id: Option<Uuid>,
+    /// Opaque token for the exact immutable selected artifact.
+    #[serde(default)]
+    pub snapshot_token: Option<String>,
     /// Full baseline SHA, or `None` when comparison is unavailable.
     pub baseline_revision: Option<String>,
+    /// Preceding retained generation used as the baseline in generation mode.
+    #[serde(default)]
+    pub baseline_generation: Option<i32>,
     /// True when Changed has a valid baseline.
     pub comparison_available: bool,
     /// Safe evaluation error for a failed snapshot.
@@ -299,6 +309,11 @@ pub struct SelectedEvaluationSummary {
     pub generation: Option<i32>,
     /// Safe lifecycle or integrity diagnostic.
     pub error: Option<String>,
+    /// Opaque token for the exact immutable selected artifact.
+    pub snapshot_token: Option<String>,
+    /// Preceding retained generation used as the baseline in generation mode.
+    #[serde(default)]
+    pub baseline_generation: Option<i32>,
     /// Authoritative number of distinct source input, revision, and path tuples.
     pub module_source_total: i64,
     /// Snapshot completion time, when evaluation completed.

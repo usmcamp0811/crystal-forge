@@ -97,13 +97,18 @@ async fn main() -> anyhow::Result<()> {
     let pool = db_pool().await?;
     tokio::spawn(memory_monitor_task(pool.clone()));
     sqlx::migrate!("./migrations").run(&pool).await?;
-    let (option_orphans, flake_orphans) =
+    let reclaimed =
         crystal_forge::queries::evaluation_snapshots::reclaim_orphaned_snapshot_content(&pool)
             .await?;
-    if option_orphans > 0 || flake_orphans > 0 {
+    if !reclaimed.is_empty() {
         info!(
-            option_orphans,
-            flake_orphans, "reclaimed orphaned snapshot content"
+            deployment_binding_rows = reclaimed.deployment_binding_rows,
+            derivation_rows = reclaimed.derivation_rows,
+            commit_rows = reclaimed.commit_rows,
+            artifact_rows = reclaimed.artifact_rows,
+            option_content_rows = reclaimed.option_content_rows,
+            flake_content_rows = reclaimed.flake_content_rows,
+            "reclaimed orphaned snapshot content"
         );
     }
     let snapshot_gc_pool = pool.clone();
@@ -120,10 +125,14 @@ async fn main() -> anyhow::Result<()> {
                 )
                 .await
                 {
-                    Ok((0, 0)) => break,
-                    Ok((option_rows, flake_rows)) => info!(
-                        option_rows,
-                        flake_rows,
+                    Ok(progress) if progress.is_empty() => break,
+                    Ok(progress) => info!(
+                        deployment_binding_rows = progress.deployment_binding_rows,
+                        derivation_rows = progress.derivation_rows,
+                        commit_rows = progress.commit_rows,
+                        artifact_rows = progress.artifact_rows,
+                        option_content_rows = progress.option_content_rows,
+                        flake_content_rows = progress.flake_content_rows,
                         "reclaimed orphaned snapshot content"
                     ),
                     Err(error) => {

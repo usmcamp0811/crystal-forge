@@ -147,6 +147,16 @@ pub async fn log(
         }
     };
 
+    // CONCURRENCY: Snapshot publication, deployment creation, and agent state
+    // ingestion acquire this lock before POA&M and system-row locks.
+    if let Err(e) = crate::queries::evaluation_snapshots::lock_snapshot_writer_tx(&mut tx).await {
+        debug!(
+            "failed to lock snapshot state for {}: {e:?}",
+            payload.hostname
+        );
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
     if let Err(e) = crate::services::composite_enforcement::lock_poam_derivations_for_store_path_tx(
         &mut tx,
         payload.store_path.as_deref(),
@@ -268,6 +278,7 @@ pub async fn log(
             &payload.hostname,
             payload.generation,
             payload.store_path.as_deref(),
+            payload.timestamp.unwrap_or_else(chrono::Utc::now),
         )
         .await
         {
@@ -310,6 +321,7 @@ pub async fn log(
                     &payload.hostname,
                     payload.generation,
                     payload.store_path.as_deref(),
+                    payload.timestamp.unwrap_or_else(chrono::Utc::now),
                 )
                 .await
                 {
