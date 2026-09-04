@@ -39,7 +39,7 @@ Crystal Forge binary, grouped by service. Calls listed in execution order.
 | # | Purpose | Command | Source |
 |---|---------|---------|--------|
 | 13 | Resolve `.drv` → output store path | `nix-store --query --outputs <drv>` | line 87 |
-| 14 | Evaluate systems with deployment policies | `nix-eval-jobs --expr <nix-expr> --impure --meta --workers <n> --max-memory-size <n> [--check-cache-status]` | line 291 |
+| 14 | Evaluate systems with deployment policies | `nix-eval-jobs --expr <nix-expr> --impure --meta --apply 'derivation: derivation.meta.policies' --workers <n> --max-memory-size <n> [--check-cache-status]` | line 291 |
 
 ### `derivations/eval.rs`
 

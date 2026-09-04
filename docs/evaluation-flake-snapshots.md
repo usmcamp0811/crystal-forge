@@ -12,18 +12,15 @@ and API contracts for those snapshots.
 
 ## Ownership and Data Flow
 
-The existing authorized commit evaluation path owns extraction. The bulk
-`nix-eval-jobs` expression emits two types of metadata:
+PRIMARY owns only system derivation and policy evaluation. It MUST NOT inspect
+option trees, module graphs, exported modules, or other exploration artifacts.
+Targeted inspection is a separate future operation and does not yet provide an
+artifact. Finalization therefore records the artifact as `unavailable`; it does
+not fabricate an empty available snapshot.
 
-- One options-tree result for each evaluated `nixosConfiguration`.
-- One configuration-independent flake-output carrier for declared systems,
-  exported modules, module declarations and consumers, and resolved lock
-  inputs. The carrier exists even when the flake has no NixOS configurations.
-
-Evaluation finalization redacts and persists the metadata in the same database
-transaction that finalizes the successful evaluation attempt. A failed
-configuration stores only a safe failed lifecycle and diagnostic. The server
-does not serialize the NixOS `config` tree.
+Snapshot persistence redacts metadata before storage. The server does not
+serialize the NixOS `config` tree. Missing exploration artifacts do not change
+system evaluation, policy, build, or deployment state.
 
 Migration `0248_immutable_evaluation_artifacts.sql` separates immutable attempt
 artifacts from the mutable current selector for each exact commit and
@@ -83,8 +80,8 @@ authorized evaluation action can queue or reuse evaluation work.
 This design does not add an agent or builder protocol field. Deployed agents
 continue to report state and generations through the existing protocol.
 Deployed builders continue to use the existing server-issued job authorization
-and evaluation path. Snapshot extraction is server-owned evaluator metadata,
-not a new database or API responsibility for an API-only builder.
+and evaluation path. Future targeted inspection remains server-owned work, not
+a new database or API responsibility for an API-only builder.
 
 ## Identity and Comparison
 
@@ -288,10 +285,10 @@ copy or log evaluator output before applying this boundary.
 
 ## Flake Outputs and Count Authority
 
-The independent carrier extracts each revision once. Browsing does not evaluate
-each managed host. Exported-module analysis uses module-system checking with
-unmatched definitions disabled; genuinely unevaluable modules carry a safe
-module-analysis error instead of failing the complete carrier.
+PRIMARY does not extract flake outputs. Targeted inspection is separate and does
+not yet provide a flake-output artifact, so its lifecycle is `unavailable` and
+artifact-derived declared-system, module, and input counts are unavailable.
+Browsing does not evaluate managed hosts.
 
 System reconciliation joins the selected revision's declared configuration
 names with active managed systems:
@@ -304,10 +301,10 @@ names with active managed systems:
 
 Multiple managed hosts with one configuration name set `output_collapsed`.
 `managed_system_count` is the authoritative count of visible active managed
-systems and is revision-independent. `declared_system_count` comes from the
-selected snapshot. Fleet subtitles, rollout denominators, removal warnings,
-and managed totals MUST use the managed-system relationship, not declared
-output count or the length of a bounded API page.
+systems and is revision-independent. `declared_system_count` is available only
+from an available selected snapshot. Fleet subtitles, rollout denominators,
+removal warnings, and managed totals MUST use the managed-system relationship,
+not declared output count or the length of a bounded API page.
 
 The Systems pane supports `all`, `declared_unmanaged`, and
 `managed_undeclared` filters. The server applies the filter before the bounded
@@ -511,8 +508,9 @@ advisory and non-blocking. They are not a strict automated pixel-baseline gate.
 
 Changes to this architecture require targeted evidence for:
 
-- options-tree and configuration-independent carrier extraction, including a
-  flake with zero configurations and an exported module with unmatched options;
+- PRIMARY isolation from option trees, module graphs, exported modules, and
+  original derivation metadata, while policy data remains available;
+- unavailable lifecycle recording when no separate exploration artifact exists;
 - pre-persistence redaction across values, defaults, errors, paths, URLs,
   storage, search, diffs, logs, and API-shaped reads;
 - content deduplication, all size bounds, corrupt-content degradation, and

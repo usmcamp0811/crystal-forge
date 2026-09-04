@@ -316,8 +316,8 @@ DELETE /api/v1/systems/{id}/policies/{policy_id}
 1. Load enabled policies from database
 2. Filter to Nix-evaluated policies (`require_cf_agent`, `require_packages`, `custom_check`)
 3. Build Nix expression embedding policy checks
-4. Execute `nix-eval-jobs --meta`
-5. Parse results from `meta.policies` JSON
+4. Execute `nix-eval-jobs --meta --apply 'derivation: derivation.meta.policies'`
+5. Normalize `extraValue` internally and parse the policy payload from `meta.policies`
 6. Block build queueing for systems failing strict policies
 
 ### Deployment-Time
