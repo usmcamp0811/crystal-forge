@@ -636,6 +636,7 @@ let
       nodejs
       playwright-driver
       playwright-test
+      postgresql
     ];
     text = ''
       export NODE_PATH="${pkgs.playwright-test}/lib/node_modules"
