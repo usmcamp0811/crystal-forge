@@ -10,32 +10,62 @@ use tracing::{error, info};
 /// Array of VulnixEntry - this is what vulnix outputs as JSON
 pub type VulnixScanOutput = Vec<VulnixEntry>;
 
+/// Interprets a finished vulnix process.
+///
+/// vulnix overloads exit code 2. Its `output()` returns 2 when the JSON report
+/// contains at least one unwhitelisted vulnerability, while `main()` maps every
+/// uncaught `RuntimeError` to `sys.exit(2)`; `DeriverLookupError` is such a
+/// `RuntimeError`. Click additionally uses exit code 2 for usage errors. The
+/// exit status alone therefore cannot distinguish a completed scan that found
+/// vulnerabilities from a fatal failure, so a result is accepted only when
+/// stdout parses as the expected JSON report.
+///
+/// A fatal vulnix run writes its diagnostic to stderr and leaves stdout empty.
+/// Reporting that case as a JSON parse error discards the only description of
+/// the real cause, so the stderr text is preserved instead.
+///
+/// # Errors
+///
+/// Returns an error when the process reported a status other than 0 or 2, and
+/// when a status of 2 is not accompanied by a parseable JSON report. Both error
+/// paths include vulnix stderr.
 fn parse_successful_vulnix_output(
     exit_code: Option<i32>,
     stdout: &str,
     stderr: &str,
 ) -> Result<VulnixScanOutput> {
-    // vulnix uses exit 2 to report that the valid JSON result contains at
-    // least one unwhitelisted vulnerability. Exit 1 and all other statuses
-    // are process failures.
     if !matches!(exit_code, Some(0 | 2)) {
-        let stderr = stderr.trim();
-        let stderr = if stderr.is_empty() {
-            "vulnix produced no stderr output"
-        } else {
-            stderr
-        };
-        return Err(anyhow!(
-            "Vulnix scan process failed with exit code {}: {}",
-            exit_code
-                .map(|code| code.to_string())
-                .unwrap_or_else(|| "terminated by signal".to_string()),
-            stderr
-        ));
+        return Err(vulnix_process_failure(exit_code, stderr));
     }
 
-    serde_json::from_str(stdout)
-        .map_err(|error| anyhow!("Failed to parse vulnix JSON output: {error}"))
+    match serde_json::from_str(stdout) {
+        Ok(entries) => Ok(entries),
+        // COMPATIBILITY: exit 2 without a parseable report is a fatal vulnix
+        // error, not malformed success output. Surfacing stderr keeps the
+        // deriver-lookup and usage diagnostics that identify the real cause.
+        Err(_) if exit_code == Some(2) => Err(vulnix_process_failure(exit_code, stderr)),
+        Err(error) => Err(anyhow!("Failed to parse vulnix JSON output: {error}")),
+    }
+}
+
+/// Builds the vulnix process-failure error, always including stderr.
+///
+/// Callers rely on this text to diagnose deployment problems, so an empty
+/// stderr is reported explicitly instead of producing an error with no cause.
+fn vulnix_process_failure(exit_code: Option<i32>, stderr: &str) -> anyhow::Error {
+    let stderr = stderr.trim();
+    let stderr = if stderr.is_empty() {
+        "vulnix produced no stderr output"
+    } else {
+        stderr
+    };
+    anyhow!(
+        "Vulnix scan process failed with exit code {}: {}",
+        exit_code
+            .map(|code| code.to_string())
+            .unwrap_or_else(|| "terminated by signal".to_string()),
+        stderr
+    )
 }
 
 #[derive(Debug)]
@@ -263,15 +293,52 @@ mod tests {
         assert_eq!(entries[0].affected_by, ["CVE-2026-0001"]);
     }
 
+    /// vulnix maps every uncaught `RuntimeError`, including
+    /// `DeriverLookupError`, to exit 2 with an empty stdout and the diagnostic
+    /// on stderr. Accepting exit 2 unconditionally reported that fatal case as
+    /// `EOF while parsing a value at line 1 column 0` and discarded the only
+    /// description of the cause, which is what deployed scans reported.
     #[test]
-    fn malformed_json_from_vulnerability_exit_is_a_parse_error() {
-        let error = parse_successful_vulnix_output(Some(2), "not-json", "")
-            .expect_err("exit 2 does not make malformed JSON valid");
+    fn fatal_vulnerability_exit_without_json_reports_stderr() {
+        let stderr = "ERROR:vulnix.main:Cannot determine deriver for path \
+                      `/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-nixos-system-host`\n\
+                      vulnix.nix.DeriverLookupError: Cannot determine deriver";
 
+        let error = parse_successful_vulnix_output(Some(2), "", stderr)
+            .expect_err("exit 2 without a JSON report is a fatal vulnix error");
+
+        let message = error.to_string();
         assert!(
-            error
-                .to_string()
-                .contains("Failed to parse vulnix JSON output")
+            message.contains("DeriverLookupError"),
+            "the fatal cause must survive: {message}"
         );
+        assert!(
+            !message.contains("EOF while parsing"),
+            "a fatal vulnix error must not be reported as a JSON parse error: {message}"
+        );
+    }
+
+    /// Exit 2 with unparseable stdout cannot be a vulnerability report, so it
+    /// is treated as the same fatal case rather than as malformed success.
+    #[test]
+    fn malformed_output_from_vulnerability_exit_reports_process_failure() {
+        let error = parse_successful_vulnix_output(Some(2), "not-json", "vulnix exploded")
+            .expect_err("exit 2 does not make malformed output valid");
+
+        let message = error.to_string();
+        assert!(message.contains("Vulnix scan process failed with exit code 2"));
+        assert!(message.contains("vulnix exploded"));
+    }
+
+    /// A fatal exit with no stderr must still name the exit status instead of
+    /// producing an error with no stated cause.
+    #[test]
+    fn fatal_exit_without_stderr_still_reports_the_exit_code() {
+        let error = parse_successful_vulnix_output(Some(2), "", "")
+            .expect_err("exit 2 without a JSON report is a fatal vulnix error");
+
+        let message = error.to_string();
+        assert!(message.contains("exit code 2"));
+        assert!(message.contains("vulnix produced no stderr output"));
     }
 }
