@@ -2310,6 +2310,245 @@ fn build_policy_fields_for_config_indented(
 
     lines
 }
+/// Nix prelude that defines failure-isolated configuration snapshot extraction.
+///
+/// The fragment is shared by [`build_nix_eval_expression`] and by the evaluator
+/// snapshot-isolation regression check, so both exercise the same traversal
+/// text. It defines `safeValue`, `walkOptions`, `optionSnapshot`, and
+/// `safeOptionSnapshot`, and deliberately contains no format placeholders.
+///
+/// INVARIANT: Every binding in this prelude is total with respect to Nix
+/// evaluation errors. Snapshot extraction represents an uninspectable option
+/// as explicit failed data and never raises an evaluation error into the
+/// surrounding derivation expression. Callers rely on that property to keep a
+/// successful `system.build.toplevel` evaluation successful.
+pub(crate) const SNAPSHOT_EXTRACTION_PRELUDE: &str = r#"
+  min = left: right: if left < right then left else right;
+  take = count: values: builtins.genList
+    (index: builtins.elemAt values index) (min count (builtins.length values));
+  safeValue = depth: raw:
+    let
+      # Classify weak-head-normal-form first. Collection elements are forced
+      # only after the bounded prefix is selected, so an omitted element cannot
+      # poison retained values.
+      typeAttempt = builtins.tryEval (builtins.typeOf raw);
+      valueType = typeAttempt.value or "failed";
+      scalarAttempt = builtins.tryEval (builtins.deepSeq raw raw);
+      scalar = scalarAttempt.value or null;
+      namesAttempt = if valueType == "set"
+        then builtins.tryEval (builtins.attrNames raw)
+        else { success = false; value = []; };
+      limitedNames = take 100 (namesAttempt.value or []);
+      lengthAttempt = if valueType == "list"
+        then builtins.tryEval (builtins.length raw)
+        else { success = false; value = 0; };
+    in
+      if !typeAttempt.success then {
+        kind = "failed";
+        value = { code = "not_evaluated"; message = "Option value did not evaluate"; };
+      } else if builtins.elem valueType [ "null" "bool" "int" "float" "string" ]
+        && !scalarAttempt.success then {
+        kind = "failed";
+        value = { code = "not_evaluated"; message = "Option scalar did not evaluate"; };
+      } else if builtins.elem valueType [ "null" "bool" "int" "float" "string" ] then {
+        kind = "scalar"; value = scalar;
+      } else if valueType == "path" then {
+        kind = "scalar"; value = builtins.toString raw;
+      } else if valueType == "lambda" then {
+        kind = "opaque"; value = { type_name = "lambda"; };
+      } else if depth >= 4 then {
+        kind = "opaque"; value = { type_name = valueType; };
+      } else if valueType == "list" && lengthAttempt.success then {
+        # A prefix is not a truthful representation of the option value. Mark
+        # an over-limit collection opaque instead of serializing silent loss.
+        kind = if lengthAttempt.value > 100 then "opaque" else "list";
+        value = if lengthAttempt.value > 100
+          then { type_name = "list_over_limit"; }
+          else builtins.genList
+            (index: safeValue (depth + 1) (builtins.elemAt raw index))
+            lengthAttempt.value;
+      } else if valueType == "list" then {
+        kind = "failed";
+        value = { code = "not_evaluated"; message = "Option list length did not evaluate"; };
+      } else if valueType == "set" && (raw.type or null) == "derivation" then {
+        kind = "package";
+        value = {
+          name = (builtins.tryEval (raw.name or null)).value or null;
+          pname = (builtins.tryEval (raw.pname or null)).value or null;
+          version = (builtins.tryEval (raw.version or null)).value or null;
+          output_path = (builtins.tryEval
+            (if raw ? outPath then builtins.toString raw.outPath else null)).value or null;
+        };
+      } else if valueType == "set" && namesAttempt.success then {
+        kind = if builtins.length (namesAttempt.value or []) > 100
+          then "opaque" else "attribute_set";
+        value = if builtins.length (namesAttempt.value or []) > 100
+          then { type_name = "attribute_set_over_limit"; }
+          else builtins.listToAttrs (map (key: {
+            name = key; value = safeValue (depth + 1) raw.${key};
+          }) limitedNames);
+      } else if valueType == "set" then {
+        kind = "failed";
+        value = { code = "not_evaluated"; message = "Option attribute names did not evaluate"; };
+      } else {
+        kind = "opaque"; value = { type_name = valueType; };
+      };
+  # This guard prevents cyclic or recursively generated attrsets from
+  # exhausting the evaluator. It marks omitted subtrees instead of limiting
+  # the number of ordinary options in the snapshot.
+  optionTraversalDepthLimit = 16;
+  # INVARIANT: walkOptions never propagates an evaluation error to its caller.
+  #
+  # Forcing an option declaration can throw. The common case is the same option
+  # declared by two modules: the module system defers that throw into the
+  # merged `options` node, so `config` and `system.build.toplevel` still
+  # evaluate successfully while the matching option metadata stays poisoned.
+  # Snapshot observability must not convert that latent condition into a system
+  # evaluation failure, so every forcing point below is guarded and an
+  # uninspectable node becomes explicit data instead of an abort.
+  walkOptions = depth: prefix: attrs:
+    let
+      namesAttempt = builtins.tryEval (builtins.attrNames attrs);
+    in
+    if !namesAttempt.success then [ { path = prefix; unreadable = true; } ]
+    # A recursive option tree must remain bounded, but reaching the guard is
+    # data rather than absence. Emit one explicit failed subtree marker so the
+    # persisted snapshot cannot silently claim completeness.
+    else if depth >= optionTraversalDepthLimit then
+      if namesAttempt.value == [] then [] else [ {
+        path = prefix;
+        over_depth = true;
+      } ]
+    else builtins.concatLists (map (name:
+    let
+      path = prefix ++ [ name ];
+      # Weak-head-normal-form is the first forcing point a poisoned option
+      # declaration reaches, so it is guarded before any inspection.
+      currentAttempt = builtins.tryEval
+        (let child = attrs.${name}; in builtins.seq child child);
+      current = currentAttempt.value;
+      # `_type` is a separate forcing point. It can throw even when the node
+      # itself resolved to an attribute set.
+      kindAttempt = if !currentAttempt.success
+        then { success = false; value = null; }
+        else builtins.tryEval
+          (if builtins.isAttrs current then (current._type or null) else null);
+    in
+      if !currentAttempt.success || !kindAttempt.success then
+        [ { inherit path; unreadable = true; } ]
+      else if builtins.isAttrs current && kindAttempt.value == "option" then
+        [ { inherit path; option = current; } ]
+      else if builtins.isAttrs current then walkOptions (depth + 1) path current
+      else []
+  ) namesAttempt.value);
+  optionSnapshot = lib: inputOrigins: rawModules: item:
+    # A node that traversal could not inspect is represented explicitly.
+    # Omitting it would let the snapshot state that the option does not exist,
+    # which is a different and false claim.
+    if item.unreadable or false then {
+      path = builtins.concatStringsSep "." item.path;
+      declared_type = "unknown";
+      value = {
+        kind = "failed";
+        value = {
+          code = "not_evaluated";
+          message = "Option declaration could not be inspected";
+        };
+      };
+      definitions = [];
+      overridden = false;
+    } else if item.over_depth or false then {
+      path = builtins.concatStringsSep "." item.path;
+      declared_type = "unknown";
+      value = {
+        kind = "failed";
+        value = {
+          code = "over_depth";
+          message = "Option subtree exceeds the traversal depth limit";
+        };
+      };
+      definitions = [];
+      overridden = false;
+    } else let
+      path = builtins.concatStringsSep "." item.path;
+      option = item.option;
+      declaredType = option.type.description or (option.type.name or "unknown");
+      winningDefinitions = map (definition:
+        let
+          sourcePath = builtins.toString (definition.file or "untracked");
+          sourceInputs = builtins.filter
+            (inputName:
+              let origin = inputOrigins.${inputName};
+              in origin.path != null && lib.hasPrefix origin.path sourcePath)
+            (builtins.attrNames inputOrigins);
+          sourceInput = if sourceInputs == [] then null else builtins.head sourceInputs;
+        in {
+          source_path = sourcePath;
+          source_input = sourceInput;
+          source_revision = if sourceInput == null then null else inputOrigins.${sourceInput}.revision;
+          value = safeValue 0 (definition.value or null);
+          # definitionsWithLocations contains the definitions that participate
+          # in the final module-system merge. Discarded mkOverride values are
+          # not exposed and therefore are not fabricated as provenance.
+          winning = true;
+          priority = option.highestPrio or null;
+          status = "winning";
+          winner_note = "This definition participates in the final module-system merge.";
+        }) (option.definitionsWithLocations or []);
+      rawDefinitions = builtins.filter (definition: definition != null) (map (module:
+        let
+          absent = { _crystalForgeMissing = true; };
+          present = lib.hasAttrByPath item.path (module.config or {});
+          raw = lib.attrByPath item.path absent (module.config or {});
+           attempted = builtins.tryEval raw;
+          forced = attempted.value or absent;
+          priority = if builtins.isAttrs forced && (forced._type or null) == "override"
+            then forced.priority else 100;
+          sourcePath = builtins.toString (module._file or "untracked");
+          sourceInputs = builtins.filter
+            (inputName:
+              let origin = inputOrigins.${inputName};
+              in origin.path != null && lib.hasPrefix origin.path sourcePath)
+            (builtins.attrNames inputOrigins);
+          sourceInput = if sourceInputs == [] then null else builtins.head sourceInputs;
+        in if !present || priority <= (option.highestPrio or 100) then null else {
+          source_path = sourcePath;
+          source_input = sourceInput;
+          source_revision = if sourceInput == null then null else inputOrigins.${sourceInput}.revision;
+          value = safeValue 0 raw;
+          winning = false;
+          inherit priority;
+          status = "overridden";
+          winner_note = "A lower numeric module-system priority won.";
+        }) rawModules);
+      definitions = winningDefinitions ++ rawDefinitions;
+    in {
+      inherit path definitions;
+      declared_type = declaredType;
+      value =
+        if lib.hasInfix "submodule" declaredType then
+          let rendered = safeValue 0 option.value;
+          in if rendered.kind == "attribute_set" then rendered // { kind = "submodule"; } else rendered
+        else safeValue 0 option.value;
+      overridden = rawDefinitions != [];
+    };
+  safeOptionSnapshot = lib: inputOrigins: rawModules: item:
+    let
+      path = builtins.concatStringsSep "." item.path;
+      snapshot = optionSnapshot lib inputOrigins rawModules item;
+      attempted = builtins.tryEval (builtins.deepSeq snapshot snapshot);
+    in attempted.value or {
+      inherit path;
+      declared_type = "unknown";
+      value = {
+        kind = "failed";
+        value = { code = "not_evaluated"; message = "Option snapshot did not evaluate"; };
+      };
+      definitions = [];
+      overridden = false;
+    };
+"#;
+
 
 /// Build the complete Nix expression for `nix-eval-jobs` with per-configuration
 /// policy checks derived from the `PoliciesByConfiguration` map.
@@ -2367,190 +2606,7 @@ let
     (config.systemd.services.crystal-forge-agent.enable or false)
     || ((config.services.crystal-forge.enable or false)
         && (config.services.crystal-forge.client.enable or false));
-  min = left: right: if left < right then left else right;
-  take = count: values: builtins.genList
-    (index: builtins.elemAt values index) (min count (builtins.length values));
-  safeValue = depth: raw:
-    let
-      # Classify weak-head-normal-form first. Collection elements are forced
-      # only after the bounded prefix is selected, so an omitted element cannot
-      # poison retained values.
-      typeAttempt = builtins.tryEval (builtins.typeOf raw);
-      valueType = typeAttempt.value or "failed";
-      scalarAttempt = builtins.tryEval (builtins.deepSeq raw raw);
-      scalar = scalarAttempt.value or null;
-      namesAttempt = if valueType == "set"
-        then builtins.tryEval (builtins.attrNames raw)
-        else {{ success = false; value = []; }};
-      limitedNames = take 100 (namesAttempt.value or []);
-      lengthAttempt = if valueType == "list"
-        then builtins.tryEval (builtins.length raw)
-        else {{ success = false; value = 0; }};
-    in
-      if !typeAttempt.success then {{
-        kind = "failed";
-        value = {{ code = "not_evaluated"; message = "Option value did not evaluate"; }};
-      }} else if builtins.elem valueType [ "null" "bool" "int" "float" "string" ]
-        && !scalarAttempt.success then {{
-        kind = "failed";
-        value = {{ code = "not_evaluated"; message = "Option scalar did not evaluate"; }};
-      }} else if builtins.elem valueType [ "null" "bool" "int" "float" "string" ] then {{
-        kind = "scalar"; value = scalar;
-      }} else if valueType == "path" then {{
-        kind = "scalar"; value = builtins.toString raw;
-      }} else if valueType == "lambda" then {{
-        kind = "opaque"; value = {{ type_name = "lambda"; }};
-      }} else if depth >= 4 then {{
-        kind = "opaque"; value = {{ type_name = valueType; }};
-      }} else if valueType == "list" && lengthAttempt.success then {{
-        # A prefix is not a truthful representation of the option value. Mark
-        # an over-limit collection opaque instead of serializing silent loss.
-        kind = if lengthAttempt.value > 100 then "opaque" else "list";
-        value = if lengthAttempt.value > 100
-          then {{ type_name = "list_over_limit"; }}
-          else builtins.genList
-            (index: safeValue (depth + 1) (builtins.elemAt raw index))
-            lengthAttempt.value;
-      }} else if valueType == "list" then {{
-        kind = "failed";
-        value = {{ code = "not_evaluated"; message = "Option list length did not evaluate"; }};
-      }} else if valueType == "set" && (raw.type or null) == "derivation" then {{
-        kind = "package";
-        value = {{
-          name = (builtins.tryEval (raw.name or null)).value or null;
-          pname = (builtins.tryEval (raw.pname or null)).value or null;
-          version = (builtins.tryEval (raw.version or null)).value or null;
-          output_path = (builtins.tryEval
-            (if raw ? outPath then builtins.toString raw.outPath else null)).value or null;
-        }};
-      }} else if valueType == "set" && namesAttempt.success then {{
-        kind = if builtins.length (namesAttempt.value or []) > 100
-          then "opaque" else "attribute_set";
-        value = if builtins.length (namesAttempt.value or []) > 100
-          then {{ type_name = "attribute_set_over_limit"; }}
-          else builtins.listToAttrs (map (key: {{
-            name = key; value = safeValue (depth + 1) raw.${{key}};
-          }}) limitedNames);
-      }} else if valueType == "set" then {{
-        kind = "failed";
-        value = {{ code = "not_evaluated"; message = "Option attribute names did not evaluate"; }};
-      }} else {{
-        kind = "opaque"; value = {{ type_name = valueType; }};
-      }};
-  # This guard prevents cyclic or recursively generated attrsets from
-  # exhausting the evaluator. It marks omitted subtrees instead of limiting
-  # the number of ordinary options in the snapshot.
-  optionTraversalDepthLimit = 16;
-  walkOptions = depth: prefix: attrs:
-    # A recursive option tree must remain bounded, but reaching the guard is
-    # data rather than absence. Emit one explicit failed subtree marker so the
-    # persisted snapshot cannot silently claim completeness.
-    if depth >= optionTraversalDepthLimit then
-      if builtins.attrNames attrs == [] then [] else [ {{
-        path = prefix;
-        over_depth = true;
-      }} ]
-    else builtins.concatLists (map (name:
-    let
-      current = attrs.${{name}};
-      path = prefix ++ [ name ];
-    in
-      if builtins.isAttrs current && (current._type or null) == "option" then
-        [ {{ inherit path; option = current; }} ]
-      else if builtins.isAttrs current then walkOptions (depth + 1) path current
-      else []
-  ) (builtins.attrNames attrs));
-  optionSnapshot = lib: inputOrigins: rawModules: item:
-    if item.over_depth or false then {{
-      path = builtins.concatStringsSep "." item.path;
-      declared_type = "unknown";
-      value = {{
-        kind = "failed";
-        value = {{
-          code = "over_depth";
-          message = "Option subtree exceeds the traversal depth limit";
-        }};
-      }};
-      definitions = [];
-      overridden = false;
-    }} else let
-      path = builtins.concatStringsSep "." item.path;
-      option = item.option;
-      declaredType = option.type.description or (option.type.name or "unknown");
-      winningDefinitions = map (definition:
-        let
-          sourcePath = builtins.toString (definition.file or "untracked");
-          sourceInputs = builtins.filter
-            (inputName:
-              let origin = inputOrigins.${{inputName}};
-              in origin.path != null && lib.hasPrefix origin.path sourcePath)
-            (builtins.attrNames inputOrigins);
-          sourceInput = if sourceInputs == [] then null else builtins.head sourceInputs;
-        in {{
-          source_path = sourcePath;
-          source_input = sourceInput;
-          source_revision = if sourceInput == null then null else inputOrigins.${{sourceInput}}.revision;
-          value = safeValue 0 (definition.value or null);
-          # definitionsWithLocations contains the definitions that participate
-          # in the final module-system merge. Discarded mkOverride values are
-          # not exposed and therefore are not fabricated as provenance.
-          winning = true;
-          priority = option.highestPrio or null;
-          status = "winning";
-          winner_note = "This definition participates in the final module-system merge.";
-        }}) (option.definitionsWithLocations or []);
-      rawDefinitions = builtins.filter (definition: definition != null) (map (module:
-        let
-          absent = {{ _crystalForgeMissing = true; }};
-          present = lib.hasAttrByPath item.path (module.config or {{}});
-          raw = lib.attrByPath item.path absent (module.config or {{}});
-           attempted = builtins.tryEval raw;
-          forced = attempted.value or absent;
-          priority = if builtins.isAttrs forced && (forced._type or null) == "override"
-            then forced.priority else 100;
-          sourcePath = builtins.toString (module._file or "untracked");
-          sourceInputs = builtins.filter
-            (inputName:
-              let origin = inputOrigins.${{inputName}};
-              in origin.path != null && lib.hasPrefix origin.path sourcePath)
-            (builtins.attrNames inputOrigins);
-          sourceInput = if sourceInputs == [] then null else builtins.head sourceInputs;
-        in if !present || priority <= (option.highestPrio or 100) then null else {{
-          source_path = sourcePath;
-          source_input = sourceInput;
-          source_revision = if sourceInput == null then null else inputOrigins.${{sourceInput}}.revision;
-          value = safeValue 0 raw;
-          winning = false;
-          inherit priority;
-          status = "overridden";
-          winner_note = "A lower numeric module-system priority won.";
-        }}) rawModules);
-      definitions = winningDefinitions ++ rawDefinitions;
-    in {{
-      inherit path definitions;
-      declared_type = declaredType;
-      value =
-        if lib.hasInfix "submodule" declaredType then
-          let rendered = safeValue 0 option.value;
-          in if rendered.kind == "attribute_set" then rendered // {{ kind = "submodule"; }} else rendered
-        else safeValue 0 option.value;
-      overridden = rawDefinitions != [];
-    }};
-  safeOptionSnapshot = lib: inputOrigins: rawModules: item:
-    let
-      path = builtins.concatStringsSep "." item.path;
-      snapshot = optionSnapshot lib inputOrigins rawModules item;
-      attempted = builtins.tryEval (builtins.deepSeq snapshot snapshot);
-    in attempted.value or {{
-      inherit path;
-      declared_type = "unknown";
-      value = {{
-        kind = "failed";
-        value = {{ code = "not_evaluated"; message = "Option snapshot did not evaluate"; }};
-      }};
-      definitions = [];
-      overridden = false;
-    }};
+{prelude}
   configurationNames = builtins.attrNames (flake.nixosConfigurations or {{}});
   exportedModuleNames = builtins.attrNames (flake.nixosModules or {{}});
   carrierLibInputNames = builtins.filter
@@ -2838,8 +2894,23 @@ in
       }}; }};
       flattenGraph = nodes: builtins.concatLists (map
         (node: [ node.module ] ++ flattenGraph (node.imports or [])) nodes);
-      rawModules = flattenGraph (cfg._module.graph or []);
-       optionItems = walkOptions 0 [] cfg.options;
+      # The module graph is evaluator metadata, not part of the derivation. A
+      # discarded or lazily broken raw definition must not abort the primary
+      # evaluation, so the graph spine is forced inside a guard. An unreadable
+      # graph degrades override provenance instead of failing the system.
+      rawModulesAttempt = builtins.tryEval
+        (let flattened = flattenGraph (cfg._module.graph or []);
+         in builtins.seq (builtins.length flattened) flattened);
+      rawModules = if rawModulesAttempt.success
+        then rawModulesAttempt.value else [];
+      # INVARIANT: Snapshot extraction is subordinate to the primary
+      # evaluation. This outer boundary is the last defence for a value that
+      # escapes the node-level guards in walkOptions and safeOptionSnapshot.
+      # The result is bound once so deepSeq does not repeat the traversal.
+      snapshotAttempt = builtins.tryEval
+        (let items = map (safeOptionSnapshot lib inputOrigins rawModules)
+           (walkOptions 0 [] cfg.options);
+         in builtins.deepSeq items items);
     in
       drv // {{
         meta = (drv.meta or {{}}) // {{
@@ -2848,14 +2919,23 @@ in
             requestedSourceRevision = {requested_revision};
             resolvedSourceRevision = flake.sourceInfo.rev or null;
           }};
-          evaluationSnapshot = map
-            (safeOptionSnapshot lib inputOrigins rawModules) optionItems;
+          # An empty list is a truthful snapshot only when capture succeeded.
+          # This flag lets the server separate "this configuration declares no
+          # options" from "no trustworthy snapshot artifact could be produced".
+          evaluationSnapshotCaptured = snapshotAttempt.success;
+          evaluationSnapshot =
+            if snapshotAttempt.success then snapshotAttempt.value else [];
+          # Override provenance is reconstructed from the raw module graph.
+          # Report degraded provenance rather than implying that no option was
+          # ever overridden.
+          evaluationSnapshotModulesCaptured = rawModulesAttempt.success;
         }};
       }}
   ) (flake.nixosConfigurations or {{}})
 "#,
         flake_ref = nix_string(flake_ref),
         checkers = checkers_block,
+        prelude = SNAPSHOT_EXTRACTION_PRELUDE,
         requested_revision = nix_string(
             crate::derivations::utils::flake_reference_revision(flake_ref).unwrap_or("")
         ),
@@ -4059,6 +4139,22 @@ in {{ {fields} }}"#
         assert!(expr.contains("carrierLibInput != null"));
         assert!(expr.contains("module_evaluation"));
         assert!(expr.contains("multiple_nixpkgs_revisions"));
+
+        // Snapshot extraction must stay subordinate to the primary evaluation.
+        // The generated expression therefore has to keep the outer boundary and
+        // the capture flag that lets the server tell "no options" apart from
+        // "no trustworthy snapshot". Removing either would silently reintroduce
+        // the failure mode where snapshot extraction fails a working system.
+        assert!(expr.contains("evaluationSnapshotCaptured = snapshotAttempt.success;"));
+        assert!(expr.contains("snapshotAttempt = builtins.tryEval"));
+        assert!(expr.contains("rawModulesAttempt = builtins.tryEval"));
+        assert!(expr.contains("evaluationSnapshotModulesCaptured"));
+        // Traversal itself must be guarded. `walkOptions` forces arbitrary
+        // option declarations, which can throw for a configuration whose
+        // toplevel evaluates successfully.
+        assert!(expr.contains("namesAttempt = builtins.tryEval (builtins.attrNames attrs);"));
+        assert!(expr.contains("currentAttempt = builtins.tryEval"));
+        assert!(expr.contains("unreadable = true;"));
     }
 
     #[test]

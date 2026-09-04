@@ -1321,7 +1321,20 @@ pub struct EvaluationPlan {
     /// Systems confirmed as failures by the fallback phase.
     pub confirmed_failures: Vec<ConfirmedSystemFailure>,
     /// Pre-persistence-redacted NixOS options keyed by configuration name.
+    ///
+    /// Presence of a key means the evaluator produced a trustworthy snapshot.
+    /// An empty vector is a valid snapshot that states the configuration
+    /// declares no inspectable options.
     pub evaluation_snapshots: HashMap<String, Vec<EvaluatedOption>>,
+    /// Configurations whose Nix evaluation succeeded but whose configuration
+    /// snapshot could not be captured, keyed by configuration name with a
+    /// short diagnostic.
+    ///
+    /// INVARIANT: A key here is never also present in `evaluation_snapshots`,
+    /// and never contributes to `had_system_eval_errors`. Snapshot capture
+    /// failure is an observability gap, not a Nix system evaluation failure,
+    /// so it must not block builds or deployments.
+    pub snapshot_capture_failures: HashMap<String, String>,
     /// Revision-scoped flake outputs extracted once during bulk evaluation.
     pub flake_output_snapshot: Option<serde_json::Value>,
     /// True when any result has a Nix evaluation error.
@@ -2521,6 +2534,23 @@ pub async fn finalize_evaluation_attempt(
             format!("Failed to persist evaluation snapshot for {configuration_name}")
         })?;
     }
+    // The Nix evaluation succeeded for these configurations but produced no
+    // trustworthy snapshot artifact. Persisting 'unavailable' with a redacted
+    // diagnostic keeps that state distinct from both a legitimate zero-option
+    // snapshot and a real Nix evaluation failure, and leaves the derivation
+    // and policy results untouched.
+    for (configuration_name, reason) in &plan.snapshot_capture_failures {
+        crate::queries::evaluation_snapshots::persist_unavailable_snapshot_deferred_tx(
+            &mut tx,
+            commit_id,
+            configuration_name,
+            reason,
+        )
+        .await
+        .with_context(|| {
+            format!("Failed to persist unavailable evaluation snapshot for {configuration_name}")
+        })?;
+    }
     // INVARIANT: Every snapshot mutation and this complete-corpus recomputation
     // share the finalization transaction. Readers see either the old corpus and
     // metrics or the complete new corpus and metrics, never an intermediate mix.
@@ -3068,6 +3098,7 @@ async fn evaluate_with_nix_eval_jobs_inner(
     let mut results = Vec::new();
     let mut policy_checks = Vec::new();
     let mut evaluation_snapshots = HashMap::new();
+    let mut snapshot_capture_failures: HashMap<String, String> = HashMap::new();
     let mut flake_output_snapshot = None;
     let mut found_target = false;
     let mut stderr_diagnostic = CappedOutput::default();
@@ -3251,19 +3282,78 @@ async fn evaluate_with_nix_eval_jobs_inner(
                                     // Error lines are converted to confirmed target failures below.
                                     // They have no successful policy metadata contract to parse.
                                 } else if let Some(meta) = &result.meta {
-                                    if let Some(snapshot) = meta.get("evaluationSnapshot") {
-                                        let options = serde_json::from_value::<Vec<EvaluatedOption>>(
+                                    // The evaluator reports snapshot capture
+                                    // separately from the derivation result. A
+                                    // configuration whose Nix evaluation
+                                    // succeeded must stay successful even when
+                                    // no snapshot artifact could be produced,
+                                    // so every branch here records observability
+                                    // state only and never a system failure.
+                                    //
+                                    // COMPATIBILITY: An evaluator that predates
+                                    // evaluationSnapshotCaptured omits the flag.
+                                    // Treat the snapshot as captured so a
+                                    // deployed older evaluator keeps its
+                                    // existing available-snapshot behaviour.
+                                    let captured = meta
+                                        .get("evaluationSnapshotCaptured")
+                                        .and_then(serde_json::Value::as_bool)
+                                        .unwrap_or(true);
+                                    if !captured {
+                                        snapshot_capture_failures.insert(
+                                            system_name.clone(),
+                                            "Configuration snapshot extraction did not complete"
+                                                .to_string(),
+                                        );
+                                    } else if let Some(snapshot) =
+                                        meta.get("evaluationSnapshot")
+                                    {
+                                        match serde_json::from_value::<Vec<EvaluatedOption>>(
                                             snapshot.clone(),
-                                        )
-                                        .with_context(|| {
-                                            format!(
-                                                "Invalid evaluation snapshot metadata for {system_name}"
-                                            )
-                                        })?
-                                        .into_iter()
-                                        .map(EvaluatedOption::redacted)
-                                        .collect();
-                                        evaluation_snapshots.insert(system_name.clone(), options);
+                                        ) {
+                                            Ok(parsed) => {
+                                                let options = parsed
+                                                    .into_iter()
+                                                    .map(EvaluatedOption::redacted)
+                                                    .collect();
+                                                evaluation_snapshots
+                                                    .insert(system_name.clone(), options);
+                                            }
+                                            // A snapshot the server cannot parse
+                                            // is not a trustworthy artifact, but
+                                            // it is also not a Nix evaluation
+                                            // failure. Record the gap instead of
+                                            // aborting the whole commit.
+                                            Err(parse_error) => {
+                                                warn!(
+                                                    commit_id = commit.id,
+                                                    system = %system_name,
+                                                    error = %parse_error,
+                                                    "evaluation_snapshot_metadata_unparsable"
+                                                );
+                                                snapshot_capture_failures.insert(
+                                                    system_name.clone(),
+                                                    "Configuration snapshot metadata could not be \
+                                                     interpreted"
+                                                        .to_string(),
+                                                );
+                                            }
+                                        }
+                                    }
+                                    // Override provenance is reconstructed from
+                                    // the raw module graph. A degraded graph
+                                    // still yields a usable snapshot, so report
+                                    // it without changing the lifecycle.
+                                    if meta
+                                        .get("evaluationSnapshotModulesCaptured")
+                                        .and_then(serde_json::Value::as_bool)
+                                        == Some(false)
+                                    {
+                                        warn!(
+                                            commit_id = commit.id,
+                                            system = %system_name,
+                                            "evaluation_snapshot_module_graph_degraded"
+                                        );
                                     }
                                     if let Some(policies_json) = meta.get("policies") {
                                         // Parse policy results using this configuration's assigned
@@ -4717,6 +4807,7 @@ async fn evaluate_with_nix_eval_jobs_inner(
         successful_systems: successful_results,
         confirmed_failures,
         evaluation_snapshots,
+        snapshot_capture_failures,
         flake_output_snapshot,
         had_system_eval_errors,
         #[cfg(test)]
@@ -4996,6 +5087,8 @@ async fn evaluate_with_mock_eval_jobs_inner(
         successful_systems,
         confirmed_failures: Vec::new(),
         evaluation_snapshots,
+        // The development evaluator always produces a complete snapshot.
+        snapshot_capture_failures: HashMap::new(),
         flake_output_snapshot: None,
         had_system_eval_errors,
         #[cfg(test)]
@@ -5722,6 +5815,7 @@ mod tests {
             successful_systems: successes,
             confirmed_failures: failures,
             evaluation_snapshots: std::collections::HashMap::new(),
+            snapshot_capture_failures: std::collections::HashMap::new(),
             flake_output_snapshot: None,
             had_system_eval_errors: false,
             force_build_job_insert_failure: false,

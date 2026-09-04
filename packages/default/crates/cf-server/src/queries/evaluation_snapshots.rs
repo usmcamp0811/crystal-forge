@@ -548,6 +548,56 @@ pub(crate) async fn persist_failed_snapshot_deferred_tx(
     Ok(())
 }
 
+/// Persists a redacted unavailable lifecycle for one configuration.
+///
+/// Use this function when the Nix configuration evaluation succeeded but no
+/// trustworthy configuration snapshot artifact could be produced, for example
+/// when snapshot extraction could not be completed. The resulting row is
+/// deliberately distinct from lifecycle 'failed', which is reserved for an
+/// actual Nix or system evaluation failure.
+///
+/// INVARIANT: An unavailable snapshot records zero options and zero modules, so
+/// no reader can mistake it for a configuration that legitimately declares no
+/// options. This function writes no `evaluation_snapshot_options` rows and
+/// creates no generation retention or deployment bindings, which keeps the
+/// existing rule that only an available snapshot can bind an exact retained
+/// artifact.
+///
+/// SECURITY: `error` describes the snapshot capture failure and is redacted
+/// before the first write. It must not be phrased so that it implies the Nix
+/// system evaluation failed.
+///
+/// # Errors
+///
+/// Returns an error when the commit does not exist or PostgreSQL rejects the
+/// insert or the selection advance.
+pub(crate) async fn persist_unavailable_snapshot_deferred_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    commit_id: i32,
+    configuration_name: &str,
+    error: &str,
+) -> Result<()> {
+    let error = crate::security::snapshot_redaction::redact_evaluation_error(error);
+    let snapshot_id: Uuid = sqlx::query_scalar(
+        r#"
+        INSERT INTO evaluation_snapshots (
+            commit_id, configuration_name, lifecycle, first_parent_sha, error,
+            option_count, module_count, content_bytes, completed_at
+        )
+        SELECT $1, $2, 'unavailable', first_parent_sha, $3, 0, 0, 0, now()
+        FROM commits WHERE id = $1
+        RETURNING id
+        "#,
+    )
+    .bind(commit_id)
+    .bind(configuration_name)
+    .bind(error)
+    .fetch_one(&mut **tx)
+    .await?;
+    advance_snapshot_selection_tx(tx, commit_id, configuration_name, snapshot_id).await?;
+    Ok(())
+}
+
 /// Recomputes every materialized host delta affected by one snapshot mutation.
 ///
 /// INVARIANT: Callers invoke this function in the same transaction that changes
@@ -3697,6 +3747,119 @@ mod tests {
         assert_eq!(escape_like_literal(r"foo%_\bar"), r"foo\%\_\\bar");
     }
 
+    /// A successful Nix evaluation whose configuration snapshot could not be
+    /// captured must persist as lifecycle 'unavailable' with a durable
+    /// diagnostic.
+    ///
+    /// This regression locks down the state separation that failure-isolated
+    /// snapshot extraction depends on:
+    ///
+    /// * 'available' with zero options means the configuration legitimately
+    ///   declares no inspectable options;
+    /// * 'unavailable' means no trustworthy snapshot artifact was produced;
+    /// * 'failed' remains reserved for an actual Nix evaluation failure.
+    ///
+    /// Collapsing the middle case into either neighbour would either fabricate
+    /// an empty configuration or wrongly report a working system as failing.
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn snapshot_capture_failure_persists_unavailable_with_durable_diagnostic(pool: PgPool) {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let repo_url = format!("https://example.test/capture-{suffix}.git");
+        insert_flake(
+            &pool,
+            &format!("capture-{suffix}"),
+            &repo_url,
+            "main",
+            "cf_systems_only",
+        )
+        .await
+        .expect("flake insert should succeed");
+        let commit = insert_test_commit(&pool, &repo_url, &"c".repeat(40)).await;
+
+        let mut tx = pool.begin().await.expect("transaction should begin");
+        persist_unavailable_snapshot_deferred_tx(
+            &mut tx,
+            commit.id,
+            "chesty",
+            "Configuration snapshot extraction did not complete",
+        )
+        .await
+        .expect("unavailable snapshot should persist");
+        tx.commit().await.expect("transaction should commit");
+
+        let (lifecycle, error, option_count, module_count): (String, Option<String>, i32, i32) =
+            sqlx::query_as(
+                "SELECT lifecycle, error, option_count, module_count \
+                 FROM evaluation_snapshots \
+                 WHERE commit_id = $1 AND configuration_name = $2",
+            )
+            .bind(commit.id)
+            .bind("chesty")
+            .fetch_one(&pool)
+            .await
+            .expect("snapshot row should exist");
+
+        assert_eq!(
+            lifecycle, "unavailable",
+            "snapshot capture failure must not be recorded as a Nix evaluation failure"
+        );
+        assert_eq!(
+            error.as_deref(),
+            Some("Configuration snapshot extraction did not complete"),
+            "an unavailable snapshot must retain its capture diagnostic"
+        );
+        assert_eq!(
+            option_count, 0,
+            "an unavailable snapshot must not report inspectable options"
+        );
+        assert_eq!(module_count, 0);
+
+        let selected: Option<Uuid> = sqlx::query_scalar(
+            "SELECT current_snapshot_id FROM evaluation_snapshot_selections \
+             WHERE commit_id = $1 AND configuration_name = $2",
+        )
+        .bind(commit.id)
+        .bind("chesty")
+        .fetch_optional(&pool)
+        .await
+        .expect("selection lookup should succeed");
+        assert!(
+            selected.is_some(),
+            "an unavailable snapshot must still advance the current selection"
+        );
+
+        // INVARIANT: Only an available snapshot can bind an exact retained
+        // artifact. Capture failure must not create a generation binding.
+        let retained: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM evaluation_generation_snapshots WHERE commit_id = $1",
+        )
+        .bind(commit.id)
+        .fetch_one(&pool)
+        .await
+        .expect("retention count should succeed");
+        assert_eq!(
+            retained, 0,
+            "snapshot capture failure must not retain a generation artifact"
+        );
+
+        // The widened constraint must still refuse a diagnostic on a lifecycle
+        // that claims a usable artifact.
+        let rejected = sqlx::query(
+            "INSERT INTO evaluation_snapshots \
+             (commit_id, configuration_name, lifecycle, error) \
+             VALUES ($1, $2, 'available', 'diagnostics are not valid here')",
+        )
+        .bind(commit.id)
+        .bind("available-with-error")
+        .execute(&pool)
+        .await;
+        assert!(
+            rejected.is_err(),
+            "an available snapshot must not carry a failure diagnostic"
+        );
+    }
+
     #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
     async fn failed_and_corrupt_snapshots_requeue_with_active_lifecycle(pool: PgPool) {
@@ -3887,6 +4050,7 @@ mod tests {
             successful_systems: Vec::new(),
             confirmed_failures: Vec::new(),
             evaluation_snapshots: snapshots,
+            snapshot_capture_failures: std::collections::HashMap::new(),
             flake_output_snapshot: None,
             had_system_eval_errors: false,
             force_build_job_insert_failure: false,
@@ -5158,6 +5322,7 @@ mod tests {
                 successful_systems: Vec::new(),
                 confirmed_failures: Vec::new(),
                 evaluation_snapshots,
+                snapshot_capture_failures: std::collections::HashMap::new(),
                 flake_output_snapshot: None,
                 had_system_eval_errors: false,
                 force_build_job_insert_failure: false,

@@ -542,6 +542,9 @@ SQL
     cargo test --offline --package cf-server --lib \
       canonical_evaluation_queue_transition_preserves_lineage_and_finalization \
       -- --ignored --test-threads=1
+    cargo test --offline --package cf-server --lib \
+      snapshot_capture_failure_persists_unavailable_with_durable_diagnostic \
+      -- --ignored --test-threads=1
 
     echo "=== Immutable evaluation artifact and exact-page contracts ==="
     cargo test --offline --package cf-server --lib \
