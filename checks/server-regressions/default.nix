@@ -537,6 +537,9 @@ SQL
       finalization_populates_host_metrics_for_complete_configuration_corpus \
       -- --ignored --test-threads=1
     cargo test --offline --package cf-server --lib \
+      evaluation_start_waits_for_snapshot_writer_before_commit_lock \
+      -- --ignored --test-threads=1
+    cargo test --offline --package cf-server --lib \
       canonical_evaluation_queue_transition_preserves_lineage_and_finalization \
       -- --ignored --test-threads=1
 

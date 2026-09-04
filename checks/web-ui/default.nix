@@ -520,6 +520,7 @@ in pkgs.testers.runNixOSTest {
       "CF_TEST_GIT_SERVER_URL": "http://gitserver/crystal-forge",
       "CF_TEST_REAL_REPO_URL": "http://gitserver/crystal-forge",
       "CF_TEST_REAL_COMMIT_HASH": main_head,
+      "CF_TEST_REAL_CONFIGURATION_NAME": "cf-test-sys",
       "CF_TEST_DB_HOST": "127.0.0.1",
       "CF_TEST_DB_PORT": "5433",
       "CF_TEST_DB_USER": "postgres",

@@ -4718,22 +4718,32 @@ async function runTask433ProductionEvaluation(page, { commitId, systemId, policy
 
 function createTask440LiveEvaluationFixture() {
   const suffix = crypto.randomUUID();
-  const revision = createHash("sha1").update(`task440-live-${suffix}`).digest("hex");
+  const revision = process.env.CF_TEST_REAL_COMMIT_HASH
+    || createHash("sha1").update(`task440-live-${suffix}`).digest("hex");
+  const repoUrl = process.env.CF_TEST_REAL_REPO_URL
+    || `https://example.invalid/task440-${suffix}.git`;
   const hostname = `task440-live-${suffix.slice(0, 8)}`;
+  const flakeName = `task440-live-${suffix}`;
+  const configurationName = process.env.CF_TEST_REAL_CONFIGURATION_NAME
+    || `${flakeName}-control-0`;
   const result = runFixtureSql(`
     WITH selected_environment AS (
       SELECT id FROM environments ORDER BY created_at, id LIMIT 1
     ), inserted_flake AS (
       INSERT INTO flakes (name, repo_url, branch, build_scope, sync_status)
       VALUES (
-        $name$TASK-440 live ${suffix}$name$,
-        $repo$https://example.invalid/task440-${suffix}.git$repo$,
+        $name$${flakeName}$name$,
+        $repo$${repoUrl}$repo$,
         'main', 'cf_systems_only', 'synced'
       )
       RETURNING id
     ), inserted_commit AS (
-      INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp, message, author)
-      SELECT id, '${revision}', now(), 'TASK-440 live queue regression', 'Web UI test'
+      INSERT INTO commits (
+        flake_id, git_commit_hash, commit_timestamp, message, author,
+        evaluation_status, evaluation_completed_at
+      )
+      SELECT id, '${revision}', now(), 'TASK-440 live queue regression', 'Web UI test',
+             'complete', now()
       FROM inserted_flake
       RETURNING id, flake_id
     ), inserted_system AS (
@@ -4746,13 +4756,25 @@ function createTask440LiveEvaluationFixture() {
         'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITASK440LIVE${suffix}',
         inserted_commit.flake_id,
         '/nix/store/00000000000000000000000000000000-task440-live',
-        'manual', '${hostname}'
+        'manual', '${configurationName}'
       FROM selected_environment, inserted_commit
       RETURNING id
-    ), stale_attempt AS (
+    )
+    SELECT json_build_object(
+      'systemId', (SELECT id FROM inserted_system),
+      'flakeId', (SELECT flake_id FROM inserted_commit),
+      'commitId', (SELECT id FROM inserted_commit),
+      'revision', '${revision}',
+      'hostname', '${hostname}',
+      'configurationName', '${configurationName}'
+    )::text;
+  `);
+  const fixture = JSON.parse(result);
+  const stale = runFixtureSql(`
+    WITH stale_attempt AS (
       UPDATE evaluation_attempts
       SET status = 'in_progress', started_at = now(), updated_at = now()
-      WHERE commit_id = (SELECT id FROM inserted_commit)
+      WHERE commit_id = ${Number(fixture.commitId)} AND status = 'queued'
       RETURNING id, root_attempt_id, attempt_number
     ), terminal_commit AS (
       UPDATE commits
@@ -4762,39 +4784,36 @@ function createTask440LiveEvaluationFixture() {
           evaluation_attempt_count = (SELECT attempt_number FROM stale_attempt),
           evaluation_error_message = NULL,
           cancellation_requested = FALSE
-      WHERE id = (SELECT id FROM inserted_commit)
+      WHERE id = ${Number(fixture.commitId)}
       RETURNING id
     )
     SELECT json_build_object(
-      'systemId', (SELECT id FROM inserted_system),
-      'commitId', (SELECT id FROM terminal_commit),
-      'revision', '${revision}',
-      'hostname', '${hostname}',
       'staleAttemptId', (SELECT id FROM stale_attempt),
       'rootAttemptId', (SELECT root_attempt_id FROM stale_attempt),
       'attemptNumber', (SELECT attempt_number FROM stale_attempt)
     )::text;
   `);
-  return JSON.parse(result);
+  return { ...fixture, ...JSON.parse(stale) };
 }
 
 async function runTask440LiveSnapshotEvaluation(page) {
   const fixture = createTask440LiveEvaluationFixture();
-  await page.unrouteAll({ behavior: "wait" });
-  await ensureAuthenticated(page);
-  await page.goto(
+  try {
+    await page.unrouteAll({ behavior: "wait" });
+    await ensureAuthenticated(page);
+    await page.goto(
     `${baseUrl}/systems/${fixture.systemId}?tab=config&config_mode=commit&revision=${fixture.revision}`,
     { timeout: LOAD_TIMEOUT },
   );
-  await assertVisible(
+    await assertVisible(
     page.getByText("Snapshot unavailable", { exact: true }),
     "Expected live commit to begin without a reusable snapshot",
     15000,
   );
-  await page.getByRole("button", { name: "Evaluate this revision" }).click();
+    await page.getByRole("button", { name: "Evaluate this revision" }).click();
 
-  let completed = null;
-  for (let attempt = 0; attempt < 180; attempt += 1) {
+    let completed = null;
+    for (let attempt = 0; attempt < 180; attempt += 1) {
     const state = runFixtureSql(`
       SELECT json_build_object(
         'commitStatus', commit_row.evaluation_status,
@@ -4813,7 +4832,7 @@ async function runTask440LiveSnapshotEvaluation(page) {
           FROM evaluation_snapshot_selections selection
           JOIN evaluation_snapshots snapshot ON snapshot.id = selection.current_snapshot_id
           WHERE selection.commit_id = commit_row.id
-            AND selection.configuration_name = '${fixture.hostname}'
+            AND selection.configuration_name = '${fixture.configurationName}'
             AND snapshot.lifecycle = 'available'
             AND snapshot.integrity_version = 1
         )
@@ -4823,18 +4842,18 @@ async function runTask440LiveSnapshotEvaluation(page) {
       WHERE commit_row.id = ${Number(fixture.commitId)}
       GROUP BY commit_row.id;
     `);
-    const parsed = JSON.parse(state);
-    if (Number(parsed.activeAttempts) > 1) {
-      throw new Error(`TASK-440 live retry created multiple active attempts: ${state}`);
+      const parsed = JSON.parse(state);
+      if (Number(parsed.activeAttempts) > 1) {
+        throw new Error(`TASK-440 live retry created multiple active attempts: ${state}`);
+      }
+      if (parsed.commitStatus === "complete" && Number(parsed.snapshotCount) === 1) {
+        completed = parsed;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1000));
     }
-    if (parsed.commitStatus === "complete" && Number(parsed.snapshotCount) === 1) {
-      completed = parsed;
-      break;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-  }
-  if (!completed) {
-    const state = runFixtureSql(`
+    if (!completed) {
+      const state = runFixtureSql(`
       SELECT json_build_object(
         'commit', row_to_json(commit_row),
         'attempts', COALESCE(json_agg(row_to_json(evaluation_attempt)
@@ -4845,33 +4864,42 @@ async function runTask440LiveSnapshotEvaluation(page) {
       WHERE commit_row.id = ${Number(fixture.commitId)}
       GROUP BY commit_row.id;
     `);
-    throw new Error(`TASK-440 live evaluation did not persist a snapshot: ${state}`);
-  }
+      throw new Error(`TASK-440 live evaluation did not persist a snapshot: ${state}`);
+    }
 
-  const stale = completed.attempts.find((attempt) => attempt.id === fixture.staleAttemptId);
-  const retry = completed.attempts.find(
+    const stale = completed.attempts.find((attempt) => attempt.id === fixture.staleAttemptId);
+    const retry = completed.attempts.find(
     (attempt) => Number(attempt.attemptNumber) === Number(fixture.attemptNumber) + 1,
   );
-  if (stale?.status !== "cancelled") {
-    throw new Error(`Expected stale production attempt to be retired: ${JSON.stringify(completed)}`);
-  }
-  if (
+    if (stale?.status !== "cancelled") {
+      throw new Error(`Expected stale production attempt to be retired: ${JSON.stringify(completed)}`);
+    }
+    if (
     !retry ||
     retry.status !== "complete" ||
     retry.parentAttemptId !== fixture.staleAttemptId ||
     retry.rootAttemptId !== fixture.rootAttemptId
-  ) {
-    throw new Error(`Expected preserved retry lineage and completed worker attempt: ${JSON.stringify(completed)}`);
-  }
-  if (Number(completed.activeAttempts) !== 0) {
-    throw new Error(`Completed evaluation retained active attempts: ${JSON.stringify(completed)}`);
-  }
+    ) {
+      throw new Error(`Expected preserved retry lineage and completed worker attempt: ${JSON.stringify(completed)}`);
+    }
+    if (Number(completed.activeAttempts) !== 0) {
+      throw new Error(`Completed evaluation retained active attempts: ${JSON.stringify(completed)}`);
+    }
 
-  await assertVisible(
-    page.getByText("services.crystal-forge-agent.enable", { exact: true }),
-    "Expected Config to render the snapshot persisted by evaluator finalization",
-    15000,
-  );
+    const expectedOption = process.env.CF_TEST_REAL_CONFIGURATION_NAME
+      ? "networking.hostName"
+      : "services.crystal-forge-agent.enable";
+    await assertVisible(
+      page.getByText(expectedOption, { exact: true }),
+      "Expected Config to render the snapshot persisted by evaluator finalization",
+      15000,
+    );
+  } finally {
+    runFixtureSql(`
+      DELETE FROM systems WHERE id='${fixture.systemId}'::uuid;
+      DELETE FROM flakes WHERE id=${Number(fixture.flakeId)};
+    `);
+  }
 }
 
 async function createPhase6PoamFixture(page, label, systemCount = 1, options = {}) {

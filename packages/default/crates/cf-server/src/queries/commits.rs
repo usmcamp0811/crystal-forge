@@ -418,6 +418,25 @@ pub async fn mark_commit_evaluation_started(
     commit_id: i32,
 ) -> Result<EvalStartOutcome> {
     let mut tx = pool.begin().await?;
+    // CONCURRENCY: Deployment authorization holds the snapshot-writer lock
+    // while it reads commit state after taking POA&M locks. Take that lock
+    // before the queue, commit, attempt, and POA&M locks so evaluation start
+    // cannot invert authorization's POA&M -> commit order. Queue mutation,
+    // retry, and cancellation then use the same queue -> commit -> attempt
+    // subsequence.
+    crate::queries::evaluation_snapshots::lock_snapshot_writer_tx(&mut tx).await?;
+    lock_eval_queue_order_tx(&mut tx).await?;
+    let pending: Option<i32> = sqlx::query_scalar(
+        "SELECT id FROM commits WHERE id = $1 AND COALESCE(evaluation_status, 'pending') = 'pending' FOR UPDATE",
+    )
+    .bind(commit_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if pending.is_none() {
+        tx.rollback().await?;
+        return Ok(EvalStartOutcome::NoLongerPending);
+    }
+
     let attempt = sqlx::query_as::<_, (uuid::Uuid, i32)>(
         r#"
         WITH next_attempt AS (
@@ -510,6 +529,29 @@ pub async fn mark_commit_evaluation_complete(
     expected_attempt: i32,
 ) -> Result<EvalCompleteOutcome> {
     let mut tx = pool.begin().await?;
+    // CONCURRENCY: Lock the commit before its active attempt. Cancellation and
+    // full evaluation finalization use the same row order, so completion cannot
+    // deadlock while each path terminalizes the same attempt.
+    let current: Option<i32> = sqlx::query_scalar(
+        r#"
+        SELECT id
+        FROM commits
+        WHERE id = $1
+          AND evaluation_status = 'in_progress'
+          AND COALESCE(cancellation_requested, FALSE) = FALSE
+          AND evaluation_attempt_count = $2
+        FOR UPDATE
+        "#,
+    )
+    .bind(commit_id)
+    .bind(expected_attempt)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if current.is_none() {
+        tx.rollback().await?;
+        return Ok(EvalCompleteOutcome::SupersededOrCancelled);
+    }
+
     let attempt_rows = sqlx::query(
         r#"
         UPDATE evaluation_attempts
@@ -678,6 +720,28 @@ pub async fn mark_commit_evaluation_failed(
         root_attempt_id: Option<uuid::Uuid>,
         attempt_number: i32,
         automatic_retry_count: i32,
+    }
+
+    // CONCURRENCY: Lock the commit before its active attempt. Success,
+    // cancellation, worker claim, and manual retry use the same row order.
+    let current: Option<i32> = sqlx::query_scalar(
+        r#"
+        SELECT id
+        FROM commits
+        WHERE id = $1
+          AND evaluation_status = 'in_progress'
+          AND COALESCE(cancellation_requested, FALSE) = FALSE
+          AND evaluation_attempt_count = $2
+        FOR UPDATE
+        "#,
+    )
+    .bind(commit_id)
+    .bind(expected_attempt)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if current.is_none() {
+        tx.rollback().await?;
+        return Ok(EvalFailureOutcome::SupersededOrCancelled);
     }
 
     let class_name = match failure_class {
@@ -1431,39 +1495,61 @@ fn validate_eval_queue_reorder_payload(
 /// - `in_progress → cancelling` (sets cancellation_requested = TRUE so the loop kills the subprocess)
 /// - Returns `NotFound` if no matching row, `AlreadyTerminal` for complete/failed/cancelled rows.
 ///
-/// NOTE: Uses `UPDATE ... RETURNING` so the returned outcome reflects an actual
-/// row transition, avoiding the TOCTOU race between a SELECT and subsequent UPDATE.
+/// The transaction locks the commit before it decides which transition applies,
+/// so the returned outcome and the attempt mutation describe one atomic state.
 pub async fn cancel_commit_evaluation(pool: &PgPool, commit_id: i32) -> Result<CancelEvalOutcome> {
     let mut tx = pool.begin().await?;
+    // CONCURRENCY: Use the queue -> commit -> attempt order shared by worker
+    // claim and retry transitions. The commit lock makes the state decision and
+    // its corresponding attempt mutation atomic.
+    lock_eval_queue_order_tx(&mut tx).await?;
+    let current: Option<String> = sqlx::query_scalar(
+        "SELECT COALESCE(evaluation_status, 'pending') FROM commits WHERE id = $1 FOR UPDATE",
+    )
+    .bind(commit_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(current) = current else {
+        tx.rollback().await?;
+        return Ok(CancelEvalOutcome::NotFound);
+    };
 
     // Try pending -> cancelled first (no in-flight worker to coordinate with).
-    let updated = sqlx::query_scalar::<_, i32>(
-        r#"
-        WITH cancelled_attempts AS (
+    if current == "pending" {
+        let attempt = sqlx::query(
+            r#"
             UPDATE evaluation_attempts
             SET status = 'cancelled',
                 completed_at = COALESCE(completed_at, NOW()),
                 updated_at = NOW()
-            WHERE commit_id = $1
-              AND status = 'queued'
-            RETURNING id
+            WHERE commit_id = $1 AND status = 'queued'
+            "#,
         )
-        UPDATE commits c
+        .bind(commit_id)
+        .execute(&mut *tx)
+        .await?;
+        anyhow::ensure!(
+            attempt.rows_affected() == 1,
+            "pending commit {commit_id} does not have exactly one queued evaluation attempt"
+        );
+        let updated = sqlx::query(
+            r#"
+        UPDATE commits
         SET evaluation_status = 'cancelled',
             cancellation_requested = FALSE,
             evaluation_completed_at = NOW(),
             evaluation_error_message = NULL
         WHERE id = $1
           AND COALESCE(evaluation_status, 'pending') = 'pending'
-          AND EXISTS (SELECT 1 FROM cancelled_attempts)
-        RETURNING id
         "#,
-    )
-    .bind(commit_id)
-    .fetch_optional(&mut *tx)
-    .await?;
-
-    if updated.is_some() {
+        )
+        .bind(commit_id)
+        .execute(&mut *tx)
+        .await?;
+        anyhow::ensure!(
+            updated.rows_affected() == 1,
+            "pending cancellation lost commit state"
+        );
         tx.commit().await?;
         info!("🚫 Cancelled pending evaluation for commit {commit_id}");
         return Ok(CancelEvalOutcome::Cancelled);
@@ -1471,42 +1557,34 @@ pub async fn cancel_commit_evaluation(pool: &PgPool, commit_id: i32) -> Result<C
 
     // Try in_progress -> cancelling (worker will see cancellation_requested
     // in its poll loop and kill the subprocess cooperatively).
-    let updated = sqlx::query_scalar::<_, i32>(
-        r#"
+    if current == "in_progress" {
+        let updated = sqlx::query(
+            r#"
         UPDATE commits
         SET evaluation_status = 'cancelling',
             cancellation_requested = TRUE
         WHERE id = $1
           AND evaluation_status = 'in_progress'
-        RETURNING id
         "#,
-    )
-    .bind(commit_id)
-    .fetch_optional(&mut *tx)
-    .await?;
-
-    if updated.is_some() {
+        )
+        .bind(commit_id)
+        .execute(&mut *tx)
+        .await?;
+        anyhow::ensure!(
+            updated.rows_affected() == 1,
+            "running cancellation lost commit state"
+        );
         tx.commit().await?;
         info!("🔄 Requested cancellation for in-progress evaluation commit {commit_id}");
         return Ok(CancelEvalOutcome::CancellingInProgress);
     }
 
-    // No transition occurred — determine the current state for a meaningful response.
-    let current: Option<String> =
-        sqlx::query_scalar("SELECT evaluation_status FROM commits WHERE id = $1")
-            .bind(commit_id)
-            .fetch_optional(&mut *tx)
-            .await?
-            .flatten();
-
     tx.commit().await?;
-
-    match current.as_deref() {
-        None => Ok(CancelEvalOutcome::NotFound),
-        Some("complete" | "failed" | "cancelled") => Ok(CancelEvalOutcome::AlreadyTerminal),
+    match current.as_str() {
+        "complete" | "failed" | "cancelled" => Ok(CancelEvalOutcome::AlreadyTerminal),
         // cancelling means a prior cancellation took effect between our updates.
-        Some("cancelling") => Ok(CancelEvalOutcome::CancellingInProgress),
-        Some(_) => Ok(CancelEvalOutcome::AlreadyTerminal),
+        "cancelling" => Ok(CancelEvalOutcome::CancellingInProgress),
+        _ => Ok(CancelEvalOutcome::AlreadyTerminal),
     }
 }
 
@@ -1644,18 +1722,61 @@ pub async fn finalize_requested_commit_evaluation_cancellation(
     commit_id: i32,
     expected_attempt: i32,
 ) -> Result<EvalCancellationOutcome> {
-    let updated = sqlx::query_scalar::<_, i32>(
+    let mut tx = pool.begin().await?;
+    // CONCURRENCY: Lock the commit before terminalizing its attempt. Every
+    // competing finalizer uses this order, so cancellation cannot deadlock
+    // with successful or failed evaluation finalization.
+    let state: Option<(String, Option<i32>, Option<bool>)> = sqlx::query_as(
         r#"
-        WITH cancelled_attempt AS (
-            UPDATE evaluation_attempts
-            SET status = 'cancelled',
-                completed_at = COALESCE(completed_at, NOW()),
-                updated_at = NOW()
-            WHERE commit_id = $1
-              AND attempt_number = $2
-              AND status = 'in_progress'
-            RETURNING id
-        )
+        SELECT COALESCE(evaluation_status, 'pending'),
+               evaluation_attempt_count,
+               cancellation_requested
+        FROM commits
+        WHERE id = $1
+        FOR UPDATE
+        "#,
+    )
+    .bind(commit_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((status, attempt_count, cancellation_requested)) = state else {
+        tx.rollback().await?;
+        return Ok(EvalCancellationOutcome::Superseded);
+    };
+    if status == "cancelled" {
+        tx.rollback().await?;
+        return Ok(EvalCancellationOutcome::AlreadyCancelled);
+    }
+    if attempt_count != Some(expected_attempt)
+        || !((status == "cancelling")
+            || (status == "in_progress" && cancellation_requested == Some(true)))
+    {
+        tx.rollback().await?;
+        return Ok(EvalCancellationOutcome::Superseded);
+    }
+
+    let attempt = sqlx::query(
+        r#"
+        UPDATE evaluation_attempts
+        SET status = 'cancelled',
+            completed_at = COALESCE(completed_at, NOW()),
+            updated_at = NOW()
+        WHERE commit_id = $1
+          AND attempt_number = $2
+          AND status = 'in_progress'
+        "#,
+    )
+    .bind(commit_id)
+    .bind(expected_attempt)
+    .execute(&mut *tx)
+    .await?;
+    if attempt.rows_affected() != 1 {
+        tx.rollback().await?;
+        return Ok(EvalCancellationOutcome::Superseded);
+    }
+
+    let updated = sqlx::query(
+        r#"
         UPDATE commits
         SET evaluation_status = 'cancelled',
             cancellation_requested = FALSE,
@@ -1666,39 +1787,18 @@ pub async fn finalize_requested_commit_evaluation_cancellation(
             evaluation_error_message = NULL
         WHERE id = $1
           AND evaluation_attempt_count = $2
-          AND (
-              evaluation_status = 'cancelling'
-              OR (
-                  evaluation_status = 'in_progress'
-                  AND cancellation_requested IS TRUE
-              )
-          )
-          AND EXISTS (SELECT 1 FROM cancelled_attempt)
-        RETURNING id
         "#,
     )
     .bind(commit_id)
     .bind(expected_attempt)
-    .fetch_optional(pool)
+    .execute(&mut *tx)
     .await?;
-
-    if updated.is_some() {
-        return Ok(EvalCancellationOutcome::Cancelled);
-    }
-
-    // No transition — check current state for a meaningful response.
-    let current: Option<String> =
-        sqlx::query_scalar("SELECT evaluation_status FROM commits WHERE id = $1")
-            .bind(commit_id)
-            .fetch_optional(pool)
-            .await?
-            .flatten();
-
-    match current.as_deref() {
-        Some("cancelled") => Ok(EvalCancellationOutcome::AlreadyCancelled),
-        // Any other existing state means this worker's attempt was superseded.
-        _ => Ok(EvalCancellationOutcome::Superseded),
-    }
+    anyhow::ensure!(
+        updated.rows_affected() == 1,
+        "cancellation finalization lost commit state"
+    );
+    tx.commit().await?;
+    Ok(EvalCancellationOutcome::Cancelled)
 }
 
 /// Clean up partial derivations for a specific commit.
@@ -2225,6 +2325,7 @@ mod tests {
     use crate::api::models::CancelEvalOutcome;
     use crate::api::models::EvalQueueParams;
     use crate::models::retry_policy::RetryFailureClass;
+    use crate::queries::evaluation_snapshots::{SNAPSHOT_WRITER_LOCK_KEY, lock_snapshot_writer_tx};
     use sqlx::PgPool;
 
     fn test_database_url() -> String {
@@ -2666,6 +2767,73 @@ mod tests {
             EvalStartOutcome::Started { attempt } => attempt,
             EvalStartOutcome::NoLongerPending => panic!("commit should be pending"),
         }
+    }
+
+    // Evaluation start eventually resets composite assessment state. It must
+    // therefore wait on the snapshot-writer lock before it locks the commit,
+    // matching deployment authorization's outer serialization boundary.
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn evaluation_start_waits_for_snapshot_writer_before_commit_lock() {
+        let pool = test_pool().await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+
+        let mut blocker = pool.begin().await.expect("blocker should begin");
+        lock_snapshot_writer_tx(&mut blocker)
+            .await
+            .expect("blocker should acquire snapshot-writer lock");
+
+        let start_pool = pool.clone();
+        let start =
+            tokio::spawn(
+                async move { mark_commit_evaluation_started(&start_pool, commit_id).await },
+            );
+
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM pg_locks \
+                     WHERE locktype = 'advisory' AND classid::bigint = 0 \
+                       AND objid::bigint = $1 AND NOT granted)",
+                )
+                .bind(SNAPSHOT_WRITER_LOCK_KEY)
+                .fetch_one(&pool)
+                .await
+                .expect("snapshot-writer wait state should load");
+                if waiting {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("evaluation start should wait on the snapshot-writer lock");
+
+        let unlocked_commit: i32 =
+            sqlx::query_scalar("SELECT id FROM commits WHERE id = $1 FOR UPDATE NOWAIT")
+                .bind(commit_id)
+                .fetch_one(&pool)
+                .await
+                .expect("evaluation start must not lock the commit before the writer lock");
+        assert_eq!(unlocked_commit, commit_id);
+
+        blocker
+            .commit()
+            .await
+            .expect("blocker should release snapshot-writer lock");
+        assert!(matches!(
+            start
+                .await
+                .expect("evaluation start task should complete")
+                .expect("evaluation start should succeed"),
+            EvalStartOutcome::Started { .. }
+        ));
+
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
     }
 
     // ── Test 1: cancel-API pending race ────────────────────────────────────

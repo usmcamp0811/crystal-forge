@@ -4909,7 +4909,9 @@ fn unavailable_generation_commit(
         .iter()
         .find(|generation| generation.generation == selected_generation)
         .and_then(|generation| generation.commit_hash.as_deref())
-        .filter(|sha| sha.len() == 40 && sha.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .filter(|sha| {
+            matches!(sha.len(), 40 | 64) && sha.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
         .map(str::to_string)
 }
 

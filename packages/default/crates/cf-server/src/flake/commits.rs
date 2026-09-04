@@ -464,6 +464,11 @@ pub async fn sync_flake_recorded(
         }
     }
 
+    // CONCURRENCY: Commit insertion allocates evaluation queue positions. Take
+    // the queue lock before any commit row can be updated in this transaction,
+    // matching manual retry and worker claim lock order for the whole sync.
+    crate::queries::commits::lock_eval_queue_order_tx(&mut tx).await?;
+
     // Pre-filter existing hashes inside the lock so concurrent syncs don't race.
     let candidate_hashes: Vec<&str> = commits.iter().map(|c| c.hash.as_str()).collect();
     let existing: std::collections::HashSet<String> = if candidate_hashes.is_empty() {
