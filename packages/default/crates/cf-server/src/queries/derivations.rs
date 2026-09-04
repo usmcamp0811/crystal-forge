@@ -398,7 +398,13 @@ pub enum SuccessfulEvalWrite {
     /// BuildComplete, BuildFailed) and was preserved unchanged.
     /// Callers must NOT enqueue a duplicate build job.
     PreservedBuildState { derivation_id: i32, status_id: i32 },
+    /// The commit-owned row was recorded without a derivation path because an
+    /// older schema still enforces path uniqueness across all commits.
+    LegacyPathConflict { derivation_id: i32 },
 }
+
+const LEGACY_PATH_CONFLICT_ERROR: &str =
+    "Derivation path is owned by another commit under the legacy global path constraint";
 
 /// Atomically record a successful evaluation result for a derivation.
 ///
@@ -588,7 +594,8 @@ pub async fn record_successful_eval_result(
         match &result {
             SuccessfulEvalWrite::Inserted { derivation_id }
             | SuccessfulEvalWrite::UpdatedEvaluationState { derivation_id }
-            | SuccessfulEvalWrite::PreservedBuildState { derivation_id, .. } => *derivation_id,
+            | SuccessfulEvalWrite::PreservedBuildState { derivation_id, .. }
+            | SuccessfulEvalWrite::LegacyPathConflict { derivation_id } => *derivation_id,
         },
     )
     .await?;
@@ -604,6 +611,9 @@ pub async fn record_successful_eval_result(
 /// State matrix, POA&M finding locking, and behavior are identical to
 /// [`record_successful_eval_result`]. The caller holds the finding locks until
 /// it commits or rolls back the transaction.
+/// If the legacy global path constraint conflicts with another commit, this
+/// function records a separate commit-owned row without the path. This preserves
+/// evaluation and assessment identity but prevents that row from being built.
 pub async fn record_successful_eval_result_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     commit_id: Option<i32>,
@@ -635,7 +645,7 @@ pub async fn record_successful_eval_result_in_tx(
             scheduled_at
         )
         VALUES ($1, $2, $3, $4, $5, 0, $6, $7, $8, $9, $10, NULL, NOW(), NOW())
-        ON CONFLICT (COALESCE(commit_id, -1), derivation_name, derivation_type)
+        ON CONFLICT
         DO NOTHING
         RETURNING id
         "#,
@@ -674,26 +684,62 @@ pub async fn record_successful_eval_result_in_tx(
 
             match existing {
                 Some((id, status_id)) => {
-                    crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx(
+                    let path_owned_by_other = sqlx::query_scalar::<_, bool>(
+                        "SELECT EXISTS (SELECT 1 FROM derivations WHERE derivation_path = $1 AND id <> $2)",
+                    )
+                    .bind(derivation_path)
+                    .bind(id)
+                    .fetch_one(&mut **tx)
+                    .await?;
+                    if path_owned_by_other {
+                        sqlx::query(
+                            r#"
+                            UPDATE derivations
+                            SET status_id = $1,
+                                derivation_path = NULL,
+                                derivation_target = COALESCE($2, derivation_target),
+                                expected_store_path = $3,
+                                cf_agent_enabled = $4,
+                                policy_requirements_met = $5,
+                                policy_results = $6,
+                                error_message = $7,
+                                completed_at = NOW(),
+                                build_preparation_state = 'not_required'
+                            WHERE id = $8
+                            "#,
+                        )
+                        .bind(EvaluationStatus::DryRunComplete.as_id())
+                        .bind(derivation_target)
+                        .bind(expected_store_path)
+                        .bind(cf_agent_enabled)
+                        .bind(policy_requirements_met)
+                        .bind(policy_results)
+                        .bind(LEGACY_PATH_CONFLICT_ERROR)
+                        .bind(id)
+                        .execute(&mut **tx)
+                        .await?;
+                        Ok(SuccessfulEvalWrite::LegacyPathConflict { derivation_id: id })
+                    } else {
+                        crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx(
                         tx, id,
                     )
                     .await?;
-                    sqlx::query(
-                        "DELETE FROM composite_policy_assessments WHERE derivation_id = $1",
-                    )
-                    .bind(id)
-                    .execute(&mut **tx)
-                    .await?;
-                    match status_id {
-                        // Build-active or build-terminal: preserve the build
-                        // status but still refresh policy metadata so that
-                        // re-evaluation after a policy change produces
-                        // up-to-date matrix results. Without this, a build
-                        // that was queued under old policy assignments would
-                        // retain stale policy_results forever.
-                        7 | 8 | 10 | 12 => {
-                            sqlx::query(
-                                r#"
+                        sqlx::query(
+                            "DELETE FROM composite_policy_assessments WHERE derivation_id = $1",
+                        )
+                        .bind(id)
+                        .execute(&mut **tx)
+                        .await?;
+                        match status_id {
+                            // Build-active or build-terminal: preserve the build
+                            // status but still refresh policy metadata so that
+                            // re-evaluation after a policy change produces
+                            // up-to-date matrix results. Without this, a build
+                            // that was queued under old policy assignments would
+                            // retain stale policy_results forever.
+                            7 | 8 | 10 | 12 => {
+                                sqlx::query(
+                                    r#"
                             UPDATE derivations
                             SET cf_agent_enabled = $1,
                                 policy_requirements_met = $2,
@@ -706,20 +752,20 @@ pub async fn record_successful_eval_result_in_tx(
                                 -- time reporting and history ordering.
                             WHERE id = $4
                             "#,
-                            )
-                            .bind(cf_agent_enabled)
-                            .bind(policy_requirements_met)
-                            .bind(policy_results)
-                            .bind(id)
-                            .execute(&mut **tx)
-                            .await?;
-                            Ok(SuccessfulEvalWrite::PreservedBuildState {
-                                derivation_id: id,
-                                status_id,
-                            })
-                        }
-                        _ => {
-                            sqlx::query(
+                                )
+                                .bind(cf_agent_enabled)
+                                .bind(policy_requirements_met)
+                                .bind(policy_results)
+                                .bind(id)
+                                .execute(&mut **tx)
+                                .await?;
+                                Ok(SuccessfulEvalWrite::PreservedBuildState {
+                                    derivation_id: id,
+                                    status_id,
+                                })
+                            }
+                            _ => {
+                                sqlx::query(
                             r#"
                             UPDATE derivations
                             SET status_id = $1,
@@ -746,14 +792,66 @@ pub async fn record_successful_eval_result_in_tx(
                         .bind(id)
                         .execute(&mut **tx)
                         .await?;
-                            Ok(SuccessfulEvalWrite::UpdatedEvaluationState { derivation_id: id })
+                                Ok(SuccessfulEvalWrite::UpdatedEvaluationState {
+                                    derivation_id: id,
+                                })
+                            }
                         }
                     }
                 }
-                None => anyhow::bail!(
-                    "Concurrent race: row disappeared after INSERT ON CONFLICT DO NOTHING for {}",
-                    derivation_name
-                ),
+                None => {
+                    let path_owner_exists = sqlx::query_scalar::<_, bool>(
+                        "SELECT EXISTS (SELECT 1 FROM derivations WHERE derivation_path = $1)",
+                    )
+                    .bind(derivation_path)
+                    .fetch_one(&mut **tx)
+                    .await?;
+                    if !path_owner_exists {
+                        anyhow::bail!(
+                            "Concurrent race: no conflicting derivation remained after INSERT ON CONFLICT DO NOTHING for {}",
+                            derivation_name
+                        );
+                    }
+                    let id = sqlx::query_scalar::<_, i32>(
+                        r#"
+                        INSERT INTO derivations (
+                            commit_id, derivation_type, derivation_name,
+                            derivation_target, status_id, attempt_count,
+                            expected_store_path, cf_agent_enabled,
+                            policy_requirements_met, policy_results,
+                            error_message, completed_at, scheduled_at,
+                            build_preparation_state
+                        )
+                        VALUES ($1, $2, $3, $4, $5, 0, $6, $7, $8, $9, $10, NOW(), NOW(), 'not_required')
+                        ON CONFLICT (COALESCE(commit_id, -1), derivation_name, derivation_type)
+                        DO UPDATE SET
+                            derivation_path = NULL,
+                            derivation_target = COALESCE(EXCLUDED.derivation_target, derivations.derivation_target),
+                            status_id = EXCLUDED.status_id,
+                            expected_store_path = EXCLUDED.expected_store_path,
+                            cf_agent_enabled = EXCLUDED.cf_agent_enabled,
+                            policy_requirements_met = EXCLUDED.policy_requirements_met,
+                            policy_results = EXCLUDED.policy_results,
+                            error_message = EXCLUDED.error_message,
+                            completed_at = NOW(),
+                            build_preparation_state = 'not_required'
+                        RETURNING id
+                        "#,
+                    )
+                    .bind(commit_id)
+                    .bind(derivation_type)
+                    .bind(derivation_name)
+                    .bind(derivation_target)
+                    .bind(EvaluationStatus::DryRunComplete.as_id())
+                    .bind(expected_store_path)
+                    .bind(cf_agent_enabled)
+                    .bind(policy_requirements_met)
+                    .bind(policy_results)
+                    .bind(LEGACY_PATH_CONFLICT_ERROR)
+                    .fetch_one(&mut **tx)
+                    .await?;
+                    Ok(SuccessfulEvalWrite::LegacyPathConflict { derivation_id: id })
+                }
             }
         }
     }?;
@@ -762,7 +860,8 @@ pub async fn record_successful_eval_result_in_tx(
         match &result {
             SuccessfulEvalWrite::Inserted { derivation_id }
             | SuccessfulEvalWrite::UpdatedEvaluationState { derivation_id }
-            | SuccessfulEvalWrite::PreservedBuildState { derivation_id, .. } => *derivation_id,
+            | SuccessfulEvalWrite::PreservedBuildState { derivation_id, .. }
+            | SuccessfulEvalWrite::LegacyPathConflict { derivation_id } => *derivation_id,
         },
     )
     .await?;
@@ -2831,7 +2930,8 @@ pub async fn get_derivation_id_by_store_path(
 #[cfg(test)]
 mod tests {
     use super::{
-        SuccessfulEvalWrite, record_successful_eval_result, record_synthetic_eval_failure,
+        SuccessfulEvalWrite, record_successful_eval_result, record_successful_eval_result_in_tx,
+        record_synthetic_eval_failure,
     };
     use sqlx::PgPool;
 
@@ -3128,6 +3228,91 @@ mod tests {
             "stale error_message must be cleared on recovery"
         );
         assert_eq!(agent, Some(true), "cf_agent_enabled must be persisted");
+
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn cross_commit_shared_path_keeps_distinct_idempotent_rows() {
+        let pool = test_pool().await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let first_commit_id = insert_throwaway_commit(&pool, flake_id).await;
+        let second_commit_id = insert_throwaway_commit(&pool, flake_id).await;
+        let path = format!(
+            "/nix/store/{}-shared-system.drv",
+            uuid::Uuid::new_v4().simple()
+        );
+        let policy_results = serde_json::json!({"result": "pass"});
+
+        let mut first_tx = pool.begin().await.expect("begin first write");
+        let first = record_successful_eval_result_in_tx(
+            &mut first_tx,
+            Some(first_commit_id),
+            "shared-system",
+            "nixos",
+            Some("shared-system"),
+            &path,
+            Some("/nix/store/shared-system"),
+            Some(false),
+            true,
+            &policy_results,
+        )
+        .await
+        .expect("persist first path owner");
+        first_tx.commit().await.expect("commit first write");
+        assert!(matches!(first, SuccessfulEvalWrite::Inserted { .. }));
+
+        for retry in 0..2 {
+            let mut second_tx = pool.begin().await.expect("begin second write");
+            let second = record_successful_eval_result_in_tx(
+                &mut second_tx,
+                Some(second_commit_id),
+                "shared-system",
+                "nixos",
+                Some("shared-system"),
+                &path,
+                Some("/nix/store/shared-system"),
+                Some(false),
+                true,
+                &policy_results,
+            )
+            .await
+            .expect("persist commit-owned compatibility row");
+            second_tx.commit().await.expect("commit second write");
+            assert!(
+                matches!(second, SuccessfulEvalWrite::LegacyPathConflict { .. }),
+                "retry {retry} must retain the compatibility outcome"
+            );
+        }
+
+        let rows: Vec<(i32, Option<String>, Option<String>)> = sqlx::query_as(
+            r#"
+            SELECT commit_id, derivation_path, error_message
+            FROM derivations
+            WHERE commit_id IN ($1, $2)
+              AND derivation_name = 'shared-system'
+            ORDER BY commit_id
+            "#,
+        )
+        .bind(first_commit_id)
+        .bind(second_commit_id)
+        .fetch_all(&pool)
+        .await
+        .expect("load commit-owned rows");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].1.as_deref(), Some(path.as_str()));
+        assert!(rows[0].2.is_none());
+        assert!(rows[1].1.is_none());
+        assert!(
+            rows[1]
+                .2
+                .as_deref()
+                .is_some_and(|error| error.contains("legacy global path constraint"))
+        );
 
         let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
             .bind(flake_id)

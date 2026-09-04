@@ -21,9 +21,32 @@ WITH generation_rows AS (
 SELECT
     gr.generation,
     gr.store_path,
-    commit_link.commit_hash,
-    gr.first_seen_at AS timestamp
+    COALESCE(retained_commit.git_commit_hash, commit_link.commit_hash) AS commit_hash,
+    gr.first_seen_at AS timestamp,
+    retained.id AS generation_snapshot_id,
+    COALESCE(
+      retained.id IS NOT NULL
+      AND retained.lineage_verified
+      AND retained.source_store_path IS NOT NULL
+      AND BTRIM(retained.source_store_path) <> ''
+       AND artifact.lifecycle = 'available'
+       AND artifact.integrity_version = 1
+      AND derivation.id IS NOT NULL
+      AND derivation.derivation_type = 'nixos'
+      AND retained.source_store_path = COALESCE(
+        derivation.store_path, derivation.expected_store_path
+      ),
+      FALSE
+    ) AS rollback_eligible
 FROM generation_rows gr
+LEFT JOIN evaluation_generation_snapshots retained
+  ON retained.system_id = $1 AND retained.generation = gr.generation
+LEFT JOIN evaluation_snapshots artifact ON artifact.id = retained.snapshot_id
+LEFT JOIN commits retained_commit ON retained_commit.id = retained.commit_id
+LEFT JOIN derivations derivation
+  ON derivation.id = retained.derivation_id
+ AND derivation.commit_id = retained.commit_id
+ AND derivation.derivation_name = retained.configuration_name
 LEFT JOIN LATERAL (
   SELECT c.git_commit_hash AS commit_hash
   FROM derivations d
@@ -183,13 +206,36 @@ pub async fn get_latest_system_state_id(pool: &PgPool, hostname: &str) -> Result
     Ok(row)
 }
 
-/// Row type for system generation history
+/// Describes one observed system generation and its retained Config identity.
+///
+/// The generation number is local to the owning system. The server-issued
+/// [`Self::generation_snapshot_id`] identifies the retained artifact row and is
+/// authoritative when a client supplies an artifact identity. Neither
+/// [`Self::store_path`] nor [`Self::commit_hash`] grants access or authorizes a
+/// rollback. [`Self::rollback_eligible`] reports a separate lineage decision; a
+/// complete retained artifact remains Config-readable when legacy deployment or
+/// store lineage cannot be verified.
 #[derive(Debug, sqlx::FromRow)]
 pub struct SystemGenerationRow {
+    /// System-local generation number reported by the agent.
     pub generation: i32,
+    /// First non-empty store path observed for the generation, when reported.
     pub store_path: Option<String>,
+    /// Full commit SHA associated with the retained artifact or derivation.
     pub commit_hash: Option<String>,
+    /// Time when the server first observed the generation.
     pub timestamp: DateTime<Utc>,
+    /// Server-issued retained-row identity for Config and rollback requests.
+    ///
+    /// The value is absent when no retained artifact is associated with the
+    /// observed generation. The server still verifies system ownership and
+    /// caller authorization when a client returns this identity.
+    pub generation_snapshot_id: Option<Uuid>,
+    /// Indicates whether exact artifact, derivation, and store lineage permits rollback.
+    ///
+    /// This value does not control Config readability. Clients must not infer
+    /// eligibility from the presence of another field.
+    pub rollback_eligible: bool,
 }
 
 /// Fetch historical generations for a system by its UUID

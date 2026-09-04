@@ -420,7 +420,8 @@ async fn record_later_legacy_result(
     let derivation_id = match write {
         SuccessfulEvalWrite::Inserted { derivation_id }
         | SuccessfulEvalWrite::UpdatedEvaluationState { derivation_id }
-        | SuccessfulEvalWrite::PreservedBuildState { derivation_id, .. } => derivation_id,
+        | SuccessfulEvalWrite::PreservedBuildState { derivation_id, .. }
+        | SuccessfulEvalWrite::LegacyPathConflict { derivation_id } => derivation_id,
     };
     sqlx::query("UPDATE derivations SET store_path=$1,status_id=10 WHERE id=$2")
         .bind(&store_path)
@@ -1520,7 +1521,8 @@ async fn assessment_fixture_with_policy(
     let derivation_id = match write {
         SuccessfulEvalWrite::Inserted { derivation_id }
         | SuccessfulEvalWrite::UpdatedEvaluationState { derivation_id }
-        | SuccessfulEvalWrite::PreservedBuildState { derivation_id, .. } => derivation_id,
+        | SuccessfulEvalWrite::PreservedBuildState { derivation_id, .. }
+        | SuccessfulEvalWrite::LegacyPathConflict { derivation_id } => derivation_id,
     };
     sqlx::query("UPDATE derivations SET store_path=$1,status_id=10 WHERE id=$2")
         .bind(&store_path)

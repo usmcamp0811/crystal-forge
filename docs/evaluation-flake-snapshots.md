@@ -25,6 +25,43 @@ transaction that finalizes the successful evaluation attempt. A failed
 configuration stores only a safe failed lifecycle and diagnostic. The server
 does not serialize the NixOS `config` tree.
 
+Migration `0248_immutable_evaluation_artifacts.sql` separates immutable attempt
+artifacts from the mutable current selector for each exact commit and
+configuration. Each success or failure inserts a new artifact and advances the
+selector atomically. A retained generation points to the exact successful
+artifact and derivation that produced it. A later success or failure does not
+rewrite that retained artifact.
+
+Pre-0248 retained metadata remains queryable after upgrade. Migration validates
+the complete copied artifact and marks valid content readable. The mutable
+legacy schema cannot prove exact deployment/store lineage, so migration marks
+these rows unverified. This flag does not affect Config validity or comparison;
+it makes the generation ineligible for rollback only.
+
+When a deployment request binds its full commit and exact derivation target, it
+also captures the current successful evaluation artifact. Generation retention
+uses this captured identity. It does not consult the mutable selector when the
+agent reports the generation later. Reciprocal retention considers only
+observations timestamped at or after the bound deployment was issued. Commit
+rollback uses the resolved commit's artifact. Generation rollback carries the
+retained artifact into the new
+deployment instead of selecting the current attempt for the commit. If the
+deployment, derivation, store path,
+configuration, and artifact lineage cannot be matched exactly, retention fails
+closed and the generation is not advertised as rollback-eligible.
+Migration marks pre-0248 deployments as not expecting an artifact binding.
+Only deployments created after migration participate in reciprocal binding.
+Unavailable artifacts, including snapshots over the content limit, advance the
+current selector but do not bind deployments or create generation retention.
+Pending and succeeded deployments can create retention. An expired deployment
+can also create retention until 24 hours after its terminal completion. The row
+remains `expired`; a delayed successful activation creates a correlated
+`cf_deployment_succeeded` event instead of rewriting terminal status. Failed and
+superseded deployments cannot create retention or successful-activation
+correlation. The server selects the newest same-path deployment issued no later
+than the observation before it checks eligibility. It does not skip a newer
+failed or superseded request to attach the observation to older work.
+
 Migration `0247_authoritative_snapshot_metrics.sql` performs the historical
 host-delta backfill. In normal operation,
 the application persists the complete configuration corpus with deferred
@@ -109,6 +146,20 @@ Snapshot rows store only option paths and digest references, so identical
 content can be shared across option paths, hosts, and revisions. Flake output
 payloads use the same content-addressed pattern at revision scope.
 
+Production option persistence uses parameterized set-oriented batches of at
+most 500 rows for content and references. It does not issue two SQL statements
+for each option. Digest conflicts update no content and fail the transaction;
+the selector advances only after every batch succeeds. Snapshot writers, both
+deployment-creation paths, generation retention, and artifact/content reclamation
+use one transaction advisory lock. Transactions acquire this advisory lock
+before POA&M, system, or deployment row locks. Heartbeat/state ingestion uses
+the same order. Therefore deployment creation either
+binds an already-published Available artifact or commits first and lets snapshot
+finalization bind the exact deployment. If state ingestion commits before
+deployment creation, deployment binding reciprocally retains the existing
+generation observation. Rollback leaves the old selector and all prior artifacts
+unchanged.
+
 The current hard bounds are:
 
 - 256 KiB for one encoded option payload. An over-limit value becomes an
@@ -124,9 +175,23 @@ The current hard bounds are:
   `over_depth` failed value. This guard bounds cyclic or recursively generated
   attribute sets; it does not silently truncate the ordinary option count.
 
-Foreign keys prevent deletion of content that a snapshot references. Server
-startup and the 15-minute maintenance loop delete unreferenced option and flake
-content in batches of 1,000 rows until no orphan remains.
+Foreign keys and immutability triggers prevent mutation or direct removal of
+artifact content and references. Server startup and the 15-minute maintenance
+loop first releases at most 100 terminal deployment rows that have a snapshot or
+derivation binding and whose completion is at least 24 hours old. This interval
+lets delayed agent state ingestion retain
+the deployed artifact. Active deployment work and retained generation rows are
+never released by this step. The loop then removes at most 100 artifacts that
+are neither current, retained, nor bound to a deployment and deletes unreferenced
+option and flake content in batches of 1,000 rows.
+Each pass reports binding, artifact, and content-row progress. The maintenance
+loop stops only when all four counts are zero, so more than 100 orphan artifacts
+drain in successive bounded transactions. The maintenance transaction uses the
+same advisory lock as writers. After a terminal deployment's 24-hour ingestion
+window, maintenance releases both its snapshot and exact derivation bindings.
+It then removes archived derivations and commits in bounded pages only when no
+retained generation, live deployment artifact, system target, or durable request
+reservation still references them.
 
 ## Retention
 
@@ -135,19 +200,61 @@ commit, store path, and snapshot identity. Restrictive foreign keys keep that
 snapshot, derivation, and commit while the generation reference exists. Nix
 store garbage collection does not affect the database snapshot.
 
+Generation rollback accepts a retained generation UUID or system-local
+generation number and resolves the exact derivation and store path on the
+server. Composite authorization remains constrained to that derivation even if
+another commit or duplicate derivation has the same store path. A supplied
+legacy store path can only narrow that exact retained lookup. A path by itself, a
+foreign system's retained UUID, a failed artifact, or mismatched derivation
+lineage does not authorize rollback. Post-migration deployment rows persist the
+exact requested derivation ID when the server resolves one. Rollback deployment
+creation carries the retained derivation ID unchanged. Ordinary path-only or
+legacy deployments can leave this field null, but such a row cannot create
+verified generation retention. When multiple same-path deployments exist, an
+observation uses the newest deployment issued no later than the observation.
+The generation-list response exposes the retained UUID and `rollback_eligible`.
+Clients MUST offer rollback only when eligibility is true. `store_path` remains
+optional in the rollback request and does not replace retained identity.
+
 Flake timeline snapshots remain attached to their commit records. A branch
 rewrite does not reinterpret an old full SHA as a new revision. Rewrite
 acceptance archives every old-lineage commit before it removes unretained
 history. Restrictive snapshot or generation references can preserve a commit,
 but the archived commit is not available through active-revision APIs.
 Derivations referenced by retained generations also remain available. A flake
-source reset archives commits required by retained generations and removes them
-from active revision APIs. Generation reads use the retained identity directly,
-so the archived snapshot remains queryable without exposing the old revision as
-part of the replacement source. Other commit snapshots follow commit timeline
-retention.
+source reset archives commits required by retained generations, exact
+deployment-bound derivations, or deployment-bound artifacts and preserves their
+derivations. It also archives commits referenced by durable explicit request
+reservations and by all deployment rows, including pre-0248 and path-only rows
+with no exact artifact or derivation binding. Bounded maintenance later releases
+terminal deployment identities after the 24-hour ingestion window. A
+derivation-only binding remains authoritative when the evaluation artifact is unavailable.
+Source reset removes those
+commits from active revision APIs. Generation reads use the retained
+identity directly, so the archived snapshot remains queryable without exposing
+the old revision as part of the replacement source. Source reset is serialized
+with snapshot publication, deployment binding, retention, and reclamation. The
+global advisory-lock order is snapshot writer, per-flake sync, then attention.
+After the final deployment binding releases, bounded maintenance removes an
+otherwise unreferenced archived derivation and commit. A terminal deployment's
+commit identity remains protected for the same 24-hour ingestion window. A
+durable explicit request reservation protects immutable request intent without a
+time limit. Source reset and history rewrite archive every deployment-referenced
+commit first. Only bounded maintenance releases an eligible terminal identity;
+an `ON DELETE` action never decides eligibility. Other commit snapshots follow
+commit timeline retention.
 
 Missing, corrupt, or schema-incompatible content is reported as unavailable.
+Migration and successful snapshot finalization recursively validate every
+persisted safe-value and provenance variant before setting the artifact's
+immutable integrity marker. Option references and content cannot change after
+certification. Each Config read checks this marker in the same read-only
+`REPEATABLE READ` transaction that selects authoritative first-parent or nearest
+preceding usable-generation comparison identity and reads the bounded page.
+Scalar variants accept only JSON string, number, Boolean, or null values. Arrays
+and objects tagged as scalar are malformed. Malformed content outside the requested page therefore prevents certification
+and cannot produce a partially available response. Read cost and response size
+remain bounded independently of the complete option corpus.
 The server MUST NOT silently re-evaluate during a read to reconstruct it.
 
 ## Safe-Value and Redaction Policy
@@ -257,7 +364,18 @@ The endpoint contract and bounds are listed in the
 Option search, filter, counts, comparison, and pagination are server-side.
 Option pages clamp `limit` to 1-100, `offset` to 0-100,000, and search to 256
 characters. Counts are revision-global; `total` reflects the active search and
-filter.
+filter. Evaluated-options, module-source, and summary responses return the same
+opaque token for the selected artifact, selected retained identity, exact
+comparison artifact, and comparison retained identity. A positive option or
+module-source offset requires the page-one token. Summary requests can supply
+the token to bind independently loaded Config cards to the same artifact.
+Replaced current artifacts return HTTP 409 `snapshot_changed` without rows or
+summary data. When a request supplies a token, a failed, unavailable, or absent
+replacement also returns `snapshot_changed` before lifecycle or no-selection
+data. A generation-mode options or summary response exposes
+`baseline_generation` when comparison is available. Integrity, counts, totals,
+rows, baseline, provenance, and summary state are read in read-only
+`REPEATABLE READ` transactions.
 
 Flake output pages apply one clamped 1-100 `limit` and 0-100,000 `offset` to
 each top-level collection and reconciliation page. Clients merge continuation

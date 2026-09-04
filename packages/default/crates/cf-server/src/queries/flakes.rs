@@ -497,7 +497,16 @@ pub async fn delete_flake_by_id(pool: &PgPool, flake_id: i32) -> Result<u64> {
 /// also the reactivation path for soft-deleted flakes, and must be able to
 /// find and update those rows.
 ///
-/// All errors are propagated via `?`.  Returns the updated `Flake` row.
+/// The transaction acquires the snapshot-writer lock before the per-flake sync
+/// lock and the attention lock. Callers that already hold the per-flake sync
+/// lock MUST hold the snapshot-writer lock first.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot acquire a lock, purge the old source
+/// lineage, or persist the replacement source identity.
+///
+/// Returns the updated `Flake` row.
 pub async fn reset_flake_source(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     flake_id: i32,
@@ -507,6 +516,13 @@ pub async fn reset_flake_source(
     build_scope: &str,
 ) -> Result<Flake> {
     use crate::queries::commits::SYNC_LOCK_BASE;
+
+    // CONCURRENCY: The global order is snapshot writer, per-flake sync, then
+    // attention. Deployment binding/release and source-history preservation
+    // therefore cannot commit from incompatible views of the same lineage.
+    crate::queries::evaluation_snapshots::lock_snapshot_writer_tx(tx)
+        .await
+        .context("Failed to acquire snapshot-writer lock for source reset")?;
 
     // 0. Acquire the per-flake advisory lock that serializes source reset
     //    with sync_flake_recorded's publication transaction.  This prevents
@@ -614,18 +630,31 @@ pub async fn reset_flake_source(
     .context("Failed to resolve build/eval attention occurrences during source reset")?;
 
     // RETENTION: Source replacement must remain operational when old commits
-    // back retained generations. Delete only derivations that no retained
-    // generation identifies authoritatively.
+    // back retained generations or deployment-bound derivations or artifacts.
+    // Delete only derivations that none of these durable identities requires.
     sqlx::query(
         r#"
         DELETE FROM derivations d
         USING commits c
         WHERE d.commit_id = c.id
           AND c.flake_id = $1
-          AND NOT EXISTS (
-              SELECT 1 FROM evaluation_generation_snapshots retained
-              WHERE retained.derivation_id = d.id
-          )
+           AND NOT EXISTS (
+               SELECT 1 FROM evaluation_generation_snapshots retained
+               WHERE retained.derivation_id = d.id
+           )
+           AND NOT EXISTS (
+               SELECT 1 FROM pending_system_deployments pending
+               WHERE pending.requested_derivation_id = d.id
+           )
+           AND NOT EXISTS (
+               SELECT 1
+               FROM pending_system_deployments pending
+               JOIN evaluation_snapshots snapshot
+                 ON snapshot.id = pending.evaluation_snapshot_id
+                AND snapshot.commit_id = pending.requested_commit_id
+               WHERE snapshot.commit_id = d.commit_id
+                 AND snapshot.configuration_name = d.derivation_name
+           )
         "#,
     )
     .bind(flake_id)
@@ -633,14 +662,36 @@ pub async fn reset_flake_source(
     .await
     .context("Failed to clear derivations during source reset")?;
 
-    // RETENTION: Mark retained history as belonging to the replaced source
-    // before the flake row receives its new source identity. Generation reads
-    // join retained IDs directly, while active revision APIs reject this flag.
+    // RETENTION: Mark generation-, deployment-, or reservation-bound history
+    // as belonging to the replaced source before the flake row receives its
+    // new source identity. Source mutation never asks an ON DELETE action to
+    // decide whether a deployment identity can be released. The bounded
+    // maintenance path owns that decision, including for legacy and path-only
+    // rows without exact artifact or derivation bindings. Explicit request
+    // reservations remain durable without a time limit. Active revision APIs
+    // reject this flag.
     sqlx::query(
         "UPDATE commits c SET source_archived = true WHERE c.flake_id = $1
-         AND EXISTS (
-             SELECT 1 FROM evaluation_generation_snapshots retained
-             WHERE retained.commit_id = c.id
+         AND (
+              EXISTS (
+                  SELECT 1 FROM evaluation_generation_snapshots retained
+                  WHERE retained.commit_id = c.id
+               ) OR EXISTS (
+                   SELECT 1
+                   FROM pending_system_deployments pending
+                   WHERE pending.requested_commit_id = c.id
+               ) OR EXISTS (
+                 SELECT 1
+                 FROM pending_system_deployments pending
+                 JOIN evaluation_snapshots snapshot
+                   ON snapshot.id = pending.evaluation_snapshot_id
+                  AND snapshot.commit_id = pending.requested_commit_id
+                  WHERE snapshot.commit_id = c.id
+             ) OR EXISTS (
+                 SELECT 1
+                 FROM deployment_request_reservations reservation
+                 WHERE reservation.requested_commit_id = c.id
+             )
          )",
     )
     .bind(flake_id)
@@ -652,9 +703,24 @@ pub async fn reset_flake_source(
     // as revisions of the new source.
     sqlx::query(
         "DELETE FROM commits c WHERE c.flake_id = $1
-         AND NOT EXISTS (
-             SELECT 1 FROM evaluation_generation_snapshots retained
-             WHERE retained.commit_id = c.id
+          AND NOT EXISTS (
+              SELECT 1 FROM evaluation_generation_snapshots retained
+              WHERE retained.commit_id = c.id
+           ) AND NOT EXISTS (
+               SELECT 1
+               FROM pending_system_deployments pending
+               WHERE pending.requested_commit_id = c.id
+           ) AND NOT EXISTS (
+             SELECT 1
+             FROM pending_system_deployments pending
+             JOIN evaluation_snapshots snapshot
+               ON snapshot.id = pending.evaluation_snapshot_id
+              AND snapshot.commit_id = pending.requested_commit_id
+              WHERE snapshot.commit_id = c.id
+         ) AND NOT EXISTS (
+             SELECT 1
+             FROM deployment_request_reservations reservation
+             WHERE reservation.requested_commit_id = c.id
          )",
     )
     .bind(flake_id)
@@ -719,9 +785,11 @@ pub async fn reset_flake_source(
     Ok(flake)
 }
 
-/// Mutate an existing flake's identity/metadata under the per-flake advisory
-/// lock, re-reading the CURRENT row inside the lock before deciding what to
-/// write. This is the single linearization point for both the create and
+/// Mutates an existing flake's identity or metadata under ordered advisory locks.
+///
+/// The function acquires the snapshot-writer lock before the per-flake lock and
+/// re-reads the current row inside the locks before it decides what to write.
+/// This is the single linearization point for both the create and
 /// update HTTP handlers: any write that could touch `repo_url` or `branch`
 /// must go through this function (or `create_or_mutate_flake` below) so a
 /// concurrent identity change is never silently clobbered or silently
@@ -736,6 +804,11 @@ pub async fn reset_flake_source(
 /// the requested identity, the source is reset via `reset_flake_source`
 /// (purges history, clears the snapshot, invalidates in-flight syncs).
 /// Otherwise only non-source metadata (`name`, `build_scope`) is updated.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot acquire a lock, read the current
+/// identity, reset the source, update metadata, or commit the transaction.
 pub async fn mutate_flake_locked(
     pool: &PgPool,
     flake_id: i32,
@@ -750,6 +823,10 @@ pub async fn mutate_flake_locked(
         .begin()
         .await
         .context("Failed to begin flake mutation tx")?;
+
+    crate::queries::evaluation_snapshots::lock_snapshot_writer_tx(&mut tx)
+        .await
+        .context("Failed to acquire snapshot-writer lock for flake mutation")?;
 
     sqlx::query("SELECT pg_advisory_xact_lock($1)")
         .bind(SYNC_LOCK_BASE + i64::from(flake_id))
@@ -828,6 +905,10 @@ async fn mutate_conflicting_flake_locked(
         .begin()
         .await
         .context("Failed to begin flake mutation tx")?;
+
+    crate::queries::evaluation_snapshots::lock_snapshot_writer_tx(&mut tx)
+        .await
+        .context("Failed to acquire snapshot-writer lock for flake mutation")?;
 
     sqlx::query("SELECT pg_advisory_xact_lock($1)")
         .bind(SYNC_LOCK_BASE + i64::from(flake_id))
@@ -1066,9 +1147,9 @@ pub async fn accept_history_rewrite_reset(pool: &PgPool, flake_id: i32) -> Resul
     .await
     .context("Failed to resolve build/eval attention occurrences during rewrite acceptance")?;
 
-    // RETENTION: A retained generation owns its exact derivation. Preserve that
-    // row during rewrite acceptance so the restrictive generation foreign key
-    // does not abort recovery and the generation remains attributable.
+    // RETENTION: A retained generation or deployment request owns its exact
+    // derivation. Preserve that row during rewrite acceptance so restrictive
+    // foreign keys do not abort recovery and each request remains attributable.
     sqlx::query(
         r#"
         DELETE FROM derivations d
@@ -1078,6 +1159,10 @@ pub async fn accept_history_rewrite_reset(pool: &PgPool, flake_id: i32) -> Resul
           AND NOT EXISTS (
               SELECT 1 FROM evaluation_generation_snapshots retained
               WHERE retained.derivation_id = d.id
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM pending_system_deployments pending
+              WHERE pending.requested_derivation_id = d.id
           )
         "#,
     )
@@ -1109,6 +1194,14 @@ pub async fn accept_history_rewrite_reset(pool: &PgPool, flake_id: i32) -> Resul
               SELECT 1 FROM flake_output_snapshots snapshot
               WHERE snapshot.commit_id = c.id
           )
+           AND NOT EXISTS (
+               SELECT 1 FROM pending_system_deployments pending
+               WHERE pending.requested_commit_id = c.id
+           )
+           AND NOT EXISTS (
+               SELECT 1 FROM deployment_request_reservations reservation
+               WHERE reservation.requested_commit_id = c.id
+           )
         "#,
     )
     .bind(flake_id)

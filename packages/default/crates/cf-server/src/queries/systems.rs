@@ -1,4 +1,5 @@
 use crate::models::systems::System;
+use crate::queries::evaluation_snapshots::lock_snapshot_writer_tx;
 use crate::queries::system_events::set_pending_deployment_target_tx;
 use anyhow::{Context, Result};
 use chrono::Duration as ChronoDuration;
@@ -1043,8 +1044,10 @@ pub async fn update_system_desired_target_with_identity(
 
 /// Atomically queues deployment work after revalidating the persisted policy.
 ///
-/// Planning state is revalidated under the system-row lock. Policy conversion
-/// is deliberately separate so a deployment failure cannot roll it back.
+/// Planning state is revalidated under the system-row lock. The transaction
+/// acquires the snapshot-writer lock before that row lock so deployment creation
+/// cannot race snapshot finalization. Policy conversion is deliberately separate
+/// so a deployment failure cannot roll it back.
 ///
 /// # Errors
 ///
@@ -1061,6 +1064,9 @@ pub async fn queue_manual_deployment_atomic(
     expected_policy: &str,
 ) -> Result<DeploymentQueueOutcome> {
     let mut tx = pool.begin().await?;
+    // CONCURRENCY: The global order is snapshot-writer lock, then system row.
+    // Finalization holds the same first lock while publishing and binding.
+    lock_snapshot_writer_tx(&mut tx).await?;
     let policy = sqlx::query_scalar::<_, String>(
         "SELECT deployment_policy FROM systems WHERE id = $1 FOR UPDATE",
     )
@@ -1181,15 +1187,55 @@ pub async fn queue_manual_deployment_atomic(
     .execute(&mut *tx)
     .await?;
     sqlx::query(
-        "UPDATE pending_system_deployments
-         SET requested_commit_id = $2, request_identity = $3, request_action = $4
-         WHERE id = $1 AND requested_commit_id IS NULL AND request_identity IS NULL",
+        "UPDATE pending_system_deployments pending
+         SET requested_commit_id = $2, request_identity = $3, request_action = $4,
+              requested_derivation_id = (
+                  SELECT derivation.id
+                  FROM systems system
+                  JOIN derivations derivation
+                    ON derivation.commit_id = $2
+                   AND derivation.derivation_type = 'nixos'
+                   AND derivation.derivation_name = COALESCE(
+                       NULLIF(btrim(system.system_configuration_name), ''), system.hostname
+                   )
+                  WHERE system.id = pending.system_id
+                    AND COALESCE(derivation.store_path, derivation.expected_store_path) = pending.target_store_path
+                  ORDER BY derivation.id DESC
+                  LIMIT 1
+              ),
+              evaluation_snapshot_id = (
+                 SELECT selection.current_snapshot_id
+                 FROM systems system
+                 JOIN derivations derivation
+                   ON derivation.commit_id = $2
+                  AND derivation.derivation_type = 'nixos'
+                  AND derivation.derivation_name = COALESCE(
+                      NULLIF(btrim(system.system_configuration_name), ''), system.hostname
+                  )
+                 JOIN evaluation_snapshot_selections selection
+                   ON selection.commit_id = derivation.commit_id
+                  AND selection.configuration_name = derivation.derivation_name
+                  JOIN evaluation_snapshots artifact
+                    ON artifact.id = selection.current_snapshot_id
+                   AND artifact.lifecycle = 'available'
+                   AND artifact.integrity_version = 1
+                 WHERE system.id = pending.system_id
+                   AND COALESCE(derivation.store_path, derivation.expected_store_path) = pending.target_store_path
+                 LIMIT 1
+             )
+         WHERE pending.id = $1
+           AND pending.requested_commit_id IS NULL AND pending.request_identity IS NULL",
     )
     .bind(deployment_id)
     .bind(requested_commit_id)
     .bind(request_identity)
     .bind(request_action)
     .execute(&mut *tx)
+    .await?;
+    crate::queries::evaluation_snapshots::retain_bound_deployment_observations_tx(
+        &mut tx,
+        deployment_id,
+    )
     .await?;
     sqlx::query(
         "UPDATE deployment_request_reservations
@@ -1218,8 +1264,11 @@ async fn set_resolved_system_deployment_target_with_source(
 ) -> Result<DeploymentQueueOutcome> {
     let mut tx = pool.begin().await?;
 
-    // CONCURRENCY: The row lock serializes retries before the pending-row
-    // existence check because the schema has no partial unique constraint.
+    // CONCURRENCY: Acquire the snapshot-writer lock before the system row. This
+    // matches finalization and prevents both transactions from observing the
+    // reciprocal artifact/deployment row as absent. The row lock then serializes
+    // retries because the schema has no partial unique constraint.
+    lock_snapshot_writer_tx(&mut tx).await?;
     sqlx::query_scalar::<_, Uuid>("SELECT id FROM systems WHERE id = $1 FOR UPDATE")
         .bind(system_id)
         .fetch_one(&mut *tx)
@@ -1263,7 +1312,37 @@ async fn set_resolved_system_deployment_target_with_source(
     if existing_id.is_none() {
         sqlx::query(
             "UPDATE pending_system_deployments pending
-             SET requested_commit_id = commit.id, request_identity = $4
+             SET requested_commit_id = commit.id, request_identity = $4,
+                  requested_derivation_id = (
+                      SELECT derivation.id
+                      FROM derivations derivation
+                      WHERE derivation.commit_id = commit.id
+                        AND derivation.derivation_type = 'nixos'
+                        AND derivation.derivation_name = COALESCE(
+                            NULLIF(btrim(system.system_configuration_name), ''), system.hostname
+                        )
+                        AND COALESCE(derivation.store_path, derivation.expected_store_path) = pending.target_store_path
+                      ORDER BY derivation.id DESC
+                      LIMIT 1
+                  ),
+                  evaluation_snapshot_id = (
+                     SELECT selection.current_snapshot_id
+                     FROM derivations derivation
+                     JOIN evaluation_snapshot_selections selection
+                       ON selection.commit_id = derivation.commit_id
+                      AND selection.configuration_name = derivation.derivation_name
+                      JOIN evaluation_snapshots artifact
+                        ON artifact.id = selection.current_snapshot_id
+                       AND artifact.lifecycle = 'available'
+                       AND artifact.integrity_version = 1
+                     WHERE derivation.commit_id = commit.id
+                       AND derivation.derivation_type = 'nixos'
+                       AND derivation.derivation_name = COALESCE(
+                           NULLIF(btrim(system.system_configuration_name), ''), system.hostname
+                       )
+                       AND COALESCE(derivation.store_path, derivation.expected_store_path) = pending.target_store_path
+                     LIMIT 1
+                 )
              FROM systems system
              LEFT JOIN commits commit
                ON commit.flake_id = system.flake_id
@@ -1278,6 +1357,11 @@ async fn set_resolved_system_deployment_target_with_source(
         .bind(requested_commit)
         .bind(request_identity)
         .execute(&mut *tx)
+        .await?;
+        crate::queries::evaluation_snapshots::retain_bound_deployment_observations_tx(
+            &mut tx,
+            deployment_id,
+        )
         .await?;
     }
 
@@ -1530,6 +1614,86 @@ pub async fn resolve_system_deployment_target(
         .await?;
 
     Ok(store_path)
+}
+
+/// Identifies exact deployment lineage retained for one observed generation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetainedGenerationDeploymentTarget {
+    /// Exact NixOS store path observed for the generation.
+    pub store_path: String,
+    /// Immutable evaluation artifact retained for the generation.
+    pub evaluation_snapshot_id: Uuid,
+    /// Exact NixOS derivation retained for composite authorization.
+    pub derivation_id: i32,
+}
+
+/// Resolves a rollback target from one retained generation owned by the system.
+///
+/// The durable generation snapshot ID or generation number is authoritative.
+/// The request must supply a generation-artifact UUID or a system-local
+/// generation number. A legacy store path is only a narrowing predicate and
+/// never authorizes a rollback by itself.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot resolve the retained target.
+pub async fn resolve_retained_generation_deployment_target(
+    pool: &PgPool,
+    system_id: Uuid,
+    generation_snapshot_id: Option<Uuid>,
+    generation: Option<i32>,
+    legacy_store_path: Option<&str>,
+) -> Result<Option<RetainedGenerationDeploymentTarget>> {
+    let legacy_store_path = legacy_store_path
+        .map(str::trim)
+        .filter(|path| !path.is_empty());
+    if generation_snapshot_id.is_none() && generation.is_none() {
+        return Ok(None);
+    }
+
+    sqlx::query_as::<_, (String, Uuid, i32)>(
+        r#"
+        SELECT retained.source_store_path, retained.snapshot_id,
+               retained.derivation_id
+        FROM evaluation_generation_snapshots retained
+        JOIN evaluation_snapshots artifact ON artifact.id = retained.snapshot_id
+        JOIN derivations derivation
+          ON derivation.id = retained.derivation_id
+         AND derivation.commit_id = retained.commit_id
+         AND derivation.derivation_name = retained.configuration_name
+        WHERE retained.system_id = $1
+          AND ($2::uuid IS NULL OR retained.id = $2)
+          AND ($3::integer IS NULL OR retained.generation = $3)
+          AND ($4::text IS NULL OR retained.source_store_path = $4)
+          AND retained.lineage_verified
+          AND retained.source_store_path IS NOT NULL
+          AND btrim(retained.source_store_path) <> ''
+          AND artifact.lifecycle = 'available'
+          AND artifact.integrity_version = 1
+          AND derivation.derivation_type = 'nixos'
+          AND retained.source_store_path = COALESCE(
+              derivation.store_path, derivation.expected_store_path
+          )
+        ORDER BY retained.generation DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(system_id)
+    .bind(generation_snapshot_id)
+    .bind(generation)
+    .bind(legacy_store_path)
+    .fetch_optional(pool)
+    .await
+    .context("failed to resolve retained generation deployment target")
+    .map(|target| {
+        target.map(|(store_path, evaluation_snapshot_id, derivation_id)| {
+            RetainedGenerationDeploymentTarget {
+                store_path,
+                evaluation_snapshot_id,
+                derivation_id,
+            }
+        })
+    })
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]

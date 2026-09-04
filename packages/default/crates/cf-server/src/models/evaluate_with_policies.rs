@@ -1429,6 +1429,9 @@ pub enum SystemNotQueuedReason {
     /// active Crystal Forge system).  The derivation is still recorded
     /// for accounting and total-system-count accuracy.
     BuildScopeExcluded,
+    /// Another commit owns the same path while the legacy global uniqueness
+    /// constraint remains. The commit-owned evaluation row must not build.
+    LegacyDerivationPathConflict,
 }
 
 fn system_not_queued_reason(
@@ -1490,6 +1493,10 @@ pub async fn persist_evaluated_system(
     use crate::queries::derivations::{SuccessfulEvalWrite, record_successful_eval_result_in_tx};
 
     let mut tx = pool.begin().await?;
+    // CONCURRENCY: Successful evaluation persistence can take attempt, POA&M,
+    // commit, derivation, system, and deployment locks. The snapshot-writer lock
+    // is the global first lock for every evaluation finalization transaction.
+    crate::queries::evaluation_snapshots::lock_snapshot_writer_tx(&mut tx).await?;
 
     #[derive(sqlx::FromRow)]
     struct CommitState {
@@ -1586,7 +1593,8 @@ pub async fn persist_evaluated_system(
     let assessment_derivation_id = match &write {
         SuccessfulEvalWrite::Inserted { derivation_id }
         | SuccessfulEvalWrite::UpdatedEvaluationState { derivation_id }
-        | SuccessfulEvalWrite::PreservedBuildState { derivation_id, .. } => *derivation_id,
+        | SuccessfulEvalWrite::PreservedBuildState { derivation_id, .. }
+        | SuccessfulEvalWrite::LegacyPathConflict { derivation_id } => *derivation_id,
     };
     if let Some((system_id, resolved)) = resolved_policies.as_ref() {
         crate::services::composite_enforcement::persist_eval_passed_for_system_in_tx(
@@ -1623,6 +1631,13 @@ pub async fn persist_evaluated_system(
     let derivation_id = match write {
         SuccessfulEvalWrite::Inserted { derivation_id }
         | SuccessfulEvalWrite::UpdatedEvaluationState { derivation_id } => derivation_id,
+        SuccessfulEvalWrite::LegacyPathConflict { derivation_id } => {
+            tx.commit().await?;
+            return Ok(SystemPersistenceOutcome::RecordedWithoutBuild {
+                derivation_id,
+                reason: SystemNotQueuedReason::LegacyDerivationPathConflict,
+            });
+        }
         SuccessfulEvalWrite::PreservedBuildState {
             derivation_id: existing_deriv_id,
             status_id: _,
@@ -1810,6 +1825,9 @@ pub async fn activate_evaluated_system_build(
     derivation_id: i32,
 ) -> Result<SystemBuildActivationOutcome> {
     let mut tx = pool.begin().await?;
+    // CONCURRENCY: Build activation is the second successful finalization phase.
+    // Keep the global writer lock ahead of its commit and derivation locks.
+    crate::queries::evaluation_snapshots::lock_snapshot_writer_tx(&mut tx).await?;
 
     #[derive(sqlx::FromRow)]
     struct CommitState {
@@ -2359,6 +2377,9 @@ pub async fn finalize_evaluation_attempt(
     use crate::queries::derivations::record_synthetic_eval_failure_in_tx;
 
     let mut tx = pool.begin().await?;
+    // CONCURRENCY: All evaluation finalization paths acquire the snapshot writer
+    // lock before the commit, POA&M, derivation, system, or deployment rows.
+    crate::queries::evaluation_snapshots::lock_snapshot_writer_tx(&mut tx).await?;
 
     // Lock the commit row for the duration of this transaction.  This
     // serialises finalization against the cancellation API: whichever
@@ -5148,6 +5169,7 @@ mod tests {
         EvalFailureOutcome, EvalStartOutcome, cancel_commit_evaluation,
         mark_commit_evaluation_failed, mark_commit_evaluation_started,
     };
+    use crate::queries::evaluation_snapshots::{SNAPSHOT_WRITER_LOCK_KEY, lock_snapshot_writer_tx};
     use sqlx::PgPool;
     use std::collections::BTreeMap;
     use std::process::Stdio;
@@ -6093,6 +6115,68 @@ mod tests {
             assigned_entry.get("name").and_then(|v| v.as_str()),
             Some("failme")
         );
+
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn successful_system_persistence_waits_for_snapshot_writer_lock() {
+        let pool = test_pool().await;
+        cleanup_throwaway_flakes(&pool).await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+        let attempt = start_eval(&pool, commit_id).await;
+
+        let mut blocker = pool.begin().await.expect("blocker should begin");
+        lock_snapshot_writer_tx(&mut blocker)
+            .await
+            .expect("blocker should acquire snapshot-writer lock");
+
+        let finalize_pool = pool.clone();
+        let finalize = tokio::spawn(async move {
+            let system = successful_system("writer-lock-host");
+            let check = passing_policy_check("writer-lock-host");
+            persist_evaluated_system(&finalize_pool, commit_id, attempt, &system, &check, &[]).await
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM pg_locks \
+                     WHERE locktype = 'advisory' AND classid::bigint = 0 \
+                       AND objid::bigint = $1 AND NOT granted)",
+                )
+                .bind(SNAPSHOT_WRITER_LOCK_KEY)
+                .fetch_one(&pool)
+                .await
+                .expect("snapshot-writer wait state should load");
+                if waiting {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("production success persistence should wait on the first lock");
+        assert_eq!(derivation_count(&pool, commit_id).await, 0);
+
+        blocker
+            .commit()
+            .await
+            .expect("blocker should release snapshot-writer lock");
+        let outcome = finalize
+            .await
+            .expect("success persistence task should complete")
+            .expect("success persistence should commit");
+        assert!(matches!(
+            outcome,
+            SystemPersistenceOutcome::NeedsBuildPreparation { .. }
+        ));
+        assert_eq!(derivation_count(&pool, commit_id).await, 1);
 
         let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
             .bind(flake_id)
