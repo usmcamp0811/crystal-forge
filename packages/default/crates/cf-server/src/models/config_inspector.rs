@@ -214,8 +214,8 @@ struct ProvenancePayload {
     target_lib_version: Option<String>,
     #[serde(rename = "targetModuleSystemPath")]
     target_module_system_path: Option<String>,
-    #[serde(rename = "definitionsByOption", default)]
-    definitions_by_option: Vec<RawDefinitionsForOptionPayload>,
+    #[serde(rename = "definitionsByOption")]
+    definitions_by_option: Option<Vec<RawDefinitionsForOptionPayload>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -576,6 +576,7 @@ fn reconcile_provenance(payload: ProvenancePayload, index: &IndexPayload) -> Ins
                 matches!(
                     *reason,
                     "module_type_payload_unavailable"
+                        | "helper_capability_unavailable"
                         | "capability_self_test_failed"
                         | "graph_replay_mismatch"
                         | "adapter_evaluation_failed"
@@ -586,15 +587,19 @@ fn reconcile_provenance(payload: ProvenancePayload, index: &IndexPayload) -> Ins
         return unavailable_provenance(reason_code, None);
     }
 
+    let Some(definitions_by_option_payload) = payload.definitions_by_option else {
+        return unavailable_provenance("malformed_payload", None);
+    };
+
     let index_paths = index
         .options
         .iter()
         .map(|entry| (entry.key.as_str(), entry.path.as_slice()))
         .collect::<HashMap<_, _>>();
     let mut seen_options = HashSet::new();
-    let mut definitions_by_option = Vec::with_capacity(payload.definitions_by_option.len());
+    let mut definitions_by_option = Vec::with_capacity(definitions_by_option_payload.len());
 
-    for option in payload.definitions_by_option {
+    for option in definitions_by_option_payload {
         if !seen_options.insert(option.option_key.clone())
             || option_key(&option.path) != option.option_key
             || index_paths
@@ -636,6 +641,16 @@ fn reconcile_provenance(payload: ProvenancePayload, index: &IndexPayload) -> Ins
                 status: definition.status,
                 surviving_merge_order: definition.surviving_merge_order,
             });
+        }
+        if !(0..definitions.len() as u64).all(|ordinal| ordinals.contains(&ordinal)) {
+            return unavailable_provenance("provenance_integrity_failure", None);
+        }
+        let surviving_count = definitions
+            .iter()
+            .filter(|definition| definition.status == RawDefinitionStatus::ActiveSurviving)
+            .count();
+        if !(0..surviving_count as u64).all(|order| merge_orders.contains(&order)) {
+            return unavailable_provenance("provenance_integrity_failure", None);
         }
         definitions_by_option.push(RawDefinitionsForOption {
             option_key: option.option_key,
@@ -1112,6 +1127,26 @@ mod tests {
         })
     }
 
+    fn output_with_provenance(path: &[&str], key: &str, provenance: Value) -> String {
+        [
+            result("__crystalForgeConfigIndex", index(key, path)),
+            result(&format!("meta_{key}"), metadata(key, path)),
+            result(
+                &format!("value_{key}"),
+                json!({
+                    "kind": "value",
+                    "key": key,
+                    "value": { "kind": "scalar", "value": true },
+                }),
+            ),
+            result(PROVENANCE_ATTRIBUTE, provenance),
+        ]
+        .iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+    }
+
     #[test]
     fn supported_provenance_preserves_discarded_and_surviving_definitions() {
         let path = ["crystalForgeProbe", "target"];
@@ -1198,6 +1233,110 @@ mod tests {
             result.provenance,
             InspectionProvenance::Unavailable { ref reason_code, .. }
                 if reason_code == "adapter_failed"
+        ));
+    }
+
+    #[test]
+    fn supported_provenance_requires_explicit_definition_list() {
+        let path = ["healthy", "option"];
+        let key = hash(&path);
+        let mut missing = supported_provenance(&path, &key);
+        missing
+            .as_object_mut()
+            .expect("provenance fixture is an object")
+            .remove("definitionsByOption");
+        let result =
+            reconcile_inspector_output(output_with_provenance(&path, &key, missing).as_bytes())
+                .expect("core inspection remains available");
+        assert!(matches!(
+            result.provenance,
+            InspectionProvenance::Unavailable { ref reason_code, .. }
+                if reason_code == "malformed_payload"
+        ));
+
+        let mut empty = supported_provenance(&path, &key);
+        empty["definitionsByOption"] = json!([]);
+        let result =
+            reconcile_inspector_output(output_with_provenance(&path, &key, empty).as_bytes())
+                .expect("an explicit empty definition list is valid");
+        assert!(matches!(
+            result.provenance,
+            InspectionProvenance::Available {
+                definitions_by_option,
+                ..
+            } if definitions_by_option.is_empty()
+        ));
+    }
+
+    #[test]
+    fn unsupported_provenance_preserves_helper_capability_reason() {
+        let path = ["healthy", "option"];
+        let key = hash(&path);
+        let payload = json!({
+            "adapterVersion": EXPECTED_PROVENANCE_ADAPTER_VERSION,
+            "supported": false,
+            "reasonCode": "helper_capability_unavailable",
+        });
+        let result =
+            reconcile_inspector_output(output_with_provenance(&path, &key, payload).as_bytes())
+                .expect("unsupported provenance does not hide core inspection");
+        assert!(matches!(
+            result.provenance,
+            InspectionProvenance::Unavailable { ref reason_code, .. }
+                if reason_code == "helper_capability_unavailable"
+        ));
+    }
+
+    #[test]
+    fn definition_ordinals_must_be_a_zero_based_permutation() {
+        let path = ["crystalForgeProbe", "target"];
+        let key = hash(&path);
+        for ordinals in [[1, 2], [0, 2], [0, 0]] {
+            let mut payload = supported_provenance(&path, &key);
+            payload["definitionsByOption"][0]["definitions"][0]["ordinal"] = json!(ordinals[0]);
+            payload["definitionsByOption"][0]["definitions"][1]["ordinal"] = json!(ordinals[1]);
+            let result =
+                reconcile_inspector_output(output_with_provenance(&path, &key, payload).as_bytes())
+                    .expect("core inspection remains available");
+            assert!(matches!(
+                result.provenance,
+                InspectionProvenance::Unavailable { ref reason_code, .. }
+                    if reason_code == "provenance_integrity_failure"
+            ));
+        }
+    }
+
+    #[test]
+    fn surviving_merge_orders_must_be_a_zero_based_permutation() {
+        let path = ["crystalForgeProbe", "target"];
+        let key = hash(&path);
+        for orders in [[1, 2], [0, 2], [0, 0]] {
+            let mut payload = supported_provenance(&path, &key);
+            payload["definitionsByOption"][0]["definitions"][0]["status"] =
+                json!("active_surviving");
+            payload["definitionsByOption"][0]["definitions"][0]["surviving_merge_order"] =
+                json!(orders[0]);
+            payload["definitionsByOption"][0]["definitions"][1]["surviving_merge_order"] =
+                json!(orders[1]);
+            let result =
+                reconcile_inspector_output(output_with_provenance(&path, &key, payload).as_bytes())
+                    .expect("core inspection remains available");
+            assert!(matches!(
+                result.provenance,
+                InspectionProvenance::Unavailable { ref reason_code, .. }
+                    if reason_code == "provenance_integrity_failure"
+            ));
+        }
+
+        let mut discarded = supported_provenance(&path, &key);
+        discarded["definitionsByOption"][0]["definitions"][0]["surviving_merge_order"] = json!(1);
+        let result =
+            reconcile_inspector_output(output_with_provenance(&path, &key, discarded).as_bytes())
+                .expect("core inspection remains available");
+        assert!(matches!(
+            result.provenance,
+            InspectionProvenance::Unavailable { ref reason_code, .. }
+                if reason_code == "provenance_integrity_failure"
         ));
     }
 

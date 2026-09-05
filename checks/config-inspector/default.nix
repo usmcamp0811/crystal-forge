@@ -23,6 +23,18 @@ let
            duplicate = { ... }: {
              config.crystalForgeProbe.duplicate = "once";
            };
+           priorityOrdinary = { ... }: {
+             config.crystalForgeProbe.priorityProbe = "ordinary";
+           };
+           priorityDefault = { lib, ... }: {
+             config.crystalForgeProbe.priorityProbe = lib.mkDefault "default";
+           };
+           priorityOverride = { lib, ... }: {
+             config.crystalForgeProbe.priorityProbe = lib.mkOverride 500 "override";
+           };
+           priorityForce = { lib, ... }: {
+             config.crystalForgeProbe.priorityProbe = lib.mkForce "force";
+           };
            disabled = {
              key = "disabled-module";
              config.crystalForgeProbe.disabled = "must-not-survive";
@@ -33,7 +45,10 @@ let
              imports = [ disabled ];
            };
            module = { lib, pkgs, ... }: {
-             imports = [ child duplicate duplicate ];
+                imports = [
+                  child duplicate duplicate
+                  priorityOrdinary priorityDefault priorityOverride priorityForce
+                ];
              options.crystalForgeProbe = {
               healthyBefore = lib.mkOption {
                 type = lib.types.str;
@@ -72,10 +87,14 @@ let
                  type = lib.types.listOf lib.types.str;
                  default = [ ];
                };
-               duplicate = lib.mkOption {
-                 type = lib.types.str;
-                 default = "unset";
-               };
+                duplicate = lib.mkOption {
+                  type = lib.types.str;
+                  default = "unset";
+                };
+                priorityProbe = lib.mkOption {
+                  type = lib.types.str;
+                  default = "unset";
+                };
                disabled = lib.mkOption {
                  type = lib.types.str;
                  default = "unset";
@@ -132,6 +151,29 @@ let
     in inspector // { __crystalForgeProvenance = provenance; }
   '';
 
+  unsupportedCapabilityExpression = ''
+    let
+      nixpkgs = import ${pkgs.path} { };
+      fakeLib = nixpkgs.lib // {
+        modules = builtins.removeAttrs nixpkgs.lib.modules [ "pushDownProperties" ];
+      };
+      configuration = {
+        pkgs = nixpkgs // { lib = fakeLib; };
+        config.system.build.toplevel = nixpkgs.runCommand "crystal-forge-unsupported-provenance" { } "touch $out";
+        options = { };
+        graph = [ ];
+        _module.args.moduleType.functor.payload = {
+          modules = [ ];
+          specialArgs = { };
+          class = "nixos";
+        };
+      };
+    in ((${provenanceSource}) {
+      flake = { inputs = { }; };
+      inherit configuration;
+    }).meta.crystalForgeProvenance
+  '';
+
   subsetExpression = ''
     let
       jobs = ${expression};
@@ -165,6 +207,7 @@ let
   '';
   subsetFile = pkgs.writeText "crystal-forge-config-inspector-subset.nix" subsetExpression;
   fullCountFile = pkgs.writeText "crystal-forge-config-inspector-count.nix" fullCountExpression;
+  unsupportedCapabilityFile = pkgs.writeText "crystal-forge-config-inspector-unsupported.nix" unsupportedCapabilityExpression;
 in
 pkgs.runCommand "crystal-forge-config-inspector-check" {
   nativeBuildInputs = [ pkgs.jq pkgs.nix pkgs.nix-eval-jobs ];
@@ -175,6 +218,9 @@ pkgs.runCommand "crystal-forge-config-inspector-check" {
   nix_args=(--impure --extra-experimental-features 'nix-command flakes')
   count=$(nix eval "''${nix_args[@]}" --raw --expr "import ${fullCountFile}")
   test "$count" -gt 30000
+  unsupported=$(nix eval "''${nix_args[@]}" --json --expr "import ${unsupportedCapabilityFile}")
+  test "$(printf '%s' "$unsupported" | jq -r '.supported')" = false
+  test "$(printf '%s' "$unsupported" | jq -r '.reasonCode')" = helper_capability_unavailable
   before_hash=$(nix eval "''${nix_args[@]}" --raw --expr \
     'builtins.hashString "sha256" (builtins.toJSON [ "crystalForgeProbe" "healthyBefore" ])')
   poison_hash=$(nix eval "''${nix_args[@]}" --raw --expr \
@@ -225,9 +271,9 @@ pkgs.runCommand "crystal-forge-config-inspector-check" {
      'select(.attr == $attr) | .error == null and .extraValue.kind == "value"' \
      result.jsonl >/dev/null
 
-   jq -e '
-     select(.attr == "__crystalForgeProvenance")
-     | .error == null
+    jq -e '
+      select(.attr == "__crystalForgeProvenance")
+      | .error == null
      and .extraValue.adapterVersion == 1
      and .extraValue.supported == true
      and (.extraValue.targetLibVersion | type == "string")
@@ -282,11 +328,17 @@ pkgs.runCommand "crystal-forge-config-inspector-check" {
      and map(.surviving_merge_order) == [1, 0]
    ' result.jsonl >/dev/null
 
-   jq -e '
-     select(.attr == "__crystalForgeProvenance")
-     | [.extraValue.definitionsByOption[] | select(.path == ["crystalForgeProbe", "merged"]) | .definitions[]]
-     | length == 2 and all(.status == "active_surviving")
-   ' result.jsonl >/dev/null
+    jq -e '
+      select(.attr == "__crystalForgeProvenance")
+      | [.extraValue.definitionsByOption[] | select(.path == ["crystalForgeProbe", "merged"]) | .definitions[]]
+      | length == 2 and all(.status == "active_surviving")
+    ' result.jsonl >/dev/null
+
+    jq -e '
+      select(.attr == "__crystalForgeProvenance")
+      | [.extraValue.definitionsByOption[] | select(.path == ["crystalForgeProbe", "priorityProbe"]) | .definitions[]]
+      | map(.priority) | sort == [50, 100, 500, 1000]
+    ' result.jsonl >/dev/null
 
    ! grep -E 'unrelated configuration forced|namespace-change-me' result.stderr
   touch "$out"
