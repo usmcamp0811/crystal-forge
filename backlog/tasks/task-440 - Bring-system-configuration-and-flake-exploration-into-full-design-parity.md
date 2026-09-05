@@ -1,7 +1,7 @@
 ---
 id: TASK-440
 title: Bring system configuration and flake exploration into full design parity
-status: Review
+status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
@@ -211,6 +211,12 @@ author: Codex
 created: 2026-09-05 21:14
 ---
 Implemented and pushed final integrity remediation in commit `5f331e30` on `TASK-440-system-config-flake-parity`. Stage 1 and Stage 2 now bind to the resolved flake `outPath`, caller-owned target key, and shared carrier derivation. Stage-2 index failures return explicit sanitized `stage2_index_failed` results. Added focused mismatch and redaction tests. Verification passed: `nix build .#checks.x86_64-linux.config-inspector --no-link`; `nix develop --command cargo test --manifest-path packages/default/Cargo.toml -p cf-server models::config_inspector --lib` (30 passed); `cargo fmt --manifest-path packages/default/crates/cf-server/Cargo.toml --check`; `git diff --check`.
+---
+
+author: Codex
+created: 2026-09-05 21:14
+---
+The pushed commit covers the bounded config-inspector integrity remediation only; the broader TASK-440 acceptance criteria remain incomplete. Restored task status to In Progress. The MR remains open for this remediation review.
 ---
 <!-- COMMENTS:END -->
 
