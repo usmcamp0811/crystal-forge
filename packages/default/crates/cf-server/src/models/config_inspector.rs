@@ -25,6 +25,18 @@ const META_PREFIX: &str = "meta_";
 const VALUE_PREFIX: &str = "value_";
 pub(crate) const EXPECTED_PROVENANCE_ADAPTER_VERSION: u64 = 1;
 
+/// Computes the internal key that binds both inspection stages to one target.
+pub(crate) fn inspection_target_key(flake_ref: &str, configuration_name: &str) -> String {
+    let encoded = serde_json::to_vec(&[flake_ref, configuration_name])
+        .expect("JSON encoding of string inspection target components cannot fail");
+    format_digest(&encoded)
+}
+
+fn format_digest(input: &[u8]) -> String {
+    let digest = Sha256::digest(input);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 /// Builds the Nix expression for one exact configuration revision.
 ///
 /// The expression selects `flake.nixosConfigurations[configuration_name]` and
@@ -35,13 +47,15 @@ pub(crate) fn build_inspector_expression(flake_ref: &str, configuration_name: &s
     let provenance_source = include_str!("config_provenance.nix");
     let provenance_lib_source = include_str!("config_provenance_lib.nix");
     let value_encoding_source = include_str!("config_value_encoding.nix");
+    let target_key = inspection_target_key(flake_ref, configuration_name);
     format!(
-        "let\n  flakeRef = {flake_ref};\n  configurationName = {configuration_name};\n  flake = builtins.getFlake flakeRef;\n  configuration = builtins.getAttr configurationName flake.nixosConfigurations;\n  valueEncoder = ({value_encoding_source});\n  inspector = ({source}) {{ inherit flakeRef configurationName; encodeValue = valueEncoder configuration.pkgs.lib; }};\n  provenance = ({provenance_source}) {{ inherit flake configuration; provenanceLib = ({provenance_lib_source}); }};\nin\n  inspector // {{ {provenance_attribute} = provenance; }}",
+        "let\n  flakeRef = {flake_ref};\n  configurationName = {configuration_name};\n  targetKey = {target_key};\n  flake = builtins.getFlake flakeRef;\n  configuration = builtins.getAttr configurationName flake.nixosConfigurations;\n  valueEncoder = ({value_encoding_source});\n  inspector = ({source}) {{ inherit flakeRef configurationName targetKey; encodeValue = valueEncoder configuration.pkgs.lib; }};\n  provenance = ({provenance_source}) {{ inherit flake configuration; provenanceLib = ({provenance_lib_source}); }};\nin\n  inspector // {{ {provenance_attribute} = provenance; }}",
         source = source,
         provenance_source = provenance_source,
         provenance_lib_source = provenance_lib_source,
         value_encoding_source = value_encoding_source,
         provenance_attribute = PROVENANCE_ATTRIBUTE,
+        target_key = nix_string_pub(&target_key),
         flake_ref = nix_string_pub(flake_ref),
         configuration_name = nix_string_pub(configuration_name),
     )
@@ -60,11 +74,13 @@ pub(crate) fn build_definition_values_expression(
     let source = include_str!("config_definition_values.nix");
     let provenance_lib_source = include_str!("config_provenance_lib.nix");
     let value_encoding_source = include_str!("config_value_encoding.nix");
+    let target_key = inspection_target_key(flake_ref, configuration_name);
     format!(
-        "let\n  flakeRef = {flake_ref};\n  configurationName = {configuration_name};\n  flake = builtins.getFlake flakeRef;\n  configuration = builtins.getAttr configurationName flake.nixosConfigurations;\n  valueEncoder = ({value_encoding_source});\n  jobs = ({source}) {{ inherit flake configuration; provenanceLib = ({provenance_lib_source}); encodeValue = valueEncoder configuration.pkgs.lib; }};\nin\njobs",
+        "let\n  flakeRef = {flake_ref};\n  configurationName = {configuration_name};\n  targetKey = {target_key};\n  flake = builtins.getFlake flakeRef;\n  configuration = builtins.getAttr configurationName flake.nixosConfigurations;\n  valueEncoder = ({value_encoding_source});\n  jobs = ({source}) {{ inherit flake configuration targetKey; provenanceLib = ({provenance_lib_source}); encodeValue = valueEncoder configuration.pkgs.lib; }};\nin\njobs",
         source = source,
         provenance_lib_source = provenance_lib_source,
         value_encoding_source = value_encoding_source,
+        target_key = nix_string_pub(&target_key),
         flake_ref = nix_string_pub(flake_ref),
         configuration_name = nix_string_pub(configuration_name),
     )
@@ -73,6 +89,10 @@ pub(crate) fn build_definition_values_expression(
 /// Contains the truthful result of one targeted inspection.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ConfigInspectorResult {
+    /// Internal key binding both stages to the requested flake/configuration pair.
+    pub target_key: String,
+    /// Validated carrier derivation for the complete Stage-1 inspection.
+    pub carrier_drv_path: String,
     /// Options in the deterministic order supplied by the Nix index.
     pub options: Vec<InspectedOption>,
     /// Raw-definition provenance, or an explicit unavailable state.
@@ -273,6 +293,8 @@ struct RawDefinitionPayload {
 #[derive(Debug, Clone, Deserialize)]
 struct IndexPayload {
     kind: String,
+    #[serde(rename = "targetKey")]
+    target_key: String,
     options: Vec<IndexEntry>,
     #[serde(default)]
     origins: Vec<Origin>,
@@ -458,6 +480,10 @@ pub(crate) fn reconcile_inspector_output(output: &[u8]) -> Result<ConfigInspecto
     }
 
     let index = index.ok_or_else(|| anyhow::anyhow!("Config inspector index result is missing"))?;
+    validate_key(&index.target_key)?;
+    let target_key = index.target_key.clone();
+    let carrier_drv_path = carrier_drv_path
+        .ok_or_else(|| anyhow::anyhow!("Config inspector carrier drvPath is missing"))?;
     let origins = index.origins.clone();
     let provenance = match provenance
         .ok_or_else(|| anyhow::anyhow!("Config inspector provenance result is missing"))?
@@ -496,6 +522,8 @@ pub(crate) fn reconcile_inspector_output(output: &[u8]) -> Result<ConfigInspecto
     }
 
     Ok(ConfigInspectorResult {
+        target_key,
+        carrier_drv_path,
         options,
         provenance,
     })
@@ -602,22 +630,10 @@ fn reconcile_provenance(payload: ProvenancePayload, index: &IndexPayload) -> Ins
         return unavailable_provenance("unsupported_adapter_version", None);
     }
     if !payload.supported {
-        let reason_code = payload
-            .reason_code
-            .as_deref()
-            .filter(|reason| {
-                matches!(
-                    *reason,
-                    "module_type_payload_unavailable"
-                        | "helper_capability_unavailable"
-                        | "capability_self_test_failed"
-                        | "graph_replay_mismatch"
-                        | "adapter_evaluation_failed"
-                        | "provenance_integrity_failure"
-                )
-            })
-            .unwrap_or("adapter_unsupported");
-        return unavailable_provenance(reason_code, None);
+        return unavailable_provenance(
+            sanitize_adapter_reason(payload.reason_code.as_deref()),
+            None,
+        );
     }
 
     let Some(provenance_digest) = payload.provenance_digest.filter(|digest| is_digest(digest))
@@ -706,6 +722,19 @@ fn reconcile_provenance(payload: ProvenancePayload, index: &IndexPayload) -> Ins
     }
 }
 
+fn sanitize_adapter_reason(reason: Option<&str>) -> &'static str {
+    match reason {
+        Some("module_type_payload_unavailable") => "module_type_payload_unavailable",
+        Some("helper_capability_unavailable") => "helper_capability_unavailable",
+        Some("capability_self_test_failed") => "capability_self_test_failed",
+        Some("graph_replay_mismatch") => "graph_replay_mismatch",
+        Some("adapter_evaluation_failed") => "adapter_evaluation_failed",
+        Some("provenance_integrity_failure") => "provenance_integrity_failure",
+        Some("adapter_unsupported") => "adapter_unsupported",
+        _ => "adapter_unsupported",
+    }
+}
+
 fn validate_key(key: &str) -> Result<()> {
     if key.len() != 64 || !key.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         bail!("invalid Config inspector option hash {key}");
@@ -758,9 +787,10 @@ struct DefinitionIdentity {
 #[derive(Debug, Clone, Deserialize)]
 struct DefinitionIndexPayload {
     kind: String,
+    #[serde(rename = "targetKey")]
+    target_key: String,
     #[serde(rename = "adapterVersion")]
     adapter_version: u64,
-    #[serde(default = "default_supported")]
     supported: bool,
     #[serde(rename = "reasonCode")]
     reason_code: Option<String>,
@@ -769,10 +799,6 @@ struct DefinitionIndexPayload {
     #[serde(rename = "definitionCount")]
     definition_count: usize,
     definitions: Vec<DefinitionIdentityPayload>,
-}
-
-fn default_supported() -> bool {
-    true
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -799,8 +825,9 @@ struct DefinitionValuePayload {
 /// enrichment instead of fabricating a value.
 pub(crate) fn reconcile_definition_values_output(
     output: &[u8],
-    expected_provenance: &InspectionProvenance,
+    expected_stage1: &ConfigInspectorResult,
 ) -> Result<DefinitionValueEnrichment> {
+    let expected_provenance = &expected_stage1.provenance;
     let InspectionProvenance::Available {
         adapter_version: expected_adapter_version,
         provenance_digest: expected_digest,
@@ -906,14 +933,27 @@ pub(crate) fn reconcile_definition_values_output(
     if index.kind != "definition_index" {
         bail!("invalid Stage-2 definition index kind");
     }
+    if !is_digest(&index.target_key) {
+        bail!("Stage-2 definition index target key is malformed");
+    }
+    if index.target_key != expected_stage1.target_key {
+        return Ok(DefinitionValueEnrichment::Unavailable {
+            reason_code: "inspection_target_mismatch".to_string(),
+            diagnostic: None,
+        });
+    }
+    if carrier_drv_path.as_deref() != Some(expected_stage1.carrier_drv_path.as_str()) {
+        return Ok(DefinitionValueEnrichment::Unavailable {
+            reason_code: "carrier_derivation_mismatch".to_string(),
+            diagnostic: None,
+        });
+    }
     if !index.supported {
         if !index.definitions.is_empty() || !values.is_empty() || index.definition_count != 0 {
             bail!("unsupported Stage-2 index contains definition jobs");
         }
         return Ok(DefinitionValueEnrichment::Unavailable {
-            reason_code: index
-                .reason_code
-                .unwrap_or_else(|| "adapter_unsupported".to_string()),
+            reason_code: sanitize_adapter_reason(index.reason_code.as_deref()).to_string(),
             diagnostic: None,
         });
     }
@@ -939,17 +979,20 @@ pub(crate) fn reconcile_definition_values_output(
         bail!("Stage-2 definition count does not match index length");
     }
 
-    let indexed = index
-        .definitions
-        .into_iter()
-        .map(|definition| {
-            validate_key(&definition.option_key)?;
-            Ok(DefinitionIdentity {
-                option_key: definition.option_key,
-                ordinal: definition.ordinal,
-            })
-        })
-        .collect::<Result<std::collections::BTreeSet<_>>>()?;
+    let mut indexed = std::collections::BTreeSet::new();
+    for definition in index.definitions {
+        validate_key(&definition.option_key)?;
+        let identity = DefinitionIdentity {
+            option_key: definition.option_key,
+            ordinal: definition.ordinal,
+        };
+        if !indexed.insert(identity) {
+            bail!("duplicate Stage-2 definition identity");
+        }
+    }
+    if index.definition_count != indexed.len() {
+        bail!("Stage-2 definition count does not match unique identities");
+    }
     if indexed != expected {
         return Ok(DefinitionValueEnrichment::Unavailable {
             reason_code: "provenance_identity_mismatch".to_string(),
@@ -1040,6 +1083,10 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    const TEST_TARGET_KEY: &str =
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const TEST_DIGEST: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
     fn hash(path: &[&str]) -> String {
         option_key(
             &path
@@ -1078,6 +1125,7 @@ mod tests {
     fn index(key: &str, path: &[&str]) -> Value {
         json!({
             "kind": "index",
+            "targetKey": TEST_TARGET_KEY,
             "options": [{
                 "key": key,
                 "path": path,
@@ -1295,6 +1343,7 @@ mod tests {
                 "__crystalForgeConfigIndex",
                 json!({
                     "kind": "index",
+                    "targetKey": TEST_TARGET_KEY,
                     "options": [
                         { "key": first_key, "path": first },
                         { "key": second_key, "path": second },
@@ -1336,6 +1385,7 @@ mod tests {
                 "__crystalForgeConfigIndex",
                 json!({
                     "kind": "index",
+                    "targetKey": TEST_TARGET_KEY,
                     "options": [
                         { "key": dotted_key, "path": dotted },
                         { "key": dotted_component_key, "path": dotted_component },
@@ -1447,7 +1497,7 @@ mod tests {
             "supported": true,
             "targetLibVersion": "26.05pre-git",
             "targetModuleSystemPath": "/nix/store/nixpkgs",
-            "provenanceDigest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "provenanceDigest": TEST_DIGEST,
             "definitionsByOption": [{
                 "option_key": key,
                 "path": path,
@@ -1495,6 +1545,49 @@ mod tests {
         .map(Value::to_string)
         .collect::<Vec<_>>()
         .join("\n")
+    }
+
+    fn stage1_context() -> ConfigInspectorResult {
+        let path = ["crystalForgeProbe", "target"];
+        let key = hash(&path);
+        let output = output_with_provenance(&path, &key, supported_provenance(&path, &key));
+        reconcile_inspector_output(output.as_bytes()).expect("Stage-1 fixture is valid")
+    }
+
+    fn stage2_output(target_key: &str, drv_path: &str, identities: &[(&str, u64)]) -> String {
+        let index = json!({
+            "kind": "definition_index",
+            "targetKey": target_key,
+            "adapterVersion": EXPECTED_PROVENANCE_ADAPTER_VERSION,
+            "supported": true,
+            "provenanceDigest": TEST_DIGEST,
+            "definitionCount": identities.len(),
+            "definitions": identities.iter().map(|(option_key, ordinal)| json!({
+                "option_key": option_key,
+                "ordinal": ordinal,
+            })).collect::<Vec<_>>(),
+        });
+        let mut lines = vec![result("__crystalForgeDefinitionIndex", index)];
+        for (option_key, ordinal) in identities {
+            let attr = format!("def_value_{option_key}_{ordinal}");
+            lines.push(result(
+                &attr,
+                json!({
+                    "kind": "definition_value",
+                    "option_key": option_key,
+                    "ordinal": ordinal,
+                    "value": { "kind": "scalar", "value": true },
+                }),
+            ));
+        }
+        lines
+            .into_iter()
+            .map(|mut line| {
+                line["drvPath"] = json!(drv_path);
+                line.to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     #[test]
@@ -1778,5 +1871,175 @@ mod tests {
             InspectionProvenance::Unavailable { ref reason_code, .. }
                 if reason_code == "capability_self_test_failed"
         ));
+    }
+
+    #[test]
+    fn inspection_target_key_is_structured_and_configuration_scoped() {
+        assert_ne!(
+            inspection_target_key("path:/flake", "one"),
+            inspection_target_key("path:/flake", "two")
+        );
+        assert_ne!(
+            inspection_target_key("path:/flake-a", "one"),
+            inspection_target_key("path:/flake-b", "one")
+        );
+        let values = [
+            "dots.name",
+            "slashes/name",
+            "quotes\"name",
+            "white space",
+            "${builtins.abort \"no\"}",
+        ];
+        let keys = values
+            .iter()
+            .map(|value| inspection_target_key(value, value))
+            .collect::<HashSet<_>>();
+        assert_eq!(keys.len(), values.len());
+        assert!(keys.iter().all(|key| is_digest(key)));
+    }
+
+    #[test]
+    fn stage2_rejects_target_mismatch_before_correlating_values() {
+        let expected = stage1_context();
+        let key = hash(&["crystalForgeProbe", "target"]);
+        let output = stage2_output(
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "/nix/store/shared.drv",
+            &[(&key, 0), (&key, 1)],
+        );
+        assert!(matches!(
+            reconcile_definition_values_output(output.as_bytes(), &expected).unwrap(),
+            DefinitionValueEnrichment::Unavailable { reason_code, .. }
+                if reason_code == "inspection_target_mismatch"
+        ));
+    }
+
+    #[test]
+    fn stage2_rejects_carrier_mismatch_even_when_stage2_is_self_consistent() {
+        let expected = stage1_context();
+        let key = hash(&["crystalForgeProbe", "target"]);
+        let output = stage2_output(
+            TEST_TARGET_KEY,
+            "/nix/store/different.drv",
+            &[(&key, 0), (&key, 1)],
+        );
+        assert!(matches!(
+            reconcile_definition_values_output(output.as_bytes(), &expected).unwrap(),
+            DefinitionValueEnrichment::Unavailable { reason_code, .. }
+                if reason_code == "carrier_derivation_mismatch"
+        ));
+    }
+
+    #[test]
+    fn stage2_accepts_exact_target_carrier_digest_and_identities() {
+        let expected = stage1_context();
+        let key = hash(&["crystalForgeProbe", "target"]);
+        let output = stage2_output(
+            TEST_TARGET_KEY,
+            "/nix/store/shared.drv",
+            &[(&key, 0), (&key, 1)],
+        );
+        assert!(matches!(
+            reconcile_definition_values_output(output.as_bytes(), &expected).unwrap(),
+            DefinitionValueEnrichment::Available { values, .. } if values.len() == 2
+        ));
+    }
+
+    #[test]
+    fn duplicate_stage2_index_identities_are_integrity_errors() {
+        let expected = stage1_context();
+        let key = hash(&["crystalForgeProbe", "target"]);
+        let mut lines = stage2_output(
+            TEST_TARGET_KEY,
+            "/nix/store/shared.drv",
+            &[(&key, 0), (&key, 1)],
+        )
+        .lines()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+        let mut index = serde_json::from_str::<Value>(&lines[0]).expect("Stage-2 index is JSON");
+        index["extraValue"]["definitions"][1]["ordinal"] = json!(0);
+        lines[0] = index.to_string();
+        assert!(
+            reconcile_definition_values_output(lines.join("\n").as_bytes(), &expected).is_err()
+        );
+    }
+
+    #[test]
+    fn stage2_supported_field_is_required() {
+        let expected = stage1_context();
+        let key = hash(&["crystalForgeProbe", "target"]);
+        let mut line = serde_json::from_str::<Value>(
+            &stage2_output(
+                TEST_TARGET_KEY,
+                "/nix/store/shared.drv",
+                &[(&key, 0), (&key, 1)],
+            )
+            .lines()
+            .next()
+            .expect("Stage-2 index exists"),
+        )
+        .expect("Stage-2 index is JSON");
+        line["extraValue"]
+            .as_object_mut()
+            .unwrap()
+            .remove("supported");
+        let output = line.to_string();
+        assert!(reconcile_definition_values_output(output.as_bytes(), &expected).is_err());
+    }
+
+    #[test]
+    fn unsupported_reason_codes_are_sanitized() {
+        let path = ["healthy", "option"];
+        let key = hash(&path);
+        let stage1 = stage1_context();
+        for reason in [
+            Some("helper_capability_unavailable"),
+            Some("not-evaluator-text"),
+            None,
+        ] {
+            let mut payload = json!({
+                "adapterVersion": EXPECTED_PROVENANCE_ADAPTER_VERSION,
+                "supported": false,
+            });
+            if let Some(reason) = reason {
+                payload["reasonCode"] = json!(reason);
+            }
+            let stage1_result =
+                reconcile_inspector_output(output_with_provenance(&path, &key, payload).as_bytes())
+                    .expect("unsupported provenance preserves Stage 1");
+            let expected = if reason == Some("helper_capability_unavailable") {
+                "helper_capability_unavailable"
+            } else {
+                "adapter_unsupported"
+            };
+            assert!(matches!(
+                stage1_result.provenance,
+                InspectionProvenance::Unavailable { ref reason_code, .. }
+                    if reason_code == expected
+            ));
+
+            let mut index = json!({
+                "kind": "definition_index",
+                "targetKey": TEST_TARGET_KEY,
+                "adapterVersion": EXPECTED_PROVENANCE_ADAPTER_VERSION,
+                "supported": false,
+                "definitionCount": 0,
+                "definitions": [],
+            });
+            if let Some(reason) = reason {
+                index["reasonCode"] = json!(reason);
+            }
+            let mut line = result("__crystalForgeDefinitionIndex", index);
+            line["drvPath"] = json!("/nix/store/shared.drv");
+            let enrichment =
+                reconcile_definition_values_output(line.to_string().as_bytes(), &stage1)
+                    .expect("unsupported Stage-2 index preserves Stage 1");
+            assert!(matches!(
+                enrichment,
+                DefinitionValueEnrichment::Unavailable { reason_code, .. }
+                    if reason_code == expected
+            ));
+        }
     }
 }

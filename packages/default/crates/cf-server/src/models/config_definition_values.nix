@@ -1,4 +1,4 @@
-{ flake, configuration, provenanceLib, encodeValue }:
+{ flake, configuration, targetKey, provenanceLib, encodeValue }:
 
 let
   lib = configuration.pkgs.lib;
@@ -36,6 +36,7 @@ let
 
   unsupportedIndex = {
     kind = "definition_index";
+    targetKey = targetKey;
     adapterVersion = provenance.provenance.adapterVersion or adapterVersion;
     supported = false;
     reasonCode = provenance.provenance.reasonCode or "adapter_unsupported";
@@ -45,6 +46,7 @@ let
 
   supportedIndex = {
     kind = "definition_index";
+    targetKey = targetKey;
     adapterVersion = provenance.provenance.adapterVersion;
     supported = true;
     provenanceDigest = provenance.provenance.provenanceDigest;
@@ -77,10 +79,15 @@ let
          }) (numberDefinitions option.definitions)
     ) provenance.rawDefinitionsByOption)
   else [ ];
+
+  valueJobNames = map (job: job.name) valueJobs;
 in
-builtins.listToAttrs ([
-  {
-    name = "__crystalForgeDefinitionIndex";
-    value = withPayload indexPayload;
-  }
-] ++ valueJobs)
+if builtins.length valueJobNames != builtins.length (lib.unique valueJobNames) then
+  throw "Config definition-value job identity collision"
+else
+  builtins.listToAttrs ([
+    {
+      name = "__crystalForgeDefinitionIndex";
+      value = withPayload indexPayload;
+    }
+  ] ++ valueJobs)

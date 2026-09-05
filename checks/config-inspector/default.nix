@@ -149,9 +149,10 @@ let
       configurationName = "good";
        flake = builtins.getFlake flakeRef;
        configuration = builtins.getAttr configurationName flake.nixosConfigurations;
+       targetKey = builtins.hashString "sha256" (builtins.toJSON [ flakeRef configurationName ]);
        valueEncoder = (${valueEncodingSource});
        inspector = (${inspectorSource}) {
-         inherit flakeRef configurationName;
+         inherit flakeRef configurationName targetKey;
          encodeValue = valueEncoder configuration.pkgs.lib;
        };
        provenance = (${provenanceSource}) {
@@ -191,9 +192,10 @@ let
       configurationName = "good";
       flake = builtins.getFlake flakeRef;
       configuration = builtins.getAttr configurationName flake.nixosConfigurations;
+      targetKey = builtins.hashString "sha256" (builtins.toJSON [ flakeRef configurationName ]);
       valueEncoder = (${valueEncodingSource});
     in (${definitionValuesSource}) {
-      inherit flake configuration;
+      inherit flake configuration targetKey;
       provenanceLib = (${provenanceLibSource});
       encodeValue = valueEncoder configuration.pkgs.lib;
     }
@@ -247,6 +249,8 @@ pkgs.runCommand "crystal-forge-config-inspector-check" {
   unsupported=$(nix eval "''${nix_args[@]}" --json --expr "import ${unsupportedCapabilityFile}")
   test "$(printf '%s' "$unsupported" | jq -r '.supported')" = false
   test "$(printf '%s' "$unsupported" | jq -r '.reasonCode')" = helper_capability_unavailable
+  target_key=$(nix eval "''${nix_args[@]}" --raw --expr \
+    'builtins.hashString "sha256" (builtins.toJSON [ "path:${fixture}" "good" ])')
 
   nix-eval-jobs \
     --expr "import ${definitionValuesFile}" \
@@ -269,6 +273,7 @@ pkgs.runCommand "crystal-forge-config-inspector-check" {
     and .extraValue.definitionCount == 3067
     and ([.extraValue.definitions[]] | length == 3067)
   ' definition-values.jsonl >/dev/null
+  test "$(jq -r 'select(.attr == "__crystalForgeDefinitionIndex") | .extraValue.targetKey' definition-values.jsonl)" = "$target_key"
   test "$(jq -c 'select(.attr | startswith("def_value_"))' definition-values.jsonl | wc -l)" -eq 3067
   test "$(jq -c 'select(.error != null)' definition-values.jsonl | wc -l)" -ge 2
   jq -e 'select(.attr | startswith("def_value_")) | .attr' definition-values.jsonl \
@@ -293,6 +298,10 @@ pkgs.runCommand "crystal-forge-config-inspector-check" {
    test "$(wc -l < result.jsonl)" -eq 8
   test "$(jq -c 'select(.error != null)' result.jsonl | wc -l)" -ge 1
   test "$(jq -c 'select(.drvPath != null) | .drvPath' result.jsonl | sort -u | wc -l)" -eq 1
+  test "$(jq -r 'select(.attr == "__crystalForgeConfigIndex") | .extraValue.targetKey' result.jsonl)" = "$target_key"
+  stage1_drv_path=$(jq -r 'select(.attr == "__crystalForgeConfigIndex") | .drvPath' result.jsonl)
+  stage2_drv_path=$(jq -r 'select(.attr == "__crystalForgeDefinitionIndex") | .drvPath' definition-values.jsonl)
+  test "$stage1_drv_path" = "$stage2_drv_path"
 
   jq -e '
     select(.attr == "__crystalForgeConfigIndex")
