@@ -35,7 +35,7 @@ let
     in {
       inherit name;
       out_path = input.outPath or sourceInfo.outPath or null;
-      revision = sourceInfo.rev or null;
+      revision = input.rev or sourceInfo.rev or null;
     };
 
   origins = [ (origin "self" flake) ]
