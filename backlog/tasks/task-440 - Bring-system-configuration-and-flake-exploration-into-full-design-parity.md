@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-05 19:17'
+updated_date: '2026-09-05 19:30'
 labels:
   - design-parity
   - web-ui
@@ -199,6 +199,12 @@ author: openai-agent
 created: 2026-09-05 19:17
 ---
 Integrity remediation started from exact local/remote HEAD 950c31fb055c251243c003d89df7b700094729dd. Worktree was clean before changes. Scope is limited to Stage-1/Stage-2 identity and wire-integrity binding; no semantic-model, persistence, HTTP, UI, deployment, or Flake Explorer work.
+---
+
+author: openai-agent
+created: 2026-09-05 19:30
+---
+Integrity remediation completed and pushed as commit c98fba26 on TASK-440-system-config-flake-parity. Stage-1/Stage-2 inspection target binding, carrier derivation binding, duplicate index identity rejection, explicit supported-field enforcement, and adapter reason sanitization are implemented. Task remains In Progress per instruction.
 ---
 <!-- COMMENTS:END -->
 
