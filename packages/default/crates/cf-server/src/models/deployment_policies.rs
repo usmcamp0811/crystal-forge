@@ -2339,7 +2339,8 @@ pub(crate) const SNAPSHOT_EXTRACTION_PRELUDE: &str = r#"
       namesAttempt = if valueType == "set"
         then builtins.tryEval (builtins.attrNames raw)
         else { success = false; value = []; };
-      limitedNames = take 100 (namesAttempt.value or []);
+      limitedNames = take 100
+        (if namesAttempt.success then namesAttempt.value else []);
       lengthAttempt = if valueType == "list"
         then builtins.tryEval (builtins.length raw)
         else { success = false; value = 0; };
@@ -2381,9 +2382,11 @@ pub(crate) const SNAPSHOT_EXTRACTION_PRELUDE: &str = r#"
             (if raw ? outPath then builtins.toString raw.outPath else null)).value or null;
         };
       } else if valueType == "set" && namesAttempt.success then {
-        kind = if builtins.length (namesAttempt.value or []) > 100
+        kind = if builtins.length
+          (if namesAttempt.success then namesAttempt.value else []) > 100
           then "opaque" else "attribute_set";
-        value = if builtins.length (namesAttempt.value or []) > 100
+        value = if builtins.length
+          (if namesAttempt.success then namesAttempt.value else []) > 100
           then { type_name = "attribute_set_over_limit"; }
           else builtins.listToAttrs (map (key: {
             name = key; value = safeValue (depth + 1) raw.${key};
@@ -2538,7 +2541,7 @@ pub(crate) const SNAPSHOT_EXTRACTION_PRELUDE: &str = r#"
       path = builtins.concatStringsSep "." item.path;
       snapshot = optionSnapshot lib inputOrigins rawModules item;
       attempted = builtins.tryEval (builtins.deepSeq snapshot snapshot);
-    in attempted.value or {
+    in if attempted.success then attempted.value else {
       inherit path;
       declared_type = "unknown";
       value = {

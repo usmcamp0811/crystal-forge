@@ -3,6 +3,7 @@ pub mod auth_identity;
 pub mod builders;
 pub mod cache_destination;
 pub mod commits;
+pub mod config_inspector;
 pub mod cve_scans;
 pub mod cves;
 pub mod deployment_policies;
