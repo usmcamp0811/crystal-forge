@@ -1,4 +1,4 @@
-{ flakeRef, configurationName, encodeValue }:
+{ flakeRef, configurationName, targetKey, encodeValue }:
 
 let
   flake = builtins.getFlake flakeRef;
@@ -78,6 +78,7 @@ let
 
   indexPayload = {
     kind = "index";
+    targetKey = targetKey;
     options = optionEntries;
     inherit origins;
   };
