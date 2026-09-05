@@ -48,15 +48,45 @@ let
     else
       { found = false; value = null; };
 
-  optionAt = path:
-    let result = getAt path configuration.options;
+  optionAt = options: path:
+    let result = getAt path options;
     in result.found && builtins.isAttrs result.value
       && (result.value._type or null) == "option";
+
+  walk = { options, module, config }:
+    let
+      walkNode = path: node:
+        if optionAt options path then
+          let result = getAt path config;
+          in if !result.found then [ ] else map (rawValue: {
+            inherit path;
+            source_path =
+              if module._file or null == null then null else toString module._file;
+            source_input = (sourceOrigin (module._file or null)).input;
+            source_revision = (sourceOrigin (module._file or null)).revision;
+            module_key = module.key or null;
+            raw_value = rawValue;
+          }) (lib.modules.dischargeProperties result.value)
+        else
+          let optionNode = getAt path options;
+          in if optionNode.found && builtins.isAttrs optionNode.value && builtins.isAttrs node then
+            builtins.concatLists (map (name:
+              let child = getAt [ name ] optionNode.value;
+              in if child.found then
+                walkNode (path ++ [ name ]) (builtins.getAttr name node)
+              else [ ]) (builtins.attrNames node))
+            else [ ];
+    in walkNode [ ] config;
 
   selfTest =
     if !helperCapabilitiesAvailable then false
     else
       let
+        selfOptions = {
+          crystalForgeProvenanceSelfTest.rawTarget = {
+            _type = "option";
+          };
+        };
         selfModules = [
           ({ lib, ... }:
             {
@@ -70,10 +100,25 @@ let
               { crystalForgeProvenanceSelfTest.order = lib.mkOrder 100 "early"; }
             ];
           }
+          {
+            _file = "raw-provenance-lower.nix";
+            key = "raw-provenance-lower";
+            config = {
+              crystalForgeProvenanceSelfTest.rawTarget =
+                lib.mkDefault (throw "raw provenance self-test forced discarded value");
+            };
+          }
+          {
+            _file = "raw-provenance-force.nix";
+            key = "raw-provenance-force";
+            config = {
+              crystalForgeProvenanceSelfTest.rawTarget = lib.mkForce "winner";
+            };
+          }
         ];
         context = ({
           inherit lib;
-          options = { };
+          options = selfOptions;
           specialArgs = payload.specialArgs;
           _class = payload.class;
           _prefix = [ ];
@@ -100,6 +145,42 @@ let
           && builtins.all (property: property ? crystalForgeProvenanceSelfTest
             && property.crystalForgeProvenanceSelfTest ? order)
             mergeContributions;
+        rawIndexResult = builtins.tryEval (buildDefinitionsByOption {
+          options = selfOptions;
+          normalizedModules = collected.modules;
+        });
+        rawTargetDefinitions =
+          if rawIndexResult.success then
+            let matches = builtins.filter
+              (entry: entry.path == [ "crystalForgeProvenanceSelfTest" "rawTarget" ])
+              rawIndexResult.value;
+            in if matches == [ ] then [ ] else (builtins.head matches).definitions
+          else [ ];
+        rawIndexWorks = rawIndexResult.success
+          && builtins.length rawTargetDefinitions == 2
+          && (map (definition: definition.ordinal) rawTargetDefinitions
+            == [ 0 1 ])
+          && (let
+            survivors = builtins.filter
+              (definition: definition.status == "active_surviving") rawTargetDefinitions;
+            discarded = builtins.filter
+              (definition: definition.status == "priority_discarded") rawTargetDefinitions;
+          in builtins.length survivors == 1
+            && builtins.length discarded == 1
+            && (builtins.head survivors).surviving_merge_order != null
+            && (builtins.head discarded).surviving_merge_order == null
+            && (builtins.head survivors).source_path == "raw-provenance-force.nix"
+            && (builtins.head discarded).source_path == "raw-provenance-lower.nix"
+            && (builtins.head survivors).module_key == "raw-provenance-force"
+            && (builtins.head discarded).module_key == "raw-provenance-lower"
+            && (builtins.head survivors).priority == priorityOf {
+              file = "raw-provenance-force.nix";
+              value = lib.mkForce "winner";
+            }
+            && (builtins.head discarded).priority == priorityOf {
+              file = "raw-provenance-lower.nix";
+              value = lib.mkDefault "discarded";
+            });
         priorityWorks = priority.highestPrio == priorityOf {
           file = "winner";
           value = lib.mkForce "winner";
@@ -113,7 +194,7 @@ let
         orderWorks = map (definition: definition.value) order == [ "early" "late" ];
       in
         normalizedFunction && pushDownWorks && falseDischarged
-          && priorityWorks && orderWorks;
+          && priorityWorks && orderWorks && rawIndexWorks;
 
   canonicalGraph = node: {
     key = node.key;
@@ -165,43 +246,18 @@ let
            then entry else best) null matches;
          in { input = selected.name; revision = selected.revision; };
 
-  walk = module: config:
-    let
-      walkNode = path: node:
-        if optionAt path then
-          let result = getAt path config;
-          in if !result.found then [ ] else map (rawValue: {
-            inherit path;
-            source_path =
-              if module._file or null == null then null else toString module._file;
-            source_input = (sourceOrigin (module._file or null)).input;
-            source_revision = (sourceOrigin (module._file or null)).revision;
-            module_key = module.key or null;
-            raw_value = rawValue;
-          }) (lib.modules.dischargeProperties result.value)
-        else
-          let optionNode = getAt path configuration.options;
-          in if optionNode.found && builtins.isAttrs optionNode.value && builtins.isAttrs node then
-            builtins.concatLists (map (name:
-              let child = getAt [ name ] optionNode.value;
-              in if child.found then
-                walkNode (path ++ [ name ]) (builtins.getAttr name node)
-              else [ ]) (builtins.attrNames node))
-           else [ ];
-    in walkNode [ ] config;
-
-  rawDefinitions = builtins.concatLists (map (module:
-    builtins.concatLists (map (config: walk module config)
-      (lib.modules.pushDownProperties module.config))
-  ) replayGraph.modules);
-
   addGrouped = grouped: definition:
     let key = builtins.hashString "sha256" (builtins.toJSON definition.path);
     in grouped // {
       "${key}" = (grouped."${key}" or [ ]) ++ [ definition ];
     };
 
-  groupedDefinitions = builtins.foldl' addGrouped { } rawDefinitions;
+  collectRawDefinitions = { options, normalizedModules }:
+    builtins.concatLists (map (module:
+      builtins.concatLists (map (config: walk {
+        inherit options module config;
+      }) (lib.modules.pushDownProperties module.config))
+    ) normalizedModules);
 
   findIndex = needle: values:
     if values == [ ] then null
@@ -249,8 +305,17 @@ let
         }) numbered;
     };
 
-  definitionsByOption = map (key: decorate key groupedDefinitions."${key}")
-    (builtins.attrNames groupedDefinitions);
+  buildDefinitionsByOption = { options, normalizedModules }:
+    let
+      rawDefinitions = collectRawDefinitions { inherit options normalizedModules; };
+      groupedDefinitions = builtins.foldl' addGrouped { } rawDefinitions;
+    in map (key: decorate key groupedDefinitions."${key}")
+      (builtins.attrNames groupedDefinitions);
+
+  definitionsByOption = buildDefinitionsByOption {
+    options = configuration.options;
+    normalizedModules = replayGraph.modules;
+  };
 
   supportedPayload = {
     adapterVersion = provenanceAdapterVersion;
