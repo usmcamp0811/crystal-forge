@@ -1,11 +1,11 @@
 ---
 id: TASK-440
 title: Bring system configuration and flake exploration into full design parity
-status: Review
+status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-05 18:56'
+updated_date: '2026-09-05 19:17'
 labels:
   - design-parity
   - web-ui
@@ -193,6 +193,12 @@ created: 2026-09-05 16:25
 Implemented and pushed commit 5b5be966 to origin/TASK-440-system-config-flake-parity. Existing MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/323
 
 Verification completed: cargo fmt --check; SQLX_OFFLINE=true cargo check --manifest-path packages/default/crates/cf-server/Cargo.toml -p cf-server --lib; nix build .#checks.x86_64-linux.config-inspector --no-link --print-build-logs; nix build .#checks.x86_64-linux.evaluator-snapshot-isolation --no-link --print-build-logs; git diff --cached --check. Cargo emitted pre-existing warnings; checks exited successfully.
+---
+
+author: openai-agent
+created: 2026-09-05 19:17
+---
+Integrity remediation started from exact local/remote HEAD 950c31fb055c251243c003d89df7b700094729dd. Worktree was clean before changes. Scope is limited to Stage-1/Stage-2 identity and wire-integrity binding; no semantic-model, persistence, HTTP, UI, deployment, or Flake Explorer work.
 ---
 <!-- COMMENTS:END -->
 
