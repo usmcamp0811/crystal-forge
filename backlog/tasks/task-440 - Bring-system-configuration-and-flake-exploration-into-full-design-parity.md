@@ -1,11 +1,11 @@
 ---
 id: TASK-440
 title: Bring system configuration and flake exploration into full design parity
-status: In Progress
+status: Review
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-05 17:45'
+updated_date: '2026-09-05 18:56'
 labels:
   - design-parity
   - web-ui
@@ -195,3 +195,9 @@ Implemented and pushed commit 5b5be966 to origin/TASK-440-system-config-flake-pa
 Verification completed: cargo fmt --check; SQLX_OFFLINE=true cargo check --manifest-path packages/default/crates/cf-server/Cargo.toml -p cf-server --lib; nix build .#checks.x86_64-linux.config-inspector --no-link --print-build-logs; nix build .#checks.x86_64-linux.evaluator-snapshot-isolation --no-link --print-build-logs; git diff --cached --check. Cargo emitted pre-existing warnings; checks exited successfully.
 ---
 <!-- COMMENTS:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Implemented and pushed isolated Stage-2 raw-definition value inspection. Added shared provenance/value encoding helpers, per-definition Nix jobs, provenance digest binding, private Rust reconciliation, and real Nix jobset assertions. Commit 950c31fb pushed to TASK-440-system-config-flake-parity; MR !323. Verification: config-inspector Nix check passed; cargo fmt --check passed; SQLX_OFFLINE=true cargo check passed inside nix develop. Direct host cargo check was not used because OpenSSL system dependencies were unavailable.
+<!-- SECTION:FINAL_SUMMARY:END -->
