@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-04 23:15'
+updated_date: '2026-09-05 01:42'
 labels:
   - design-parity
   - web-ui
@@ -293,6 +293,8 @@ Production campground commit `cb67fcae6e713a21aba85b9a5b8b9efd52f6d93f` proved t
 5. Commit and push the evaluator rollback separately for deployment. Reevaluate campground `cb67fcae6e713a21aba85b9a5b8b9efd52f6d93f` (and optionally `111575f79e329bb9ccbf509eac99847ae8523a57`). Do not design or implement a replacement exploration evaluator until deployed primary evaluation again returns drvPaths without TASK-440 snapshot errors.
 
 Primary evaluator rollback checkpoint (2026-09-04): restore the pre-TASK-440 PRIMARY boundary by evaluating only `nixosConfigurations`, each `config.system.build.toplevel`, assigned policy checks, `cfAgentEnabled`, and revision metadata. Keep Config and flake exploration out of the PRIMARY expression. Verify the exact production transport through `nix-eval-jobs --meta`, including `meta.policies`, against lazy duplicate-option and missing-namespace fixtures. Treat absent separately captured configuration and flake-output artifacts as durable `unavailable` lifecycle states without changing successful system evaluation, policy, build, or deployment outcomes. Add pure bulk/fallback classification coverage and a migration-backed finalization regression, then run focused Rust, Nix, formatting, and diff checks before creating a separate checkpoint commit.
+
+Checkpoint build correction (2026-09-04): restore the established `cfg` and `checker` local names in `primary_evaluation.nix` so the existing `bulk_package_checker_binds_full_cfg_object` source-contract regression recognizes that package policies receive the complete `cfg.config` object. Do not change evaluator behavior or touch Campground. Verify the reported exact Rust test, PRIMARY structural/parse tests, the direct real `nix-eval-jobs` isolation fixture, formatting, and diff checks; then push a focused corrective commit to MR !323.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
