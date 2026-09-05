@@ -19,6 +19,8 @@ use crate::security::snapshot_redaction::redact_evaluation_error;
 
 const INDEX_ATTRIBUTE: &str = "__crystalForgeConfigIndex";
 const PROVENANCE_ATTRIBUTE: &str = "__crystalForgeProvenance";
+const DEFINITION_INDEX_ATTRIBUTE: &str = "__crystalForgeDefinitionIndex";
+const DEFINITION_VALUE_PREFIX: &str = "def_value_";
 const META_PREFIX: &str = "meta_";
 const VALUE_PREFIX: &str = "value_";
 pub(crate) const EXPECTED_PROVENANCE_ADAPTER_VERSION: u64 = 1;
@@ -31,11 +33,38 @@ pub(crate) const EXPECTED_PROVENANCE_ADAPTER_VERSION: u64 = 1;
 pub(crate) fn build_inspector_expression(flake_ref: &str, configuration_name: &str) -> String {
     let source = include_str!("config_inspector.nix");
     let provenance_source = include_str!("config_provenance.nix");
+    let provenance_lib_source = include_str!("config_provenance_lib.nix");
+    let value_encoding_source = include_str!("config_value_encoding.nix");
     format!(
-        "let\n  flakeRef = {flake_ref};\n  configurationName = {configuration_name};\n  flake = builtins.getFlake flakeRef;\n  configuration = builtins.getAttr configurationName flake.nixosConfigurations;\n  inspector = ({source}) {{ inherit flakeRef configurationName; }};\n  provenance = ({provenance_source}) {{ inherit flake configuration; }};\nin\n  inspector // {{ {provenance_attribute} = provenance; }}",
+        "let\n  flakeRef = {flake_ref};\n  configurationName = {configuration_name};\n  flake = builtins.getFlake flakeRef;\n  configuration = builtins.getAttr configurationName flake.nixosConfigurations;\n  valueEncoder = ({value_encoding_source});\n  inspector = ({source}) {{ inherit flakeRef configurationName; encodeValue = valueEncoder configuration.pkgs.lib; }};\n  provenance = ({provenance_source}) {{ inherit flake configuration; provenanceLib = ({provenance_lib_source}); }};\nin\n  inspector // {{ {provenance_attribute} = provenance; }}",
         source = source,
         provenance_source = provenance_source,
+        provenance_lib_source = provenance_lib_source,
+        value_encoding_source = value_encoding_source,
         provenance_attribute = PROVENANCE_ATTRIBUTE,
+        flake_ref = nix_string_pub(flake_ref),
+        configuration_name = nix_string_pub(configuration_name),
+    )
+}
+
+/// Builds the separate raw-definition value job expression for one exact
+/// configuration revision.
+///
+/// The expression reuses the provenance replay and safe-value encoder but
+/// remains a separate nix-eval-jobs root. Every value job uses the selected
+/// configuration's `system.build.toplevel` as its carrier.
+pub(crate) fn build_definition_values_expression(
+    flake_ref: &str,
+    configuration_name: &str,
+) -> String {
+    let source = include_str!("config_definition_values.nix");
+    let provenance_lib_source = include_str!("config_provenance_lib.nix");
+    let value_encoding_source = include_str!("config_value_encoding.nix");
+    format!(
+        "let\n  flakeRef = {flake_ref};\n  configurationName = {configuration_name};\n  flake = builtins.getFlake flakeRef;\n  configuration = builtins.getAttr configurationName flake.nixosConfigurations;\n  valueEncoder = ({value_encoding_source});\n  jobs = ({source}) {{ inherit flake configuration; provenanceLib = ({provenance_lib_source}); encodeValue = valueEncoder configuration.pkgs.lib; }};\nin\njobs",
+        source = source,
+        provenance_lib_source = provenance_lib_source,
+        value_encoding_source = value_encoding_source,
         flake_ref = nix_string_pub(flake_ref),
         configuration_name = nix_string_pub(configuration_name),
     )
@@ -92,6 +121,8 @@ pub(crate) enum InspectionProvenance {
         target_lib_version: Option<String>,
         /// Target module-system source path, when available.
         target_module_system_path: Option<String>,
+        /// Digest of the canonical raw-definition provenance metadata.
+        provenance_digest: String,
         /// Validated raw definitions grouped by option key.
         definitions_by_option: Vec<RawDefinitionsForOption>,
     },
@@ -214,6 +245,8 @@ struct ProvenancePayload {
     target_lib_version: Option<String>,
     #[serde(rename = "targetModuleSystemPath")]
     target_module_system_path: Option<String>,
+    #[serde(rename = "provenanceDigest", default)]
+    provenance_digest: Option<String>,
     #[serde(rename = "definitionsByOption")]
     definitions_by_option: Option<Vec<RawDefinitionsForOptionPayload>>,
 }
@@ -587,6 +620,11 @@ fn reconcile_provenance(payload: ProvenancePayload, index: &IndexPayload) -> Ins
         return unavailable_provenance(reason_code, None);
     }
 
+    let Some(provenance_digest) = payload.provenance_digest.filter(|digest| is_digest(digest))
+    else {
+        return unavailable_provenance("malformed_payload", None);
+    };
+
     let Some(definitions_by_option_payload) = payload.definitions_by_option else {
         return unavailable_provenance("malformed_payload", None);
     };
@@ -663,6 +701,7 @@ fn reconcile_provenance(payload: ProvenancePayload, index: &IndexPayload) -> Ins
         adapter_version: payload.adapter_version,
         target_lib_version: payload.target_lib_version,
         target_module_system_path: payload.target_module_system_path,
+        provenance_digest,
         definitions_by_option,
     }
 }
@@ -672,6 +711,316 @@ fn validate_key(key: &str) -> Result<()> {
         bail!("invalid Config inspector option hash {key}");
     }
     Ok(())
+}
+
+fn is_digest(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// Holds the validated value results from the separate definition-value jobset.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum DefinitionValueEnrichment {
+    /// Every Stage-1 definition has one validated Stage-2 result.
+    Available {
+        /// Adapter protocol version that produced the index.
+        adapter_version: u64,
+        /// Digest binding the Stage-2 index to Stage-1 provenance.
+        provenance_digest: String,
+        /// Values in deterministic option-key/ordinal order.
+        values: Vec<DefinitionValue>,
+    },
+    /// Stage-2 could not be correlated with Stage-1 provenance.
+    Unavailable {
+        /// Stable reason for the unavailable enrichment.
+        reason_code: String,
+        /// Sanitized diagnostic, when one is available.
+        diagnostic: Option<SafeEvaluationError>,
+    },
+}
+
+/// Represents one raw definition's independently evaluated semantic value.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DefinitionValue {
+    /// Collision-resistant option identity.
+    pub option_key: String,
+    /// Definition ordinal within the option's provenance index.
+    pub ordinal: u64,
+    /// Available safe value or an isolated evaluation failure.
+    pub value: InspectionValue,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
+struct DefinitionIdentity {
+    option_key: String,
+    ordinal: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct DefinitionIndexPayload {
+    kind: String,
+    #[serde(rename = "adapterVersion")]
+    adapter_version: u64,
+    #[serde(default = "default_supported")]
+    supported: bool,
+    #[serde(rename = "reasonCode")]
+    reason_code: Option<String>,
+    #[serde(rename = "provenanceDigest")]
+    provenance_digest: Option<String>,
+    #[serde(rename = "definitionCount")]
+    definition_count: usize,
+    definitions: Vec<DefinitionIdentityPayload>,
+}
+
+fn default_supported() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct DefinitionIdentityPayload {
+    option_key: String,
+    ordinal: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct DefinitionValuePayload {
+    kind: String,
+    option_key: String,
+    ordinal: u64,
+    value: SafeOptionValue,
+}
+
+/// Reconciles the separate Stage-2 JSONL output against validated Stage-1
+/// provenance.
+///
+/// The index, digest, adapter version, exact identity set, complete result set,
+/// and shared carrier derivation are all checked before values become available.
+/// Per-definition evaluator errors remain isolated as `not_evaluated` values.
+/// Missing, duplicate, unknown, or malformed results reject the complete
+/// enrichment instead of fabricating a value.
+pub(crate) fn reconcile_definition_values_output(
+    output: &[u8],
+    expected_provenance: &InspectionProvenance,
+) -> Result<DefinitionValueEnrichment> {
+    let InspectionProvenance::Available {
+        adapter_version: expected_adapter_version,
+        provenance_digest: expected_digest,
+        definitions_by_option,
+        ..
+    } = expected_provenance
+    else {
+        return Ok(DefinitionValueEnrichment::Unavailable {
+            reason_code: "stage1_provenance_unavailable".to_string(),
+            diagnostic: None,
+        });
+    };
+
+    let expected = definitions_by_option
+        .iter()
+        .flat_map(|option| {
+            option
+                .definitions
+                .iter()
+                .map(move |definition| DefinitionIdentity {
+                    option_key: option.option_key.clone(),
+                    ordinal: definition.ordinal,
+                })
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+
+    if expected.len()
+        != definitions_by_option
+            .iter()
+            .map(|option| option.definitions.len())
+            .sum::<usize>()
+    {
+        return Ok(DefinitionValueEnrichment::Unavailable {
+            reason_code: "provenance_identity_mismatch".to_string(),
+            diagnostic: None,
+        });
+    }
+
+    let mut index: Option<DefinitionIndexPayload> = None;
+    let mut values = HashMap::<DefinitionIdentity, JobResult>::new();
+    let mut seen_attributes = HashSet::new();
+    let mut carrier_drv_path = None;
+
+    for (line_number, line) in output
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.iter().all(u8::is_ascii_whitespace))
+        .enumerate()
+    {
+        let result: JobResult = serde_json::from_slice(line).with_context(|| {
+            format!("invalid definition-value JSONL at line {}", line_number + 1)
+        })?;
+        if !seen_attributes.insert(result.attr.clone()) {
+            bail!("duplicate definition-value result for {}", result.attr);
+        }
+
+        let is_index = result.attr == DEFINITION_INDEX_ATTRIBUTE;
+        let identity = if is_index {
+            None
+        } else if result.attr.starts_with(DEFINITION_VALUE_PREFIX) {
+            Some(parse_definition_job_name(&result.attr)?)
+        } else {
+            bail!("unknown Stage-2 job attribute {}", result.attr);
+        };
+
+        if result.error.is_none() {
+            let drv_path = result.drv_path.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("successful Stage-2 result {} has no drvPath", result.attr)
+            })?;
+            if let Some(expected_drv_path) = &carrier_drv_path {
+                if expected_drv_path != drv_path {
+                    bail!("Stage-2 successful drvPath changed");
+                }
+            } else {
+                carrier_drv_path = Some(drv_path.clone());
+            }
+        }
+
+        if let Some(error) = result.error.as_deref() {
+            if is_index {
+                bail!("Stage-2 definition index failed: {error}");
+            }
+            values.insert(identity.expect("definition identity exists"), result);
+            continue;
+        }
+
+        let payload = result.extra_value.clone().ok_or_else(|| {
+            anyhow::anyhow!(
+                "successful Stage-2 result {} has no extraValue",
+                result.attr
+            )
+        })?;
+        if is_index {
+            if index.is_some() {
+                bail!("duplicate Stage-2 definition index");
+            }
+            index = Some(serde_json::from_value(payload).context("invalid Stage-2 index payload")?);
+        } else {
+            values.insert(identity.expect("definition identity exists"), result);
+        }
+    }
+
+    let index = index.ok_or_else(|| anyhow::anyhow!("Stage-2 definition index is missing"))?;
+    if index.kind != "definition_index" {
+        bail!("invalid Stage-2 definition index kind");
+    }
+    if !index.supported {
+        if !index.definitions.is_empty() || !values.is_empty() || index.definition_count != 0 {
+            bail!("unsupported Stage-2 index contains definition jobs");
+        }
+        return Ok(DefinitionValueEnrichment::Unavailable {
+            reason_code: index
+                .reason_code
+                .unwrap_or_else(|| "adapter_unsupported".to_string()),
+            diagnostic: None,
+        });
+    }
+    let Some(stage2_digest) = index.provenance_digest.as_deref() else {
+        bail!("Stage-2 definition index digest is missing");
+    };
+    if !is_digest(stage2_digest) {
+        bail!("Stage-2 definition index digest is malformed");
+    }
+    if index.adapter_version != *expected_adapter_version {
+        return Ok(DefinitionValueEnrichment::Unavailable {
+            reason_code: "provenance_adapter_version_mismatch".to_string(),
+            diagnostic: None,
+        });
+    }
+    if stage2_digest != expected_digest {
+        return Ok(DefinitionValueEnrichment::Unavailable {
+            reason_code: "provenance_digest_mismatch".to_string(),
+            diagnostic: None,
+        });
+    }
+    if index.definition_count != index.definitions.len() {
+        bail!("Stage-2 definition count does not match index length");
+    }
+
+    let indexed = index
+        .definitions
+        .into_iter()
+        .map(|definition| {
+            validate_key(&definition.option_key)?;
+            Ok(DefinitionIdentity {
+                option_key: definition.option_key,
+                ordinal: definition.ordinal,
+            })
+        })
+        .collect::<Result<std::collections::BTreeSet<_>>>()?;
+    if indexed != expected {
+        return Ok(DefinitionValueEnrichment::Unavailable {
+            reason_code: "provenance_identity_mismatch".to_string(),
+            diagnostic: None,
+        });
+    }
+    if values.keys().any(|identity| !expected.contains(identity)) {
+        bail!("unknown Stage-2 definition result");
+    }
+    if values.len() != expected.len() {
+        bail!("missing expected Stage-2 definition result");
+    }
+
+    let values = expected
+        .into_iter()
+        .map(|identity| {
+            let result = values
+                .remove(&identity)
+                .expect("validated Stage-2 identity has a result");
+            let value = if let Some(error) = result.error {
+                InspectionValue::Failed(failed_evaluation("not_evaluated", &error))
+            } else {
+                let payload: DefinitionValuePayload = serde_json::from_value(
+                    result
+                        .extra_value
+                        .expect("successful result has extraValue"),
+                )
+                .with_context(|| format!("invalid Stage-2 value payload for {}", result.attr))?;
+                if payload.kind != "definition_value"
+                    || payload.option_key != identity.option_key
+                    || payload.ordinal != identity.ordinal
+                {
+                    bail!("Stage-2 value payload does not match {}", result.attr);
+                }
+                InspectionValue::Available(payload.value)
+            };
+            Ok(DefinitionValue {
+                option_key: identity.option_key,
+                ordinal: identity.ordinal,
+                value,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(DefinitionValueEnrichment::Available {
+        adapter_version: *expected_adapter_version,
+        provenance_digest: expected_digest.clone(),
+        values,
+    })
+}
+
+fn parse_definition_job_name(attribute: &str) -> Result<DefinitionIdentity> {
+    let suffix = attribute
+        .strip_prefix(DEFINITION_VALUE_PREFIX)
+        .ok_or_else(|| anyhow::anyhow!("invalid Stage-2 definition job name"))?;
+    if suffix.len() <= 65 || suffix.as_bytes()[64] != b'_' {
+        bail!("malformed Stage-2 definition job name {attribute}");
+    }
+    let option_key = &suffix[..64];
+    validate_key(option_key)?;
+    let ordinal_text = &suffix[65..];
+    let ordinal = ordinal_text
+        .parse::<u64>()
+        .with_context(|| format!("malformed Stage-2 definition ordinal {ordinal_text}"))?;
+    if ordinal.to_string() != ordinal_text {
+        bail!("non-canonical Stage-2 definition ordinal {ordinal_text}");
+    }
+    Ok(DefinitionIdentity {
+        option_key: option_key.to_string(),
+        ordinal,
+    })
 }
 
 fn option_key(path: &[String]) -> String {
@@ -1098,6 +1447,7 @@ mod tests {
             "supported": true,
             "targetLibVersion": "26.05pre-git",
             "targetModuleSystemPath": "/nix/store/nixpkgs",
+            "provenanceDigest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
             "definitionsByOption": [{
                 "option_key": key,
                 "path": path,
