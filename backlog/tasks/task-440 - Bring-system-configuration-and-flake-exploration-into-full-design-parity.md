@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-05 13:29'
+updated_date: '2026-09-05 15:45'
 labels:
   - design-parity
   - web-ui
@@ -297,6 +297,8 @@ Primary evaluator rollback checkpoint (2026-09-04): restore the pre-TASK-440 PRI
 Checkpoint build correction (2026-09-04): restore the established `cfg` and `checker` local names in `primary_evaluation.nix` so the existing `bulk_package_checker_binds_full_cfg_object` source-contract regression recognizes that package policies receive the complete `cfg.config` object. Do not change evaluator behavior or touch Campground. Verify the reported exact Rust test, PRIMARY structural/parse tests, the direct real `nix-eval-jobs` isolation fixture, formatting, and diff checks; then push a focused corrective commit to MR !323.
 
 Bounded targeted-inspector slice (2026-09-05): replace the monolithic config_inspector.rs scaffold with a checked-in config_inspector.nix that selects only flake.nixosConfigurations[configurationName], discovers option paths without forcing values, creates one index plus metadata/value carrier jobs per hashed option, and reuses configuration.config.system.build.toplevel. Add private Rust wire/domain types and order-independent JSONL reconciliation with explicit metadata/value failures, duplicate/unknown hash rejection, and safe diagnostic redaction via existing utilities. Add a permanent checks/config-inspector real-Nix fixture using inputs.base and base.lib.nixosSystem with lazy sibling/module poison, plus representative and full jobset assertions. Preserve primary evaluator semantics and defer discarded override provenance, persistence, APIs, UI, and queueing.
+
+Bounded production slice (2026-09-05): add a dedicated version-1 config_provenance.nix adapter using the exact moduleType.functor.payload seed; gate it with capability/self-tests and semantic graph replay; build one shared raw-definition index without values; add a separate provenance carrier to the existing inspector jobset; extend private Rust reconciliation with typed available/unavailable provenance and integrity validation; extend the real-Nix fixture for hidden modules, modulesLocation, priority/mkIf/mkMerge/mkOrder/disabled/duplicate/poison cases; run focused Rust, Nix, primary-isolation, formatting, SQLx-offline, and diff checks. No API/DB/UI/definition-value work.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
