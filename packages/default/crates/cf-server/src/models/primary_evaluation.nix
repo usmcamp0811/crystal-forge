@@ -8,15 +8,15 @@ let
       && (config.services.crystal-forge.client.enable or false));
 in
 builtins.mapAttrs
-  (name: configuration:
+  (name: cfg:
     let
-      system = configuration.config.system.build.toplevel;
-      checkPolicies = policyCheckers.${name} or (_: { });
+      system = cfg.config.system.build.toplevel;
+      checker = policyCheckers.${name} or (_: { });
     in
     system // {
       meta = {
-        policies = (checkPolicies configuration.config) // {
-          cfAgentEnabled = cfAgentEnabled configuration.config;
+        policies = (checker cfg.config) // {
+          cfAgentEnabled = cfAgentEnabled cfg.config;
           requestedSourceRevision = requestedRevision;
           resolvedSourceRevision = flake.sourceInfo.rev or null;
         };

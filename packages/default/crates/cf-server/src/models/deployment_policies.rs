@@ -3791,7 +3791,7 @@ in {{ {fields} }}"#
         // must still be emitted unconditionally so builds can be queued.
         assert!(expr.contains("policyCheckers"));
         assert!(expr.contains("cfAgentEnabled"));
-        assert!(expr.contains("configuration.config.system.build.toplevel"));
+        assert!(expr.contains("cfg.config.system.build.toplevel"));
 
         for forbidden in [
             "cfg.options",
