@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-05 13:02'
+updated_date: '2026-09-05 13:29'
 labels:
   - design-parity
   - web-ui
@@ -303,6 +303,8 @@ Bounded targeted-inspector slice (2026-09-05): replace the monolithic config_ins
 
 <!-- SECTION:NOTES:BEGIN -->
 Remediation stopped before commit/push. Starting branch was 968662d52fdbf1078b96a13c2d7ba34dcc85f933 and worktree was restored clean. The selected real nixosSystem exposes configuration.pkgs.lib and configuration._module.args.modules. However, scanning its full options tree reaches poisoned standard option metadata/value paths (for example hardware.nvidia.open and boot.systemd.services); the repository Nix evaluator reports uncaught `expected a set but found null` / coercion failures while forcing metadata/value structures. The attempted focused check could not yet prove safe failed-row isolation without deciding whether to change the extraction failure boundary or use per-option evaluator isolation. No commit or push was made.
+
+Implemented the bounded targeted inspector slice in the dedicated worktree. Replaced the monolithic JSON inspector with checked-in config_inspector.nix: selected nixosConfiguration only, configuration.pkgs.lib, full hashed index, shared system.build.toplevel carrier, separate metadata/value jobs, safe origin table, and no discarded override reconstruction. Added private Rust JSONL reconciliation with order-independent index/hash matching, same-drvPath enforcement, isolated metadata/value failures, duplicate/unknown rejection, and existing evaluator-error redaction. Added checks/config-inspector/default.nix using inputs.base/base.lib.nixosSystem, lazy sibling/exported-module poison, full jobset count, subset poison/healthy assertions, and same-carrier proof. Focused Rust tests, the permanent Nix check, primary evaluator isolation check, SQLX_OFFLINE cargo check, rustfmt, and diff-check have passed; broad flake/browser checks were intentionally not run per scope.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
