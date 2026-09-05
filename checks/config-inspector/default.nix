@@ -2,7 +2,10 @@
 
 let
   inspectorSource = builtins.readFile ../../packages/default/crates/cf-server/src/models/config_inspector.nix;
+  definitionValuesSource = builtins.readFile ../../packages/default/crates/cf-server/src/models/config_definition_values.nix;
   provenanceSource = builtins.readFile ../../packages/default/crates/cf-server/src/models/config_provenance.nix;
+  provenanceLibSource = builtins.readFile ../../packages/default/crates/cf-server/src/models/config_provenance_lib.nix;
+  valueEncodingSource = builtins.readFile ../../packages/default/crates/cf-server/src/models/config_value_encoding.nix;
   fixture = pkgs.runCommand "crystal-forge-config-inspector-fixture" { } ''
     mkdir -p "$out"
     touch "$out/explicit-modules-location.nix"
@@ -144,10 +147,17 @@ let
     let
       flakeRef = "path:${fixture}";
       configurationName = "good";
-      flake = builtins.getFlake flakeRef;
-      configuration = builtins.getAttr configurationName flake.nixosConfigurations;
-      inspector = (${inspectorSource}) { inherit flakeRef configurationName; };
-      provenance = (${provenanceSource}) { inherit flake configuration; };
+       flake = builtins.getFlake flakeRef;
+       configuration = builtins.getAttr configurationName flake.nixosConfigurations;
+       valueEncoder = (${valueEncodingSource});
+       inspector = (${inspectorSource}) {
+         inherit flakeRef configurationName;
+         encodeValue = valueEncoder configuration.pkgs.lib;
+       };
+       provenance = (${provenanceSource}) {
+         inherit flake configuration;
+         provenanceLib = (${provenanceLibSource});
+       };
     in inspector // { __crystalForgeProvenance = provenance; }
   '';
 
@@ -171,7 +181,22 @@ let
     in ((${provenanceSource}) {
       flake = { inputs = { }; };
       inherit configuration;
+      provenanceLib = (${provenanceLibSource});
     }).meta.crystalForgeProvenance
+  '';
+
+  definitionValuesExpression = ''
+    let
+      flakeRef = "path:${fixture}";
+      configurationName = "good";
+      flake = builtins.getFlake flakeRef;
+      configuration = builtins.getAttr configurationName flake.nixosConfigurations;
+      valueEncoder = (${valueEncodingSource});
+    in (${definitionValuesSource}) {
+      inherit flake configuration;
+      provenanceLib = (${provenanceLibSource});
+      encodeValue = valueEncoder configuration.pkgs.lib;
+    }
   '';
 
   subsetExpression = ''
@@ -208,6 +233,7 @@ let
   subsetFile = pkgs.writeText "crystal-forge-config-inspector-subset.nix" subsetExpression;
   fullCountFile = pkgs.writeText "crystal-forge-config-inspector-count.nix" fullCountExpression;
   unsupportedCapabilityFile = pkgs.writeText "crystal-forge-config-inspector-unsupported.nix" unsupportedCapabilityExpression;
+  definitionValuesFile = pkgs.writeText "crystal-forge-config-definition-values.nix" definitionValuesExpression;
 in
 pkgs.runCommand "crystal-forge-config-inspector-check" {
   nativeBuildInputs = [ pkgs.jq pkgs.nix pkgs.nix-eval-jobs ];
@@ -221,6 +247,34 @@ pkgs.runCommand "crystal-forge-config-inspector-check" {
   unsupported=$(nix eval "''${nix_args[@]}" --json --expr "import ${unsupportedCapabilityFile}")
   test "$(printf '%s' "$unsupported" | jq -r '.supported')" = false
   test "$(printf '%s' "$unsupported" | jq -r '.reasonCode')" = helper_capability_unavailable
+
+  nix-eval-jobs \
+    --expr "import ${definitionValuesFile}" \
+    --impure \
+    --meta \
+    --apply 'derivation: if derivation.meta ? crystalForgeDefinitionValues then derivation.meta.crystalForgeDefinitionValues else derivation.meta' \
+    --option experimental-features 'nix-command flakes' \
+    --workers 2 > definition-values.jsonl 2> definition-values.stderr || {
+      cat definition-values.stderr >&2
+      exit 1
+    }
+
+  test "$(wc -l < definition-values.jsonl)" -eq 3068
+  test "$(jq -c 'select(.attr == "__crystalForgeDefinitionIndex")' definition-values.jsonl | wc -l)" -eq 1
+  jq -e '
+    select(.attr == "__crystalForgeDefinitionIndex")
+    | .error == null
+    and .extraValue.kind == "definition_index"
+    and .extraValue.supported == true
+    and .extraValue.definitionCount == 3067
+    and ([.extraValue.definitions[]] | length == 3067)
+  ' definition-values.jsonl >/dev/null
+  test "$(jq -c 'select(.attr | startswith("def_value_"))' definition-values.jsonl | wc -l)" -eq 3067
+  test "$(jq -c 'select(.error != null)' definition-values.jsonl | wc -l)" -ge 2
+  jq -e 'select(.attr | startswith("def_value_")) | .attr' definition-values.jsonl \
+    | sort | uniq -d | test "$(wc -l)" -eq 0
+  test "$(jq -s '[.[] | select(.error == null and .drvPath != null) | .drvPath] | unique | length' definition-values.jsonl)" -eq 1
+
   before_hash=$(nix eval "''${nix_args[@]}" --raw --expr \
     'builtins.hashString "sha256" (builtins.toJSON [ "crystalForgeProbe" "healthyBefore" ])')
   poison_hash=$(nix eval "''${nix_args[@]}" --raw --expr \
