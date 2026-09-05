@@ -12,6 +12,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use super::deployment_policies::nix_string_pub;
 use super::evaluation_snapshots::{SafeEvaluationError, SafeOptionValue};
 use crate::security::snapshot_redaction::redact_evaluation_error;
 
@@ -29,8 +30,8 @@ pub(crate) fn build_inspector_expression(flake_ref: &str, configuration_name: &s
     format!(
         "({source}) {{ flakeRef = {flake_ref}; configurationName = {configuration_name}; }}",
         source = source,
-        flake_ref = nix_string(flake_ref),
-        configuration_name = nix_string(configuration_name),
+        flake_ref = nix_string_pub(flake_ref),
+        configuration_name = nix_string_pub(configuration_name),
     )
 }
 
@@ -44,8 +45,8 @@ pub(crate) struct ConfigInspectorResult {
 /// Represents one option after independent metadata and value reconciliation.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct InspectedOption {
-    /// Full option path joined with dots for existing snapshot consumers.
-    pub path: String,
+    /// Exact option path components supplied by the authoritative Nix index.
+    pub path_components: Vec<String>,
     /// The full collision-resistant key emitted by the Nix index.
     pub key: String,
     /// Metadata result, independent from effective value evaluation.
@@ -204,18 +205,22 @@ pub(crate) fn reconcile_inspector_output(output: &[u8]) -> Result<ConfigInspecto
 
         let job = classify_attribute(&result.attr)?;
         if result.error.is_none() {
-            if let Some(drv_path) = &result.drv_path {
-                if let Some(expected) = &carrier_drv_path {
-                    if expected != drv_path {
-                        bail!(
-                            "Config inspector carrier drvPath changed from {} to {}",
-                            expected,
-                            drv_path
-                        );
-                    }
-                } else {
-                    carrier_drv_path = Some(drv_path.clone());
+            let drv_path = result.drv_path.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "successful Config inspector result {} has no drvPath",
+                    result.attr
+                )
+            })?;
+            if let Some(expected) = &carrier_drv_path {
+                if expected != drv_path {
+                    bail!(
+                        "Config inspector carrier drvPath changed from {} to {}",
+                        expected,
+                        drv_path
+                    );
                 }
+            } else {
+                carrier_drv_path = Some(drv_path.clone());
             }
         }
 
@@ -281,27 +286,27 @@ pub(crate) fn reconcile_inspector_output(output: &[u8]) -> Result<ConfigInspecto
     let origins = index.origins;
     let mut options = Vec::with_capacity(index.options.len());
     for entry in index.options {
-        let mut pending = pending.remove(&entry.key).unwrap_or_default();
-        if pending.metadata.is_none() {
-            pending.metadata = Some(InspectionMetadata::Failed(failed_evaluation(
-                "not_evaluated",
-                "metadata job produced no result",
-            )));
-        }
-        if pending.value.is_none() {
-            pending.value = Some(InspectionValue::Failed(failed_evaluation(
-                "not_evaluated",
-                "value job produced no result",
-            )));
-        }
-
-        let metadata = pending.metadata.expect("metadata defaulted above");
+        let pending = pending.remove(&entry.key).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Config inspector results are missing jobs for {}",
+                entry.key
+            )
+        })?;
+        let metadata = pending.metadata.ok_or_else(|| {
+            anyhow::anyhow!(
+                "Config inspector metadata result is missing for {}",
+                entry.key
+            )
+        })?;
+        let key = entry.key;
         let metadata = resolve_definition_origins(metadata, &origins);
         options.push(InspectedOption {
-            path: entry.path.join("."),
-            key: entry.key,
+            path_components: entry.path,
+            key: key.clone(),
             metadata,
-            value: pending.value.expect("value defaulted above"),
+            value: pending.value.ok_or_else(|| {
+                anyhow::anyhow!("Config inspector value result is missing for {}", key)
+            })?,
         });
     }
 
@@ -408,10 +413,6 @@ fn failed_evaluation(code: &str, message: &str) -> SafeEvaluationError {
     }
 }
 
-fn nix_string(value: &str) -> String {
-    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -479,6 +480,29 @@ mod tests {
         assert!(!expression.contains("flake.inputs.nixpkgs"));
         assert!(!expression.contains("flake.nixosModules"));
         assert!(!expression.contains("evaluationSnapshot"));
+    }
+
+    #[test]
+    fn expression_uses_safe_nix_strings_for_flake_and_configuration_names() {
+        let value = r#"${builtins.abort "should-not-run"} \ "quoted"
+	"#;
+        let expression = build_inspector_expression(value, value);
+
+        assert!(!expression.contains("flakeRef = \"${builtins.abort"));
+        assert!(!expression.contains("configurationName = \"${builtins.abort"));
+        assert!(expression.contains("flakeRef = \"\\${builtins.abort"));
+        assert!(expression.contains("configurationName = \"\\${builtins.abort"));
+        assert!(expression.contains("\\\"quoted\\\""));
+        assert!(expression.contains("\\\\"));
+        assert!(expression.contains("\\n"));
+        assert!(expression.contains("\\t"));
+    }
+
+    #[test]
+    fn expression_preserves_canonical_nul_behavior() {
+        let expression = build_inspector_expression("before\0after", "good");
+
+        assert!(expression.contains("flakeRef = throw \"Nix strings cannot represent NUL bytes\""));
     }
 
     #[test]
@@ -592,6 +616,148 @@ mod tests {
     }
 
     #[test]
+    fn missing_metadata_or_value_results_are_integrity_failures() {
+        let path = ["healthy", "option"];
+        let key = hash(&path);
+        let index_line = result("__crystalForgeConfigIndex", index(&key, &path));
+        let metadata_line = result(&format!("meta_{key}"), metadata(&key, &path));
+        let value_line = result(
+            &format!("value_{key}"),
+            json!({
+                "kind": "value",
+                "key": key,
+                "value": { "kind": "scalar", "value": true },
+            }),
+        );
+
+        for lines in [
+            vec![index_line.clone(), metadata_line.clone()],
+            vec![index_line.clone(), value_line.clone()],
+            vec![index_line.clone()],
+        ] {
+            let output = lines
+                .iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(reconcile_inspector_output(output.as_bytes()).is_err());
+        }
+    }
+
+    #[test]
+    fn truncated_multi_option_output_is_an_integrity_failure() {
+        let first = ["first", "option"];
+        let second = ["second", "option"];
+        let first_key = hash(&first);
+        let second_key = hash(&second);
+        let lines = [
+            result(
+                "__crystalForgeConfigIndex",
+                json!({
+                    "kind": "index",
+                    "options": [
+                        { "key": first_key, "path": first },
+                        { "key": second_key, "path": second },
+                    ],
+                    "origins": [],
+                }),
+            ),
+            result(&format!("meta_{first_key}"), metadata(&first_key, &first)),
+            result(
+                &format!("value_{first_key}"),
+                json!({
+                    "kind": "value",
+                    "key": first_key,
+                    "value": { "kind": "scalar", "value": true },
+                }),
+            ),
+        ];
+        let output = lines
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(reconcile_inspector_output(output.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn exact_path_components_survive_reconciliation_and_hash_distinctly() {
+        let dotted = ["foo", "bar", "baz"];
+        let dotted_component = ["foo", "bar.baz"];
+        let dotted_key = hash(&dotted);
+        let dotted_component_key = hash(&dotted_component);
+        assert_ne!(dotted_key, dotted_component_key);
+
+        let special = ["quote\" whitespace", r#"${not-an-interpolation}"#];
+        let special_key = hash(&special);
+        let lines = [
+            result(
+                "__crystalForgeConfigIndex",
+                json!({
+                    "kind": "index",
+                    "options": [
+                        { "key": dotted_key, "path": dotted },
+                        { "key": dotted_component_key, "path": dotted_component },
+                        { "key": special_key, "path": special },
+                    ],
+                    "origins": [],
+                }),
+            ),
+            result(
+                &format!("meta_{dotted_key}"),
+                metadata(&dotted_key, &dotted),
+            ),
+            result(
+                &format!("value_{dotted_key}"),
+                json!({
+                    "kind": "value", "key": dotted_key,
+                    "value": { "kind": "scalar", "value": true },
+                }),
+            ),
+            result(
+                &format!("meta_{dotted_component_key}"),
+                metadata(&dotted_component_key, &dotted_component),
+            ),
+            result(
+                &format!("value_{dotted_component_key}"),
+                json!({
+                    "kind": "value", "key": dotted_component_key,
+                    "value": { "kind": "scalar", "value": true },
+                }),
+            ),
+            result(
+                &format!("meta_{special_key}"),
+                metadata(&special_key, &special),
+            ),
+            result(
+                &format!("value_{special_key}"),
+                json!({
+                    "kind": "value", "key": special_key,
+                    "value": { "kind": "scalar", "value": true },
+                }),
+            ),
+        ];
+        let output = lines
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let result = reconcile_inspector_output(output.as_bytes()).unwrap();
+
+        assert_eq!(result.options[0].path_components, string_path(&dotted));
+        assert_eq!(
+            result.options[1].path_components,
+            string_path(&dotted_component)
+        );
+        assert_eq!(result.options[2].path_components, string_path(&special));
+    }
+
+    fn string_path(path: &[&str]) -> Vec<String> {
+        path.iter().map(|part| (*part).to_string()).collect()
+    }
+
+    #[test]
     fn duplicate_and_unknown_jobs_are_rejected() {
         let path = ["example", "option"];
         let key = hash(&path);
@@ -623,5 +789,15 @@ mod tests {
         let output = format!("{}\n{}", index_line, metadata_line);
 
         assert!(reconcile_inspector_output(output.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn successful_result_without_drv_path_is_rejected() {
+        let path = ["example", "option"];
+        let key = hash(&path);
+        let mut line = result("__crystalForgeConfigIndex", index(&key, &path));
+        line["drvPath"] = Value::Null;
+
+        assert!(reconcile_inspector_output(line.to_string().as_bytes()).is_err());
     }
 }

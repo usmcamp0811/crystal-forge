@@ -19,7 +19,8 @@ let
               };
               poison = lib.mkOption {
                 type = lib.types.str;
-                default = throw "selected poisoned option forced";
+                default = "poison";
+                apply = _: throw "selected poisoned option forced";
               };
               healthyAfter = lib.mkOption {
                 type = lib.types.str;
@@ -141,6 +142,10 @@ pkgs.runCommand "crystal-forge-config-inspector-check" {
 
   jq -e --arg attr "value_$poison_hash" \
     'select(.attr == $attr) | (.error // "") | contains("selected poisoned option forced")' \
+    result.jsonl >/dev/null
+
+  jq -e --arg attr "meta_$poison_hash" \
+    'select(.attr == $attr) | .error == null and .extraValue.kind == "metadata"' \
     result.jsonl >/dev/null
 
   jq -e --arg attr "meta_$after_hash" \
