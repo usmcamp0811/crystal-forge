@@ -274,6 +274,7 @@ pkgs.runCommand "crystal-forge-config-inspector-check" {
     and ([.extraValue.definitions[]] | length == 3067)
   ' definition-values.jsonl >/dev/null
   test "$(jq -r 'select(.attr == "__crystalForgeDefinitionIndex") | .extraValue.targetKey' definition-values.jsonl)" = "$target_key"
+  stage2_source_out_path=$(jq -r 'select(.attr == "__crystalForgeDefinitionIndex") | .extraValue.sourceOutPath' definition-values.jsonl)
   test "$(jq -c 'select(.attr | startswith("def_value_"))' definition-values.jsonl | wc -l)" -eq 3067
   test "$(jq -c 'select(.error != null)' definition-values.jsonl | wc -l)" -ge 2
   jq -e 'select(.attr | startswith("def_value_")) | .attr' definition-values.jsonl \
@@ -300,6 +301,8 @@ pkgs.runCommand "crystal-forge-config-inspector-check" {
   test "$(jq -c 'select(.drvPath != null) | .drvPath' result.jsonl | sort -u | wc -l)" -eq 1
   test "$(jq -r 'select(.attr == "__crystalForgeConfigIndex") | .extraValue.targetKey' result.jsonl)" = "$target_key"
   stage1_drv_path=$(jq -r 'select(.attr == "__crystalForgeConfigIndex") | .drvPath' result.jsonl)
+  stage1_source_out_path=$(jq -r 'select(.attr == "__crystalForgeConfigIndex") | .extraValue.sourceOutPath' result.jsonl)
+  test "$stage1_source_out_path" = "$stage2_source_out_path"
   stage2_drv_path=$(jq -r 'select(.attr == "__crystalForgeDefinitionIndex") | .drvPath' definition-values.jsonl)
   test "$stage1_drv_path" = "$stage2_drv_path"
 

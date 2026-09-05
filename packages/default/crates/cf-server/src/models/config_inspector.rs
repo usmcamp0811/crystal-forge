@@ -25,6 +25,28 @@ const META_PREFIX: &str = "meta_";
 const VALUE_PREFIX: &str = "value_";
 pub(crate) const EXPECTED_PROVENANCE_ADAPTER_VERSION: u64 = 1;
 
+/// Identifies the exact requested configuration shared by both inspector stages.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct InspectionTarget {
+    /// Flake reference passed to `builtins.getFlake`.
+    pub flake_ref: String,
+    /// Configuration name selected from the flake.
+    pub configuration_name: String,
+    /// Canonical key for the requested flake/configuration pair.
+    pub target_key: String,
+}
+
+impl InspectionTarget {
+    /// Creates an immutable inspection target and computes its canonical key.
+    pub(crate) fn new(flake_ref: &str, configuration_name: &str) -> Self {
+        Self {
+            flake_ref: flake_ref.to_string(),
+            configuration_name: configuration_name.to_string(),
+            target_key: inspection_target_key(flake_ref, configuration_name),
+        }
+    }
+}
+
 /// Computes the internal key that binds both inspection stages to one target.
 pub(crate) fn inspection_target_key(flake_ref: &str, configuration_name: &str) -> String {
     let encoded = serde_json::to_vec(&[flake_ref, configuration_name])
@@ -42,12 +64,11 @@ fn format_digest(input: &[u8]) -> String {
 /// The expression selects `flake.nixosConfigurations[configuration_name]` and
 /// passes the selected system's `pkgs.lib` to the dedicated expressions. It
 /// never enumerates sibling configurations or evaluates exported modules.
-pub(crate) fn build_inspector_expression(flake_ref: &str, configuration_name: &str) -> String {
+pub(crate) fn build_inspector_expression(target: &InspectionTarget) -> String {
     let source = include_str!("config_inspector.nix");
     let provenance_source = include_str!("config_provenance.nix");
     let provenance_lib_source = include_str!("config_provenance_lib.nix");
     let value_encoding_source = include_str!("config_value_encoding.nix");
-    let target_key = inspection_target_key(flake_ref, configuration_name);
     format!(
         "let\n  flakeRef = {flake_ref};\n  configurationName = {configuration_name};\n  targetKey = {target_key};\n  flake = builtins.getFlake flakeRef;\n  configuration = builtins.getAttr configurationName flake.nixosConfigurations;\n  valueEncoder = ({value_encoding_source});\n  inspector = ({source}) {{ inherit flakeRef configurationName targetKey; encodeValue = valueEncoder configuration.pkgs.lib; }};\n  provenance = ({provenance_source}) {{ inherit flake configuration; provenanceLib = ({provenance_lib_source}); }};\nin\n  inspector // {{ {provenance_attribute} = provenance; }}",
         source = source,
@@ -55,9 +76,9 @@ pub(crate) fn build_inspector_expression(flake_ref: &str, configuration_name: &s
         provenance_lib_source = provenance_lib_source,
         value_encoding_source = value_encoding_source,
         provenance_attribute = PROVENANCE_ATTRIBUTE,
-        target_key = nix_string_pub(&target_key),
-        flake_ref = nix_string_pub(flake_ref),
-        configuration_name = nix_string_pub(configuration_name),
+        target_key = nix_string_pub(&target.target_key),
+        flake_ref = nix_string_pub(&target.flake_ref),
+        configuration_name = nix_string_pub(&target.configuration_name),
     )
 }
 
@@ -67,22 +88,18 @@ pub(crate) fn build_inspector_expression(flake_ref: &str, configuration_name: &s
 /// The expression reuses the provenance replay and safe-value encoder but
 /// remains a separate nix-eval-jobs root. Every value job uses the selected
 /// configuration's `system.build.toplevel` as its carrier.
-pub(crate) fn build_definition_values_expression(
-    flake_ref: &str,
-    configuration_name: &str,
-) -> String {
+pub(crate) fn build_definition_values_expression(target: &InspectionTarget) -> String {
     let source = include_str!("config_definition_values.nix");
     let provenance_lib_source = include_str!("config_provenance_lib.nix");
     let value_encoding_source = include_str!("config_value_encoding.nix");
-    let target_key = inspection_target_key(flake_ref, configuration_name);
     format!(
         "let\n  flakeRef = {flake_ref};\n  configurationName = {configuration_name};\n  targetKey = {target_key};\n  flake = builtins.getFlake flakeRef;\n  configuration = builtins.getAttr configurationName flake.nixosConfigurations;\n  valueEncoder = ({value_encoding_source});\n  jobs = ({source}) {{ inherit flake configuration targetKey; provenanceLib = ({provenance_lib_source}); encodeValue = valueEncoder configuration.pkgs.lib; }};\nin\njobs",
         source = source,
         provenance_lib_source = provenance_lib_source,
         value_encoding_source = value_encoding_source,
-        target_key = nix_string_pub(&target_key),
-        flake_ref = nix_string_pub(flake_ref),
-        configuration_name = nix_string_pub(configuration_name),
+        target_key = nix_string_pub(&target.target_key),
+        flake_ref = nix_string_pub(&target.flake_ref),
+        configuration_name = nix_string_pub(&target.configuration_name),
     )
 }
 
@@ -93,6 +110,8 @@ pub(crate) struct ConfigInspectorResult {
     pub target_key: String,
     /// Validated carrier derivation for the complete Stage-1 inspection.
     pub carrier_drv_path: String,
+    /// Resolved immutable source path returned by `builtins.getFlake`.
+    pub source_out_path: String,
     /// Options in the deterministic order supplied by the Nix index.
     pub options: Vec<InspectedOption>,
     /// Raw-definition provenance, or an explicit unavailable state.
@@ -295,6 +314,8 @@ struct IndexPayload {
     kind: String,
     #[serde(rename = "targetKey")]
     target_key: String,
+    #[serde(rename = "sourceOutPath")]
+    source_out_path: String,
     options: Vec<IndexEntry>,
     #[serde(default)]
     origins: Vec<Origin>,
@@ -347,7 +368,10 @@ struct PendingOption {
 /// Returns an error for malformed JSONL, missing or duplicate index entries,
 /// unknown inspector attributes, duplicate results, hash mismatches, payload
 /// mismatches, or inconsistent successful carrier derivation paths.
-pub(crate) fn reconcile_inspector_output(output: &[u8]) -> Result<ConfigInspectorResult> {
+pub(crate) fn reconcile_inspector_output(
+    output: &[u8],
+    expected_target: &InspectionTarget,
+) -> Result<ConfigInspectorResult> {
     let mut index: Option<IndexPayload> = None;
     let mut pending = HashMap::<String, PendingOption>::new();
     let mut seen_attributes = HashSet::new();
@@ -481,7 +505,12 @@ pub(crate) fn reconcile_inspector_output(output: &[u8]) -> Result<ConfigInspecto
 
     let index = index.ok_or_else(|| anyhow::anyhow!("Config inspector index result is missing"))?;
     validate_key(&index.target_key)?;
+    if index.target_key != expected_target.target_key {
+        bail!("Config inspector target key does not match expected target");
+    }
+    validate_source_out_path(&index.source_out_path)?;
     let target_key = index.target_key.clone();
+    let source_out_path = index.source_out_path.clone();
     let carrier_drv_path = carrier_drv_path
         .ok_or_else(|| anyhow::anyhow!("Config inspector carrier drvPath is missing"))?;
     let origins = index.origins.clone();
@@ -524,6 +553,7 @@ pub(crate) fn reconcile_inspector_output(output: &[u8]) -> Result<ConfigInspecto
     Ok(ConfigInspectorResult {
         target_key,
         carrier_drv_path,
+        source_out_path,
         options,
         provenance,
     })
@@ -742,6 +772,13 @@ fn validate_key(key: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_source_out_path(path: &str) -> Result<()> {
+    if path.is_empty() || !path.starts_with("/nix/store/") {
+        bail!("invalid resolved flake source outPath");
+    }
+    Ok(())
+}
+
 fn is_digest(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
@@ -789,6 +826,8 @@ struct DefinitionIndexPayload {
     kind: String,
     #[serde(rename = "targetKey")]
     target_key: String,
+    #[serde(rename = "sourceOutPath")]
+    source_out_path: String,
     #[serde(rename = "adapterVersion")]
     adapter_version: u64,
     supported: bool,
@@ -907,7 +946,10 @@ pub(crate) fn reconcile_definition_values_output(
 
         if let Some(error) = result.error.as_deref() {
             if is_index {
-                bail!("Stage-2 definition index failed: {error}");
+                return Ok(DefinitionValueEnrichment::Unavailable {
+                    reason_code: "stage2_index_failed".to_string(),
+                    diagnostic: Some(failed_evaluation("stage2_index_failed", &error)),
+                });
             }
             values.insert(identity.expect("definition identity exists"), result);
             continue;
@@ -939,6 +981,15 @@ pub(crate) fn reconcile_definition_values_output(
     if index.target_key != expected_stage1.target_key {
         return Ok(DefinitionValueEnrichment::Unavailable {
             reason_code: "inspection_target_mismatch".to_string(),
+            diagnostic: None,
+        });
+    }
+    if !validate_source_out_path(&index.source_out_path).is_ok() {
+        bail!("Stage-2 definition index source path is malformed");
+    }
+    if index.source_out_path != expected_stage1.source_out_path {
+        return Ok(DefinitionValueEnrichment::Unavailable {
+            reason_code: "flake_source_mismatch".to_string(),
             diagnostic: None,
         });
     }
@@ -1085,6 +1136,7 @@ mod tests {
 
     const TEST_TARGET_KEY: &str =
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const TEST_SOURCE_OUT_PATH: &str = "/nix/store/test-flake-source";
     const TEST_DIGEST: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     fn hash(path: &[&str]) -> String {
@@ -1106,9 +1158,17 @@ mod tests {
         })
     }
 
+    fn test_target() -> InspectionTarget {
+        InspectionTarget {
+            flake_ref: "test-flake".to_string(),
+            configuration_name: "good".to_string(),
+            target_key: TEST_TARGET_KEY.to_string(),
+        }
+    }
+
     fn reconcile_for_test(output: &str) -> Result<ConfigInspectorResult> {
         if output.contains(PROVENANCE_ATTRIBUTE) {
-            reconcile_inspector_output(output.as_bytes())
+            reconcile_inspector_output(output.as_bytes(), &test_target())
         } else {
             let provenance = result(
                 PROVENANCE_ATTRIBUTE,
@@ -1118,7 +1178,7 @@ mod tests {
                     "reasonCode": "capability_self_test_failed",
                 }),
             );
-            reconcile_inspector_output(format!("{output}\n{provenance}").as_bytes())
+            reconcile_inspector_output(format!("{output}\n{provenance}").as_bytes(), &test_target())
         }
     }
 
@@ -1126,6 +1186,7 @@ mod tests {
         json!({
             "kind": "index",
             "targetKey": TEST_TARGET_KEY,
+            "sourceOutPath": TEST_SOURCE_OUT_PATH,
             "options": [{
                 "key": key,
                 "path": path,
@@ -1157,7 +1218,8 @@ mod tests {
 
     #[test]
     fn expression_selects_one_configuration_and_uses_selected_system_library() {
-        let expression = build_inspector_expression("path:/tmp/example", "good");
+        let expression =
+            build_inspector_expression(&InspectionTarget::new("path:/tmp/example", "good"));
 
         assert!(
             expression.contains("builtins.getAttr configurationName flake.nixosConfigurations")
@@ -1174,7 +1236,7 @@ mod tests {
     fn expression_uses_safe_nix_strings_for_flake_and_configuration_names() {
         let value = r#"${builtins.abort "should-not-run"} \ "quoted"
 	"#;
-        let expression = build_inspector_expression(value, value);
+        let expression = build_inspector_expression(&InspectionTarget::new(value, value));
 
         assert!(!expression.contains("flakeRef = \"${builtins.abort"));
         assert!(!expression.contains("configurationName = \"${builtins.abort"));
@@ -1188,7 +1250,8 @@ mod tests {
 
     #[test]
     fn expression_preserves_canonical_nul_behavior() {
-        let expression = build_inspector_expression("before\0after", "good");
+        let expression =
+            build_inspector_expression(&InspectionTarget::new("before\0after", "good"));
 
         assert!(expression.contains("flakeRef = throw \"Nix strings cannot represent NUL bytes\""));
     }
@@ -1344,6 +1407,7 @@ mod tests {
                 json!({
                     "kind": "index",
                     "targetKey": TEST_TARGET_KEY,
+                    "sourceOutPath": TEST_SOURCE_OUT_PATH,
                     "options": [
                         { "key": first_key, "path": first },
                         { "key": second_key, "path": second },
@@ -1386,6 +1450,7 @@ mod tests {
                 json!({
                     "kind": "index",
                     "targetKey": TEST_TARGET_KEY,
+                    "sourceOutPath": TEST_SOURCE_OUT_PATH,
                     "options": [
                         { "key": dotted_key, "path": dotted },
                         { "key": dotted_component_key, "path": dotted_component },
@@ -1551,13 +1616,15 @@ mod tests {
         let path = ["crystalForgeProbe", "target"];
         let key = hash(&path);
         let output = output_with_provenance(&path, &key, supported_provenance(&path, &key));
-        reconcile_inspector_output(output.as_bytes()).expect("Stage-1 fixture is valid")
+        reconcile_inspector_output(output.as_bytes(), &test_target())
+            .expect("Stage-1 fixture is valid")
     }
 
     fn stage2_output(target_key: &str, drv_path: &str, identities: &[(&str, u64)]) -> String {
         let index = json!({
             "kind": "definition_index",
             "targetKey": target_key,
+            "sourceOutPath": TEST_SOURCE_OUT_PATH,
             "adapterVersion": EXPECTED_PROVENANCE_ADAPTER_VERSION,
             "supported": true,
             "provenanceDigest": TEST_DIGEST,
@@ -1612,7 +1679,7 @@ mod tests {
             .map(Value::to_string)
             .collect::<Vec<_>>()
             .join("\n");
-        let result = reconcile_inspector_output(output.as_bytes()).unwrap();
+        let result = reconcile_inspector_output(output.as_bytes(), &test_target()).unwrap();
 
         let InspectionProvenance::Available {
             adapter_version,
@@ -1662,7 +1729,7 @@ mod tests {
             .map(Value::to_string)
             .collect::<Vec<_>>()
             .join("\n");
-        let result = reconcile_inspector_output(output.as_bytes()).unwrap();
+        let result = reconcile_inspector_output(output.as_bytes(), &test_target()).unwrap();
 
         assert!(matches!(
             result.options[0].metadata,
@@ -1688,9 +1755,11 @@ mod tests {
             .as_object_mut()
             .expect("provenance fixture is an object")
             .remove("definitionsByOption");
-        let result =
-            reconcile_inspector_output(output_with_provenance(&path, &key, missing).as_bytes())
-                .expect("core inspection remains available");
+        let result = reconcile_inspector_output(
+            output_with_provenance(&path, &key, missing).as_bytes(),
+            &test_target(),
+        )
+        .expect("core inspection remains available");
         assert!(matches!(
             result.provenance,
             InspectionProvenance::Unavailable { ref reason_code, .. }
@@ -1699,9 +1768,11 @@ mod tests {
 
         let mut empty = supported_provenance(&path, &key);
         empty["definitionsByOption"] = json!([]);
-        let result =
-            reconcile_inspector_output(output_with_provenance(&path, &key, empty).as_bytes())
-                .expect("an explicit empty definition list is valid");
+        let result = reconcile_inspector_output(
+            output_with_provenance(&path, &key, empty).as_bytes(),
+            &test_target(),
+        )
+        .expect("an explicit empty definition list is valid");
         assert!(matches!(
             result.provenance,
             InspectionProvenance::Available {
@@ -1720,9 +1791,11 @@ mod tests {
             "supported": false,
             "reasonCode": "helper_capability_unavailable",
         });
-        let result =
-            reconcile_inspector_output(output_with_provenance(&path, &key, payload).as_bytes())
-                .expect("unsupported provenance does not hide core inspection");
+        let result = reconcile_inspector_output(
+            output_with_provenance(&path, &key, payload).as_bytes(),
+            &test_target(),
+        )
+        .expect("unsupported provenance does not hide core inspection");
         assert!(matches!(
             result.provenance,
             InspectionProvenance::Unavailable { ref reason_code, .. }
@@ -1738,9 +1811,11 @@ mod tests {
             let mut payload = supported_provenance(&path, &key);
             payload["definitionsByOption"][0]["definitions"][0]["ordinal"] = json!(ordinals[0]);
             payload["definitionsByOption"][0]["definitions"][1]["ordinal"] = json!(ordinals[1]);
-            let result =
-                reconcile_inspector_output(output_with_provenance(&path, &key, payload).as_bytes())
-                    .expect("core inspection remains available");
+            let result = reconcile_inspector_output(
+                output_with_provenance(&path, &key, payload).as_bytes(),
+                &test_target(),
+            )
+            .expect("core inspection remains available");
             assert!(matches!(
                 result.provenance,
                 InspectionProvenance::Unavailable { ref reason_code, .. }
@@ -1761,9 +1836,11 @@ mod tests {
                 json!(orders[0]);
             payload["definitionsByOption"][0]["definitions"][1]["surviving_merge_order"] =
                 json!(orders[1]);
-            let result =
-                reconcile_inspector_output(output_with_provenance(&path, &key, payload).as_bytes())
-                    .expect("core inspection remains available");
+            let result = reconcile_inspector_output(
+                output_with_provenance(&path, &key, payload).as_bytes(),
+                &test_target(),
+            )
+            .expect("core inspection remains available");
             assert!(matches!(
                 result.provenance,
                 InspectionProvenance::Unavailable { ref reason_code, .. }
@@ -1773,9 +1850,11 @@ mod tests {
 
         let mut discarded = supported_provenance(&path, &key);
         discarded["definitionsByOption"][0]["definitions"][0]["surviving_merge_order"] = json!(1);
-        let result =
-            reconcile_inspector_output(output_with_provenance(&path, &key, discarded).as_bytes())
-                .expect("core inspection remains available");
+        let result = reconcile_inspector_output(
+            output_with_provenance(&path, &key, discarded).as_bytes(),
+            &test_target(),
+        )
+        .expect("core inspection remains available");
         assert!(matches!(
             result.provenance,
             InspectionProvenance::Unavailable { ref reason_code, .. }
@@ -1807,7 +1886,7 @@ mod tests {
             .map(Value::to_string)
             .collect::<Vec<_>>()
             .join("\n");
-        let result = reconcile_inspector_output(output.as_bytes()).unwrap();
+        let result = reconcile_inspector_output(output.as_bytes(), &test_target()).unwrap();
 
         assert!(matches!(
             result.provenance,
@@ -1839,7 +1918,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert!(reconcile_inspector_output(output.as_bytes()).is_err());
+        assert!(reconcile_inspector_output(output.as_bytes(), &test_target()).is_err());
     }
 
     #[test]
@@ -1931,6 +2010,39 @@ mod tests {
     }
 
     #[test]
+    fn stage2_rejects_flake_source_mismatch() {
+        let expected = stage1_context();
+        let key = hash(&["crystalForgeProbe", "target"]);
+        let output = stage2_output(
+            TEST_TARGET_KEY,
+            "/nix/store/shared.drv",
+            &[(&key, 0), (&key, 1)],
+        )
+        .replace(TEST_SOURCE_OUT_PATH, "/nix/store/different-flake-source");
+        assert!(matches!(
+            reconcile_definition_values_output(output.as_bytes(), &expected).unwrap(),
+            DefinitionValueEnrichment::Unavailable { reason_code, .. }
+                if reason_code == "flake_source_mismatch"
+        ));
+    }
+
+    #[test]
+    fn stage2_index_failure_is_explicit_and_redacted() {
+        let expected = stage1_context();
+        let mut line = result("__crystalForgeDefinitionIndex", json!(null));
+        line["error"] = json!("https://user:secret@example.com/repo?token=query-secret");
+        assert!(matches!(
+            reconcile_definition_values_output(line.to_string().as_bytes(), &expected).unwrap(),
+            DefinitionValueEnrichment::Unavailable {
+                reason_code,
+                diagnostic: Some(SafeEvaluationError { message, .. }),
+            } if reason_code == "stage2_index_failed"
+                && !message.contains("secret")
+                && !message.contains("query-secret")
+        ));
+    }
+
+    #[test]
     fn stage2_accepts_exact_target_carrier_digest_and_identities() {
         let expected = stage1_context();
         let key = hash(&["crystalForgeProbe", "target"]);
@@ -2005,9 +2117,11 @@ mod tests {
             if let Some(reason) = reason {
                 payload["reasonCode"] = json!(reason);
             }
-            let stage1_result =
-                reconcile_inspector_output(output_with_provenance(&path, &key, payload).as_bytes())
-                    .expect("unsupported provenance preserves Stage 1");
+            let stage1_result = reconcile_inspector_output(
+                output_with_provenance(&path, &key, payload).as_bytes(),
+                &test_target(),
+            )
+            .expect("unsupported provenance preserves Stage 1");
             let expected = if reason == Some("helper_capability_unavailable") {
                 "helper_capability_unavailable"
             } else {
@@ -2022,6 +2136,7 @@ mod tests {
             let mut index = json!({
                 "kind": "definition_index",
                 "targetKey": TEST_TARGET_KEY,
+                "sourceOutPath": TEST_SOURCE_OUT_PATH,
                 "adapterVersion": EXPECTED_PROVENANCE_ADAPTER_VERSION,
                 "supported": false,
                 "definitionCount": 0,

@@ -37,6 +37,7 @@ let
   unsupportedIndex = {
     kind = "definition_index";
     targetKey = targetKey;
+    sourceOutPath = flake.outPath;
     adapterVersion = provenance.provenance.adapterVersion or adapterVersion;
     supported = false;
     reasonCode = provenance.provenance.reasonCode or "adapter_unsupported";
@@ -47,6 +48,7 @@ let
   supportedIndex = {
     kind = "definition_index";
     targetKey = targetKey;
+    sourceOutPath = flake.outPath;
     adapterVersion = provenance.provenance.adapterVersion;
     supported = true;
     provenanceDigest = provenance.provenance.provenanceDigest;

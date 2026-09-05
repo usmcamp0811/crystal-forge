@@ -79,6 +79,7 @@ let
   indexPayload = {
     kind = "index";
     targetKey = targetKey;
+    sourceOutPath = flake.outPath;
     options = optionEntries;
     inherit origins;
   };
