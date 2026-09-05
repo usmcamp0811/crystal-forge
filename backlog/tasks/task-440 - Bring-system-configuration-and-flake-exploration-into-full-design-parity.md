@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-05 03:14'
+updated_date: '2026-09-05 03:45'
 labels:
   - design-parity
   - web-ui
@@ -300,7 +300,7 @@ Checkpoint build correction (2026-09-04): restore the established `cfg` and `che
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Committed and pushed the Config Inspector slice as 968662d5 (`TASK-440: Add isolated configuration inspector`) to origin/TASK-440-system-config-flake-parity. Targeted unit tests and the ignored real-Nix fixture test pass in nix develop; rustfmt and git diff --check pass. Full broader TASK-440 verification remains outside this slice.
+Remediation stopped before commit/push. Starting branch was 968662d52fdbf1078b96a13c2d7ba34dcc85f933 and worktree was restored clean. The selected real nixosSystem exposes configuration.pkgs.lib and configuration._module.args.modules. However, scanning its full options tree reaches poisoned standard option metadata/value paths (for example hardware.nvidia.open and boot.systemd.services); the repository Nix evaluator reports uncaught `expected a set but found null` / coercion failures while forcing metadata/value structures. The attempted focused check could not yet prove safe failed-row isolation without deciding whether to change the extraction failure boundary or use per-option evaluator isolation. No commit or push was made.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
