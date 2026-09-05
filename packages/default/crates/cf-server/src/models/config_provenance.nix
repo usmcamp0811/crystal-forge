@@ -26,13 +26,19 @@ let
     "sortProperties"
   ];
 
-  helpersAvailable =
+  moduleTypePayloadAvailable =
     payload != null
     && payload ? modules
     && payload ? specialArgs
     && payload ? class
-    && builtins.isList payload.modules
+    && builtins.isList payload.modules;
+
+  helperCapabilitiesAvailable =
+    moduleTypePayloadAvailable
     && builtins.all (name: builtins.hasAttr name lib.modules) helperNames;
+
+  priorityOf = definition:
+    (lib.modules.filterOverrides' [ definition ]).highestPrio;
 
   getAt = path: value:
     if path == [ ] then
@@ -48,7 +54,7 @@ let
       && (result.value._type or null) == "option";
 
   selfTest =
-    if !helpersAvailable then false
+    if !helperCapabilitiesAvailable then false
     else
       let
         selfModules = [
@@ -88,7 +94,16 @@ let
           { file = "loser"; value = lib.mkOverride 500 "loser"; }
           { file = "winner"; value = lib.mkForce "winner"; }
         ];
-        priorityWorks = priority.highestPrio == 50
+        mergeContributions = lib.modules.pushDownProperties
+          (builtins.elemAt selfModules 1).config;
+        pushDownWorks = builtins.length mergeContributions == 2
+          && builtins.all (property: property ? crystalForgeProvenanceSelfTest
+            && property.crystalForgeProvenanceSelfTest ? order)
+            mergeContributions;
+        priorityWorks = priority.highestPrio == priorityOf {
+          file = "winner";
+          value = lib.mkForce "winner";
+        }
           && builtins.length priority.values == 1
           && (builtins.head priority.values).file == "winner";
         order = lib.modules.sortProperties [
@@ -97,7 +112,8 @@ let
         ];
         orderWorks = map (definition: definition.value) order == [ "early" "late" ];
       in
-        normalizedFunction && falseDischarged && priorityWorks && orderWorks;
+        normalizedFunction && pushDownWorks && falseDischarged
+          && priorityWorks && orderWorks;
 
   canonicalGraph = node: {
     key = node.key;
@@ -137,7 +153,7 @@ let
 
   sourceOrigin = sourcePath:
     let
-      matches = builtins.filter (entry:
+      matches = if sourcePath == null then [ ] else builtins.filter (entry:
         entry.out_path != null
         && (sourcePath == entry.out_path
           || builtins.substring 0 (builtins.stringLength entry.out_path + 1) sourcePath
@@ -156,9 +172,10 @@ let
           let result = getAt path config;
           in if !result.found then [ ] else map (rawValue: {
             inherit path;
-            source_path = toString module._file;
-            source_input = (sourceOrigin (toString module._file)).input;
-            source_revision = (sourceOrigin (toString module._file)).revision;
+            source_path =
+              if module._file or null == null then null else toString module._file;
+            source_input = (sourceOrigin (module._file or null)).input;
+            source_revision = (sourceOrigin (module._file or null)).revision;
             module_key = module.key or null;
             raw_value = rawValue;
           }) (lib.modules.dischargeProperties result.value)
@@ -213,8 +230,10 @@ let
       path = optionPath;
       definitions = map (definition:
         let
-          priority = if (definition.raw_value._type or "") == "override"
-            then definition.raw_value.priority else 100;
+          priority = priorityOf {
+            file = definition.source_path;
+            value = definition.raw_value;
+          };
           mergeIndex = findIndex definition.ordinal mergeOrder;
         in {
           source_path = definition.source_path;
@@ -264,7 +283,8 @@ let
   };
 
   checked = builtins.tryEval (
-    if !helpersAvailable then unavailable "module_type_payload_unavailable"
+    if !moduleTypePayloadAvailable then unavailable "module_type_payload_unavailable"
+    else if !helperCapabilitiesAvailable then unavailable "helper_capability_unavailable"
     else if !selfTest then unavailable "capability_self_test_failed"
     else if !graphMatches then unavailable "graph_replay_mismatch"
     else supportedPayload
