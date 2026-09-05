@@ -2,8 +2,9 @@
 //!
 //! The checked-in [`config_inspector.nix`](config_inspector.nix) expression
 //! selects one real `nixosConfiguration`, discovers its option paths, and
-//! creates an index plus separate metadata and value jobs. This module does
-//! not participate in primary evaluation, persistence, or API serialization.
+//! creates an index, separate metadata and value jobs, and one independently
+//! evaluated raw-provenance carrier. This module does not participate in
+//! primary evaluation, persistence, or API serialization.
 
 use std::collections::{HashMap, HashSet};
 
@@ -17,19 +18,24 @@ use super::evaluation_snapshots::{SafeEvaluationError, SafeOptionValue};
 use crate::security::snapshot_redaction::redact_evaluation_error;
 
 const INDEX_ATTRIBUTE: &str = "__crystalForgeConfigIndex";
+const PROVENANCE_ATTRIBUTE: &str = "__crystalForgeProvenance";
 const META_PREFIX: &str = "meta_";
 const VALUE_PREFIX: &str = "value_";
+pub(crate) const EXPECTED_PROVENANCE_ADAPTER_VERSION: u64 = 1;
 
 /// Builds the Nix expression for one exact configuration revision.
 ///
 /// The expression selects `flake.nixosConfigurations[configuration_name]` and
-/// passes the selected system's `pkgs.lib` to the dedicated expression. It
+/// passes the selected system's `pkgs.lib` to the dedicated expressions. It
 /// never enumerates sibling configurations or evaluates exported modules.
 pub(crate) fn build_inspector_expression(flake_ref: &str, configuration_name: &str) -> String {
     let source = include_str!("config_inspector.nix");
+    let provenance_source = include_str!("config_provenance.nix");
     format!(
-        "({source}) {{ flakeRef = {flake_ref}; configurationName = {configuration_name}; }}",
+        "let\n  flakeRef = {flake_ref};\n  configurationName = {configuration_name};\n  flake = builtins.getFlake flakeRef;\n  configuration = builtins.getAttr configurationName flake.nixosConfigurations;\n  inspector = ({source}) {{ inherit flakeRef configurationName; }};\n  provenance = ({provenance_source}) {{ inherit flake configuration; }};\nin\n  inspector // {{ {provenance_attribute} = provenance; }}",
         source = source,
+        provenance_source = provenance_source,
+        provenance_attribute = PROVENANCE_ATTRIBUTE,
         flake_ref = nix_string_pub(flake_ref),
         configuration_name = nix_string_pub(configuration_name),
     )
@@ -40,6 +46,8 @@ pub(crate) fn build_inspector_expression(flake_ref: &str, configuration_name: &s
 pub(crate) struct ConfigInspectorResult {
     /// Options in the deterministic order supplied by the Nix index.
     pub options: Vec<InspectedOption>,
+    /// Raw-definition provenance, or an explicit unavailable state.
+    pub provenance: InspectionProvenance,
 }
 
 /// Represents one option after independent metadata and value reconciliation.
@@ -71,6 +79,71 @@ pub(crate) enum InspectionValue {
     Available(SafeOptionValue),
     /// Value job failure retained as an explicit safe failure.
     Failed(SafeEvaluationError),
+}
+
+/// Describes whether the versioned raw-definition adapter was usable.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum InspectionProvenance {
+    /// Raw definition metadata was recovered before priority filtering.
+    Available {
+        /// Adapter protocol version that produced the metadata.
+        adapter_version: u64,
+        /// Target Nixpkgs library version, when available.
+        target_lib_version: Option<String>,
+        /// Target module-system source path, when available.
+        target_module_system_path: Option<String>,
+        /// Validated raw definitions grouped by option key.
+        definitions_by_option: Vec<RawDefinitionsForOption>,
+    },
+    /// Raw-definition provenance was unavailable without invalidating options.
+    Unavailable {
+        /// Stable reason for the unavailable state.
+        reason_code: String,
+        /// Sanitized evaluator diagnostic, when one is available.
+        diagnostic: Option<SafeEvaluationError>,
+    },
+}
+
+/// Contains all raw definitions indexed for one exact option path.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RawDefinitionsForOption {
+    /// Collision-resistant option key.
+    pub option_key: String,
+    /// Exact option path components.
+    pub path: Vec<String>,
+    /// Definitions before priority filtering.
+    pub definitions: Vec<RawDefinition>,
+}
+
+/// Describes one raw definition without including its value.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RawDefinition {
+    /// Source module path, when the module system supplied one.
+    pub source_path: Option<String>,
+    /// Flake input name resolved from the adapter origin table.
+    pub source_input: Option<String>,
+    /// Full source revision resolved from the adapter origin table.
+    pub source_revision: Option<String>,
+    /// Normalized module key, when available.
+    pub module_key: Option<String>,
+    /// Definition ordinal within this option's adapter result.
+    pub ordinal: u64,
+    /// Target module-system priority.
+    pub priority: i64,
+    /// Whether the definition survived priority filtering.
+    pub status: RawDefinitionStatus,
+    /// Position among surviving definitions after target ordering.
+    pub surviving_merge_order: Option<u64>,
+}
+
+/// Classifies a raw definition using the target module-system result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RawDefinitionStatus {
+    /// Definition participates at the winning priority.
+    ActiveSurviving,
+    /// Definition was discarded by target priority filtering.
+    PriorityDiscarded,
 }
 
 /// Metadata proved without forcing the option's effective value.
@@ -128,6 +201,40 @@ struct JobResult {
     error: Option<String>,
     #[serde(rename = "extraValue")]
     extra_value: Option<Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ProvenancePayload {
+    #[serde(rename = "adapterVersion")]
+    adapter_version: u64,
+    supported: bool,
+    #[serde(rename = "reasonCode")]
+    reason_code: Option<String>,
+    #[serde(rename = "targetLibVersion")]
+    target_lib_version: Option<String>,
+    #[serde(rename = "targetModuleSystemPath")]
+    target_module_system_path: Option<String>,
+    #[serde(rename = "definitionsByOption", default)]
+    definitions_by_option: Vec<RawDefinitionsForOptionPayload>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RawDefinitionsForOptionPayload {
+    option_key: String,
+    path: Vec<String>,
+    definitions: Vec<RawDefinitionPayload>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RawDefinitionPayload {
+    source_path: Option<String>,
+    source_input: Option<String>,
+    source_revision: Option<String>,
+    module_key: Option<String>,
+    ordinal: u64,
+    priority: i64,
+    status: RawDefinitionStatus,
+    surviving_merge_order: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -190,6 +297,7 @@ pub(crate) fn reconcile_inspector_output(output: &[u8]) -> Result<ConfigInspecto
     let mut pending = HashMap::<String, PendingOption>::new();
     let mut seen_attributes = HashSet::new();
     let mut carrier_drv_path: Option<String> = None;
+    let mut provenance: Option<PendingProvenance> = None;
 
     for (line_number, line) in output
         .split(|byte| *byte == b'\n')
@@ -225,23 +333,40 @@ pub(crate) fn reconcile_inspector_output(output: &[u8]) -> Result<ConfigInspecto
         }
 
         if let Some(error) = result.error {
-            let failure = failed_evaluation("not_evaluated", &error);
             match job {
-                JobKind::Index => bail!("Config inspector index job failed: {}", failure.message),
+                JobKind::Index => {
+                    let failure = failed_evaluation("not_evaluated", &error);
+                    bail!("Config inspector index job failed: {}", failure.message)
+                }
                 JobKind::Metadata(key) => {
+                    let failure = failed_evaluation("not_evaluated", &error);
                     pending_entry(&mut pending, key).metadata =
                         Some(InspectionMetadata::Failed(failure));
                 }
                 JobKind::Value(key) => {
+                    let failure = failed_evaluation("not_evaluated", &error);
                     pending_entry(&mut pending, key).value = Some(InspectionValue::Failed(failure));
+                }
+                JobKind::Provenance => {
+                    provenance = Some(PendingProvenance::Unavailable(unavailable_provenance(
+                        "adapter_failed",
+                        Some(failed_evaluation("adapter_failed", &error)),
+                    )));
                 }
             }
             continue;
         }
 
-        let payload = result.extra_value.ok_or_else(|| {
-            anyhow::anyhow!("Config inspector result {} has no extraValue", result.attr)
-        })?;
+        let Some(payload) = result.extra_value else {
+            if matches!(job, JobKind::Provenance) {
+                provenance = Some(PendingProvenance::Unavailable(unavailable_provenance(
+                    "malformed_payload",
+                    None,
+                )));
+                continue;
+            }
+            bail!("Config inspector result {} has no extraValue", result.attr);
+        };
         match job {
             JobKind::Index => {
                 if index.is_some() {
@@ -279,11 +404,34 @@ pub(crate) fn reconcile_inspector_output(output: &[u8]) -> Result<ConfigInspecto
                 }
                 entry.value = Some(InspectionValue::Available(payload.value));
             }
+            JobKind::Provenance => {
+                let parsed = serde_json::from_value::<ProvenancePayload>(payload);
+                match parsed {
+                    Ok(payload) => {
+                        if provenance.is_some() {
+                            bail!("duplicate Config inspector provenance result");
+                        }
+                        provenance = Some(PendingProvenance::Payload(payload));
+                    }
+                    Err(_) => {
+                        provenance = Some(PendingProvenance::Unavailable(unavailable_provenance(
+                            "malformed_payload",
+                            None,
+                        )));
+                    }
+                }
+            }
         }
     }
 
     let index = index.ok_or_else(|| anyhow::anyhow!("Config inspector index result is missing"))?;
-    let origins = index.origins;
+    let origins = index.origins.clone();
+    let provenance = match provenance
+        .ok_or_else(|| anyhow::anyhow!("Config inspector provenance result is missing"))?
+    {
+        PendingProvenance::Unavailable(result) => result,
+        PendingProvenance::Payload(payload) => reconcile_provenance(payload, &index),
+    };
     let mut options = Vec::with_capacity(index.options.len());
     for entry in index.options {
         let pending = pending.remove(&entry.key).ok_or_else(|| {
@@ -314,7 +462,10 @@ pub(crate) fn reconcile_inspector_output(output: &[u8]) -> Result<ConfigInspecto
         bail!("Config inspector result hash {unindexed} is not in the index");
     }
 
-    Ok(ConfigInspectorResult { options })
+    Ok(ConfigInspectorResult {
+        options,
+        provenance,
+    })
 }
 
 fn resolve_definition_origins(
@@ -377,11 +528,15 @@ enum JobKind<'a> {
     Index,
     Metadata(&'a str),
     Value(&'a str),
+    Provenance,
 }
 
 fn classify_attribute(attribute: &str) -> Result<JobKind<'_>> {
     if attribute == INDEX_ATTRIBUTE {
         return Ok(JobKind::Index);
+    }
+    if attribute == PROVENANCE_ATTRIBUTE {
+        return Ok(JobKind::Provenance);
     }
     if let Some(key) = attribute.strip_prefix(META_PREFIX) {
         validate_key(key)?;
@@ -392,6 +547,109 @@ fn classify_attribute(attribute: &str) -> Result<JobKind<'_>> {
         return Ok(JobKind::Value(key));
     }
     bail!("unknown Config inspector job attribute {attribute}");
+}
+
+enum PendingProvenance {
+    Payload(ProvenancePayload),
+    Unavailable(InspectionProvenance),
+}
+
+fn unavailable_provenance(
+    reason_code: &str,
+    diagnostic: Option<SafeEvaluationError>,
+) -> InspectionProvenance {
+    InspectionProvenance::Unavailable {
+        reason_code: reason_code.to_string(),
+        diagnostic,
+    }
+}
+
+fn reconcile_provenance(payload: ProvenancePayload, index: &IndexPayload) -> InspectionProvenance {
+    if payload.adapter_version != EXPECTED_PROVENANCE_ADAPTER_VERSION {
+        return unavailable_provenance("unsupported_adapter_version", None);
+    }
+    if !payload.supported {
+        let reason_code = payload
+            .reason_code
+            .as_deref()
+            .filter(|reason| {
+                matches!(
+                    *reason,
+                    "module_type_payload_unavailable"
+                        | "capability_self_test_failed"
+                        | "graph_replay_mismatch"
+                        | "adapter_evaluation_failed"
+                        | "provenance_integrity_failure"
+                )
+            })
+            .unwrap_or("adapter_unsupported");
+        return unavailable_provenance(reason_code, None);
+    }
+
+    let index_paths = index
+        .options
+        .iter()
+        .map(|entry| (entry.key.as_str(), entry.path.as_slice()))
+        .collect::<HashMap<_, _>>();
+    let mut seen_options = HashSet::new();
+    let mut definitions_by_option = Vec::with_capacity(payload.definitions_by_option.len());
+
+    for option in payload.definitions_by_option {
+        if !seen_options.insert(option.option_key.clone())
+            || option_key(&option.path) != option.option_key
+            || index_paths
+                .get(option.option_key.as_str())
+                .is_none_or(|path| *path != option.path.as_slice())
+        {
+            return unavailable_provenance("provenance_integrity_failure", None);
+        }
+
+        let mut ordinals = HashSet::new();
+        let mut merge_orders = HashSet::new();
+        let mut definitions = Vec::with_capacity(option.definitions.len());
+        for definition in option.definitions {
+            if !ordinals.insert(definition.ordinal) {
+                return unavailable_provenance("provenance_integrity_failure", None);
+            }
+            match definition.status {
+                RawDefinitionStatus::ActiveSurviving => {
+                    let Some(order) = definition.surviving_merge_order else {
+                        return unavailable_provenance("provenance_integrity_failure", None);
+                    };
+                    if !merge_orders.insert(order) {
+                        return unavailable_provenance("provenance_integrity_failure", None);
+                    }
+                }
+                RawDefinitionStatus::PriorityDiscarded => {
+                    if definition.surviving_merge_order.is_some() {
+                        return unavailable_provenance("provenance_integrity_failure", None);
+                    }
+                }
+            }
+            definitions.push(RawDefinition {
+                source_path: definition.source_path,
+                source_input: definition.source_input,
+                source_revision: definition.source_revision,
+                module_key: definition.module_key,
+                ordinal: definition.ordinal,
+                priority: definition.priority,
+                status: definition.status,
+                surviving_merge_order: definition.surviving_merge_order,
+            });
+        }
+        definitions_by_option.push(RawDefinitionsForOption {
+            option_key: option.option_key,
+            path: option.path,
+            definitions,
+        });
+    }
+
+    InspectionProvenance::Available {
+        adapter_version: payload.adapter_version,
+        target_lib_version: payload.target_lib_version,
+        target_module_system_path: payload.target_module_system_path,
+        definitions_by_option,
+    }
 }
 
 fn validate_key(key: &str) -> Result<()> {
@@ -437,6 +695,22 @@ mod tests {
         })
     }
 
+    fn reconcile_for_test(output: &str) -> Result<ConfigInspectorResult> {
+        if output.contains(PROVENANCE_ATTRIBUTE) {
+            reconcile_inspector_output(output.as_bytes())
+        } else {
+            let provenance = result(
+                PROVENANCE_ATTRIBUTE,
+                json!({
+                    "adapterVersion": EXPECTED_PROVENANCE_ADAPTER_VERSION,
+                    "supported": false,
+                    "reasonCode": "capability_self_test_failed",
+                }),
+            );
+            reconcile_inspector_output(format!("{output}\n{provenance}").as_bytes())
+        }
+    }
+
     fn index(key: &str, path: &[&str]) -> Value {
         json!({
             "kind": "index",
@@ -477,6 +751,8 @@ mod tests {
             expression.contains("builtins.getAttr configurationName flake.nixosConfigurations")
         );
         assert!(expression.contains("configuration.pkgs.lib"));
+        assert!(expression.contains("__crystalForgeProvenance"));
+        assert!(expression.contains("provenanceAdapterVersion = 1"));
         assert!(!expression.contains("flake.inputs.nixpkgs"));
         assert!(!expression.contains("flake.nixosModules"));
         assert!(!expression.contains("evaluationSnapshot"));
@@ -532,7 +808,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        let result = reconcile_inspector_output(output.as_bytes()).unwrap();
+        let result = reconcile_for_test(&output).unwrap();
         assert_eq!(result.options.len(), 1);
         assert!(matches!(
             result.options[0].metadata,
@@ -572,7 +848,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        let result = reconcile_inspector_output(output.as_bytes()).unwrap();
+        let result = reconcile_for_test(&output).unwrap();
         assert!(matches!(
             result.options[0].metadata,
             InspectionMetadata::Failed(_)
@@ -603,7 +879,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        let result = reconcile_inspector_output(output.as_bytes()).unwrap();
+        let result = reconcile_for_test(&output).unwrap();
         assert!(matches!(
             result.options[0].metadata,
             InspectionMetadata::Available(_)
@@ -640,7 +916,7 @@ mod tests {
                 .map(Value::to_string)
                 .collect::<Vec<_>>()
                 .join("\n");
-            assert!(reconcile_inspector_output(output.as_bytes()).is_err());
+            assert!(reconcile_for_test(&output).is_err());
         }
     }
 
@@ -678,7 +954,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert!(reconcile_inspector_output(output.as_bytes()).is_err());
+        assert!(reconcile_for_test(&output).is_err());
     }
 
     #[test]
@@ -743,7 +1019,7 @@ mod tests {
             .map(Value::to_string)
             .collect::<Vec<_>>()
             .join("\n");
-        let result = reconcile_inspector_output(output.as_bytes()).unwrap();
+        let result = reconcile_for_test(&output).unwrap();
 
         assert_eq!(result.options[0].path_components, string_path(&dotted));
         assert_eq!(
@@ -772,10 +1048,10 @@ mod tests {
         )
         .to_string();
         let duplicate_output = format!("{index_line}\n{duplicate}\n{duplicate}");
-        assert!(reconcile_inspector_output(duplicate_output.as_bytes()).is_err());
+        assert!(reconcile_for_test(&duplicate_output).is_err());
 
         let unknown = result("other_job", json!({})).to_string();
-        assert!(reconcile_inspector_output(unknown.as_bytes()).is_err());
+        assert!(reconcile_for_test(&unknown).is_err());
     }
 
     #[test]
@@ -788,7 +1064,7 @@ mod tests {
         metadata_line["drvPath"] = json!("/nix/store/two.drv");
         let output = format!("{}\n{}", index_line, metadata_line);
 
-        assert!(reconcile_inspector_output(output.as_bytes()).is_err());
+        assert!(reconcile_for_test(&output).is_err());
     }
 
     #[test]
@@ -798,6 +1074,220 @@ mod tests {
         let mut line = result("__crystalForgeConfigIndex", index(&key, &path));
         line["drvPath"] = Value::Null;
 
-        assert!(reconcile_inspector_output(line.to_string().as_bytes()).is_err());
+        assert!(reconcile_for_test(&line.to_string()).is_err());
+    }
+
+    fn supported_provenance(path: &[&str], key: &str) -> Value {
+        json!({
+            "adapterVersion": EXPECTED_PROVENANCE_ADAPTER_VERSION,
+            "supported": true,
+            "targetLibVersion": "26.05pre-git",
+            "targetModuleSystemPath": "/nix/store/nixpkgs",
+            "definitionsByOption": [{
+                "option_key": key,
+                "path": path,
+                "definitions": [
+                    {
+                        "source_path": "/nix/store/source/default.nix",
+                        "source_input": "self",
+                        "source_revision": null,
+                        "module_key": "module",
+                        "ordinal": 0,
+                        "priority": 1000,
+                        "status": "priority_discarded",
+                        "surviving_merge_order": null,
+                    },
+                    {
+                        "source_path": "/nix/store/source/force.nix",
+                        "source_input": "self",
+                        "source_revision": null,
+                        "module_key": "force",
+                        "ordinal": 1,
+                        "priority": 50,
+                        "status": "active_surviving",
+                        "surviving_merge_order": 0,
+                    },
+                ],
+            }],
+        })
+    }
+
+    #[test]
+    fn supported_provenance_preserves_discarded_and_surviving_definitions() {
+        let path = ["crystalForgeProbe", "target"];
+        let key = hash(&path);
+        let lines = [
+            result("__crystalForgeConfigIndex", index(&key, &path)),
+            result(&format!("meta_{key}"), metadata(&key, &path)),
+            result(
+                &format!("value_{key}"),
+                json!({
+                    "kind": "value",
+                    "key": key,
+                    "value": { "kind": "scalar", "value": "winner" },
+                }),
+            ),
+            result(PROVENANCE_ATTRIBUTE, supported_provenance(&path, &key)),
+        ];
+        let output = lines
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let result = reconcile_inspector_output(output.as_bytes()).unwrap();
+
+        let InspectionProvenance::Available {
+            adapter_version,
+            definitions_by_option,
+            ..
+        } = result.provenance
+        else {
+            panic!("supported provenance was not available");
+        };
+        assert_eq!(adapter_version, EXPECTED_PROVENANCE_ADAPTER_VERSION);
+        assert_eq!(definitions_by_option.len(), 1);
+        assert_eq!(definitions_by_option[0].definitions.len(), 2);
+        assert_eq!(
+            definitions_by_option[0].definitions[0].status,
+            RawDefinitionStatus::PriorityDiscarded
+        );
+        assert_eq!(
+            definitions_by_option[0].definitions[1].status,
+            RawDefinitionStatus::ActiveSurviving
+        );
+    }
+
+    #[test]
+    fn explicit_provenance_error_does_not_hide_core_inspection() {
+        let path = ["healthy", "option"];
+        let key = hash(&path);
+        let lines = [
+            result("__crystalForgeConfigIndex", index(&key, &path)),
+            result(&format!("meta_{key}"), metadata(&key, &path)),
+            result(
+                &format!("value_{key}"),
+                json!({
+                    "kind": "value",
+                    "key": key,
+                    "value": { "kind": "scalar", "value": true },
+                }),
+            ),
+            json!({
+                "attr": PROVENANCE_ATTRIBUTE,
+                "attrPath": [PROVENANCE_ATTRIBUTE],
+                "drvPath": null,
+                "error": "provenance adapter failed with token=secret",
+            }),
+        ];
+        let output = lines
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let result = reconcile_inspector_output(output.as_bytes()).unwrap();
+
+        assert!(matches!(
+            result.options[0].metadata,
+            InspectionMetadata::Available(_)
+        ));
+        assert!(matches!(
+            result.options[0].value,
+            InspectionValue::Available(_)
+        ));
+        assert!(matches!(
+            result.provenance,
+            InspectionProvenance::Unavailable { ref reason_code, .. }
+                if reason_code == "adapter_failed"
+        ));
+    }
+
+    #[test]
+    fn provenance_integrity_failure_isolated_from_core_inspection() {
+        let path = ["healthy", "option"];
+        let key = hash(&path);
+        let mut payload = supported_provenance(&path, &key);
+        payload["definitionsByOption"][0]["definitions"][1]["ordinal"] = json!(0);
+        let lines = [
+            result("__crystalForgeConfigIndex", index(&key, &path)),
+            result(&format!("meta_{key}"), metadata(&key, &path)),
+            result(
+                &format!("value_{key}"),
+                json!({
+                    "kind": "value",
+                    "key": key,
+                    "value": { "kind": "scalar", "value": true },
+                }),
+            ),
+            result(PROVENANCE_ATTRIBUTE, payload),
+        ];
+        let output = lines
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let result = reconcile_inspector_output(output.as_bytes()).unwrap();
+
+        assert!(matches!(
+            result.provenance,
+            InspectionProvenance::Unavailable { ref reason_code, .. }
+                if reason_code == "provenance_integrity_failure"
+        ));
+        assert_eq!(result.options.len(), 1);
+    }
+
+    #[test]
+    fn missing_provenance_result_is_a_stream_integrity_failure() {
+        let path = ["healthy", "option"];
+        let key = hash(&path);
+        let lines = [
+            result("__crystalForgeConfigIndex", index(&key, &path)),
+            result(&format!("meta_{key}"), metadata(&key, &path)),
+            result(
+                &format!("value_{key}"),
+                json!({
+                    "kind": "value",
+                    "key": key,
+                    "value": { "kind": "scalar", "value": true },
+                }),
+            ),
+        ];
+        let output = lines
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(reconcile_inspector_output(output.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn unsupported_provenance_preserves_core_inspection() {
+        let path = ["healthy", "option"];
+        let key = hash(&path);
+        let lines = [
+            result("__crystalForgeConfigIndex", index(&key, &path)),
+            result(&format!("meta_{key}"), metadata(&key, &path)),
+            result(
+                &format!("value_{key}"),
+                json!({
+                    "kind": "value",
+                    "key": key,
+                    "value": { "kind": "scalar", "value": true },
+                }),
+            ),
+        ];
+        let output = lines
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let result = reconcile_for_test(&output).unwrap();
+
+        assert_eq!(result.options.len(), 1);
+        assert!(matches!(
+            result.provenance,
+            InspectionProvenance::Unavailable { ref reason_code, .. }
+                if reason_code == "capability_self_test_failed"
+        ));
     }
 }

@@ -2,17 +2,39 @@
 
 let
   inspectorSource = builtins.readFile ../../packages/default/crates/cf-server/src/models/config_inspector.nix;
+  provenanceSource = builtins.readFile ../../packages/default/crates/cf-server/src/models/config_provenance.nix;
   fixture = pkgs.runCommand "crystal-forge-config-inspector-fixture" { } ''
     mkdir -p "$out"
+    touch "$out/explicit-modules-location.nix"
     cat > "$out/flake.nix" <<'EOF'
     {
       inputs.base.url = "path:${pkgs.path}";
 
       outputs = { self, base, ... }:
         let
-          lib = base.lib;
-          module = { lib, pkgs, ... }: {
-            options.crystalForgeProbe = {
+           lib = base.lib;
+           child = { lib, ... }: {
+             config.crystalForgeProbe = {
+               samePriority = lib.mkOverride 400 "child";
+               poison = lib.mkForce "poison-winner";
+               imported = "child";
+             };
+           };
+           duplicate = { ... }: {
+             config.crystalForgeProbe.duplicate = "once";
+           };
+           disabled = {
+             key = "disabled-module";
+             config.crystalForgeProbe.disabled = "must-not-survive";
+           };
+           disabler = {
+             key = "disabler";
+             disabledModules = [ { key = "disabled-module"; } ];
+             imports = [ disabled ];
+           };
+           module = { lib, pkgs, ... }: {
+             imports = [ child duplicate duplicate ];
+             options.crystalForgeProbe = {
               healthyBefore = lib.mkOption {
                 type = lib.types.str;
                 default = "before";
@@ -22,15 +44,56 @@ let
                 default = "poison";
                 apply = _: throw "selected poisoned option forced";
               };
-              healthyAfter = lib.mkOption {
-                type = lib.types.str;
-                default = "after";
-              };
-            };
+               healthyAfter = lib.mkOption {
+                 type = lib.types.str;
+                 default = "after";
+               };
+               samePriority = lib.mkOption {
+                 type = lib.types.str;
+                 default = "unset";
+               };
+               imported = lib.mkOption {
+                 type = lib.types.str;
+                 default = "unset";
+               };
+               conditionalTrue = lib.mkOption {
+                 type = lib.types.str;
+                 default = "unset";
+               };
+               conditionalFalse = lib.mkOption {
+                 type = lib.types.str;
+                 default = "unset";
+               };
+               merged = lib.mkOption {
+                 type = lib.types.listOf lib.types.str;
+                 default = [ ];
+               };
+               ordered = lib.mkOption {
+                 type = lib.types.listOf lib.types.str;
+                 default = [ ];
+               };
+               duplicate = lib.mkOption {
+                 type = lib.types.str;
+                 default = "unset";
+               };
+               disabled = lib.mkOption {
+                 type = lib.types.str;
+                 default = "unset";
+               };
+             };
 
-            config = {
-              crystalForgeProbe.healthyBefore = "before";
-              crystalForgeProbe.healthyAfter = "after";
+             config = {
+               crystalForgeProbe.healthyBefore = "before";
+               crystalForgeProbe.healthyAfter = "after";
+               crystalForgeProbe.poison = lib.mkDefault "poison-loser";
+               crystalForgeProbe.samePriority = lib.mkOverride 400 "module";
+               crystalForgeProbe.conditionalTrue = lib.mkIf true "true";
+               crystalForgeProbe.conditionalFalse = lib.mkIf false "false";
+               crystalForgeProbe.merged = lib.mkMerge [ [ "first" ] [ "second" ] ];
+               crystalForgeProbe.ordered = lib.mkMerge [
+                 (lib.mkOrder 200 [ "late" ])
+                 (lib.mkOrder 100 [ "early" ])
+               ];
               boot.loader.grub.devices = [ "nodev" ];
               fileSystems."/" = {
                 device = "/dev/sda";
@@ -38,14 +101,15 @@ let
               };
               boot.consoleLogLevel = 7;
               boot.kernelParams = [ "quiet" ];
-              environment.systemPackages = [ pkgs.hello ];
-              system.stateVersion = "26.05";
-            };
+               environment.systemPackages = [ pkgs.hello ];
+               system.stateVersion = "26.05";
+             };
           };
         in {
-          nixosConfigurations.good = lib.nixosSystem {
-            system = builtins.currentSystem;
-            modules = [ module ];
+           nixosConfigurations.good = lib.nixosSystem {
+             system = builtins.currentSystem;
+             modulesLocation = toString ./explicit-modules-location.nix;
+             modules = [ module disabler ];
           };
           nixosConfigurations.unrelatedBroken =
             throw "unrelated configuration forced";
@@ -58,10 +122,14 @@ let
   '';
 
   expression = ''
-    (${inspectorSource}) {
+    let
       flakeRef = "path:${fixture}";
       configurationName = "good";
-    }
+      flake = builtins.getFlake flakeRef;
+      configuration = builtins.getAttr configurationName flake.nixosConfigurations;
+      inspector = (${inspectorSource}) { inherit flakeRef configurationName; };
+      provenance = (${provenanceSource}) { inherit flake configuration; };
+    in inspector // { __crystalForgeProvenance = provenance; }
   '';
 
   subsetExpression = ''
@@ -80,11 +148,12 @@ let
         "__crystalForgeConfigIndex"
         ("meta_" + healthyBefore)
         ("value_" + healthyBefore)
-        ("meta_" + poison)
-        ("value_" + poison)
-        ("meta_" + healthyAfter)
-        ("value_" + healthyAfter)
-      ];
+         ("meta_" + poison)
+         ("value_" + poison)
+         ("meta_" + healthyAfter)
+         ("value_" + healthyAfter)
+         "__crystalForgeProvenance"
+       ];
     in builtins.listToAttrs (map (name: {
       inherit name;
       value = builtins.getAttr name jobs;
@@ -117,11 +186,11 @@ pkgs.runCommand "crystal-forge-config-inspector-check" {
     --expr "import ${subsetFile}" \
     --impure \
     --meta \
-    --apply 'derivation: derivation.meta.crystalForgeInspector' \
+     --apply 'derivation: if derivation.meta ? crystalForgeInspector then derivation.meta.crystalForgeInspector else derivation.meta.crystalForgeProvenance' \
     --option experimental-features 'nix-command flakes' \
     --workers 2 > result.jsonl 2> result.stderr
 
-  test "$(wc -l < result.jsonl)" -eq 7
+   test "$(wc -l < result.jsonl)" -eq 8
   test "$(jq -c 'select(.error != null)' result.jsonl | wc -l)" -ge 1
   test "$(jq -c 'select(.drvPath != null) | .drvPath' result.jsonl | sort -u | wc -l)" -eq 1
 
@@ -152,10 +221,73 @@ pkgs.runCommand "crystal-forge-config-inspector-check" {
     'select(.attr == $attr) | .error == null and .extraValue.kind == "metadata"' \
     result.jsonl >/dev/null
 
-  jq -e --arg attr "value_$after_hash" \
-    'select(.attr == $attr) | .error == null and .extraValue.kind == "value"' \
-    result.jsonl >/dev/null
+   jq -e --arg attr "value_$after_hash" \
+     'select(.attr == $attr) | .error == null and .extraValue.kind == "value"' \
+     result.jsonl >/dev/null
 
-  ! grep -E 'unrelated configuration forced|namespace-change-me' result.stderr
+   jq -e '
+     select(.attr == "__crystalForgeProvenance")
+     | .error == null
+     and .extraValue.adapterVersion == 1
+     and .extraValue.supported == true
+     and (.extraValue.targetLibVersion | type == "string")
+     and (.extraValue.targetModuleSystemPath | type == "string")
+     and .extraValue.graphReplay.equal == true
+     and .extraValue.graphReplay.actualNodeCount == .extraValue.graphReplay.replayNodeCount
+     and .extraValue.seedEvidence.hiddenPkgsModulePresent == true
+     and .extraValue.seedEvidence.hiddenModulesModulePresent == true
+     and ([.extraValue.seedEvidence.modulesLocationSources[] | select(contains("explicit-modules-location.nix"))] | length == 1)
+   ' result.jsonl >/dev/null
+
+   jq -e '
+     select(.attr == "__crystalForgeProvenance")
+     | [.extraValue.definitionsByOption[] | select(.path == ["crystalForgeProbe", "poison"]) | .definitions[]]
+     | any(.status == "priority_discarded")
+   ' result.jsonl >/dev/null
+
+   jq -e '
+     select(.attr == "__crystalForgeProvenance")
+     | [.extraValue.definitionsByOption[] | select(.path == ["crystalForgeProbe", "samePriority"]) | .definitions[]]
+     | map(select(.status == "active_surviving")) | length == 2
+   ' result.jsonl >/dev/null
+
+   jq -e '
+     select(.attr == "__crystalForgeProvenance")
+     | [.extraValue.definitionsByOption[] | select(.path == ["crystalForgeProbe", "conditionalFalse"]) | .definitions[]]
+     | length == 0
+   ' result.jsonl >/dev/null
+
+   jq -e '
+     select(.attr == "__crystalForgeProvenance")
+     | [.extraValue.definitionsByOption[] | select(.path == ["crystalForgeProbe", "conditionalTrue"]) | .definitions[]]
+     | any(.status == "active_surviving")
+   ' result.jsonl >/dev/null
+
+   jq -e '
+     select(.attr == "__crystalForgeProvenance")
+     | [.extraValue.definitionsByOption[] | select(.path == ["crystalForgeProbe", "imported"]) | .definitions[]]
+     | length == 1
+   ' result.jsonl >/dev/null
+
+   jq -e '
+     select(.attr == "__crystalForgeProvenance")
+     | [.extraValue.definitionsByOption[] | select(.path == ["crystalForgeProbe", "disabled"]) | .definitions[]]
+     | length == 0
+   ' result.jsonl >/dev/null
+
+   jq -e '
+     select(.attr == "__crystalForgeProvenance")
+     | [.extraValue.definitionsByOption[] | select(.path == ["crystalForgeProbe", "ordered"]) | .definitions[]]
+     | all(.status == "active_surviving")
+     and map(.surviving_merge_order) == [1, 0]
+   ' result.jsonl >/dev/null
+
+   jq -e '
+     select(.attr == "__crystalForgeProvenance")
+     | [.extraValue.definitionsByOption[] | select(.path == ["crystalForgeProbe", "merged"]) | .definitions[]]
+     | length == 2 and all(.status == "active_surviving")
+   ' result.jsonl >/dev/null
+
+   ! grep -E 'unrelated configuration forced|namespace-change-me' result.stderr
   touch "$out"
 ''
