@@ -1,11 +1,11 @@
 ---
 id: TASK-440
 title: Bring system configuration and flake exploration into full design parity
-status: In Progress
+status: Review
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-05 15:45'
+updated_date: '2026-09-05 16:25'
 labels:
   - design-parity
   - web-ui
@@ -334,5 +334,13 @@ author: @openai-agent
 created: 2026-09-03 09:45
 ---
 Final deployment/snapshot race P1 resolved on 2026-09-03. Added one shared `SNAPSHOT_WRITER_LOCK_KEY` transaction-lock helper and made both deployment-creation transactions acquire it before the system-row lock and before artifact selection/binding. Snapshot publication, deployment creation, generation retention, and reclamation now use the documented lock order: snapshot-writer advisory lock first, row locks second. Added and enrolled migrated PostgreSQL regression `deployment_creation_and_snapshot_finalization_serialize_exact_binding_and_retention`; it holds the advisory lock until deployment creation and snapshot finalization are both waiting, releases them to race in either order, and proves exact deployment binding plus retained snapshot/derivation/commit lineage. Passed: `nix develop ../.. -c env SQLX_OFFLINE=true cargo check --offline --package cf-server`; `nix develop ../.. -c cargo fmt --package cf-server -- --check`; `nix build .#checks.x86_64-linux.server-regressions -L`; scoped `git diff --check -- packages/default/crates/cf-server checks/server-regressions/default.nix docs/evaluation-flake-snapshots.md docs/specs/02-backend-api.md`. Existing compiler warnings remain. No frontend files were edited and nothing was staged, committed, or pushed.
+---
+
+author: opencode
+created: 2026-09-05 16:25
+---
+Implemented and pushed commit 5b5be966 to origin/TASK-440-system-config-flake-parity. Existing MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/323
+
+Verification completed: cargo fmt --check; SQLX_OFFLINE=true cargo check --manifest-path packages/default/crates/cf-server/Cargo.toml -p cf-server --lib; nix build .#checks.x86_64-linux.config-inspector --no-link --print-build-logs; nix build .#checks.x86_64-linux.evaluator-snapshot-isolation --no-link --print-build-logs; git diff --cached --check. Cargo emitted pre-existing warnings; checks exited successfully.
 ---
 <!-- COMMENTS:END -->
