@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-05 03:45'
+updated_date: '2026-09-05 13:02'
 labels:
   - design-parity
   - web-ui
@@ -295,6 +295,8 @@ Production campground commit `cb67fcae6e713a21aba85b9a5b8b9efd52f6d93f` proved t
 Primary evaluator rollback checkpoint (2026-09-04): restore the pre-TASK-440 PRIMARY boundary by evaluating only `nixosConfigurations`, each `config.system.build.toplevel`, assigned policy checks, `cfAgentEnabled`, and revision metadata. Keep Config and flake exploration out of the PRIMARY expression. Verify the exact production transport through `nix-eval-jobs --meta`, including `meta.policies`, against lazy duplicate-option and missing-namespace fixtures. Treat absent separately captured configuration and flake-output artifacts as durable `unavailable` lifecycle states without changing successful system evaluation, policy, build, or deployment outcomes. Add pure bulk/fallback classification coverage and a migration-backed finalization regression, then run focused Rust, Nix, formatting, and diff checks before creating a separate checkpoint commit.
 
 Checkpoint build correction (2026-09-04): restore the established `cfg` and `checker` local names in `primary_evaluation.nix` so the existing `bulk_package_checker_binds_full_cfg_object` source-contract regression recognizes that package policies receive the complete `cfg.config` object. Do not change evaluator behavior or touch Campground. Verify the reported exact Rust test, PRIMARY structural/parse tests, the direct real `nix-eval-jobs` isolation fixture, formatting, and diff checks; then push a focused corrective commit to MR !323.
+
+Bounded targeted-inspector slice (2026-09-05): replace the monolithic config_inspector.rs scaffold with a checked-in config_inspector.nix that selects only flake.nixosConfigurations[configurationName], discovers option paths without forcing values, creates one index plus metadata/value carrier jobs per hashed option, and reuses configuration.config.system.build.toplevel. Add private Rust wire/domain types and order-independent JSONL reconciliation with explicit metadata/value failures, duplicate/unknown hash rejection, and safe diagnostic redaction via existing utilities. Add a permanent checks/config-inspector real-Nix fixture using inputs.base and base.lib.nixosSystem with lazy sibling/module poison, plus representative and full jobset assertions. Preserve primary evaluator semantics and defer discarded override provenance, persistence, APIs, UI, and queueing.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
