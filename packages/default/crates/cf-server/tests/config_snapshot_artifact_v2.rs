@@ -551,3 +551,262 @@ async fn v2_validates_merge_order_override_and_exact_identity(pool: PgPool) {
         "duplicate path identity must be rejected"
     );
 }
+
+#[sqlx::test]
+#[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+async fn v2_malformed_payloads_rejected(pool: PgPool) {
+    MIGRATOR.run(&pool).await.expect("apply migrations");
+
+    // Metadata failed error cases
+    let metadata_failed_no_code = json!({
+        "state": "failed",
+        "error": {"message": "test"},
+    });
+    let metadata_failed_no_message = json!({
+        "state": "failed",
+        "error": {"code": "test"},
+    });
+
+    for (metadata, label) in [
+        (metadata_failed_no_code, "metadata failed missing code"),
+        (
+            metadata_failed_no_message,
+            "metadata failed missing message",
+        ),
+    ] {
+        let payload = json!({
+            "metadata": metadata,
+            "effective_value": {"kind": "scalar", "value": "test"},
+            "provenance": {"state": "unavailable"},
+        });
+        let snapshot = insert_snapshot(
+            &pool,
+            label,
+            2,
+            payload,
+            Some(global_unavailable()),
+            Some(false),
+            Some(TARGET_KEY),
+            Some("/nix/store/source"),
+            Some("/nix/store/carrier.drv"),
+            Some(&format!("{:064x}", label.len())),
+            Some(&["test", label]),
+            None,
+        )
+        .await;
+        assert!(
+            !certify(&pool, snapshot).await,
+            "{} must fail certification",
+            label
+        );
+    }
+
+    // Global provenance unavailable malformed diagnostic
+    let bad_diagnostic = json!({
+        "state": "unavailable",
+        "reason_code": "test",
+        "diagnostic": {"code": "x"},
+    });
+    let snapshot = insert_snapshot(
+        &pool,
+        "bad-global-diagnostic",
+        2,
+        unavailable_payload(),
+        Some(bad_diagnostic),
+        Some(false),
+        Some(TARGET_KEY),
+        Some("/nix/store/source"),
+        Some("/nix/store/carrier.drv"),
+        Some("dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"),
+        Some(&["test", "diagnostic"]),
+        None,
+    )
+    .await;
+    assert!(
+        !certify(&pool, snapshot).await,
+        "bad global diagnostic must fail"
+    );
+
+    // Stage-2 unavailable malformed diagnostic
+    let bad_enrichment = json!({
+        "state": "available",
+        "adapter_version": 1,
+        "target_lib_version": null,
+        "target_module_system_path": null,
+        "provenance_digest": PROVENANCE_DIGEST,
+        "definition_value_enrichment": {
+            "state": "unavailable",
+            "reason_code": "test",
+            "diagnostic": {"message": "x"},
+        },
+    });
+    let snapshot2 = insert_snapshot(
+        &pool,
+        "bad-enrichment-diagnostic",
+        2,
+        local_payload(vec![], false),
+        Some(bad_enrichment),
+        Some(false),
+        Some(TARGET_KEY),
+        Some("/nix/store/source"),
+        Some("/nix/store/carrier.drv"),
+        Some("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"),
+        Some(&["test", "enrichment"]),
+        Some(false),
+    )
+    .await;
+    assert!(
+        !certify(&pool, snapshot2).await,
+        "bad enrichment diagnostic must fail"
+    );
+
+    // Missing definition nullable key
+    let bad_def_payload = json!({
+        "metadata": metadata(),
+        "effective_value": {"kind": "scalar", "value": "test"},
+        "provenance": {
+            "state": "available",
+            "definitions": [{
+                "ordinal": 0,
+                "source_path": "test.nix",
+                "priority": 100,
+                "status": "active_surviving",
+                "surviving_merge_order": 0,
+                "value": {"kind": "scalar", "value": "test"},
+            }],
+            "override_state": false,
+        },
+    });
+    let snapshot3 = insert_snapshot(
+        &pool,
+        "missing-def-keys",
+        2,
+        bad_def_payload,
+        Some(global_available(enrichment_available(1, PROVENANCE_DIGEST))),
+        Some(true),
+        Some(TARGET_KEY),
+        Some("/nix/store/source"),
+        Some("/nix/store/carrier.drv"),
+        Some("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"),
+        Some(&["test", "def"]),
+        Some(false),
+    )
+    .await;
+    assert!(
+        !certify(&pool, snapshot3).await,
+        "missing definition keys must fail"
+    );
+
+    // Malformed surviving_definition_sources element
+    let bad_metadata = json!({
+        "state": "available",
+        "option_type": "string",
+        "loc": [],
+        "declared_type": "str",
+        "declarations": [],
+        "declaration_positions": [],
+        "highest_prio": 100,
+        "is_defined": true,
+        "surviving_definition_sources": [{"source_path": "test.nix"}],
+    });
+    let payload4 = json!({
+        "metadata": bad_metadata,
+        "effective_value": {"kind": "scalar", "value": "test"},
+        "provenance": {"state": "unavailable"},
+    });
+    let snapshot4 = insert_snapshot(
+        &pool,
+        "bad-surviving-sources",
+        2,
+        payload4,
+        Some(global_unavailable()),
+        Some(false),
+        Some(TARGET_KEY),
+        Some("/nix/store/source"),
+        Some("/nix/store/carrier.drv"),
+        Some("1111111111111111111111111111111111111111111111111111111111111111"),
+        Some(&["test", "sources"]),
+        None,
+    )
+    .await;
+    assert!(
+        !certify(&pool, snapshot4).await,
+        "malformed surviving_definition_sources must fail"
+    );
+
+    // Non-contiguous definition ordinal
+    let bad_ordinal = local_payload(
+        vec![
+            definition(
+                0,
+                Some(0),
+                "active_surviving",
+                json!({"kind": "scalar", "value": "a"}),
+            ),
+            definition(
+                2,
+                Some(1),
+                "active_surviving",
+                json!({"kind": "scalar", "value": "b"}),
+            ),
+        ],
+        false,
+    );
+    let snapshot5 = insert_snapshot(
+        &pool,
+        "non-contiguous-ordinal",
+        2,
+        bad_ordinal,
+        Some(global_available(enrichment_available(1, PROVENANCE_DIGEST))),
+        Some(true),
+        Some(TARGET_KEY),
+        Some("/nix/store/source"),
+        Some("/nix/store/carrier.drv"),
+        Some("2222222222222222222222222222222222222222222222222222222222222222"),
+        Some(&["test", "ordinal"]),
+        Some(false),
+    )
+    .await;
+    assert!(
+        !certify(&pool, snapshot5).await,
+        "non-contiguous ordinal must fail"
+    );
+
+    // Duplicate survivor merge order
+    let bad_merge = local_payload(
+        vec![
+            definition(
+                0,
+                Some(0),
+                "active_surviving",
+                json!({"kind": "scalar", "value": "a"}),
+            ),
+            definition(
+                1,
+                Some(0),
+                "active_surviving",
+                json!({"kind": "scalar", "value": "b"}),
+            ),
+        ],
+        false,
+    );
+    let snapshot6 = insert_snapshot(
+        &pool,
+        "duplicate-merge-order",
+        2,
+        bad_merge,
+        Some(global_available(enrichment_available(1, PROVENANCE_DIGEST))),
+        Some(true),
+        Some(TARGET_KEY),
+        Some("/nix/store/source"),
+        Some("/nix/store/carrier.drv"),
+        Some("3333333333333333333333333333333333333333333333333333333333333333"),
+        Some(&["test", "merge"]),
+        Some(false),
+    )
+    .await;
+    assert!(
+        !certify(&pool, snapshot6).await,
+        "duplicate merge order must fail"
+    );
+}

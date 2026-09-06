@@ -44,6 +44,8 @@ ALTER TABLE evaluation_snapshot_options
     ADD COLUMN option_key text,
     ADD COLUMN path_components text[],
     ALTER COLUMN is_overridden DROP NOT NULL,
+    -- SAFETY: All production V1 writers explicitly supply is_overridden.
+    -- Verified: evaluation_snapshots.rs INSERT statements at lines 341, 6984, 9264, 9303.
     ALTER COLUMN is_overridden DROP DEFAULT,
     ADD CONSTRAINT evaluation_snapshot_options_v2_identity_pair_check
         CHECK ((option_key IS NULL) = (path_components IS NULL)),
@@ -74,9 +76,15 @@ COMMENT ON COLUMN evaluation_snapshot_options.option_path IS
 CREATE FUNCTION evaluation_safe_error_v2_valid(candidate jsonb)
 RETURNS boolean LANGUAGE plpgsql IMMUTABLE STRICT AS $$
 BEGIN
-    RETURN jsonb_typeof(candidate) = 'object'
-       AND jsonb_typeof(candidate->'code') = 'string'
-       AND jsonb_typeof(candidate->'message') = 'string';
+    -- INVARIANT: Total boolean validator. Returns FALSE for malformed input, never NULL.
+    -- Required keys: code (string), message (string).
+    RETURN COALESCE(
+        jsonb_typeof(candidate) = 'object'
+        AND candidate ?& ARRAY['code', 'message']
+        AND jsonb_typeof(candidate->'code') = 'string'
+        AND jsonb_typeof(candidate->'message') = 'string',
+        false
+    );
 EXCEPTION WHEN OTHERS THEN
     RETURN false;
 END;
@@ -85,16 +93,19 @@ $$;
 CREATE FUNCTION evaluation_definition_source_v2_valid(candidate jsonb)
 RETURNS boolean LANGUAGE plpgsql IMMUTABLE STRICT AS $$
 BEGIN
-    RETURN candidate ? 'source_path'
-       AND jsonb_typeof(candidate->'source_path') = 'string'
-       AND candidate ? 'priority'
-       AND jsonb_typeof(candidate->'priority') IN ('number', 'null')
-       AND (jsonb_typeof(candidate->'priority') = 'null'
-            OR (candidate->>'priority')::bigint::text = candidate->>'priority')
-       AND candidate ? 'source_input'
-       AND jsonb_typeof(candidate->'source_input') IN ('string', 'null')
-       AND candidate ? 'source_revision'
-       AND jsonb_typeof(candidate->'source_revision') IN ('string', 'null');
+    -- INVARIANT: Total boolean validator. Returns FALSE for malformed input, never NULL.
+    -- Required keys: source_path (string), priority (number|null), source_input (string|null), source_revision (string|null).
+    RETURN COALESCE(
+        jsonb_typeof(candidate) = 'object'
+        AND candidate ?& ARRAY['source_path', 'priority', 'source_input', 'source_revision']
+        AND jsonb_typeof(candidate->'source_path') = 'string'
+        AND jsonb_typeof(candidate->'priority') IN ('number', 'null')
+        AND (jsonb_typeof(candidate->'priority') = 'null'
+             OR (candidate->>'priority')::bigint::text = candidate->>'priority')
+        AND jsonb_typeof(candidate->'source_input') IN ('string', 'null')
+        AND jsonb_typeof(candidate->'source_revision') IN ('string', 'null'),
+        false
+    );
 EXCEPTION WHEN OTHERS THEN
     RETURN false;
 END;
@@ -110,7 +121,10 @@ DECLARE
     has_discarded boolean := false;
     status text;
 BEGIN
+    -- INVARIANT: Total boolean validator. Returns FALSE for malformed input, never NULL.
+    -- Required top-level keys: metadata, effective_value, provenance.
     IF jsonb_typeof(candidate) <> 'object'
+       OR NOT candidate ?& ARRAY['metadata', 'effective_value', 'provenance']
        OR jsonb_typeof(candidate->'metadata') <> 'object'
        OR jsonb_typeof(candidate->'effective_value') <> 'object'
        OR jsonb_typeof(candidate->'provenance') <> 'object' THEN
