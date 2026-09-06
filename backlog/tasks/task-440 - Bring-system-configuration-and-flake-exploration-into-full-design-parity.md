@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-06 01:43'
+updated_date: '2026-09-06 14:49'
 labels:
   - design-parity
   - web-ui
@@ -150,6 +150,8 @@ The `modifiedFiles` metadata is anticipated and non-exhaustive. The implementati
 Bounded Stage-2 isolated raw-definition value slice: (1) extract the existing provenance replay/index/classification/canonical-digest inputs into the smallest shared Nix helper without forcing raw values in Stage 1; (2) extract the existing config-inspector SafeOptionValue encoder into a shared Nix expression; (3) add config_definition_values.nix with one index carrier and one lazy definition-value job per exact option_key/ordinal, using target mergeDefinitions for single-definition normalization; (4) add private Rust Stage-2 models, expression builder, index/value JSONL reconciliation, digest/version/identity/drvPath validation, and sanitized isolated failures without changing public DTOs or persistence; (5) extend checks/config-inspector with the real nix-eval-jobs Stage-2 fixture and wrapper/encoder assertions; (6) run only focused Rust/Nix/format/check verification, inspect scope, commit once, and push TASK-440-system-config-flake-parity. Do not modify DB, API, UI, queues, primary evaluation, or persistence.
 
 Final Stage-1 single-resolution remediation: update config_inspector.nix to accept only already-resolved `flake` and `configuration`; keep the single outer resolution in build_inspector_expression and pass those bindings to both inspector and provenance; add structural count tests for Stage 1/Stage 2 getFlake usage and no inner selection; run only the requested focused Rust/Nix/evaluator/format/check verification; make one commit on top of 5f331e30 and push without changing broader task scope.
+
+TASK-440 MR !323 test-hardening remediation: in evaluation_snapshots.rs, add a private V2 total-content-limit parameter to the existing writer path while preserving production SNAPSHOT_CONTENT_BYTES_LIMIT; rewrite the aggregate oversize regression with actual redacted payload serialization and explicit per-option/aggregate preconditions; run isolated PostgreSQL focused writer, contract, model, inspector, query, cargo/fmt/diff, and two Nix semantic checks; commit once and push without changing task status or acceptance checkboxes.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -162,6 +164,8 @@ Implemented the bounded targeted inspector slice in the dedicated worktree. Repl
 Implementation preflight: local and remote TASK-440 heads are both 7afe32f7c07094c859059a93c9949895d9347245; TASK-440 worktree is clean; main and dev integration worktrees are clean. dev is ahead 23 and behind 2 relative to origin but has no local modifications. Scope is limited to cf-server config inspector models/Nix expressions and checks/config-inspector.
 
 Final remediation preflight: fetched origin; local HEAD and origin/TASK-440-system-config-flake-parity both equal 5f331e304670985a6991528507f62d124143c025; worktree is clean; task remains In Progress. Scope is limited to Stage-1 expression/Nix consumer structural binding and requested tests/checks.
+
+2026-09-06 remediation preflight: fetched origin; local and remote branch both at cf8ad6cd015bdce991309c7a98bd72c59ffd5198; worktree clean. Scope is only packages/default/crates/cf-server/src/queries/evaluation_snapshots.rs.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
