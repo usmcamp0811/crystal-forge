@@ -6,7 +6,7 @@
 //! evaluated raw-provenance carrier. This module does not participate in
 //! primary evaluation, persistence, or API serialization.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -815,6 +815,114 @@ pub(crate) struct DefinitionValue {
     pub value: InspectionValue,
 }
 
+/// Contains the truthful semantic join of both validated inspector stages.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AssembledConfigInspection {
+    /// Immutable target identity shared by both stages.
+    pub target_key: String,
+    /// Resolved immutable flake source path.
+    pub source_out_path: String,
+    /// Shared carrier derivation path.
+    pub carrier_drv_path: String,
+    /// Options in Stage-1 index order.
+    pub options: Vec<AssembledOption>,
+}
+
+/// Contains one option with its validated metadata, value, and provenance.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AssembledOption {
+    /// Collision-resistant option identity.
+    pub option_key: String,
+    /// Exact option path components.
+    pub path_components: Vec<String>,
+    /// Metadata result preserved without defaulting failures.
+    pub metadata: InspectionMetadata,
+    /// Effective value result preserved without defaulting failures.
+    pub effective_value: InspectionValue,
+    /// Explicitly available or unavailable raw-definition provenance.
+    pub provenance: AssembledOptionProvenance,
+}
+
+/// Describes whether raw-definition provenance is available for an option.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum AssembledOptionProvenance {
+    /// Raw definitions and their definition-value enrichment state are known.
+    Available {
+        /// Adapter protocol version that produced the definitions.
+        adapter_version: u64,
+        /// Target library version, when available.
+        target_lib_version: Option<String>,
+        /// Target module-system source path, when available.
+        target_module_system_path: Option<String>,
+        /// Canonical raw-definition digest.
+        provenance_digest: String,
+        /// All definitions retained in ordinal order.
+        definitions: Vec<AssembledDefinition>,
+        /// Whether priority-discarded definitions were observed.
+        override_state: OverrideState,
+        /// Global state of the Stage-2 definition-value layer.
+        definition_value_enrichment: DefinitionValueEnrichmentState,
+    },
+    /// Raw-definition provenance was not established.
+    Unavailable {
+        /// Stable reason for the unavailable state.
+        reason_code: String,
+        /// Sanitized diagnostic, when available.
+        diagnostic: Option<SafeEvaluationError>,
+    },
+}
+
+/// Represents whether an available option has discarded definitions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OverrideState {
+    /// The available provenance establishes the Boolean value.
+    Known(bool),
+}
+
+/// Contains one raw definition and its optional Stage-2 value.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AssembledDefinition {
+    /// Option identity repeated for unambiguous downstream joins.
+    pub option_key: String,
+    /// Definition identity within the option.
+    pub ordinal: u64,
+    /// Source module path, when supplied by the module system.
+    pub source_path: Option<String>,
+    /// Flake input name, when resolved.
+    pub source_input: Option<String>,
+    /// Full source revision, when resolved.
+    pub source_revision: Option<String>,
+    /// Module-system key, when supplied.
+    pub module_key: Option<String>,
+    /// Module-system priority.
+    pub priority: i64,
+    /// Raw definition status.
+    pub status: RawDefinitionStatus,
+    /// Surviving-definition merge order, when applicable.
+    pub surviving_merge_order: Option<u64>,
+    /// Definition value, or `None` when the global Stage-2 layer is unavailable.
+    pub value: Option<InspectionValue>,
+}
+
+/// Describes the global state of definition-value enrichment.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum DefinitionValueEnrichmentState {
+    /// Every definition has one explicit available or failed value.
+    Available {
+        /// Adapter protocol version bound to the values.
+        adapter_version: u64,
+        /// Provenance digest bound to the values.
+        provenance_digest: String,
+    },
+    /// No per-definition value was established by Stage 2.
+    Unavailable {
+        /// Stable reason for the unavailable enrichment.
+        reason_code: String,
+        /// Sanitized diagnostic, when available.
+        diagnostic: Option<SafeEvaluationError>,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
 struct DefinitionIdentity {
     option_key: String,
@@ -1095,6 +1203,286 @@ pub(crate) fn reconcile_definition_values_output(
     })
 }
 
+/// Joins validated Stage-1 options with validated Stage-2 definition values.
+///
+/// This function performs no Nix evaluation, JSONL parsing, hashing, or
+/// provenance reconstruction. It preserves unavailable and failed states
+/// instead of coercing them into empty or fabricated durable values.
+pub(crate) fn assemble_config_inspection(
+    stage1: ConfigInspectorResult,
+    stage2: DefinitionValueEnrichment,
+) -> Result<AssembledConfigInspection> {
+    let ConfigInspectorResult {
+        target_key,
+        carrier_drv_path,
+        source_out_path,
+        options,
+        provenance,
+    } = stage1;
+
+    let stage2_state = match stage2 {
+        DefinitionValueEnrichment::Available {
+            adapter_version,
+            provenance_digest,
+            values,
+        } => Stage2AssemblyInput::Available {
+            adapter_version,
+            provenance_digest,
+            values,
+        },
+        DefinitionValueEnrichment::Unavailable {
+            reason_code,
+            diagnostic,
+        } => Stage2AssemblyInput::Unavailable {
+            reason_code,
+            diagnostic,
+        },
+    };
+
+    let assembled_options = match provenance {
+        InspectionProvenance::Unavailable {
+            reason_code,
+            diagnostic,
+        } => {
+            if !matches!(
+                &stage2_state,
+                Stage2AssemblyInput::Unavailable { reason_code: stage2_reason, .. }
+                    if stage2_reason == "stage1_provenance_unavailable"
+            ) {
+                bail!(
+                    "Stage-2 enrichment is available or has an incompatible reason while Stage-1 provenance is unavailable"
+                );
+            }
+            options
+                .into_iter()
+                .map(|option| AssembledOption {
+                    option_key: option.key,
+                    path_components: option.path_components,
+                    metadata: option.metadata,
+                    effective_value: option.value,
+                    provenance: AssembledOptionProvenance::Unavailable {
+                        reason_code: reason_code.clone(),
+                        diagnostic: diagnostic.clone(),
+                    },
+                })
+                .collect()
+        }
+        InspectionProvenance::Available {
+            adapter_version,
+            target_lib_version,
+            target_module_system_path,
+            provenance_digest,
+            definitions_by_option,
+        } => {
+            let (definition_value_enrichment, definition_values) = match stage2_state {
+                Stage2AssemblyInput::Unavailable {
+                    reason_code,
+                    diagnostic,
+                } => (
+                    DefinitionValueEnrichmentState::Unavailable {
+                        reason_code,
+                        diagnostic,
+                    },
+                    BTreeMap::new(),
+                ),
+                Stage2AssemblyInput::Available {
+                    adapter_version: stage2_adapter_version,
+                    provenance_digest: stage2_provenance_digest,
+                    values,
+                } => {
+                    if stage2_adapter_version != adapter_version {
+                        bail!("Stage-1 and Stage-2 provenance adapter versions disagree");
+                    }
+                    if stage2_provenance_digest != provenance_digest {
+                        bail!("Stage-1 and Stage-2 provenance digests disagree");
+                    }
+                    (
+                        DefinitionValueEnrichmentState::Available {
+                            adapter_version: stage2_adapter_version,
+                            provenance_digest: stage2_provenance_digest,
+                        },
+                        definition_value_map(values)?,
+                    )
+                }
+            };
+
+            let mut option_paths = BTreeMap::new();
+            for option in &options {
+                if option_paths
+                    .insert(option.key.clone(), option.path_components.clone())
+                    .is_some()
+                {
+                    bail!("duplicate Stage-1 option key {}", option.key);
+                }
+            }
+            let provenance_groups = provenance_group_map(definitions_by_option, &option_paths)?;
+            if matches!(
+                &definition_value_enrichment,
+                DefinitionValueEnrichmentState::Available { .. }
+            ) {
+                let expected_definition_values = provenance_groups
+                    .values()
+                    .flat_map(|group| {
+                        group
+                            .definitions
+                            .iter()
+                            .map(|definition| DefinitionIdentity {
+                                option_key: group.option_key.clone(),
+                                ordinal: definition.ordinal,
+                            })
+                    })
+                    .collect::<BTreeSet<_>>();
+                let actual_definition_values =
+                    definition_values.keys().cloned().collect::<BTreeSet<_>>();
+                if actual_definition_values != expected_definition_values {
+                    bail!("Stage-2 definition identities disagree during assembly");
+                }
+            }
+
+            options
+                .into_iter()
+                .map(|option| {
+                    // `buildRawDefinitionsByOption` groups only options with
+                    // at least one raw definition. An omitted group therefore
+                    // means known zero definitions, not unavailable provenance.
+                    let definitions = provenance_groups
+                        .get(&option.key)
+                        .map(|group| {
+                            assemble_definitions(
+                                &option.key,
+                                group,
+                                &definition_value_enrichment,
+                                &definition_values,
+                            )
+                        })
+                        .transpose()?
+                        .unwrap_or_default();
+                    let override_state =
+                        OverrideState::Known(definitions.iter().any(|definition| {
+                            definition.status == RawDefinitionStatus::PriorityDiscarded
+                        }));
+                    Ok(AssembledOption {
+                        option_key: option.key,
+                        path_components: option.path_components,
+                        metadata: option.metadata,
+                        effective_value: option.value,
+                        provenance: AssembledOptionProvenance::Available {
+                            adapter_version,
+                            target_lib_version: target_lib_version.clone(),
+                            target_module_system_path: target_module_system_path.clone(),
+                            provenance_digest: provenance_digest.clone(),
+                            definitions,
+                            override_state,
+                            definition_value_enrichment: definition_value_enrichment.clone(),
+                        },
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?
+        }
+    };
+
+    Ok(AssembledConfigInspection {
+        target_key,
+        source_out_path,
+        carrier_drv_path,
+        options: assembled_options,
+    })
+}
+
+enum Stage2AssemblyInput {
+    Available {
+        adapter_version: u64,
+        provenance_digest: String,
+        values: Vec<DefinitionValue>,
+    },
+    Unavailable {
+        reason_code: String,
+        diagnostic: Option<SafeEvaluationError>,
+    },
+}
+
+fn definition_value_map(
+    values: Vec<DefinitionValue>,
+) -> Result<BTreeMap<DefinitionIdentity, InspectionValue>> {
+    let mut map = BTreeMap::new();
+    for value in values {
+        let identity = DefinitionIdentity {
+            option_key: value.option_key,
+            ordinal: value.ordinal,
+        };
+        if map.insert(identity, value.value).is_some() {
+            bail!("duplicate Stage-2 definition value identity");
+        }
+    }
+    Ok(map)
+}
+
+fn provenance_group_map(
+    groups: Vec<RawDefinitionsForOption>,
+    option_paths: &BTreeMap<String, Vec<String>>,
+) -> Result<BTreeMap<String, RawDefinitionsForOption>> {
+    let mut map = BTreeMap::new();
+    for group in groups {
+        let Some(expected_path) = option_paths.get(&group.option_key) else {
+            bail!("unknown provenance option key {}", group.option_key);
+        };
+        if expected_path != &group.path {
+            bail!("provenance path does not match option {}", group.option_key);
+        }
+        if map.insert(group.option_key.clone(), group).is_some() {
+            bail!("duplicate provenance option group");
+        }
+    }
+    Ok(map)
+}
+
+fn assemble_definitions(
+    option_key: &str,
+    group: &RawDefinitionsForOption,
+    enrichment: &DefinitionValueEnrichmentState,
+    values: &BTreeMap<DefinitionIdentity, InspectionValue>,
+) -> Result<Vec<AssembledDefinition>> {
+    let mut definitions = group.definitions.clone();
+    definitions.sort_by_key(|definition| definition.ordinal);
+    let mut ordinals = BTreeSet::new();
+    for definition in &definitions {
+        if !ordinals.insert(definition.ordinal) {
+            bail!("duplicate raw definition ordinal for option {option_key}");
+        }
+    }
+
+    definitions
+        .into_iter()
+        .map(|definition| {
+            let identity = DefinitionIdentity {
+                option_key: option_key.to_string(),
+                ordinal: definition.ordinal,
+            };
+            let value = match enrichment {
+                DefinitionValueEnrichmentState::Available { .. } => Some(
+                    values
+                        .get(&identity)
+                        .cloned()
+                        .ok_or_else(|| anyhow::anyhow!("missing Stage-2 value for definition"))?,
+                ),
+                DefinitionValueEnrichmentState::Unavailable { .. } => None,
+            };
+            Ok(AssembledDefinition {
+                option_key: option_key.to_string(),
+                ordinal: definition.ordinal,
+                source_path: definition.source_path,
+                source_input: definition.source_input,
+                source_revision: definition.source_revision,
+                module_key: definition.module_key,
+                priority: definition.priority,
+                status: definition.status,
+                surviving_merge_order: definition.surviving_merge_order,
+                value,
+            })
+        })
+        .collect()
+}
+
 fn parse_definition_job_name(attribute: &str) -> Result<DefinitionIdentity> {
     let suffix = attribute
         .strip_prefix(DEFINITION_VALUE_PREFIX)
@@ -1163,6 +1551,100 @@ mod tests {
             flake_ref: "test-flake".to_string(),
             configuration_name: "good".to_string(),
             target_key: TEST_TARGET_KEY.to_string(),
+        }
+    }
+
+    fn semantic_metadata(path: &[&str]) -> OptionMetadata {
+        OptionMetadata {
+            path: path.iter().map(|part| (*part).to_string()).collect(),
+            option_type: Some("option".to_string()),
+            loc: Vec::new(),
+            declared_type: Some("boolean".to_string()),
+            declarations: Vec::new(),
+            declaration_positions: Vec::new(),
+            highest_prio: Some(100),
+            is_defined: true,
+            surviving_definition_sources: Vec::new(),
+        }
+    }
+
+    fn semantic_option(
+        key: &str,
+        path: &[&str],
+        metadata: InspectionMetadata,
+        value: InspectionValue,
+    ) -> InspectedOption {
+        InspectedOption {
+            path_components: path.iter().map(|part| (*part).to_string()).collect(),
+            key: key.to_string(),
+            metadata,
+            value,
+        }
+    }
+
+    fn semantic_stage1(
+        options: Vec<InspectedOption>,
+        provenance: InspectionProvenance,
+    ) -> ConfigInspectorResult {
+        ConfigInspectorResult {
+            target_key: TEST_TARGET_KEY.to_string(),
+            carrier_drv_path: "/nix/store/shared.drv".to_string(),
+            source_out_path: TEST_SOURCE_OUT_PATH.to_string(),
+            options,
+            provenance,
+        }
+    }
+
+    fn semantic_definition(
+        ordinal: u64,
+        priority: i64,
+        status: RawDefinitionStatus,
+        source_path: Option<&str>,
+        surviving_merge_order: Option<u64>,
+    ) -> RawDefinition {
+        RawDefinition {
+            source_path: source_path.map(str::to_string),
+            source_input: Some("self".to_string()),
+            source_revision: Some("rev".to_string()),
+            module_key: Some(format!("module-{ordinal}")),
+            ordinal,
+            priority,
+            status,
+            surviving_merge_order,
+        }
+    }
+
+    fn semantic_provenance(groups: Vec<RawDefinitionsForOption>) -> InspectionProvenance {
+        InspectionProvenance::Available {
+            adapter_version: EXPECTED_PROVENANCE_ADAPTER_VERSION,
+            target_lib_version: Some("lib".to_string()),
+            target_module_system_path: Some("/nix/store/lib".to_string()),
+            provenance_digest: TEST_DIGEST.to_string(),
+            definitions_by_option: groups,
+        }
+    }
+
+    fn semantic_value(value: bool) -> InspectionValue {
+        InspectionValue::Available(SafeOptionValue::Scalar(json!(value)))
+    }
+
+    fn semantic_stage2(values: Vec<DefinitionValue>) -> DefinitionValueEnrichment {
+        DefinitionValueEnrichment::Available {
+            adapter_version: EXPECTED_PROVENANCE_ADAPTER_VERSION,
+            provenance_digest: TEST_DIGEST.to_string(),
+            values,
+        }
+    }
+
+    fn semantic_definition_value(
+        option_key: &str,
+        ordinal: u64,
+        value: InspectionValue,
+    ) -> DefinitionValue {
+        DefinitionValue {
+            option_key: option_key.to_string(),
+            ordinal,
+            value,
         }
     }
 
@@ -2167,5 +2649,398 @@ mod tests {
                     if reason_code == expected
             ));
         }
+    }
+
+    #[test]
+    fn assembly_retains_discarded_definitions_and_joins_values_by_identity() {
+        let path = ["services", "demo", "enable"];
+        let key = hash(&path);
+        let stage1 = semantic_stage1(
+            vec![semantic_option(
+                &key,
+                &path,
+                InspectionMetadata::Available(semantic_metadata(&path)),
+                semantic_value(true),
+            )],
+            semantic_provenance(vec![RawDefinitionsForOption {
+                option_key: key.clone(),
+                path: path.iter().map(|part| (*part).to_string()).collect(),
+                definitions: vec![
+                    semantic_definition(1, 50, RawDefinitionStatus::PriorityDiscarded, None, None),
+                    semantic_definition(
+                        0,
+                        100,
+                        RawDefinitionStatus::ActiveSurviving,
+                        Some("/nix/store/winner.nix"),
+                        Some(0),
+                    ),
+                ],
+            }]),
+        );
+        let assembled = assemble_config_inspection(
+            stage1,
+            semantic_stage2(vec![
+                semantic_definition_value(&key, 1, semantic_value(false)),
+                semantic_definition_value(&key, 0, semantic_value(true)),
+            ]),
+        )
+        .unwrap();
+
+        let AssembledOptionProvenance::Available {
+            definitions,
+            override_state,
+            definition_value_enrichment,
+            ..
+        } = &assembled.options[0].provenance
+        else {
+            panic!("expected available provenance");
+        };
+        assert_eq!(definitions.len(), 2);
+        assert_eq!(
+            assembled.options[0].path_components,
+            path.iter()
+                .map(|part| (*part).to_string())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(definitions[0].ordinal, 0);
+        assert_eq!(definitions[1].ordinal, 1);
+        assert_eq!(definitions[1].source_path, None);
+        assert!(matches!(override_state, OverrideState::Known(true)));
+        assert!(matches!(
+            definition_value_enrichment,
+            DefinitionValueEnrichmentState::Available { .. }
+        ));
+        assert!(matches!(
+            definitions[0].value,
+            Some(InspectionValue::Available(_))
+        ));
+        assert!(matches!(
+            definitions[1].value,
+            Some(InspectionValue::Available(_))
+        ));
+    }
+
+    #[test]
+    fn assembly_preserves_multiple_survivors_and_known_no_override() {
+        let path = ["system", "feature"];
+        let key = hash(&path);
+        let stage1 = semantic_stage1(
+            vec![semantic_option(
+                &key,
+                &path,
+                InspectionMetadata::Available(semantic_metadata(&path)),
+                semantic_value(true),
+            )],
+            semantic_provenance(vec![RawDefinitionsForOption {
+                option_key: key.clone(),
+                path: path.iter().map(|part| (*part).to_string()).collect(),
+                definitions: vec![
+                    semantic_definition(
+                        2,
+                        100,
+                        RawDefinitionStatus::ActiveSurviving,
+                        Some("/nix/store/two.nix"),
+                        Some(1),
+                    ),
+                    semantic_definition(
+                        0,
+                        100,
+                        RawDefinitionStatus::ActiveSurviving,
+                        Some("/nix/store/zero.nix"),
+                        Some(0),
+                    ),
+                ],
+            }]),
+        );
+        let assembled = assemble_config_inspection(
+            stage1,
+            semantic_stage2(vec![
+                semantic_definition_value(&key, 2, semantic_value(false)),
+                semantic_definition_value(&key, 0, semantic_value(true)),
+            ]),
+        )
+        .unwrap();
+        let AssembledOptionProvenance::Available {
+            definitions,
+            override_state,
+            ..
+        } = &assembled.options[0].provenance
+        else {
+            panic!("expected available provenance");
+        };
+        assert_eq!(
+            definitions
+                .iter()
+                .map(|definition| definition.ordinal)
+                .collect::<Vec<_>>(),
+            vec![0, 2]
+        );
+        assert_eq!(definitions[0].surviving_merge_order, Some(0));
+        assert_eq!(definitions[1].surviving_merge_order, Some(1));
+        assert!(matches!(override_state, OverrideState::Known(false)));
+    }
+
+    #[test]
+    fn assembly_preserves_individual_failure_and_global_unavailability() {
+        let path = ["feature"];
+        let key = hash(&path);
+        let failed = InspectionValue::Failed(SafeEvaluationError {
+            code: "not_evaluated".to_string(),
+            message: "safe failure".to_string(),
+        });
+        let stage1 = semantic_stage1(
+            vec![semantic_option(
+                &key,
+                &path,
+                InspectionMetadata::Available(semantic_metadata(&path)),
+                semantic_value(true),
+            )],
+            semantic_provenance(vec![RawDefinitionsForOption {
+                option_key: key.clone(),
+                path: vec!["feature".to_string()],
+                definitions: vec![semantic_definition(
+                    0,
+                    100,
+                    RawDefinitionStatus::ActiveSurviving,
+                    Some("/nix/store/feature.nix"),
+                    Some(0),
+                )],
+            }]),
+        );
+        let assembled = assemble_config_inspection(
+            stage1.clone(),
+            semantic_stage2(vec![semantic_definition_value(&key, 0, failed.clone())]),
+        )
+        .unwrap();
+        let AssembledOptionProvenance::Available {
+            definitions,
+            definition_value_enrichment,
+            ..
+        } = &assembled.options[0].provenance
+        else {
+            panic!("expected available provenance");
+        };
+        assert!(matches!(
+            definitions[0].value,
+            Some(InspectionValue::Failed(_))
+        ));
+        assert!(matches!(
+            definition_value_enrichment,
+            DefinitionValueEnrichmentState::Available { .. }
+        ));
+
+        let unavailable = assemble_config_inspection(
+            stage1,
+            DefinitionValueEnrichment::Unavailable {
+                reason_code: "stage2_index_failed".to_string(),
+                diagnostic: None,
+            },
+        )
+        .unwrap();
+        let AssembledOptionProvenance::Available {
+            definitions,
+            override_state,
+            definition_value_enrichment,
+            ..
+        } = &unavailable.options[0].provenance
+        else {
+            panic!("expected available provenance");
+        };
+        assert_eq!(definitions[0].value, None);
+        assert!(matches!(override_state, OverrideState::Known(false)));
+        assert!(matches!(
+            definition_value_enrichment,
+            DefinitionValueEnrichmentState::Unavailable { reason_code, .. }
+                if reason_code == "stage2_index_failed"
+        ));
+    }
+
+    #[test]
+    fn assembly_preserves_provenance_unavailability_and_rejects_enrichment() {
+        let path = ["feature"];
+        let key = hash(&path);
+        let stage1 = semantic_stage1(
+            vec![semantic_option(
+                &key,
+                &path,
+                InspectionMetadata::Available(semantic_metadata(&path)),
+                semantic_value(true),
+            )],
+            InspectionProvenance::Unavailable {
+                reason_code: "capability_self_test_failed".to_string(),
+                diagnostic: None,
+            },
+        );
+        let valid = assemble_config_inspection(
+            stage1.clone(),
+            DefinitionValueEnrichment::Unavailable {
+                reason_code: "stage1_provenance_unavailable".to_string(),
+                diagnostic: None,
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            valid.options[0].provenance,
+            AssembledOptionProvenance::Unavailable { ref reason_code, .. }
+                if reason_code == "capability_self_test_failed"
+        ));
+        assert!(matches!(
+            assemble_config_inspection(stage1, semantic_stage2(Vec::new())),
+            Err(_)
+        ));
+    }
+
+    #[test]
+    fn assembly_preserves_metadata_and_effective_value_failures() {
+        let path = ["feature"];
+        let key = hash(&path);
+        let metadata_failure = InspectionMetadata::Failed(SafeEvaluationError {
+            code: "metadata_failed".to_string(),
+            message: "metadata unavailable".to_string(),
+        });
+        let value_failure = InspectionValue::Failed(SafeEvaluationError {
+            code: "not_evaluated".to_string(),
+            message: "value unavailable".to_string(),
+        });
+        let stage1 = semantic_stage1(
+            vec![semantic_option(
+                &key,
+                &path,
+                metadata_failure.clone(),
+                value_failure.clone(),
+            )],
+            semantic_provenance(Vec::new()),
+        );
+        let assembled = assemble_config_inspection(stage1, semantic_stage2(Vec::new())).unwrap();
+        assert_eq!(assembled.options[0].metadata, metadata_failure);
+        assert_eq!(assembled.options[0].effective_value, value_failure);
+        assert!(matches!(
+            assembled.options[0].provenance,
+            AssembledOptionProvenance::Available {
+                override_state: OverrideState::Known(false),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn assembly_rejects_identity_and_path_disagreements() {
+        let path = ["foo", "bar", "baz"];
+        let dotted_path = ["foo", "bar.baz"];
+        let key = hash(&path);
+        let unknown_stage1 = semantic_stage1(
+            vec![semantic_option(
+                &key,
+                &path,
+                InspectionMetadata::Available(semantic_metadata(&path)),
+                semantic_value(true),
+            )],
+            semantic_provenance(vec![RawDefinitionsForOption {
+                option_key: "unknown".to_string(),
+                path: vec!["unknown".to_string()],
+                definitions: Vec::new(),
+            }]),
+        );
+        assert!(matches!(
+            assemble_config_inspection(unknown_stage1, semantic_stage2(Vec::new())),
+            Err(_)
+        ));
+
+        let stage1 = semantic_stage1(
+            vec![semantic_option(
+                &key,
+                &path,
+                InspectionMetadata::Available(semantic_metadata(&path)),
+                semantic_value(true),
+            )],
+            semantic_provenance(vec![RawDefinitionsForOption {
+                option_key: key.clone(),
+                path: dotted_path.iter().map(|part| (*part).to_string()).collect(),
+                definitions: Vec::new(),
+            }]),
+        );
+        assert!(matches!(
+            assemble_config_inspection(stage1, semantic_stage2(Vec::new())),
+            Err(_)
+        ));
+
+        let path = ["feature"];
+        let key = hash(&path);
+        let stage1 = semantic_stage1(
+            vec![semantic_option(
+                &key,
+                &path,
+                InspectionMetadata::Available(semantic_metadata(&path)),
+                semantic_value(true),
+            )],
+            semantic_provenance(vec![RawDefinitionsForOption {
+                option_key: key.clone(),
+                path: vec!["feature".to_string()],
+                definitions: vec![semantic_definition(
+                    0,
+                    100,
+                    RawDefinitionStatus::ActiveSurviving,
+                    None,
+                    Some(0),
+                )],
+            }]),
+        );
+        assert!(matches!(
+            assemble_config_inspection(
+                stage1,
+                semantic_stage2(vec![semantic_definition_value(
+                    &key,
+                    1,
+                    semantic_value(true)
+                )])
+            ),
+            Err(_)
+        ));
+    }
+
+    #[test]
+    fn assembly_rejects_duplicate_and_mismatched_stage2_metadata() {
+        let path = ["feature"];
+        let key = hash(&path);
+        let stage1 = semantic_stage1(
+            vec![semantic_option(
+                &key,
+                &path,
+                InspectionMetadata::Available(semantic_metadata(&path)),
+                semantic_value(true),
+            )],
+            semantic_provenance(vec![RawDefinitionsForOption {
+                option_key: key.clone(),
+                path: vec!["feature".to_string()],
+                definitions: vec![semantic_definition(
+                    0,
+                    100,
+                    RawDefinitionStatus::ActiveSurviving,
+                    None,
+                    Some(0),
+                )],
+            }]),
+        );
+        assert!(matches!(
+            assemble_config_inspection(
+                stage1.clone(),
+                semantic_stage2(vec![
+                    semantic_definition_value(&key, 0, semantic_value(true)),
+                    semantic_definition_value(&key, 0, semantic_value(false)),
+                ])
+            ),
+            Err(_)
+        ));
+        assert!(matches!(
+            assemble_config_inspection(
+                stage1,
+                DefinitionValueEnrichment::Available {
+                    adapter_version: EXPECTED_PROVENANCE_ADAPTER_VERSION + 1,
+                    provenance_digest: TEST_DIGEST.to_string(),
+                    values: vec![semantic_definition_value(&key, 0, semantic_value(true))],
+                }
+            ),
+            Err(_)
+        ));
     }
 }
