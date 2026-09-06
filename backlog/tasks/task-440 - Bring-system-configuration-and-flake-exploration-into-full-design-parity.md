@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-06 14:49'
+updated_date: '2026-09-06 16:06'
 labels:
   - design-parity
   - web-ui
@@ -157,15 +157,7 @@ TASK-440 MR !323 test-hardening remediation: in evaluation_snapshots.rs, add a p
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Remediation stopped before commit/push. Starting branch was 968662d52fdbf1078b96a13c2d7ba34dcc85f933 and worktree was restored clean. The selected real nixosSystem exposes configuration.pkgs.lib and configuration._module.args.modules. However, scanning its full options tree reaches poisoned standard option metadata/value paths (for example hardware.nvidia.open and boot.systemd.services); the repository Nix evaluator reports uncaught `expected a set but found null` / coercion failures while forcing metadata/value structures. The attempted focused check could not yet prove safe failed-row isolation without deciding whether to change the extraction failure boundary or use per-option evaluator isolation. No commit or push was made.
-
-Implemented the bounded targeted inspector slice in the dedicated worktree. Replaced the monolithic JSON inspector with checked-in config_inspector.nix: selected nixosConfiguration only, configuration.pkgs.lib, full hashed index, shared system.build.toplevel carrier, separate metadata/value jobs, safe origin table, and no discarded override reconstruction. Added private Rust JSONL reconciliation with order-independent index/hash matching, same-drvPath enforcement, isolated metadata/value failures, duplicate/unknown rejection, and existing evaluator-error redaction. Added checks/config-inspector/default.nix using inputs.base/base.lib.nixosSystem, lazy sibling/exported-module poison, full jobset count, subset poison/healthy assertions, and same-carrier proof. Focused Rust tests, the permanent Nix check, primary evaluator isolation check, SQLX_OFFLINE cargo check, rustfmt, and diff-check have passed; broad flake/browser checks were intentionally not run per scope.
-
-Implementation preflight: local and remote TASK-440 heads are both 7afe32f7c07094c859059a93c9949895d9347245; TASK-440 worktree is clean; main and dev integration worktrees are clean. dev is ahead 23 and behind 2 relative to origin but has no local modifications. Scope is limited to cf-server config inspector models/Nix expressions and checks/config-inspector.
-
-Final remediation preflight: fetched origin; local HEAD and origin/TASK-440-system-config-flake-parity both equal 5f331e304670985a6991528507f62d124143c025; worktree is clean; task remains In Progress. Scope is limited to Stage-1 expression/Nix consumer structural binding and requested tests/checks.
-
-2026-09-06 remediation preflight: fetched origin; local and remote branch both at cf8ad6cd015bdce991309c7a98bd72c59ffd5198; worktree clean. Scope is only packages/default/crates/cf-server/src/queries/evaluation_snapshots.rs.
+2026-09-06 selector-isolation remediation verification: isolated V2 selector tests passed (v2_selection_isolation_preserves_primary_and_replaces_targeted_attempts, v2_persistence_does_not_change_primary_host_delta_corpus, config_selector_protects_current_v2_and_allows_replaced_v2_gc, deployment_binding_uses_primary_v1_after_targeted_v2_persistence, plus existing V2 carrier/oversize tests). SQLx offline cf-server lib check and cargo fmt --check passed with existing warnings. A clean isolated database applied all migrations through 0251 successfully. The broad server-regressions Nix build exceeded the 15-minute command timeout during compilation, so no pass is claimed. Running all ignored evaluation_snapshots tests produced 29 passes and 5 failures; the failures were existing environment-sensitive tests requiring pg_stat_statements/shared_preload_libraries or unrelated lifecycle fixtures. Worktree remains uncommitted with only evaluation_snapshots.rs and migration 0251 modified.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
