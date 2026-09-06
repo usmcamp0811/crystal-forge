@@ -1,8 +1,6 @@
-{ flakeRef, configurationName, targetKey, encodeValue }:
+{ flake, configuration, targetKey, encodeValue }:
 
 let
-  flake = builtins.getFlake flakeRef;
-  configuration = builtins.getAttr configurationName flake.nixosConfigurations;
   lib = configuration.pkgs.lib;
   carrier = configuration.config.system.build.toplevel;
 

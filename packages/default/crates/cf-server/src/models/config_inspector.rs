@@ -61,16 +61,16 @@ fn format_digest(input: &[u8]) -> String {
 
 /// Builds the Nix expression for one exact configuration revision.
 ///
-/// The expression selects `flake.nixosConfigurations[configuration_name]` and
-/// passes the selected system's `pkgs.lib` to the dedicated expressions. It
-/// never enumerates sibling configurations or evaluates exported modules.
+/// The expression resolves one flake/configuration pair and passes those exact
+/// bindings to the inspector and provenance expressions. It never enumerates
+/// sibling configurations or evaluates exported modules.
 pub(crate) fn build_inspector_expression(target: &InspectionTarget) -> String {
     let source = include_str!("config_inspector.nix");
     let provenance_source = include_str!("config_provenance.nix");
     let provenance_lib_source = include_str!("config_provenance_lib.nix");
     let value_encoding_source = include_str!("config_value_encoding.nix");
     format!(
-        "let\n  flakeRef = {flake_ref};\n  configurationName = {configuration_name};\n  targetKey = {target_key};\n  flake = builtins.getFlake flakeRef;\n  configuration = builtins.getAttr configurationName flake.nixosConfigurations;\n  valueEncoder = ({value_encoding_source});\n  inspector = ({source}) {{ inherit flakeRef configurationName targetKey; encodeValue = valueEncoder configuration.pkgs.lib; }};\n  provenance = ({provenance_source}) {{ inherit flake configuration; provenanceLib = ({provenance_lib_source}); }};\nin\n  inspector // {{ {provenance_attribute} = provenance; }}",
+        "let\n  flakeRef = {flake_ref};\n  configurationName = {configuration_name};\n  targetKey = {target_key};\n  flake = builtins.getFlake flakeRef;\n  configuration = builtins.getAttr configurationName flake.nixosConfigurations;\n  valueEncoder = ({value_encoding_source});\n  inspector = ({source}) {{ inherit flake configuration targetKey; encodeValue = valueEncoder configuration.pkgs.lib; }};\n  provenance = ({provenance_source}) {{ inherit flake configuration; provenanceLib = ({provenance_lib_source}); }};\nin\n  inspector // {{ {provenance_attribute} = provenance; }}",
         source = source,
         provenance_source = provenance_source,
         provenance_lib_source = provenance_lib_source,
@@ -1218,13 +1218,24 @@ mod tests {
 
     #[test]
     fn expression_selects_one_configuration_and_uses_selected_system_library() {
-        let expression =
-            build_inspector_expression(&InspectionTarget::new("path:/tmp/example", "good"));
+        let target = InspectionTarget::new("path:/tmp/example", "good");
+        let expression = build_inspector_expression(&target);
 
         assert!(
             expression.contains("builtins.getAttr configurationName flake.nixosConfigurations")
         );
         assert!(expression.contains("configuration.pkgs.lib"));
+        assert_eq!(expression.matches("builtins.getFlake").count(), 1);
+        assert_eq!(
+            build_definition_values_expression(&target)
+                .matches("builtins.getFlake")
+                .count(),
+            1
+        );
+        let inspector_source = include_str!("config_inspector.nix");
+        assert_eq!(inspector_source.matches("builtins.getFlake").count(), 0);
+        assert!(!inspector_source.contains("configurationName"));
+        assert!(!inspector_source.contains("flake.nixosConfigurations"));
         assert!(expression.contains("__crystalForgeProvenance"));
         assert!(expression.contains("provenanceAdapterVersion = 1"));
         assert!(!expression.contains("flake.inputs.nixpkgs"));

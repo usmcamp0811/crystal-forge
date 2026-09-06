@@ -151,8 +151,8 @@ let
        configuration = builtins.getAttr configurationName flake.nixosConfigurations;
        targetKey = builtins.hashString "sha256" (builtins.toJSON [ flakeRef configurationName ]);
        valueEncoder = (${valueEncodingSource});
-       inspector = (${inspectorSource}) {
-         inherit flakeRef configurationName targetKey;
+        inspector = (${inspectorSource}) {
+          inherit flake configuration targetKey;
          encodeValue = valueEncoder configuration.pkgs.lib;
        };
        provenance = (${provenanceSource}) {
