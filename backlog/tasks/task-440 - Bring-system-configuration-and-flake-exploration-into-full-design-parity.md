@@ -1,11 +1,11 @@
 ---
 id: TASK-440
 title: Bring system configuration and flake exploration into full design parity
-status: In Progress
+status: Review
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-06 17:41'
+updated_date: '2026-09-06 18:02'
 labels:
   - design-parity
   - web-ui
@@ -238,5 +238,5 @@ Starting bounded V2 DB-only reader core from accepted selector-isolation commit 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Implemented and pushed isolated Stage-2 raw-definition value inspection. Added shared provenance/value encoding helpers, per-definition Nix jobs, provenance digest binding, private Rust reconciliation, and real Nix jobset assertions. Commit 950c31fb pushed to TASK-440-system-config-flake-parity; MR !323. Verification: config-inspector Nix check passed; cargo fmt --check passed; SQLX_OFFLINE=true cargo check passed inside nix develop. Direct host cargo check was not used because OpenSSL system dependencies were unavailable.
+Hardened V2 config snapshot reads with fail-closed corruption handling, comparison-unavailable state, literal LIKE search escaping, structured path identity coverage, provenance/global-unavailability coverage, query bounds, and side-effect regression checks. Verified targeted Rust tests, Nix config-inspector and evaluator-snapshot-isolation checks, formatting, diff checks, and cargo check. Committed and pushed as deb37a5d6f9653fda55ec12a36abfa75425d4986.
 <!-- SECTION:FINAL_SUMMARY:END -->
