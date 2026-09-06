@@ -242,15 +242,22 @@ impl ConfigInspectionArtifactV2 {
         self
     }
 
-    /// Returns the SHA-256 digest of redacted option-local semantic content.
+    /// Returns the SHA-256 digest of namespaced, redacted option-local content.
     ///
-    /// The digest is only an option-local storage and comparison identity.
-    /// Global inspection completeness belongs to the parent artifact and must
-    /// be considered separately by future comparison queries.
+    /// The digest contains the V2 artifact schema version as a content-addressing
+    /// namespace. It excludes option paths, target identity, and configuration-
+    /// global provenance metadata, so equal local semantics deduplicate within
+    /// V2 while remaining distinct from content in another artifact schema.
+    /// Global inspection completeness belongs to the parent artifact and must be
+    /// considered separately by future comparison queries.
     pub(crate) fn option_content_digest(option: &ConfigOptionArtifactV2) -> [u8; 32] {
         let redacted = redact_option(option.clone());
         let content = option_content_projection(&redacted);
-        let bytes = serde_json::to_vec(&content).unwrap_or_default();
+        let namespaced_content = json!({
+            "schema_version": CONFIG_OPTION_ARTIFACT_SCHEMA_VERSION_V2,
+            "content": content,
+        });
+        let bytes = serde_json::to_vec(&namespaced_content).unwrap_or_default();
         Sha256::digest(bytes).into()
     }
 
@@ -1519,5 +1526,76 @@ mod tests {
                 ConfigInspectionArtifactV2::option_content_digest(&artifact.options[0])
             );
         }
+    }
+
+    #[test]
+    fn option_content_digest_includes_the_v2_schema_domain() {
+        let artifact = config_artifact_v2_from_assembled(assembled(vec![option(
+            KEY_A,
+            &["feature"],
+            metadata(&["feature"]),
+            value("one"),
+            provenance(
+                Vec::new(),
+                available_enrichment(),
+                OverrideState::Known(false),
+            ),
+        )]))
+        .unwrap();
+        let option = &artifact.options[0];
+        let redacted = redact_option(option.clone());
+        let local = option_content_projection(&redacted);
+        let raw_unversioned: [u8; 32] = Sha256::digest(serde_json::to_vec(&local).unwrap()).into();
+        let expected_envelope = json!({
+            "schema_version": CONFIG_OPTION_ARTIFACT_SCHEMA_VERSION_V2,
+            "content": local,
+        });
+        let expected_v2: [u8; 32] =
+            Sha256::digest(serde_json::to_vec(&expected_envelope).unwrap()).into();
+
+        assert_ne!(
+            ConfigInspectionArtifactV2::option_content_digest(option),
+            raw_unversioned
+        );
+        assert_eq!(
+            ConfigInspectionArtifactV2::option_content_digest(option),
+            expected_v2
+        );
+    }
+
+    #[test]
+    fn available_and_unavailable_zero_option_artifacts_remain_distinct() {
+        let available = config_artifact_v2_from_assembled(assembled_with_state(
+            Vec::new(),
+            AssembledConfigProvenanceState::Available {
+                adapter_version: 1,
+                target_lib_version: Some("lib".to_string()),
+                target_module_system_path: Some("/nix/store/lib".to_string()),
+                provenance_digest: DIGEST.to_string(),
+                definition_value_enrichment: available_enrichment(),
+            },
+        ))
+        .unwrap();
+        assert!(available.options.is_empty());
+        assert!(matches!(
+            available.provenance_state,
+            ConfigProvenanceArtifactStateV2::Available { .. }
+        ));
+        assert!(available.comparison_ready());
+
+        let unavailable = config_artifact_v2_from_assembled(assembled_with_state(
+            Vec::new(),
+            AssembledConfigProvenanceState::Unavailable {
+                reason_code: "capability_unavailable".to_string(),
+                diagnostic: None,
+            },
+        ))
+        .unwrap();
+        assert!(unavailable.options.is_empty());
+        assert!(matches!(
+            unavailable.provenance_state,
+            ConfigProvenanceArtifactStateV2::Unavailable { .. }
+        ));
+        assert!(!unavailable.comparison_ready());
     }
 }
