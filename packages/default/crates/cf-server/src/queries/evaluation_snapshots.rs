@@ -3,13 +3,17 @@
 //! Every read in this module is database-only. Nix, Git, and network work must
 //! remain in the authorized evaluation job path.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::{Executor, PgPool, Postgres, QueryBuilder, Row, Transaction};
 use uuid::Uuid;
 
+use crate::models::config_inspector::option_key as canonical_option_key;
+use crate::models::config_snapshot_artifact::{
+    ConfigInspectionArtifactV2, ConfigOptionProvenanceArtifactV2, ConfigProvenanceArtifactStateV2,
+};
 use crate::models::evaluation_snapshots::{
     AgentFingerprintStatus, EvaluatedOption, EvaluatedOptionCounts, EvaluatedOptionFilter,
     EvaluatedOptionRow, EvaluatedOptionsPage, EvaluationDrift, EvaluationModuleSourcesPage,
@@ -71,6 +75,16 @@ struct PreparedOption {
     search_text: String,
     is_overridden: bool,
     encoded_len: i64,
+}
+
+struct PreparedConfigOptionV2 {
+    option_path_projection: String,
+    option_key: String,
+    path_components: Vec<String>,
+    digest: [u8; 32],
+    payload: Value,
+    search_text: String,
+    is_overridden: Option<bool>,
 }
 
 /// Identifies a persisted snapshot selected for a system and revision.
@@ -143,6 +157,289 @@ pub enum SelectedEvaluationSummaryQuery {
 fn option_persistence_batch_count(option_count: usize, unique_content_count: usize) -> usize {
     option_count.div_ceil(OPTION_PERSIST_BATCH_SIZE)
         + 2 * unique_content_count.div_ceil(OPTION_PERSIST_BATCH_SIZE)
+}
+
+/// Persists one redacted, certified schema-V2 config artifact atomically.
+///
+/// The caller supplies an already assembled artifact. This function redacts it
+/// again before validation, serialization, digesting, or any database mutation.
+/// It acquires the snapshot writer lock, but it does not bind deployments,
+/// generations, or host-delta materializations.
+///
+/// # Errors
+///
+/// Returns an error when the artifact is malformed, its carrier derivation does
+/// not belong to the requested commit/configuration, serialization fails, or
+/// PostgreSQL rejects the transaction.
+pub(crate) async fn persist_config_artifact_v2_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    commit_id: i32,
+    configuration_name: &str,
+    artifact: ConfigInspectionArtifactV2,
+) -> Result<Uuid> {
+    lock_snapshot_writer_tx(tx).await?;
+    persist_config_artifact_v2_deferred_tx(tx, commit_id, configuration_name, artifact).await
+}
+
+/// Persists one V2 artifact without acquiring the shared writer lock.
+///
+/// Callers MUST hold the snapshot writer lock when another snapshot writer can
+/// operate concurrently. This deferred path intentionally does not recompute
+/// V1 host deltas or create deployment/generation bindings.
+pub(crate) async fn persist_config_artifact_v2_deferred_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    commit_id: i32,
+    configuration_name: &str,
+    artifact: ConfigInspectionArtifactV2,
+) -> Result<Uuid> {
+    let artifact = artifact.redacted();
+    validate_config_artifact_v2(&artifact)?;
+    let provenance_state = artifact.provenance_state_payload()?;
+
+    let carrier_matches: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM derivations WHERE commit_id = $1 AND derivation_type = 'nixos' AND derivation_name = $2 AND derivation_path = $3)",
+    )
+    .bind(commit_id)
+    .bind(configuration_name)
+    .bind(&artifact.carrier_drv_path)
+    .fetch_one(&mut **tx)
+    .await?;
+    if !carrier_matches {
+        bail!("V2 artifact carrier does not match the requested commit/configuration");
+    }
+
+    let module_count = config_artifact_module_count(&artifact);
+    let mut prepared = Vec::with_capacity(artifact.options.len());
+    let mut content_bytes = 0_i64;
+    for option in &artifact.options {
+        let payload = ConfigInspectionArtifactV2::option_content_payload(option);
+        let encoded_len = i64::try_from(serde_json::to_vec(&payload)?.len())
+            .context("V2 option payload size exceeds i64")?;
+        if encoded_len > OPTION_CONTENT_BYTES_LIMIT as i64 {
+            return persist_oversized_config_artifact_v2(
+                tx,
+                commit_id,
+                configuration_name,
+                &artifact,
+                provenance_state,
+            )
+            .await;
+        }
+        content_bytes = content_bytes
+            .checked_add(encoded_len)
+            .context("V2 snapshot payload size exceeds i64")?;
+        if content_bytes > SNAPSHOT_CONTENT_BYTES_LIMIT {
+            return persist_oversized_config_artifact_v2(
+                tx,
+                commit_id,
+                configuration_name,
+                &artifact,
+                provenance_state,
+            )
+            .await;
+        }
+        let path_components = option.path_components.clone();
+        prepared.push(PreparedConfigOptionV2 {
+            option_path_projection: serde_json::to_string(&path_components)?,
+            option_key: option.option_key.clone(),
+            path_components,
+            digest: ConfigInspectionArtifactV2::option_content_digest(option),
+            payload,
+            search_text: ConfigInspectionArtifactV2::option_search_text(option),
+            is_overridden: match option.provenance {
+                ConfigOptionProvenanceArtifactV2::Available { override_state, .. } => {
+                    Some(override_state)
+                }
+                ConfigOptionProvenanceArtifactV2::Unavailable => None,
+            },
+        });
+    }
+
+    let snapshot_id: Uuid = sqlx::query_scalar(
+        r#"
+        INSERT INTO evaluation_snapshots (
+            commit_id, configuration_name, schema_version, lifecycle,
+            first_parent_sha, option_count, module_count, evaluation_duration_ms,
+            content_bytes, target_key, source_out_path, carrier_drv_path,
+            provenance_state, comparison_ready, completed_at
+        )
+        SELECT $1, $2, 2, 'available', c.first_parent_sha, $3, $4,
+               GREATEST(0, (EXTRACT(EPOCH FROM (now() - c.evaluation_started_at)) * 1000)::bigint),
+               $5, $6, $7, $8, $9, $10, now()
+        FROM commits c
+        WHERE c.id = $1
+        RETURNING id
+        "#,
+    )
+    .bind(commit_id)
+    .bind(configuration_name)
+    .bind(i32::try_from(prepared.len()).context("V2 option count exceeds i32")?)
+    .bind(i32::try_from(module_count).context("V2 module count exceeds i32")?)
+    .bind(content_bytes)
+    .bind(&artifact.target_key)
+    .bind(&artifact.source_out_path)
+    .bind(&artifact.carrier_drv_path)
+    .bind(&provenance_state)
+    .bind(artifact.comparison_ready())
+    .fetch_one(&mut **tx)
+    .await?;
+
+    let unique_content = prepared
+        .iter()
+        .map(|option| (option.digest, option))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    for batch in unique_content
+        .values()
+        .collect::<Vec<_>>()
+        .chunks(OPTION_PERSIST_BATCH_SIZE)
+    {
+        let mut query = QueryBuilder::<Postgres>::new(
+            "INSERT INTO evaluation_option_contents (digest, schema_version, payload, search_text) ",
+        );
+        query.push_values(batch, |mut row, option| {
+            row.push_bind(option.digest.as_slice())
+                .push_bind(2_i32)
+                .push_bind(&option.payload)
+                .push_bind(&option.search_text);
+        });
+        query.push(" ON CONFLICT (digest) DO NOTHING");
+        query.build().execute(&mut **tx).await?;
+
+        let mut consistency = QueryBuilder::<Postgres>::new("SELECT COUNT(*)::bigint FROM (");
+        consistency.push_values(batch, |mut row, option| {
+            row.push_bind(option.digest.as_slice())
+                .push_bind(2_i32)
+                .push_bind(&option.payload)
+                .push_bind(&option.search_text);
+        });
+        consistency.push(
+            ") expected(digest, schema_version, payload, search_text) JOIN evaluation_option_contents content ON content.digest = expected.digest AND content.schema_version = expected.schema_version AND content.payload = expected.payload AND content.search_text = expected.search_text",
+        );
+        let consistent: i64 = consistency
+            .build_query_scalar()
+            .fetch_one(&mut **tx)
+            .await?;
+        if consistent != i64::try_from(batch.len())? {
+            bail!("V2 content digest conflicts with different content");
+        }
+    }
+
+    for batch in prepared.chunks(OPTION_PERSIST_BATCH_SIZE) {
+        let mut query = QueryBuilder::<Postgres>::new(
+            "INSERT INTO evaluation_snapshot_options (snapshot_id, option_path, content_digest, is_overridden, option_key, path_components) ",
+        );
+        query.push_values(batch, |mut row, option| {
+            row.push_bind(snapshot_id)
+                .push_bind(&option.option_path_projection)
+                .push_bind(option.digest.as_slice())
+                .push_bind(option.is_overridden)
+                .push_bind(&option.option_key)
+                .push_bind(&option.path_components);
+        });
+        query.build().execute(&mut **tx).await?;
+    }
+
+    let certified = sqlx::query(
+        "UPDATE evaluation_snapshots SET integrity_version = 2 WHERE id = $1 AND schema_version = 2 AND evaluation_snapshot_payloads_valid($1)",
+    )
+    .bind(snapshot_id)
+    .execute(&mut **tx)
+    .await?;
+    if certified.rows_affected() != 1 {
+        bail!("persisted V2 artifact failed complete integrity validation");
+    }
+    advance_snapshot_selection_tx(tx, commit_id, configuration_name, snapshot_id).await?;
+    Ok(snapshot_id)
+}
+
+fn validate_config_artifact_v2(artifact: &ConfigInspectionArtifactV2) -> Result<()> {
+    if artifact.artifact_version
+        != crate::models::config_snapshot_artifact::CONFIG_OPTION_ARTIFACT_SCHEMA_VERSION_V2
+    {
+        bail!("unsupported V2 config artifact version");
+    }
+    if artifact.target_key.len() != 64
+        || !artifact
+            .target_key
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        || artifact.source_out_path.trim().is_empty()
+        || artifact.carrier_drv_path.trim().is_empty()
+    {
+        bail!("invalid V2 config artifact identity");
+    }
+    let mut keys = std::collections::BTreeSet::new();
+    for option in &artifact.options {
+        if option.path_components.is_empty()
+            || option.path_components.iter().any(String::is_empty)
+            || option.option_key != canonical_option_key(&option.path_components)
+            || !keys.insert(&option.option_key)
+        {
+            bail!("invalid or duplicate V2 option identity");
+        }
+    }
+    Ok(())
+}
+
+fn config_artifact_module_count(artifact: &ConfigInspectionArtifactV2) -> usize {
+    if !matches!(
+        artifact.provenance_state,
+        ConfigProvenanceArtifactStateV2::Available { .. }
+    ) {
+        return 0;
+    }
+    artifact
+        .options
+        .iter()
+        .flat_map(|option| match &option.provenance {
+            ConfigOptionProvenanceArtifactV2::Available { definitions, .. } => definitions
+                .iter()
+                .map(|definition| {
+                    (
+                        definition.source_input.as_deref(),
+                        definition.source_revision.as_deref(),
+                        definition.source_path.as_deref(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            ConfigOptionProvenanceArtifactV2::Unavailable => Vec::new(),
+        })
+        .filter(|triple| triple.0.is_some() || triple.1.is_some() || triple.2.is_some())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
+}
+
+async fn persist_oversized_config_artifact_v2(
+    tx: &mut Transaction<'_, Postgres>,
+    commit_id: i32,
+    configuration_name: &str,
+    artifact: &ConfigInspectionArtifactV2,
+    provenance_state: Value,
+) -> Result<Uuid> {
+    let snapshot_id: Uuid = sqlx::query_scalar(
+        r#"
+        INSERT INTO evaluation_snapshots (
+            commit_id, configuration_name, schema_version, lifecycle,
+            first_parent_sha, option_count, module_count, content_bytes,
+            target_key, source_out_path, carrier_drv_path, provenance_state,
+            comparison_ready, error, completed_at
+        )
+        SELECT $1, $2, 2, 'unavailable', c.first_parent_sha, 0, 0, 0,
+               $3, $4, $5, $6, false,
+               'Config inspection artifact exceeds persistence size limits', now()
+        FROM commits c WHERE c.id = $1 RETURNING id
+        "#,
+    )
+    .bind(commit_id)
+    .bind(configuration_name)
+    .bind(&artifact.target_key)
+    .bind(&artifact.source_out_path)
+    .bind(&artifact.carrier_drv_path)
+    .bind(provenance_state)
+    .fetch_one(&mut **tx)
+    .await?;
+    advance_snapshot_selection_tx(tx, commit_id, configuration_name, snapshot_id).await?;
+    Ok(snapshot_id)
 }
 
 /// Inserts a complete available snapshot in the caller's evaluation transaction.
@@ -3400,8 +3697,15 @@ mod tests {
     use chrono::Utc;
     use ed25519_dalek::SigningKey;
     use serde_json::json;
+    use sqlx::PgPool;
 
     use crate::models::commits::Commit;
+    use crate::models::config_snapshot_artifact::{
+        CONFIG_OPTION_ARTIFACT_SCHEMA_VERSION_V2, ConfigDefinitionArtifactV2,
+        ConfigDefinitionStatusV2, ConfigInspectionArtifactV2, ConfigOptionArtifactV2,
+        ConfigOptionMetadataArtifactV2, ConfigOptionProvenanceArtifactV2,
+        ConfigProvenanceArtifactStateV2, DefinitionValueArtifactStateV2,
+    };
     use crate::models::evaluate_with_policies::{
         EvaluationFinalizeOutcome, EvaluationPlan, finalize_evaluation_attempt,
     };
@@ -9438,5 +9742,255 @@ mod tests {
             .rollback()
             .await
             .expect("plan transaction should roll back");
+    }
+
+    fn v2_option(path: &[&str], value: &str) -> ConfigOptionArtifactV2 {
+        let path_components = path
+            .iter()
+            .map(|part| (*part).to_string())
+            .collect::<Vec<_>>();
+        let key = crate::models::config_inspector::option_key(&path_components);
+        ConfigOptionArtifactV2 {
+            option_key: key.clone(),
+            path_components,
+            metadata: ConfigOptionMetadataArtifactV2::Failed {
+                error: crate::models::evaluation_snapshots::SafeEvaluationError {
+                    code: "metadata_failed".to_string(),
+                    message: "metadata unavailable".to_string(),
+                },
+            },
+            effective_value: SafeOptionValue::Scalar(json!(value)),
+            provenance: ConfigOptionProvenanceArtifactV2::Available {
+                definitions: vec![ConfigDefinitionArtifactV2 {
+                    option_key: key,
+                    ordinal: 0,
+                    source_path: Some("module.nix".to_string()),
+                    source_input: None,
+                    source_revision: None,
+                    module_key: None,
+                    priority: 100,
+                    status: ConfigDefinitionStatusV2::ActiveSurviving,
+                    surviving_merge_order: Some(0),
+                    value: Some(SafeOptionValue::Scalar(json!(value))),
+                }],
+                override_state: false,
+            },
+        }
+    }
+
+    fn v2_artifact(options: Vec<ConfigOptionArtifactV2>) -> ConfigInspectionArtifactV2 {
+        ConfigInspectionArtifactV2 {
+            artifact_version: CONFIG_OPTION_ARTIFACT_SCHEMA_VERSION_V2,
+            target_key: "a".repeat(64),
+            source_out_path: "/nix/store/source".to_string(),
+            carrier_drv_path: "/nix/store/carrier.drv".to_string(),
+            provenance_state: ConfigProvenanceArtifactStateV2::Available {
+                adapter_version: 1,
+                target_lib_version: None,
+                target_module_system_path: None,
+                provenance_digest: "b".repeat(64),
+                definition_value_enrichment: DefinitionValueArtifactStateV2::Available {
+                    adapter_version: 1,
+                    provenance_digest: "b".repeat(64),
+                },
+            },
+            options,
+        }
+    }
+
+    async fn v2_carrier(pool: &PgPool, configuration_name: &str) -> (i32, i32) {
+        let flake_id: i32 =
+            sqlx::query_scalar("INSERT INTO flakes (name, repo_url) VALUES ($1, $2) RETURNING id")
+                .bind(format!("v2-writer-{}", Uuid::new_v4().simple()))
+                .bind(format!(
+                    "https://example.invalid/{}.git",
+                    Uuid::new_v4().simple()
+                ))
+                .fetch_one(pool)
+                .await
+                .expect("insert V2 writer flake");
+        let commit_id: i32 = sqlx::query_scalar(
+            "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp) VALUES ($1, $2, now()) RETURNING id",
+        )
+        .bind(flake_id)
+        .bind(format!("{flake_id:040x}"))
+        .fetch_one(pool)
+        .await
+        .expect("insert V2 writer commit");
+        sqlx::query(
+            "INSERT INTO derivations (commit_id, derivation_type, derivation_name, derivation_path, status_id, attempt_count) VALUES ($1, 'nixos', $2, '/nix/store/carrier.drv', 1, 0)",
+        )
+        .bind(commit_id)
+        .bind(configuration_name)
+        .execute(pool)
+        .await
+        .expect("insert V2 writer carrier");
+        (commit_id, flake_id)
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn persists_certified_v2_with_deduplicated_content(pool: PgPool) {
+        let (commit_id, _) = v2_carrier(&pool, "host").await;
+        let artifact = v2_artifact(vec![
+            v2_option(&["foo", "bar.baz"], "same"),
+            v2_option(&["foo", "bar", "baz"], "same"),
+        ]);
+        let mut tx = pool.begin().await.expect("begin V2 writer transaction");
+        let snapshot_id = persist_config_artifact_v2_tx(&mut tx, commit_id, "host", artifact)
+            .await
+            .expect("persist V2 artifact");
+        tx.commit().await.expect("commit V2 writer transaction");
+
+        let row: (i32, i16, String, bool, i32, i32, i64) = sqlx::query_as(
+            "SELECT schema_version, integrity_version, lifecycle, comparison_ready, option_count, module_count, content_bytes FROM evaluation_snapshots WHERE id = $1",
+        )
+        .bind(snapshot_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load V2 snapshot");
+        assert_eq!(row.0, 2);
+        assert_eq!(row.1, 2);
+        assert_eq!(row.2, "available");
+        assert!(row.3);
+        assert_eq!(row.4, 2);
+        assert_eq!(row.5, 1);
+        assert!(row.6 > 0);
+
+        let content_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM evaluation_option_contents WHERE schema_version = 2",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count V2 content");
+        assert_eq!(content_count, 1);
+        let refs: Vec<(String, Vec<String>, String, Option<bool>)> = sqlx::query_as(
+            "SELECT option_path, path_components, encode(content_digest, 'hex'), is_overridden FROM evaluation_snapshot_options WHERE snapshot_id = $1 ORDER BY option_path",
+        )
+        .bind(snapshot_id)
+        .fetch_all(&pool)
+        .await
+        .expect("load V2 references");
+        assert_eq!(refs.len(), 2);
+        assert_ne!(refs[0].0, refs[1].0);
+        assert_eq!(refs[0].2, refs[1].2);
+        assert_eq!(refs[0].3, Some(false));
+        assert_eq!(refs[1].3, Some(false));
+        let binding_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM evaluation_generation_snapshots WHERE snapshot_id = $1",
+        )
+        .bind(snapshot_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count generation bindings");
+        assert_eq!(binding_count, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn persists_unavailable_v2_without_override_claims(pool: PgPool) {
+        let (commit_id, _) = v2_carrier(&pool, "unavailable").await;
+        let mut artifact = v2_artifact(vec![v2_option(&["services", "x"], "value")]);
+        artifact.provenance_state = ConfigProvenanceArtifactStateV2::Unavailable {
+            reason_code: "not_evaluated".to_string(),
+            diagnostic: None,
+        };
+        let ConfigOptionArtifactV2 { provenance, .. } = &mut artifact.options[0];
+        *provenance = ConfigOptionProvenanceArtifactV2::Unavailable;
+        let mut tx = pool
+            .begin()
+            .await
+            .expect("begin unavailable V2 transaction");
+        let snapshot_id =
+            persist_config_artifact_v2_tx(&mut tx, commit_id, "unavailable", artifact)
+                .await
+                .expect("persist unavailable-state V2 artifact");
+        tx.commit()
+            .await
+            .expect("commit unavailable V2 transaction");
+        let row: (i16, String, i32, i32, i64, bool) = sqlx::query_as(
+            "SELECT integrity_version, lifecycle, option_count, module_count, content_bytes, comparison_ready FROM evaluation_snapshots WHERE id = $1",
+        )
+        .bind(snapshot_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load unavailable V2 snapshot");
+        assert_eq!(row, (2, "available".to_string(), 1, 0, row.4, false));
+        let override_state: Option<bool> = sqlx::query_scalar(
+            "SELECT is_overridden FROM evaluation_snapshot_options WHERE snapshot_id = $1",
+        )
+        .bind(snapshot_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load unavailable override state");
+        assert_eq!(override_state, None);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn oversized_v2_artifact_advances_unavailable_selection(pool: PgPool) {
+        let (commit_id, _) = v2_carrier(&pool, "oversized").await;
+        let mut artifact = v2_artifact(vec![v2_option(&["services", "oversized"], "x")]);
+        artifact.options[0].effective_value = SafeOptionValue::List(
+            (0..=OPTION_CONTENT_BYTES_LIMIT)
+                .map(|_| SafeOptionValue::Scalar(json!(true)))
+                .collect(),
+        );
+        let mut tx = pool.begin().await.expect("begin oversized V2 transaction");
+        let snapshot_id = persist_config_artifact_v2_tx(&mut tx, commit_id, "oversized", artifact)
+            .await
+            .expect("persist oversized V2 artifact");
+        tx.commit().await.expect("commit oversized V2 transaction");
+        let row: (i16, String, i32, i32, i64, bool) = sqlx::query_as(
+            "SELECT integrity_version, lifecycle, option_count, module_count, content_bytes, comparison_ready FROM evaluation_snapshots WHERE id = $1",
+        )
+        .bind(snapshot_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load oversized V2 snapshot");
+        assert_eq!(row, (0, "unavailable".to_string(), 0, 0, 0, false));
+        let reference_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM evaluation_snapshot_options WHERE snapshot_id = $1",
+        )
+        .bind(snapshot_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count oversized references");
+        assert_eq!(reference_count, 0);
+        let selected: Uuid = sqlx::query_scalar(
+            "SELECT current_snapshot_id FROM evaluation_snapshot_selections WHERE commit_id = $1 AND configuration_name = 'oversized'",
+        )
+        .bind(commit_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load oversized selection");
+        assert_eq!(selected, snapshot_id);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn v2_carrier_mismatch_fails_before_snapshot_insert(pool: PgPool) {
+        let (commit_id, _) = v2_carrier(&pool, "host").await;
+        let artifact = v2_artifact(vec![v2_option(&["services", "x"], "value")]);
+        let mut tx = pool.begin().await.expect("begin mismatch transaction");
+        let result =
+            persist_config_artifact_v2_tx(&mut tx, commit_id, "wrong-config", artifact).await;
+        assert!(result.is_err());
+        tx.rollback().await.expect("rollback mismatch transaction");
+        let snapshot_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM evaluation_snapshots WHERE commit_id = $1")
+                .bind(commit_id)
+                .fetch_one(&pool)
+                .await
+                .expect("count mismatch snapshots");
+        assert_eq!(snapshot_count, 0);
+    }
+
+    #[test]
+    fn v2_writer_rejects_tampered_option_key_before_database_work() {
+        let mut artifact = v2_artifact(vec![v2_option(&["services", "x"], "value")]);
+        artifact.options[0].option_key = "c".repeat(64);
+        let error = validate_config_artifact_v2(&artifact).expect_err("tampered key must fail");
+        assert!(error.to_string().contains("option identity"));
     }
 }

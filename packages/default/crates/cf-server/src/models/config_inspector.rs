@@ -1563,7 +1563,8 @@ fn parse_definition_job_name(attribute: &str) -> Result<DefinitionIdentity> {
     })
 }
 
-fn option_key(path: &[String]) -> String {
+/// Returns the canonical SHA-256 identity for exact option path components.
+pub(crate) fn option_key(path: &[String]) -> String {
     let bytes = serde_json::to_vec(path).expect("JSON arrays of strings are serializable");
     hex::encode(Sha256::digest(bytes))
 }

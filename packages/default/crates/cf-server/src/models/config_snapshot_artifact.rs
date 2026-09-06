@@ -273,6 +273,16 @@ impl ConfigInspectionArtifactV2 {
             .collect()
     }
 
+    /// Returns the canonical redacted JSON payload for one option's local content.
+    pub(crate) fn option_content_payload(option: &ConfigOptionArtifactV2) -> Value {
+        option_content_projection(&redact_option(option.clone()))
+    }
+
+    /// Returns the redacted configuration-global provenance JSON value.
+    pub(crate) fn provenance_state_payload(&self) -> Result<Value, serde_json::Error> {
+        serde_json::to_value(&self.provenance_state)
+    }
+
     /// Reports whether this artifact supports a complete semantic comparison.
     pub(crate) fn comparison_ready(&self) -> bool {
         matches!(
