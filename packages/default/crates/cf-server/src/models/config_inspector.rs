@@ -1278,13 +1278,20 @@ pub(crate) fn assemble_config_inspection(
                 Stage2AssemblyInput::Unavailable {
                     reason_code,
                     diagnostic,
-                } => (
-                    DefinitionValueEnrichmentState::Unavailable {
-                        reason_code,
-                        diagnostic,
-                    },
-                    BTreeMap::new(),
-                ),
+                } => {
+                    if reason_code == "stage1_provenance_unavailable" {
+                        bail!(
+                            "Stage-2 reports unavailable provenance while Stage-1 provenance is available"
+                        );
+                    }
+                    (
+                        DefinitionValueEnrichmentState::Unavailable {
+                            reason_code,
+                            diagnostic,
+                        },
+                        BTreeMap::new(),
+                    )
+                }
                 Stage2AssemblyInput::Available {
                     adapter_version: stage2_adapter_version,
                     provenance_digest: stage2_provenance_digest,
@@ -1445,10 +1452,43 @@ fn assemble_definitions(
     let mut definitions = group.definitions.clone();
     definitions.sort_by_key(|definition| definition.ordinal);
     let mut ordinals = BTreeSet::new();
-    for definition in &definitions {
+    let mut surviving_merge_orders = BTreeSet::new();
+    let mut survivor_count = 0_u64;
+    // INVARIANT: Stage-1 emits a complete zero-based ordinal permutation, and
+    // survivor merge order is a separate complete zero-based permutation.
+    for (expected_ordinal, definition) in definitions.iter().enumerate() {
+        let expected_ordinal = u64::try_from(expected_ordinal)
+            .context("raw definition count exceeds supported ordinal range")?;
+        if definition.ordinal != expected_ordinal {
+            bail!(
+                "raw definition ordinals are not a zero-based permutation for option {option_key}"
+            );
+        }
         if !ordinals.insert(definition.ordinal) {
             bail!("duplicate raw definition ordinal for option {option_key}");
         }
+        match definition.status {
+            RawDefinitionStatus::ActiveSurviving => {
+                let Some(merge_order) = definition.surviving_merge_order else {
+                    bail!(
+                        "active surviving definition is missing merge order for option {option_key}"
+                    );
+                };
+                if !surviving_merge_orders.insert(merge_order) {
+                    bail!("duplicate surviving merge order for option {option_key}");
+                }
+                survivor_count += 1;
+            }
+            RawDefinitionStatus::PriorityDiscarded => {
+                if definition.surviving_merge_order.is_some() {
+                    bail!("discarded definition has surviving merge order for option {option_key}");
+                }
+            }
+        }
+    }
+    let expected_merge_orders = (0..survivor_count).collect::<BTreeSet<_>>();
+    if surviving_merge_orders != expected_merge_orders {
+        bail!("surviving merge orders are not a zero-based permutation for option {option_key}");
     }
 
     definitions
@@ -2736,7 +2776,7 @@ mod tests {
                 path: path.iter().map(|part| (*part).to_string()).collect(),
                 definitions: vec![
                     semantic_definition(
-                        2,
+                        1,
                         100,
                         RawDefinitionStatus::ActiveSurviving,
                         Some("/nix/store/two.nix"),
@@ -2755,7 +2795,7 @@ mod tests {
         let assembled = assemble_config_inspection(
             stage1,
             semantic_stage2(vec![
-                semantic_definition_value(&key, 2, semantic_value(false)),
+                semantic_definition_value(&key, 1, semantic_value(false)),
                 semantic_definition_value(&key, 0, semantic_value(true)),
             ]),
         )
@@ -2773,11 +2813,167 @@ mod tests {
                 .iter()
                 .map(|definition| definition.ordinal)
                 .collect::<Vec<_>>(),
-            vec![0, 2]
+            vec![0, 1]
         );
         assert_eq!(definitions[0].surviving_merge_order, Some(0));
         assert_eq!(definitions[1].surviving_merge_order, Some(1));
         assert!(matches!(override_state, OverrideState::Known(false)));
+    }
+
+    fn definition_group_for_test(
+        definitions: Vec<RawDefinition>,
+    ) -> (RawDefinitionsForOption, DefinitionValueEnrichmentState) {
+        (
+            RawDefinitionsForOption {
+                option_key: "test-option".to_string(),
+                path: vec!["test".to_string(), "option".to_string()],
+                definitions,
+            },
+            DefinitionValueEnrichmentState::Unavailable {
+                reason_code: "stage2_index_failed".to_string(),
+                diagnostic: None,
+            },
+        )
+    }
+
+    #[test]
+    fn assembly_requires_contiguous_zero_based_definition_ordinals() {
+        for ordinals in [[0, 1], [0, 2], [1, 2], [0, 0]] {
+            let definitions = ordinals
+                .into_iter()
+                .map(|ordinal| {
+                    semantic_definition(
+                        ordinal,
+                        100,
+                        RawDefinitionStatus::ActiveSurviving,
+                        None,
+                        Some(ordinal),
+                    )
+                })
+                .collect();
+            let (group, enrichment) = definition_group_for_test(definitions);
+            let result = assemble_definitions("test-option", &group, &enrichment, &BTreeMap::new());
+            if ordinals == [0, 1] {
+                assert!(result.is_ok());
+            } else {
+                assert!(result.is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn assembly_requires_valid_surviving_merge_orders() {
+        let valid = [Some(0), Some(1)];
+        let invalid = [
+            [Some(0), Some(2)],
+            [Some(1), Some(2)],
+            [Some(0), Some(0)],
+            [None, Some(0)],
+        ];
+
+        let valid_definitions = valid
+            .into_iter()
+            .enumerate()
+            .map(|(ordinal, merge_order)| {
+                semantic_definition(
+                    ordinal as u64,
+                    100,
+                    RawDefinitionStatus::ActiveSurviving,
+                    None,
+                    merge_order,
+                )
+            })
+            .collect();
+        let (group, enrichment) = definition_group_for_test(valid_definitions);
+        assert!(
+            assemble_definitions("test-option", &group, &enrichment, &BTreeMap::new(),).is_ok()
+        );
+
+        for merge_orders in invalid {
+            let definitions = merge_orders
+                .into_iter()
+                .enumerate()
+                .map(|(ordinal, merge_order)| {
+                    semantic_definition(
+                        ordinal as u64,
+                        100,
+                        RawDefinitionStatus::ActiveSurviving,
+                        None,
+                        merge_order,
+                    )
+                })
+                .collect();
+            let (group, enrichment) = definition_group_for_test(definitions);
+            assert!(
+                assemble_definitions("test-option", &group, &enrichment, &BTreeMap::new(),)
+                    .is_err()
+            );
+        }
+
+        let (group, enrichment) = definition_group_for_test(vec![semantic_definition(
+            0,
+            100,
+            RawDefinitionStatus::PriorityDiscarded,
+            None,
+            Some(0),
+        )]);
+        assert!(
+            assemble_definitions("test-option", &group, &enrichment, &BTreeMap::new(),).is_err()
+        );
+    }
+
+    #[test]
+    fn assembly_rejects_stage1_available_with_provenance_unavailable_reason() {
+        let path = ["feature"];
+        let key = hash(&path);
+        let stage1 = semantic_stage1(
+            vec![semantic_option(
+                &key,
+                &path,
+                InspectionMetadata::Available(semantic_metadata(&path)),
+                semantic_value(true),
+            )],
+            semantic_provenance(Vec::new()),
+        );
+        assert!(matches!(
+            assemble_config_inspection(
+                stage1,
+                DefinitionValueEnrichment::Unavailable {
+                    reason_code: "stage1_provenance_unavailable".to_string(),
+                    diagnostic: None,
+                },
+            ),
+            Err(_)
+        ));
+    }
+
+    #[test]
+    fn assembly_treats_omitted_definition_group_as_known_zero_definitions() {
+        let path = ["feature"];
+        let key = hash(&path);
+        let assembled = assemble_config_inspection(
+            semantic_stage1(
+                vec![semantic_option(
+                    &key,
+                    &path,
+                    InspectionMetadata::Available(semantic_metadata(&path)),
+                    semantic_value(true),
+                )],
+                semantic_provenance(Vec::new()),
+            ),
+            semantic_stage2(Vec::new()),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            assembled.options[0].provenance,
+            AssembledOptionProvenance::Available {
+                ref definitions,
+                override_state: OverrideState::Known(false),
+                definition_value_enrichment: DefinitionValueEnrichmentState::Available { .. },
+                ..
+            } if definitions.is_empty()
+        ));
     }
 
     #[test]
