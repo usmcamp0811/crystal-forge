@@ -13,9 +13,9 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use super::config_inspector::{
-    AssembledConfigInspection, AssembledDefinition, AssembledOption, AssembledOptionProvenance,
-    DefinitionValueEnrichmentState, InspectionMetadata, InspectionValue, OverrideState,
-    RawDefinitionStatus,
+    AssembledConfigInspection, AssembledConfigProvenanceState, AssembledDefinition,
+    AssembledOption, AssembledOptionProvenance, DefinitionValueEnrichmentState, InspectionMetadata,
+    InspectionValue, OverrideState, RawDefinitionStatus,
 };
 use super::evaluation_snapshots::{SafeEvaluationError, SafeOptionValue};
 use crate::security::snapshot_redaction::{
@@ -37,8 +37,36 @@ pub(crate) struct ConfigInspectionArtifactV2 {
     pub source_out_path: String,
     /// Shared evaluation carrier derivation path.
     pub carrier_drv_path: String,
+    /// Configuration-global provenance and enrichment state.
+    pub provenance_state: ConfigProvenanceArtifactStateV2,
     /// Options in validated Stage-1 index order.
     pub options: Vec<ConfigOptionArtifactV2>,
+}
+
+/// Preserves configuration-global provenance and definition-value state once.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub(crate) enum ConfigProvenanceArtifactStateV2 {
+    /// Provenance metadata and global enrichment are available.
+    Available {
+        /// Provenance adapter version.
+        adapter_version: u64,
+        /// Target library version, when available.
+        target_lib_version: Option<String>,
+        /// Target module-system source path, when available.
+        target_module_system_path: Option<String>,
+        /// Canonical raw-definition digest.
+        provenance_digest: String,
+        /// Global Stage-2 definition-value state.
+        definition_value_enrichment: DefinitionValueArtifactStateV2,
+    },
+    /// Configuration-wide raw provenance was not established.
+    Unavailable {
+        /// Stable unavailable reason.
+        reason_code: String,
+        /// Sanitized diagnostic, when available.
+        diagnostic: Option<SafeEvaluationError>,
+    },
 }
 
 /// Contains one option without collapsing failed or unavailable states.
@@ -103,30 +131,15 @@ pub(crate) struct ConfigDefinitionSourceArtifactV2 {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub(crate) enum ConfigOptionProvenanceArtifactV2 {
-    /// Raw definitions and Stage-2 state are available.
+    /// Raw definitions and local override state are available.
     Available {
-        /// Provenance adapter version.
-        adapter_version: u64,
-        /// Target library version, when available.
-        target_lib_version: Option<String>,
-        /// Target module-system path, when available.
-        target_module_system_path: Option<String>,
-        /// Canonical raw-definition digest.
-        provenance_digest: String,
         /// All raw definitions in ordinal order.
         definitions: Vec<ConfigDefinitionArtifactV2>,
         /// Proven override state.
         override_state: bool,
-        /// Global Stage-2 definition-value state.
-        definition_value_enrichment: DefinitionValueArtifactStateV2,
     },
     /// Raw provenance was not established.
-    Unavailable {
-        /// Stable unavailable reason.
-        reason_code: String,
-        /// Sanitized diagnostic, when available.
-        diagnostic: Option<SafeEvaluationError>,
-    },
+    Unavailable,
 }
 
 /// Contains one raw definition and its optional safe value.
@@ -197,6 +210,7 @@ pub(crate) fn config_artifact_v2_from_assembled(
     if assembled.carrier_drv_path.is_empty() {
         bail!("config artifact carrier path is empty");
     }
+    let provenance_state = config_provenance_artifact(&assembled.provenance_state)?;
 
     let mut option_keys = BTreeSet::new();
     let options = assembled
@@ -206,7 +220,7 @@ pub(crate) fn config_artifact_v2_from_assembled(
             if !option_keys.insert(option.option_key.clone()) {
                 bail!("duplicate config artifact option key");
             }
-            config_option_artifact(option)
+            config_option_artifact(option, &provenance_state)
         })
         .collect::<Result<Vec<_>>>()?;
 
@@ -215,6 +229,7 @@ pub(crate) fn config_artifact_v2_from_assembled(
         target_key: assembled.target_key,
         source_out_path: assembled.source_out_path,
         carrier_drv_path: assembled.carrier_drv_path,
+        provenance_state,
         options,
     })
 }
@@ -222,11 +237,16 @@ pub(crate) fn config_artifact_v2_from_assembled(
 impl ConfigInspectionArtifactV2 {
     /// Returns a redacted artifact safe for digesting, indexing, or persistence.
     pub(crate) fn redacted(mut self) -> Self {
+        self.provenance_state = redact_global_provenance(self.provenance_state);
         self.options = self.options.into_iter().map(redact_option).collect();
         self
     }
 
-    /// Returns the SHA-256 digest of redacted semantic content without identity.
+    /// Returns the SHA-256 digest of redacted option-local semantic content.
+    ///
+    /// The digest is only an option-local storage and comparison identity.
+    /// Global inspection completeness belongs to the parent artifact and must
+    /// be considered separately by future comparison queries.
     pub(crate) fn option_content_digest(option: &ConfigOptionArtifactV2) -> [u8; 32] {
         let redacted = redact_option(option.clone());
         let content = option_content_projection(&redacted);
@@ -245,6 +265,17 @@ impl ConfigInspectionArtifactV2 {
             .take(MAX_SEARCH_TEXT_CHARS)
             .collect()
     }
+
+    /// Reports whether this artifact supports a complete semantic comparison.
+    pub(crate) fn comparison_ready(&self) -> bool {
+        matches!(
+            self.provenance_state,
+            ConfigProvenanceArtifactStateV2::Available {
+                definition_value_enrichment: DefinitionValueArtifactStateV2::Available { .. },
+                ..
+            }
+        )
+    }
 }
 
 fn redact_option(mut option: ConfigOptionArtifactV2) -> ConfigOptionArtifactV2 {
@@ -262,17 +293,71 @@ fn redact_option(mut option: ConfigOptionArtifactV2) -> ConfigOptionArtifactV2 {
     option.provenance = redact_provenance(
         std::mem::replace(
             &mut option.provenance,
-            ConfigOptionProvenanceArtifactV2::Unavailable {
-                reason_code: "internal_redaction_placeholder".to_string(),
-                diagnostic: None,
-            },
+            ConfigOptionProvenanceArtifactV2::Unavailable,
         ),
         &context,
     );
     option
 }
 
-fn config_option_artifact(option: AssembledOption) -> Result<ConfigOptionArtifactV2> {
+fn redact_global_provenance(
+    state: ConfigProvenanceArtifactStateV2,
+) -> ConfigProvenanceArtifactStateV2 {
+    match state {
+        ConfigProvenanceArtifactStateV2::Available {
+            adapter_version,
+            target_lib_version,
+            target_module_system_path,
+            provenance_digest,
+            definition_value_enrichment,
+        } => ConfigProvenanceArtifactStateV2::Available {
+            adapter_version,
+            target_lib_version: target_lib_version.map(|value| redact_text(&value)),
+            target_module_system_path: target_module_system_path.map(|value| redact_text(&value)),
+            provenance_digest: redact_text(&provenance_digest),
+            definition_value_enrichment: redact_enrichment(definition_value_enrichment),
+        },
+        ConfigProvenanceArtifactStateV2::Unavailable {
+            reason_code,
+            diagnostic,
+        } => ConfigProvenanceArtifactStateV2::Unavailable {
+            reason_code: redact_text(&reason_code),
+            diagnostic: diagnostic.map(redact_error),
+        },
+    }
+}
+
+fn config_provenance_artifact(
+    state: &AssembledConfigProvenanceState,
+) -> Result<ConfigProvenanceArtifactStateV2> {
+    Ok(match state {
+        AssembledConfigProvenanceState::Available {
+            adapter_version,
+            target_lib_version,
+            target_module_system_path,
+            provenance_digest,
+            definition_value_enrichment,
+        } => ConfigProvenanceArtifactStateV2::Available {
+            adapter_version: *adapter_version,
+            target_lib_version: target_lib_version.clone(),
+            target_module_system_path: target_module_system_path.clone(),
+            provenance_digest: provenance_digest.clone(),
+            definition_value_enrichment: enrichment_artifact(definition_value_enrichment)?,
+        },
+        AssembledConfigProvenanceState::Unavailable {
+            reason_code,
+            diagnostic,
+        } => ConfigProvenanceArtifactStateV2::Unavailable {
+            reason_code: reason_code.clone(),
+            diagnostic: diagnostic.clone(),
+        },
+    })
+}
+
+fn config_option_artifact(
+    option: AssembledOption,
+    global_provenance: &ConfigProvenanceArtifactStateV2,
+) -> Result<ConfigOptionArtifactV2> {
     if !is_key(&option.option_key) {
         bail!("invalid config artifact option key");
     }
@@ -282,6 +367,7 @@ fn config_option_artifact(option: AssembledOption) -> Result<ConfigOptionArtifac
     let metadata = metadata_artifact(&option.path_components, option.metadata)?;
     let effective_value = inspection_value(option.effective_value);
     let provenance = provenance_artifact(&option.option_key, &option.provenance)?;
+    validate_option_provenance(global_provenance, &provenance)?;
     Ok(ConfigOptionArtifactV2 {
         option_key: option.option_key,
         path_components: option.path_components,
@@ -289,6 +375,37 @@ fn config_option_artifact(option: AssembledOption) -> Result<ConfigOptionArtifac
         effective_value,
         provenance,
     })
+}
+
+fn validate_option_provenance(
+    global: &ConfigProvenanceArtifactStateV2,
+    local: &ConfigOptionProvenanceArtifactV2,
+) -> Result<()> {
+    match (global, local) {
+        (
+            ConfigProvenanceArtifactStateV2::Available {
+                definition_value_enrichment,
+                ..
+            },
+            ConfigOptionProvenanceArtifactV2::Available { definitions, .. },
+        ) => validate_definition_values(definitions, definition_value_enrichment),
+        (
+            ConfigProvenanceArtifactStateV2::Unavailable { .. },
+            ConfigOptionProvenanceArtifactV2::Unavailable,
+        ) => Ok(()),
+        (
+            ConfigProvenanceArtifactStateV2::Available { .. },
+            ConfigOptionProvenanceArtifactV2::Unavailable,
+        ) => {
+            bail!("available global provenance has unavailable option provenance")
+        }
+        (
+            ConfigProvenanceArtifactStateV2::Unavailable { .. },
+            ConfigOptionProvenanceArtifactV2::Available { .. },
+        ) => {
+            bail!("unavailable global provenance has available option provenance")
+        }
+    }
 }
 
 fn metadata_artifact(
@@ -329,21 +446,10 @@ fn provenance_artifact(
     provenance: &AssembledOptionProvenance,
 ) -> Result<ConfigOptionProvenanceArtifactV2> {
     match provenance {
-        AssembledOptionProvenance::Unavailable {
-            reason_code,
-            diagnostic,
-        } => Ok(ConfigOptionProvenanceArtifactV2::Unavailable {
-            reason_code: reason_code.clone(),
-            diagnostic: diagnostic.clone(),
-        }),
+        AssembledOptionProvenance::Unavailable => Ok(ConfigOptionProvenanceArtifactV2::Unavailable),
         AssembledOptionProvenance::Available {
-            adapter_version,
-            target_lib_version,
-            target_module_system_path,
-            provenance_digest,
             definitions,
             override_state,
-            definition_value_enrichment,
         } => {
             let override_state = match override_state {
                 OverrideState::Known(value) => *value,
@@ -353,16 +459,9 @@ fn provenance_artifact(
                 .map(|definition| definition_artifact(option_key, definition))
                 .collect::<Result<Vec<_>>>()?;
             validate_definition_structure(&definitions)?;
-            let definition_value_enrichment = enrichment_artifact(definition_value_enrichment)?;
-            validate_definition_values(&definitions, &definition_value_enrichment)?;
             Ok(ConfigOptionProvenanceArtifactV2::Available {
-                adapter_version: *adapter_version,
-                target_lib_version: target_lib_version.clone(),
-                target_module_system_path: target_module_system_path.clone(),
-                provenance_digest: provenance_digest.clone(),
                 definitions,
                 override_state,
-                definition_value_enrichment,
             })
         }
     }
@@ -533,26 +632,13 @@ fn redact_provenance(
     context: &str,
 ) -> ConfigOptionProvenanceArtifactV2 {
     match provenance {
-        ConfigOptionProvenanceArtifactV2::Unavailable {
-            reason_code,
-            diagnostic,
-        } => ConfigOptionProvenanceArtifactV2::Unavailable {
-            reason_code: redact_text(&reason_code),
-            diagnostic: diagnostic.map(redact_error),
-        },
+        ConfigOptionProvenanceArtifactV2::Unavailable => {
+            ConfigOptionProvenanceArtifactV2::Unavailable
+        }
         ConfigOptionProvenanceArtifactV2::Available {
-            adapter_version,
-            target_lib_version,
-            target_module_system_path,
-            provenance_digest,
             definitions,
             override_state,
-            definition_value_enrichment,
         } => ConfigOptionProvenanceArtifactV2::Available {
-            adapter_version,
-            target_lib_version: target_lib_version.map(|value| redact_text(&value)),
-            target_module_system_path: target_module_system_path.map(|value| redact_text(&value)),
-            provenance_digest: redact_text(&provenance_digest),
             definitions: definitions
                 .into_iter()
                 .map(|mut definition| {
@@ -570,7 +656,6 @@ fn redact_provenance(
                 })
                 .collect(),
             override_state,
-            definition_value_enrichment: redact_enrichment(definition_value_enrichment),
         },
     }
 }
@@ -670,28 +755,14 @@ fn option_content_projection(option: &ConfigOptionArtifactV2) -> Value {
         }
     };
     let provenance = match &option.provenance {
-        ConfigOptionProvenanceArtifactV2::Unavailable {
-            reason_code,
-            diagnostic,
-        } => json!({
+        ConfigOptionProvenanceArtifactV2::Unavailable => json!({
             "state": "unavailable",
-            "reason_code": reason_code,
-            "diagnostic": diagnostic,
         }),
         ConfigOptionProvenanceArtifactV2::Available {
-            adapter_version,
-            target_lib_version,
-            target_module_system_path,
-            provenance_digest,
             definitions,
             override_state,
-            definition_value_enrichment,
         } => json!({
             "state": "available",
-            "adapter_version": adapter_version,
-            "target_lib_version": target_lib_version,
-            "target_module_system_path": target_module_system_path,
-            "provenance_digest": provenance_digest,
             "definitions": definitions.iter().map(|definition| json!({
                 "ordinal": definition.ordinal,
                 "source_path": definition.source_path,
@@ -704,7 +775,6 @@ fn option_content_projection(option: &ConfigOptionArtifactV2) -> Value {
                 "value": definition.value,
             })).collect::<Vec<_>>(),
             "override_state": override_state,
-            "definition_value_enrichment": definition_value_enrichment,
         }),
     };
     json!({
@@ -768,17 +838,12 @@ mod tests {
 
     fn provenance(
         definitions: Vec<AssembledDefinition>,
-        enrichment: DefinitionValueEnrichmentState,
+        _enrichment: DefinitionValueEnrichmentState,
         override_state: OverrideState,
     ) -> AssembledOptionProvenance {
         AssembledOptionProvenance::Available {
-            adapter_version: 1,
-            target_lib_version: Some("lib".to_string()),
-            target_module_system_path: Some("/nix/store/lib".to_string()),
-            provenance_digest: DIGEST.to_string(),
             definitions,
             override_state,
-            definition_value_enrichment: enrichment,
         }
     }
 
@@ -799,10 +864,27 @@ mod tests {
     }
 
     fn assembled(options: Vec<AssembledOption>) -> AssembledConfigInspection {
+        assembled_with_state(
+            options,
+            AssembledConfigProvenanceState::Available {
+                adapter_version: 1,
+                target_lib_version: Some("lib".to_string()),
+                target_module_system_path: Some("/nix/store/lib".to_string()),
+                provenance_digest: DIGEST.to_string(),
+                definition_value_enrichment: available_enrichment(),
+            },
+        )
+    }
+
+    fn assembled_with_state(
+        options: Vec<AssembledOption>,
+        provenance_state: AssembledConfigProvenanceState,
+    ) -> AssembledConfigInspection {
         AssembledConfigInspection {
             target_key: KEY_A.to_string(),
             source_out_path: "/nix/store/flake-source".to_string(),
             carrier_drv_path: "/nix/store/carrier.drv".to_string(),
+            provenance_state,
             options,
         }
     }
@@ -911,17 +993,20 @@ mod tests {
             code: "metadata_failed".to_string(),
             message: "metadata failed".to_string(),
         };
-        let provenance = AssembledOptionProvenance::Unavailable {
-            reason_code: "capability_unavailable".to_string(),
-            diagnostic: None,
-        };
-        let artifact = config_artifact_v2_from_assembled(assembled(vec![option(
-            KEY_A,
-            &["feature"],
-            InspectionMetadata::Failed(metadata_error.clone()),
-            value("effective"),
-            provenance,
-        )]))
+        let provenance = AssembledOptionProvenance::Unavailable;
+        let artifact = config_artifact_v2_from_assembled(assembled_with_state(
+            vec![option(
+                KEY_A,
+                &["feature"],
+                InspectionMetadata::Failed(metadata_error.clone()),
+                value("effective"),
+                provenance,
+            )],
+            AssembledConfigProvenanceState::Unavailable {
+                reason_code: "capability_unavailable".to_string(),
+                diagnostic: None,
+            },
+        ))
         .unwrap();
         assert_eq!(
             artifact.options[0].metadata,
@@ -952,7 +1037,6 @@ mod tests {
         let ConfigOptionProvenanceArtifactV2::Available {
             definitions,
             override_state,
-            definition_value_enrichment,
             ..
         } = &zero.options[0].provenance
         else {
@@ -961,62 +1045,83 @@ mod tests {
         assert!(definitions.is_empty());
         assert!(!*override_state);
         assert!(matches!(
-            definition_value_enrichment,
-            DefinitionValueArtifactStateV2::Available { .. }
+            zero.provenance_state,
+            ConfigProvenanceArtifactStateV2::Available {
+                definition_value_enrichment: DefinitionValueArtifactStateV2::Available { .. },
+                ..
+            }
         ));
 
-        let unavailable = config_artifact_v2_from_assembled(assembled(vec![option(
-            KEY_A,
-            &["feature"],
-            metadata(&["feature"]),
-            value("effective"),
-            provenance(
-                vec![definition(
-                    KEY_A,
-                    0,
-                    RawDefinitionStatus::ActiveSurviving,
-                    Some(0),
-                    None,
-                )],
-                unavailable_enrichment(),
-                OverrideState::Known(false),
-            ),
-        )]))
+        let unavailable = config_artifact_v2_from_assembled(assembled_with_state(
+            vec![option(
+                KEY_A,
+                &["feature"],
+                metadata(&["feature"]),
+                value("effective"),
+                provenance(
+                    vec![definition(
+                        KEY_A,
+                        0,
+                        RawDefinitionStatus::ActiveSurviving,
+                        Some(0),
+                        None,
+                    )],
+                    unavailable_enrichment(),
+                    OverrideState::Known(false),
+                ),
+            )],
+            AssembledConfigProvenanceState::Available {
+                adapter_version: 1,
+                target_lib_version: Some("lib".to_string()),
+                target_module_system_path: Some("/nix/store/lib".to_string()),
+                provenance_digest: DIGEST.to_string(),
+                definition_value_enrichment: unavailable_enrichment(),
+            },
+        ))
         .unwrap();
-        let ConfigOptionProvenanceArtifactV2::Available {
-            definitions,
-            definition_value_enrichment,
-            ..
-        } = &unavailable.options[0].provenance
+        let ConfigOptionProvenanceArtifactV2::Available { definitions, .. } =
+            &unavailable.options[0].provenance
         else {
             panic!("expected available provenance");
         };
         assert_eq!(definitions[0].value, None);
         assert!(matches!(
-            definition_value_enrichment,
-            DefinitionValueArtifactStateV2::Unavailable { .. }
+            unavailable.provenance_state,
+            ConfigProvenanceArtifactStateV2::Available {
+                definition_value_enrichment: DefinitionValueArtifactStateV2::Unavailable { .. },
+                ..
+            }
         ));
     }
 
     #[test]
     fn conversion_rejects_impossible_definition_value_presence() {
-        let result = config_artifact_v2_from_assembled(assembled(vec![option(
-            KEY_A,
-            &["feature"],
-            metadata(&["feature"]),
-            value("effective"),
-            provenance(
-                vec![definition(
-                    KEY_A,
-                    0,
-                    RawDefinitionStatus::ActiveSurviving,
-                    Some(0),
-                    Some(value("should be absent")),
-                )],
-                unavailable_enrichment(),
-                OverrideState::Known(false),
-            ),
-        )]));
+        let result = config_artifact_v2_from_assembled(assembled_with_state(
+            vec![option(
+                KEY_A,
+                &["feature"],
+                metadata(&["feature"]),
+                value("effective"),
+                provenance(
+                    vec![definition(
+                        KEY_A,
+                        0,
+                        RawDefinitionStatus::ActiveSurviving,
+                        Some(0),
+                        Some(value("should be absent")),
+                    )],
+                    unavailable_enrichment(),
+                    OverrideState::Known(false),
+                ),
+            )],
+            AssembledConfigProvenanceState::Available {
+                adapter_version: 1,
+                target_lib_version: Some("lib".to_string()),
+                target_module_system_path: Some("/nix/store/lib".to_string()),
+                provenance_digest: DIGEST.to_string(),
+                definition_value_enrichment: unavailable_enrichment(),
+            },
+        ));
         assert!(result.is_err());
     }
 
@@ -1155,35 +1260,47 @@ mod tests {
         )]))
         .unwrap()
         .redacted();
-        let unavailable_provenance = config_artifact_v2_from_assembled(assembled(vec![option(
-            KEY_A,
-            &["feature"],
-            metadata(&["feature"]),
-            value("one"),
-            AssembledOptionProvenance::Unavailable {
+        let unavailable_provenance = config_artifact_v2_from_assembled(assembled_with_state(
+            vec![option(
+                KEY_A,
+                &["feature"],
+                metadata(&["feature"]),
+                value("one"),
+                AssembledOptionProvenance::Unavailable,
+            )],
+            AssembledConfigProvenanceState::Unavailable {
                 reason_code: "unavailable".to_string(),
                 diagnostic: None,
             },
-        )]))
+        ))
         .unwrap()
         .redacted();
-        let unavailable_values = config_artifact_v2_from_assembled(assembled(vec![option(
-            KEY_A,
-            &["feature"],
-            metadata(&["feature"]),
-            value("one"),
-            provenance(
-                vec![definition(
-                    KEY_A,
-                    0,
-                    RawDefinitionStatus::ActiveSurviving,
-                    Some(0),
-                    None,
-                )],
-                unavailable_enrichment(),
-                OverrideState::Known(false),
-            ),
-        )]))
+        let unavailable_values = config_artifact_v2_from_assembled(assembled_with_state(
+            vec![option(
+                KEY_A,
+                &["feature"],
+                metadata(&["feature"]),
+                value("one"),
+                provenance(
+                    vec![definition(
+                        KEY_A,
+                        0,
+                        RawDefinitionStatus::ActiveSurviving,
+                        Some(0),
+                        None,
+                    )],
+                    unavailable_enrichment(),
+                    OverrideState::Known(false),
+                ),
+            )],
+            AssembledConfigProvenanceState::Available {
+                adapter_version: 1,
+                target_lib_version: Some("lib".to_string()),
+                target_module_system_path: Some("/nix/store/lib".to_string()),
+                provenance_digest: DIGEST.to_string(),
+                definition_value_enrichment: unavailable_enrichment(),
+            },
+        ))
         .unwrap()
         .redacted();
         let digest = |artifact: &ConfigInspectionArtifactV2| {
@@ -1193,5 +1310,214 @@ mod tests {
         assert_ne!(digest(&base), digest(&changed_status));
         assert_ne!(digest(&base), digest(&unavailable_provenance));
         assert_ne!(digest(&base), digest(&unavailable_values));
+    }
+
+    #[test]
+    fn option_content_digest_excludes_global_provenance_identity() {
+        let make_option = |key, path, text| {
+            option(
+                key,
+                path,
+                metadata(path),
+                value(text),
+                provenance(
+                    Vec::new(),
+                    available_enrichment(),
+                    OverrideState::Known(false),
+                ),
+            )
+        };
+        let first = config_artifact_v2_from_assembled(assembled_with_state(
+            vec![
+                make_option(KEY_A, &["feature", "a"], "one"),
+                make_option(KEY_B, &["feature", "b"], "one"),
+            ],
+            AssembledConfigProvenanceState::Available {
+                adapter_version: 1,
+                target_lib_version: Some("lib-a".to_string()),
+                target_module_system_path: Some("/nix/store/lib-a".to_string()),
+                provenance_digest:
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+                definition_value_enrichment: available_enrichment(),
+            },
+        ))
+        .unwrap();
+        let second = config_artifact_v2_from_assembled(assembled_with_state(
+            vec![
+                make_option(KEY_A, &["feature", "a"], "one"),
+                make_option(KEY_B, &["feature", "b"], "two"),
+            ],
+            AssembledConfigProvenanceState::Available {
+                adapter_version: 2,
+                target_lib_version: Some("lib-b".to_string()),
+                target_module_system_path: Some("/nix/store/lib-b".to_string()),
+                provenance_digest:
+                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+                definition_value_enrichment: available_enrichment(),
+            },
+        ))
+        .unwrap();
+
+        assert_eq!(
+            ConfigInspectionArtifactV2::option_content_digest(&first.options[0]),
+            ConfigInspectionArtifactV2::option_content_digest(&second.options[0])
+        );
+        assert_ne!(
+            ConfigInspectionArtifactV2::option_content_digest(&first.options[1]),
+            ConfigInspectionArtifactV2::option_content_digest(&second.options[1])
+        );
+    }
+
+    #[test]
+    fn comparison_readiness_requires_global_provenance_and_available_enrichment() {
+        let available = assembled(vec![option(
+            KEY_A,
+            &["feature"],
+            metadata(&["feature"]),
+            value("one"),
+            provenance(
+                Vec::new(),
+                available_enrichment(),
+                OverrideState::Known(false),
+            ),
+        )]);
+        assert!(
+            config_artifact_v2_from_assembled(available)
+                .unwrap()
+                .comparison_ready()
+        );
+
+        let failed_value = InspectionValue::Failed(SafeEvaluationError {
+            code: "not_evaluated".to_string(),
+            message: "value unavailable".to_string(),
+        });
+        let failed_semantics = config_artifact_v2_from_assembled(assembled_with_state(
+            vec![option(
+                KEY_A,
+                &["feature"],
+                metadata(&["feature"]),
+                failed_value.clone(),
+                provenance(
+                    vec![definition(
+                        KEY_A,
+                        0,
+                        RawDefinitionStatus::ActiveSurviving,
+                        Some(0),
+                        Some(failed_value),
+                    )],
+                    available_enrichment(),
+                    OverrideState::Known(false),
+                ),
+            )],
+            AssembledConfigProvenanceState::Available {
+                adapter_version: 1,
+                target_lib_version: Some("lib".to_string()),
+                target_module_system_path: Some("/nix/store/lib".to_string()),
+                provenance_digest: DIGEST.to_string(),
+                definition_value_enrichment: available_enrichment(),
+            },
+        ))
+        .unwrap();
+        assert!(failed_semantics.comparison_ready());
+
+        let unavailable = assembled_with_state(
+            Vec::new(),
+            AssembledConfigProvenanceState::Unavailable {
+                reason_code: "capability_unavailable".to_string(),
+                diagnostic: None,
+            },
+        );
+        assert!(
+            !config_artifact_v2_from_assembled(unavailable)
+                .unwrap()
+                .comparison_ready()
+        );
+    }
+
+    #[test]
+    fn each_parent_global_field_is_excluded_from_option_digest() {
+        let make_option = || {
+            option(
+                KEY_A,
+                &["feature"],
+                metadata(&["feature"]),
+                value("one"),
+                provenance(
+                    Vec::new(),
+                    available_enrichment(),
+                    OverrideState::Known(false),
+                ),
+            )
+        };
+        let available = |adapter_version,
+                         target_lib_version,
+                         target_module_system_path,
+                         provenance_digest,
+                         definition_value_enrichment| {
+            AssembledConfigProvenanceState::Available {
+                adapter_version,
+                target_lib_version,
+                target_module_system_path,
+                provenance_digest,
+                definition_value_enrichment,
+            }
+        };
+        let base = config_artifact_v2_from_assembled(assembled_with_state(
+            vec![make_option()],
+            available(
+                1,
+                Some("lib".to_string()),
+                Some("/nix/store/lib".to_string()),
+                DIGEST.to_string(),
+                available_enrichment(),
+            ),
+        ))
+        .unwrap();
+        let base_digest = ConfigInspectionArtifactV2::option_content_digest(&base.options[0]);
+        for state in [
+            available(
+                2,
+                Some("lib".to_string()),
+                Some("/nix/store/lib".to_string()),
+                DIGEST.to_string(),
+                available_enrichment(),
+            ),
+            available(
+                1,
+                Some("other-lib".to_string()),
+                Some("/nix/store/lib".to_string()),
+                DIGEST.to_string(),
+                available_enrichment(),
+            ),
+            available(
+                1,
+                Some("lib".to_string()),
+                Some("/nix/store/other-lib".to_string()),
+                DIGEST.to_string(),
+                available_enrichment(),
+            ),
+            available(
+                1,
+                Some("lib".to_string()),
+                Some("/nix/store/lib".to_string()),
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+                available_enrichment(),
+            ),
+            available(
+                1,
+                Some("lib".to_string()),
+                Some("/nix/store/lib".to_string()),
+                DIGEST.to_string(),
+                unavailable_enrichment(),
+            ),
+        ] {
+            let artifact =
+                config_artifact_v2_from_assembled(assembled_with_state(vec![make_option()], state))
+                    .unwrap();
+            assert_eq!(
+                base_digest,
+                ConfigInspectionArtifactV2::option_content_digest(&artifact.options[0])
+            );
+        }
     }
 }

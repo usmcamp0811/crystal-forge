@@ -824,8 +824,35 @@ pub(crate) struct AssembledConfigInspection {
     pub source_out_path: String,
     /// Shared carrier derivation path.
     pub carrier_drv_path: String,
+    /// Configuration-global provenance capture and enrichment state.
+    pub provenance_state: AssembledConfigProvenanceState,
     /// Options in Stage-1 index order.
     pub options: Vec<AssembledOption>,
+}
+
+/// Describes configuration-global provenance and definition-value state.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum AssembledConfigProvenanceState {
+    /// Provenance metadata and global enrichment state are available.
+    Available {
+        /// Adapter protocol version that produced the definitions.
+        adapter_version: u64,
+        /// Target library version, when available.
+        target_lib_version: Option<String>,
+        /// Target module-system source path, when available.
+        target_module_system_path: Option<String>,
+        /// Canonical raw-definition digest.
+        provenance_digest: String,
+        /// Global state of the Stage-2 definition-value layer.
+        definition_value_enrichment: DefinitionValueEnrichmentState,
+    },
+    /// Configuration-wide raw provenance was not established.
+    Unavailable {
+        /// Stable reason for the unavailable state.
+        reason_code: String,
+        /// Sanitized diagnostic, when available.
+        diagnostic: Option<SafeEvaluationError>,
+    },
 }
 
 /// Contains one option with its validated metadata, value, and provenance.
@@ -846,30 +873,15 @@ pub(crate) struct AssembledOption {
 /// Describes whether raw-definition provenance is available for an option.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum AssembledOptionProvenance {
-    /// Raw definitions and their definition-value enrichment state are known.
+    /// Raw definitions and local override state are known.
     Available {
-        /// Adapter protocol version that produced the definitions.
-        adapter_version: u64,
-        /// Target library version, when available.
-        target_lib_version: Option<String>,
-        /// Target module-system source path, when available.
-        target_module_system_path: Option<String>,
-        /// Canonical raw-definition digest.
-        provenance_digest: String,
         /// All definitions retained in ordinal order.
         definitions: Vec<AssembledDefinition>,
         /// Whether priority-discarded definitions were observed.
         override_state: OverrideState,
-        /// Global state of the Stage-2 definition-value layer.
-        definition_value_enrichment: DefinitionValueEnrichmentState,
     },
-    /// Raw-definition provenance was not established.
-    Unavailable {
-        /// Stable reason for the unavailable state.
-        reason_code: String,
-        /// Sanitized diagnostic, when available.
-        diagnostic: Option<SafeEvaluationError>,
-    },
+    /// Raw-definition provenance was not established for this option.
+    Unavailable,
 }
 
 /// Represents whether an available option has discarded definitions.
@@ -1239,7 +1251,7 @@ pub(crate) fn assemble_config_inspection(
         },
     };
 
-    let assembled_options = match provenance {
+    let (provenance_state, assembled_options) = match provenance {
         InspectionProvenance::Unavailable {
             reason_code,
             diagnostic,
@@ -1253,19 +1265,21 @@ pub(crate) fn assemble_config_inspection(
                     "Stage-2 enrichment is available or has an incompatible reason while Stage-1 provenance is unavailable"
                 );
             }
-            options
+            let provenance_state = AssembledConfigProvenanceState::Unavailable {
+                reason_code,
+                diagnostic,
+            };
+            let assembled_options = options
                 .into_iter()
                 .map(|option| AssembledOption {
                     option_key: option.key,
                     path_components: option.path_components,
                     metadata: option.metadata,
                     effective_value: option.value,
-                    provenance: AssembledOptionProvenance::Unavailable {
-                        reason_code: reason_code.clone(),
-                        diagnostic: diagnostic.clone(),
-                    },
+                    provenance: AssembledOptionProvenance::Unavailable,
                 })
-                .collect()
+                .collect();
+            (provenance_state, assembled_options)
         }
         InspectionProvenance::Available {
             adapter_version,
@@ -1346,7 +1360,14 @@ pub(crate) fn assemble_config_inspection(
                 }
             }
 
-            options
+            let provenance_state = AssembledConfigProvenanceState::Available {
+                adapter_version,
+                target_lib_version,
+                target_module_system_path,
+                provenance_digest,
+                definition_value_enrichment: definition_value_enrichment.clone(),
+            };
+            let assembled_options = options
                 .into_iter()
                 .map(|option| {
                     // `buildRawDefinitionsByOption` groups only options with
@@ -1374,17 +1395,13 @@ pub(crate) fn assemble_config_inspection(
                         metadata: option.metadata,
                         effective_value: option.value,
                         provenance: AssembledOptionProvenance::Available {
-                            adapter_version,
-                            target_lib_version: target_lib_version.clone(),
-                            target_module_system_path: target_module_system_path.clone(),
-                            provenance_digest: provenance_digest.clone(),
                             definitions,
                             override_state,
-                            definition_value_enrichment: definition_value_enrichment.clone(),
                         },
                     })
                 })
-                .collect::<Result<Vec<_>>>()?
+                .collect::<Result<Vec<_>>>()?;
+            (provenance_state, assembled_options)
         }
     };
 
@@ -1392,6 +1409,7 @@ pub(crate) fn assemble_config_inspection(
         target_key,
         source_out_path,
         carrier_drv_path,
+        provenance_state,
         options: assembled_options,
     })
 }
@@ -2729,8 +2747,6 @@ mod tests {
         let AssembledOptionProvenance::Available {
             definitions,
             override_state,
-            definition_value_enrichment,
-            ..
         } = &assembled.options[0].provenance
         else {
             panic!("expected available provenance");
@@ -2747,8 +2763,11 @@ mod tests {
         assert_eq!(definitions[1].source_path, None);
         assert!(matches!(override_state, OverrideState::Known(true)));
         assert!(matches!(
-            definition_value_enrichment,
-            DefinitionValueEnrichmentState::Available { .. }
+            assembled.provenance_state,
+            AssembledConfigProvenanceState::Available {
+                definition_value_enrichment: DefinitionValueEnrichmentState::Available { .. },
+                ..
+            }
         ));
         assert!(matches!(
             definitions[0].value,
@@ -2970,9 +2989,14 @@ mod tests {
             AssembledOptionProvenance::Available {
                 ref definitions,
                 override_state: OverrideState::Known(false),
+            } if definitions.is_empty()
+        ));
+        assert!(matches!(
+            assembled.provenance_state,
+            AssembledConfigProvenanceState::Available {
                 definition_value_enrichment: DefinitionValueEnrichmentState::Available { .. },
                 ..
-            } if definitions.is_empty()
+            }
         ));
     }
 
@@ -3008,11 +3032,8 @@ mod tests {
             semantic_stage2(vec![semantic_definition_value(&key, 0, failed.clone())]),
         )
         .unwrap();
-        let AssembledOptionProvenance::Available {
-            definitions,
-            definition_value_enrichment,
-            ..
-        } = &assembled.options[0].provenance
+        let AssembledOptionProvenance::Available { definitions, .. } =
+            &assembled.options[0].provenance
         else {
             panic!("expected available provenance");
         };
@@ -3021,8 +3042,11 @@ mod tests {
             Some(InspectionValue::Failed(_))
         ));
         assert!(matches!(
-            definition_value_enrichment,
-            DefinitionValueEnrichmentState::Available { .. }
+            assembled.provenance_state,
+            AssembledConfigProvenanceState::Available {
+                definition_value_enrichment: DefinitionValueEnrichmentState::Available { .. },
+                ..
+            }
         ));
 
         let unavailable = assemble_config_inspection(
@@ -3036,8 +3060,6 @@ mod tests {
         let AssembledOptionProvenance::Available {
             definitions,
             override_state,
-            definition_value_enrichment,
-            ..
         } = &unavailable.options[0].provenance
         else {
             panic!("expected available provenance");
@@ -3045,8 +3067,11 @@ mod tests {
         assert_eq!(definitions[0].value, None);
         assert!(matches!(override_state, OverrideState::Known(false)));
         assert!(matches!(
-            definition_value_enrichment,
-            DefinitionValueEnrichmentState::Unavailable { reason_code, .. }
+            unavailable.provenance_state,
+            AssembledConfigProvenanceState::Available {
+                definition_value_enrichment: DefinitionValueEnrichmentState::Unavailable { reason_code, .. },
+                ..
+            }
                 if reason_code == "stage2_index_failed"
         ));
     }
@@ -3077,7 +3102,11 @@ mod tests {
         .unwrap();
         assert!(matches!(
             valid.options[0].provenance,
-            AssembledOptionProvenance::Unavailable { ref reason_code, .. }
+            AssembledOptionProvenance::Unavailable
+        ));
+        assert!(matches!(
+            valid.provenance_state,
+            AssembledConfigProvenanceState::Unavailable { ref reason_code, .. }
                 if reason_code == "capability_self_test_failed"
         ));
         assert!(matches!(
