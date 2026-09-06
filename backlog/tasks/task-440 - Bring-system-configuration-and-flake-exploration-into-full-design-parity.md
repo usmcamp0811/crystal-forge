@@ -1,11 +1,11 @@
 ---
 id: TASK-440
 title: Bring system configuration and flake exploration into full design parity
-status: Review
+status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-06 18:02'
+updated_date: '2026-09-06 18:09'
 labels:
   - design-parity
   - web-ui
@@ -156,6 +156,8 @@ Bounded hardening pass from e1fa022a: (1) make corrupt V2 pages clear comparison
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-09-06 selector-isolation remediation verification: isolated V2 selector tests passed (v2_selection_isolation_preserves_primary_and_replaces_targeted_attempts, v2_persistence_does_not_change_primary_host_delta_corpus, config_selector_protects_current_v2_and_allows_replaced_v2_gc, deployment_binding_uses_primary_v1_after_targeted_v2_persistence, plus existing V2 carrier/oversize tests). SQLx offline cf-server lib check and cargo fmt --check passed with existing warnings. A clean isolated database applied all migrations through 0251 successfully. The broad server-regressions Nix build exceeded the 15-minute command timeout during compilation, so no pass is claimed. Running all ignored evaluation_snapshots tests produced 29 passes and 5 failures; the failures were existing environment-sensitive tests requiring pg_stat_statements/shared_preload_libraries or unrelated lifecycle fixtures. Worktree remains uncommitted with only evaluation_snapshots.rs and migration 0251 modified.
+
+Starting bounded V2 Config summary and module-source DB-only reader slice from deb37a5d. Task intentionally remains In Progress; no acceptance criteria are being marked complete.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
