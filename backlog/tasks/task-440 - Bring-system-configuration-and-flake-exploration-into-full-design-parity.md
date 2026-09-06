@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-06 00:08'
+updated_date: '2026-09-06 00:14'
 labels:
   - design-parity
   - web-ui
@@ -221,6 +221,12 @@ author: Codex
 created: 2026-09-05 21:14
 ---
 The pushed commit covers the bounded config-inspector integrity remediation only; the broader TASK-440 acceptance criteria remain incomplete. Restored task status to In Progress. The MR remains open for this remediation review.
+---
+
+author: Codex
+created: 2026-09-06 00:14
+---
+Final Stage-1 single-resolution remediation completed and pushed as `5b8a8514` on TASK-440-system-config-flake-parity. `config_inspector.nix` now accepts `{ flake, configuration, targetKey, encodeValue }` and contains no target resolution. Structural tests prove one `builtins.getFlake` in generated Stage 1, one in generated Stage 2, and none in the inspector source. Verification passed: 30 targeted config-inspector Rust tests; `nix build .#checks.x86_64-linux.config-inspector --no-link --print-build-logs`; `nix build .#checks.x86_64-linux.evaluator-snapshot-isolation --no-link --print-build-logs`; Nix-dev `cargo fmt --check`; `SQLX_OFFLINE=true cargo check -p cf-server --lib`; and `git diff --check`. Task remains In Progress; worktree is clean and local/remote HEAD is `5b8a85148417d7944a9a3860743ce718a21a4b49`.
 ---
 <!-- COMMENTS:END -->
 
