@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-06 17:07'
+updated_date: '2026-09-06 17:41'
 labels:
   - design-parity
   - web-ui
@@ -148,6 +148,8 @@ The `modifiedFiles` metadata is anticipated and non-exhaustive. The implementati
 
 <!-- SECTION:PLAN:BEGIN -->
 Selector-isolation V2 reader core: (1) add a private persisted V2 option decoder in config_snapshot_artifact.rs that restores authoritative option_key/path_components and validates their canonical correspondence; (2) add private/pub(crate) V2 selected-snapshot, comparison-state, counts, row, page, and query result types in evaluation_snapshots.rs; (3) add commit-mode selector and repeatable-read page query using only config_snapshot_selections, constant-time V2 certification checks, explicit first-parent comparison reasons, bounded SQL search/count/paging, exact option_key/path_components joins, tri-state override handling, and domain-separated immutable tokens; (4) add focused model and isolated PostgreSQL reader regressions for path collisions, V2-only selection, unavailable Stage-2/global provenance, valid added/removed/modified comparison, unready baseline, stale selected/baseline tokens, corruption, and side-effect freedom; (5) run only the requested focused checks, format/diff checks, and semantic Nix guards; (6) make one commit and push without changing migrations, V1 readers/writers, deployment/enforcement/host-delta code, API, UI, or evaluator work.
+
+Bounded hardening pass from e1fa022a: (1) make corrupt V2 pages clear comparison/counts/rows; (2) add certified post-corruption regression; (3) execute dynamic LIKE escaping searches for %, _, backslash, and combined literals; (4) add DB-reader structured-path collision, global-provenance, side-effect, and bounds regressions; (5) run the requested focused/Nix checks, commit once as TASK-440: Harden V2 config snapshot reads, and push.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
