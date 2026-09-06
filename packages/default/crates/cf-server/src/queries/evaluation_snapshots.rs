@@ -264,7 +264,7 @@ pub(crate) async fn persist_config_artifact_v2_deferred_tx(
             provenance_state, comparison_ready, completed_at
         )
         SELECT $1, $2, 2, 'available', c.first_parent_sha, $3, $4,
-               GREATEST(0, (EXTRACT(EPOCH FROM (now() - c.evaluation_started_at)) * 1000)::bigint),
+               NULL::bigint,
                $5, $6, $7, $8, $9, $10, now()
         FROM commits c
         WHERE c.id = $1
@@ -422,11 +422,11 @@ async fn persist_oversized_config_artifact_v2(
             commit_id, configuration_name, schema_version, lifecycle,
             first_parent_sha, option_count, module_count, content_bytes,
             target_key, source_out_path, carrier_drv_path, provenance_state,
-            comparison_ready, error, completed_at
+            comparison_ready, error, evaluation_duration_ms, completed_at
         )
         SELECT $1, $2, 2, 'unavailable', c.first_parent_sha, 0, 0, 0,
                $3, $4, $5, $6, false,
-               'Config inspection artifact exceeds persistence size limits', now()
+               'Config inspection artifact exceeds persistence size limits', NULL::bigint, now()
         FROM commits c WHERE c.id = $1 RETURNING id
         "#,
     )
@@ -9745,10 +9745,13 @@ mod tests {
     }
 
     fn v2_option(path: &[&str], value: &str) -> ConfigOptionArtifactV2 {
-        let path_components = path
-            .iter()
-            .map(|part| (*part).to_string())
-            .collect::<Vec<_>>();
+        v2_option_with_components(path.iter().map(|part| (*part).to_string()).collect(), value)
+    }
+
+    fn v2_option_with_components(
+        path_components: Vec<String>,
+        value: &str,
+    ) -> ConfigOptionArtifactV2 {
         let key = crate::models::config_inspector::option_key(&path_components);
         ConfigOptionArtifactV2 {
             option_key: key.clone(),
@@ -9818,6 +9821,13 @@ mod tests {
         .await
         .expect("insert V2 writer commit");
         sqlx::query(
+            "UPDATE commits SET evaluation_started_at = now() - interval '2 hours' WHERE id = $1",
+        )
+        .bind(commit_id)
+        .execute(pool)
+        .await
+        .expect("age V2 writer commit evaluation timestamp");
+        sqlx::query(
             "INSERT INTO derivations (commit_id, derivation_type, derivation_name, derivation_path, status_id, attempt_count) VALUES ($1, 'nixos', $2, '/nix/store/carrier.drv', 1, 0)",
         )
         .bind(commit_id)
@@ -9842,8 +9852,8 @@ mod tests {
             .expect("persist V2 artifact");
         tx.commit().await.expect("commit V2 writer transaction");
 
-        let row: (i32, i16, String, bool, i32, i32, i64) = sqlx::query_as(
-            "SELECT schema_version, integrity_version, lifecycle, comparison_ready, option_count, module_count, content_bytes FROM evaluation_snapshots WHERE id = $1",
+        let row: (i32, i16, String, bool, i32, i32, i64, Option<i64>) = sqlx::query_as(
+            "SELECT schema_version, integrity_version, lifecycle, comparison_ready, option_count, module_count, content_bytes, evaluation_duration_ms FROM evaluation_snapshots WHERE id = $1",
         )
         .bind(snapshot_id)
         .fetch_one(&pool)
@@ -9856,6 +9866,7 @@ mod tests {
         assert_eq!(row.4, 2);
         assert_eq!(row.5, 1);
         assert!(row.6 > 0);
+        assert_eq!(row.7, None);
 
         let content_count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM evaluation_option_contents WHERE schema_version = 2",
@@ -9908,14 +9919,20 @@ mod tests {
         tx.commit()
             .await
             .expect("commit unavailable V2 transaction");
-        let row: (i16, String, i32, i32, i64, bool) = sqlx::query_as(
-            "SELECT integrity_version, lifecycle, option_count, module_count, content_bytes, comparison_ready FROM evaluation_snapshots WHERE id = $1",
+        let row: (i16, String, i32, i32, i64, bool, Option<i64>) = sqlx::query_as(
+            "SELECT integrity_version, lifecycle, option_count, module_count, content_bytes, comparison_ready, evaluation_duration_ms FROM evaluation_snapshots WHERE id = $1",
         )
         .bind(snapshot_id)
         .fetch_one(&pool)
         .await
         .expect("load unavailable V2 snapshot");
-        assert_eq!(row, (2, "available".to_string(), 1, 0, row.4, false));
+        assert_eq!(row.0, 2);
+        assert_eq!(row.1, "available");
+        assert_eq!(row.2, 1);
+        assert_eq!(row.3, 0);
+        assert!(row.4 > 0);
+        assert!(!row.5);
+        assert_eq!(row.6, None);
         let override_state: Option<bool> = sqlx::query_scalar(
             "SELECT is_overridden FROM evaluation_snapshot_options WHERE snapshot_id = $1",
         )
@@ -9941,14 +9958,20 @@ mod tests {
             .await
             .expect("persist oversized V2 artifact");
         tx.commit().await.expect("commit oversized V2 transaction");
-        let row: (i16, String, i32, i32, i64, bool) = sqlx::query_as(
-            "SELECT integrity_version, lifecycle, option_count, module_count, content_bytes, comparison_ready FROM evaluation_snapshots WHERE id = $1",
+        let row: (i16, String, i32, i32, i64, bool, Option<i64>) = sqlx::query_as(
+            "SELECT integrity_version, lifecycle, option_count, module_count, content_bytes, comparison_ready, evaluation_duration_ms FROM evaluation_snapshots WHERE id = $1",
         )
         .bind(snapshot_id)
         .fetch_one(&pool)
         .await
         .expect("load oversized V2 snapshot");
-        assert_eq!(row, (0, "unavailable".to_string(), 0, 0, 0, false));
+        assert_eq!(row.0, 0);
+        assert_eq!(row.1, "unavailable");
+        assert_eq!(row.2, 0);
+        assert_eq!(row.3, 0);
+        assert_eq!(row.4, 0);
+        assert!(!row.5);
+        assert_eq!(row.6, None);
         let reference_count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM evaluation_snapshot_options WHERE snapshot_id = $1",
         )
@@ -9964,6 +9987,222 @@ mod tests {
         .fetch_one(&pool)
         .await
         .expect("load oversized selection");
+        assert_eq!(selected, snapshot_id);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn persists_v2_with_stage2_values_unavailable(pool: PgPool) {
+        let (commit_id, _) = v2_carrier(&pool, "stage2-unavailable").await;
+        let mut artifact = v2_artifact(vec![v2_option(&["services", "x"], "value")]);
+        artifact.provenance_state = ConfigProvenanceArtifactStateV2::Available {
+            adapter_version: 1,
+            target_lib_version: None,
+            target_module_system_path: None,
+            provenance_digest: "c".repeat(64),
+            definition_value_enrichment: DefinitionValueArtifactStateV2::Unavailable {
+                reason_code: "stage2_timeout".to_string(),
+                diagnostic: Some(crate::models::evaluation_snapshots::SafeEvaluationError {
+                    code: "stage2_timeout".to_string(),
+                    message: "definition values were not collected".to_string(),
+                }),
+            },
+        };
+        if let ConfigOptionProvenanceArtifactV2::Available {
+            definitions,
+            override_state,
+        } = &mut artifact.options[0].provenance
+        {
+            definitions[0].value = None;
+            *override_state = false;
+        }
+
+        let mut tx = pool.begin().await.expect("begin Stage 2 V2 transaction");
+        let snapshot_id =
+            persist_config_artifact_v2_tx(&mut tx, commit_id, "stage2-unavailable", artifact)
+                .await
+                .expect("persist Stage 2 unavailable V2 artifact");
+        tx.commit()
+            .await
+            .expect("commit Stage 2 unavailable V2 transaction");
+
+        let row: (String, i16, bool, Value) = sqlx::query_as(
+            "SELECT lifecycle, integrity_version, comparison_ready, provenance_state FROM evaluation_snapshots WHERE id = $1",
+        )
+        .bind(snapshot_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load Stage 2 unavailable V2 snapshot");
+        assert_eq!(row.0, "available");
+        assert_eq!(row.1, 2);
+        assert!(!row.2);
+        assert_eq!(row.3["definition_value_enrichment"]["state"], "unavailable");
+        assert_eq!(
+            row.3["definition_value_enrichment"]["reason_code"],
+            "stage2_timeout"
+        );
+
+        let payload: Value = sqlx::query_scalar(
+            "SELECT payload FROM evaluation_option_contents content JOIN evaluation_snapshot_options option ON option.content_digest = content.digest AND content.schema_version = 2 WHERE option.snapshot_id = $1",
+        )
+        .bind(snapshot_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load Stage 2 unavailable V2 payload");
+        assert_eq!(payload["provenance"]["state"], "available");
+        assert_eq!(
+            payload["provenance"]["definitions"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(payload["provenance"]["definitions"][0]["value"].is_null());
+
+        let override_state: Option<bool> = sqlx::query_scalar(
+            "SELECT is_overridden FROM evaluation_snapshot_options WHERE snapshot_id = $1",
+        )
+        .bind(snapshot_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load Stage 2 unavailable override state");
+        assert_eq!(override_state, Some(false));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn redacts_v2_content_at_the_database_boundary(pool: PgPool) {
+        let (commit_id, _) = v2_carrier(&pool, "redaction").await;
+        let mut option = v2_option(&["services", "secret"], "effective-secret");
+        option.metadata = ConfigOptionMetadataArtifactV2::Failed {
+            error: crate::models::evaluation_snapshots::SafeEvaluationError {
+                code: "metadata_failed".to_string(),
+                message: "Authorization: Bearer metadata-secret-token".to_string(),
+            },
+        };
+        if let ConfigOptionProvenanceArtifactV2::Available { definitions, .. } =
+            &mut option.provenance
+        {
+            definitions[0].source_path =
+                Some("https://example.invalid/module.nix?token=source-secret-token".to_string());
+            definitions[0].value = Some(SafeOptionValue::Scalar(json!("definition-secret-token")));
+        }
+        option.effective_value = SafeOptionValue::Scalar(json!("effective-secret-token"));
+        let mut artifact = v2_artifact(vec![option]);
+        artifact.provenance_state = ConfigProvenanceArtifactStateV2::Available {
+            adapter_version: 1,
+            target_lib_version: Some(
+                "https://example.invalid/lib?token=global-secret-token".to_string(),
+            ),
+            target_module_system_path: Some(
+                "https://example.invalid/module?token=global-secret-token".to_string(),
+            ),
+            provenance_digest: "d".repeat(64),
+            definition_value_enrichment: DefinitionValueArtifactStateV2::Available {
+                adapter_version: 1,
+                provenance_digest: "d".repeat(64),
+            },
+        };
+
+        let mut tx = pool.begin().await.expect("begin redaction V2 transaction");
+        let snapshot_id = persist_config_artifact_v2_tx(&mut tx, commit_id, "redaction", artifact)
+            .await
+            .expect("persist redaction V2 artifact");
+        tx.commit().await.expect("commit redaction V2 transaction");
+
+        let payload: String = sqlx::query_scalar(
+            "SELECT payload::text FROM evaluation_option_contents content JOIN evaluation_snapshot_options option ON option.content_digest = content.digest AND content.schema_version = 2 WHERE option.snapshot_id = $1",
+        )
+        .bind(snapshot_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load redacted V2 payload");
+        let search_text: String = sqlx::query_scalar(
+            "SELECT search_text FROM evaluation_option_contents content JOIN evaluation_snapshot_options option ON option.content_digest = content.digest AND content.schema_version = 2 WHERE option.snapshot_id = $1",
+        )
+        .bind(snapshot_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load redacted V2 search text");
+        let provenance: String = sqlx::query_scalar(
+            "SELECT provenance_state::text FROM evaluation_snapshots WHERE id = $1",
+        )
+        .bind(snapshot_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load redacted V2 provenance");
+
+        for secret in [
+            "effective-secret-token",
+            "definition-secret-token",
+            "metadata-secret-token",
+            "source-secret-token",
+            "global-secret-token",
+        ] {
+            assert!(!payload.contains(secret), "payload leaked {secret}");
+            assert!(!search_text.contains(secret), "search text leaked {secret}");
+            assert!(!provenance.contains(secret), "provenance leaked {secret}");
+        }
+        assert!(payload.contains("[REDACTED]"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn aggregate_v2_snapshot_oversize_advances_unavailable_selection(pool: PgPool) {
+        let (commit_id, _) = v2_carrier(&pool, "aggregate-oversized").await;
+        let per_option_items = OPTION_CONTENT_BYTES_LIMIT / 6;
+        let mut options = Vec::with_capacity(300);
+        for index in 0..300 {
+            let mut option = v2_option_with_components(
+                vec!["services".to_string(), format!("aggregate_{index}")],
+                "x",
+            );
+            option.effective_value = SafeOptionValue::List(
+                (0..per_option_items)
+                    .map(|_| SafeOptionValue::Scalar(json!(true)))
+                    .collect(),
+            );
+            options.push(option);
+        }
+        let artifact = v2_artifact(options);
+
+        let mut tx = pool.begin().await.expect("begin aggregate V2 transaction");
+        let snapshot_id =
+            persist_config_artifact_v2_tx(&mut tx, commit_id, "aggregate-oversized", artifact)
+                .await
+                .expect("persist aggregate oversized V2 artifact");
+        tx.commit().await.expect("commit aggregate V2 transaction");
+
+        let row: (i16, String, i32, i32, i64, bool, Option<i64>) = sqlx::query_as(
+            "SELECT integrity_version, lifecycle, option_count, module_count, content_bytes, comparison_ready, evaluation_duration_ms FROM evaluation_snapshots WHERE id = $1",
+        )
+        .bind(snapshot_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load aggregate oversized V2 snapshot");
+        assert_eq!(row.0, 0);
+        assert_eq!(row.1, "unavailable");
+        assert_eq!(row.2, 0);
+        assert_eq!(row.3, 0);
+        assert_eq!(row.4, 0);
+        assert!(!row.5);
+        assert_eq!(row.6, None);
+
+        let reference_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM evaluation_snapshot_options WHERE snapshot_id = $1",
+        )
+        .bind(snapshot_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count aggregate oversized references");
+        assert_eq!(reference_count, 0);
+        let selected: Uuid = sqlx::query_scalar(
+            "SELECT current_snapshot_id FROM evaluation_snapshot_selections WHERE commit_id = $1 AND configuration_name = 'aggregate-oversized'",
+        )
+        .bind(commit_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load aggregate oversized selection");
         assert_eq!(selected, snapshot_id);
     }
 
