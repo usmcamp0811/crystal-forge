@@ -1791,6 +1791,10 @@ fn corrupt_v2_page(
 ) -> ConfigOptionsPageV2 {
     selected.lifecycle = SnapshotLifecycle::Unavailable;
     selected.error = Some("Snapshot data is unavailable or corrupt".to_string());
+    selected.comparison = ConfigComparisonStateV2::Unavailable {
+        reason: ConfigComparisonUnavailableReasonV2::SelectedUnavailable,
+        baseline_revision: selected.first_parent_revision.clone(),
+    };
     ConfigOptionsPageV2 {
         selected,
         snapshot_token: token,
@@ -1988,7 +1992,7 @@ pub(crate) async fn query_config_options_page_v2(
     if !search.is_empty() {
         query.push(" AND lower(array_to_string(identities.path_components, '.') || ' ' || COALESCE(selected_content.search_text, '') || ' ' || COALESCE(baseline_content.search_text, '')) LIKE ");
         query.push_bind(&search_pattern);
-        query.push(" ESCAPE '\\'");
+        query.push(" ESCAPE CHR(92)");
     }
     match filter {
         EvaluatedOptionFilter::All => query.push(" AND selected.snapshot_id IS NOT NULL"),
@@ -10889,6 +10893,16 @@ mod tests {
     #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
     async fn v2_reader_preserves_unknown_override_and_rejects_stale_authority(pool: PgPool) {
         let (system, _, child) = v2_reader_history_fixture(&pool).await;
+        let mut v1_tx = pool.begin().await.expect("V1 transaction should begin");
+        persist_available_snapshot_tx(
+            &mut v1_tx,
+            child.id,
+            "host",
+            vec![option("services.v1", json!(true))],
+        )
+        .await
+        .expect("V1 artifact should persist");
+        v1_tx.commit().await.expect("V1 transaction should commit");
         let mut global_unavailable =
             v2_reader_artifact(child.id, vec![v2_option(&["services", "unknown"], "value")]);
         global_unavailable.provenance_state = ConfigProvenanceArtifactStateV2::Unavailable {
@@ -10936,6 +10950,21 @@ mod tests {
         };
         assert_eq!(all.counts.override_unknown, 1);
         assert_eq!(all.counts.overridden, 0);
+        assert_eq!(
+            all.options[0].option.as_ref().unwrap().effective_value,
+            SafeOptionValue::Scalar(json!("value"))
+        );
+        assert_eq!(
+            all.options[0].option.as_ref().unwrap().provenance,
+            ConfigOptionProvenanceArtifactV2::Unavailable
+        );
+        assert!(matches!(
+            all.selected.comparison,
+            ConfigComparisonStateV2::Unavailable {
+                reason: ConfigComparisonUnavailableReasonV2::SelectedNotComparisonReady,
+                ..
+            }
+        ));
         assert!(matches!(
             query_config_options_page_v2(
                 &pool,
@@ -10951,6 +10980,120 @@ mod tests {
             .expect("global-unavailable Overridden page should succeed"),
             ConfigOptionsPageQueryV2::Page(ConfigOptionsPageV2 { total: 0, .. })
         ));
+
+        let changed = query_config_options_page_v2(
+            &pool,
+            system.id,
+            &child.git_commit_hash,
+            "",
+            EvaluatedOptionFilter::Changed,
+            None,
+            100,
+            0,
+        )
+        .await
+        .expect("global-unavailable Changed page should succeed");
+        let ConfigOptionsPageQueryV2::Page(changed) = changed else {
+            panic!("expected global-unavailable Changed page");
+        };
+        assert_eq!(changed.counts.changed, None);
+        assert_eq!(changed.total, 0);
+        assert!(changed.options.is_empty());
+
+        let status_before: String =
+            sqlx::query_scalar("SELECT evaluation_status FROM commits WHERE id = $1")
+                .bind(child.id)
+                .fetch_one(&pool)
+                .await
+                .expect("evaluation status should load before reads");
+        let attempts_before: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM evaluation_attempts WHERE commit_id = $1")
+                .bind(child.id)
+                .fetch_one(&pool)
+                .await
+                .expect("attempt count should load before reads");
+        let primary_before: Option<Uuid> = sqlx::query_scalar(
+            "SELECT current_snapshot_id FROM evaluation_snapshot_selections \
+             WHERE commit_id = $1 AND configuration_name = 'host'",
+        )
+        .bind(child.id)
+        .fetch_optional(&pool)
+        .await
+        .expect("primary selector should load before reads");
+        let config_before: Option<Uuid> = sqlx::query_scalar(
+            "SELECT current_snapshot_id FROM config_snapshot_selections \
+             WHERE commit_id = $1 AND configuration_name = 'host'",
+        )
+        .bind(child.id)
+        .fetch_optional(&pool)
+        .await
+        .expect("V2 selector should load before reads");
+        let snapshots_before: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM evaluation_snapshots WHERE commit_id = $1")
+                .bind(child.id)
+                .fetch_one(&pool)
+                .await
+                .expect("snapshot count should load before reads");
+
+        for filter in [
+            EvaluatedOptionFilter::All,
+            EvaluatedOptionFilter::Overridden,
+            EvaluatedOptionFilter::Changed,
+        ] {
+            let result = query_config_options_page_v2(
+                &pool,
+                system.id,
+                &child.git_commit_hash,
+                "value",
+                filter,
+                None,
+                100,
+                0,
+            )
+            .await
+            .expect("V2 read should remain side-effect free");
+            assert!(matches!(result, ConfigOptionsPageQueryV2::Page(_)));
+        }
+
+        let status_after: String =
+            sqlx::query_scalar("SELECT evaluation_status FROM commits WHERE id = $1")
+                .bind(child.id)
+                .fetch_one(&pool)
+                .await
+                .expect("evaluation status should load after reads");
+        let attempts_after: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM evaluation_attempts WHERE commit_id = $1")
+                .bind(child.id)
+                .fetch_one(&pool)
+                .await
+                .expect("attempt count should load after reads");
+        let primary_after: Option<Uuid> = sqlx::query_scalar(
+            "SELECT current_snapshot_id FROM evaluation_snapshot_selections \
+             WHERE commit_id = $1 AND configuration_name = 'host'",
+        )
+        .bind(child.id)
+        .fetch_optional(&pool)
+        .await
+        .expect("primary selector should load after reads");
+        let config_after: Option<Uuid> = sqlx::query_scalar(
+            "SELECT current_snapshot_id FROM config_snapshot_selections \
+             WHERE commit_id = $1 AND configuration_name = 'host'",
+        )
+        .bind(child.id)
+        .fetch_optional(&pool)
+        .await
+        .expect("V2 selector should load after reads");
+        let snapshots_after: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM evaluation_snapshots WHERE commit_id = $1")
+                .bind(child.id)
+                .fetch_one(&pool)
+                .await
+                .expect("snapshot count should load after reads");
+        assert_eq!(status_before, status_after);
+        assert_eq!(attempts_before, attempts_after);
+        assert_eq!(primary_before, primary_after);
+        assert_eq!(config_before, config_after);
+        assert_eq!(snapshots_before, snapshots_after);
 
         let before_selector: Uuid = sqlx::query_scalar(
             "SELECT current_snapshot_id FROM config_snapshot_selections WHERE commit_id = $1 AND configuration_name = 'host'",
@@ -11196,7 +11339,23 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
     async fn v2_reader_fails_closed_for_uncertified_available_artifacts(pool: PgPool) {
-        let (system, _, child) = v2_reader_history_fixture(&pool).await;
+        let (system, parent, child) = v2_reader_history_fixture(&pool).await;
+        let mut parent_tx = pool.begin().await.expect("parent transaction should begin");
+        persist_config_artifact_v2_deferred_tx(
+            &mut parent_tx,
+            parent.id,
+            "host",
+            v2_reader_artifact(
+                parent.id,
+                vec![v2_option(&["services", "parent"], "parent")],
+            ),
+        )
+        .await
+        .expect("certified parent artifact should persist");
+        parent_tx
+            .commit()
+            .await
+            .expect("parent transaction should commit");
         let mut tx = pool
             .begin()
             .await
@@ -11212,14 +11371,48 @@ mod tests {
         tx.commit()
             .await
             .expect("corruption fixture transaction should commit");
-        disable_evaluation_immutability_for_corruption_fixture(&pool).await;
-        sqlx::query(
-            "UPDATE evaluation_snapshots SET integrity_version = 1 WHERE commit_id = $1 AND configuration_name = 'host'",
+        let normal = query_config_options_page_v2(
+            &pool,
+            system.id,
+            &child.git_commit_hash,
+            "",
+            EvaluatedOptionFilter::All,
+            None,
+            100,
+            0,
+        )
+        .await
+        .expect("certified page should succeed before corruption");
+        let ConfigOptionsPageQueryV2::Page(normal) = normal else {
+            panic!("expected certified page before corruption");
+        };
+        assert_eq!(normal.selected.lifecycle, SnapshotLifecycle::Available);
+        assert!(matches!(
+            normal.selected.comparison,
+            ConfigComparisonStateV2::Available { .. }
+        ));
+        assert_eq!(normal.total, 1);
+        assert_eq!(normal.options.len(), 1);
+
+        let child_snapshot_id: Uuid = sqlx::query_scalar(
+            "SELECT current_snapshot_id FROM config_snapshot_selections \
+             WHERE commit_id = $1 AND configuration_name = 'host'",
         )
         .bind(child.id)
+        .fetch_one(&pool)
+        .await
+        .expect("corruption fixture selector should load");
+        disable_evaluation_immutability_for_corruption_fixture(&pool).await;
+        sqlx::query(
+            "UPDATE evaluation_option_contents content SET payload = $2 \
+             FROM evaluation_snapshot_options item \
+             WHERE item.snapshot_id = $1 AND item.content_digest = content.digest",
+        )
+        .bind(child_snapshot_id)
+        .bind(json!({"corrupt": true}))
         .execute(&pool)
         .await
-        .expect("corruption fixture should be mutable");
+        .expect("corruption fixture payload should be mutable");
         let persisted_integrity: i16 = sqlx::query_scalar(
             "SELECT integrity_version FROM evaluation_snapshots WHERE commit_id = $1 AND configuration_name = 'host'",
         )
@@ -11227,13 +11420,13 @@ mod tests {
         .fetch_one(&pool)
         .await
         .expect("corruption fixture integrity should load");
-        assert_eq!(persisted_integrity, 1);
+        assert_eq!(persisted_integrity, 2);
 
         let selected = select_config_snapshot_v2(&pool, system.id, &child.git_commit_hash)
             .await
             .expect("corrupt selector should succeed")
             .expect("corrupt selector should exist");
-        assert_eq!(selected.lifecycle, SnapshotLifecycle::Unavailable);
+        assert_eq!(selected.lifecycle, SnapshotLifecycle::Available);
         let page = query_config_options_page_v2(
             &pool,
             system.id,
@@ -11250,8 +11443,203 @@ mod tests {
             panic!("expected corrupt page");
         };
         assert_eq!(page.selected.lifecycle, SnapshotLifecycle::Unavailable);
+        assert!(
+            page.selected
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("corrupt"))
+        );
+        assert_eq!(
+            page.selected.comparison,
+            ConfigComparisonStateV2::Unavailable {
+                reason: ConfigComparisonUnavailableReasonV2::SelectedUnavailable,
+                baseline_revision: Some(parent.git_commit_hash.clone()),
+            }
+        );
         assert!(page.options.is_empty());
         assert_eq!(page.counts.all, 0);
+        assert_eq!(page.counts.changed, None);
+        assert_eq!(page.total, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn v2_reader_search_escapes_literal_like_metacharacters(pool: PgPool) {
+        let (system, _, child) = v2_reader_history_fixture(&pool).await;
+        let options = vec![
+            v2_option(&["services", "normal"], "normal-text"),
+            v2_option(&["services", "percent"], "literal%value"),
+            v2_option(&["services", "underscore"], "literal_value"),
+            v2_option(&["services", "wildcard-control"], "literalXvalue"),
+            v2_option_with_components(
+                vec!["services".into(), "backslash".into()],
+                r"literal\value",
+            ),
+            v2_option_with_components(vec!["services".into(), r"foo%_\bar".into()], "combined"),
+        ];
+        let mut tx = pool.begin().await.expect("search transaction should begin");
+        persist_config_artifact_v2_deferred_tx(
+            &mut tx,
+            child.id,
+            "host",
+            v2_reader_artifact(child.id, options),
+        )
+        .await
+        .expect("search artifact should persist");
+        tx.commit().await.expect("search transaction should commit");
+
+        let searches = [
+            ("normal-text", 1, &["normal"][..]),
+            ("literal%", 1, &["percent"][..]),
+            ("literal_", 1, &["underscore"][..]),
+            (r"literal\", 1, &["backslash"][..]),
+            (r"foo%_\bar", 1, &[r"foo%_\bar"][..]),
+        ];
+        for (search, expected_total, expected_components) in searches {
+            let result = query_config_options_page_v2(
+                &pool,
+                system.id,
+                &child.git_commit_hash,
+                search,
+                EvaluatedOptionFilter::All,
+                None,
+                100,
+                0,
+            )
+            .await
+            .expect("literal search should execute");
+            let ConfigOptionsPageQueryV2::Page(page) = result else {
+                panic!("expected literal search page");
+            };
+            assert_eq!(
+                page.total, expected_total,
+                "search {search:?} must be literal"
+            );
+            assert_eq!(page.options.len(), expected_total as usize);
+            let returned_components = page
+                .options
+                .iter()
+                .map(|row| row.option.as_ref().unwrap().path_components[1].clone())
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(
+                returned_components,
+                expected_components
+                    .iter()
+                    .map(|component| (*component).to_string())
+                    .collect()
+            );
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn v2_reader_preserves_structured_path_identity(pool: PgPool) {
+        let (system, _, child) = v2_reader_history_fixture(&pool).await;
+        let mut tx = pool.begin().await.expect("path transaction should begin");
+        persist_config_artifact_v2_deferred_tx(
+            &mut tx,
+            child.id,
+            "host",
+            v2_reader_artifact(
+                child.id,
+                vec![
+                    v2_option_with_components(vec!["foo".into(), "bar.baz".into()], "first"),
+                    v2_option_with_components(
+                        vec!["foo".into(), "bar".into(), "baz".into()],
+                        "second",
+                    ),
+                ],
+            ),
+        )
+        .await
+        .expect("structured path artifact should persist");
+        tx.commit().await.expect("path transaction should commit");
+
+        let result = query_config_options_page_v2(
+            &pool,
+            system.id,
+            &child.git_commit_hash,
+            "",
+            EvaluatedOptionFilter::All,
+            None,
+            100,
+            0,
+        )
+        .await
+        .expect("structured path page should execute");
+        let ConfigOptionsPageQueryV2::Page(page) = result else {
+            panic!("expected structured path page");
+        };
+        assert_eq!(page.counts.all, 2);
+        assert_eq!(page.total, 2);
+        assert_eq!(page.options.len(), 2);
+        let rows = page
+            .options
+            .iter()
+            .map(|row| {
+                let option = row.option.as_ref().expect("all row should have an option");
+                (option.option_key.clone(), option.path_components.clone())
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            rows,
+            [
+                (
+                    crate::models::config_inspector::option_key(&[
+                        "foo".to_string(),
+                        "bar.baz".to_string()
+                    ],),
+                    vec!["foo".to_string(), "bar.baz".to_string()]
+                ),
+                (
+                    crate::models::config_inspector::option_key(&[
+                        "foo".to_string(),
+                        "bar".to_string(),
+                        "baz".to_string(),
+                    ]),
+                    vec!["foo".to_string(), "bar".to_string(), "baz".to_string()]
+                ),
+            ]
+            .into_iter()
+            .collect()
+        );
+        assert_ne!(rows.iter().next(), rows.iter().nth(1));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn v2_reader_applies_query_bounds_and_search_limit(pool: PgPool) {
+        let (system, _, child) = v2_reader_history_fixture(&pool).await;
+        let mut tx = pool.begin().await.expect("bounds transaction should begin");
+        persist_config_artifact_v2_deferred_tx(
+            &mut tx,
+            child.id,
+            "host",
+            v2_reader_artifact(child.id, vec![v2_option(&["services", "bounded"], "value")]),
+        )
+        .await
+        .expect("bounds artifact should persist");
+        tx.commit().await.expect("bounds transaction should commit");
+
+        let result = query_config_options_page_v2(
+            &pool,
+            system.id,
+            &child.git_commit_hash,
+            &"x".repeat(10_000),
+            EvaluatedOptionFilter::All,
+            None,
+            1_000,
+            200_000,
+        )
+        .await
+        .expect("bounded search should execute");
+        let ConfigOptionsPageQueryV2::Page(page) = result else {
+            panic!("expected bounded page");
+        };
+        assert_eq!(page.limit, OPTIONS_PAGE_LIMIT);
+        assert_eq!(page.offset, OPTIONS_OFFSET_LIMIT);
+        assert_eq!(page.total, 0);
+        assert!(page.options.is_empty());
     }
 
     async fn v2_carrier(pool: &PgPool, configuration_name: &str) -> (i32, i32) {
