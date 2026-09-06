@@ -192,6 +192,23 @@ pub(crate) async fn persist_config_artifact_v2_deferred_tx(
     configuration_name: &str,
     artifact: ConfigInspectionArtifactV2,
 ) -> Result<Uuid> {
+    persist_config_artifact_v2_with_content_limit_tx(
+        tx,
+        commit_id,
+        configuration_name,
+        artifact,
+        SNAPSHOT_CONTENT_BYTES_LIMIT,
+    )
+    .await
+}
+
+async fn persist_config_artifact_v2_with_content_limit_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    commit_id: i32,
+    configuration_name: &str,
+    artifact: ConfigInspectionArtifactV2,
+    snapshot_content_bytes_limit: i64,
+) -> Result<Uuid> {
     let artifact = artifact.redacted();
     validate_config_artifact_v2(&artifact)?;
     let provenance_state = artifact.provenance_state_payload()?;
@@ -228,7 +245,7 @@ pub(crate) async fn persist_config_artifact_v2_deferred_tx(
         content_bytes = content_bytes
             .checked_add(encoded_len)
             .context("V2 snapshot payload size exceeds i64")?;
-        if content_bytes > SNAPSHOT_CONTENT_BYTES_LIMIT {
+        if content_bytes > snapshot_content_bytes_limit {
             return persist_oversized_config_artifact_v2(
                 tx,
                 commit_id,
@@ -10150,27 +10167,61 @@ mod tests {
     #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
     async fn aggregate_v2_snapshot_oversize_advances_unavailable_selection(pool: PgPool) {
         let (commit_id, _) = v2_carrier(&pool, "aggregate-oversized").await;
-        let per_option_items = OPTION_CONTENT_BYTES_LIMIT / 6;
-        let mut options = Vec::with_capacity(300);
-        for index in 0..300 {
-            let mut option = v2_option_with_components(
+        let mut options = Vec::with_capacity(4);
+        for index in 0..4 {
+            options.push(v2_option_with_components(
                 vec!["services".to_string(), format!("aggregate_{index}")],
-                "x",
-            );
-            option.effective_value = SafeOptionValue::List(
-                (0..per_option_items)
-                    .map(|_| SafeOptionValue::Scalar(json!(true)))
-                    .collect(),
-            );
-            options.push(option);
+                &format!("value-{index}-{}", "x".repeat(4096)),
+            ));
         }
         let artifact = v2_artifact(options);
+        let redacted = artifact.clone().redacted();
+        let encoded_sizes = redacted
+            .options
+            .iter()
+            .map(|option| {
+                serde_json::to_vec(&ConfigInspectionArtifactV2::option_content_payload(option))
+                    .expect("encode aggregate V2 option payload")
+                    .len() as i64
+            })
+            .collect::<Vec<_>>();
+        let expected_total = encoded_sizes.iter().sum::<i64>();
+        let max_individual_payload = encoded_sizes
+            .iter()
+            .copied()
+            .max()
+            .expect("aggregate V2 options are non-empty");
+        let snapshot_content_bytes_limit = expected_total - 1;
+
+        assert!(
+            encoded_sizes
+                .iter()
+                .all(|size| *size <= OPTION_CONTENT_BYTES_LIMIT as i64)
+        );
+        assert!(
+            encoded_sizes
+                .iter()
+                .all(|size| *size < snapshot_content_bytes_limit)
+        );
+        assert!(max_individual_payload < snapshot_content_bytes_limit);
+        assert!(expected_total > snapshot_content_bytes_limit);
+        let content_count_before: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM evaluation_option_contents WHERE schema_version = 2",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count existing V2 content");
 
         let mut tx = pool.begin().await.expect("begin aggregate V2 transaction");
-        let snapshot_id =
-            persist_config_artifact_v2_tx(&mut tx, commit_id, "aggregate-oversized", artifact)
-                .await
-                .expect("persist aggregate oversized V2 artifact");
+        let snapshot_id = persist_config_artifact_v2_with_content_limit_tx(
+            &mut tx,
+            commit_id,
+            "aggregate-oversized",
+            artifact,
+            snapshot_content_bytes_limit,
+        )
+        .await
+        .expect("persist aggregate oversized V2 artifact");
         tx.commit().await.expect("commit aggregate V2 transaction");
 
         let row: (i16, String, i32, i32, i64, bool, Option<i64>) = sqlx::query_as(
@@ -10196,6 +10247,13 @@ mod tests {
         .await
         .expect("count aggregate oversized references");
         assert_eq!(reference_count, 0);
+        let content_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM evaluation_option_contents WHERE schema_version = 2",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count aggregate oversized content");
+        assert_eq!(content_count, content_count_before);
         let selected: Uuid = sqlx::query_scalar(
             "SELECT current_snapshot_id FROM evaluation_snapshot_selections WHERE commit_id = $1 AND configuration_name = 'aggregate-oversized'",
         )
