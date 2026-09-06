@@ -12,7 +12,8 @@ use uuid::Uuid;
 
 use crate::models::config_inspector::option_key as canonical_option_key;
 use crate::models::config_snapshot_artifact::{
-    ConfigInspectionArtifactV2, ConfigOptionProvenanceArtifactV2, ConfigProvenanceArtifactStateV2,
+    ConfigInspectionArtifactV2, ConfigOptionArtifactV2, ConfigOptionProvenanceArtifactV2,
+    ConfigProvenanceArtifactStateV2, config_option_v2_from_persisted,
 };
 use crate::models::evaluation_snapshots::{
     AgentFingerprintStatus, EvaluatedOption, EvaluatedOptionCounts, EvaluatedOptionFilter,
@@ -142,6 +143,141 @@ pub enum EvaluatedOptionsQuery {
     /// The exact immutable artifact produced a page.
     Page(EvaluatedOptionsPage),
     /// The continuation token identifies a replaced current artifact.
+    SnapshotChanged,
+}
+
+/// Explains why a commit-mode V2 comparison cannot be evaluated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConfigComparisonUnavailableReasonV2 {
+    /// The selected attempt is unavailable or fails V2 certification.
+    SelectedUnavailable,
+    /// The selected artifact is readable but its comparison state is incomplete.
+    SelectedNotComparisonReady,
+    /// The selected commit has no authoritative first-parent resolution.
+    FirstParentUnresolved,
+    /// The selected commit is an authoritative root commit.
+    RootCommit,
+    /// The authoritative first-parent commit is absent from the same flake.
+    BaselineCommitMissing,
+    /// The first-parent commit has no V2 selector for this configuration.
+    BaselineSnapshotMissing,
+    /// The first-parent selector points to an unavailable or uncertified attempt.
+    BaselineUnavailable,
+    /// The first-parent V2 artifact is readable but not comparison-ready.
+    BaselineNotComparisonReady,
+}
+
+/// Represents the explicit commit-mode comparison state for a V2 read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ConfigComparisonStateV2 {
+    /// The selected and first-parent V2 artifacts can be compared.
+    Available {
+        /// Certified baseline snapshot identity.
+        baseline_id: Uuid,
+        /// Full baseline commit SHA.
+        baseline_revision: String,
+    },
+    /// The comparison is unavailable for a typed reason.
+    Unavailable {
+        /// Stable reason for the unavailable comparison.
+        reason: ConfigComparisonUnavailableReasonV2,
+        /// Full first-parent SHA when the database resolved one.
+        baseline_revision: Option<String>,
+    },
+}
+
+/// Contains the database-authoritative state of one selected V2 snapshot.
+#[derive(Debug, Clone)]
+pub(crate) struct ConfigSelectedSnapshotV2 {
+    /// Immutable snapshot identity.
+    pub(crate) id: Uuid,
+    /// Commit identity owning the snapshot.
+    pub(crate) commit_id: i32,
+    /// Full selected commit SHA.
+    pub(crate) revision: String,
+    /// Configuration name selected for the system.
+    pub(crate) configuration_name: String,
+    /// Persisted lifecycle after V2 certification normalization.
+    pub(crate) lifecycle: SnapshotLifecycle,
+    /// Safe persisted lifecycle or corruption diagnostic.
+    pub(crate) error: Option<String>,
+    /// V2 target identity, when the certified artifact provides it.
+    pub(crate) target_key: Option<String>,
+    /// Resolved flake source path, when available.
+    pub(crate) source_out_path: Option<String>,
+    /// Shared carrier derivation path, when available.
+    pub(crate) carrier_drv_path: Option<String>,
+    /// Configuration-global provenance state, when decodable.
+    pub(crate) provenance_state: Option<ConfigProvenanceArtifactStateV2>,
+    /// Whether complete V2 comparison inputs were persisted.
+    pub(crate) comparison_ready: Option<bool>,
+    /// Authoritative option count recorded by persistence.
+    pub(crate) option_count: i64,
+    /// Authoritative module count recorded by persistence.
+    pub(crate) module_count: i64,
+    /// Snapshot completion time.
+    pub(crate) completed_at: Option<DateTime<Utc>>,
+    /// Persisted evaluator duration.
+    pub(crate) evaluation_duration_ms: Option<i64>,
+    /// Whether Git first-parent resolution completed.
+    pub(crate) first_parent_resolved: bool,
+    /// Exact first-parent SHA, or `None` for a resolved root.
+    pub(crate) first_parent_revision: Option<String>,
+    /// Explicit selected-versus-parent comparison state.
+    pub(crate) comparison: ConfigComparisonStateV2,
+}
+
+/// Reports revision-global V2 option counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ConfigOptionCountsV2 {
+    /// Number of selected options.
+    pub(crate) all: i64,
+    /// Number of selected options with known overridden definitions.
+    pub(crate) overridden: i64,
+    /// Number of selected options with unknown override state.
+    pub(crate) override_unknown: i64,
+    /// Number of changed options, or `None` without a valid comparison.
+    pub(crate) changed: Option<i64>,
+}
+
+/// Contains one bounded V2 option row and its optional comparison partner.
+#[derive(Debug, Clone)]
+pub(crate) struct ConfigOptionRowV2 {
+    /// Selected option, or `None` for a removed baseline option.
+    pub(crate) option: Option<ConfigOptionArtifactV2>,
+    /// Baseline option, or `None` for an added selected option.
+    pub(crate) before: Option<ConfigOptionArtifactV2>,
+    /// Content change state, or `None` without a valid comparison.
+    pub(crate) changed: Option<bool>,
+}
+
+/// Returns one bounded database-only page of V2 options.
+#[derive(Debug, Clone)]
+pub(crate) struct ConfigOptionsPageV2 {
+    /// Selected V2 snapshot state.
+    pub(crate) selected: ConfigSelectedSnapshotV2,
+    /// Immutable continuation token for this selected/baseline authority.
+    pub(crate) snapshot_token: String,
+    /// Revision-global option counts.
+    pub(crate) counts: ConfigOptionCountsV2,
+    /// Number of rows matching the active search and filter.
+    pub(crate) total: i64,
+    /// Bounded zero-based offset.
+    pub(crate) offset: i64,
+    /// Bounded page size.
+    pub(crate) limit: i64,
+    /// Decoded page rows.
+    pub(crate) options: Vec<ConfigOptionRowV2>,
+}
+
+/// Classifies a V2 page request without collapsing no-snapshot and stale-token states.
+#[derive(Debug, Clone)]
+pub(crate) enum ConfigOptionsPageQueryV2 {
+    /// A current V2 selector produced a page.
+    Page(ConfigOptionsPageV2),
+    /// The current commit/configuration has no V2 selector.
+    NoSnapshot,
+    /// The requested continuation no longer identifies current authority.
     SnapshotChanged,
 }
 
@@ -1294,6 +1430,636 @@ pub async fn select_commit_snapshot(
         selected.baseline_generation_snapshot_id = None;
     }
     Ok(Some(selected))
+}
+
+const CONFIG_SNAPSHOT_TOKEN_DOMAIN_V2: &[u8] = b"crystal-forge:config-snapshot-pagination:v2";
+
+#[derive(Debug, Clone)]
+struct V2SnapshotRecord {
+    id: Uuid,
+    commit_id: i32,
+    revision: String,
+    configuration_name: String,
+    lifecycle: SnapshotLifecycle,
+    raw_lifecycle: String,
+    schema_version: i32,
+    integrity_version: i16,
+    error: Option<String>,
+    target_key: Option<String>,
+    source_out_path: Option<String>,
+    carrier_drv_path: Option<String>,
+    provenance_state: Option<Value>,
+    comparison_ready: Option<bool>,
+    option_count: i64,
+    module_count: i64,
+    completed_at: Option<DateTime<Utc>>,
+    evaluation_duration_ms: Option<i64>,
+}
+
+fn v2_snapshot_record_from_row(
+    row: &sqlx::postgres::PgRow,
+    prefix: &str,
+) -> Result<Option<V2SnapshotRecord>> {
+    let id: Option<Uuid> = row.try_get(format!("{prefix}_id").as_str())?;
+    let Some(id) = id else {
+        return Ok(None);
+    };
+    let raw_lifecycle: String = row.try_get(format!("{prefix}_lifecycle").as_str())?;
+    Ok(Some(V2SnapshotRecord {
+        id,
+        commit_id: row.try_get(format!("{prefix}_commit_id").as_str())?,
+        revision: row.try_get(format!("{prefix}_revision").as_str())?,
+        configuration_name: row.try_get(format!("{prefix}_configuration_name").as_str())?,
+        lifecycle: parse_lifecycle(raw_lifecycle.clone())?,
+        raw_lifecycle,
+        schema_version: row.try_get(format!("{prefix}_schema_version").as_str())?,
+        integrity_version: row.try_get(format!("{prefix}_integrity_version").as_str())?,
+        error: row.try_get(format!("{prefix}_error").as_str())?,
+        target_key: row.try_get(format!("{prefix}_target_key").as_str())?,
+        source_out_path: row.try_get(format!("{prefix}_source_out_path").as_str())?,
+        carrier_drv_path: row.try_get(format!("{prefix}_carrier_drv_path").as_str())?,
+        provenance_state: row.try_get(format!("{prefix}_provenance_state").as_str())?,
+        comparison_ready: row.try_get(format!("{prefix}_comparison_ready").as_str())?,
+        option_count: row.try_get(format!("{prefix}_option_count").as_str())?,
+        module_count: row.try_get(format!("{prefix}_module_count").as_str())?,
+        completed_at: row.try_get(format!("{prefix}_completed_at").as_str())?,
+        evaluation_duration_ms: row.try_get(format!("{prefix}_evaluation_duration_ms").as_str())?,
+    }))
+}
+
+fn v2_record_is_certified(record: &V2SnapshotRecord) -> bool {
+    record.raw_lifecycle == "available"
+        && record.schema_version == 2
+        && record.integrity_version == 2
+}
+
+fn v2_record_is_usable(record: &V2SnapshotRecord) -> bool {
+    v2_record_is_certified(record) && record.lifecycle == SnapshotLifecycle::Available
+}
+
+fn unavailable_v2_error(record: &V2SnapshotRecord) -> Option<String> {
+    (record.raw_lifecycle == "available" && !v2_record_is_certified(record))
+        .then(|| "Snapshot data is unavailable or corrupt".to_string())
+}
+
+fn decode_v2_global_state(record: &V2SnapshotRecord) -> Result<ConfigProvenanceArtifactStateV2> {
+    serde_json::from_value(
+        record
+            .provenance_state
+            .clone()
+            .context("certified V2 snapshot is missing provenance state")?,
+    )
+    .context("certified V2 snapshot has malformed provenance state")
+}
+
+fn selected_v2_from_record(
+    selected: V2SnapshotRecord,
+    first_parent_resolved: bool,
+    first_parent_revision: Option<String>,
+    baseline: Option<&V2SnapshotRecord>,
+    parent_commit_exists: bool,
+    baseline_selector_exists: bool,
+) -> Result<ConfigSelectedSnapshotV2> {
+    let mut lifecycle = selected.lifecycle;
+    let mut error = selected
+        .error
+        .clone()
+        .or_else(|| unavailable_v2_error(&selected));
+    let mut provenance_state = None;
+    if selected.raw_lifecycle == "available" && !v2_record_is_certified(&selected) {
+        lifecycle = SnapshotLifecycle::Unavailable;
+        error = Some("Snapshot data is unavailable or corrupt".to_string());
+    } else if v2_record_is_certified(&selected) {
+        if selected.target_key.is_none()
+            || selected.source_out_path.is_none()
+            || selected.carrier_drv_path.is_none()
+            || selected.comparison_ready.is_none()
+        {
+            lifecycle = SnapshotLifecycle::Unavailable;
+            error = Some("Snapshot data is unavailable or corrupt".to_string());
+        } else {
+            match decode_v2_global_state(&selected) {
+                Ok(state) => provenance_state = Some(state),
+                Err(_) => {
+                    lifecycle = SnapshotLifecycle::Unavailable;
+                    error = Some("Snapshot data is unavailable or corrupt".to_string());
+                }
+            }
+        }
+    }
+
+    let baseline_revision = first_parent_revision.clone();
+    let comparison =
+        if lifecycle != SnapshotLifecycle::Available || !v2_record_is_certified(&selected) {
+            ConfigComparisonStateV2::Unavailable {
+                reason: ConfigComparisonUnavailableReasonV2::SelectedUnavailable,
+                baseline_revision,
+            }
+        } else if selected.comparison_ready != Some(true) {
+            ConfigComparisonStateV2::Unavailable {
+                reason: ConfigComparisonUnavailableReasonV2::SelectedNotComparisonReady,
+                baseline_revision,
+            }
+        } else if !first_parent_resolved {
+            ConfigComparisonStateV2::Unavailable {
+                reason: ConfigComparisonUnavailableReasonV2::FirstParentUnresolved,
+                baseline_revision,
+            }
+        } else if first_parent_revision.is_none() {
+            ConfigComparisonStateV2::Unavailable {
+                reason: ConfigComparisonUnavailableReasonV2::RootCommit,
+                baseline_revision,
+            }
+        } else if !parent_commit_exists {
+            ConfigComparisonStateV2::Unavailable {
+                reason: ConfigComparisonUnavailableReasonV2::BaselineCommitMissing,
+                baseline_revision,
+            }
+        } else if !baseline_selector_exists || baseline.is_none() {
+            ConfigComparisonStateV2::Unavailable {
+                reason: ConfigComparisonUnavailableReasonV2::BaselineSnapshotMissing,
+                baseline_revision,
+            }
+        } else if !v2_record_is_usable(baseline.expect("checked above")) {
+            ConfigComparisonStateV2::Unavailable {
+                reason: ConfigComparisonUnavailableReasonV2::BaselineUnavailable,
+                baseline_revision,
+            }
+        } else if baseline.expect("checked above").comparison_ready != Some(true) {
+            ConfigComparisonStateV2::Unavailable {
+                reason: ConfigComparisonUnavailableReasonV2::BaselineNotComparisonReady,
+                baseline_revision,
+            }
+        } else {
+            let baseline = baseline.expect("checked above");
+            ConfigComparisonStateV2::Available {
+                baseline_id: baseline.id,
+                baseline_revision: baseline.revision.clone(),
+            }
+        };
+
+    Ok(ConfigSelectedSnapshotV2 {
+        id: selected.id,
+        commit_id: selected.commit_id,
+        revision: selected.revision,
+        configuration_name: selected.configuration_name,
+        lifecycle,
+        error,
+        target_key: selected.target_key,
+        source_out_path: selected.source_out_path,
+        carrier_drv_path: selected.carrier_drv_path,
+        provenance_state,
+        comparison_ready: selected.comparison_ready,
+        option_count: selected.option_count,
+        module_count: selected.module_count,
+        completed_at: selected.completed_at,
+        evaluation_duration_ms: selected.evaluation_duration_ms,
+        first_parent_resolved,
+        first_parent_revision,
+        comparison,
+    })
+}
+
+async fn select_config_snapshot_v2_with_executor<'e, E>(
+    executor: E,
+    system_id: Uuid,
+    revision: &str,
+) -> Result<Option<ConfigSelectedSnapshotV2>>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    let row = sqlx::query(
+        r#"
+        SELECT c.id AS selected_commit_id,
+               c.git_commit_hash AS selected_revision,
+               c.first_parent_resolved,
+               c.first_parent_sha,
+               cfg.configuration_name,
+               selected.id AS selected_id,
+               c.id AS selected_commit_id_for_snapshot,
+               c.git_commit_hash AS selected_revision_for_snapshot,
+               cfg.configuration_name AS selected_configuration_name,
+               selected.lifecycle AS selected_lifecycle,
+               selected.schema_version AS selected_schema_version,
+               selected.integrity_version AS selected_integrity_version,
+               selected.error AS selected_error,
+               selected.target_key AS selected_target_key,
+               selected.source_out_path AS selected_source_out_path,
+               selected.carrier_drv_path AS selected_carrier_drv_path,
+               selected.provenance_state AS selected_provenance_state,
+               selected.comparison_ready AS selected_comparison_ready,
+               selected.option_count::bigint AS selected_option_count,
+               selected.module_count::bigint AS selected_module_count,
+               selected.completed_at AS selected_completed_at,
+               selected.evaluation_duration_ms AS selected_evaluation_duration_ms,
+               parent.id AS parent_commit_id,
+               parent_selection.current_snapshot_id AS baseline_selector_id,
+               baseline.id AS baseline_id,
+               parent.id AS baseline_commit_id,
+               parent.git_commit_hash AS baseline_revision,
+               cfg.configuration_name AS baseline_configuration_name,
+               baseline.lifecycle AS baseline_lifecycle,
+               baseline.schema_version AS baseline_schema_version,
+               baseline.integrity_version AS baseline_integrity_version,
+               baseline.error AS baseline_error,
+               baseline.target_key AS baseline_target_key,
+               baseline.source_out_path AS baseline_source_out_path,
+               baseline.carrier_drv_path AS baseline_carrier_drv_path,
+               baseline.provenance_state AS baseline_provenance_state,
+               baseline.comparison_ready AS baseline_comparison_ready,
+               baseline.option_count::bigint AS baseline_option_count,
+               baseline.module_count::bigint AS baseline_module_count,
+               baseline.completed_at AS baseline_completed_at,
+               baseline.evaluation_duration_ms AS baseline_evaluation_duration_ms
+        FROM systems system
+        JOIN flakes flake ON flake.id = system.flake_id AND flake.deleted_at IS NULL
+        JOIN commits c
+          ON c.flake_id = flake.id
+         AND c.git_commit_hash = $2
+         AND c.source_archived = false
+        CROSS JOIN LATERAL (
+            SELECT COALESCE(NULLIF(btrim(system.system_configuration_name), ''), system.hostname)
+                AS configuration_name
+        ) cfg
+        JOIN config_snapshot_selections selection
+          ON selection.commit_id = c.id
+         AND selection.configuration_name = cfg.configuration_name
+        JOIN evaluation_snapshots selected ON selected.id = selection.current_snapshot_id
+        LEFT JOIN commits parent
+          ON parent.flake_id = c.flake_id
+         AND c.first_parent_resolved
+         AND parent.git_commit_hash = c.first_parent_sha
+        LEFT JOIN config_snapshot_selections parent_selection
+          ON parent_selection.commit_id = parent.id
+         AND parent_selection.configuration_name = cfg.configuration_name
+        LEFT JOIN evaluation_snapshots baseline
+          ON baseline.id = parent_selection.current_snapshot_id
+        WHERE system.id = $1
+        "#,
+    )
+    .bind(system_id)
+    .bind(revision)
+    .fetch_optional(executor)
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+
+    let selected_record = V2SnapshotRecord {
+        id: row.try_get("selected_id")?,
+        commit_id: row.try_get("selected_commit_id_for_snapshot")?,
+        revision: row.try_get("selected_revision_for_snapshot")?,
+        configuration_name: row.try_get("selected_configuration_name")?,
+        lifecycle: parse_lifecycle(row.try_get("selected_lifecycle")?)?,
+        raw_lifecycle: row.try_get("selected_lifecycle")?,
+        schema_version: row.try_get("selected_schema_version")?,
+        integrity_version: row.try_get("selected_integrity_version")?,
+        error: row.try_get("selected_error")?,
+        target_key: row.try_get("selected_target_key")?,
+        source_out_path: row.try_get("selected_source_out_path")?,
+        carrier_drv_path: row.try_get("selected_carrier_drv_path")?,
+        provenance_state: row.try_get("selected_provenance_state")?,
+        comparison_ready: row.try_get("selected_comparison_ready")?,
+        option_count: row.try_get("selected_option_count")?,
+        module_count: row.try_get("selected_module_count")?,
+        completed_at: row.try_get("selected_completed_at")?,
+        evaluation_duration_ms: row.try_get("selected_evaluation_duration_ms")?,
+    };
+    let baseline = v2_snapshot_record_from_row(&row, "baseline")?;
+    let parent_commit_exists: bool = row.try_get::<Option<i32>, _>("parent_commit_id")?.is_some();
+    let baseline_selector_exists = row
+        .try_get::<Option<Uuid>, _>("baseline_selector_id")?
+        .is_some();
+    selected_v2_from_record(
+        selected_record,
+        row.try_get("first_parent_resolved")?,
+        row.try_get("first_parent_sha")?,
+        baseline.as_ref(),
+        parent_commit_exists,
+        baseline_selector_exists,
+    )
+    .map(Some)
+}
+
+/// Selects the current commit-mode V2 Config snapshot without falling back to V1.
+///
+/// The query resolves the system's active flake and exact active full revision,
+/// then reads only `config_snapshot_selections`. It performs no evaluation, Git,
+/// network, queue, or write operation.
+pub(crate) async fn select_config_snapshot_v2(
+    pool: &PgPool,
+    system_id: Uuid,
+    revision: &str,
+) -> Result<Option<ConfigSelectedSnapshotV2>> {
+    select_config_snapshot_v2_with_executor(pool, system_id, revision).await
+}
+
+fn config_snapshot_token_v2(selected: &ConfigSelectedSnapshotV2) -> String {
+    let mut token = Sha256::new();
+    token.update(CONFIG_SNAPSHOT_TOKEN_DOMAIN_V2);
+    for value in [
+        selected.id.to_string(),
+        selected.revision.clone(),
+        selected.configuration_name.clone(),
+        selected.first_parent_resolved.to_string(),
+        selected.first_parent_revision.clone().unwrap_or_default(),
+        match &selected.comparison {
+            ConfigComparisonStateV2::Available {
+                baseline_id,
+                baseline_revision,
+            } => format!("available:{baseline_id}:{baseline_revision}"),
+            ConfigComparisonStateV2::Unavailable {
+                reason,
+                baseline_revision,
+            } => format!(
+                "unavailable:{reason:?}:{}",
+                baseline_revision.as_deref().unwrap_or("")
+            ),
+        },
+    ] {
+        token.update((value.len() as u64).to_be_bytes());
+        token.update(value.as_bytes());
+    }
+    format!("{:x}", token.finalize())
+}
+
+fn corrupt_v2_page(
+    mut selected: ConfigSelectedSnapshotV2,
+    token: String,
+    limit: i64,
+    offset: i64,
+) -> ConfigOptionsPageV2 {
+    selected.lifecycle = SnapshotLifecycle::Unavailable;
+    selected.error = Some("Snapshot data is unavailable or corrupt".to_string());
+    ConfigOptionsPageV2 {
+        selected,
+        snapshot_token: token,
+        counts: ConfigOptionCountsV2 {
+            all: 0,
+            overridden: 0,
+            override_unknown: 0,
+            changed: None,
+        },
+        total: 0,
+        offset,
+        limit,
+        options: Vec::new(),
+    }
+}
+
+/// Reads a bounded current commit-mode V2 options page in one repeatable-read transaction.
+///
+/// Counts and rows use authoritative V2 option identity (`option_key` plus
+/// `path_components`). The function is database-only and returns typed absence or
+/// stale-token results instead of mutating state or falling back to V1.
+pub(crate) async fn query_config_options_page_v2(
+    pool: &PgPool,
+    system_id: Uuid,
+    revision: &str,
+    search: &str,
+    filter: EvaluatedOptionFilter,
+    requested_token: Option<&str>,
+    limit: i64,
+    offset: i64,
+) -> Result<ConfigOptionsPageQueryV2> {
+    let limit = limit.clamp(1, OPTIONS_PAGE_LIMIT);
+    let offset = offset.clamp(0, OPTIONS_OFFSET_LIMIT);
+    let mut tx = pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .execute(&mut *tx)
+        .await?;
+    let Some(selected) =
+        select_config_snapshot_v2_with_executor(&mut *tx, system_id, revision).await?
+    else {
+        tx.commit().await?;
+        return Ok(ConfigOptionsPageQueryV2::NoSnapshot);
+    };
+    let token = config_snapshot_token_v2(&selected);
+    if requested_token.is_some_and(|requested| requested != token) {
+        tx.commit().await?;
+        return Ok(ConfigOptionsPageQueryV2::SnapshotChanged);
+    }
+    if selected.lifecycle != SnapshotLifecycle::Available || selected.comparison_ready.is_none() {
+        let page = ConfigOptionsPageV2 {
+            selected,
+            snapshot_token: token,
+            counts: ConfigOptionCountsV2 {
+                all: 0,
+                overridden: 0,
+                override_unknown: 0,
+                changed: None,
+            },
+            total: 0,
+            offset,
+            limit,
+            options: Vec::new(),
+        };
+        tx.commit().await?;
+        return Ok(ConfigOptionsPageQueryV2::Page(page));
+    }
+
+    let baseline_id = match selected.comparison {
+        ConfigComparisonStateV2::Available { baseline_id, .. } => Some(baseline_id),
+        ConfigComparisonStateV2::Unavailable { .. } => None,
+    };
+    let counts_row = sqlx::query(
+        r#"
+        SELECT
+            (SELECT COUNT(*)::bigint FROM evaluation_snapshot_options
+             WHERE snapshot_id = $1 AND option_key IS NOT NULL) AS all_count,
+            (SELECT COUNT(*)::bigint FROM evaluation_snapshot_options
+             WHERE snapshot_id = $1 AND option_key IS NOT NULL AND is_overridden IS TRUE)
+                AS overridden_count,
+            (SELECT COUNT(*)::bigint FROM evaluation_snapshot_options
+             WHERE snapshot_id = $1 AND option_key IS NOT NULL AND is_overridden IS NULL)
+                AS override_unknown_count,
+            (SELECT COUNT(*)::bigint
+             FROM (
+                 SELECT option_key, path_components
+                 FROM evaluation_snapshot_options WHERE snapshot_id = $1
+                 UNION
+                 SELECT option_key, path_components
+                 FROM evaluation_snapshot_options WHERE snapshot_id = $2
+             ) identities
+             LEFT JOIN evaluation_snapshot_options selected
+               ON selected.snapshot_id = $1
+              AND selected.option_key = identities.option_key
+              AND selected.path_components = identities.path_components
+             LEFT JOIN evaluation_snapshot_options baseline
+               ON baseline.snapshot_id = $2
+              AND baseline.option_key = identities.option_key
+              AND baseline.path_components = identities.path_components
+             WHERE selected.content_digest IS DISTINCT FROM baseline.content_digest)
+                AS changed_count
+        "#,
+    )
+    .bind(selected.id)
+    .bind(baseline_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    let comparison_available = baseline_id.is_some();
+    let counts = ConfigOptionCountsV2 {
+        all: counts_row.try_get("all_count")?,
+        overridden: counts_row.try_get("overridden_count")?,
+        override_unknown: counts_row.try_get("override_unknown_count")?,
+        changed: comparison_available.then(|| counts_row.get("changed_count")),
+    };
+
+    let search = search
+        .trim()
+        .chars()
+        .take(OPTIONS_SEARCH_LIMIT)
+        .collect::<String>();
+    let search_pattern = format!("%{}%", escape_like_literal(&search.to_ascii_lowercase()));
+    let filter_name = match filter {
+        EvaluatedOptionFilter::All => "all",
+        EvaluatedOptionFilter::Overridden => "overridden",
+        EvaluatedOptionFilter::Changed => "changed",
+    };
+    let total: i64 = sqlx::query_scalar(
+        r#"
+        WITH identities AS (
+            SELECT option_key, path_components
+            FROM evaluation_snapshot_options WHERE snapshot_id = $1
+            UNION
+            SELECT option_key, path_components
+            FROM evaluation_snapshot_options
+            WHERE snapshot_id = $2 AND $5 = 'changed'
+        )
+        SELECT COUNT(*)::bigint
+        FROM identities
+        LEFT JOIN evaluation_snapshot_options selected
+          ON selected.snapshot_id = $1
+         AND selected.option_key = identities.option_key
+         AND selected.path_components = identities.path_components
+        LEFT JOIN evaluation_option_contents selected_content
+          ON selected_content.digest = selected.content_digest
+        LEFT JOIN evaluation_snapshot_options baseline
+          ON baseline.snapshot_id = $2
+         AND baseline.option_key = identities.option_key
+         AND baseline.path_components = identities.path_components
+        LEFT JOIN evaluation_option_contents baseline_content
+          ON baseline_content.digest = baseline.content_digest
+        WHERE ($3 = '' OR lower(array_to_string(identities.path_components, '.') || ' ' ||
+              COALESCE(selected_content.search_text, '') || ' ' ||
+              COALESCE(baseline_content.search_text, '')) LIKE $4 ESCAPE '\')
+          AND (($5 = 'all' AND selected.snapshot_id IS NOT NULL)
+            OR ($5 = 'overridden' AND selected.is_overridden IS TRUE)
+            OR ($5 = 'changed' AND $2::uuid IS NOT NULL
+                AND selected.content_digest IS DISTINCT FROM baseline.content_digest))
+        "#,
+    )
+    .bind(selected.id)
+    .bind(baseline_id)
+    .bind(&search)
+    .bind(&search_pattern)
+    .bind(filter_name)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    let mut query = QueryBuilder::<Postgres>::new(
+        "WITH identities AS (SELECT option_key, path_components FROM evaluation_snapshot_options WHERE snapshot_id = ",
+    );
+    query.push_bind(selected.id);
+    if matches!(filter, EvaluatedOptionFilter::Changed) && baseline_id.is_some() {
+        query.push(
+            " UNION SELECT option_key, path_components FROM evaluation_snapshot_options WHERE snapshot_id = ",
+        );
+        query.push_bind(baseline_id);
+    }
+    query.push(
+        ") SELECT identities.option_key, identities.path_components, \
+             selected.snapshot_id AS selected_present, selected.content_digest AS selected_digest, \
+             selected_content.payload AS selected_payload, \
+             baseline.snapshot_id AS baseline_present, baseline_content.payload AS baseline_payload, \
+             selected.content_digest IS DISTINCT FROM baseline.content_digest AS changed \
+             FROM identities \
+             LEFT JOIN evaluation_snapshot_options selected \
+               ON selected.snapshot_id = ",
+    );
+    query.push_bind(selected.id);
+    query.push(" AND selected.option_key = identities.option_key AND selected.path_components = identities.path_components \
+             LEFT JOIN evaluation_option_contents selected_content ON selected_content.digest = selected.content_digest \
+             LEFT JOIN evaluation_snapshot_options baseline ON baseline.snapshot_id = ");
+    query.push_bind(baseline_id);
+    query.push(" AND baseline.option_key = identities.option_key AND baseline.path_components = identities.path_components \
+             LEFT JOIN evaluation_option_contents baseline_content ON baseline_content.digest = baseline.content_digest \
+             WHERE true");
+    if !search.is_empty() {
+        query.push(" AND lower(array_to_string(identities.path_components, '.') || ' ' || COALESCE(selected_content.search_text, '') || ' ' || COALESCE(baseline_content.search_text, '')) LIKE ");
+        query.push_bind(&search_pattern);
+        query.push(" ESCAPE '\\'");
+    }
+    match filter {
+        EvaluatedOptionFilter::All => query.push(" AND selected.snapshot_id IS NOT NULL"),
+        EvaluatedOptionFilter::Overridden => query.push(" AND selected.is_overridden IS TRUE"),
+        EvaluatedOptionFilter::Changed if baseline_id.is_some() => {
+            query.push(" AND selected.content_digest IS DISTINCT FROM baseline.content_digest")
+        }
+        EvaluatedOptionFilter::Changed => query.push(" AND false"),
+    };
+    query.push(" ORDER BY array_to_string(identities.path_components, '.') COLLATE \"C\", identities.option_key COLLATE \"C\" LIMIT ");
+    query.push_bind(limit);
+    query.push(" OFFSET ");
+    query.push_bind(offset);
+    let rows = query.build().fetch_all(&mut *tx).await?;
+    let decoded = rows
+        .into_iter()
+        .map(|row| -> Result<ConfigOptionRowV2> {
+            let option_key: String = row.try_get("option_key")?;
+            let path_components: Vec<String> = row.try_get("path_components")?;
+            let selected_present: Option<Uuid> = row.try_get("selected_present")?;
+            let baseline_present: Option<Uuid> = row.try_get("baseline_present")?;
+            let option = if selected_present.is_some() {
+                let payload: Value = row
+                    .try_get::<Option<Value>, _>("selected_payload")?
+                    .context("certified V2 selected option has no content payload")?;
+                Some(config_option_v2_from_persisted(
+                    option_key.clone(),
+                    path_components.clone(),
+                    payload,
+                )?)
+            } else {
+                None
+            };
+            let before = if baseline_present.is_some() {
+                let payload: Value = row
+                    .try_get::<Option<Value>, _>("baseline_payload")?
+                    .context("certified V2 baseline option has no content payload")?;
+                Some(config_option_v2_from_persisted(
+                    option_key,
+                    path_components,
+                    payload,
+                )?)
+            } else {
+                None
+            };
+            Ok(ConfigOptionRowV2 {
+                option,
+                before,
+                changed: comparison_available.then(|| row.get("changed")),
+            })
+        })
+        .collect::<Result<Vec<_>>>();
+    let options = match decoded {
+        Ok(options) => options,
+        Err(_) => {
+            let page = corrupt_v2_page(selected, token, limit, offset);
+            tx.commit().await?;
+            return Ok(ConfigOptionsPageQueryV2::Page(page));
+        }
+    };
+    let page = ConfigOptionsPageV2 {
+        selected,
+        snapshot_token: token,
+        counts,
+        total,
+        offset,
+        limit,
+        options,
+    };
+    tx.commit().await?;
+    Ok(ConfigOptionsPageQueryV2::Page(page))
 }
 
 /// Selects a retained generation and its immediately preceding retained snapshot.
@@ -9843,6 +10609,649 @@ mod tests {
             },
             options,
         }
+    }
+
+    fn v2_reader_artifact(
+        commit_id: i32,
+        options: Vec<ConfigOptionArtifactV2>,
+    ) -> ConfigInspectionArtifactV2 {
+        let mut artifact = v2_artifact(options);
+        artifact.carrier_drv_path = format!("/nix/store/v2-reader-{commit_id}.drv");
+        artifact
+    }
+
+    async fn v2_reader_history_fixture(pool: &PgPool) -> (System, Commit, Commit) {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let repo_url = format!("https://example.test/v2-reader-{suffix}.git");
+        let flake_id: i32 =
+            sqlx::query_scalar("INSERT INTO flakes (name, repo_url) VALUES ($1, $2) RETURNING id")
+                .bind(format!("v2-reader-{suffix}"))
+                .bind(&repo_url)
+                .fetch_one(pool)
+                .await
+                .expect("reader fixture flake should persist");
+        let parent_hash = format!("{}{}", "a".repeat(39), &suffix[..1]);
+        let child_hash = format!("{}{}", "b".repeat(39), &suffix[1..2]);
+        let parent_id: i32 = sqlx::query_scalar(
+            "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp) VALUES ($1, $2, now()) RETURNING id",
+        )
+        .bind(flake_id)
+        .bind(&parent_hash)
+        .fetch_one(pool)
+        .await
+        .expect("reader fixture parent should persist");
+        let child_id: i32 = sqlx::query_scalar(
+            "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp) VALUES ($1, $2, now()) RETURNING id",
+        )
+        .bind(flake_id)
+        .bind(&child_hash)
+        .fetch_one(pool)
+        .await
+        .expect("reader fixture child should persist");
+        sqlx::query(
+            "UPDATE commits SET first_parent_resolved = true, first_parent_sha = $2 WHERE id = $1",
+        )
+        .bind(child_id)
+        .bind(&parent_hash)
+        .execute(pool)
+        .await
+        .expect("reader fixture first parent should persist");
+        for commit_id in [parent_id, child_id] {
+            sqlx::query(
+                "INSERT INTO derivations (commit_id, derivation_type, derivation_name, derivation_path, status_id, attempt_count) VALUES ($1, 'nixos', 'host', $2, 1, 0)",
+            )
+            .bind(commit_id)
+            .bind(format!("/nix/store/v2-reader-{commit_id}.drv"))
+            .execute(pool)
+            .await
+            .expect("reader fixture carrier should persist");
+        }
+        let system = insert_test_system(pool, flake_id, &suffix).await;
+        let parent = get_commit_by_hash(pool, &parent_hash)
+            .await
+            .expect("reader fixture parent should load");
+        let child = get_commit_by_hash(pool, &child_hash)
+            .await
+            .expect("reader fixture child should load");
+        (system, parent, child)
+    }
+
+    #[test]
+    fn v2_token_binds_selected_and_baseline_authority() {
+        let selected = ConfigSelectedSnapshotV2 {
+            id: Uuid::new_v4(),
+            commit_id: 1,
+            revision: "a".repeat(40),
+            configuration_name: "host".to_string(),
+            lifecycle: SnapshotLifecycle::Available,
+            error: None,
+            target_key: Some("b".repeat(64)),
+            source_out_path: Some("/nix/store/source".to_string()),
+            carrier_drv_path: Some("/nix/store/carrier.drv".to_string()),
+            provenance_state: None,
+            comparison_ready: Some(true),
+            option_count: 0,
+            module_count: 0,
+            completed_at: None,
+            evaluation_duration_ms: None,
+            first_parent_resolved: true,
+            first_parent_revision: Some("c".repeat(40)),
+            comparison: ConfigComparisonStateV2::Available {
+                baseline_id: Uuid::new_v4(),
+                baseline_revision: "c".repeat(40),
+            },
+        };
+        let token = config_snapshot_token_v2(&selected);
+        let mut replaced = selected.clone();
+        replaced.id = Uuid::new_v4();
+        assert_ne!(token, config_snapshot_token_v2(&replaced));
+        replaced = selected.clone();
+        replaced.comparison = ConfigComparisonStateV2::Unavailable {
+            reason: ConfigComparisonUnavailableReasonV2::BaselineNotComparisonReady,
+            baseline_revision: Some("c".repeat(40)),
+        };
+        assert_ne!(token, config_snapshot_token_v2(&replaced));
+        replaced = selected;
+        replaced.first_parent_resolved = false;
+        assert_ne!(token, config_snapshot_token_v2(&replaced));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn v2_reader_uses_exact_identity_and_first_parent_comparison(pool: PgPool) {
+        let (system, parent, child) = v2_reader_history_fixture(&pool).await;
+        let mut parent_tx = pool.begin().await.expect("parent transaction should begin");
+        persist_config_artifact_v2_deferred_tx(
+            &mut parent_tx,
+            parent.id,
+            "host",
+            v2_reader_artifact(
+                parent.id,
+                vec![
+                    v2_option(&["services", "unchanged"], "same"),
+                    v2_option(&["services", "modified"], "old"),
+                    v2_option(&["services", "removed"], "gone"),
+                ],
+            ),
+        )
+        .await
+        .expect("parent V2 artifact should persist");
+        parent_tx
+            .commit()
+            .await
+            .expect("parent transaction should commit");
+        let mut child_tx = pool.begin().await.expect("child transaction should begin");
+        persist_config_artifact_v2_deferred_tx(
+            &mut child_tx,
+            child.id,
+            "host",
+            v2_reader_artifact(
+                child.id,
+                vec![
+                    v2_option(&["services", "unchanged"], "same"),
+                    v2_option(&["services", "modified"], "new"),
+                    v2_option(&["services", "added"], "new"),
+                ],
+            ),
+        )
+        .await
+        .expect("child V2 artifact should persist");
+        child_tx
+            .commit()
+            .await
+            .expect("child transaction should commit");
+
+        let selected = select_config_snapshot_v2(&pool, system.id, &child.git_commit_hash)
+            .await
+            .expect("child V2 selector should succeed")
+            .expect("child V2 selector should exist");
+        assert!(matches!(
+            selected.comparison,
+            ConfigComparisonStateV2::Available { .. }
+        ));
+        let page = query_config_options_page_v2(
+            &pool,
+            system.id,
+            &child.git_commit_hash,
+            "",
+            EvaluatedOptionFilter::Changed,
+            None,
+            100,
+            0,
+        )
+        .await
+        .expect("changed V2 page should succeed");
+        let ConfigOptionsPageQueryV2::Page(page) = page else {
+            panic!("expected changed V2 page");
+        };
+        assert_eq!(page.counts.all, 3);
+        assert_eq!(page.counts.changed, Some(3));
+        assert_eq!(page.total, 3);
+        assert_eq!(page.options.len(), 3);
+        assert!(
+            page.options
+                .iter()
+                .any(|row| row.option.is_none() && row.before.is_some())
+        );
+        assert!(
+            page.options
+                .iter()
+                .any(|row| row.option.is_some() && row.before.is_none())
+        );
+        assert!(page.options.iter().any(|row| {
+            row.option
+                .as_ref()
+                .is_some_and(|option| option.path_components == ["services", "modified"])
+                && row.before.is_some()
+        }));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn v2_reader_preserves_unavailable_states_and_never_falls_back_to_v1(pool: PgPool) {
+        let (system, _, child) = v2_reader_history_fixture(&pool).await;
+        let mut v1_tx = pool.begin().await.expect("V1 transaction should begin");
+        persist_available_snapshot_tx(
+            &mut v1_tx,
+            child.id,
+            "host",
+            vec![option("services.v1", json!(true))],
+        )
+        .await
+        .expect("V1 artifact should persist");
+        v1_tx.commit().await.expect("V1 transaction should commit");
+        assert!(
+            select_config_snapshot_v2(&pool, system.id, &child.git_commit_hash)
+                .await
+                .expect("V2 selector should succeed")
+                .is_none()
+        );
+
+        let mut stage2 =
+            v2_reader_artifact(child.id, vec![v2_option(&["services", "stage2"], "value")]);
+        stage2.provenance_state = ConfigProvenanceArtifactStateV2::Available {
+            adapter_version: 1,
+            target_lib_version: None,
+            target_module_system_path: None,
+            provenance_digest: "b".repeat(64),
+            definition_value_enrichment: DefinitionValueArtifactStateV2::Unavailable {
+                reason_code: "stage2_unavailable".to_string(),
+                diagnostic: None,
+            },
+        };
+        if let ConfigOptionProvenanceArtifactV2::Available { definitions, .. } =
+            &mut stage2.options[0].provenance
+        {
+            definitions[0].value = None;
+        }
+        let expected_provenance = stage2.options[0].provenance.clone();
+        let mut tx = pool.begin().await.expect("stage2 transaction should begin");
+        persist_config_artifact_v2_deferred_tx(&mut tx, child.id, "host", stage2)
+            .await
+            .expect("stage2-unavailable V2 artifact should persist");
+        tx.commit().await.expect("stage2 transaction should commit");
+        let selected = select_config_snapshot_v2(&pool, system.id, &child.git_commit_hash)
+            .await
+            .expect("stage2 selector should succeed")
+            .expect("stage2 selector should exist");
+        assert_eq!(selected.lifecycle, SnapshotLifecycle::Available);
+        assert!(matches!(
+            selected.comparison,
+            ConfigComparisonStateV2::Unavailable {
+                reason: ConfigComparisonUnavailableReasonV2::SelectedNotComparisonReady,
+                ..
+            }
+        ));
+        let page = query_config_options_page_v2(
+            &pool,
+            system.id,
+            &child.git_commit_hash,
+            "",
+            EvaluatedOptionFilter::All,
+            None,
+            100,
+            0,
+        )
+        .await
+        .expect("stage2 page should succeed");
+        let ConfigOptionsPageQueryV2::Page(page) = page else {
+            panic!("expected stage2 page");
+        };
+        assert_eq!(page.options.len(), 1);
+        assert_eq!(
+            page.options[0].option.as_ref().unwrap().provenance,
+            expected_provenance
+        );
+        assert_eq!(page.counts.changed, None);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn v2_reader_preserves_unknown_override_and_rejects_stale_authority(pool: PgPool) {
+        let (system, _, child) = v2_reader_history_fixture(&pool).await;
+        let mut global_unavailable =
+            v2_reader_artifact(child.id, vec![v2_option(&["services", "unknown"], "value")]);
+        global_unavailable.provenance_state = ConfigProvenanceArtifactStateV2::Unavailable {
+            reason_code: "provenance_unavailable".to_string(),
+            diagnostic: None,
+        };
+        global_unavailable.options[0].provenance = ConfigOptionProvenanceArtifactV2::Unavailable;
+        let mut tx = pool
+            .begin()
+            .await
+            .expect("global-unavailable transaction should begin");
+        persist_config_artifact_v2_deferred_tx(&mut tx, child.id, "host", global_unavailable)
+            .await
+            .expect("global-unavailable V2 artifact should persist");
+        tx.commit()
+            .await
+            .expect("global-unavailable transaction should commit");
+
+        let selected = select_config_snapshot_v2(&pool, system.id, &child.git_commit_hash)
+            .await
+            .expect("global-unavailable selector should succeed")
+            .expect("global-unavailable selector should exist");
+        assert_eq!(selected.lifecycle, SnapshotLifecycle::Available);
+        assert!(matches!(
+            selected.comparison,
+            ConfigComparisonStateV2::Unavailable {
+                reason: ConfigComparisonUnavailableReasonV2::SelectedNotComparisonReady,
+                ..
+            }
+        ));
+        let all = query_config_options_page_v2(
+            &pool,
+            system.id,
+            &child.git_commit_hash,
+            "",
+            EvaluatedOptionFilter::All,
+            None,
+            100,
+            0,
+        )
+        .await
+        .expect("global-unavailable All page should succeed");
+        let ConfigOptionsPageQueryV2::Page(all) = all else {
+            panic!("expected global-unavailable All page");
+        };
+        assert_eq!(all.counts.override_unknown, 1);
+        assert_eq!(all.counts.overridden, 0);
+        assert!(matches!(
+            query_config_options_page_v2(
+                &pool,
+                system.id,
+                &child.git_commit_hash,
+                "",
+                EvaluatedOptionFilter::Overridden,
+                None,
+                100,
+                0,
+            )
+            .await
+            .expect("global-unavailable Overridden page should succeed"),
+            ConfigOptionsPageQueryV2::Page(ConfigOptionsPageV2 { total: 0, .. })
+        ));
+
+        let before_selector: Uuid = sqlx::query_scalar(
+            "SELECT current_snapshot_id FROM config_snapshot_selections WHERE commit_id = $1 AND configuration_name = 'host'",
+        )
+        .bind(child.id)
+        .fetch_one(&pool)
+        .await
+        .expect("selector should load before read");
+        let before_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM evaluation_snapshots WHERE commit_id = $1")
+                .bind(child.id)
+                .fetch_one(&pool)
+                .await
+                .expect("snapshot count should load before read");
+        let _ = query_config_options_page_v2(
+            &pool,
+            system.id,
+            &child.git_commit_hash,
+            "unknown",
+            EvaluatedOptionFilter::All,
+            None,
+            1_000,
+            200_000,
+        )
+        .await
+        .expect("side-effect-free bounded read should succeed");
+        let after_selector: Uuid = sqlx::query_scalar(
+            "SELECT current_snapshot_id FROM config_snapshot_selections WHERE commit_id = $1 AND configuration_name = 'host'",
+        )
+        .bind(child.id)
+        .fetch_one(&pool)
+        .await
+        .expect("selector should load after read");
+        let after_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM evaluation_snapshots WHERE commit_id = $1")
+                .bind(child.id)
+                .fetch_one(&pool)
+                .await
+                .expect("snapshot count should load after read");
+        assert_eq!(before_selector, after_selector);
+        assert_eq!(before_count, after_count);
+
+        let first = query_config_options_page_v2(
+            &pool,
+            system.id,
+            &child.git_commit_hash,
+            "",
+            EvaluatedOptionFilter::All,
+            None,
+            1,
+            0,
+        )
+        .await
+        .expect("first token page should succeed");
+        let ConfigOptionsPageQueryV2::Page(first) = first else {
+            panic!("expected first token page");
+        };
+        let token = first.snapshot_token;
+        let mut replacement_tx = pool
+            .begin()
+            .await
+            .expect("replacement transaction should begin");
+        persist_config_artifact_v2_deferred_tx(
+            &mut replacement_tx,
+            child.id,
+            "host",
+            v2_reader_artifact(
+                child.id,
+                vec![v2_option(&["services", "replacement"], "new")],
+            ),
+        )
+        .await
+        .expect("replacement V2 artifact should persist");
+        replacement_tx
+            .commit()
+            .await
+            .expect("replacement transaction should commit");
+        assert!(matches!(
+            query_config_options_page_v2(
+                &pool,
+                system.id,
+                &child.git_commit_hash,
+                "",
+                EvaluatedOptionFilter::All,
+                Some(&token),
+                1,
+                1,
+            )
+            .await
+            .expect("stale selected continuation should classify"),
+            ConfigOptionsPageQueryV2::SnapshotChanged
+        ));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn v2_reader_rejects_unready_baseline_and_stale_baseline_token(pool: PgPool) {
+        let (system, parent, child) = v2_reader_history_fixture(&pool).await;
+        let mut parent_artifact =
+            v2_reader_artifact(parent.id, vec![v2_option(&["services", "parent"], "old")]);
+        parent_artifact.provenance_state = ConfigProvenanceArtifactStateV2::Available {
+            adapter_version: 1,
+            target_lib_version: None,
+            target_module_system_path: None,
+            provenance_digest: "b".repeat(64),
+            definition_value_enrichment: DefinitionValueArtifactStateV2::Unavailable {
+                reason_code: "stage2_unavailable".to_string(),
+                diagnostic: None,
+            },
+        };
+        if let ConfigOptionProvenanceArtifactV2::Available { definitions, .. } =
+            &mut parent_artifact.options[0].provenance
+        {
+            definitions[0].value = None;
+        }
+        let mut parent_tx = pool.begin().await.expect("parent transaction should begin");
+        persist_config_artifact_v2_deferred_tx(&mut parent_tx, parent.id, "host", parent_artifact)
+            .await
+            .expect("unready parent artifact should persist");
+        parent_tx
+            .commit()
+            .await
+            .expect("parent transaction should commit");
+        let mut child_tx = pool.begin().await.expect("child transaction should begin");
+        persist_config_artifact_v2_deferred_tx(
+            &mut child_tx,
+            child.id,
+            "host",
+            v2_reader_artifact(child.id, vec![v2_option(&["services", "child"], "new")]),
+        )
+        .await
+        .expect("ready child artifact should persist");
+        child_tx
+            .commit()
+            .await
+            .expect("child transaction should commit");
+        let unready = query_config_options_page_v2(
+            &pool,
+            system.id,
+            &child.git_commit_hash,
+            "",
+            EvaluatedOptionFilter::Changed,
+            None,
+            100,
+            0,
+        )
+        .await
+        .expect("unready baseline read should succeed");
+        let ConfigOptionsPageQueryV2::Page(unready) = unready else {
+            panic!("expected unready baseline page");
+        };
+        assert!(matches!(
+            unready.selected.comparison,
+            ConfigComparisonStateV2::Unavailable {
+                reason: ConfigComparisonUnavailableReasonV2::BaselineNotComparisonReady,
+                ..
+            }
+        ));
+        assert_eq!(unready.counts.changed, None);
+        assert_eq!(unready.total, 0);
+
+        let mut ready_parent_tx = pool
+            .begin()
+            .await
+            .expect("ready parent replacement should begin");
+        persist_config_artifact_v2_deferred_tx(
+            &mut ready_parent_tx,
+            parent.id,
+            "host",
+            v2_reader_artifact(parent.id, vec![v2_option(&["services", "parent"], "ready")]),
+        )
+        .await
+        .expect("ready parent replacement should persist");
+        ready_parent_tx
+            .commit()
+            .await
+            .expect("ready parent replacement should commit");
+        let mut ready_child_tx = pool
+            .begin()
+            .await
+            .expect("ready child replacement should begin");
+        persist_config_artifact_v2_deferred_tx(
+            &mut ready_child_tx,
+            child.id,
+            "host",
+            v2_reader_artifact(child.id, vec![v2_option(&["services", "child"], "ready")]),
+        )
+        .await
+        .expect("ready child replacement should persist");
+        ready_child_tx
+            .commit()
+            .await
+            .expect("ready child replacement should commit");
+        let ready_child = query_config_options_page_v2(
+            &pool,
+            system.id,
+            &child.git_commit_hash,
+            "",
+            EvaluatedOptionFilter::All,
+            None,
+            1,
+            0,
+        )
+        .await
+        .expect("ready child page should succeed");
+        let ConfigOptionsPageQueryV2::Page(ready_child) = ready_child else {
+            panic!("expected ready child page");
+        };
+        let token = ready_child.snapshot_token;
+        let mut parent_replacement_tx = pool
+            .begin()
+            .await
+            .expect("second parent replacement should begin");
+        persist_config_artifact_v2_deferred_tx(
+            &mut parent_replacement_tx,
+            parent.id,
+            "host",
+            v2_reader_artifact(parent.id, vec![v2_option(&["services", "parent"], "newer")]),
+        )
+        .await
+        .expect("second parent replacement should persist");
+        parent_replacement_tx
+            .commit()
+            .await
+            .expect("second parent replacement should commit");
+        assert!(matches!(
+            query_config_options_page_v2(
+                &pool,
+                system.id,
+                &child.git_commit_hash,
+                "",
+                EvaluatedOptionFilter::All,
+                Some(&token),
+                1,
+                1,
+            )
+            .await
+            .expect("stale baseline continuation should classify"),
+            ConfigOptionsPageQueryV2::SnapshotChanged
+        ));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn v2_reader_fails_closed_for_uncertified_available_artifacts(pool: PgPool) {
+        let (system, _, child) = v2_reader_history_fixture(&pool).await;
+        let mut tx = pool
+            .begin()
+            .await
+            .expect("corruption fixture transaction should begin");
+        persist_config_artifact_v2_deferred_tx(
+            &mut tx,
+            child.id,
+            "host",
+            v2_reader_artifact(child.id, vec![v2_option(&["services", "corrupt"], "value")]),
+        )
+        .await
+        .expect("corruption fixture artifact should persist");
+        tx.commit()
+            .await
+            .expect("corruption fixture transaction should commit");
+        disable_evaluation_immutability_for_corruption_fixture(&pool).await;
+        sqlx::query(
+            "UPDATE evaluation_snapshots SET integrity_version = 1 WHERE commit_id = $1 AND configuration_name = 'host'",
+        )
+        .bind(child.id)
+        .execute(&pool)
+        .await
+        .expect("corruption fixture should be mutable");
+        let persisted_integrity: i16 = sqlx::query_scalar(
+            "SELECT integrity_version FROM evaluation_snapshots WHERE commit_id = $1 AND configuration_name = 'host'",
+        )
+        .bind(child.id)
+        .fetch_one(&pool)
+        .await
+        .expect("corruption fixture integrity should load");
+        assert_eq!(persisted_integrity, 1);
+
+        let selected = select_config_snapshot_v2(&pool, system.id, &child.git_commit_hash)
+            .await
+            .expect("corrupt selector should succeed")
+            .expect("corrupt selector should exist");
+        assert_eq!(selected.lifecycle, SnapshotLifecycle::Unavailable);
+        let page = query_config_options_page_v2(
+            &pool,
+            system.id,
+            &child.git_commit_hash,
+            "",
+            EvaluatedOptionFilter::All,
+            None,
+            100,
+            0,
+        )
+        .await
+        .expect("corrupt page should classify");
+        let ConfigOptionsPageQueryV2::Page(page) = page else {
+            panic!("expected corrupt page");
+        };
+        assert_eq!(page.selected.lifecycle, SnapshotLifecycle::Unavailable);
+        assert!(page.options.is_empty());
+        assert_eq!(page.counts.all, 0);
     }
 
     async fn v2_carrier(pool: &PgPool, configuration_name: &str) -> (i32, i32) {

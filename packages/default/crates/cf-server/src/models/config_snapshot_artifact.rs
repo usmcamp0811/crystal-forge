@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+use super::config_inspector::option_key as canonical_option_key;
 use super::config_inspector::{
     AssembledConfigInspection, AssembledConfigProvenanceState, AssembledDefinition,
     AssembledOption, AssembledOptionProvenance, DefinitionValueEnrichmentState, InspectionMetadata,
@@ -293,6 +294,73 @@ impl ConfigInspectionArtifactV2 {
             }
         )
     }
+}
+
+/// Reconstructs one V2 option from its authoritative identity and persisted local payload.
+///
+/// The database stores `option_key` and `path_components` beside a local payload
+/// that intentionally omits both fields. This helper restores the identity for
+/// semantic readers and rejects payloads that do not match the exact V2 shape.
+pub(crate) fn config_option_v2_from_persisted(
+    option_key: String,
+    path_components: Vec<String>,
+    mut payload: Value,
+) -> Result<ConfigOptionArtifactV2> {
+    if path_components.is_empty() || path_components.iter().any(String::is_empty) {
+        bail!("persisted V2 option path is empty");
+    }
+    if canonical_option_key(&path_components) != option_key {
+        bail!("persisted V2 option key does not match path components");
+    }
+
+    let object = payload
+        .as_object_mut()
+        .context("persisted V2 option payload is not an object")?;
+    let expected = ["metadata", "effective_value", "provenance"];
+    if object.len() != expected.len() || expected.iter().any(|key| !object.contains_key(*key)) {
+        bail!("persisted V2 option payload has an invalid local shape");
+    }
+
+    let provenance = object
+        .get_mut("provenance")
+        .and_then(Value::as_object_mut)
+        .context("persisted V2 option provenance is not an object")?;
+    if provenance.get("state").and_then(Value::as_str) == Some("available") {
+        let definitions = provenance
+            .get_mut("definitions")
+            .and_then(Value::as_array_mut)
+            .context("persisted V2 definitions are not an array")?;
+        for definition in definitions {
+            let definition = definition
+                .as_object_mut()
+                .context("persisted V2 definition is not an object")?;
+            if definition.contains_key("option_key") {
+                bail!("persisted V2 definition contains an unexpected option key");
+            }
+            definition.insert("option_key".to_string(), Value::String(option_key.clone()));
+        }
+    }
+
+    let mut complete = object.clone();
+    complete.insert("option_key".to_string(), Value::String(option_key.clone()));
+    complete.insert(
+        "path_components".to_string(),
+        Value::Array(path_components.iter().cloned().map(Value::String).collect()),
+    );
+    let option: ConfigOptionArtifactV2 = serde_json::from_value(Value::Object(complete))
+        .context("persisted V2 option payload failed semantic decoding")?;
+    if option.option_key != option_key || option.path_components != path_components {
+        bail!("persisted V2 option identity changed during decoding");
+    }
+    if let ConfigOptionProvenanceArtifactV2::Available { definitions, .. } = &option.provenance {
+        if definitions
+            .iter()
+            .any(|definition| definition.option_key != option_key)
+        {
+            bail!("persisted V2 definition owner does not match option identity");
+        }
+    }
+    Ok(option)
 }
 
 fn redact_option(mut option: ConfigOptionArtifactV2) -> ConfigOptionArtifactV2 {
@@ -1109,6 +1177,56 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn persisted_decoder_preserves_exact_path_component_collisions() {
+        let first_path = vec!["foo".to_string(), "bar.baz".to_string()];
+        let second_path = vec!["foo".to_string(), "bar".to_string(), "baz".to_string()];
+        let first = ConfigOptionArtifactV2 {
+            option_key: canonical_option_key(&first_path),
+            path_components: first_path.clone(),
+            metadata: ConfigOptionMetadataArtifactV2::Failed {
+                error: SafeEvaluationError {
+                    code: "metadata_failed".to_string(),
+                    message: "metadata unavailable".to_string(),
+                },
+            },
+            effective_value: SafeOptionValue::Scalar(json!("first")),
+            provenance: ConfigOptionProvenanceArtifactV2::Unavailable,
+        };
+        let second = ConfigOptionArtifactV2 {
+            option_key: canonical_option_key(&second_path),
+            path_components: second_path.clone(),
+            metadata: first.metadata.clone(),
+            effective_value: SafeOptionValue::Scalar(json!("second")),
+            provenance: ConfigOptionProvenanceArtifactV2::Unavailable,
+        };
+
+        let first_decoded = config_option_v2_from_persisted(
+            first.option_key.clone(),
+            first_path.clone(),
+            ConfigInspectionArtifactV2::option_content_payload(&first),
+        )
+        .expect("first exact path should decode");
+        let second_decoded = config_option_v2_from_persisted(
+            second.option_key.clone(),
+            second_path.clone(),
+            ConfigInspectionArtifactV2::option_content_payload(&second),
+        )
+        .expect("second exact path should decode");
+
+        assert_ne!(first.option_key, second.option_key);
+        assert_eq!(first_decoded.path_components, first_path);
+        assert_eq!(second_decoded.path_components, second_path);
+        assert!(
+            config_option_v2_from_persisted(
+                first.option_key,
+                second_decoded.path_components,
+                ConfigInspectionArtifactV2::option_content_payload(&first_decoded),
+            )
+            .is_err()
+        );
     }
 
     #[test]
