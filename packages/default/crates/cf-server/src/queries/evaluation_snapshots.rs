@@ -365,7 +365,7 @@ async fn persist_config_artifact_v2_with_content_limit_tx(
     if certified.rows_affected() != 1 {
         bail!("persisted V2 artifact failed complete integrity validation");
     }
-    advance_snapshot_selection_tx(tx, commit_id, configuration_name, snapshot_id).await?;
+    advance_config_snapshot_selection_v2_tx(tx, commit_id, configuration_name, snapshot_id).await?;
     Ok(snapshot_id)
 }
 
@@ -455,7 +455,7 @@ async fn persist_oversized_config_artifact_v2(
     .bind(provenance_state)
     .fetch_one(&mut **tx)
     .await?;
-    advance_snapshot_selection_tx(tx, commit_id, configuration_name, snapshot_id).await?;
+    advance_config_snapshot_selection_v2_tx(tx, commit_id, configuration_name, snapshot_id).await?;
     Ok(snapshot_id)
 }
 
@@ -778,6 +778,29 @@ async fn advance_snapshot_selection_tx(
     sqlx::query(
         r#"
         INSERT INTO evaluation_snapshot_selections (
+            commit_id, configuration_name, current_snapshot_id, updated_at
+        ) VALUES ($1, $2, $3, now())
+        ON CONFLICT (commit_id, configuration_name) DO UPDATE
+        SET current_snapshot_id = EXCLUDED.current_snapshot_id, updated_at = now()
+        "#,
+    )
+    .bind(commit_id)
+    .bind(configuration_name)
+    .bind(snapshot_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn advance_config_snapshot_selection_v2_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    commit_id: i32,
+    configuration_name: &str,
+    snapshot_id: Uuid,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO config_snapshot_selections (
             commit_id, configuration_name, current_snapshot_id, updated_at
         ) VALUES ($1, $2, $3, now())
         ON CONFLICT (commit_id, configuration_name) DO UPDATE
@@ -2575,8 +2598,12 @@ pub async fn reclaim_orphaned_snapshot_content(pool: &PgPool) -> Result<Snapshot
                 WHERE selection.current_snapshot_id = candidate.id
             )
               AND NOT EXISTS (
-                SELECT 1 FROM evaluation_generation_snapshots retained
-                WHERE retained.snapshot_id = candidate.id
+                  SELECT 1 FROM config_snapshot_selections selection
+                  WHERE selection.current_snapshot_id = candidate.id
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM evaluation_generation_snapshots retained
+                  WHERE retained.snapshot_id = candidate.id
             )
               AND NOT EXISTS (
                 SELECT 1 FROM pending_system_deployments deployment
@@ -9819,6 +9846,14 @@ mod tests {
     }
 
     async fn v2_carrier(pool: &PgPool, configuration_name: &str) -> (i32, i32) {
+        v2_carrier_at_path(pool, configuration_name, "/nix/store/carrier.drv").await
+    }
+
+    async fn v2_carrier_at_path(
+        pool: &PgPool,
+        configuration_name: &str,
+        derivation_path: &str,
+    ) -> (i32, i32) {
         let flake_id: i32 =
             sqlx::query_scalar("INSERT INTO flakes (name, repo_url) VALUES ($1, $2) RETURNING id")
                 .bind(format!("v2-writer-{}", Uuid::new_v4().simple()))
@@ -9845,14 +9880,597 @@ mod tests {
         .await
         .expect("age V2 writer commit evaluation timestamp");
         sqlx::query(
-            "INSERT INTO derivations (commit_id, derivation_type, derivation_name, derivation_path, status_id, attempt_count) VALUES ($1, 'nixos', $2, '/nix/store/carrier.drv', 1, 0)",
+            "INSERT INTO derivations (commit_id, derivation_type, derivation_name, derivation_path, status_id, attempt_count) VALUES ($1, 'nixos', $2, $3, 1, 0)",
         )
         .bind(commit_id)
         .bind(configuration_name)
+        .bind(derivation_path)
         .execute(pool)
         .await
         .expect("insert V2 writer carrier");
         (commit_id, flake_id)
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn v2_selection_isolation_preserves_primary_and_replaces_targeted_attempts(pool: PgPool) {
+        let (commit_id, _) = v2_carrier(&pool, "host").await;
+        let mut tx = pool.begin().await.expect("begin primary V1 transaction");
+        let primary_id = persist_available_snapshot_tx(
+            &mut tx,
+            commit_id,
+            "host",
+            vec![option("services.primary", json!(true))],
+        )
+        .await
+        .expect("persist primary V1 snapshot");
+        tx.commit().await.expect("commit primary V1 transaction");
+
+        let mut tx = pool.begin().await.expect("begin available V2 transaction");
+        let available_id = persist_config_artifact_v2_tx(
+            &mut tx,
+            commit_id,
+            "host",
+            v2_artifact(vec![v2_option(&["services", "targeted"], "available")]),
+        )
+        .await
+        .expect("persist available V2 snapshot");
+        tx.commit().await.expect("commit available V2 transaction");
+
+        let primary_after_available: Uuid = sqlx::query_scalar(
+            "SELECT current_snapshot_id FROM evaluation_snapshot_selections WHERE commit_id = $1 AND configuration_name = 'host'",
+        )
+        .bind(commit_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load primary selector after available V2");
+        let targeted_after_available: Uuid = sqlx::query_scalar(
+            "SELECT current_snapshot_id FROM config_snapshot_selections WHERE commit_id = $1 AND configuration_name = 'host'",
+        )
+        .bind(commit_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load targeted selector after available V2");
+        assert_eq!(primary_after_available, primary_id);
+        assert_eq!(targeted_after_available, available_id);
+
+        let mut tx = pool
+            .begin()
+            .await
+            .expect("begin unavailable V2 transaction");
+        let unavailable_id = persist_config_artifact_v2_with_content_limit_tx(
+            &mut tx,
+            commit_id,
+            "host",
+            v2_artifact(vec![v2_option(&["services", "targeted"], "unavailable")]),
+            1,
+        )
+        .await
+        .expect("persist unavailable V2 snapshot");
+        tx.commit()
+            .await
+            .expect("commit unavailable V2 transaction");
+
+        let selectors: (Uuid, Uuid) = sqlx::query_as(
+            "SELECT primary_selection.current_snapshot_id, config_selection.current_snapshot_id
+             FROM evaluation_snapshot_selections primary_selection
+             JOIN config_snapshot_selections config_selection
+               ON config_selection.commit_id = primary_selection.commit_id
+              AND config_selection.configuration_name = primary_selection.configuration_name
+             WHERE primary_selection.commit_id = $1 AND primary_selection.configuration_name = 'host'",
+        )
+        .bind(commit_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load selectors after unavailable V2");
+        assert_eq!(selectors.0, primary_id);
+        assert_eq!(selectors.1, unavailable_id);
+
+        let versions: Vec<(Uuid, i32, i16, String)> = sqlx::query_as(
+            "SELECT id, schema_version, integrity_version, lifecycle FROM evaluation_snapshots WHERE id IN ($1, $2, $3) ORDER BY created_at",
+        )
+        .bind(primary_id)
+        .bind(available_id)
+        .bind(unavailable_id)
+        .fetch_all(&pool)
+        .await
+        .expect("load selector isolation artifact versions");
+        assert_eq!(versions[0].1, 1);
+        assert_eq!(versions[0].2, 1);
+        assert_eq!(versions[1].1, 2);
+        assert_eq!(versions[1].2, 2);
+        assert_eq!(versions[2].1, 2);
+        assert_eq!(versions[2].2, 0);
+        assert_eq!(versions[2].3, "unavailable");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn migration_0251_repairs_intermediate_contaminated_selectors(pool: PgPool) {
+        let (commit_id, _) = v2_carrier(&pool, "host").await;
+        let mut tx = pool.begin().await.expect("begin V1 transaction");
+        let primary_v1_id = persist_available_snapshot_tx(
+            &mut tx,
+            commit_id,
+            "host",
+            vec![option("services.primary", json!(true))],
+        )
+        .await
+        .expect("persist V1 primary snapshot");
+        tx.commit().await.expect("commit V1 transaction");
+
+        let mut tx = pool.begin().await.expect("begin available V2 transaction");
+        let available_v2_id = persist_config_artifact_v2_tx(
+            &mut tx,
+            commit_id,
+            "host",
+            v2_artifact(vec![v2_option(&["services", "targeted"], "available")]),
+        )
+        .await
+        .expect("persist available V2 snapshot");
+        tx.commit().await.expect("commit available V2 transaction");
+
+        let mut tx = pool
+            .begin()
+            .await
+            .expect("begin unavailable V2 transaction");
+        let unavailable_v2_id = persist_config_artifact_v2_with_content_limit_tx(
+            &mut tx,
+            commit_id,
+            "host",
+            v2_artifact(vec![v2_option(&["services", "targeted"], "unavailable")]),
+            1,
+        )
+        .await
+        .expect("persist unavailable V2 snapshot");
+        tx.commit()
+            .await
+            .expect("commit unavailable V2 transaction");
+
+        let v1_only_path = format!("/nix/store/v1-only-{}.drv", Uuid::new_v4().simple());
+        let (v1_only_commit_id, _) = v2_carrier_at_path(&pool, "v1-only", &v1_only_path).await;
+        let mut tx = pool.begin().await.expect("begin V1-only transaction");
+        let v1_only_id = persist_available_snapshot_tx(
+            &mut tx,
+            v1_only_commit_id,
+            "v1-only",
+            vec![option("services.primary", json!(true))],
+        )
+        .await
+        .expect("persist V1-only snapshot");
+        tx.commit().await.expect("commit V1-only transaction");
+
+        let v2_only_path = format!("/nix/store/v2-only-{}.drv", Uuid::new_v4().simple());
+        let (v2_only_commit_id, _) = v2_carrier_at_path(&pool, "v2-only", &v2_only_path).await;
+        let mut v2_only_artifact =
+            v2_artifact(vec![v2_option(&["services", "targeted"], "only-v2")]);
+        v2_only_artifact.carrier_drv_path = v2_only_path;
+        let mut tx = pool.begin().await.expect("begin V2-only transaction");
+        let v2_only_id =
+            persist_config_artifact_v2_tx(&mut tx, v2_only_commit_id, "v2-only", v2_only_artifact)
+                .await
+                .expect("persist V2-only snapshot");
+        tx.commit().await.expect("commit V2-only transaction");
+
+        let snapshot_ids = vec![
+            primary_v1_id,
+            available_v2_id,
+            unavailable_v2_id,
+            v1_only_id,
+            v2_only_id,
+        ];
+        let before: Vec<(Uuid, i32, i16, String, i32, i32, i64)> = sqlx::query_as(
+            "SELECT id, schema_version, integrity_version, lifecycle, option_count, module_count, content_bytes
+             FROM evaluation_snapshots WHERE id = ANY($1) ORDER BY id",
+        )
+        .bind(&snapshot_ids)
+        .fetch_all(&pool)
+        .await
+        .expect("load pre-migration artifact state");
+
+        // Recreate the intermediate state produced before migration 0251:
+        // the V2 selector table and both selector guards do not exist, and a
+        // V2 artifact contaminates the primary selector.
+        for statement in [
+            "DROP TRIGGER config_snapshot_selections_v2_only ON config_snapshot_selections",
+            "DROP TRIGGER evaluation_snapshot_selections_v1_only ON evaluation_snapshot_selections",
+            "DROP FUNCTION validate_config_snapshot_selection_v2()",
+            "DROP FUNCTION validate_primary_evaluation_snapshot_selection_v1()",
+            "DROP TABLE config_snapshot_selections",
+        ] {
+            sqlx::query(statement)
+                .execute(&pool)
+                .await
+                .expect("remove migration 0251 objects for upgrade fixture");
+        }
+        sqlx::query(
+            "UPDATE evaluation_snapshot_selections SET current_snapshot_id = $1
+             WHERE commit_id = $2 AND configuration_name = 'host'",
+        )
+        .bind(unavailable_v2_id)
+        .bind(commit_id)
+        .execute(&pool)
+        .await
+        .expect("contaminate primary selector with latest V2 attempt");
+        sqlx::query(
+            "INSERT INTO evaluation_snapshot_selections
+             (commit_id, configuration_name, current_snapshot_id)
+             VALUES ($1, 'v2-only', $2)",
+        )
+        .bind(v2_only_commit_id)
+        .bind(v2_only_id)
+        .execute(&pool)
+        .await
+        .expect("create V2-only contaminated primary selector");
+
+        sqlx::raw_sql(include_str!(
+            "../../migrations/0251_config_snapshot_selection_isolation.sql"
+        ))
+        .execute(&pool)
+        .await
+        .expect("apply migration 0251 to intermediate state");
+
+        let repaired_primary: Uuid = sqlx::query_scalar(
+            "SELECT current_snapshot_id FROM evaluation_snapshot_selections
+             WHERE commit_id = $1 AND configuration_name = 'host'",
+        )
+        .bind(commit_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load repaired primary selector");
+        assert_eq!(repaired_primary, primary_v1_id);
+
+        let config_current: Uuid = sqlx::query_scalar(
+            "SELECT current_snapshot_id FROM config_snapshot_selections
+             WHERE commit_id = $1 AND configuration_name = 'host'",
+        )
+        .bind(commit_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load backfilled Config selector");
+        assert_eq!(config_current, unavailable_v2_id);
+
+        let v1_only_primary: Uuid = sqlx::query_scalar(
+            "SELECT current_snapshot_id FROM evaluation_snapshot_selections
+             WHERE commit_id = $1 AND configuration_name = 'v1-only'",
+        )
+        .bind(v1_only_commit_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load unchanged V1 selector");
+        assert_eq!(v1_only_primary, v1_only_id);
+
+        let v2_only_config: Uuid = sqlx::query_scalar(
+            "SELECT current_snapshot_id FROM config_snapshot_selections
+             WHERE commit_id = $1 AND configuration_name = 'v2-only'",
+        )
+        .bind(v2_only_commit_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load V2-only Config selector");
+        assert_eq!(v2_only_config, v2_only_id);
+        let v2_only_primary: Option<Uuid> = sqlx::query_scalar(
+            "SELECT current_snapshot_id FROM evaluation_snapshot_selections
+             WHERE commit_id = $1 AND configuration_name = 'v2-only'",
+        )
+        .bind(v2_only_commit_id)
+        .fetch_optional(&pool)
+        .await
+        .expect("load repaired V2-only primary selector");
+        assert_eq!(v2_only_primary, None);
+
+        let after: Vec<(Uuid, i32, i16, String, i32, i32, i64)> = sqlx::query_as(
+            "SELECT id, schema_version, integrity_version, lifecycle, option_count, module_count, content_bytes
+             FROM evaluation_snapshots WHERE id = ANY($1) ORDER BY id",
+        )
+        .bind(&snapshot_ids)
+        .fetch_all(&pool)
+        .await
+        .expect("load post-migration artifact state");
+        assert_eq!(after, before);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn selector_schema_enforcement_rejects_wrong_schema_and_target(pool: PgPool) {
+        let (commit_id, _) = v2_carrier(&pool, "host").await;
+        let mut tx = pool.begin().await.expect("begin V1 transaction");
+        let v1_id = persist_available_snapshot_tx(
+            &mut tx,
+            commit_id,
+            "host",
+            vec![option("services.primary", json!(true))],
+        )
+        .await
+        .expect("persist valid V1 snapshot");
+        tx.commit().await.expect("commit V1 transaction");
+
+        let mut tx = pool.begin().await.expect("begin V2 transaction");
+        let v2_id = persist_config_artifact_v2_tx(
+            &mut tx,
+            commit_id,
+            "host",
+            v2_artifact(vec![v2_option(&["services", "targeted"], "value")]),
+        )
+        .await
+        .expect("persist valid V2 snapshot");
+        tx.commit().await.expect("commit V2 transaction");
+
+        let primary_v2 = sqlx::query(
+            "UPDATE evaluation_snapshot_selections SET current_snapshot_id = $1
+             WHERE commit_id = $2 AND configuration_name = 'host'",
+        )
+        .bind(v2_id)
+        .bind(commit_id)
+        .execute(&pool)
+        .await;
+        assert!(primary_v2.is_err());
+
+        let config_v1 = sqlx::query(
+            "UPDATE config_snapshot_selections SET current_snapshot_id = $1
+             WHERE commit_id = $2 AND configuration_name = 'host'",
+        )
+        .bind(v1_id)
+        .bind(commit_id)
+        .execute(&pool)
+        .await;
+        assert!(config_v1.is_err());
+
+        let other_path = format!("/nix/store/other-{}.drv", Uuid::new_v4().simple());
+        let (other_commit_id, _) = v2_carrier_at_path(&pool, "other", &other_path).await;
+        let mut other_artifact = v2_artifact(vec![v2_option(&["services", "other"], "value")]);
+        other_artifact.carrier_drv_path = other_path;
+        let mut tx = pool.begin().await.expect("begin other V2 transaction");
+        let other_v2_id =
+            persist_config_artifact_v2_tx(&mut tx, other_commit_id, "other", other_artifact)
+                .await
+                .expect("persist other V2 snapshot");
+        tx.commit().await.expect("commit other V2 transaction");
+
+        let mismatched_config = sqlx::query(
+            "INSERT INTO config_snapshot_selections
+             (commit_id, configuration_name, current_snapshot_id)
+             VALUES ($1, 'mismatch', $2)",
+        )
+        .bind(commit_id)
+        .bind(other_v2_id)
+        .execute(&pool)
+        .await;
+        assert!(mismatched_config.is_err());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn v2_persistence_does_not_change_primary_host_delta_corpus(pool: PgPool) {
+        let (commit_id, _) = v2_carrier(&pool, "host-a").await;
+        let mut tx = pool.begin().await.expect("begin host delta V1 transaction");
+        persist_available_snapshot_tx(
+            &mut tx,
+            commit_id,
+            "host-a",
+            vec![option("services.shared", json!(true))],
+        )
+        .await
+        .expect("persist host-a V1 snapshot");
+        persist_available_snapshot_tx(
+            &mut tx,
+            commit_id,
+            "host-b",
+            vec![option("services.shared", json!(false))],
+        )
+        .await
+        .expect("persist host-b V1 snapshot");
+        tx.commit().await.expect("commit host delta V1 transaction");
+
+        let before: Vec<(String, Uuid, Option<i64>)> = sqlx::query_as(
+            "SELECT selection.configuration_name, selection.current_snapshot_id, snapshot.host_delta_count
+             FROM evaluation_snapshot_selections selection
+             JOIN evaluation_snapshots snapshot ON snapshot.id = selection.current_snapshot_id
+             WHERE selection.commit_id = $1 ORDER BY selection.configuration_name",
+        )
+        .bind(commit_id)
+        .fetch_all(&pool)
+        .await
+        .expect("load primary host delta corpus before V2");
+
+        let mut tx = pool.begin().await.expect("begin targeted V2 transaction");
+        persist_config_artifact_v2_tx(
+            &mut tx,
+            commit_id,
+            "host-a",
+            v2_artifact(vec![v2_option(&["services", "targeted"], "value")]),
+        )
+        .await
+        .expect("persist targeted V2 artifact");
+        recompute_host_deltas_tx(&mut tx, commit_id)
+            .await
+            .expect("recompute primary host delta corpus");
+        tx.commit().await.expect("commit targeted V2 transaction");
+
+        let after: Vec<(String, Uuid, Option<i64>)> = sqlx::query_as(
+            "SELECT selection.configuration_name, selection.current_snapshot_id, snapshot.host_delta_count
+             FROM evaluation_snapshot_selections selection
+             JOIN evaluation_snapshots snapshot ON snapshot.id = selection.current_snapshot_id
+             WHERE selection.commit_id = $1 ORDER BY selection.configuration_name",
+        )
+        .bind(commit_id)
+        .fetch_all(&pool)
+        .await
+        .expect("load primary host delta corpus after V2");
+        assert_eq!(after, before);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn config_selector_protects_current_v2_and_allows_replaced_v2_gc(pool: PgPool) {
+        let (commit_id, _) = v2_carrier(&pool, "host").await;
+        let mut tx = pool.begin().await.expect("begin first V2 transaction");
+        let first_id = persist_config_artifact_v2_tx(
+            &mut tx,
+            commit_id,
+            "host",
+            v2_artifact(vec![v2_option(&["services", "targeted"], "first")]),
+        )
+        .await
+        .expect("persist first V2 artifact");
+        tx.commit().await.expect("commit first V2 transaction");
+
+        reclaim_orphaned_snapshot_content(&pool)
+            .await
+            .expect("GC should preserve current V2 artifact");
+        let first_exists: bool =
+            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM evaluation_snapshots WHERE id = $1)")
+                .bind(first_id)
+                .fetch_one(&pool)
+                .await
+                .expect("check current V2 artifact");
+        assert!(first_exists);
+
+        let mut tx = pool
+            .begin()
+            .await
+            .expect("begin replacement V2 transaction");
+        let second_id = persist_config_artifact_v2_tx(
+            &mut tx,
+            commit_id,
+            "host",
+            v2_artifact(vec![v2_option(&["services", "targeted"], "second")]),
+        )
+        .await
+        .expect("persist replacement V2 artifact");
+        tx.commit()
+            .await
+            .expect("commit replacement V2 transaction");
+
+        reclaim_orphaned_snapshot_content(&pool)
+            .await
+            .expect("GC should reclaim replaced V2 artifact");
+        let remaining: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM evaluation_snapshots WHERE id IN ($1, $2) ORDER BY id",
+        )
+        .bind(first_id)
+        .bind(second_id)
+        .fetch_all(&pool)
+        .await
+        .expect("load V2 GC ownership results");
+        assert_eq!(remaining, vec![second_id]);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn deployment_binding_uses_primary_v1_after_targeted_v2_persistence(pool: PgPool) {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let repo_url = format!("https://example.test/selector-isolation-{suffix}.git");
+        let flake = insert_flake(
+            &pool,
+            &format!("selector-isolation-{suffix}"),
+            &repo_url,
+            "main",
+            "cf_systems_only",
+        )
+        .await
+        .expect("flake should persist");
+        let commit_sha = "c".repeat(40);
+        let commit = insert_test_commit(&pool, &repo_url, &commit_sha).await;
+        let key = SigningKey::from_bytes(&[46; 32]);
+        let system = insert_system(
+            &pool,
+            &System {
+                id: Uuid::new_v4(),
+                hostname: format!("selector-isolation-{suffix}"),
+                environment_id: None,
+                is_active: true,
+                public_key: PublicKey::from_verifying_key(key.verifying_key()),
+                flake_id: Some(flake.id),
+                derivation: String::new(),
+                system_configuration_name: Some("host".into()),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                desired_target: None,
+                deployment_policy: "manual".into(),
+            },
+        )
+        .await
+        .expect("system should persist");
+        let derivation = insert_derivation(&pool, Some(&commit), "host", "nixos")
+            .await
+            .expect("derivation should persist");
+        let store_path = format!("/nix/store/{suffix}-selector-isolation");
+        sqlx::query(
+            "UPDATE derivations
+             SET derivation_path = '/nix/store/carrier.drv', store_path = $2,
+                 expected_store_path = $2, cf_agent_enabled = true,
+                 policy_requirements_met = true
+             WHERE id = $1",
+        )
+        .bind(derivation.id)
+        .bind(&store_path)
+        .execute(&pool)
+        .await
+        .expect("deployable derivation should persist");
+        sqlx::query(
+            "INSERT INTO cache_push_jobs
+             (derivation_id, status, completed_at, cache_destination, store_path)
+             VALUES ($1, 'completed', NOW(), 'selector-isolation', $2)",
+        )
+        .bind(derivation.id)
+        .bind(&store_path)
+        .execute(&pool)
+        .await
+        .expect("completed cache push should persist");
+
+        let mut tx = pool
+            .begin()
+            .await
+            .expect("begin primary deployment snapshot");
+        let primary_id = persist_available_snapshot_tx(
+            &mut tx,
+            commit.id,
+            "host",
+            vec![option("system.stateVersion", json!("26.11"))],
+        )
+        .await
+        .expect("persist primary deployment snapshot");
+        tx.commit()
+            .await
+            .expect("commit primary deployment snapshot");
+
+        let mut tx = pool
+            .begin()
+            .await
+            .expect("begin targeted deployment snapshot");
+        let targeted_id = persist_config_artifact_v2_tx(
+            &mut tx,
+            commit.id,
+            "host",
+            v2_artifact(vec![v2_option(&["services", "targeted"], "value")]),
+        )
+        .await
+        .expect("persist targeted deployment snapshot");
+        tx.commit()
+            .await
+            .expect("commit targeted deployment snapshot");
+
+        let queued = crate::queries::systems::queue_manual_deployment_atomic(
+            &pool,
+            system.id,
+            &commit_sha,
+            "selector_isolation_test",
+            &format!("selector-isolation:{suffix}"),
+            "deploy",
+            "manual",
+        )
+        .await
+        .expect("queue deployment through production path");
+        let bound: Option<Uuid> = sqlx::query_scalar(
+            "SELECT evaluation_snapshot_id FROM pending_system_deployments WHERE id = $1",
+        )
+        .bind(queued.deployment_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load deployment snapshot binding");
+        assert_eq!(bound, Some(primary_id));
+        assert_ne!(bound, Some(targeted_id));
     }
 
     #[sqlx::test]
@@ -9998,7 +10616,7 @@ mod tests {
         .expect("count oversized references");
         assert_eq!(reference_count, 0);
         let selected: Uuid = sqlx::query_scalar(
-            "SELECT current_snapshot_id FROM evaluation_snapshot_selections WHERE commit_id = $1 AND configuration_name = 'oversized'",
+            "SELECT current_snapshot_id FROM config_snapshot_selections WHERE commit_id = $1 AND configuration_name = 'oversized'",
         )
         .bind(commit_id)
         .fetch_one(&pool)
@@ -10255,7 +10873,7 @@ mod tests {
         .expect("count aggregate oversized content");
         assert_eq!(content_count, content_count_before);
         let selected: Uuid = sqlx::query_scalar(
-            "SELECT current_snapshot_id FROM evaluation_snapshot_selections WHERE commit_id = $1 AND configuration_name = 'aggregate-oversized'",
+            "SELECT current_snapshot_id FROM config_snapshot_selections WHERE commit_id = $1 AND configuration_name = 'aggregate-oversized'",
         )
         .bind(commit_id)
         .fetch_one(&pool)
