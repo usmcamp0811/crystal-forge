@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-06 18:09'
+updated_date: '2026-09-06 18:11'
 labels:
   - design-parity
   - web-ui
@@ -147,9 +147,7 @@ The `modifiedFiles` metadata is anticipated and non-exhaustive. The implementati
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-Selector-isolation V2 reader core: (1) add a private persisted V2 option decoder in config_snapshot_artifact.rs that restores authoritative option_key/path_components and validates their canonical correspondence; (2) add private/pub(crate) V2 selected-snapshot, comparison-state, counts, row, page, and query result types in evaluation_snapshots.rs; (3) add commit-mode selector and repeatable-read page query using only config_snapshot_selections, constant-time V2 certification checks, explicit first-parent comparison reasons, bounded SQL search/count/paging, exact option_key/path_components joins, tri-state override handling, and domain-separated immutable tokens; (4) add focused model and isolated PostgreSQL reader regressions for path collisions, V2-only selection, unavailable Stage-2/global provenance, valid added/removed/modified comparison, unready baseline, stale selected/baseline tokens, corruption, and side-effect freedom; (5) run only the requested focused checks, format/diff checks, and semantic Nix guards; (6) make one commit and push without changing migrations, V1 readers/writers, deployment/enforcement/host-delta code, API, UI, or evaluator work.
-
-Bounded hardening pass from e1fa022a: (1) make corrupt V2 pages clear comparison/counts/rows; (2) add certified post-corruption regression; (3) execute dynamic LIKE escaping searches for %, _, backslash, and combined literals; (4) add DB-reader structured-path collision, global-provenance, side-effect, and bounds regressions; (5) run the requested focused/Nix checks, commit once as TASK-440: Harden V2 config snapshot reads, and push.
+Bounded V2 Config summary/module-source slice in evaluation_snapshots.rs only: (1) add internal ConfigSummaryV2 and ConfigModuleSourceV2 page/query types; (2) make config_snapshot_token_v2 the shared token authority and resolve current V2 selected/baseline state inside READ ONLY REPEATABLE READ transactions; (3) implement exact carrier derivation lookup using commit/config/type/path with expected_store_path precedence, latest running-state exact drift, and reusable seven_day_drift_status; (4) implement bounded SQL module aggregation from V2 raw definitions using (source_input, source_revision, source_path) identity, active_surviving/priority_discarded counts, nullable paths, and persisted module_count consistency fail-closed behavior; (5) add focused DB-only regressions for carrier decoys, pre-build/post-build facts, drift, lifecycle, stage/global provenance, no V1 fallback, shared/stale tokens, module aggregation/paging, corruption, and side effects; (6) run only requested focused V2/legacy tests, Nix guards, offline check, format/diff checks, clean isolated PostgreSQL, make one commit, and push. Do not modify migrations, API/UI, V1 readers, or runner/job code.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
