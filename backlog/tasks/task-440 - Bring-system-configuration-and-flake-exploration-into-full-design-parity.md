@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-06 16:06'
+updated_date: '2026-09-06 17:07'
 labels:
   - design-parity
   - web-ui
@@ -147,11 +147,7 @@ The `modifiedFiles` metadata is anticipated and non-exhaustive. The implementati
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-Bounded Stage-2 isolated raw-definition value slice: (1) extract the existing provenance replay/index/classification/canonical-digest inputs into the smallest shared Nix helper without forcing raw values in Stage 1; (2) extract the existing config-inspector SafeOptionValue encoder into a shared Nix expression; (3) add config_definition_values.nix with one index carrier and one lazy definition-value job per exact option_key/ordinal, using target mergeDefinitions for single-definition normalization; (4) add private Rust Stage-2 models, expression builder, index/value JSONL reconciliation, digest/version/identity/drvPath validation, and sanitized isolated failures without changing public DTOs or persistence; (5) extend checks/config-inspector with the real nix-eval-jobs Stage-2 fixture and wrapper/encoder assertions; (6) run only focused Rust/Nix/format/check verification, inspect scope, commit once, and push TASK-440-system-config-flake-parity. Do not modify DB, API, UI, queues, primary evaluation, or persistence.
-
-Final Stage-1 single-resolution remediation: update config_inspector.nix to accept only already-resolved `flake` and `configuration`; keep the single outer resolution in build_inspector_expression and pass those bindings to both inspector and provenance; add structural count tests for Stage 1/Stage 2 getFlake usage and no inner selection; run only the requested focused Rust/Nix/evaluator/format/check verification; make one commit on top of 5f331e30 and push without changing broader task scope.
-
-TASK-440 MR !323 test-hardening remediation: in evaluation_snapshots.rs, add a private V2 total-content-limit parameter to the existing writer path while preserving production SNAPSHOT_CONTENT_BYTES_LIMIT; rewrite the aggregate oversize regression with actual redacted payload serialization and explicit per-option/aggregate preconditions; run isolated PostgreSQL focused writer, contract, model, inspector, query, cargo/fmt/diff, and two Nix semantic checks; commit once and push without changing task status or acceptance checkboxes.
+Selector-isolation V2 reader core: (1) add a private persisted V2 option decoder in config_snapshot_artifact.rs that restores authoritative option_key/path_components and validates their canonical correspondence; (2) add private/pub(crate) V2 selected-snapshot, comparison-state, counts, row, page, and query result types in evaluation_snapshots.rs; (3) add commit-mode selector and repeatable-read page query using only config_snapshot_selections, constant-time V2 certification checks, explicit first-parent comparison reasons, bounded SQL search/count/paging, exact option_key/path_components joins, tri-state override handling, and domain-separated immutable tokens; (4) add focused model and isolated PostgreSQL reader regressions for path collisions, V2-only selection, unavailable Stage-2/global provenance, valid added/removed/modified comparison, unready baseline, stale selected/baseline tokens, corruption, and side-effect freedom; (5) run only the requested focused checks, format/diff checks, and semantic Nix guards; (6) make one commit and push without changing migrations, V1 readers/writers, deployment/enforcement/host-delta code, API, UI, or evaluator work.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -229,6 +225,11 @@ author: Codex
 created: 2026-09-06 01:43
 ---
 Bounded semantic assembly slice completed and pushed as `e55eb87a` on TASK-440-system-config-flake-parity. Added pure `assemble_config_inspection` joining validated Stage-1 and Stage-2 results without Nix, JSONL, DB, API, or DTO changes. Preserves explicit metadata/value/provenance/enrichment states, raw definition metadata including nullable source paths, multiple survivors, ordinal identity, and integrity failures. Producer inspection confirmed `definitionsByOption` omits zero-definition options; assembly treats omission as known zero definitions. Verification passed: 37 targeted Config Inspector tests; Config Inspector Nix check; evaluator snapshot isolation check; Nix-dev fmt check; SQLX_OFFLINE cf-server lib check; and diff check. Task remains In Progress; worktree and local/remote heads are clean and equal.
+---
+
+created: 2026-09-06 17:07
+---
+Starting bounded V2 DB-only reader core from accepted selector-isolation commit baaac5de6eff905c1506e5c55fcfbfdb75905a22. Initial inspection found existing V1 commit reader and V1 page code intentionally use evaluation_snapshot_selections and option_path; the new reader will remain separate and use config_snapshot_selections plus V2 identity columns.
 ---
 <!-- COMMENTS:END -->
 
