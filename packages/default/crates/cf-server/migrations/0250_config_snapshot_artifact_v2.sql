@@ -44,8 +44,8 @@ ALTER TABLE evaluation_snapshot_options
     ADD COLUMN option_key text,
     ADD COLUMN path_components text[],
     ALTER COLUMN is_overridden DROP NOT NULL,
-    -- SAFETY: All production V1 writers explicitly supply is_overridden.
-    -- Verified: evaluation_snapshots.rs INSERT statements at lines 341, 6984, 9264, 9303.
+    -- SAFETY: The V1 production snapshot writer explicitly binds is_overridden;
+    -- focused regression coverage protects this contract.
     ALTER COLUMN is_overridden DROP DEFAULT,
     ADD CONSTRAINT evaluation_snapshot_options_v2_identity_pair_check
         CHECK ((option_key IS NULL) = (path_components IS NULL)),
@@ -74,10 +74,13 @@ COMMENT ON COLUMN evaluation_snapshot_options.option_path IS
     'Legacy denormalized compatibility and search projection; schema-V2 identity is option_key plus path_components.';
 
 CREATE FUNCTION evaluation_safe_error_v2_valid(candidate jsonb)
-RETURNS boolean LANGUAGE plpgsql IMMUTABLE STRICT AS $$
+RETURNS boolean LANGUAGE plpgsql IMMUTABLE AS $$
 BEGIN
     -- INVARIANT: Total boolean validator. Returns FALSE for malformed input, never NULL.
     -- Required keys: code (string), message (string).
+    IF candidate IS NULL THEN
+        RETURN false;
+    END IF;
     RETURN COALESCE(
         jsonb_typeof(candidate) = 'object'
         AND candidate ?& ARRAY['code', 'message']
@@ -91,10 +94,13 @@ END;
 $$;
 
 CREATE FUNCTION evaluation_definition_source_v2_valid(candidate jsonb)
-RETURNS boolean LANGUAGE plpgsql IMMUTABLE STRICT AS $$
+RETURNS boolean LANGUAGE plpgsql IMMUTABLE AS $$
 BEGIN
     -- INVARIANT: Total boolean validator. Returns FALSE for malformed input, never NULL.
     -- Required keys: source_path (string), priority (number|null), source_input (string|null), source_revision (string|null).
+    IF candidate IS NULL THEN
+        RETURN false;
+    END IF;
     RETURN COALESCE(
         jsonb_typeof(candidate) = 'object'
         AND candidate ?& ARRAY['source_path', 'priority', 'source_input', 'source_revision']
@@ -112,7 +118,7 @@ END;
 $$;
 
 CREATE FUNCTION evaluation_option_payload_v2_valid(candidate jsonb)
-RETURNS boolean LANGUAGE plpgsql IMMUTABLE STRICT AS $$
+RETURNS boolean LANGUAGE plpgsql IMMUTABLE AS $$
 DECLARE
     definition jsonb;
     expected_ordinal bigint := 0;
@@ -123,6 +129,9 @@ DECLARE
 BEGIN
     -- INVARIANT: Total boolean validator. Returns FALSE for malformed input, never NULL.
     -- Required top-level keys: metadata, effective_value, provenance.
+    IF candidate IS NULL THEN
+        RETURN false;
+    END IF;
     IF jsonb_typeof(candidate) <> 'object'
        OR NOT candidate ?& ARRAY['metadata', 'effective_value', 'provenance']
        OR jsonb_typeof(candidate->'metadata') <> 'object'
