@@ -56,10 +56,11 @@ static HEAVY_NIX_LIMITER: OnceLock<Arc<Semaphore>> = OnceLock::new();
 /// cross-process — the in-process `HEAVY_NIX_LIMITER` semaphore alone cannot
 /// reach the separate hardening worker process.
 ///
-/// The lock is held for the entire duration of bulk evaluation (including
-/// fallback and build-preparation phases) and released by committing the
-/// transaction.  The hardening worker acquires the same lock before starting
-/// a hardening `nix eval` subprocess.
+/// The lock is held for bulk evaluator discovery and standalone fallback
+/// evaluation, then released before dependency-plan preparation. Dependency
+/// planning uses its own bounded in-process concurrency and may overlap a
+/// hardening evaluation. The hardening worker acquires this lock before
+/// starting a hardening `nix eval` subprocess.
 ///
 /// IMPORTANT: If you add a new long-running Nix subprocess that should not
 /// overlap with evaluation or hardening, acquire this advisory lock in
@@ -408,6 +409,28 @@ fn classify_evaluation_failure(message: &str) -> RetryFailureClass {
 fn structured_evaluation_failure(source: anyhow::Error) -> EvaluationFailure {
     let class = classify_evaluation_failure(&format!("{source:#}"));
     EvaluationFailure { source, class }
+}
+
+/// Creates the evaluator-contract error for malformed policy metadata.
+///
+/// A metadata mismatch invalidates the complete evaluation attempt. The
+/// streaming caller returns this error before it persists any derivation or
+/// synthetic evaluation failure, so the outer attempt-failure authority owns
+/// the durable lifecycle. The diagnostic records whether the evaluator also
+/// supplied a derivation path without retaining that path as state.
+fn policy_metadata_protocol_failure(
+    system_name: &str,
+    drv_path: Option<&str>,
+    metadata_error: &str,
+) -> anyhow::Error {
+    anyhow::anyhow!(
+        "evaluator policy metadata contract failure for {system_name} (drvPath {}): {metadata_error}",
+        if drv_path.is_some() {
+            "present"
+        } else {
+            "absent"
+        },
+    )
 }
 
 /// NixEvalJobResult with meta field
@@ -3544,13 +3567,13 @@ async fn evaluate_with_nix_eval_jobs_inner(
     // acquires the advisory lock first.  Both sides holding their own semaphore
     // first would create a classic ABBA deadlock.
     //
-    // The advisory lock transaction is committed at the very end of this
-    // function (after fallback evaluation and build-preparation drain) so the
-    // lock covers the entire bulk-evaluation lifetime, not just the spawn.
+    // The advisory lock transaction is committed after discovery and fallback,
+    // before dependency-plan preparation. Planning has its own bounded
+    // concurrency and is allowed to overlap hardening evaluation.
     //
-    // IMPORTANT: Do not remove this lock or shorten its scope without also
-    // updating `services/hardening_scans.rs::run_hardening_scan` and verifying
-    // that hardening evals can never overlap bulk evaluation.
+    // IMPORTANT: Do not remove this lock or shorten its discovery/fallback
+    // scope without also updating `services/hardening_scans.rs::run_hardening_scan`
+    // and verifying that hardening evals cannot overlap bulk evaluation.
     let mut heavy_nix_db_lock = pool.begin().await?;
     sqlx::query("SELECT pg_advisory_xact_lock($1)")
         .bind(HEAVY_NIX_ADVISORY_LOCK)
@@ -3998,67 +4021,15 @@ async fn evaluate_with_nix_eval_jobs_inner(
                                             build_eligible,
                                         });
                                     } else if let Some(metadata_error) = policy_metadata_error.as_ref() {
-                                        let derivation_target = build_agent_target(
-                                            &flake.repo_url,
-                                            &commit.git_commit_hash,
+                                        // A malformed evaluator metadata contract invalidates the
+                                        // whole attempt. Return before discovery can persist either
+                                        // this drvPath or a synthetic failure; the outer evaluator
+                                        // lifecycle performs the retry/failure CAS.
+                                        return Err(policy_metadata_protocol_failure(
                                             system_name,
-                                        );
-                                        let error_check = PolicyCheckResult::for_evaluation_terminal(
-                                            system_name.clone(),
-                                            assigned_policies,
-                                            EvaluationTerminalOutcome::Error,
+                                            drv_path.as_deref(),
                                             metadata_error,
-                                        );
-                                        if let Some(drv_path) = drv_path.clone() {
-                                            let failed = SuccessfulSystemResult {
-                                                system_name: system_name.clone(),
-                                                derivation_target,
-                                                drv_path,
-                                                expected_store_path: expected_store_path.clone(),
-                                                cf_agent_enabled: None,
-                                                build_eligible: false,
-                                            };
-                                            match persist_evaluated_system(
-                                                pool,
-                                                commit.id,
-                                                expected_attempt,
-                                                &failed,
-                                                &error_check,
-                                                assigned_policies,
-                                            )
-                                            .await?
-                                            {
-                                                SystemPersistenceOutcome::RecordedWithoutBuild { .. }
-                                                | SystemPersistenceOutcome::ExistingBuildJob { .. }
-                                                | SystemPersistenceOutcome::LegacyPathConflict { .. } => {}
-                                                SystemPersistenceOutcome::Cancelled => {
-                                                    return Err(EvaluationCancelled.into());
-                                                }
-                                                SystemPersistenceOutcome::Superseded => {
-                                                    bail!("evaluation attempt was superseded while recording policy parser failure for {system_name}");
-                                                }
-                                                SystemPersistenceOutcome::NeedsBuildPreparation { .. } => {
-                                                    bail!("policy parser failure unexpectedly authorized build preparation for {system_name}");
-                                                }
-                                            }
-                                        } else {
-                                            crate::queries::derivations::record_synthetic_eval_failure(
-                                                pool,
-                                                Some(commit.id),
-                                                system_name,
-                                                "nixos",
-                                                Some(&derivation_target),
-                                                metadata_error,
-                                            )
-                                            .await
-                                            .with_context(|| {
-                                                format!(
-                                                    "Failed to record policy metadata failure for {}",
-                                                    system_name
-                                                )
-                                            })?;
-                                        }
-                                        policy_checks.push(error_check);
+                                        ));
                                     } else {
                                         if has_error {
                                             debug!("⚠️  {} has evaluation error, will not be persisted as success", system_name);
@@ -5301,6 +5272,29 @@ mod tests {
         }
     }
 
+    #[test]
+    fn policy_metadata_protocol_failure_is_attempt_infrastructure_for_both_drv_shapes() {
+        for drv_path in [Some("/nix/store/example-system.drv"), None] {
+            let error = policy_metadata_protocol_failure(
+                "broken-system",
+                drv_path,
+                "evaluator did not emit policy metadata",
+            );
+            let text = error.to_string();
+            assert!(text.contains("evaluator policy metadata contract failure"));
+            assert_eq!(
+                classify_evaluation_failure(&text),
+                RetryFailureClass::Unknown,
+                "metadata protocol failures must use the existing retry-safe Unknown class"
+            );
+            assert_eq!(
+                text.contains("drvPath present"),
+                drv_path.is_some(),
+                "diagnostics must retain only drvPath presence"
+            );
+        }
+    }
+
     use super::{
         CappedOutput, ConfirmedSystemFailure, EvaluationFinalizeOutcome, EvaluationPlan,
         FinalizedDerivation, NixEvalJobResult, NixEvalProcessGuard, SuccessfulSystemResult,
@@ -5309,9 +5303,9 @@ mod tests {
         calculate_and_persist_dependency_build_plan_with,
         finalize_evaluated_system_with_calculator, finalize_evaluation_attempt,
         handle_system_build_activation, mock_eval_stage_delay, persist_evaluated_system,
-        prepare_evaluation_dependency_plans_with, prepare_mock_evaluation_dependency_plans,
-        read_capped, register_successful_fallback_system, resolve_mock_systems,
-        should_mock_policy_fail, summarize_commit_metadata,
+        policy_metadata_protocol_failure, prepare_evaluation_dependency_plans_with,
+        prepare_mock_evaluation_dependency_plans, read_capped, register_successful_fallback_system,
+        resolve_mock_systems, should_mock_policy_fail, summarize_commit_metadata,
     };
     use crate::api::models::CancelEvalOutcome;
     use crate::models::deployment_policies::{
