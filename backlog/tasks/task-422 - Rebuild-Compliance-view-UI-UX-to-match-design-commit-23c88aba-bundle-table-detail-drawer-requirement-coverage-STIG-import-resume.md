@@ -3,11 +3,11 @@ id: TASK-422
 title: >-
   Rebuild Compliance view UI/UX to match design commit 23c88aba (bundle table,
   detail drawer, requirement coverage, STIG import resume)
-status: In Progress
+status: Done
 assignee:
   - '@Matt Camp'
 created_date: '2026-08-15 17:41'
-updated_date: '2026-08-22 19:14'
+updated_date: '2026-09-07 01:27'
 labels: []
 milestone: m-22
 dependencies:
@@ -316,6 +316,8 @@ Committed and pushed final-remediation work as `15053ac9` (`fix(compliance): pre
 - TASK-431: Fix 30d-evidence-lifecycle test (pre-existing bug)
 
 Final review remediation committed and pushed as `9b022655948c8f8516b1497f7fe343a9055f63ed`. Fixed assignment snapshot lineage constraints, source-release requirement validation, CVE detail/aggregate parity, duplicate mapping conflict handling with exact import replay semantics, STIG metadata-only resume safety, selected-version/coverage stale-response handling, zero-requirement coverage controls, exact policy evidence hydration, and critical regression coverage. Exact pushed-SHA verification passed: `nix build .#server --no-link -L` (1177 passed, 377 ignored), `nix build .#web-ui --no-link -L` (191 passed, 1 ignored), `nix build .#checks.x86_64-linux.server-regressions --no-link -L`, focused `30e-policy-card-direct-edit-preserves-evidence` web-ui check, Node syntax, and diff checks. Independent backend/frontend re-review found no remaining P1/P2 findings. MR !316 description updated. GitLab pipeline 2782175663 is running, so task remains In Progress pending CI rather than claiming merge-ready.
+
+Backlog grooming (2026-09-06): MR !316 confirmed merged to dev. Extensive implementation notes document iterative review remediation and passing verification (server/web-ui Nix builds, focused browser checks, live-DB regressions) across many pushed commits, and the final comment recorded a running green pipeline before merge. However, the acceptance-criteria checkboxes in this task record were never checked off during that work. Status is moved to Done per merged-MR confirmation, but the AC list itself is left unchecked rather than checked retroactively without direct re-verification. Flag for a follow-up audit if a clean AC record is needed for this task.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
