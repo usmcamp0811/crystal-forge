@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-07 15:01'
+updated_date: '2026-09-07 16:19'
 labels:
   - design-parity
   - web-ui
@@ -232,6 +232,12 @@ Bounded semantic assembly slice completed and pushed as `e55eb87a` on TASK-440-s
 created: 2026-09-06 17:07
 ---
 Starting bounded V2 DB-only reader core from accepted selector-isolation commit baaac5de6eff905c1506e5c55fcfbfdb75905a22. Initial inspection found existing V1 commit reader and V1 page code intentionally use evaluation_snapshot_selections and option_path; the new reader will remain separate and use config_snapshot_selections plus V2 identity columns.
+---
+
+author: openai-agent
+created: 2026-09-07 16:19
+---
+Bounded durable Config Inspector scheduling slice completed and pushed as commit 49520a25 on TASK-440-system-config-flake-parity. Added migration 0252_config_inspection_jobs.sql, exact finalized-target validation, real-mode-only enqueue wiring, V2 same-carrier suppression, active idempotency, terminal retry, mismatch/atomicity/concurrency/lifecycle tests, and non-fatal enqueue failure handling. Verified in the repository Nix environment: 8 focused config-inspection PostgreSQL tests passed; 23 finalization tests passed sequentially; 4 V2 artifact tests passed; 10 V2 remediation tests passed; 1393 cf-server library tests passed with 483 ignored; cargo fmt/check passed; config-inspector and evaluator-snapshot-isolation Nix checks passed; schema/index/trigger audit passed; scoped diff check passed. Full nix flake check was attempted but remains blocked by existing test-flake MAIN_HEAD evaluation errors and unavailable remote cache workers. MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/323
 ---
 <!-- COMMENTS:END -->
 
