@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-07 23:00'
+updated_date: '2026-09-07 23:07'
 labels:
   - design-parity
   - web-ui
@@ -158,6 +158,8 @@ Bounded durable Config Inspector scheduling slice from 0202350f: (1) fetch origi
 Starting bounded V2 Config summary and module-source DB-only reader slice from deb37a5d. Task intentionally remains In Progress; no acceptance criteria are being marked complete.
 
 2026-09-07 remediation verification: Dedicated worktree remains clean relative to origin except the intended uncommitted changes in services/config_inspections.rs and queries/config_inspections.rs. Passed cargo fmt --check, SQLX_OFFLINE cargo check --offline -p cf-server --lib, Config Inspector Nix check, evaluator snapshot isolation Nix check, 41 config_inspector unit tests, final persistence lock-order structural test, and git diff --check. The ignored PostgreSQL advisory-lock regression could not run against the current database because the configured role lacks CREATEDB. The server-regressions Nix check was attempted for an isolated PostgreSQL role but exceeded the 15-minute tool timeout during compilation; no pass is claimed. No additional code changes were needed during this verification pass.
+
+2026-09-07 executor ownership remediation finished. Disposable PostgreSQL 17.11 user-owned cluster verified current_user=postgres with rolcreatedb=true and rolsuper=true. All 17 ignored queries::config_inspections PostgreSQL tests passed, including executor_lock_acquisition_failure_leaves_claim_untouched and executor_persists_stage2_unavailable_v2_atomically; four selector-isolation/publication tests also passed. No production defect exposed, so no further code changes were made. Committed as d4262d03 with the required message and pushed to origin/TASK-440-system-config-flake-parity. Local and remote heads are equal. GitLab pipeline 2827782393 for the exact SHA is running. Disposable PostgreSQL clusters were stopped and ports 55432/55433 have no listener. TASK-440 remains In Progress.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
