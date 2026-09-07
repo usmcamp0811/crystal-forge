@@ -1611,6 +1611,61 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn executor_lock_acquisition_failure_leaves_claim_untouched(pool: PgPool) {
+        let (_, job_id) = make_claimable_job(&pool, "executor-lock-failure").await;
+        let claim = claim_next_config_inspection_job(&pool)
+            .await
+            .expect("job should claim")
+            .expect("claim should exist");
+        let before_primary: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM evaluation_snapshot_selections")
+                .fetch_one(&pool)
+                .await
+                .expect("primary selector count should load");
+        let before_v2: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM evaluation_snapshots WHERE schema_version = 2",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("V2 snapshot count should load");
+
+        let error = crate::services::config_inspections::execute_claimed_config_inspection_with_lock_failure_for_test(
+            &pool,
+            claim.clone(),
+            std::path::Path::new("/definitely/missing/nix-eval-jobs"),
+        )
+        .await
+        .expect_err("injected advisory-lock failure should propagate");
+        assert!(format!("{error:#}").contains("injected execution lock failure"));
+
+        let job = get_config_inspection_job(&pool, job_id)
+            .await
+            .expect("claimed job should load")
+            .expect("claimed job should exist");
+        assert_eq!(job.status, ConfigInspectionJobStatus::Running);
+        assert_eq!(job.execution_id, Some(claim.execution_id));
+        assert!(job.completed_at.is_none());
+        assert!(job.error.is_none());
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM evaluation_snapshot_selections",)
+                .fetch_one(&pool)
+                .await
+                .expect("primary selector count should reload"),
+            before_primary
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM evaluation_snapshots WHERE schema_version = 2",
+            )
+            .fetch_one(&pool)
+            .await
+            .expect("V2 snapshot count should reload"),
+            before_v2
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
     async fn executor_persists_stage2_unavailable_v2_atomically(pool: PgPool) {
         let (commit_id, derivation_id, carrier_drv_path) = fixture(&pool, "executor-success").await;
         let job_id = insert_queued_job(

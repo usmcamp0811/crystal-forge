@@ -5,9 +5,10 @@
 //! primary evaluation and deployment behavior.
 
 use anyhow::{Context, Result, bail};
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 use std::path::Path;
 use std::time::Duration;
+use std::{future::Future, pin::Pin};
 use tokio::process::Command;
 
 use crate::derivations::utils::build_flake_reference;
@@ -27,7 +28,9 @@ use crate::queries::config_inspections::{
     lock_config_inspection_execution_tx,
 };
 use crate::queries::cve_scans::{acquire_execution_lock, release_execution_lock_or_close};
-use crate::queries::evaluation_snapshots::persist_config_artifact_v2_tx;
+use crate::queries::evaluation_snapshots::{
+    lock_snapshot_writer_tx, persist_config_artifact_v2_deferred_tx,
+};
 use crate::security::snapshot_redaction::redact_text;
 
 const STAGE_DEADLINE: Duration = Duration::from_secs(5 * 60);
@@ -83,6 +86,32 @@ pub(crate) async fn execute_claimed_config_inspection_with_program(
     claim: ConfigInspectionExecutionClaim,
     nix_eval_jobs_program: &Path,
 ) -> Result<ConfigInspectionExecutionOutcome> {
+    execute_claimed_config_inspection_with_lock_acquirer(
+        pool,
+        claim,
+        nix_eval_jobs_program,
+        acquire_execution_lock_for_executor,
+    )
+    .await
+}
+
+type ExecutionLockAcquireFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
+type ExecutionLockAcquirer =
+    for<'a> fn(&'a mut PgConnection, uuid::Uuid) -> ExecutionLockAcquireFuture<'a>;
+
+fn acquire_execution_lock_for_executor<'a>(
+    conn: &'a mut PgConnection,
+    execution_id: uuid::Uuid,
+) -> ExecutionLockAcquireFuture<'a> {
+    Box::pin(acquire_execution_lock(conn, execution_id))
+}
+
+async fn execute_claimed_config_inspection_with_lock_acquirer(
+    pool: &PgPool,
+    claim: ConfigInspectionExecutionClaim,
+    nix_eval_jobs_program: &Path,
+    acquire_lock: ExecutionLockAcquirer,
+) -> Result<ConfigInspectionExecutionOutcome> {
     let Some(context) = load_config_inspection_execution_context(pool, &claim).await? else {
         return Ok(ConfigInspectionExecutionOutcome::LostOwnership);
     };
@@ -93,30 +122,60 @@ pub(crate) async fn execute_claimed_config_inspection_with_program(
         .acquire()
         .await
         .context("acquire Config Inspector execution lock connection")?;
-    if let Err(error) = acquire_execution_lock(&mut lock_conn, claim.execution_id).await {
+    if let Err(error) = acquire_lock(&mut lock_conn, claim.execution_id).await {
         // The session state is uncertain after a failed lock acquisition. Do
         // not return the connection to the pool.
         let _ = lock_conn.close().await;
-        return terminalize_failure(
-            pool,
-            &claim,
-            error.context("acquire execution advisory lock"),
-        )
-        .await;
+        return Err(error.context("acquire execution advisory lock"));
     }
 
-    // CONCURRENCY: Recovery can win between the context query and lock
-    // acquisition. The first heartbeat is the final gate before any Nix work.
-    let outcome = execute_with_lock(
+    // CONCURRENCY: The advisory lock alone does not prove that this claim is
+    // still current. Confirm the exact token before loading credentials or
+    // allowing any owned failure terminalization.
+    let outcome = match crate::queries::config_inspections::heartbeat_config_inspection_execution(
         pool,
-        &claim,
-        &target,
-        context.flake_id,
-        nix_eval_jobs_program,
+        claim.job_id,
+        claim.execution_id,
     )
-    .await;
+    .await
+    {
+        Ok(true) => {
+            execute_with_lock(
+                pool,
+                &claim,
+                &target,
+                context.flake_id,
+                nix_eval_jobs_program,
+            )
+            .await
+        }
+        Ok(false) => Ok(ConfigInspectionExecutionOutcome::LostOwnership),
+        Err(error) => Err(error.context("initial Config Inspector ownership heartbeat")),
+    };
     release_execution_lock_or_close(lock_conn, claim.execution_id).await;
     outcome
+}
+
+#[cfg(test)]
+pub(crate) async fn execute_claimed_config_inspection_with_lock_failure_for_test(
+    pool: &PgPool,
+    claim: ConfigInspectionExecutionClaim,
+    nix_eval_jobs_program: &Path,
+) -> Result<ConfigInspectionExecutionOutcome> {
+    fn fail_lock<'a>(
+        _conn: &'a mut PgConnection,
+        _execution_id: uuid::Uuid,
+    ) -> ExecutionLockAcquireFuture<'a> {
+        Box::pin(async { Err(anyhow::anyhow!("injected execution lock failure")) })
+    }
+
+    execute_claimed_config_inspection_with_lock_acquirer(
+        pool,
+        claim,
+        nix_eval_jobs_program,
+        fail_lock,
+    )
+    .await
 }
 
 async fn execute_with_lock(
@@ -126,17 +185,6 @@ async fn execute_with_lock(
     flake_id: i32,
     nix_eval_jobs_program: &Path,
 ) -> Result<ConfigInspectionExecutionOutcome> {
-    if !crate::queries::config_inspections::heartbeat_config_inspection_execution(
-        pool,
-        claim.job_id,
-        claim.execution_id,
-    )
-    .await
-    .context("initial Config Inspector ownership heartbeat")?
-    {
-        return Ok(ConfigInspectionExecutionOutcome::LostOwnership);
-    }
-
     let credentials = match FlakeCredentialEnv::load(pool, flake_id).await {
         Ok(credentials) => credentials,
         Err(error) => {
@@ -336,11 +384,16 @@ async fn persist_artifact_and_complete(
         .begin()
         .await
         .context("begin Config Inspector persistence")?;
+    // INVARIANT: The snapshot-writer advisory lock is the first lock in every
+    // snapshot mutation transaction. The execution row lock follows it.
+    lock_snapshot_writer_tx(&mut tx)
+        .await
+        .context("acquire Config Inspector snapshot writer lock")?;
     if !lock_config_inspection_execution_tx(&mut tx, claim).await? {
         tx.rollback().await.ok();
         return Ok(PersistOutcome::LostOwnership);
     }
-    let snapshot_id = persist_config_artifact_v2_tx(
+    let snapshot_id = persist_config_artifact_v2_deferred_tx(
         &mut tx,
         claim.commit_id,
         &claim.configuration_name,
@@ -406,5 +459,27 @@ mod tests {
         assert_eq!(STAGE_STDOUT_LIMIT, 256 * 1024 * 1024);
         assert_eq!(STAGE_STDERR_LIMIT, 256 * 1024);
         assert_eq!(STAGE_DEADLINE, Duration::from_secs(300));
+    }
+
+    #[test]
+    fn final_persistence_lock_order_is_structurally_guarded() {
+        let source = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/services/config_inspections.rs"
+        ));
+        let persistence = source
+            .split_once("async fn persist_artifact_and_complete")
+            .and_then(|(_, body)| body.split_once("async fn terminalize_failure"))
+            .map(|(body, _)| body)
+            .expect("final persistence helper should remain present");
+        let snapshot_lock = persistence
+            .find("lock_snapshot_writer_tx(&mut tx)")
+            .expect("snapshot writer lock must remain in final persistence");
+        let execution_lock = persistence
+            .find("lock_config_inspection_execution_tx(&mut tx, claim)")
+            .expect("execution row lock must remain in final persistence");
+        assert!(snapshot_lock < execution_lock);
+        assert!(persistence.contains("persist_config_artifact_v2_deferred_tx"));
+        assert!(!persistence.contains("persist_config_artifact_v2_tx"));
     }
 }
