@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-07 16:19'
+updated_date: '2026-09-07 18:54'
 labels:
   - design-parity
   - web-ui
@@ -238,6 +238,12 @@ author: openai-agent
 created: 2026-09-07 16:19
 ---
 Bounded durable Config Inspector scheduling slice completed and pushed as commit 49520a25 on TASK-440-system-config-flake-parity. Added migration 0252_config_inspection_jobs.sql, exact finalized-target validation, real-mode-only enqueue wiring, V2 same-carrier suppression, active idempotency, terminal retry, mismatch/atomicity/concurrency/lifecycle tests, and non-fatal enqueue failure handling. Verified in the repository Nix environment: 8 focused config-inspection PostgreSQL tests passed; 23 finalization tests passed sequentially; 4 V2 artifact tests passed; 10 V2 remediation tests passed; 1393 cf-server library tests passed with 483 ignored; cargo fmt/check passed; config-inspector and evaluator-snapshot-isolation Nix checks passed; schema/index/trigger audit passed; scoped diff check passed. Full nix flake check was attempted but remains blocked by existing test-flake MAIN_HEAD evaluation errors and unavailable remote cache workers. MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/323
+---
+
+author: openai-agent
+created: 2026-09-07 18:54
+---
+Scheduling remediation follow-up committed and pushed as 868d11db. Finalization group: 23/23 passed. Config Inspector scheduling DB tests: 8/8 passed. Four focused V2 selector/persistence tests passed. The two non-metric lifecycle failures were reproduced identically on corrected and pristine 49520a25 worktrees: failed_and_corrupt_snapshots_requeue_with_active_lifecycle (Available vs Unavailable at evaluation_snapshots.rs:5677) and retained_generation_survives_store_metadata_loss_and_blocks_commit_deletion (snapshot finalization should retain the observed generation at evaluation_snapshots.rs:9254). Three metric tests remain unverified because pg_stat_statements is unavailable in the disposable database. Both architectural Nix guards, cargo checks, formatting, and diff checks passed. Task remains In Progress pending maintainer review.
 ---
 <!-- COMMENTS:END -->
 
