@@ -502,6 +502,8 @@ SQL
       models::evaluate_with_policies::tests::terminal_existing_jobs_do_not_require_missing_drv_paths_during_re_evaluation
     run_exact_ignored_lib_test \
       queries::build_jobs::tests::recovery_ignores_planning_attempt_and_uses_released_terminal_plan
+    run_exact_ignored_lib_test \
+      models::evaluate_with_policies::tests::policy_metadata_protocol_failure_leaves_no_partial_planning_state
 
     echo "=== Resolver exact-version/enforcement regressions ==="
     cargo test --offline --package cf-server \

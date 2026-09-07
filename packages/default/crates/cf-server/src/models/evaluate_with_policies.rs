@@ -5240,7 +5240,7 @@ fn summarize_commit_metadata(
 #[cfg(test)]
 mod tests {
     use super::classify_evaluation_failure;
-    use crate::models::retry_policy::RetryFailureClass;
+    use crate::models::retry_policy::{RetryFailureClass, automatic_retry_eligible};
 
     #[test]
     fn evaluation_failures_are_classified_at_source() {
@@ -6360,6 +6360,113 @@ mod tests {
             .bind(flake_id)
             .execute(&pool)
             .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn policy_metadata_protocol_failure_leaves_no_partial_planning_state() {
+        let pool = test_pool().await;
+        cleanup_throwaway_flakes(&pool).await;
+
+        let default_transient_only: bool = sqlx::query_scalar(
+            "SELECT COALESCE((SELECT transient_only FROM automatic_retry_policy WHERE id = 1), TRUE)",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("read default retry policy");
+        assert!(default_transient_only);
+        assert!(!automatic_retry_eligible(
+            default_transient_only,
+            RetryFailureClass::Unknown
+        ));
+
+        for drv_path in [Some("/nix/store/protocol-failure-system.drv"), None] {
+            let flake_id = insert_throwaway_flake(&pool).await;
+            let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+            let attempt = start_eval(&pool, commit_id).await;
+
+            let (attempt_id, initial_barrier, initial_status): (uuid::Uuid, String, String) =
+                sqlx::query_as(
+                    "SELECT id, dependency_plan_barrier, status FROM evaluation_attempts WHERE commit_id = $1 AND attempt_number = $2",
+                )
+                .bind(commit_id)
+                .bind(attempt)
+                .fetch_one(&pool)
+                .await
+                .expect("read started evaluation attempt");
+            assert_eq!(initial_barrier, "planning");
+            assert_eq!(initial_status, "in_progress");
+
+            let protocol_error = policy_metadata_protocol_failure(
+                "protocol-failure-system",
+                drv_path,
+                "evaluator did not emit policy metadata",
+            );
+            let protocol_error_text = protocol_error.to_string();
+            let failure_class = classify_evaluation_failure(&protocol_error_text);
+            assert_eq!(failure_class, RetryFailureClass::Unknown);
+
+            let outcome = mark_commit_evaluation_failed(
+                &pool,
+                commit_id,
+                &protocol_error_text,
+                attempt,
+                failure_class,
+            )
+            .await
+            .expect("route protocol failure through outer failure authority");
+            assert_eq!(outcome, EvalFailureOutcome::PermanentlyFailed);
+
+            let commit_status: String =
+                sqlx::query_scalar("SELECT evaluation_status FROM commits WHERE id = $1")
+                    .bind(commit_id)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("read failed commit status");
+            assert_eq!(commit_status, "failed");
+
+            let attempt_state: (String, String, Option<String>) = sqlx::query_as(
+                "SELECT status, dependency_plan_barrier, failure_class FROM evaluation_attempts WHERE id = $1",
+            )
+            .bind(attempt_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read failed attempt state");
+            assert_eq!(attempt_state.0, "failed");
+            assert_ne!(attempt_state.1, "ready");
+            assert_eq!(attempt_state.2.as_deref(), Some("unknown"));
+
+            let dependency_plan_count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM derivations WHERE commit_id = $1 AND dependency_build_plan_status IS NOT NULL",
+            )
+            .bind(commit_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count dependency plans");
+            let tagged_derivation_count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM derivations WHERE evaluation_attempt_id = $1",
+            )
+            .bind(attempt_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count attempt-tagged derivations");
+
+            assert_eq!(derivation_count(&pool, commit_id).await, 0);
+            assert_eq!(tagged_derivation_count, 0);
+            assert_eq!(dependency_plan_count, 0);
+            assert_eq!(build_job_count(&pool, commit_id).await, 0);
+
+            let queued_or_building_jobs: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM build_jobs bj JOIN derivations d ON d.id = bj.derivation_id WHERE d.commit_id = $1 AND bj.status IN ('queued', 'building')",
+            )
+            .bind(commit_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count queue-visible jobs");
+            assert_eq!(queued_or_building_jobs, 0);
+        }
+
+        cleanup_throwaway_flakes(&pool).await;
     }
 
     // ── Agent-disabled / multiple-strict-policy tests ─────────────────────
