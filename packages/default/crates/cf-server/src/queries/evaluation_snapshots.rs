@@ -2414,6 +2414,12 @@ pub(crate) async fn get_config_module_sources_v2(
 }
 
 /// Returns a bounded V2 module-source page and rejects a stale shared token.
+///
+/// The module aggregation revalidates each persisted provenance object,
+/// definitions array, definition element, status, and source field during the
+/// same repeatable-read scan that builds the page. Any malformed row or count
+/// mismatch makes the selected snapshot unavailable instead of returning a
+/// partial module corpus.
 pub(crate) async fn get_config_module_sources_v2_with_token(
     pool: &PgPool,
     system_id: Uuid,
@@ -2465,50 +2471,126 @@ pub(crate) async fn get_config_module_sources_v2_with_token(
     let rows = if provenance_available {
         sqlx::query(
             r#"
-            WITH module_rows AS (
-                SELECT definition.value->>'source_input' AS source_input,
-                       definition.value->>'source_revision' AS source_revision,
-                       definition.value->>'source_path' AS source_path,
-                       COUNT(DISTINCT item.option_key)::bigint AS option_count,
-                       COUNT(*)::bigint AS definition_count,
-                       COUNT(*) FILTER (
-                           WHERE definition.value->>'status' = 'active_surviving'
-                       )::bigint AS surviving_definition_count,
-                       COUNT(*) FILTER (
-                           WHERE definition.value->>'status' = 'priority_discarded'
-                       )::bigint AS discarded_definition_count,
-                       COUNT(DISTINCT item.option_key) FILTER (
-                           WHERE item.is_overridden IS TRUE
-                       )::bigint AS overridden_option_count
+            WITH selected_options AS (
+                SELECT item.option_path AS option_key,
+                       item.is_overridden,
+                       content.payload
                 FROM evaluation_snapshot_options item
                 JOIN evaluation_option_contents content
                   ON content.digest = item.content_digest
-                 CROSS JOIN LATERAL jsonb_array_elements(
-                     CASE
-                         WHEN jsonb_typeof(
-                             content.payload->'provenance'->'definitions'
-                         ) = 'array'
-                         THEN content.payload->'provenance'->'definitions'
-                         ELSE '[]'::jsonb
-                     END
-                 ) definition(value)
                 WHERE item.snapshot_id = $1
-                  AND (
-                      definition.value->>'source_input' IS NOT NULL
-                      OR definition.value->>'source_revision' IS NOT NULL
-                      OR definition.value->>'source_path' IS NOT NULL
+            ),
+            local_provenance AS (
+                SELECT option_key,
+                       is_overridden,
+                       COALESCE(
+                           jsonb_typeof(payload->'provenance') = 'object'
+                               AND jsonb_typeof(
+                                   payload->'provenance'->'definitions'
+                               ) = 'array',
+                           false
+                       ) AS provenance_shape_valid,
+                       CASE
+                           WHEN jsonb_typeof(payload->'provenance') = 'object'
+                                AND jsonb_typeof(
+                                    payload->'provenance'->'definitions'
+                                ) = 'array'
+                           THEN payload->'provenance'->'definitions'
+                           ELSE '[]'::jsonb
+                       END AS definitions
+                FROM selected_options
+            ),
+            definition_rows AS (
+                SELECT option_key, is_overridden, provenance_shape_valid,
+                       definition.value
+                FROM local_provenance
+                CROSS JOIN LATERAL jsonb_array_elements(definitions) definition(value)
+            ),
+            invalid_rows AS (
+                SELECT option_key
+                FROM local_provenance
+                WHERE NOT provenance_shape_valid
+                UNION ALL
+                SELECT option_key
+                FROM definition_rows
+                WHERE jsonb_typeof(value) <> 'object'
+                   OR COALESCE(jsonb_typeof(value->'status'), '') <> 'string'
+                   OR COALESCE(value->>'status', '') NOT IN (
+                       'active_surviving', 'priority_discarded'
+                   )
+                   OR (
+                       value ? 'source_input'
+                       AND COALESCE(jsonb_typeof(value->'source_input'), '')
+                           NOT IN ('null', 'string')
+                   )
+                   OR (
+                       value ? 'source_revision'
+                       AND COALESCE(jsonb_typeof(value->'source_revision'), '')
+                           NOT IN ('null', 'string')
+                   )
+                   OR (
+                       value ? 'source_path'
+                       AND COALESCE(jsonb_typeof(value->'source_path'), '')
+                           NOT IN ('null', 'string')
+                   )
+            ),
+            valid_definition_rows AS (
+                SELECT option_key, is_overridden, value
+                FROM definition_rows
+                WHERE jsonb_typeof(value) = 'object'
+                  AND jsonb_typeof(value->'status') = 'string'
+                  AND value->>'status' IN (
+                      'active_surviving', 'priority_discarded'
                   )
-                GROUP BY definition.value->>'source_input',
-                         definition.value->>'source_revision',
-                         definition.value->>'source_path'
+                  AND (
+                      NOT (value ? 'source_input')
+                      OR jsonb_typeof(value->'source_input') IN ('null', 'string')
+                  )
+                  AND (
+                      NOT (value ? 'source_revision')
+                      OR jsonb_typeof(value->'source_revision') IN ('null', 'string')
+                  )
+                  AND (
+                      NOT (value ? 'source_path')
+                      OR jsonb_typeof(value->'source_path') IN ('null', 'string')
+                  )
+            ),
+            module_rows AS (
+                SELECT value->>'source_input' AS source_input,
+                       value->>'source_revision' AS source_revision,
+                       value->>'source_path' AS source_path,
+                       COUNT(DISTINCT option_key)::bigint AS option_count,
+                       COUNT(*)::bigint AS definition_count,
+                       COUNT(*) FILTER (
+                           WHERE value->>'status' = 'active_surviving'
+                       )::bigint AS surviving_definition_count,
+                       COUNT(*) FILTER (
+                           WHERE value->>'status' = 'priority_discarded'
+                       )::bigint AS discarded_definition_count,
+                       COUNT(DISTINCT option_key) FILTER (
+                           WHERE is_overridden IS TRUE
+                       )::bigint AS overridden_option_count
+                FROM valid_definition_rows
+                WHERE (
+                    value->>'source_input' IS NOT NULL
+                    OR value->>'source_revision' IS NOT NULL
+                    OR value->>'source_path' IS NOT NULL
+                )
+                GROUP BY value->>'source_input',
+                         value->>'source_revision',
+                         value->>'source_path'
+            ),
+            module_stats AS (
+                SELECT (SELECT COUNT(*)::bigint FROM module_rows) AS total,
+                       (SELECT COUNT(*)::bigint FROM invalid_rows) AS invalid_count
             )
-            SELECT (SELECT COUNT(*)::bigint FROM module_rows) AS total,
+            SELECT module_stats.total, module_stats.invalid_count,
                    page.source_input, page.source_revision, page.source_path,
                    page.option_count, page.definition_count,
                    page.surviving_definition_count,
                    page.discarded_definition_count,
                    page.overridden_option_count
-            FROM (SELECT true) selected_snapshot
+            FROM module_stats
             LEFT JOIN LATERAL (
                 SELECT *
                 FROM module_rows
@@ -2529,15 +2611,20 @@ pub(crate) async fn get_config_module_sources_v2_with_token(
     } else {
         Vec::new()
     };
-    let total = if provenance_available {
+    let (total, invalid_count) = if provenance_available {
         rows.first()
-            .map(|row| row.try_get("total"))
+            .map(|row| {
+                Ok::<_, sqlx::Error>((
+                    row.try_get::<i64, _>("total")?,
+                    row.try_get::<i64, _>("invalid_count")?,
+                ))
+            })
             .transpose()?
-            .unwrap_or(0)
+            .unwrap_or((0, 0))
     } else {
-        0
+        (0, 0)
     };
-    if total != selected.module_count {
+    if invalid_count > 0 || total != selected.module_count {
         selected = unavailable_v2_selected(
             selected,
             "Snapshot data is unavailable or corrupt".to_string(),
@@ -11630,15 +11717,13 @@ mod tests {
     #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
     async fn v2_summary_and_modules_are_bounded_and_fail_closed_for_corruption(pool: PgPool) {
         let (system, _, child) = v2_reader_history_fixture(&pool).await;
+        let mut artifact = v2_module_fixture_artifact(child.id);
+        artifact.options.pop();
+        let corrupt_option_key = artifact.options[0].option_key.clone();
         let mut tx = pool.begin().await.expect("bounds transaction should begin");
-        persist_config_artifact_v2_deferred_tx(
-            &mut tx,
-            child.id,
-            "host",
-            v2_reader_artifact(child.id, vec![v2_option(&["services", "bounded"], "value")]),
-        )
-        .await
-        .expect("bounds artifact should persist");
+        persist_config_artifact_v2_deferred_tx(&mut tx, child.id, "host", artifact)
+            .await
+            .expect("bounds artifact should persist");
         tx.commit().await.expect("bounds transaction should commit");
 
         let ConfigModuleSourcesQueryV2::Page(bounded) = get_config_module_sources_v2(
@@ -11677,12 +11762,17 @@ mod tests {
         );
         assert_eq!(available_modules.total, 1);
         assert_eq!(available_modules.sources.len(), 1);
+        assert_eq!(available_modules.sources[0].option_count, 2);
+        assert_eq!(available_modules.sources[0].definition_count, 4);
+        assert_eq!(available_modules.sources[0].surviving_definition_count, 3);
+        assert_eq!(available_modules.sources[0].discarded_definition_count, 1);
 
         disable_evaluation_immutability_for_corruption_fixture(&pool).await;
         sqlx::query(
-            "UPDATE evaluation_option_contents content SET payload = $2 FROM evaluation_snapshot_options item WHERE item.snapshot_id = $1 AND item.content_digest = content.digest",
+            "UPDATE evaluation_option_contents content SET payload = $3 FROM evaluation_snapshot_options item WHERE item.snapshot_id = $1 AND item.option_path = $2 AND item.content_digest = content.digest",
         )
         .bind(selected_id)
+        .bind(&corrupt_option_key)
         .bind(json!({
             "provenance": {"definitions": {"malformed": true}}
         }))
@@ -11699,13 +11789,81 @@ mod tests {
         // The scalar summary remains available because certification owns the
         // module count; only the requested module corpus is re-aggregated.
         assert_eq!(summary.selected.lifecycle, SnapshotLifecycle::Available);
-        assert_eq!(summary.option_total, 1);
+        assert_eq!(summary.option_total, 2);
         assert_eq!(summary.module_source_total, 1);
         assert!(summary.selected_store_path.is_none());
+        let persisted_module_count: i64 =
+            sqlx::query_scalar("SELECT module_count FROM evaluation_snapshots WHERE id = $1")
+                .bind(selected_id)
+                .fetch_one(&pool)
+                .await
+                .expect("persisted module count should remain certified");
+        assert_eq!(persisted_module_count, 1);
         let ConfigModuleSourcesQueryV2::Page(modules) =
             get_config_module_sources_v2(&pool, system.id, &child.git_commit_hash, 100, 0)
                 .await
                 .expect("malformed definitions should classify without SQL error")
+        else {
+            panic!("expected malformed module page");
+        };
+        assert_eq!(modules.selected.lifecycle, SnapshotLifecycle::Unavailable);
+        assert_eq!(modules.total, 0);
+        assert!(modules.sources.is_empty());
+        assert!(modules.snapshot_token.is_none());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn v2_module_sources_fail_closed_for_malformed_definition_fields(pool: PgPool) {
+        let (system, _, child) = v2_reader_history_fixture(&pool).await;
+        let mut artifact = v2_module_fixture_artifact(child.id);
+        artifact.options.pop();
+        let corrupt_option_key = artifact.options[0].option_key.clone();
+        let mut tx = pool
+            .begin()
+            .await
+            .expect("malformed field transaction should begin");
+        persist_config_artifact_v2_deferred_tx(&mut tx, child.id, "host", artifact)
+            .await
+            .expect("malformed field artifact should persist");
+        tx.commit()
+            .await
+            .expect("malformed field transaction should commit");
+
+        let selected_id: Uuid = sqlx::query_scalar(
+            "SELECT current_snapshot_id FROM config_snapshot_selections WHERE commit_id = $1 AND configuration_name = 'host'",
+        )
+        .bind(child.id)
+        .fetch_one(&pool)
+        .await
+        .expect("malformed field snapshot should load");
+        disable_evaluation_immutability_for_corruption_fixture(&pool).await;
+        sqlx::query(
+            "UPDATE evaluation_option_contents content SET payload = $3 FROM evaluation_snapshot_options item WHERE item.snapshot_id = $1 AND item.option_path = $2 AND item.content_digest = content.digest",
+        )
+        .bind(selected_id)
+        .bind(&corrupt_option_key)
+        .bind(json!({
+            "provenance": {
+                "definitions": [
+                    true,
+                    {
+                        "status": "winner",
+                        "source_input": true,
+                        "source_revision": null,
+                        "source_path": false
+                    }
+                ]
+            }
+        }))
+        .execute(&pool)
+        .await
+        .expect("malformed definition fields should persist");
+
+        let ConfigModuleSourcesQueryV2::Page(modules) =
+            get_config_module_sources_v2(&pool, system.id, &child.git_commit_hash, 100, 0)
+                .await
+                .expect("malformed definition fields should classify without SQL error")
         else {
             panic!("expected malformed module page");
         };
