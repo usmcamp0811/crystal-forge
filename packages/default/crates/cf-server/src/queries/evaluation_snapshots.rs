@@ -2290,7 +2290,7 @@ pub(crate) async fn get_config_summary_v2_with_token(
     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
         .execute(&mut *tx)
         .await?;
-    let Some(mut selected) =
+    let Some(selected) =
         select_config_snapshot_v2_with_executor(&mut *tx, system_id, revision).await?
     else {
         tx.commit().await?;
@@ -2308,22 +2308,6 @@ pub(crate) async fn get_config_summary_v2_with_token(
     if selected.lifecycle != SnapshotLifecycle::Available
         || !v2_snapshot_is_certified(&mut *tx, selected.id).await?
     {
-        let summary = empty_config_summary_v2(&selected);
-        tx.commit().await?;
-        return Ok(ConfigSummaryQueryV2::Summary(summary));
-    }
-
-    let provenance_available = matches!(
-        selected.provenance_state,
-        Some(ConfigProvenanceArtifactStateV2::Available { .. })
-    );
-    let module_source_total =
-        v2_module_source_total(&mut *tx, selected.id, provenance_available).await?;
-    if module_source_total != selected.module_count {
-        selected = unavailable_v2_selected(
-            selected,
-            "Snapshot data is unavailable or corrupt".to_string(),
-        );
         let summary = empty_config_summary_v2(&selected);
         tx.commit().await?;
         return Ok(ConfigSummaryQueryV2::Summary(summary));
@@ -2352,15 +2336,18 @@ pub(crate) async fn get_config_summary_v2_with_token(
     } else {
         None
     };
-    let selected_store_path = carrier
-        .as_ref()
-        .and_then(|row| row.try_get("selected_store_path").ok());
-    let closure_package_count = carrier
-        .as_ref()
-        .and_then(|row| row.try_get("closure_total").ok());
-    let closure_size_bytes = carrier
-        .as_ref()
-        .and_then(|row| row.try_get("closure_size_bytes").ok());
+    let selected_store_path = match carrier.as_ref() {
+        Some(row) => row.try_get::<Option<String>, _>("selected_store_path")?,
+        None => None,
+    };
+    let closure_package_count = match carrier.as_ref() {
+        Some(row) => row.try_get::<Option<i32>, _>("closure_total")?,
+        None => None,
+    };
+    let closure_size_bytes = match carrier.as_ref() {
+        Some(row) => row.try_get::<Option<i64>, _>("closure_size_bytes")?,
+        None => None,
+    };
 
     let running = sqlx::query(
         r#"
@@ -2376,12 +2363,14 @@ pub(crate) async fn get_config_summary_v2_with_token(
     .bind(system_id)
     .fetch_optional(&mut *tx)
     .await?;
-    let running_store_path = running
-        .as_ref()
-        .and_then(|row| row.try_get("running_store_path").ok());
-    let running_profile_matches = running
-        .as_ref()
-        .and_then(|row| row.try_get("running_profile_matches").ok());
+    let running_store_path = match running.as_ref() {
+        Some(row) => row.try_get::<Option<String>, _>("running_store_path")?,
+        None => None,
+    };
+    let running_profile_matches = match running.as_ref() {
+        Some(row) => row.try_get::<Option<bool>, _>("running_profile_matches")?,
+        None => None,
+    };
     let drift = exact_store_path_drift(
         selected_store_path.as_deref(),
         running_store_path.as_deref(),
@@ -2389,12 +2378,15 @@ pub(crate) async fn get_config_summary_v2_with_token(
     let seven_day_drift =
         seven_day_drift_status(&mut *tx, system_id, selected_store_path.as_deref()).await?;
     let option_total = selected.option_count;
+    let module_source_total = selected.module_count;
     let completed_at = selected.completed_at;
     let evaluation_duration_ms = selected.evaluation_duration_ms;
     let summary = ConfigSummaryV2 {
         selected,
         snapshot_token: Some(token),
         option_total,
+        // INVARIANT: Certification makes module_count the immutable scalar
+        // authority. The summary MUST NOT expand option definitions.
         module_source_total,
         completed_at,
         evaluation_duration_ms,
@@ -2491,9 +2483,15 @@ pub(crate) async fn get_config_module_sources_v2_with_token(
                 FROM evaluation_snapshot_options item
                 JOIN evaluation_option_contents content
                   ON content.digest = item.content_digest
-                CROSS JOIN LATERAL jsonb_array_elements(
-                    content.payload->'provenance'->'definitions'
-                ) definition(value)
+                 CROSS JOIN LATERAL jsonb_array_elements(
+                     CASE
+                         WHEN jsonb_typeof(
+                             content.payload->'provenance'->'definitions'
+                         ) = 'array'
+                         THEN content.payload->'provenance'->'definitions'
+                         ELSE '[]'::jsonb
+                     END
+                 ) definition(value)
                 WHERE item.snapshot_id = $1
                   AND (
                       definition.value->>'source_input' IS NOT NULL
@@ -2636,43 +2634,6 @@ where
     .fetch_one(executor)
     .await
     .context("failed to validate V2 snapshot certification")
-}
-
-async fn v2_module_source_total<'e, E>(
-    executor: E,
-    snapshot_id: Uuid,
-    provenance_available: bool,
-) -> Result<i64>
-where
-    E: Executor<'e, Database = Postgres>,
-{
-    if !provenance_available {
-        return Ok(0);
-    }
-    sqlx::query_scalar(
-        r#"
-        SELECT COUNT(DISTINCT (
-                   definition.value->>'source_input',
-                   definition.value->>'source_revision',
-                   definition.value->>'source_path'
-               ))::bigint
-        FROM evaluation_snapshot_options item
-        JOIN evaluation_option_contents content ON content.digest = item.content_digest
-        CROSS JOIN LATERAL jsonb_array_elements(
-            content.payload->'provenance'->'definitions'
-        ) definition(value)
-        WHERE item.snapshot_id = $1
-          AND (
-              definition.value->>'source_input' IS NOT NULL
-              OR definition.value->>'source_revision' IS NOT NULL
-              OR definition.value->>'source_path' IS NOT NULL
-          )
-        "#,
-    )
-    .bind(snapshot_id)
-    .fetch_one(executor)
-    .await
-    .context("failed to count V2 module sources")
 }
 
 /// Returns the scalar database-only summary for one selected evaluation.
@@ -11141,6 +11102,14 @@ mod tests {
                     Some("self"),
                     Some("rev-a"),
                     Some("modules/shared.nix"),
+                    ConfigDefinitionStatusV2::ActiveSurviving,
+                ),
+                v2_definition(
+                    &shared_one_key,
+                    2,
+                    Some("self"),
+                    Some("rev-a"),
+                    Some("modules/shared.nix"),
                     ConfigDefinitionStatusV2::PriorityDiscarded,
                 ),
             ],
@@ -11377,8 +11346,8 @@ mod tests {
             Some("modules/shared.nix")
         );
         assert_eq!(modules.sources[0].option_count, 2);
-        assert_eq!(modules.sources[0].definition_count, 3);
-        assert_eq!(modules.sources[0].surviving_definition_count, 2);
+        assert_eq!(modules.sources[0].definition_count, 4);
+        assert_eq!(modules.sources[0].surviving_definition_count, 3);
         assert_eq!(modules.sources[0].discarded_definition_count, 1);
         assert_eq!(modules.sources[0].overridden_option_count, 1);
         assert_eq!(modules.sources[1].source_input.as_deref(), Some("nixpkgs"));
@@ -11695,36 +11664,55 @@ mod tests {
         .fetch_one(&pool)
         .await
         .expect("selected V2 snapshot should load");
+        let ConfigModuleSourcesQueryV2::Page(available_modules) =
+            get_config_module_sources_v2(&pool, system.id, &child.git_commit_hash, 100, 0)
+                .await
+                .expect("uncorrupted module read should succeed")
+        else {
+            panic!("expected an available module page before corruption");
+        };
+        assert_eq!(
+            available_modules.selected.lifecycle,
+            SnapshotLifecycle::Available
+        );
+        assert_eq!(available_modules.total, 1);
+        assert_eq!(available_modules.sources.len(), 1);
+
         disable_evaluation_immutability_for_corruption_fixture(&pool).await;
         sqlx::query(
             "UPDATE evaluation_option_contents content SET payload = $2 FROM evaluation_snapshot_options item WHERE item.snapshot_id = $1 AND item.content_digest = content.digest",
         )
         .bind(selected_id)
-        .bind(json!({"corrupt": true}))
+        .bind(json!({
+            "provenance": {"definitions": {"malformed": true}}
+        }))
         .execute(&pool)
         .await
-        .expect("corrupt content should persist");
+        .expect("malformed definitions should persist");
         let ConfigSummaryQueryV2::Summary(summary) =
             get_config_summary_v2(&pool, system.id, &child.git_commit_hash)
                 .await
-                .expect("corrupt summary should classify")
+                .expect("summary should not expand malformed module definitions")
         else {
-            panic!("expected corrupt summary");
+            panic!("expected summary");
         };
-        assert_eq!(summary.selected.lifecycle, SnapshotLifecycle::Unavailable);
-        assert_eq!(summary.option_total, 0);
-        assert_eq!(summary.module_source_total, 0);
+        // The scalar summary remains available because certification owns the
+        // module count; only the requested module corpus is re-aggregated.
+        assert_eq!(summary.selected.lifecycle, SnapshotLifecycle::Available);
+        assert_eq!(summary.option_total, 1);
+        assert_eq!(summary.module_source_total, 1);
         assert!(summary.selected_store_path.is_none());
         let ConfigModuleSourcesQueryV2::Page(modules) =
             get_config_module_sources_v2(&pool, system.id, &child.git_commit_hash, 100, 0)
                 .await
-                .expect("corrupt modules should classify")
+                .expect("malformed definitions should classify without SQL error")
         else {
-            panic!("expected corrupt modules");
+            panic!("expected malformed module page");
         };
         assert_eq!(modules.selected.lifecycle, SnapshotLifecycle::Unavailable);
         assert_eq!(modules.total, 0);
         assert!(modules.sources.is_empty());
+        assert!(modules.snapshot_token.is_none());
     }
 
     #[sqlx::test]
