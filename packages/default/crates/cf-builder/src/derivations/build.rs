@@ -217,7 +217,7 @@ impl Derivation {
         };
 
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-        build_config.apply_to_command(&mut cmd);
+        build_config.apply_to_legacy_nix_store_realise_command(&mut cmd);
 
         info!("  → About to spawn command for {}", drv_path);
 
@@ -596,7 +596,7 @@ impl Derivation {
         cmd.args(["--realise", "--log-format", "internal-json", drv_path]);
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-        build_config.apply_to_command(&mut cmd);
+        build_config.apply_to_legacy_nix_store_realise_command(&mut cmd);
 
         Self::run_streaming_build(cmd, drv_path, self.id, reporter, job_id, log_sink).await
     }

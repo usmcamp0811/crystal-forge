@@ -66,6 +66,13 @@ Crystal Forge binary, grouped by service. Calls listed in execution order.
 | 28 | Count dependency derivations (filter `.drv` requisites and exclude the top-level system derivation) | `nix-store --query --requisites <drv>` | `calculate_dependency_build_plan` |
 | 29 | Calculate dependency build work with the effective substitute and offline configuration | `nix-store --realise --dry-run <drv> <build-options...>` | `calculate_dependency_build_plan` |
 
+The dependency build-plan command uses legacy `nix-store --realise --dry-run`.
+Legacy `nix-store` on Nix 2.34.8 does not accept the newer CLI's `--offline`
+flag. Because the planner receives an already-instantiated derivation,
+Crystal Forge represents `offline = true` by disabling substitution with
+`--no-substitute` for this command. This prevents planned cache fetches; it
+does not claim to prevent arbitrary network activity inside a builder.
+
 The dependency build-plan command counts only derivations in Nix's build
 section. It does not count fetched paths. A successful plan with no output is
 zero work. Any unrecognized nonempty output fails closed. Command failure,

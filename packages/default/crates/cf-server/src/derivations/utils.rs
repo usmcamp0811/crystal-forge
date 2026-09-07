@@ -495,7 +495,7 @@ fn dependency_build_plan_command(drv_path: &str, build_config: &BuildConfig) -> 
     // COMPATIBILITY: The legacy dry-run interface is human-readable. A fixed
     // locale keeps the documented singular and plural section headers stable.
     command.env("LC_ALL", "C");
-    build_config.apply_to_command(&mut command);
+    build_config.apply_to_legacy_nix_store_realise_command(&mut command);
     command
 }
 
@@ -707,8 +707,14 @@ mod tests {
 
         assert!(arguments.windows(2).any(|args| args == ["--max-jobs", "7"]));
         assert!(arguments.windows(2).any(|args| args == ["--cores", "3"]));
-        assert!(arguments.iter().any(|arg| arg == "--no-substitute"));
-        assert!(arguments.iter().any(|arg| arg == "--offline"));
+        assert!(!arguments.iter().any(|arg| arg == "--offline"));
+        assert_eq!(
+            arguments
+                .iter()
+                .filter(|arg| *arg == "--no-substitute")
+                .count(),
+            1
+        );
         assert_eq!(
             command
                 .as_std()
@@ -718,6 +724,65 @@ mod tests {
                 .map(|value| value.to_string_lossy().into_owned()),
             Some("C".to_string())
         );
+    }
+
+    #[ignore = "requires host Nix daemon and store access"]
+    #[tokio::test]
+    async fn real_nix_dependency_build_plan_smoke() {
+        let temp_dir = tempfile::tempdir().expect("create temporary builder directory");
+        let builder = temp_dir.path().join("builder");
+        std::fs::write(&builder, "#!/bin/sh\nexit 0\n").expect("write temporary builder");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&builder)
+                .expect("read temporary builder metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&builder, permissions)
+                .expect("make temporary builder executable");
+        }
+
+        let nonce = uuid::Uuid::new_v4().simple().to_string();
+        let expression = format!(
+            "let dep = derivation {{ name = \"cf-task441-real-nix-dep-{nonce}\"; system = builtins.currentSystem; builder = {builder}; }}; in derivation {{ name = \"cf-task441-real-nix-top-{nonce}\"; system = builtins.currentSystem; builder = {builder}; dependency = dep; }}",
+            builder = builder.display()
+        );
+        let instantiate = tokio::time::timeout(
+            Duration::from_secs(30),
+            Command::new("nix-instantiate")
+                .args(["--expr", &expression])
+                .output(),
+        )
+        .await
+        .expect("nix-instantiate timed out")
+        .expect("run nix-instantiate");
+        assert!(
+            instantiate.status.success(),
+            "nix-instantiate failed: {}",
+            String::from_utf8_lossy(&instantiate.stderr)
+        );
+        let top_drv = String::from_utf8(instantiate.stdout)
+            .expect("nix-instantiate output is UTF-8")
+            .trim()
+            .to_string();
+
+        let plan = calculate_dependency_build_plan(
+            &top_drv,
+            &BuildConfig {
+                offline: true,
+                use_substitutes: true,
+                ..BuildConfig::default()
+            },
+        )
+        .await
+        .expect("calculate real dependency build plan");
+        eprintln!(
+            "real_nix_dependency_build_plan_smoke top_drv={top_drv} dependency_derivation_count={} dependency_build_count={}",
+            plan.dependency_derivation_count, plan.dependency_build_count
+        );
+        assert_eq!(plan.dependency_derivation_count, 1);
+        assert_eq!(plan.dependency_build_count, 1);
     }
 
     #[test]

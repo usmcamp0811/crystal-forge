@@ -1,7 +1,7 @@
 ---
 id: TASK-441
 title: Correct dependency graph build counts and comparative scaling
-status: Review
+status: In Progress
 assignee:
   - '@openai-gpt-5.6-sol'
 created_date: '2026-08-29 16:26'

@@ -94,9 +94,7 @@ fn default_cores_per_job() -> usize {
 }
 
 impl BuildConfig {
-    /// Apply build configuration to a nix command
-    pub fn apply_to_command(&self, cmd: &mut tokio::process::Command) {
-        // Resource limits - use new config fields
+    fn apply_common_nix_options(&self, cmd: &mut tokio::process::Command) {
         cmd.args([
             "--cores",
             &self.cores_per_job.to_string(),
@@ -104,16 +102,18 @@ impl BuildConfig {
             &self.max_jobs.to_string(),
         ]);
 
-        // Timeout settings
         cmd.args([
             "--option",
             "max-silent-time",
             &self.max_silent_time.as_secs().to_string(),
         ]);
         cmd.args(["--option", "timeout", &self.timeout.as_secs().to_string()]);
-
-        // Sandbox setting
         cmd.args(["--option", "sandbox", &self.sandbox.to_string()]);
+    }
+
+    /// Apply build configuration to a nix command
+    pub fn apply_to_command(&self, cmd: &mut tokio::process::Command) {
+        self.apply_common_nix_options(cmd);
 
         // Substitute settings
         if !self.use_substitutes {
@@ -123,6 +123,21 @@ impl BuildConfig {
         // Offline mode
         if self.offline {
             cmd.arg("--offline");
+        }
+    }
+
+    /// Applies configuration to a legacy `nix-store --realise` command.
+    ///
+    /// Legacy `nix-store` does not accept the newer `--offline` flag. For an
+    /// already-instantiated derivation, offline planning and realization use
+    /// the supported no-substitute switch instead.
+    pub fn apply_to_legacy_nix_store_realise_command(
+        &self,
+        cmd: &mut tokio::process::Command,
+    ) {
+        self.apply_common_nix_options(cmd);
+        if self.offline || !self.use_substitutes {
+            cmd.arg("--no-substitute");
         }
     }
 
@@ -321,5 +336,54 @@ mod tests {
 
         let args = config.nix_build_args();
         assert_eq!(args, vec!["--max-jobs", "2", "--cores", "4"]);
+    }
+
+    #[test]
+    fn test_generic_command_keeps_offline_flag() {
+        let config = BuildConfig {
+            offline: true,
+            ..Default::default()
+        };
+        let mut command = tokio::process::Command::new("nix");
+        config.apply_to_command(&mut command);
+        let args = command
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(args.iter().any(|arg| arg == "--offline"));
+    }
+
+    #[test]
+    fn test_legacy_realise_command_maps_offline_to_no_substitute() {
+        for (offline, use_substitutes, expected_no_substitute) in
+            [(false, true, false), (false, false, true), (true, true, true), (true, false, true)]
+        {
+            let config = BuildConfig {
+                offline,
+                use_substitutes,
+                max_jobs: 7,
+                cores_per_job: 3,
+                ..Default::default()
+            };
+            let mut command = tokio::process::Command::new("nix-store");
+            config.apply_to_legacy_nix_store_realise_command(&mut command);
+            let args = command
+                .as_std()
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+
+            assert!(!args.iter().any(|arg| arg == "--offline"));
+            assert_eq!(
+                args.iter().filter(|arg| *arg == "--no-substitute").count(),
+                if expected_no_substitute { 1 } else { 0 }
+            );
+            assert!(args.windows(2).any(|pair| pair == ["--cores", "3"]));
+            assert!(args.windows(2).any(|pair| pair == ["--max-jobs", "7"]));
+            assert!(args.windows(3).any(|part| part[0] == "--option" && part[1] == "max-silent-time"));
+            assert!(args.windows(3).any(|part| part[0] == "--option" && part[1] == "timeout"));
+            assert!(args.windows(3).any(|part| part[0] == "--option" && part[1] == "sandbox"));
+        }
     }
 }
