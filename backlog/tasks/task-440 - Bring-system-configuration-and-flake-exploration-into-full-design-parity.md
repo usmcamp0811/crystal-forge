@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-06 18:11'
+updated_date: '2026-09-07 15:01'
 labels:
   - design-parity
   - web-ui
@@ -147,7 +147,7 @@ The `modifiedFiles` metadata is anticipated and non-exhaustive. The implementati
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-Bounded V2 Config summary/module-source slice in evaluation_snapshots.rs only: (1) add internal ConfigSummaryV2 and ConfigModuleSourceV2 page/query types; (2) make config_snapshot_token_v2 the shared token authority and resolve current V2 selected/baseline state inside READ ONLY REPEATABLE READ transactions; (3) implement exact carrier derivation lookup using commit/config/type/path with expected_store_path precedence, latest running-state exact drift, and reusable seven_day_drift_status; (4) implement bounded SQL module aggregation from V2 raw definitions using (source_input, source_revision, source_path) identity, active_surviving/priority_discarded counts, nullable paths, and persisted module_count consistency fail-closed behavior; (5) add focused DB-only regressions for carrier decoys, pre-build/post-build facts, drift, lifecycle, stage/global provenance, no V1 fallback, shared/stale tokens, module aggregation/paging, corruption, and side effects; (6) run only requested focused V2/legacy tests, Nix guards, offline check, format/diff checks, clean isolated PostgreSQL, make one commit, and push. Do not modify migrations, API/UI, V1 readers, or runner/job code.
+Bounded durable Config Inspector scheduling slice from 0202350f: (1) fetch origin and verify exact clean starting HEAD; (2) inspect finalized evaluation flow, execution-mode authority, query conventions, and migration 0251; (3) add migration 0252_config_inspection_jobs.sql with exact target identity, lifecycle checks, immutable targets, partial active deduplication, FKs, and minimal worker indexes; (4) add internal config_inspections query/types module with validated set-based enqueue, exact finalized-derivation matching, comparison-ready same-carrier suppression, active idempotency, terminal retry support, and focused PostgreSQL regressions; (5) wire scheduling adjacent to Completed finalization only in real mode, preserving primary success/build activation on enqueue failure and without touching evaluator Nix expressions, readers, selectors, or APIs; (6) run disposable PostgreSQL tests, finalization and selector/writer regressions, SQLx offline checks, format/diff checks, and both architectural Nix guards; (7) commit TASK-440: Queue targeted config inspections and push, leaving TASK-440 In Progress. Do not implement worker execution or public API/UI.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
