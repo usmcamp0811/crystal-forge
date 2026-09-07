@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-gpt-5.6-sol'
 created_date: '2026-08-29 16:26'
-updated_date: '2026-09-07 01:59'
+updated_date: '2026-09-07 03:31'
 labels:
   - backend
   - frontend
@@ -136,4 +136,6 @@ The user selected a two-release zero-downtime transition for the legacy global d
 Local branch rebased onto origin/dev at 701151f4. Conflicts preserved both TASK-433 and TASK-441 behavior. TASK-441 migrations were renumbered after rebase to the next available sequence: 0245 dependency counts, 0246 explicit plan state, and 0247 evaluation-wide barrier. Post-rebase formatting, SQLX_OFFLINE cf-server test check, wasm Web UI check, Node syntax check, server-regressions, and diff checks passed; existing warnings remain. Local rebased head is f2f472bc. Remote update requires an explicitly authorized force-with-lease push because rebase rewrote branch history.
 
 User authorized a force-with-lease update after the verified rebase. Remote branch and MR !322 now point to f2f472bcf7b34a7bd2af6c8af3287dfebda9d5c6. The worktree is clean and origin/dev is an ancestor of the branch. Exact-head CI is pending.
+
+FINAL TEST/EVIDENCE REMEDIATION started. Preflight fetch/HEAD/origin-dev/divergence/worktree checks passed against expected SHAs. Acceptance criteria remain unchecked. Plan: probe real Nix fixture first; add ignored production-function smoke; add/enroll PostgreSQL metadata-protocol lifecycle coverage; add confirmed Nix-error regression if absent; run authoritative server/UI/SQLx/static checks; synchronize modified_files and append superseding final-verification evidence while preserving historical notes.
 <!-- SECTION:NOTES:END -->
