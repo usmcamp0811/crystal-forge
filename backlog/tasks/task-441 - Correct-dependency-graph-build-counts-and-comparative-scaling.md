@@ -1,11 +1,11 @@
 ---
 id: TASK-441
 title: Correct dependency graph build counts and comparative scaling
-status: Review
+status: In Progress
 assignee:
   - '@openai-gpt-5.6-sol'
 created_date: '2026-08-29 16:26'
-updated_date: '2026-09-02 02:46'
+updated_date: '2026-09-07 01:59'
 labels:
   - backend
   - frontend
@@ -96,6 +96,8 @@ The evaluation dependency graph currently conflates closure paths, locally absen
 9. Commit and push implementation and task-record updates, wait for exact-head GitLab CI, verify the remote task file and MR conflict state, then return TASK-441 to Review without merging.
 
 Research decision: migration 0235 will place the durable barrier on immutable `evaluation_attempts` and tag each graph-relevant derivation with the attempt UUID. New attempts enter `planning`; finalization verifies the exact current-attempt derivation set and terminal `complete|failed` states, records expected/terminal counts, releases the barrier, inserts/reconciles rooted eligible jobs, marks the attempt and commit complete, and commits atomically. Claim/reservation paths require the current completed commit, matching derivation attempt UUID, and a released barrier; database triggers provide defense in depth. Existing queued jobs are held while re-evaluation is pending/in progress. Manual re-evaluation must reject active building/cancelling jobs or reservations so an in-flight build cannot mutate the snapshot. Streaming, graph-only, and fallback systems use one structured planning set; no detached planner or per-system activation remains. Recovery may activate only released attempts and can release a legacy completed attempt only after all tagged graph rows are terminal.
+
+Current remediation slice: remove all durable derivation or synthetic-failure writes from policy metadata protocol-error handling during streaming discovery; route the error through the existing attempt failure/retry authority; add focused drvPath and no-drvPath regressions plus mixed-attempt and confirmed-Nix-error coverage; correct the heavy-Nix lock comment without changing lock duration; inspect and report whether a permanent real-Nix planner smoke exists. Do not alter migrations, schemas, claims, reservations, frontend, API contract, design docs, or acceptance checkboxes.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
