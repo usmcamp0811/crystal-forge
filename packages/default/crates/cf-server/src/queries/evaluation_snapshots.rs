@@ -2472,7 +2472,7 @@ pub(crate) async fn get_config_module_sources_v2_with_token(
         sqlx::query(
             r#"
             WITH selected_options AS (
-                SELECT item.option_path AS option_key,
+                SELECT item.option_key,
                        item.is_overridden,
                        content.payload
                 FROM evaluation_snapshot_options item
@@ -11749,6 +11749,16 @@ mod tests {
         .fetch_one(&pool)
         .await
         .expect("selected V2 snapshot should load");
+        let (persisted_option_path, persisted_option_key): (String, String) = sqlx::query_as(
+            "SELECT option_path, option_key FROM evaluation_snapshot_options WHERE snapshot_id = $1 AND option_key = $2",
+        )
+        .bind(selected_id)
+        .bind(&corrupt_option_key)
+        .fetch_one(&pool)
+        .await
+        .expect("V2 option identities should load");
+        assert_eq!(persisted_option_key, corrupt_option_key);
+        assert_ne!(persisted_option_path, corrupt_option_key);
         let ConfigModuleSourcesQueryV2::Page(available_modules) =
             get_config_module_sources_v2(&pool, system.id, &child.git_commit_hash, 100, 0)
                 .await
@@ -11768,8 +11778,8 @@ mod tests {
         assert_eq!(available_modules.sources[0].discarded_definition_count, 1);
 
         disable_evaluation_immutability_for_corruption_fixture(&pool).await;
-        sqlx::query(
-            "UPDATE evaluation_option_contents content SET payload = $3 FROM evaluation_snapshot_options item WHERE item.snapshot_id = $1 AND item.option_path = $2 AND item.content_digest = content.digest",
+        let corruption = sqlx::query(
+            "UPDATE evaluation_option_contents content SET payload = $3 FROM evaluation_snapshot_options item WHERE item.snapshot_id = $1 AND item.option_key = $2 AND item.content_digest = content.digest",
         )
         .bind(selected_id)
         .bind(&corrupt_option_key)
@@ -11779,6 +11789,42 @@ mod tests {
         .execute(&pool)
         .await
         .expect("malformed definitions should persist");
+        assert_eq!(corruption.rows_affected(), 1);
+        let surviving_source_tuple_count: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*)
+            FROM (
+                SELECT DISTINCT definition.value->>'source_input',
+                                definition.value->>'source_revision',
+                                definition.value->>'source_path'
+                FROM evaluation_snapshot_options item
+                JOIN evaluation_option_contents content
+                  ON content.digest = item.content_digest
+                CROSS JOIN LATERAL jsonb_array_elements(
+                    CASE
+                        WHEN jsonb_typeof(content.payload->'provenance'->'definitions') = 'array'
+                        THEN content.payload->'provenance'->'definitions'
+                        ELSE '[]'::jsonb
+                    END
+                ) definition(value)
+                WHERE item.snapshot_id = $1
+                  AND jsonb_typeof(definition.value) = 'object'
+                  AND definition.value->>'status' IN (
+                      'active_surviving', 'priority_discarded'
+                  )
+                  AND (
+                      definition.value->>'source_input' IS NOT NULL
+                      OR definition.value->>'source_revision' IS NOT NULL
+                      OR definition.value->>'source_path' IS NOT NULL
+                  )
+            ) tuples
+            "#,
+        )
+        .bind(selected_id)
+        .fetch_one(&pool)
+        .await
+        .expect("surviving source tuples should count");
+        assert_eq!(surviving_source_tuple_count, 1);
         let ConfigSummaryQueryV2::Summary(summary) =
             get_config_summary_v2(&pool, system.id, &child.git_commit_hash)
                 .await
@@ -11792,7 +11838,7 @@ mod tests {
         assert_eq!(summary.option_total, 2);
         assert_eq!(summary.module_source_total, 1);
         assert!(summary.selected_store_path.is_none());
-        let persisted_module_count: i64 =
+        let persisted_module_count: i32 =
             sqlx::query_scalar("SELECT module_count FROM evaluation_snapshots WHERE id = $1")
                 .bind(selected_id)
                 .fetch_one(&pool)
@@ -11807,6 +11853,13 @@ mod tests {
             panic!("expected malformed module page");
         };
         assert_eq!(modules.selected.lifecycle, SnapshotLifecycle::Unavailable);
+        assert!(matches!(
+            modules.selected.comparison,
+            ConfigComparisonStateV2::Unavailable {
+                reason: ConfigComparisonUnavailableReasonV2::SelectedUnavailable,
+                ..
+            }
+        ));
         assert_eq!(modules.total, 0);
         assert!(modules.sources.is_empty());
         assert!(modules.snapshot_token.is_none());
@@ -11815,6 +11868,31 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
     async fn v2_module_sources_fail_closed_for_malformed_definition_fields(pool: PgPool) {
+        let malformed_payloads = [
+            json!({"provenance": []}),
+            json!({"provenance": {"definitions": {"malformed": true}}}),
+            json!({"provenance": {"definitions": [true]}}),
+            json!({
+                "provenance": {
+                    "definitions": [{
+                        "status": "winner",
+                        "source_input": "self",
+                        "source_revision": "rev-a",
+                        "source_path": "module.nix"
+                    }]
+                }
+            }),
+            json!({
+                "provenance": {
+                    "definitions": [{
+                        "status": "active_surviving",
+                        "source_input": true,
+                        "source_revision": 42,
+                        "source_path": []
+                    }]
+                }
+            }),
+        ];
         let (system, _, child) = v2_reader_history_fixture(&pool).await;
         let mut artifact = v2_module_fixture_artifact(child.id);
         artifact.options.pop();
@@ -11838,39 +11916,37 @@ mod tests {
         .await
         .expect("malformed field snapshot should load");
         disable_evaluation_immutability_for_corruption_fixture(&pool).await;
-        sqlx::query(
-            "UPDATE evaluation_option_contents content SET payload = $3 FROM evaluation_snapshot_options item WHERE item.snapshot_id = $1 AND item.option_path = $2 AND item.content_digest = content.digest",
-        )
-        .bind(selected_id)
-        .bind(&corrupt_option_key)
-        .bind(json!({
-            "provenance": {
-                "definitions": [
-                    true,
-                    {
-                        "status": "winner",
-                        "source_input": true,
-                        "source_revision": null,
-                        "source_path": false
-                    }
-                ]
-            }
-        }))
-        .execute(&pool)
-        .await
-        .expect("malformed definition fields should persist");
+        for payload in malformed_payloads {
+            let corruption = sqlx::query(
+                "UPDATE evaluation_option_contents content SET payload = $3 FROM evaluation_snapshot_options item WHERE item.snapshot_id = $1 AND item.option_key = $2 AND item.content_digest = content.digest",
+            )
+            .bind(selected_id)
+            .bind(&corrupt_option_key)
+            .bind(payload)
+            .execute(&pool)
+            .await
+            .expect("malformed definition fields should persist");
+            assert_eq!(corruption.rows_affected(), 1);
 
-        let ConfigModuleSourcesQueryV2::Page(modules) =
-            get_config_module_sources_v2(&pool, system.id, &child.git_commit_hash, 100, 0)
-                .await
-                .expect("malformed definition fields should classify without SQL error")
-        else {
-            panic!("expected malformed module page");
-        };
-        assert_eq!(modules.selected.lifecycle, SnapshotLifecycle::Unavailable);
-        assert_eq!(modules.total, 0);
-        assert!(modules.sources.is_empty());
-        assert!(modules.snapshot_token.is_none());
+            let ConfigModuleSourcesQueryV2::Page(modules) =
+                get_config_module_sources_v2(&pool, system.id, &child.git_commit_hash, 100, 0)
+                    .await
+                    .expect("malformed definition fields should classify without SQL error")
+            else {
+                panic!("expected malformed module page");
+            };
+            assert_eq!(modules.selected.lifecycle, SnapshotLifecycle::Unavailable);
+            assert!(matches!(
+                modules.selected.comparison,
+                ConfigComparisonStateV2::Unavailable {
+                    reason: ConfigComparisonUnavailableReasonV2::SelectedUnavailable,
+                    ..
+                }
+            ));
+            assert_eq!(modules.total, 0);
+            assert!(modules.sources.is_empty());
+            assert!(modules.snapshot_token.is_none());
+        }
     }
 
     #[sqlx::test]
