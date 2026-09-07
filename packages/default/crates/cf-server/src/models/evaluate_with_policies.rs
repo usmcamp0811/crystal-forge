@@ -2720,9 +2720,65 @@ pub async fn finalize_evaluation_attempt(
         "successful finalization did not terminalize exactly one evaluation attempt"
     );
 
+    let finalized_system_names: Vec<String> = plan
+        .successful_systems
+        .iter()
+        .map(|system| system.system_name.clone())
+        .collect();
+    let finalized_drv_paths: Vec<String> = plan
+        .successful_systems
+        .iter()
+        .map(|system| system.drv_path.clone())
+        .collect();
+    let finalized_derivations = if finalized_system_names.is_empty() {
+        Vec::new()
+    } else {
+        let rows: Vec<(i32, String, String, Option<bool>)> = sqlx::query_as(
+            r#"
+            WITH successful AS (
+                SELECT *
+                FROM unnest($2::text[], $3::text[])
+                    AS target(system_name, drv_path)
+            )
+            SELECT derivation.id,
+                   derivation.derivation_path,
+                   derivation.derivation_name,
+                   derivation.cf_agent_enabled
+            FROM successful
+            JOIN derivations derivation
+              ON derivation.commit_id = $1
+             AND derivation.derivation_type = 'nixos'
+             AND derivation.derivation_name = successful.system_name
+             AND derivation.derivation_path = successful.drv_path
+            ORDER BY derivation.derivation_name
+            "#,
+        )
+        .bind(commit_id)
+        .bind(&finalized_system_names)
+        .bind(&finalized_drv_paths)
+        .fetch_all(&mut *tx)
+        .await
+        .context("load finalized NixOS derivations for enrichment scheduling")?;
+        // The streaming and fallback paths persist derivations before this
+        // terminal transaction, but direct finalization callers can complete
+        // the evaluation without creating derivation rows. Return only rows
+        // that were actually finalized so enrichment scheduling never
+        // invents a target or changes the primary finalization contract.
+        rows.into_iter()
+            .map(
+                |(derivation_id, drv_path, system_name, cf_agent_enabled)| FinalizedDerivation {
+                    derivation_id,
+                    drv_path,
+                    system_name,
+                    cf_agent_enabled,
+                },
+            )
+            .collect()
+    };
+
     tx.commit().await?;
     Ok(EvaluationFinalizeOutcome::Completed {
-        derivations: Vec::new(),
+        derivations: finalized_derivations,
         queued_builds: Vec::new(),
     })
 }
