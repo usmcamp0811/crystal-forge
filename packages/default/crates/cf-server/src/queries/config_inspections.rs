@@ -7,9 +7,10 @@ use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use serde_json::json;
 use sqlx::{PgPool, Row};
+use std::collections::BTreeMap;
 use uuid::Uuid;
 
-use crate::models::evaluate_with_policies::FinalizedDerivation;
+use crate::models::evaluate_with_policies::SuccessfulSystemResult;
 
 /// Describes the lifecycle state of one durable Config Inspector job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,17 +80,10 @@ pub(crate) struct ConfigInspectionJob {
 /// Summarizes one set-based enqueue operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ConfigInspectionEnqueueSummary {
-    /// Number of exact finalized targets supplied by the caller.
+    /// Number of exact successful targets supplied by the caller.
     pub requested_targets: usize,
     /// Number of new queued rows inserted by this call.
     pub inserted_jobs: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct InspectionTarget {
-    derivation_id: i32,
-    configuration_name: String,
-    carrier_drv_path: String,
 }
 
 /// Returns whether automatic Config Inspector scheduling is enabled for a mode.
@@ -97,13 +91,14 @@ pub(crate) fn should_schedule_config_inspections(execution_mode_is_mock: bool) -
     !execution_mode_is_mock
 }
 
-/// Enqueues exact finalized NixOS derivations for later Config Inspector work.
+/// Enqueues exact successful NixOS systems for later Config Inspector work.
 ///
-/// The function validates every supplied `(derivation_id, configuration_name,
-/// carrier_drv_path)` tuple against the specified commit, then performs one
-/// set-based insert. A ready V2 artifact for the same carrier suppresses new
-/// work. Active rows are deduplicated by the database partial unique index;
-/// terminal history does not suppress a later attempt.
+/// The function resolves every supplied `(configuration_name, carrier_drv_path)`
+/// against the specified commit and locks the matching derivation rows for the
+/// complete validation and insert transaction. A ready V2 artifact for the
+/// same carrier suppresses new work. Active rows are deduplicated by the
+/// database partial unique index; terminal history does not suppress a later
+/// attempt.
 ///
 /// This function performs database work only. It does not spawn processes,
 /// evaluate Nix, access Git, mutate snapshots, or advance selectors.
@@ -111,30 +106,24 @@ pub(crate) fn should_schedule_config_inspections(execution_mode_is_mock: bool) -
 /// # Errors
 ///
 /// Returns an error when a supplied target does not exactly match a NixOS
-/// derivation for `commit_id`, or when database access fails.
-pub(crate) async fn enqueue_config_inspection_jobs_for_finalized(
+/// derivation for `commit_id`, or when database access fails. If validation
+/// fails, the transaction inserts no inspection jobs.
+pub(crate) async fn enqueue_config_inspection_jobs_for_successful_systems(
     pool: &PgPool,
     commit_id: i32,
-    finalized_derivations: &[FinalizedDerivation],
+    successful_systems: &[SuccessfulSystemResult],
 ) -> Result<ConfigInspectionEnqueueSummary> {
-    let mut targets: Vec<InspectionTarget> = Vec::with_capacity(finalized_derivations.len());
-    for finalized in finalized_derivations {
-        let target = InspectionTarget {
-            derivation_id: finalized.derivation_id,
-            configuration_name: finalized.system_name.clone(),
-            carrier_drv_path: finalized.drv_path.clone(),
-        };
-        if targets.iter().any(|existing| {
-            existing.configuration_name == target.configuration_name && existing != &target
-        }) {
+    let mut targets = BTreeMap::new();
+    for successful in successful_systems {
+        if let Some(existing) = targets.get(&successful.system_name)
+            && existing != &successful.drv_path
+        {
             bail!(
-                "multiple finalized derivations supplied for configuration {:?}",
-                target.configuration_name
+                "multiple successful derivations supplied for configuration {:?}",
+                successful.system_name
             );
         }
-        if !targets.contains(&target) {
-            targets.push(target);
-        }
+        targets.insert(successful.system_name.clone(), successful.drv_path.clone());
     }
 
     if targets.is_empty() {
@@ -144,47 +133,48 @@ pub(crate) async fn enqueue_config_inspection_jobs_for_finalized(
         });
     }
 
-    let derivation_ids: Vec<i32> = targets.iter().map(|target| target.derivation_id).collect();
-    let configuration_names: Vec<&str> = targets
-        .iter()
-        .map(|target| target.configuration_name.as_str())
-        .collect();
-    let carrier_drv_paths: Vec<&str> = targets
-        .iter()
-        .map(|target| target.carrier_drv_path.as_str())
-        .collect();
+    let configuration_names: Vec<String> = targets.keys().cloned().collect();
+    let carrier_drv_paths: Vec<String> = targets.values().cloned().collect();
 
-    let unmatched: Vec<i32> = sqlx::query_scalar(
+    let mut tx = pool
+        .begin()
+        .await
+        .context("begin Config Inspector enqueue")?;
+    let resolved: Vec<(i32, String, String)> = sqlx::query_as(
         r#"
         WITH supplied AS (
             SELECT *
-            FROM unnest($1::integer[], $2::text[], $3::text[])
-                AS target(derivation_id, configuration_name, carrier_drv_path)
+            FROM unnest($1::text[], $2::text[])
+                AS target(configuration_name, carrier_drv_path)
         )
-        SELECT supplied.derivation_id
+        SELECT derivation.id, derivation.derivation_name, derivation.derivation_path
         FROM supplied
-        LEFT JOIN derivations derivation
-          ON derivation.id = supplied.derivation_id
-         AND derivation.commit_id = $4
+        JOIN derivations derivation
+          ON derivation.commit_id = $3
          AND derivation.derivation_type = 'nixos'
          AND derivation.derivation_name = supplied.configuration_name
          AND derivation.derivation_path = supplied.carrier_drv_path
-        WHERE derivation.id IS NULL
-        ORDER BY supplied.derivation_id
+        ORDER BY derivation.derivation_name
+        FOR SHARE OF derivation
         "#,
     )
-    .bind(&derivation_ids)
     .bind(&configuration_names)
     .bind(&carrier_drv_paths)
     .bind(commit_id)
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await
-    .context("validate finalized Config Inspector targets")?;
-    if let Some(derivation_id) = unmatched.first() {
+    .context("resolve and lock successful Config Inspector targets")?;
+    if resolved.len() != targets.len() {
         bail!(
-            "finalized Config Inspector target derivation {derivation_id} does not match commit {commit_id}"
+            "successful Config Inspector targets do not exactly match NixOS derivations for commit {commit_id}"
         );
     }
+
+    let derivation_ids: Vec<i32> = resolved.iter().map(|(id, _, _)| *id).collect();
+    let resolved_configuration_names: Vec<&str> =
+        resolved.iter().map(|(_, name, _)| name.as_str()).collect();
+    let resolved_carrier_drv_paths: Vec<&str> =
+        resolved.iter().map(|(_, _, path)| path.as_str()).collect();
 
     let inserted: Vec<Uuid> = sqlx::query_scalar(
         r#"
@@ -228,15 +218,19 @@ pub(crate) async fn enqueue_config_inspection_jobs_for_finalized(
         "#,
     )
     .bind(&derivation_ids)
-    .bind(&configuration_names)
-    .bind(&carrier_drv_paths)
+    .bind(&resolved_configuration_names)
+    .bind(&resolved_carrier_drv_paths)
     .bind(commit_id)
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await
     .context("enqueue Config Inspector jobs")?;
 
+    tx.commit()
+        .await
+        .context("commit Config Inspector enqueue")?;
+
     Ok(ConfigInspectionEnqueueSummary {
-        requested_targets: targets.len(),
+        requested_targets: resolved.len(),
         inserted_jobs: inserted.len(),
     })
 }
@@ -317,12 +311,18 @@ mod tests {
         (commit_id, derivation_id, drv_path)
     }
 
-    fn finalized(derivation_id: i32, name: &str, drv_path: &str) -> FinalizedDerivation {
-        FinalizedDerivation {
-            derivation_id,
-            drv_path: drv_path.to_string(),
+    fn successful_system(
+        _derivation_id: i32,
+        name: &str,
+        drv_path: &str,
+    ) -> SuccessfulSystemResult {
+        SuccessfulSystemResult {
             system_name: name.to_string(),
+            derivation_target: format!("test://nixosConfigurations.{name}"),
+            drv_path: drv_path.to_string(),
+            expected_store_path: None,
             cf_agent_enabled: Some(true),
+            build_eligible: true,
         }
     }
 
@@ -497,18 +497,22 @@ mod tests {
     #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
     async fn enqueue_uses_exact_targets_and_is_idempotent(pool: PgPool) {
         let (commit_id, derivation_id, drv_path) = fixture(&pool, "host").await;
-        let target = finalized(derivation_id, "host", &drv_path);
+        let target = successful_system(derivation_id, "host", &drv_path);
 
-        let first =
-            enqueue_config_inspection_jobs_for_finalized(&pool, commit_id, &[target.clone()])
-                .await
-                .expect("first inspection enqueue should succeed");
+        let first = enqueue_config_inspection_jobs_for_successful_systems(
+            &pool,
+            commit_id,
+            &[target.clone()],
+        )
+        .await
+        .expect("first inspection enqueue should succeed");
         assert_eq!(first.requested_targets, 1);
         assert_eq!(first.inserted_jobs, 1);
 
-        let second = enqueue_config_inspection_jobs_for_finalized(&pool, commit_id, &[target])
-            .await
-            .expect("duplicate inspection enqueue should succeed");
+        let second =
+            enqueue_config_inspection_jobs_for_successful_systems(&pool, commit_id, &[target])
+                .await
+                .expect("duplicate inspection enqueue should succeed");
         assert_eq!(second.requested_targets, 1);
         assert_eq!(second.inserted_jobs, 0);
         assert_eq!(job_count(&pool, commit_id).await, 1);
@@ -520,10 +524,10 @@ mod tests {
         .execute(&pool)
         .await
         .expect("inspection job should enter running state");
-        let third = enqueue_config_inspection_jobs_for_finalized(
+        let third = enqueue_config_inspection_jobs_for_successful_systems(
             &pool,
             commit_id,
-            &[finalized(derivation_id, "host", &drv_path)],
+            &[successful_system(derivation_id, "host", &drv_path)],
         )
         .await
         .expect("running duplicate inspection enqueue should succeed");
@@ -555,12 +559,12 @@ mod tests {
             .await
             .expect("second derivation should move to the fixture commit");
 
-        let summary = enqueue_config_inspection_jobs_for_finalized(
+        let summary = enqueue_config_inspection_jobs_for_successful_systems(
             &pool,
             commit_id,
             &[
-                finalized(first_id, "first", &first_drv),
-                finalized(second_id, "second", &second_drv),
+                successful_system(first_id, "first", &first_drv),
+                successful_system(second_id, "second", &second_drv),
             ],
         )
         .await
@@ -568,9 +572,9 @@ mod tests {
         assert_eq!(summary.inserted_jobs, 2);
         assert_eq!(job_count(&pool, commit_id).await, 2);
 
-        let wrong = finalized(first_id, "wrong-name", &first_drv);
+        let wrong = successful_system(first_id, "wrong-name", &first_drv);
         assert!(
-            enqueue_config_inspection_jobs_for_finalized(&pool, commit_id, &[wrong])
+            enqueue_config_inspection_jobs_for_successful_systems(&pool, commit_id, &[wrong])
                 .await
                 .is_err()
         );
@@ -581,12 +585,13 @@ mod tests {
     #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
     async fn enqueue_suppresses_only_ready_same_carrier_v2(pool: PgPool) {
         let (commit_id, derivation_id, drv_path) = fixture(&pool, "host").await;
-        let target = finalized(derivation_id, "host", &drv_path);
+        let target = successful_system(derivation_id, "host", &drv_path);
         insert_v2_snapshot(&pool, commit_id, "host", &drv_path, true).await;
 
-        let summary = enqueue_config_inspection_jobs_for_finalized(&pool, commit_id, &[target])
-            .await
-            .expect("ready V2 artifact should suppress work");
+        let summary =
+            enqueue_config_inspection_jobs_for_successful_systems(&pool, commit_id, &[target])
+                .await
+                .expect("ready V2 artifact should suppress work");
         assert_eq!(summary.inserted_jobs, 0);
         assert_eq!(job_count(&pool, commit_id).await, 0);
     }
@@ -595,13 +600,16 @@ mod tests {
     #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
     async fn enqueue_allows_incomplete_or_different_v2_and_terminal_retries(pool: PgPool) {
         let (commit_id, derivation_id, drv_path) = fixture(&pool, "host").await;
-        let target = finalized(derivation_id, "host", &drv_path);
+        let target = successful_system(derivation_id, "host", &drv_path);
         insert_v2_snapshot(&pool, commit_id, "host", &drv_path, false).await;
 
-        let first =
-            enqueue_config_inspection_jobs_for_finalized(&pool, commit_id, &[target.clone()])
-                .await
-                .expect("incomplete V2 should enqueue");
+        let first = enqueue_config_inspection_jobs_for_successful_systems(
+            &pool,
+            commit_id,
+            &[target.clone()],
+        )
+        .await
+        .expect("incomplete V2 should enqueue");
         assert_eq!(first.inserted_jobs, 1);
         sqlx::query(
             "UPDATE config_inspection_jobs SET status = 'failed', started_at = now(), completed_at = now(), error = 'test failure', updated_at = now() WHERE commit_id = $1",
@@ -610,9 +618,10 @@ mod tests {
         .execute(&pool)
         .await
         .expect("terminal test job should update");
-        let retry = enqueue_config_inspection_jobs_for_finalized(&pool, commit_id, &[target])
-            .await
-            .expect("terminal history should allow retry");
+        let retry =
+            enqueue_config_inspection_jobs_for_successful_systems(&pool, commit_id, &[target])
+                .await
+                .expect("terminal history should allow retry");
         assert_eq!(retry.inserted_jobs, 1);
         assert_eq!(job_count(&pool, commit_id).await, 2);
     }
@@ -657,11 +666,14 @@ mod tests {
                     true,
                 )
                 .await;
-                let target = finalized(derivation_id, configuration_name, &drv_path);
-                let summary =
-                    enqueue_config_inspection_jobs_for_finalized(&pool, commit_id, &[target])
-                        .await
-                        .expect("different-carrier V2 should enqueue");
+                let target = successful_system(derivation_id, configuration_name, &drv_path);
+                let summary = enqueue_config_inspection_jobs_for_successful_systems(
+                    &pool,
+                    commit_id,
+                    &[target],
+                )
+                .await
+                .expect("different-carrier V2 should enqueue");
                 assert_eq!(summary.inserted_jobs, 1);
                 continue;
             } else if insert_v2 {
@@ -681,10 +693,14 @@ mod tests {
             if case_name != "v1" {
                 add_snapshot_selector(&pool, commit_id, configuration_name, snapshot_id).await;
             }
-            let summary = enqueue_config_inspection_jobs_for_finalized(
+            let summary = enqueue_config_inspection_jobs_for_successful_systems(
                 &pool,
                 commit_id,
-                &[finalized(derivation_id, configuration_name, &drv_path)],
+                &[successful_system(
+                    derivation_id,
+                    configuration_name,
+                    &drv_path,
+                )],
             )
             .await
             .expect("non-satisfying snapshot should enqueue");
@@ -706,23 +722,28 @@ mod tests {
         .await
         .expect("package derivation should persist");
         let cases = [
-            finalized(other_commit_derivation_id, "other-commit", &other_drv_path),
-            finalized(derivation_id, "wrong-name", &drv_path),
-            finalized(derivation_id, "host", &format!("{drv_path}-wrong")),
-            finalized(package_id, "package", &format!("{drv_path}-package")),
+            successful_system(other_commit_derivation_id, "other-commit", &other_drv_path),
+            successful_system(derivation_id, "wrong-name", &drv_path),
+            successful_system(derivation_id, "host", &format!("{drv_path}-wrong")),
+            successful_system(package_id, "package", &format!("{drv_path}-package")),
         ];
         for target in cases {
             let result =
-                enqueue_config_inspection_jobs_for_finalized(&pool, commit_id, &[target]).await;
+                enqueue_config_inspection_jobs_for_successful_systems(&pool, commit_id, &[target])
+                    .await;
             assert!(result.is_err());
             assert_eq!(job_count(&pool, commit_id).await, 0);
         }
-        let valid = finalized(derivation_id, "host", &drv_path);
-        let invalid = finalized(derivation_id, "wrong-name", &drv_path);
+        let valid = successful_system(derivation_id, "host", &drv_path);
+        let invalid = successful_system(derivation_id, "wrong-name", &drv_path);
         assert!(
-            enqueue_config_inspection_jobs_for_finalized(&pool, commit_id, &[valid, invalid])
-                .await
-                .is_err()
+            enqueue_config_inspection_jobs_for_successful_systems(
+                &pool,
+                commit_id,
+                &[valid, invalid]
+            )
+            .await
+            .is_err()
         );
         assert_eq!(job_count(&pool, commit_id).await, 0);
     }
@@ -731,8 +752,8 @@ mod tests {
     #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
     async fn config_inspection_jobs_reject_target_mutation_and_bad_lifecycle(pool: PgPool) {
         let (commit_id, derivation_id, drv_path) = fixture(&pool, "host").await;
-        let target = finalized(derivation_id, "host", &drv_path);
-        enqueue_config_inspection_jobs_for_finalized(&pool, commit_id, &[target])
+        let target = successful_system(derivation_id, "host", &drv_path);
+        enqueue_config_inspection_jobs_for_successful_systems(&pool, commit_id, &[target])
             .await
             .expect("inspection job should enqueue");
         let mutation = sqlx::query(
@@ -755,14 +776,14 @@ mod tests {
     #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
     async fn concurrent_enqueue_calls_share_one_active_row(pool: PgPool) {
         let (commit_id, derivation_id, drv_path) = fixture(&pool, "host").await;
-        let target = finalized(derivation_id, "host", &drv_path);
+        let target = successful_system(derivation_id, "host", &drv_path);
         let (left, right) = tokio::join!(
-            enqueue_config_inspection_jobs_for_finalized(
+            enqueue_config_inspection_jobs_for_successful_systems(
                 &pool,
                 commit_id,
                 std::slice::from_ref(&target)
             ),
-            enqueue_config_inspection_jobs_for_finalized(
+            enqueue_config_inspection_jobs_for_successful_systems(
                 &pool,
                 commit_id,
                 std::slice::from_ref(&target)

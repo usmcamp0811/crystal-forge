@@ -2117,12 +2117,15 @@ async fn process_pending_commits(
                         // Atomic DB finalization succeeded — now safe to run all
                         // external completion side effects.
 
-                        if !server_config.execution_mode.is_mock() && !derivations.is_empty() {
+                        if crate::queries::config_inspections::should_schedule_config_inspections(
+                            server_config.execution_mode.is_mock(),
+                        ) && !plan.successful_systems.is_empty()
+                        {
                             if let Err(err) =
-                                crate::queries::config_inspections::enqueue_config_inspection_jobs_for_finalized(
+                                crate::queries::config_inspections::enqueue_config_inspection_jobs_for_successful_systems(
                                     pool,
                                     commit.id,
-                                    &derivations,
+                                    &plan.successful_systems,
                                 )
                                 .await
                             {

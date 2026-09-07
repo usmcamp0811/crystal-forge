@@ -436,10 +436,6 @@ use crate::queries::build_jobs::{
     BuildJobInsertOutcome, QueuedBuild, create_build_job_for_derivation_tx,
 };
 use crate::queries::commits_artifacts::CachedSystemsState;
-use crate::queries::derivations::{
-    insert_derivation_with_target, mark_derivation_dry_run_complete, set_closure_counts,
-    set_expected_store_path,
-};
 use crate::queries::systems::list_configuration_names_for_flake;
 use crate::queue::QueueNotifier;
 
@@ -2720,65 +2716,13 @@ pub async fn finalize_evaluation_attempt(
         "successful finalization did not terminalize exactly one evaluation attempt"
     );
 
-    let finalized_system_names: Vec<String> = plan
-        .successful_systems
-        .iter()
-        .map(|system| system.system_name.clone())
-        .collect();
-    let finalized_drv_paths: Vec<String> = plan
-        .successful_systems
-        .iter()
-        .map(|system| system.drv_path.clone())
-        .collect();
-    let finalized_derivations = if finalized_system_names.is_empty() {
-        Vec::new()
-    } else {
-        let rows: Vec<(i32, String, String, Option<bool>)> = sqlx::query_as(
-            r#"
-            WITH successful AS (
-                SELECT *
-                FROM unnest($2::text[], $3::text[])
-                    AS target(system_name, drv_path)
-            )
-            SELECT derivation.id,
-                   derivation.derivation_path,
-                   derivation.derivation_name,
-                   derivation.cf_agent_enabled
-            FROM successful
-            JOIN derivations derivation
-              ON derivation.commit_id = $1
-             AND derivation.derivation_type = 'nixos'
-             AND derivation.derivation_name = successful.system_name
-             AND derivation.derivation_path = successful.drv_path
-            ORDER BY derivation.derivation_name
-            "#,
-        )
-        .bind(commit_id)
-        .bind(&finalized_system_names)
-        .bind(&finalized_drv_paths)
-        .fetch_all(&mut *tx)
-        .await
-        .context("load finalized NixOS derivations for enrichment scheduling")?;
-        // The streaming and fallback paths persist derivations before this
-        // terminal transaction, but direct finalization callers can complete
-        // the evaluation without creating derivation rows. Return only rows
-        // that were actually finalized so enrichment scheduling never
-        // invents a target or changes the primary finalization contract.
-        rows.into_iter()
-            .map(
-                |(derivation_id, drv_path, system_name, cf_agent_enabled)| FinalizedDerivation {
-                    derivation_id,
-                    drv_path,
-                    system_name,
-                    cf_agent_enabled,
-                },
-            )
-            .collect()
-    };
-
     tx.commit().await?;
     Ok(EvaluationFinalizeOutcome::Completed {
-        derivations: finalized_derivations,
+        // Keep derivation side effects owned by the established streaming and
+        // fallback success paths. Config Inspector scheduling resolves its
+        // own exact targets from the validated evaluation plan instead of
+        // replaying GC-root or closure-count work here.
+        derivations: Vec::new(),
         queued_builds: Vec::new(),
     })
 }
@@ -6245,7 +6189,8 @@ mod tests {
 
         assert!(matches!(
             outcome,
-            EvaluationFinalizeOutcome::Completed { .. }
+            EvaluationFinalizeOutcome::Completed { ref derivations, .. }
+                if derivations.is_empty()
         ));
         assert_eq!(derivation_count(&pool, commit_id).await, 0);
         assert_eq!(
