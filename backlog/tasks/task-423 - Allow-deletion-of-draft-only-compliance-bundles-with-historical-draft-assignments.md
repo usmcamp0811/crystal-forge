@@ -3,11 +3,11 @@ id: TASK-423
 title: >-
   Allow deletion of draft-only compliance bundles with historical draft
   assignments
-status: In Progress
+status: Done
 assignee:
   - '@Matt Camp'
 created_date: '2026-08-16 15:13'
-updated_date: '2026-08-16 15:48'
+updated_date: '2026-09-07 01:27'
 labels: []
 dependencies: []
 references:
@@ -54,6 +54,8 @@ Compliance bundle deletion currently blocks permanently whenever any compliance_
 Preflight completed: TASK-423 and TASK-424 are being implemented together because both correct the mixed legacy/versioned assignment model and both block MR !316. Dedicated worktree is /home/mcamp/code/crystal-forge/TASK-423-424-compliance-assignment-corrections on branch TASK-423-424-compliance-assignment-corrections from dev.
 
 Implemented and pushed commit 11836d03 on origin/TASK-423-424-compliance-assignment-corrections. Draft-only assignment history is now disposable and cleaned in reverse version order; accepted/deprecated assignment history remains protected; migration 0226 narrows immutable triggers for draft cleanup. Server build and offline cargo check passed. Database-backed deletion lifecycle tests remain to be run against the isolated disposable PostgreSQL database.
+
+Backlog grooming (2026-09-06): MR !316 confirmed merged to dev (TASK-423 was implemented together with TASK-424 to unblock that MR). Acceptance-criteria checkboxes in this task record were never checked off during implementation. Status is moved to Done per merged-MR confirmation; the AC list is left unchecked rather than checked retroactively without direct re-verification. Flag for a follow-up audit if a clean AC record is needed.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
