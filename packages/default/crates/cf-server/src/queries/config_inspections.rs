@@ -4,13 +4,18 @@
 //! inspect flakes, create snapshots, or advance either snapshot selector.
 
 use anyhow::{Context, Result, bail};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde_json::json;
 use sqlx::{PgPool, Row};
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
 use crate::models::evaluate_with_policies::SuccessfulSystemResult;
+
+const MAX_CONFIG_INSPECTION_ATTEMPTS: i32 = 3;
+const MAX_CONFIG_INSPECTION_ERROR_CHARS: usize = 4096;
+const STALE_RECOVERY_BATCH_SIZE: i64 = 32;
+const MAX_ATTEMPTS_ERROR: &str = "Config inspection execution expired after maximum retry attempts";
 
 /// Describes the lifecycle state of one durable Config Inspector job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,6 +68,10 @@ pub(crate) struct ConfigInspectionJob {
     pub status: ConfigInspectionJobStatus,
     /// Number of worker attempts recorded for this job.
     pub attempts: i32,
+    /// Session-scoped token that owns the current or terminal execution.
+    pub execution_id: Option<Uuid>,
+    /// Last heartbeat recorded for the current or terminal execution.
+    pub execution_heartbeat_at: Option<DateTime<Utc>>,
     /// Redacted terminal failure, when the job failed.
     pub error: Option<String>,
     /// Time at which the job became eligible for a worker.
@@ -75,6 +84,38 @@ pub(crate) struct ConfigInspectionJob {
     pub created_at: DateTime<Utc>,
     /// Last lifecycle update timestamp.
     pub updated_at: DateTime<Utc>,
+}
+
+/// Describes the exact execution lease granted by a durable job claim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ConfigInspectionExecutionClaim {
+    /// Durable job identity.
+    pub job_id: Uuid,
+    /// Commit containing the exact configuration target.
+    pub commit_id: i32,
+    /// NixOS carrier derivation targeted by the job.
+    pub derivation_id: i32,
+    /// Exact NixOS configuration name.
+    pub configuration_name: String,
+    /// Exact carrier `.drv` path.
+    pub carrier_drv_path: String,
+    /// Unique token fencing this execution from later owners.
+    pub execution_id: Uuid,
+    /// Number of claims made, including this claim.
+    pub attempts: i32,
+}
+
+/// Summarizes one bounded stale-execution recovery pass.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ConfigInspectionRecoverySummary {
+    /// Number of stale candidates inspected.
+    pub inspected: usize,
+    /// Number of candidates protected by a live execution advisory lock.
+    pub locked: usize,
+    /// Number of stale executions requeued.
+    pub requeued: usize,
+    /// Number of stale executions terminalized as failed.
+    pub failed: usize,
 }
 
 /// Summarizes one set-based enqueue operation.
@@ -243,8 +284,9 @@ pub(crate) async fn get_config_inspection_job(
     let row = sqlx::query(
         r#"
         SELECT id, commit_id, derivation_id, configuration_name,
-               carrier_drv_path, status, attempts, error, scheduled_at,
-               started_at, completed_at, created_at, updated_at
+               carrier_drv_path, status, attempts, execution_id,
+               execution_heartbeat_at, error, scheduled_at, started_at,
+               completed_at, created_at, updated_at
         FROM config_inspection_jobs
         WHERE id = $1
         "#,
@@ -262,6 +304,8 @@ pub(crate) async fn get_config_inspection_job(
             carrier_drv_path: row.try_get("carrier_drv_path")?,
             status: ConfigInspectionJobStatus::parse(row.try_get::<String, _>("status")?.as_str())?,
             attempts: row.try_get("attempts")?,
+            execution_id: row.try_get("execution_id")?,
+            execution_heartbeat_at: row.try_get("execution_heartbeat_at")?,
             error: row.try_get("error")?,
             scheduled_at: row.try_get("scheduled_at")?,
             started_at: row.try_get("started_at")?,
@@ -271,6 +315,234 @@ pub(crate) async fn get_config_inspection_job(
         })
     })
     .transpose()
+}
+
+/// Claims the oldest queued Config Inspector job without globally serializing claims.
+///
+/// PostgreSQL locks the selected candidate with `FOR UPDATE SKIP LOCKED` inside
+/// the same statement that changes it to `running`. Concurrent claimers therefore
+/// either skip the locked row or claim a different queued row.
+pub(crate) async fn claim_next_config_inspection_job(
+    pool: &PgPool,
+) -> Result<Option<ConfigInspectionExecutionClaim>> {
+    let claim = sqlx::query_as::<_, (Uuid, i32, i32, String, String, Uuid, i32)>(
+        r#"
+        WITH candidate AS (
+            SELECT id
+            FROM config_inspection_jobs
+            WHERE status = 'queued'
+            ORDER BY scheduled_at ASC, created_at ASC, id ASC
+            LIMIT 1
+            FOR UPDATE SKIP LOCKED
+        )
+        UPDATE config_inspection_jobs job
+        SET status = 'running',
+            attempts = job.attempts + 1,
+            started_at = now(),
+            completed_at = NULL,
+            error = NULL,
+            execution_id = gen_random_uuid(),
+            execution_heartbeat_at = now(),
+            updated_at = now()
+        FROM candidate
+        WHERE job.id = candidate.id
+        RETURNING job.id, job.commit_id, job.derivation_id,
+                  job.configuration_name, job.carrier_drv_path,
+                  job.execution_id, job.attempts
+        "#,
+    )
+    .fetch_optional(pool)
+    .await
+    .context("claim Config Inspector job")?;
+
+    claim
+        .map(
+            |(
+                job_id,
+                commit_id,
+                derivation_id,
+                configuration_name,
+                carrier_drv_path,
+                execution_id,
+                attempts,
+            )| {
+                Ok(ConfigInspectionExecutionClaim {
+                    job_id,
+                    commit_id,
+                    derivation_id,
+                    configuration_name,
+                    carrier_drv_path,
+                    execution_id,
+                    attempts,
+                })
+            },
+        )
+        .transpose()
+}
+
+/// Refreshes a running execution heartbeat only for the exact owner token.
+pub(crate) async fn heartbeat_config_inspection_execution(
+    pool: &PgPool,
+    job_id: Uuid,
+    execution_id: Uuid,
+) -> Result<bool> {
+    let affected = sqlx::query(
+        "UPDATE config_inspection_jobs SET execution_heartbeat_at = now(), updated_at = now() WHERE id = $1 AND status = 'running' AND execution_id = $2",
+    )
+    .bind(job_id)
+    .bind(execution_id)
+    .execute(pool)
+    .await
+    .context("heartbeat Config Inspector execution")?
+    .rows_affected();
+    Ok(affected == 1)
+}
+
+/// Completes a running execution successfully for the exact owner token.
+pub(crate) async fn complete_config_inspection_execution_success(
+    pool: &PgPool,
+    job_id: Uuid,
+    execution_id: Uuid,
+) -> Result<bool> {
+    let affected = sqlx::query(
+        "UPDATE config_inspection_jobs SET status = 'succeeded', completed_at = now(), error = NULL, updated_at = now() WHERE id = $1 AND status = 'running' AND execution_id = $2",
+    )
+    .bind(job_id)
+    .bind(execution_id)
+    .execute(pool)
+    .await
+    .context("complete Config Inspector execution successfully")?
+    .rows_affected();
+    Ok(affected == 1)
+}
+
+/// Redacts and bounds a diagnostic before it crosses the persistence boundary.
+fn bounded_config_inspection_error(error: &str) -> String {
+    let redacted = crate::security::snapshot_redaction::redact_text(error);
+    let bounded: String = redacted
+        .chars()
+        .take(MAX_CONFIG_INSPECTION_ERROR_CHARS)
+        .collect();
+    if bounded.trim().is_empty() {
+        "Config inspection execution failed".to_string()
+    } else {
+        bounded
+    }
+}
+
+/// Completes a running execution with a bounded redacted diagnostic.
+pub(crate) async fn complete_config_inspection_execution_failure(
+    pool: &PgPool,
+    job_id: Uuid,
+    execution_id: Uuid,
+    error: &str,
+) -> Result<bool> {
+    let safe_error = bounded_config_inspection_error(error);
+    let affected = sqlx::query(
+        "UPDATE config_inspection_jobs SET status = 'failed', completed_at = now(), error = $3, updated_at = now() WHERE id = $1 AND status = 'running' AND execution_id = $2",
+    )
+    .bind(job_id)
+    .bind(execution_id)
+    .bind(safe_error)
+    .execute(pool)
+    .await
+    .context("complete Config Inspector execution with failure")?
+    .rows_affected();
+    Ok(affected == 1)
+}
+
+/// Requeues or terminalizes one exact stale execution using a heartbeat CAS.
+async fn recover_stale_config_inspection_execution(
+    pool: &PgPool,
+    job_id: Uuid,
+    execution_id: Uuid,
+    stale_before: DateTime<Utc>,
+) -> Result<Option<ConfigInspectionJobStatus>> {
+    let status = sqlx::query_scalar::<_, String>(
+        r#"
+        UPDATE config_inspection_jobs
+        SET status = CASE
+                         WHEN attempts < $4 THEN 'queued'
+                         ELSE 'failed'
+                     END,
+            scheduled_at = CASE WHEN attempts < $4 THEN now() ELSE scheduled_at END,
+            started_at = CASE WHEN attempts < $4 THEN NULL ELSE started_at END,
+            completed_at = CASE WHEN attempts < $4 THEN NULL ELSE now() END,
+            error = CASE
+                        WHEN attempts < $4 THEN NULL
+                        ELSE $5
+                    END,
+            execution_id = CASE WHEN attempts < $4 THEN NULL ELSE execution_id END,
+            execution_heartbeat_at = CASE
+                                         WHEN attempts < $4 THEN NULL
+                                         ELSE execution_heartbeat_at
+                                     END,
+            updated_at = now()
+        WHERE id = $1
+          AND status = 'running'
+          AND execution_id = $2
+          AND execution_heartbeat_at < $3
+        RETURNING status
+        "#,
+    )
+    .bind(job_id)
+    .bind(execution_id)
+    .bind(stale_before)
+    .bind(MAX_CONFIG_INSPECTION_ATTEMPTS)
+    .bind(MAX_ATTEMPTS_ERROR)
+    .fetch_optional(pool)
+    .await
+    .context("recover stale Config Inspector execution")?;
+
+    status
+        .map(|status| ConfigInspectionJobStatus::parse(&status))
+        .transpose()
+}
+
+/// Recovers at most 32 stale Config Inspector executions.
+///
+/// A session-level execution advisory lock is authoritative over heartbeat age.
+/// Recovery therefore never revokes a stale-looking execution while its owner
+/// still holds the lock on a live PostgreSQL session.
+pub(crate) async fn recover_stale_config_inspection_jobs(
+    pool: &PgPool,
+    stale_threshold: Duration,
+) -> Result<ConfigInspectionRecoverySummary> {
+    let stale_before = Utc::now() - stale_threshold;
+    let candidates: Vec<(Uuid, Uuid, i32)> = sqlx::query_as(
+        r#"
+        SELECT id, execution_id, attempts
+            FROM config_inspection_jobs
+            WHERE status = 'running'
+          AND execution_heartbeat_at < $1
+        ORDER BY execution_heartbeat_at ASC, id ASC
+        LIMIT $2
+        "#,
+    )
+    .bind(stale_before)
+    .bind(STALE_RECOVERY_BATCH_SIZE)
+    .fetch_all(pool)
+    .await
+    .context("list stale Config Inspector executions")?;
+
+    let mut summary = ConfigInspectionRecoverySummary {
+        inspected: candidates.len(),
+        ..Default::default()
+    };
+    for (job_id, execution_id, _attempts) in candidates {
+        if crate::queries::cve_scans::execution_lock_is_held(pool, execution_id).await? {
+            summary.locked += 1;
+            continue;
+        }
+        match recover_stale_config_inspection_execution(pool, job_id, execution_id, stale_before)
+            .await?
+        {
+            Some(ConfigInspectionJobStatus::Queued) => summary.requeued += 1,
+            Some(ConfigInspectionJobStatus::Failed) => summary.failed += 1,
+            Some(_) | None => {}
+        }
+    }
+    Ok(summary)
 }
 
 #[cfg(test)]
@@ -332,6 +604,45 @@ mod tests {
             .fetch_one(pool)
             .await
             .expect("inspection job count should load")
+    }
+
+    async fn insert_queued_job(
+        pool: &PgPool,
+        commit_id: i32,
+        derivation_id: i32,
+        configuration_name: &str,
+        carrier_drv_path: &str,
+        scheduled_at: DateTime<Utc>,
+    ) -> Uuid {
+        sqlx::query_scalar(
+            "INSERT INTO config_inspection_jobs (commit_id, derivation_id, configuration_name, carrier_drv_path, status, scheduled_at) VALUES ($1, $2, $3, $4, 'queued', $5) RETURNING id",
+        )
+        .bind(commit_id)
+        .bind(derivation_id)
+        .bind(configuration_name)
+        .bind(carrier_drv_path)
+        .bind(scheduled_at)
+        .fetch_one(pool)
+        .await
+        .expect("queued Config Inspector job should persist")
+    }
+
+    async fn make_claimable_job(pool: &PgPool, name: &str) -> (i32, Uuid) {
+        let (commit_id, derivation_id, drv_path) = fixture(pool, name).await;
+        let job_id =
+            insert_queued_job(pool, commit_id, derivation_id, name, &drv_path, Utc::now()).await;
+        (commit_id, job_id)
+    }
+
+    async fn set_stale(pool: &PgPool, job_id: Uuid, attempts: i32) {
+        sqlx::query(
+            "UPDATE config_inspection_jobs SET attempts = $2, execution_heartbeat_at = now() - interval '1 hour', updated_at = now() WHERE id = $1",
+        )
+        .bind(job_id)
+        .bind(attempts)
+        .execute(pool)
+        .await
+        .expect("Config Inspector execution should become stale");
     }
 
     async fn add_snapshot_selector(
@@ -493,6 +804,351 @@ mod tests {
         }
     }
 
+    #[test]
+    fn migration_0253_documents_pre_worker_running_row_upgrade() {
+        let migration =
+            include_str!("../../migrations/0253_config_inspection_execution_ownership.sql");
+        assert!(migration.contains("WHERE status = 'running'"));
+        assert!(migration.contains("status = 'queued'"));
+        assert!(migration.contains("started_at = NULL"));
+        assert!(migration.contains("completed_at = NULL"));
+        assert!(migration.contains("error = NULL"));
+        assert!(migration.contains("execution_id uuid"));
+        assert!(migration.contains("execution_heartbeat_at timestamptz"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn claim_is_ordered_and_records_execution_ownership(pool: PgPool) {
+        let (commit_id, first_id, first_drv) = fixture(&pool, "first").await;
+        let (_, second_id, second_drv) = fixture(&pool, "second").await;
+        sqlx::query("UPDATE derivations SET commit_id = $1 WHERE id = $2")
+            .bind(commit_id)
+            .bind(second_id)
+            .execute(&pool)
+            .await
+            .expect("second derivation should move to the fixture commit");
+        let now = Utc::now();
+        let first_job = insert_queued_job(
+            &pool,
+            commit_id,
+            first_id,
+            "first",
+            &first_drv,
+            now - Duration::minutes(2),
+        )
+        .await;
+        let second_job = insert_queued_job(
+            &pool,
+            commit_id,
+            second_id,
+            "second",
+            &second_drv,
+            now - Duration::minutes(1),
+        )
+        .await;
+
+        let claim = claim_next_config_inspection_job(&pool)
+            .await
+            .expect("oldest job should claim")
+            .expect("a queued job should exist");
+        assert_eq!(claim.job_id, first_job);
+        assert_eq!(claim.attempts, 1);
+        assert_ne!(claim.execution_id, Uuid::nil());
+        let row = get_config_inspection_job(&pool, first_job)
+            .await
+            .expect("claimed job should load")
+            .expect("claimed job should exist");
+        assert_eq!(row.status, ConfigInspectionJobStatus::Running);
+        assert!(row.started_at.is_some());
+        assert!(row.execution_heartbeat_at.is_some());
+        assert_eq!(row.execution_id, Some(claim.execution_id));
+        assert_eq!(
+            get_config_inspection_job(&pool, second_job)
+                .await
+                .expect("second job should load")
+                .expect("second job should exist")
+                .status,
+            ConfigInspectionJobStatus::Queued
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn concurrent_claimers_claim_one_or_two_distinct_jobs(pool: PgPool) {
+        let (_, one) = make_claimable_job(&pool, "one").await;
+        let (_, two) = make_claimable_job(&pool, "two").await;
+        let (left, right) = tokio::join!(
+            claim_next_config_inspection_job(&pool),
+            claim_next_config_inspection_job(&pool)
+        );
+        let left = left
+            .expect("first concurrent claim should succeed")
+            .expect("first job should claim");
+        let right = right
+            .expect("second concurrent claim should succeed")
+            .expect("second job should claim");
+        assert_ne!(left.job_id, right.job_id);
+        assert_eq!(
+            [one, two]
+                .into_iter()
+                .filter(|id| *id == left.job_id || *id == right.job_id)
+                .count(),
+            2
+        );
+
+        let (_, only) = make_claimable_job(&pool, "only").await;
+        let (left, right) = tokio::join!(
+            claim_next_config_inspection_job(&pool),
+            claim_next_config_inspection_job(&pool)
+        );
+        let claims = [
+            left.expect("single-row first claim should succeed"),
+            right.expect("single-row second claim should succeed"),
+        ];
+        assert_eq!(claims.iter().filter_map(|claim| claim.as_ref()).count(), 1);
+        assert!(claims.iter().flatten().all(|claim| claim.job_id == only));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn execution_owner_fencing_and_redacted_failure_are_enforced(pool: PgPool) {
+        let (_, job_id) = make_claimable_job(&pool, "owner").await;
+        let claim = claim_next_config_inspection_job(&pool)
+            .await
+            .expect("job should claim")
+            .expect("claim should exist");
+        let wrong = Uuid::new_v4();
+        assert!(
+            !heartbeat_config_inspection_execution(&pool, job_id, wrong)
+                .await
+                .unwrap()
+        );
+        assert!(
+            heartbeat_config_inspection_execution(&pool, job_id, claim.execution_id)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !complete_config_inspection_execution_success(&pool, job_id, wrong)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !complete_config_inspection_execution_failure(
+                &pool,
+                job_id,
+                wrong,
+                "Authorization: Bearer secret-value"
+            )
+            .await
+            .unwrap()
+        );
+        let diagnostic = format!("Authorization: Bearer secret-value {}", "x".repeat(5000));
+        assert!(
+            complete_config_inspection_execution_failure(
+                &pool,
+                job_id,
+                claim.execution_id,
+                &diagnostic
+            )
+            .await
+            .unwrap()
+        );
+        let row = get_config_inspection_job(&pool, job_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.status, ConfigInspectionJobStatus::Failed);
+        let error = row.error.unwrap();
+        assert!(error.chars().count() <= MAX_CONFIG_INSPECTION_ERROR_CHARS);
+        assert!(!error.contains("secret-value"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn stale_recovery_respects_live_locks_requeues_and_rotates_tokens(pool: PgPool) {
+        let (_, job_id) = make_claimable_job(&pool, "recover").await;
+        let first = claim_next_config_inspection_job(&pool)
+            .await
+            .unwrap()
+            .unwrap();
+        set_stale(&pool, job_id, first.attempts).await;
+        let mut lock_conn = pool.acquire().await.unwrap();
+        crate::queries::cve_scans::acquire_execution_lock(&mut lock_conn, first.execution_id)
+            .await
+            .unwrap();
+        let locked = recover_stale_config_inspection_jobs(&pool, Duration::minutes(5))
+            .await
+            .unwrap();
+        assert_eq!(locked.locked, 1);
+        assert_eq!(locked.requeued, 0);
+        assert_eq!(
+            get_config_inspection_job(&pool, job_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            ConfigInspectionJobStatus::Running
+        );
+        assert!(
+            crate::queries::cve_scans::release_execution_lock(&mut lock_conn, first.execution_id)
+                .await
+                .unwrap()
+        );
+        let recovered = recover_stale_config_inspection_jobs(&pool, Duration::minutes(5))
+            .await
+            .unwrap();
+        assert_eq!(recovered.requeued, 1);
+        let queued = get_config_inspection_job(&pool, job_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(queued.status, ConfigInspectionJobStatus::Queued);
+        assert_eq!(queued.attempts, 1);
+        assert!(queued.execution_id.is_none());
+        assert!(queued.execution_heartbeat_at.is_none());
+        assert!(queued.started_at.is_none());
+
+        let second = claim_next_config_inspection_job(&pool)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.attempts, 2);
+        assert_ne!(second.execution_id, first.execution_id);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn stale_recovery_fences_successors_late_heartbeats_and_max_attempts(pool: PgPool) {
+        let (_, job_id) = make_claimable_job(&pool, "fence").await;
+        let first = claim_next_config_inspection_job(&pool)
+            .await
+            .unwrap()
+            .unwrap();
+        set_stale(&pool, job_id, first.attempts).await;
+        let cutoff = Utc::now() - Duration::minutes(5);
+        let recovered = recover_stale_config_inspection_execution(
+            &pool,
+            first.job_id,
+            first.execution_id,
+            cutoff,
+        )
+        .await
+        .unwrap();
+        assert_eq!(recovered, Some(ConfigInspectionJobStatus::Queued));
+        let successor = claim_next_config_inspection_job(&pool)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(successor.execution_id, first.execution_id);
+        assert_eq!(
+            recover_stale_config_inspection_execution(
+                &pool,
+                first.job_id,
+                first.execution_id,
+                cutoff
+            )
+            .await
+            .unwrap(),
+            None
+        );
+        assert_eq!(
+            get_config_inspection_job(&pool, job_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .execution_id,
+            Some(successor.execution_id)
+        );
+
+        assert!(
+            heartbeat_config_inspection_execution(&pool, job_id, successor.execution_id)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            recover_stale_config_inspection_execution(
+                &pool,
+                successor.job_id,
+                successor.execution_id,
+                cutoff
+            )
+            .await
+            .unwrap(),
+            None
+        );
+
+        set_stale(&pool, job_id, MAX_CONFIG_INSPECTION_ATTEMPTS).await;
+        assert_eq!(
+            recover_stale_config_inspection_jobs(&pool, Duration::minutes(5))
+                .await
+                .unwrap()
+                .failed,
+            1
+        );
+        let failed = get_config_inspection_job(&pool, job_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(failed.status, ConfigInspectionJobStatus::Failed);
+        assert_eq!(failed.error.as_deref(), Some(MAX_ATTEMPTS_ERROR));
+        assert_eq!(failed.attempts, MAX_CONFIG_INSPECTION_ATTEMPTS);
+        assert_eq!(failed.execution_id, Some(successor.execution_id));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn stale_recovery_is_bounded_and_does_not_touch_selectors(pool: PgPool) {
+        let mut job_ids = Vec::new();
+        for index in 0..33 {
+            let (_, job_id) = make_claimable_job(&pool, &format!("bounded-{index}")).await;
+            job_ids.push(job_id);
+        }
+        for job_id in &job_ids {
+            let claim = claim_next_config_inspection_job(&pool)
+                .await
+                .unwrap()
+                .unwrap();
+            set_stale(&pool, *job_id, claim.attempts).await;
+        }
+        let before_primary: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM evaluation_snapshot_selections")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let before_config: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM config_snapshot_selections")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let summary = recover_stale_config_inspection_jobs(&pool, Duration::minutes(5))
+            .await
+            .unwrap();
+        assert_eq!(summary.inspected, 32);
+        assert_eq!(summary.requeued, 32);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM evaluation_snapshot_selections")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            before_primary
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM config_snapshot_selections")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            before_config
+        );
+        assert!(
+            get_config_inspection_job(&pool, job_ids[0])
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
     #[sqlx::test]
     #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
     async fn enqueue_uses_exact_targets_and_is_idempotent(pool: PgPool) {
@@ -517,13 +1173,10 @@ mod tests {
         assert_eq!(second.inserted_jobs, 0);
         assert_eq!(job_count(&pool, commit_id).await, 1);
 
-        sqlx::query(
-            "UPDATE config_inspection_jobs SET status = 'running', started_at = now(), updated_at = now() WHERE commit_id = $1",
-        )
-        .bind(commit_id)
-        .execute(&pool)
-        .await
-        .expect("inspection job should enter running state");
+        let claim = claim_next_config_inspection_job(&pool)
+            .await
+            .expect("inspection job should claim");
+        assert!(claim.is_some());
         let third = enqueue_config_inspection_jobs_for_successful_systems(
             &pool,
             commit_id,
