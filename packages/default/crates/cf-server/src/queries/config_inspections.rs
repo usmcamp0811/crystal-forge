@@ -5,8 +5,7 @@
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Duration, Utc};
-use serde_json::json;
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, Postgres, Row, Transaction};
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
@@ -103,6 +102,17 @@ pub(crate) struct ConfigInspectionExecutionClaim {
     pub execution_id: Uuid,
     /// Number of claims made, including this claim.
     pub attempts: i32,
+}
+
+/// Resolves the immutable flake lineage required by one claimed execution.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub(crate) struct ConfigInspectionExecutionContext {
+    /// Owning flake identity used for credential lookup.
+    pub flake_id: i32,
+    /// Repository reference stored by the owning flake.
+    pub repo_url: String,
+    /// Full immutable commit revision selected by the claimed derivation.
+    pub commit_hash: String,
 }
 
 /// Summarizes one bounded stale-execution recovery pass.
@@ -315,6 +325,124 @@ pub(crate) async fn get_config_inspection_job(
         })
     })
     .transpose()
+}
+
+/// Resolves a claim only when its complete target and execution identity still
+/// match the current database row and derivation lineage.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot load the exact execution context.
+pub(crate) async fn load_config_inspection_execution_context(
+    pool: &PgPool,
+    claim: &ConfigInspectionExecutionClaim,
+) -> Result<Option<ConfigInspectionExecutionContext>> {
+    sqlx::query_as(
+        r#"
+        SELECT flake.id AS flake_id,
+               flake.repo_url,
+               commit.git_commit_hash AS commit_hash
+        FROM config_inspection_jobs job
+        JOIN derivations derivation
+          ON derivation.id = job.derivation_id
+         AND derivation.commit_id = job.commit_id
+         AND derivation.derivation_type = 'nixos'
+         AND derivation.derivation_name = job.configuration_name
+         AND derivation.derivation_path = job.carrier_drv_path
+        JOIN commits commit ON commit.id = job.commit_id
+        JOIN flakes flake ON flake.id = commit.flake_id
+        WHERE job.id = $1
+          AND job.status = 'running'
+          AND job.execution_id = $2
+          AND job.commit_id = $3
+          AND job.derivation_id = $4
+          AND job.configuration_name = $5
+          AND job.carrier_drv_path = $6
+        "#,
+    )
+    .bind(claim.job_id)
+    .bind(claim.execution_id)
+    .bind(claim.commit_id)
+    .bind(claim.derivation_id)
+    .bind(&claim.configuration_name)
+    .bind(&claim.carrier_drv_path)
+    .fetch_optional(pool)
+    .await
+    .context("load exact Config Inspector execution context")
+}
+
+/// Locks and revalidates the exact execution row before artifact persistence.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot acquire the row lock or inspect the
+/// execution row.
+pub(crate) async fn lock_config_inspection_execution_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    claim: &ConfigInspectionExecutionClaim,
+) -> Result<bool> {
+    let row = sqlx::query(
+        r#"
+        SELECT id
+        FROM config_inspection_jobs
+        WHERE id = $1
+          AND status = 'running'
+          AND execution_id = $2
+          AND commit_id = $3
+          AND derivation_id = $4
+          AND configuration_name = $5
+          AND carrier_drv_path = $6
+        FOR UPDATE
+        "#,
+    )
+    .bind(claim.job_id)
+    .bind(claim.execution_id)
+    .bind(claim.commit_id)
+    .bind(claim.derivation_id)
+    .bind(&claim.configuration_name)
+    .bind(&claim.carrier_drv_path)
+    .fetch_optional(&mut **tx)
+    .await
+    .context("lock exact Config Inspector execution")?;
+    Ok(row.is_some())
+}
+
+/// Marks the exact locked execution successful inside its persistence transaction.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot update the execution row.
+pub(crate) async fn complete_config_inspection_execution_success_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    claim: &ConfigInspectionExecutionClaim,
+) -> Result<bool> {
+    let affected = sqlx::query(
+        r#"
+        UPDATE config_inspection_jobs
+        SET status = 'succeeded',
+            completed_at = now(),
+            error = NULL,
+            updated_at = now()
+        WHERE id = $1
+          AND status = 'running'
+          AND execution_id = $2
+          AND commit_id = $3
+          AND derivation_id = $4
+          AND configuration_name = $5
+          AND carrier_drv_path = $6
+        "#,
+    )
+    .bind(claim.job_id)
+    .bind(claim.execution_id)
+    .bind(claim.commit_id)
+    .bind(claim.derivation_id)
+    .bind(&claim.configuration_name)
+    .bind(&claim.carrier_drv_path)
+    .execute(&mut **tx)
+    .await
+    .context("complete Config Inspector execution in persistence transaction")?
+    .rows_affected();
+    Ok(affected == 1)
 }
 
 /// Claims the oldest queued Config Inspector job without globally serializing claims.
@@ -548,6 +676,7 @@ pub(crate) async fn recover_stale_config_inspection_jobs(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use sqlx::PgPool;
 
     async fn fixture(pool: &PgPool, name: &str) -> (i32, i32, String) {
@@ -1445,5 +1574,181 @@ mod tests {
         assert!(left.is_ok());
         assert!(right.is_ok());
         assert_eq!(job_count(&pool, commit_id).await, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn executor_rejects_forged_context_before_starting_a_process(pool: PgPool) {
+        let (_, job_id) = make_claimable_job(&pool, "executor-context").await;
+        let claim = claim_next_config_inspection_job(&pool)
+            .await
+            .expect("job should claim")
+            .expect("claim should exist");
+        let mut forged = claim.clone();
+        forged.commit_id += 1;
+
+        let outcome =
+            crate::services::config_inspections::execute_claimed_config_inspection_with_program(
+                &pool,
+                forged,
+                std::path::Path::new("/definitely/missing/nix-eval-jobs"),
+            )
+            .await
+            .expect("forged context should be rejected as lost ownership");
+        assert_eq!(
+            outcome,
+            crate::services::config_inspections::ConfigInspectionExecutionOutcome::LostOwnership
+        );
+        assert_eq!(
+            get_config_inspection_job(&pool, job_id)
+                .await
+                .expect("claimed job should load")
+                .expect("claimed job should exist")
+                .status,
+            ConfigInspectionJobStatus::Running
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn executor_persists_stage2_unavailable_v2_atomically(pool: PgPool) {
+        let (commit_id, derivation_id, carrier_drv_path) = fixture(&pool, "executor-success").await;
+        let job_id = insert_queued_job(
+            &pool,
+            commit_id,
+            derivation_id,
+            "executor-success",
+            &carrier_drv_path,
+            Utc::now(),
+        )
+        .await;
+        let claim = claim_next_config_inspection_job(&pool)
+            .await
+            .expect("job should claim")
+            .expect("claim should exist");
+        let (repo_url, commit_hash): (String, String) = sqlx::query_as(
+            "SELECT flakes.repo_url, commits.git_commit_hash FROM commits JOIN flakes ON flakes.id = commits.flake_id WHERE commits.id = $1",
+        )
+        .bind(commit_id)
+        .fetch_one(&pool)
+        .await
+        .expect("fixture commit lineage should load");
+        let flake_ref = crate::derivations::utils::build_flake_reference(&repo_url, &commit_hash);
+        let target =
+            crate::models::config_inspector::InspectionTarget::new(&flake_ref, "executor-success");
+        let stage1_lines = [
+            json!({
+                "attr": "__crystalForgeConfigIndex",
+                "attrPath": ["__crystalForgeConfigIndex"],
+                "drvPath": carrier_drv_path.clone(),
+                "extraValue": {
+                    "kind": "index",
+                    "targetKey": target.target_key,
+                    "sourceOutPath": "/nix/store/config-inspection-source",
+                    "options": [],
+                    "origins": []
+                }
+            }),
+            json!({
+                "attr": "__crystalForgeProvenance",
+                "attrPath": ["__crystalForgeProvenance"],
+                "drvPath": carrier_drv_path,
+                "extraValue": {
+                    "adapterVersion": 1,
+                    "supported": false,
+                    "reasonCode": "capability_self_test_failed"
+                }
+            }),
+        ]
+        .into_iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>();
+        let stage1_shell = stage1_lines
+            .iter()
+            .map(|line| format!("'{}'", line.replace('\'', "'\\''")))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let tempdir = tempfile::tempdir().expect("executor test tempdir should create");
+        let program = tempdir.path().join("fake-nix-eval-jobs");
+        std::fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\ncase \"$*\" in\n  *crystalForgeInspector*) printf '%s\\n' {} ;;\n  *) : ;;\nesac\n",
+                stage1_shell
+            ),
+        )
+        .expect("fake executor should write");
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&program)
+            .expect("fake executor should stat")
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&program, permissions)
+            .expect("fake executor should be executable");
+
+        let before_primary: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM evaluation_snapshot_selections")
+                .fetch_one(&pool)
+                .await
+                .expect("primary selector count should load");
+        let before_job = get_config_inspection_job(&pool, job_id)
+            .await
+            .expect("claimed job should load")
+            .expect("claimed job should exist");
+        let outcome =
+            crate::services::config_inspections::execute_claimed_config_inspection_with_program(
+                &pool, claim, &program,
+            )
+            .await
+            .expect("executor should complete semantic unavailable result");
+        let snapshot_id = match outcome {
+            crate::services::config_inspections::ConfigInspectionExecutionOutcome::Succeeded {
+                snapshot_id,
+            } => snapshot_id,
+            other => panic!("expected successful snapshot execution, got {other:?}"),
+        };
+        let after_job = get_config_inspection_job(&pool, job_id)
+            .await
+            .expect("completed job should load")
+            .expect("completed job should exist");
+        assert_eq!(after_job.status, ConfigInspectionJobStatus::Succeeded);
+        assert_eq!(after_job.attempts, before_job.attempts);
+        assert_eq!(
+            sqlx::query_scalar::<_, Uuid>(
+                "SELECT current_snapshot_id FROM config_snapshot_selections WHERE commit_id = $1 AND configuration_name = $2",
+            )
+            .bind(commit_id)
+            .bind("executor-success")
+            .fetch_one(&pool)
+            .await
+            .expect("V2 selector should advance"),
+            snapshot_id
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM evaluation_snapshot_selections")
+                .fetch_one(&pool)
+                .await
+                .expect("primary selector count should reload"),
+            before_primary
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT lifecycle FROM evaluation_snapshots WHERE id = $1"
+            )
+            .bind(snapshot_id)
+            .fetch_one(&pool)
+            .await
+            .expect("V2 snapshot should load"),
+            "available"
+        );
+        assert!(
+            !sqlx::query_scalar::<_, bool>(
+                "SELECT comparison_ready FROM evaluation_snapshots WHERE id = $1"
+            )
+            .bind(snapshot_id)
+            .fetch_one(&pool)
+            .await
+            .expect("V2 comparison readiness should load")
+        );
     }
 }
