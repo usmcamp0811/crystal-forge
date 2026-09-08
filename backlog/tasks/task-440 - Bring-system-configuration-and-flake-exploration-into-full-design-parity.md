@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-08 03:31'
+updated_date: '2026-09-08 03:50'
 labels:
   - design-parity
   - web-ui
@@ -164,6 +164,8 @@ Starting bounded V2 Config summary and module-source DB-only reader slice from d
 2026-09-07 executor ownership remediation finished. Disposable PostgreSQL 17.11 user-owned cluster verified current_user=postgres with rolcreatedb=true and rolsuper=true. All 17 ignored queries::config_inspections PostgreSQL tests passed, including executor_lock_acquisition_failure_leaves_claim_untouched and executor_persists_stage2_unavailable_v2_atomically; four selector-isolation/publication tests also passed. No production defect exposed, so no further code changes were made. Committed as d4262d03 with the required message and pushed to origin/TASK-440-system-config-flake-parity. Local and remote heads are equal. GitLab pipeline 2827782393 for the exact SHA is running. Disposable PostgreSQL clusters were stopped and ports 55432/55433 have no listener. TASK-440 remains In Progress.
 
 2026-09-08 bounded NixOS process-boundary slice: Added crystal-forge-config-inspector.service, its config-inspector-worker wrapper, and fixed resource limits in crystal-forge-config-inspector.slice. The exact slice name creates the runtime cgroup ancestry /crystal-forge.slice/crystal-forge-config.slice/crystal-forge-config-inspector.slice, so the aggregate crystal-forge.slice remains the outer cap. Extended the integration VM with runtime assertions for service readiness, assigned slice, cgroup ancestry, memory/swap/CPU/task limits, control-group cleanup, OOM/restart policy, wrapper ExecStart, and the running package binary. The first two local VM attempts exposed incorrect test assumptions about slice-unit Slice/ControlGroup values; only the integration assertion changed. The final required integration build passed with 13 tests passed, 14 skipped, and 179 deselected. Focused integration module evaluation, config-inspector guard, evaluator-snapshot-isolation guard, and git diff checks passed. The repository exports no configured Nix formatter; nixfmt and nixpkgs-fmt checks both also reject the unchanged parent versions of these two already-unformatted files, so no unrelated whole-file reformat was applied. No Rust, migration, query, database, API, UI, backfill, primary evaluator, or deployment files changed. Committed and pushed as 1ccee7cf6aa59c3dc66f80ba02ed0817d2c0c9ba. Exact-head pipeline 2828091108 is running; integration and oidc-auth are running, server-regressions and remaining automatic checks are pending/created. TASK-440 remains In Progress.
+
+2026-09-08 finish-line API implementation started from clean exact HEAD 1ccee7cf. Commit-mode branches now call V2-only readers while generation mode remains on V1. The V2 option and module-source readers resolve visibility-scoped tracked provenance in the same read-only repeatable-read transaction. Initial SQLX_OFFLINE cf-server library check passed with existing warnings; formatting identified one local layout correction, now applied. Focused tests remain pending.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
