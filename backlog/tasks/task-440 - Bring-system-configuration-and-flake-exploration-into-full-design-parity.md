@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-08 16:42'
+updated_date: '2026-09-08 17:35'
 labels:
   - design-parity
   - web-ui
@@ -152,6 +152,8 @@ The `modifiedFiles` metadata is anticipated and non-exhaustive. The implementati
 Finish-line V2 Config API slice from accepted service commit 1ccee7cf: (1) confirm exact branch/pipeline state and prove current commit-mode production handlers still use the V1 selector/readers; (2) audit generation retention and historical real/mock authority without changing generation mode or adding backfill/schema; (3) adapt the three existing public Config response DTOs to accepted V2 commit-mode query results while preserving generation-mode V1 behavior and authorization-before-selection; (4) add focused PostgreSQL-backed handler regressions for V2 availability, V1/V2 isolation, V1-only unavailability, Stage-2 unavailable truth, first-parent comparison, shared/stale tokens, corruption, non-disclosure, read-only behavior, and an injected executor writer-to-handler vertical path with scheduling suppression; (5) run disposable PostgreSQL Config Inspector/V2/API tests, SQLx checks, formatting/diff checks, and both architectural guards; (6) run the named fast TASK-440 browser workflows and only then the final server, server-regressions, integration, and web-ui Nix gates once; (7) audit MR !323, architecture, migration ordering, and scope; commit one coherent TASK-440: Serve Config Inspector V2 artifacts change, push, verify exact-head CI/local-remote equality, and leave TASK-440 In Progress. No migration, generation redesign, unsafe backfill, worker/service redesign, deployment, TASK-441 work, merge, or unrelated cleanup.
 
 Public-contract clarification approved on 2026-09-08: preserve V2 missing/failure states by widening only existing Config DTO fields. Change definition and module source paths plus declared type to `Option<String>`; add optional `metadata_error`; change `overridden` to `Option<bool>`. V1 mappings wrap known values in `Some`. Mirror fields in the Web UI, render placeholders only in Dioxus, disable source-path interaction when absent, audit this adapter for lossy coercions, and add exact JSON/deserialization regressions before resuming the existing finish-line gates.
+
+Focused Web UI VM verification exposed a test-harness environment propagation defect: the driver sets the real git fixture variables only in its own process, while the browser Node process runs inside the machine without them and falls back to example.invalid. Pass the existing real repository, commit, and configuration fixture values into the browser process, then rerun the exact seven TASK-440 workflows before broad gates. This is test-only and does not change product behavior.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
