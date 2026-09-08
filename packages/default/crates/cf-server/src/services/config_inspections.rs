@@ -5,11 +5,14 @@
 //! primary evaluation and deployment behavior.
 
 use anyhow::{Context, Result, bail};
+use chrono::Duration as ChronoDuration;
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 use std::path::Path;
 use std::time::Duration;
 use std::{future::Future, pin::Pin};
 use tokio::process::Command;
+use tokio::time::MissedTickBehavior;
+use tracing::{debug, info, warn};
 
 use crate::derivations::utils::build_flake_reference;
 use crate::flake::credentials::FlakeCredentialEnv;
@@ -23,9 +26,10 @@ use crate::models::evaluate_with_policies::{
     BoundedProcessOutput, HEAVY_NIX_ADVISORY_LOCK, heavy_nix_limiter, run_nix_command_bounded,
 };
 use crate::queries::config_inspections::{
-    ConfigInspectionExecutionClaim, complete_config_inspection_execution_failure,
+    ConfigInspectionExecutionClaim, ConfigInspectionRecoverySummary,
+    claim_next_config_inspection_job, complete_config_inspection_execution_failure,
     complete_config_inspection_execution_success_tx, load_config_inspection_execution_context,
-    lock_config_inspection_execution_tx,
+    lock_config_inspection_execution_tx, recover_stale_config_inspection_jobs,
 };
 use crate::queries::cve_scans::{acquire_execution_lock, release_execution_lock_or_close};
 use crate::queries::evaluation_snapshots::{
@@ -40,6 +44,16 @@ const NIX_EVAL_JOBS_PROGRAM: &str = "nix-eval-jobs";
 const NIX_WORKERS: &str = "2";
 const STAGE1_APPLY: &str = "derivation: if derivation.meta ? crystalForgeInspector then derivation.meta.crystalForgeInspector else derivation.meta.crystalForgeProvenance";
 const STAGE2_APPLY: &str = "derivation: if derivation.meta ? crystalForgeDefinitionValues then derivation.meta.crystalForgeDefinitionValues else derivation.meta";
+const CONFIG_INSPECTION_QUEUE_POLL_INTERVAL: Duration = Duration::from_secs(5);
+const CONFIG_INSPECTION_STALE_THRESHOLD: ChronoDuration = ChronoDuration::minutes(10);
+
+/// Returns whether the dedicated Config Inspector worker may run.
+///
+/// Mock execution mode must not open the worker database path or perform
+/// stale recovery. Primary mock evaluation remains independent of this worker.
+pub fn should_run_config_inspection_worker(execution_mode_is_mock: bool) -> bool {
+    !execution_mode_is_mock
+}
 
 /// Reports the durable result of one claimed Config Inspector execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,6 +83,128 @@ pub(crate) async fn execute_claimed_config_inspection(
 ) -> Result<ConfigInspectionExecutionOutcome> {
     execute_claimed_config_inspection_with_program(pool, claim, Path::new(NIX_EVAL_JOBS_PROGRAM))
         .await
+}
+
+/// Runs the durable Config Inspector queue serially until the process stops.
+///
+/// Recovery and claiming remain owned by the query/lifecycle layer. This loop
+/// awaits one exact executor call before it claims another job, so a worker
+/// process never creates per-job Tokio tasks or an in-memory work queue.
+pub async fn run_config_inspection_queue(pool: PgPool) {
+    info!("Starting serial Config Inspector queue worker");
+    recover_config_inspection_jobs(&pool).await;
+
+    let mut ticker = tokio::time::interval(CONFIG_INSPECTION_QUEUE_POLL_INTERVAL);
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+    loop {
+        ticker.tick().await;
+        run_config_inspection_worker_cycle(&pool).await;
+    }
+}
+
+async fn run_config_inspection_worker_cycle(pool: &PgPool) {
+    recover_config_inspection_jobs(pool).await;
+    process_one_config_inspection_job(
+        pool,
+        |pool| Box::pin(claim_next_config_inspection_job(pool)),
+        |pool, claim| Box::pin(execute_claimed_config_inspection(pool, claim)),
+    )
+    .await;
+}
+
+async fn recover_config_inspection_jobs(pool: &PgPool) {
+    match recover_stale_config_inspection_jobs(pool, CONFIG_INSPECTION_STALE_THRESHOLD).await {
+        Ok(summary) => log_recovery_summary(summary),
+        Err(error) => warn!(%error, "config_inspection_stale_recovery_failed"),
+    }
+}
+
+fn log_recovery_summary(summary: ConfigInspectionRecoverySummary) {
+    if summary.inspected > 0 || summary.locked > 0 || summary.requeued > 0 || summary.failed > 0 {
+        info!(
+            inspected = summary.inspected,
+            locked = summary.locked,
+            requeued = summary.requeued,
+            failed = summary.failed,
+            "config_inspection_stale_recovery"
+        );
+    }
+}
+
+type ClaimFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Option<ConfigInspectionExecutionClaim>>> + Send + 'a>>;
+type ExecuteFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<ConfigInspectionExecutionOutcome>> + Send + 'a>>;
+
+async fn process_one_config_inspection_job<Claim, Execute>(
+    pool: &PgPool,
+    claim_next: Claim,
+    execute: Execute,
+) where
+    Claim: for<'a> FnOnce(&'a PgPool) -> ClaimFuture<'a>,
+    Execute: for<'a> FnOnce(&'a PgPool, ConfigInspectionExecutionClaim) -> ExecuteFuture<'a>,
+{
+    let claim = match claim_next(pool).await {
+        Ok(Some(claim)) => claim,
+        Ok(None) => return,
+        Err(error) => {
+            warn!(%error, "config_inspection_claim_failed");
+            return;
+        }
+    };
+
+    let claim_details = (
+        claim.job_id,
+        claim.commit_id,
+        claim.configuration_name.clone(),
+        claim.execution_id,
+        claim.attempts,
+    );
+    match execute(pool, claim).await {
+        Ok(ConfigInspectionExecutionOutcome::Succeeded { snapshot_id }) => {
+            info!(
+                job_id = %claim_details.0,
+                commit_id = claim_details.1,
+                configuration_name = %claim_details.2,
+                execution_id = %claim_details.3,
+                snapshot_id = %snapshot_id,
+                attempts = claim_details.4,
+                "config_inspection_succeeded"
+            );
+        }
+        Ok(ConfigInspectionExecutionOutcome::Failed) => {
+            warn!(
+                job_id = %claim_details.0,
+                commit_id = claim_details.1,
+                configuration_name = %claim_details.2,
+                execution_id = %claim_details.3,
+                attempts = claim_details.4,
+                "config_inspection_failed"
+            );
+        }
+        Ok(ConfigInspectionExecutionOutcome::LostOwnership) => {
+            debug!(
+                job_id = %claim_details.0,
+                commit_id = claim_details.1,
+                configuration_name = %claim_details.2,
+                execution_id = %claim_details.3,
+                attempts = claim_details.4,
+                "config_inspection_lost_ownership"
+            );
+        }
+        Err(error) => {
+            warn!(
+                job_id = %claim_details.0,
+                commit_id = claim_details.1,
+                configuration_name = %claim_details.2,
+                execution_id = %claim_details.3,
+                attempts = claim_details.4,
+                %error,
+                "config_inspection_executor_error"
+            );
+        }
+    }
 }
 
 /// Executes one claimed job with an injected `nix-eval-jobs` program.
@@ -434,6 +570,214 @@ async fn terminalize_failure(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex as StdMutex};
+    use tokio::sync::{Mutex, Notify};
+    use uuid::Uuid;
+
+    fn test_pool() -> PgPool {
+        PgPool::connect_lazy("postgres://worker-test.invalid/config_inspections")
+            .expect("test pool should be constructible without connecting")
+    }
+
+    fn test_claim(attempts: i32) -> ConfigInspectionExecutionClaim {
+        ConfigInspectionExecutionClaim {
+            job_id: Uuid::new_v4(),
+            commit_id: attempts,
+            derivation_id: attempts,
+            configuration_name: format!("worker-{attempts}"),
+            carrier_drv_path: format!("/nix/store/{attempts}-worker.drv"),
+            execution_id: Uuid::new_v4(),
+            attempts,
+        }
+    }
+
+    #[tokio::test]
+    async fn worker_cycle_empty_queue_does_not_execute() {
+        let executor_calls = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::clone(&executor_calls);
+        process_one_config_inspection_job(
+            &test_pool(),
+            |_| Box::pin(async { Ok(None) }),
+            move |_, _| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async { Ok(ConfigInspectionExecutionOutcome::Failed) })
+            },
+        )
+        .await;
+
+        assert_eq!(executor_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn worker_cycle_passes_exact_claim_to_executor_once() {
+        let expected = test_claim(1);
+        let observed = Arc::new(Mutex::new(None));
+        let observed_by_executor = Arc::clone(&observed);
+        let claim = expected.clone();
+        process_one_config_inspection_job(
+            &test_pool(),
+            move |_| Box::pin(async move { Ok(Some(claim)) }),
+            move |_, claim| {
+                let observed = Arc::clone(&observed_by_executor);
+                Box::pin(async move {
+                    *observed.lock().await = Some(claim);
+                    Ok(ConfigInspectionExecutionOutcome::Failed)
+                })
+            },
+        )
+        .await;
+
+        assert_eq!(*observed.lock().await, Some(expected));
+    }
+
+    #[tokio::test]
+    async fn worker_cycles_execute_two_jobs_serially() {
+        let queue = Arc::new(StdMutex::new(VecDeque::from([
+            test_claim(1),
+            test_claim(2),
+        ])));
+        let executor_calls = Arc::new(AtomicUsize::new(0));
+        let first_started = Arc::new(Notify::new());
+        let release_first = Arc::new(Notify::new());
+        let first_pool = Arc::new(test_pool());
+
+        let first_queue = Arc::clone(&queue);
+        let first_calls = Arc::clone(&executor_calls);
+        let first_started_for_executor = Arc::clone(&first_started);
+        let release_first_for_executor = Arc::clone(&release_first);
+        let first_pool_for_task = Arc::clone(&first_pool);
+        let first_cycle = tokio::spawn(async move {
+            process_one_config_inspection_job(
+                &first_pool_for_task,
+                move |_| {
+                    let claim = first_queue
+                        .lock()
+                        .expect("queue mutex should not be poisoned")
+                        .pop_front();
+                    Box::pin(async move { Ok(claim) })
+                },
+                move |_, _| {
+                    let calls = Arc::clone(&first_calls);
+                    let started = Arc::clone(&first_started_for_executor);
+                    let release = Arc::clone(&release_first_for_executor);
+                    Box::pin(async move {
+                        assert_eq!(calls.fetch_add(1, Ordering::SeqCst), 0);
+                        started.notify_one();
+                        release.notified().await;
+                        Ok(ConfigInspectionExecutionOutcome::Succeeded {
+                            snapshot_id: Uuid::new_v4(),
+                        })
+                    })
+                },
+            )
+            .await;
+        });
+
+        first_started.notified().await;
+        assert_eq!(executor_calls.load(Ordering::SeqCst), 1);
+        release_first.notify_one();
+        first_cycle.await.expect("first cycle should complete");
+
+        let second_queue = Arc::clone(&queue);
+        let second_calls = Arc::clone(&executor_calls);
+        process_one_config_inspection_job(
+            &test_pool(),
+            move |_| {
+                let claim = second_queue
+                    .lock()
+                    .expect("queue mutex should not be poisoned")
+                    .pop_front();
+                Box::pin(async move { Ok(claim) })
+            },
+            move |_, _| {
+                second_calls.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async {
+                    Ok(ConfigInspectionExecutionOutcome::Succeeded {
+                        snapshot_id: Uuid::new_v4(),
+                    })
+                })
+            },
+        )
+        .await;
+
+        assert_eq!(executor_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn worker_executor_error_does_not_retry_or_terminalize() {
+        let executor_calls = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::clone(&executor_calls);
+        process_one_config_inspection_job(
+            &test_pool(),
+            |_| Box::pin(async { Ok(Some(test_claim(1))) }),
+            move |_, _| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async { Err(anyhow::anyhow!("injected worker error")) })
+            },
+        )
+        .await;
+
+        assert_eq!(executor_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn worker_lost_ownership_does_not_retry_or_mutate() {
+        let executor_calls = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::clone(&executor_calls);
+        process_one_config_inspection_job(
+            &test_pool(),
+            |_| Box::pin(async { Ok(Some(test_claim(1))) }),
+            move |_, _| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async { Ok(ConfigInspectionExecutionOutcome::LostOwnership) })
+            },
+        )
+        .await;
+
+        assert_eq!(executor_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn worker_failed_outcome_does_not_double_terminalize() {
+        let executor_calls = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::clone(&executor_calls);
+        process_one_config_inspection_job(
+            &test_pool(),
+            |_| Box::pin(async { Ok(Some(test_claim(1))) }),
+            move |_, _| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async { Ok(ConfigInspectionExecutionOutcome::Failed) })
+            },
+        )
+        .await;
+
+        assert_eq!(executor_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn worker_mode_gate_disables_mock_execution() {
+        assert!(should_run_config_inspection_worker(false));
+        assert!(!should_run_config_inspection_worker(true));
+    }
+
+    #[test]
+    fn worker_loop_has_no_per_job_fanout() {
+        let source = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/services/config_inspections.rs"
+        ));
+        let worker = source
+            .split_once("pub async fn run_config_inspection_queue")
+            .and_then(|(_, body)| body.split_once("async fn recover_config_inspection_jobs"))
+            .map(|(body, _)| body)
+            .expect("worker loop should remain present");
+        assert!(!worker.contains("tokio::spawn"));
+        assert!(!worker.contains("JoinSet"));
+        assert!(!worker.contains("FuturesUnordered"));
+        assert!(!worker.contains("buffer_unordered"));
+    }
 
     #[test]
     fn stage_commands_are_bounded_and_targeted() {

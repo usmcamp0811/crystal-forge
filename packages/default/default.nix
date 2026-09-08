@@ -194,13 +194,14 @@ let
   # default 404 Not Found. API routes are unaffected. This is deliberate: a
   # core build must not appear to serve a UI.
   #
-  # Only the server, hardening-worker, test-agent, and xccdf-export-fixture
-  # binaries come from this crate. The agent, builder, and keygen binaries are
-  # separate derivations.
+  # Only the server, hardening-worker, config-inspector-worker, test-agent, and
+  # xccdf-export-fixture binaries come from this crate. The agent, builder, and
+  # keygen binaries are separate derivations.
   # ─────────────────────────────────────────────────────────────────────────
   serverCargoBuildExtraArgs = lib.concatStringsSep " " [
     "--bin server"
     "--bin hardening-worker"
+    "--bin config-inspector-worker"
     "--bin test-agent"
     "--bin xccdf-export-fixture"
   ];
