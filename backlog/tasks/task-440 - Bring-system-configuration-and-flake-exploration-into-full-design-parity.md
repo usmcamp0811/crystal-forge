@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-08 12:53'
+updated_date: '2026-09-08 16:42'
 labels:
   - design-parity
   - web-ui
@@ -170,6 +170,8 @@ Starting bounded V2 Config summary and module-source DB-only reader slice from d
 2026-09-08 finish-line API implementation started from clean exact HEAD 1ccee7cf. Commit-mode branches now call V2-only readers while generation mode remains on V1. The V2 option and module-source readers resolve visibility-scoped tracked provenance in the same read-only repeatable-read transaction. Initial SQLX_OFFLINE cf-server library check passed with existing warnings; formatting identified one local layout correction, now applied. Focused tests remain pending.
 
 2026-09-08 finish-line API verification: The focused PostgreSQL handler regression initially returned queued for its V1-only fixture because the fixture left the primary commit evaluation pending. The fixture now marks the already-persisted V1 evaluation complete; the regression passes against isolated PostgreSQL 17 on port 55434. Added authoritative V2 digest change classification after lossy compatibility mapping and a focused unit regression; the unit test passes. `cargo fmt --package cf-server -- --check`, `SQLX_OFFLINE=true cargo check --offline -p cf-server --tests`, and `git diff --check` pass with existing warnings. Review identified a public-contract ambiguity: V2 permits nullable definition/module source paths and failed or absent declared-type metadata, but the retained compatibility DTOs require strings. Current mapping uses empty strings, which does not explicitly distinguish unavailable data. A compatibility strategy must be selected before final verification.
+
+2026-09-08 V2 public-contract regression pass: widened Config DTOs now preserve nullable declared type and source paths, safe metadata failure, and unknown override state through server JSON and Web UI deserialization. Commit-mode handler coverage proves JSON nulls, known V1 false/string values, no semantic placeholder strings, V1/V2 selector isolation, Stage-2 provenance unavailability, shared/stale tokens, side-effect-free reads, and targeted V2 host_delta_count exclusion from the primary V1 host corpus. The Config token now binds selected and first-parent flake-output content digests, with a PostgreSQL regression proving replacement returns SnapshotChanged. Source controls are disabled when both source path and independently authorized tracked identity are unavailable. Focused server unit tests, Web UI DTO test, SQLX_OFFLINE cf-server --tests check, the PostgreSQL handler regression, and the provenance-lock PostgreSQL regression pass with existing warnings. Broad Nix/browser gates remain pending.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
