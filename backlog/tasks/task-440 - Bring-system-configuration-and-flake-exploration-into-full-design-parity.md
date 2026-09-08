@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-07 23:07'
+updated_date: '2026-09-08 02:14'
 labels:
   - design-parity
   - web-ui
@@ -26,6 +26,7 @@ references:
   - git commit 4ddf19c6
   - git commit 046f46f14797aef5741fe7b27843db64a6133f76
   - TASK-454
+  - git commit a41d41e8
 documentation:
   - docs/design/CrystalForge/app.jsx
   - docs/design/CrystalForge/components/SystemDetail.jsx
@@ -248,6 +249,12 @@ author: openai-agent
 created: 2026-09-07 18:54
 ---
 Scheduling remediation follow-up committed and pushed as 868d11db. Finalization group: 23/23 passed. Config Inspector scheduling DB tests: 8/8 passed. Four focused V2 selector/persistence tests passed. The two non-metric lifecycle failures were reproduced identically on corrected and pristine 49520a25 worktrees: failed_and_corrupt_snapshots_requeue_with_active_lifecycle (Available vs Unavailable at evaluation_snapshots.rs:5677) and retained_generation_survives_store_metadata_loss_and_blocks_commit_deletion (snapshot finalization should retain the observed generation at evaluation_snapshots.rs:9254). Three metric tests remain unverified because pg_stat_statements is unavailable in the disposable database. Both architectural Nix guards, cargo checks, formatting, and diff checks passed. Task remains In Progress pending maintainer review.
+---
+
+author: openai-agent
+created: 2026-09-08 02:14
+---
+2026-09-07: Added and pushed the bounded durable Config Inspector worker as commit a41d41e8. The dedicated serial worker uses 5-second skipped intervals, startup/periodic stale recovery with a 10-minute threshold, one claim per cycle, direct awaited execution, and mock-mode gating before database initialization. Added worker unit coverage and the config-inspector-worker binary/package target. Verification passed: 13 focused worker tests, Nix-dev cargo fmt --check, SQLX_OFFLINE cargo check --offline -p cf-server --all-targets, evaluator-snapshot-isolation Nix guard, Config Inspector Nix guard, disposable PostgreSQL 17 Config Inspector tests (17/17), and nix build .#server with config-inspector-worker present. A direct non-Nix cargo test attempt was blocked by missing host OpenSSL tooling; the Nix-dev test passed. TASK-440 remains In Progress because broader acceptance criterion #27 and final MR workflow are incomplete. MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/323
 ---
 <!-- COMMENTS:END -->
 
