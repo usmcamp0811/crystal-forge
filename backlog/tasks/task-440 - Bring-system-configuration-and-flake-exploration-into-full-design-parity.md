@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-08 02:42'
+updated_date: '2026-09-08 03:07'
 labels:
   - design-parity
   - web-ui
@@ -27,6 +27,7 @@ references:
   - git commit 046f46f14797aef5741fe7b27843db64a6133f76
   - TASK-454
   - git commit a41d41e8
+  - git commit 1ccee7cf6aa59c3dc66f80ba02ed0817d2c0c9ba
 documentation:
   - docs/design/CrystalForge/app.jsx
   - docs/design/CrystalForge/components/SystemDetail.jsx
@@ -161,6 +162,8 @@ Starting bounded V2 Config summary and module-source DB-only reader slice from d
 2026-09-07 remediation verification: Dedicated worktree remains clean relative to origin except the intended uncommitted changes in services/config_inspections.rs and queries/config_inspections.rs. Passed cargo fmt --check, SQLX_OFFLINE cargo check --offline -p cf-server --lib, Config Inspector Nix check, evaluator snapshot isolation Nix check, 41 config_inspector unit tests, final persistence lock-order structural test, and git diff --check. The ignored PostgreSQL advisory-lock regression could not run against the current database because the configured role lacks CREATEDB. The server-regressions Nix check was attempted for an isolated PostgreSQL role but exceeded the 15-minute tool timeout during compilation; no pass is claimed. No additional code changes were needed during this verification pass.
 
 2026-09-07 executor ownership remediation finished. Disposable PostgreSQL 17.11 user-owned cluster verified current_user=postgres with rolcreatedb=true and rolsuper=true. All 17 ignored queries::config_inspections PostgreSQL tests passed, including executor_lock_acquisition_failure_leaves_claim_untouched and executor_persists_stage2_unavailable_v2_atomically; four selector-isolation/publication tests also passed. No production defect exposed, so no further code changes were made. Committed as d4262d03 with the required message and pushed to origin/TASK-440-system-config-flake-parity. Local and remote heads are equal. GitLab pipeline 2827782393 for the exact SHA is running. Disposable PostgreSQL clusters were stopped and ports 55432/55433 have no listener. TASK-440 remains In Progress.
+
+2026-09-08 bounded NixOS process-boundary slice: Added crystal-forge-config-inspector.service, its config-inspector-worker wrapper, and fixed resource limits in crystal-forge-config-inspector.slice. The exact slice name creates the runtime cgroup ancestry /crystal-forge.slice/crystal-forge-config.slice/crystal-forge-config-inspector.slice, so the aggregate crystal-forge.slice remains the outer cap. Extended the integration VM with runtime assertions for service readiness, assigned slice, cgroup ancestry, memory/swap/CPU/task limits, control-group cleanup, OOM/restart policy, wrapper ExecStart, and the running package binary. The first two local VM attempts exposed incorrect test assumptions about slice-unit Slice/ControlGroup values; only the integration assertion changed. The final required integration build passed with 13 tests passed, 14 skipped, and 179 deselected. Focused integration module evaluation, config-inspector guard, evaluator-snapshot-isolation guard, and git diff checks passed. The repository exports no configured Nix formatter; nixfmt and nixpkgs-fmt checks both also reject the unchanged parent versions of these two already-unformatted files, so no unrelated whole-file reformat was applied. No Rust, migration, query, database, API, UI, backfill, primary evaluator, or deployment files changed. Committed and pushed as 1ccee7cf6aa59c3dc66f80ba02ed0817d2c0c9ba. Exact-head pipeline 2828091108 is running; integration and oidc-auth are running, server-regressions and remaining automatic checks are pending/created. TASK-440 remains In Progress.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
@@ -255,6 +258,12 @@ author: openai-agent
 created: 2026-09-08 02:14
 ---
 2026-09-07: Added and pushed the bounded durable Config Inspector worker as commit a41d41e8. The dedicated serial worker uses 5-second skipped intervals, startup/periodic stale recovery with a 10-minute threshold, one claim per cycle, direct awaited execution, and mock-mode gating before database initialization. Added worker unit coverage and the config-inspector-worker binary/package target. Verification passed: 13 focused worker tests, Nix-dev cargo fmt --check, SQLX_OFFLINE cargo check --offline -p cf-server --all-targets, evaluator-snapshot-isolation Nix guard, Config Inspector Nix guard, disposable PostgreSQL 17 Config Inspector tests (17/17), and nix build .#server with config-inspector-worker present. A direct non-Nix cargo test attempt was blocked by missing host OpenSSL tooling; the Nix-dev test passed. TASK-440 remains In Progress because broader acceptance criterion #27 and final MR workflow are incomplete. MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/323
+---
+
+author: openai-agent
+created: 2026-09-08 03:07
+---
+The bounded Config Inspector NixOS service-isolation slice is ready for maintainer review in commit `1ccee7cf6aa59c3dc66f80ba02ed0817d2c0c9ba` on MR https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/323. No deployment was performed.
 ---
 <!-- COMMENTS:END -->
 
