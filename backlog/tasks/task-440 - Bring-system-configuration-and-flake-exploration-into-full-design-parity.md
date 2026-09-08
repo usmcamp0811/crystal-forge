@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-08 03:07'
+updated_date: '2026-09-08 03:31'
 labels:
   - design-parity
   - web-ui
@@ -149,7 +149,7 @@ The `modifiedFiles` metadata is anticipated and non-exhaustive. The implementati
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-Bounded NixOS Config Inspector service isolation slice from accepted commit a41d41e8: (1) verify exact clean local/remote starting SHA, parent, TASK-440 state, integration worktree cleanliness, and exact-head CI worker-related jobs; (2) follow the hardening worker precedent in modules/nixos/crystal-forge/default.nix to add the Config Inspector wrapper, fixed nested slice limits, and crystal-forge-config-inspector.service with server enablement, conditional local PostgreSQL ordering, bounded restart policy, control-group cleanup, and matching process hardening; (3) extend checks/integration/default.nix with runtime systemd assertions for unit readiness, nesting, resource limits, cleanup/OOM/restart policies, identity, and the installed worker executable without running an inspection; (4) run focused module evaluation, Nix formatting and diff checks, required local integration VM, and both Config Inspector architectural guards; (5) audit scope and API-server isolation, commit exactly TASK-440: Isolate config inspection worker service, push the task branch, record exact-head CI state, and leave TASK-440 In Progress. No Rust, migration, database, API, UI, backfill, evaluator, or deployment changes.
+Finish-line V2 Config API slice from accepted service commit 1ccee7cf: (1) confirm exact branch/pipeline state and prove current commit-mode production handlers still use the V1 selector/readers; (2) audit generation retention and historical real/mock authority without changing generation mode or adding backfill/schema; (3) adapt the three existing public Config response DTOs to accepted V2 commit-mode query results while preserving generation-mode V1 behavior and authorization-before-selection; (4) add focused PostgreSQL-backed handler regressions for V2 availability, V1/V2 isolation, V1-only unavailability, Stage-2 unavailable truth, first-parent comparison, shared/stale tokens, corruption, non-disclosure, read-only behavior, and an injected executor writer-to-handler vertical path with scheduling suppression; (5) run disposable PostgreSQL Config Inspector/V2/API tests, SQLx checks, formatting/diff checks, and both architectural guards; (6) run the named fast TASK-440 browser workflows and only then the final server, server-regressions, integration, and web-ui Nix gates once; (7) audit MR !323, architecture, migration ordering, and scope; commit one coherent TASK-440: Serve Config Inspector V2 artifacts change, push, verify exact-head CI/local-remote equality, and leave TASK-440 In Progress. No migration, generation redesign, unsafe backfill, worker/service redesign, deployment, TASK-441 work, merge, or unrelated cleanup.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
