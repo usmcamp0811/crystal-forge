@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-08 02:14'
+updated_date: '2026-09-08 02:42'
 labels:
   - design-parity
   - web-ui
@@ -148,7 +148,7 @@ The `modifiedFiles` metadata is anticipated and non-exhaustive. The implementati
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-Bounded durable Config Inspector scheduling slice from 0202350f: (1) fetch origin and verify exact clean starting HEAD; (2) inspect finalized evaluation flow, execution-mode authority, query conventions, and migration 0251; (3) add migration 0252_config_inspection_jobs.sql with exact target identity, lifecycle checks, immutable targets, partial active deduplication, FKs, and minimal worker indexes; (4) add internal config_inspections query/types module with validated set-based enqueue, exact finalized-derivation matching, comparison-ready same-carrier suppression, active idempotency, terminal retry support, and focused PostgreSQL regressions; (5) wire scheduling adjacent to Completed finalization only in real mode, preserving primary success/build activation on enqueue failure and without touching evaluator Nix expressions, readers, selectors, or APIs; (6) run disposable PostgreSQL tests, finalization and selector/writer regressions, SQLx offline checks, format/diff checks, and both architectural Nix guards; (7) commit TASK-440: Queue targeted config inspections and push, leaving TASK-440 In Progress. Do not implement worker execution or public API/UI.
+Bounded NixOS Config Inspector service isolation slice from accepted commit a41d41e8: (1) verify exact clean local/remote starting SHA, parent, TASK-440 state, integration worktree cleanliness, and exact-head CI worker-related jobs; (2) follow the hardening worker precedent in modules/nixos/crystal-forge/default.nix to add the Config Inspector wrapper, fixed nested slice limits, and crystal-forge-config-inspector.service with server enablement, conditional local PostgreSQL ordering, bounded restart policy, control-group cleanup, and matching process hardening; (3) extend checks/integration/default.nix with runtime systemd assertions for unit readiness, nesting, resource limits, cleanup/OOM/restart policies, identity, and the installed worker executable without running an inspection; (4) run focused module evaluation, Nix formatting and diff checks, required local integration VM, and both Config Inspector architectural guards; (5) audit scope and API-server isolation, commit exactly TASK-440: Isolate config inspection worker service, push the task branch, record exact-head CI state, and leave TASK-440 In Progress. No Rust, migration, database, API, UI, backfill, evaluator, or deployment changes.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
