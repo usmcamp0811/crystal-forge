@@ -6,6 +6,9 @@ let
   provenanceSource = builtins.readFile ../../packages/default/crates/cf-server/src/models/config_provenance.nix;
   provenanceLibSource = builtins.readFile ../../packages/default/crates/cf-server/src/models/config_provenance_lib.nix;
   valueEncodingSource = builtins.readFile ../../packages/default/crates/cf-server/src/models/config_value_encoding.nix;
+  legacyNixpkgs = builtins.fetchTree
+    (builtins.fromJSON
+      (builtins.readFile ../../lib/test-flake/test-flake/flake.lock)).nodes.nixpkgs.locked;
   fixture = pkgs.runCommand "crystal-forge-config-inspector-fixture" { } ''
     mkdir -p "$out"
     touch "$out/explicit-modules-location.nix"
@@ -143,6 +146,35 @@ let
     EOF
   '';
 
+  legacyFixture = pkgs.runCommand "crystal-forge-config-inspector-legacy-fixture" { } ''
+    mkdir -p "$out"
+    cat > "$out/flake.nix" <<'EOF'
+    {
+      inputs.base.url = "path:${legacyNixpkgs.outPath}";
+
+      outputs = { base, ... }: {
+        nixosConfigurations.legacy = base.lib.nixosSystem {
+          system = builtins.currentSystem;
+          modules = [
+            ({ lib, ... }: {
+              options.crystalForgeProbe.enabled = lib.mkEnableOption "legacy probe";
+              config = {
+                crystalForgeProbe.enabled = true;
+                boot.isContainer = true;
+                fileSystems."/" = {
+                  device = "none";
+                  fsType = "tmpfs";
+                };
+                system.stateVersion = "25.05";
+              };
+            })
+          ];
+        };
+      };
+    }
+    EOF
+  '';
+
   expression = ''
     let
       flakeRef = "path:${fixture}";
@@ -201,6 +233,21 @@ let
     }
   '';
 
+  legacyDefinitionValuesExpression = ''
+    let
+      flakeRef = "path:${legacyFixture}";
+      configurationName = "legacy";
+      flake = builtins.getFlake flakeRef;
+      configuration = builtins.getAttr configurationName flake.nixosConfigurations;
+      targetKey = builtins.hashString "sha256" (builtins.toJSON [ flakeRef configurationName ]);
+      valueEncoder = (${valueEncodingSource});
+    in (${definitionValuesSource}) {
+      inherit flake configuration targetKey;
+      provenanceLib = (${provenanceLibSource});
+      encodeValue = valueEncoder configuration.pkgs.lib;
+    }
+  '';
+
   subsetExpression = ''
     let
       jobs = ${expression};
@@ -236,6 +283,7 @@ let
   fullCountFile = pkgs.writeText "crystal-forge-config-inspector-count.nix" fullCountExpression;
   unsupportedCapabilityFile = pkgs.writeText "crystal-forge-config-inspector-unsupported.nix" unsupportedCapabilityExpression;
   definitionValuesFile = pkgs.writeText "crystal-forge-config-definition-values.nix" definitionValuesExpression;
+  legacyDefinitionValuesFile = pkgs.writeText "crystal-forge-config-definition-values-legacy.nix" legacyDefinitionValuesExpression;
 in
 pkgs.runCommand "crystal-forge-config-inspector-check" {
   nativeBuildInputs = [ pkgs.jq pkgs.nix pkgs.nix-eval-jobs ];
@@ -280,6 +328,32 @@ pkgs.runCommand "crystal-forge-config-inspector-check" {
   jq -e 'select(.attr | startswith("def_value_")) | .attr' definition-values.jsonl \
     | sort | uniq -d | test "$(wc -l)" -eq 0
   test "$(jq -s '[.[] | select(.error == null and .drvPath != null) | .drvPath] | unique | length' definition-values.jsonl)" -eq 1
+
+  # COMPATIBILITY: Nixpkgs 25.05 returns a list from collectModules and does
+  # not expose the graph required to prove replay equality. Stage 2 must report
+  # unsupported provenance instead of failing the complete inspection.
+  nix-eval-jobs \
+    --expr "import ${legacyDefinitionValuesFile}" \
+    --impure \
+    --meta \
+    --apply 'derivation: if derivation.meta ? crystalForgeDefinitionValues then derivation.meta.crystalForgeDefinitionValues else derivation.meta' \
+    --option experimental-features 'nix-command flakes' \
+    --workers 1 > legacy-definition-values.jsonl 2> legacy-definition-values.stderr || {
+      cat legacy-definition-values.stderr >&2
+      exit 1
+    }
+
+  test "$(wc -l < legacy-definition-values.jsonl)" -eq 1
+  jq -e '
+    .attr == "__crystalForgeDefinitionIndex"
+    and .error == null
+    and .extraValue.kind == "definition_index"
+    and .extraValue.supported == false
+    and .extraValue.reasonCode == "helper_capability_unavailable"
+    and .extraValue.definitionCount == 0
+    and .extraValue.definitions == []
+  ' legacy-definition-values.jsonl >/dev/null
+  ! grep -F 'expected a set but found a list' legacy-definition-values.stderr
 
   before_hash=$(nix eval "''${nix_args[@]}" --raw --expr \
     'builtins.hashString "sha256" (builtins.toJSON [ "crystalForgeProbe" "healthyBefore" ])')

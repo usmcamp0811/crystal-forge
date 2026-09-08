@@ -316,6 +316,10 @@ Query parameters:
 
 The response lifecycle is `queued`, `running`, `failed`, `available`, or
 `unavailable`. `counts` is revision-global and independent of search/filter.
+Commit mode selects only schema-V2 Config Inspector artifacts through
+`config_snapshot_selections`. It does not fall back to a schema-V1 commit
+artifact. Generation mode retains schema-V1 selection through the exact retained
+generation identity.
 Generation-mode Config validity is independent of rollback lineage. A complete
 pre-0248 retained artifact remains readable after migration even though its
 unverified deployment/store lineage makes rollback ineligible.
@@ -324,15 +328,19 @@ unverified deployment/store lineage makes rollback ineligible.
 generation snapshot exists. `module_count` is the exact count of distinct
 `(source_input, source_revision, source_path)` tuples after redaction and
 per-option bounding; it is not derived from the bounded option page.
-An available response includes an opaque `snapshot_token` bound to the exact
-selected artifact and exact comparison baseline identity. Generation responses
-also return `baseline_generation` when comparison is available. Continuations
+An available response includes an opaque `snapshot_token`. In commit mode, the
+token binds the selected and first-parent V2 artifacts, first-parent state, and
+the selected and first-parent flake-output digests used for tracked provenance.
+In generation mode, the token binds the exact selected artifact, retained
+identity, and comparison baseline identity. Generation responses also return
+`baseline_generation` when comparison is available. Continuations
 send page one's token. A replaced selected artifact, replaced baseline, or
 removed retained identity returns HTTP 409 `snapshot_changed`; counts, total,
 rows, baseline, and provenance are read from one read-only `REPEATABLE READ`
 transaction.
 A request revalidates the system-local selected generation or exact commit and
-selects its first-parent or nearest preceding usable-generation baseline inside
+selects its mode-specific first-parent V2 or nearest preceding usable-generation
+V1 baseline inside
 that transaction. It requires the immutable integrity marker computed by
 recursive full-artifact validation before publication, then decodes only the
 bounded page. Malformed content outside the requested search, offset, or limit
@@ -347,7 +355,7 @@ lifecycle data before it rejects the stale token.
 
 ### GET `/systems/:id/evaluation-summary`
 
-This endpoint uses the same `revision`, `mode`, and `generation` selection and
+This endpoint uses the same mode-specific `revision`, `mode`, and `generation` selection and
 non-disclosing system authorization as evaluated-options. The response is
 scalar. It does not contain module-source or definition rows.
 Unverified retained generation lineage does not affect a valid Config summary;
@@ -372,12 +380,14 @@ affect the count. Drift is `matches` only when selected and running store paths
 are exactly equal, `differs` only when both paths exist and differ, and
 `unavailable` otherwise.
 
-`host_delta_count` is materialized from all usable configuration snapshots at
-the selected commit. For each option path, the server selects the most frequent
-complete safe content digest, including definition provenance; missing is also
-a state, and bytewise state identity breaks ties. The count is the selected
-snapshot's differences from that modal corpus. A usable one-configuration
-corpus returns zero. Null means no usable materialized result exists.
+In generation mode, `host_delta_count` is materialized from the schema-V1 usable
+configuration snapshots at the selected commit. For each option path, the server
+selects the most frequent complete safe content digest, including definition
+provenance; missing is also a state, and bytewise state identity breaks ties. The
+count is the selected snapshot's differences from that modal corpus. A usable
+one-configuration corpus returns zero. Commit-mode V2 snapshots remain outside
+that corpus and return null. Null otherwise means no usable materialized result
+exists.
 
 `closure_size_bytes` is the sum of `narSize` for every unique store path from
 one successful complete recursive Nix query of the selected toplevel output.

@@ -83,8 +83,14 @@ let
   else [ ];
 
   valueJobNames = map (job: job.name) valueJobs;
+  # INVARIANT: Use builtins here because a target configuration can expose a
+  # package-set `lib.unique` with a different contract.
+  uniqueValueJobNames = builtins.attrNames (builtins.listToAttrs (map (name: {
+    inherit name;
+    value = true;
+  }) valueJobNames));
 in
-if builtins.length valueJobNames != builtins.length (lib.unique valueJobNames) then
+if builtins.length valueJobNames != builtins.length uniqueValueJobNames then
   throw "Config definition-value job identity collision"
 else
   builtins.listToAttrs ([

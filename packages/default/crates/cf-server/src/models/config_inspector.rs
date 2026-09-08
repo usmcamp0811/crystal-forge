@@ -1773,6 +1773,10 @@ mod tests {
                 .count(),
             1
         );
+        assert!(build_definition_values_expression(&target).contains("builtins.listToAttrs"));
+        assert!(
+            build_definition_values_expression(&target).contains("collectModulesResultSupported")
+        );
         let inspector_source = include_str!("config_inspector.nix");
         assert_eq!(inspector_source.matches("builtins.getFlake").count(), 0);
         assert!(!inspector_source.contains("configurationName"));

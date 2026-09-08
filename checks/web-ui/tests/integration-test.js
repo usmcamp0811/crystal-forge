@@ -4817,6 +4817,12 @@ function createTask440LiveEvaluationFixture() {
 }
 
 async function runTask440LiveSnapshotEvaluation(page) {
+  const controlsConfigWorker = Boolean(
+    process.env.CF_TEST_REAL_REPO_URL && process.env.CF_TEST_REAL_COMMIT_HASH,
+  );
+  if (controlsConfigWorker) {
+    execFileSync("systemctl", ["stop", "crystal-forge-config-inspector.service"]);
+  }
   const fixture = createTask440LiveEvaluationFixture();
   try {
     await page.unrouteAll({ behavior: "wait" });
@@ -4849,12 +4855,12 @@ async function runTask440LiveSnapshotEvaluation(page) {
         ) ORDER BY evaluation_attempt.attempt_number),
         'snapshotCount', (
           SELECT COUNT(*)
-          FROM evaluation_snapshot_selections selection
+          FROM config_snapshot_selections selection
           JOIN evaluation_snapshots snapshot ON snapshot.id = selection.current_snapshot_id
           WHERE selection.commit_id = commit_row.id
             AND selection.configuration_name = '${fixture.configurationName}'
             AND snapshot.lifecycle = 'available'
-            AND snapshot.integrity_version = 1
+            AND snapshot.integrity_version = 2
         )
       )::text
       FROM commits commit_row
@@ -4866,7 +4872,7 @@ async function runTask440LiveSnapshotEvaluation(page) {
       if (Number(parsed.activeAttempts) > 1) {
         throw new Error(`TASK-440 live retry created multiple active attempts: ${state}`);
       }
-      if (parsed.commitStatus === "complete" && Number(parsed.snapshotCount) === 1) {
+      if (parsed.commitStatus === "complete") {
         completed = parsed;
         break;
       }
@@ -4884,7 +4890,38 @@ async function runTask440LiveSnapshotEvaluation(page) {
       WHERE commit_row.id = ${Number(fixture.commitId)}
       GROUP BY commit_row.id;
     `);
-      throw new Error(`TASK-440 live evaluation did not persist a snapshot: ${state}`);
+      throw new Error(`TASK-440 live evaluation did not complete: ${state}`);
+    }
+
+    if (controlsConfigWorker) {
+      runFixtureSql(`
+        DELETE FROM config_inspection_jobs
+        WHERE commit_id <> ${Number(fixture.commitId)};
+      `);
+      execFileSync("systemctl", ["start", "crystal-forge-config-inspector.service"]);
+    }
+
+    let snapshotAvailable = Number(completed.snapshotCount) === 1;
+    for (let attempt = 0; !snapshotAvailable && attempt < 300; attempt += 1) {
+      const snapshotCount = runFixtureSql(`
+        SELECT COUNT(*)
+        FROM config_snapshot_selections selection
+        JOIN evaluation_snapshots snapshot ON snapshot.id = selection.current_snapshot_id
+        WHERE selection.commit_id = ${Number(fixture.commitId)}
+          AND selection.configuration_name = '${fixture.configurationName}'
+          AND snapshot.lifecycle = 'available'
+          AND snapshot.integrity_version = 2;
+      `);
+      snapshotAvailable = Number(snapshotCount) === 1;
+      if (!snapshotAvailable) await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+    if (!snapshotAvailable) {
+      const jobs = runFixtureSql(`
+        SELECT COALESCE(json_agg(row_to_json(job) ORDER BY job.created_at), '[]'::json)::text
+        FROM config_inspection_jobs job
+        WHERE job.commit_id = ${Number(fixture.commitId)};
+      `);
+      throw new Error(`TASK-440 Config Inspector did not persist a V2 snapshot: ${jobs}`);
     }
 
     const stale = completed.attempts.find((attempt) => attempt.id === fixture.staleAttemptId);
@@ -4906,15 +4943,22 @@ async function runTask440LiveSnapshotEvaluation(page) {
       throw new Error(`Completed evaluation retained active attempts: ${JSON.stringify(completed)}`);
     }
 
-    const expectedOption = process.env.CF_TEST_REAL_CONFIGURATION_NAME
-      ? "networking.hostName"
-      : "services.crystal-forge-agent.enable";
     await assertVisible(
-      page.getByText(expectedOption, { exact: true }),
+      page.locator(".cfg-toolbar .seg button").first(),
       "Expected Config to render the snapshot persisted by evaluator finalization",
       15000,
     );
+    const liveSearch = page.getByPlaceholder("Filter options, values, modules…");
+    await liveSearch.fill("networking.hostName");
+    await assertVisible(
+      page.getByText("networking.hostName", { exact: true }),
+      "Expected Config to render a known option from the persisted V2 artifact",
+      15000,
+    );
   } finally {
+    if (controlsConfigWorker) {
+      execFileSync("systemctl", ["start", "crystal-forge-config-inspector.service"]);
+    }
     runFixtureSql(`
       DELETE FROM systems WHERE id='${fixture.systemId}'::uuid;
       DELETE FROM flakes WHERE id=${Number(fixture.flakeId)};

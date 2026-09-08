@@ -12,11 +12,14 @@ and API contracts for those snapshots.
 
 ## Ownership and Data Flow
 
-PRIMARY owns only system derivation and policy evaluation. It MUST NOT inspect
-option trees, module graphs, exported modules, or other exploration artifacts.
-Targeted inspection is a separate future operation and does not yet provide an
-artifact. Finalization therefore records the artifact as `unavailable`; it does
-not fabricate an empty available snapshot.
+PRIMARY owns system derivation and policy evaluation. It also emits one
+revision-scoped flake-output projection. PRIMARY MUST NOT inspect per-host option
+trees or module graphs. After PRIMARY succeeds, an exact commit and configuration
+can have one durable Config Inspector job. The separate Config Inspector worker
+reuses the evaluated carrier derivation and persists a V2 artifact without
+changing build or deployment eligibility. Unsupported, failed, or incomplete
+inspection remains explicitly unavailable; the worker does not fabricate an
+empty available snapshot.
 
 Snapshot persistence redacts metadata before storage. The server does not
 serialize the NixOS `config` tree. Missing exploration artifacts do not change
@@ -80,8 +83,8 @@ authorized evaluation action can queue or reuse evaluation work.
 This design does not add an agent or builder protocol field. Deployed agents
 continue to report state and generations through the existing protocol.
 Deployed builders continue to use the existing server-issued job authorization
-and evaluation path. Future targeted inspection remains server-owned work, not
-a new database or API responsibility for an API-only builder.
+and evaluation path. Targeted Config inspection remains server-owned work, not a
+new database or API responsibility for an API-only builder.
 
 ## Identity and Comparison
 
@@ -129,11 +132,15 @@ not return a partial corpus as available. The explicit action treats corrupt
 content as non-reusable and can therefore queue its reconstruction.
 
 The explicit evaluation action requires administrator authority because the
-current evaluator processes a complete commit and can cross configuration and
+primary evaluator processes a complete commit and can cross configuration and
 environment boundaries. It locks the commit and reuses available, queued, or
 running work. It queues only a missing terminal evaluation and sends a queue
 wakeup only when the database transition occurred. The commit transition and
-its new claimable `evaluation_attempts` lineage row commit atomically.
+its new claimable `evaluation_attempts` lineage row commit atomically. After
+primary success, Config Inspector scheduling creates or reuses one active job
+for the exact configuration. The separate worker claims that job, persists the
+V2 artifact and selector atomically, and records a redacted terminal failure when
+inspection cannot produce a reusable artifact.
 
 ## Persistence, Bounds, and Reclamation
 
@@ -285,10 +292,11 @@ copy or log evaluator output before applying this boundary.
 
 ## Flake Outputs and Count Authority
 
-PRIMARY does not extract flake outputs. Targeted inspection is separate and does
-not yet provide a flake-output artifact, so its lifecycle is `unavailable` and
-artifact-derived declared-system, module, and input counts are unavailable.
-Browsing does not evaluate managed hosts.
+PRIMARY emits one bounded flake-output projection for the selected revision. The
+projection contains declared systems, exported modules, and resolved inputs. It
+does not evaluate managed hosts separately. Missing, failed, corrupt, or
+over-limit projection data has an explicit unavailable lifecycle, and browsing
+does not reconstruct it.
 
 System reconciliation joins the selected revision's declared configuration
 names with active managed systems:
@@ -361,9 +369,15 @@ The endpoint contract and bounds are listed in the
 Option search, filter, counts, comparison, and pagination are server-side.
 Option pages clamp `limit` to 1-100, `offset` to 0-100,000, and search to 256
 characters. Counts are revision-global; `total` reflects the active search and
-filter. Evaluated-options, module-source, and summary responses return the same
-opaque token for the selected artifact, selected retained identity, exact
-comparison artifact, and comparison retained identity. A positive option or
+filter. Generation mode selects immutable schema-V1 artifacts through retained
+generation identity. Commit mode selects only schema-V2 artifacts through
+`config_snapshot_selections`; it never falls back to the V1 commit selector.
+Evaluated-options, module-source, and summary responses return the same opaque
+token. The generation token binds the selected artifact, selected retained
+identity, exact comparison artifact, and comparison retained identity. The
+commit token binds the selected and first-parent V2 artifacts, first-parent
+state, and selected and first-parent flake-output digests used for tracked
+provenance. A positive option or
 module-source offset requires the page-one token. Summary requests can supply
 the token to bind independently loaded Config cards to the same artifact.
 Replaced current artifacts return HTTP 409 `snapshot_changed` without rows or
@@ -406,12 +420,13 @@ distinct tuple count; the summary does not transfer module rows.
 
 Summary fields have these authoritative meanings:
 
-- `host_delta_count` counts option paths whose complete safe content digest
+- In generation mode, `host_delta_count` counts option paths whose complete safe content digest
   differs from the deterministic modal state across usable configuration
   snapshots at the same commit. Missing options participate as a state. Ties
   use bytewise state identity. Definition-provenance changes affect the digest.
-  A usable one-configuration corpus has a zero delta. Null means that no usable
-  materialized result exists.
+  A usable one-configuration corpus has a zero delta. Commit-mode V2 artifacts
+  are outside this schema-V1 host corpus and always return null. Null otherwise
+  means that no usable materialized result exists.
 - `closure_size_bytes` is the sum of `narSize` for each unique store path from
   one successful complete recursive Nix query of the selected toplevel output.
   Null means that no complete local measurement was persisted. The server does
@@ -433,7 +448,9 @@ zero totals. The server and UI display unavailable states; they do not infer a
 metric from another field or replace unknown data with zero.
 
 The module-source endpoint groups the complete persisted definition corpus by
-the same exact tuple. It returns bounded pages ordered by winning count
+the same exact tuple. `won_count` counts distinct options with at least one
+surviving definition from the tuple; multiple surviving definitions for one
+option count once. It returns bounded pages ordered by winning option count
 descending, definition count descending, then input, revision, and path in
 ascending bytewise order; null input and revision values sort last. `total` is
 the complete snapshot-wide tuple count even when the requested page is empty.

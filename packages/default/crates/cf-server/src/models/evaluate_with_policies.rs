@@ -5110,7 +5110,7 @@ async fn evaluate_with_mock_eval_jobs_inner(
         .iter()
         .map(|system_name| {
             let source = OptionDefinitionProvenance {
-                source_path: "/nix/store/mock-source/crystal-forge-module.nix".to_string(),
+                source_path: Some("/nix/store/mock-source/crystal-forge-module.nix".to_string()),
                 source_input: Some("self".to_string()),
                 source_revision: Some(commit_hash.to_string()),
                 value: None,
@@ -5127,17 +5127,19 @@ async fn evaluate_with_mock_eval_jobs_inner(
                 vec![
                     EvaluatedOption {
                         path: "services.crystal-forge-agent.enable".to_string(),
-                        declared_type: "boolean".to_string(),
+                        declared_type: Some("boolean".to_string()),
+                        metadata_error: None,
                         value: SafeOptionValue::Scalar(serde_json::json!(true)),
                         definitions: vec![source.clone()],
-                        overridden: false,
+                        overridden: Some(false),
                     },
                     EvaluatedOption {
                         path: "system.stateVersion".to_string(),
-                        declared_type: "string".to_string(),
+                        declared_type: Some("string".to_string()),
+                        metadata_error: None,
                         value: SafeOptionValue::Scalar(serde_json::json!("26.05")),
                         definitions: vec![source],
-                        overridden: false,
+                        overridden: Some(false),
                     },
                 ],
             )
@@ -6218,10 +6220,11 @@ mod tests {
                 configuration.to_string(),
                 vec![EvaluatedOption {
                     path: "services.example.value".to_string(),
-                    declared_type: "string".to_string(),
+                    declared_type: Some("string".to_string()),
+                    metadata_error: None,
                     value: SafeOptionValue::Scalar(serde_json::json!(value)),
                     definitions: Vec::new(),
-                    overridden: false,
+                    overridden: Some(false),
                 }],
             );
         }
@@ -6266,10 +6269,11 @@ mod tests {
             "chesty",
             vec![EvaluatedOption {
                 path: "services.example.enable".to_string(),
-                declared_type: "boolean".to_string(),
+                declared_type: Some("boolean".to_string()),
+                metadata_error: None,
                 value: SafeOptionValue::Scalar(serde_json::json!(true)),
                 definitions: Vec::new(),
-                overridden: false,
+                overridden: Some(false),
             }],
         )
         .await

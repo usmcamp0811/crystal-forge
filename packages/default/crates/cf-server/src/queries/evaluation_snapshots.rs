@@ -219,6 +219,10 @@ pub(crate) struct ConfigSelectedSnapshotV2 {
     pub(crate) completed_at: Option<DateTime<Utc>>,
     /// Persisted evaluator duration.
     pub(crate) evaluation_duration_ms: Option<i64>,
+    /// Selected commit flake-output digest used to resolve tracked input provenance.
+    pub(crate) provenance_lock_digest: Option<String>,
+    /// Baseline commit flake-output digest used to resolve tracked input provenance.
+    pub(crate) baseline_provenance_lock_digest: Option<String>,
     /// Whether Git first-parent resolution completed.
     pub(crate) first_parent_resolved: bool,
     /// Exact first-parent SHA, or `None` for a resolved root.
@@ -249,6 +253,10 @@ pub(crate) struct ConfigOptionRowV2 {
     pub(crate) before: Option<ConfigOptionArtifactV2>,
     /// Content change state, or `None` without a valid comparison.
     pub(crate) changed: Option<bool>,
+    /// Visibility-scoped navigation identities for selected definitions by ordinal.
+    pub(crate) option_tracked_flakes: Vec<Option<TrackedFlakeIdentity>>,
+    /// Visibility-scoped navigation identities for baseline definitions by ordinal.
+    pub(crate) before_tracked_flakes: Vec<Option<TrackedFlakeIdentity>>,
 }
 
 /// Returns one bounded database-only page of V2 options.
@@ -338,10 +346,14 @@ pub(crate) struct ConfigModuleSourceV2 {
     pub(crate) definition_count: i64,
     /// Number of definitions with active-surviving status.
     pub(crate) surviving_definition_count: i64,
+    /// Number of options with a surviving definition from this source tuple.
+    pub(crate) winning_option_count: i64,
     /// Number of definitions with priority-discarded status.
     pub(crate) discarded_definition_count: i64,
     /// Number of distinct overridden owning options using this source tuple.
     pub(crate) overridden_option_count: i64,
+    /// Server-issued navigation identity after exact repository and visibility checks.
+    pub(crate) tracked_flake: Option<TrackedFlakeIdentity>,
 }
 
 /// Contains one bounded V2 module-source page.
@@ -740,6 +752,21 @@ async fn persist_available_snapshot_with_content_limit_tx(
     options: Vec<EvaluatedOption>,
     snapshot_content_bytes_limit: i64,
 ) -> Result<Uuid> {
+    // COMPATIBILITY: V1 persistence keeps its original non-null JSON shape.
+    // Validate before payload bounding so an oversized V2-only state cannot be
+    // coerced into known V1 metadata when its provenance is removed.
+    for option in &options {
+        if option.declared_type.is_none()
+            || option.metadata_error.is_some()
+            || option.overridden.is_none()
+            || option
+                .definitions
+                .iter()
+                .any(|definition| definition.source_path.is_none())
+        {
+            anyhow::bail!("V1 evaluation snapshot contains V2-only nullable metadata");
+        }
+    }
     // SECURITY: Count the exact tuples that will be persisted. Redaction can
     // collapse credential-bearing source metadata, and response-only tracked
     // identities must not affect the durable scalar.
@@ -755,7 +782,7 @@ async fn persist_available_snapshot_with_content_limit_tx(
                 (
                     definition.source_input.as_deref(),
                     definition.source_revision.as_deref(),
-                    definition.source_path.as_str(),
+                    definition.source_path.as_deref(),
                 )
             })
         })
@@ -764,6 +791,9 @@ async fn persist_available_snapshot_with_content_limit_tx(
     let prepared = options
         .into_iter()
         .map(|option| {
+            let is_overridden = option
+                .overridden
+                .context("validated V1 option lost override state")?;
             let digest = option.content_digest();
             let search_text = option.search_text();
             let payload = serde_json::json!({
@@ -779,7 +809,7 @@ async fn persist_available_snapshot_with_content_limit_tx(
                 digest,
                 payload,
                 search_text,
-                is_overridden: option.overridden,
+                is_overridden,
                 encoded_len,
             })
         })
@@ -1054,12 +1084,12 @@ fn bounded_option_payload(mut option: EvaluatedOption) -> Result<EvaluatedOption
         return Ok(option);
     }
 
-    option.declared_type = "unknown (oversized evaluator payload)".to_string();
+    option.declared_type = Some("unknown (oversized evaluator payload)".to_string());
     option.value = crate::models::evaluation_snapshots::SafeOptionValue::Opaque {
         type_name: "oversized".to_string(),
     };
     option.definitions.clear();
-    option.overridden = false;
+    option.overridden = Some(false);
     Ok(option)
 }
 
@@ -1610,6 +1640,8 @@ fn selected_v2_from_record(
     baseline: Option<&V2SnapshotRecord>,
     parent_commit_exists: bool,
     baseline_selector_exists: bool,
+    provenance_lock_digest: Option<String>,
+    baseline_provenance_lock_digest: Option<String>,
 ) -> Result<ConfigSelectedSnapshotV2> {
     let mut lifecycle = selected.lifecycle;
     let mut error = selected
@@ -1705,6 +1737,8 @@ fn selected_v2_from_record(
         module_count: selected.module_count,
         completed_at: selected.completed_at,
         evaluation_duration_ms: selected.evaluation_duration_ms,
+        provenance_lock_digest,
+        baseline_provenance_lock_digest,
         first_parent_resolved,
         first_parent_revision,
         comparison,
@@ -1742,8 +1776,10 @@ where
                selected.option_count::bigint AS selected_option_count,
                selected.module_count::bigint AS selected_module_count,
                selected.completed_at AS selected_completed_at,
-               selected.evaluation_duration_ms AS selected_evaluation_duration_ms,
-               parent.id AS parent_commit_id,
+                selected.evaluation_duration_ms AS selected_evaluation_duration_ms,
+                encode(selected_output.content_digest, 'hex')
+                    AS selected_provenance_lock_digest,
+                parent.id AS parent_commit_id,
                parent_selection.current_snapshot_id AS baseline_selector_id,
                baseline.id AS baseline_id,
                parent.id AS baseline_commit_id,
@@ -1761,7 +1797,9 @@ where
                baseline.option_count::bigint AS baseline_option_count,
                baseline.module_count::bigint AS baseline_module_count,
                baseline.completed_at AS baseline_completed_at,
-               baseline.evaluation_duration_ms AS baseline_evaluation_duration_ms
+                baseline.evaluation_duration_ms AS baseline_evaluation_duration_ms,
+                encode(baseline_output.content_digest, 'hex')
+                    AS baseline_provenance_lock_digest
         FROM systems system
         JOIN flakes flake ON flake.id = system.flake_id AND flake.deleted_at IS NULL
         JOIN commits c
@@ -1776,6 +1814,10 @@ where
           ON selection.commit_id = c.id
          AND selection.configuration_name = cfg.configuration_name
         JOIN evaluation_snapshots selected ON selected.id = selection.current_snapshot_id
+        LEFT JOIN flake_output_snapshots selected_output
+          ON selected_output.commit_id = c.id
+         AND selected_output.lifecycle = 'available'
+         AND selected_output.schema_version = 1
         LEFT JOIN commits parent
           ON parent.flake_id = c.flake_id
          AND c.first_parent_resolved
@@ -1785,6 +1827,10 @@ where
          AND parent_selection.configuration_name = cfg.configuration_name
         LEFT JOIN evaluation_snapshots baseline
           ON baseline.id = parent_selection.current_snapshot_id
+        LEFT JOIN flake_output_snapshots baseline_output
+          ON baseline_output.commit_id = parent.id
+         AND baseline_output.lifecycle = 'available'
+         AND baseline_output.schema_version = 1
         WHERE system.id = $1
         "#,
     )
@@ -1828,6 +1874,8 @@ where
         baseline.as_ref(),
         parent_commit_exists,
         baseline_selector_exists,
+        row.try_get("selected_provenance_lock_digest")?,
+        row.try_get("baseline_provenance_lock_digest")?,
     )
     .map(Some)
 }
@@ -1854,6 +1902,11 @@ pub(crate) fn config_snapshot_token_v2(selected: &ConfigSelectedSnapshotV2) -> S
         selected.configuration_name.clone(),
         selected.first_parent_resolved.to_string(),
         selected.first_parent_revision.clone().unwrap_or_default(),
+        selected.provenance_lock_digest.clone().unwrap_or_default(),
+        selected
+            .baseline_provenance_lock_digest
+            .clone()
+            .unwrap_or_default(),
         match &selected.comparison {
             ConfigComparisonStateV2::Available {
                 baseline_id,
@@ -1917,6 +1970,69 @@ pub(crate) async fn query_config_options_page_v2(
     limit: i64,
     offset: i64,
 ) -> Result<ConfigOptionsPageQueryV2> {
+    query_config_options_page_v2_for_visibility(
+        pool,
+        system_id,
+        revision,
+        None,
+        search,
+        filter,
+        requested_token,
+        limit,
+        offset,
+    )
+    .await
+}
+
+/// Reads a visibility-scoped V2 options page for a production API caller.
+///
+/// Tracked provenance is resolved in the same repeatable-read transaction as
+/// the selected and baseline artifacts. The function performs no writes or
+/// external work. `visibility_user` must be `None` only after the caller has
+/// been authorized as an administrator. Otherwise, it must contain the
+/// authorized caller's user ID. The caller must authorize access to `system_id`
+/// before calling this function.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot read the snapshot or resolve its
+/// visibility-scoped tracked provenance.
+pub(crate) async fn query_config_options_page_v2_for_user(
+    pool: &PgPool,
+    system_id: Uuid,
+    revision: &str,
+    visibility_user: Option<Uuid>,
+    search: &str,
+    filter: EvaluatedOptionFilter,
+    requested_token: Option<&str>,
+    limit: i64,
+    offset: i64,
+) -> Result<ConfigOptionsPageQueryV2> {
+    query_config_options_page_v2_for_visibility(
+        pool,
+        system_id,
+        revision,
+        visibility_user,
+        search,
+        filter,
+        requested_token,
+        limit,
+        offset,
+    )
+    .await
+}
+
+async fn query_config_options_page_v2_for_visibility(
+    pool: &PgPool,
+    system_id: Uuid,
+    revision: &str,
+    visibility_user: Option<Uuid>,
+    search: &str,
+    filter: EvaluatedOptionFilter,
+    requested_token: Option<&str>,
+    limit: i64,
+    offset: i64,
+) -> Result<ConfigOptionsPageQueryV2> {
     let limit = limit.clamp(1, OPTIONS_PAGE_LIMIT);
     let offset = offset.clamp(0, OPTIONS_OFFSET_LIMIT);
     let mut tx = pool.begin().await?;
@@ -1927,7 +2043,11 @@ pub(crate) async fn query_config_options_page_v2(
         select_config_snapshot_v2_with_executor(&mut *tx, system_id, revision).await?
     else {
         tx.commit().await?;
-        return Ok(ConfigOptionsPageQueryV2::NoSnapshot);
+        return Ok(if requested_token.is_some() {
+            ConfigOptionsPageQueryV2::SnapshotChanged
+        } else {
+            ConfigOptionsPageQueryV2::NoSnapshot
+        });
     };
     let token = config_snapshot_token_v2(&selected);
     if requested_token.is_some_and(|requested| requested != token) {
@@ -2133,10 +2253,12 @@ pub(crate) async fn query_config_options_page_v2(
                 option,
                 before,
                 changed: comparison_available.then(|| row.get("changed")),
+                option_tracked_flakes: Vec::new(),
+                before_tracked_flakes: Vec::new(),
             })
         })
         .collect::<Result<Vec<_>>>();
-    let options = match decoded {
+    let mut options = match decoded {
         Ok(options) => options,
         Err(_) => {
             let page = corrupt_v2_page(selected, token, limit, offset);
@@ -2144,6 +2266,63 @@ pub(crate) async fn query_config_options_page_v2(
             return Ok(ConfigOptionsPageQueryV2::Page(page));
         }
     };
+    // PERFORMANCE: Resolve every selected and baseline definition in one
+    // visibility-scoped query while the immutable artifact transaction is open.
+    let baseline_revision = match &selected.comparison {
+        ConfigComparisonStateV2::Available {
+            baseline_revision, ..
+        } => Some(baseline_revision.clone()),
+        ConfigComparisonStateV2::Unavailable { .. } => None,
+    };
+    let mut candidates = Vec::new();
+    let mut locations = Vec::new();
+    for (row_index, row) in options.iter().enumerate() {
+        if let Some(option) = &row.option
+            && let ConfigOptionProvenanceArtifactV2::Available { definitions, .. } =
+                &option.provenance
+        {
+            for definition in definitions {
+                candidates.push((
+                    selected.revision.clone(),
+                    definition.source_input.clone(),
+                    definition.source_revision.clone(),
+                ));
+                locations.push((row_index, false));
+            }
+        }
+        if let (Some(before), Some(context_revision)) = (&row.before, &baseline_revision)
+            && let ConfigOptionProvenanceArtifactV2::Available { definitions, .. } =
+                &before.provenance
+        {
+            for definition in definitions {
+                candidates.push((
+                    context_revision.clone(),
+                    definition.source_input.clone(),
+                    definition.source_revision.clone(),
+                ));
+                locations.push((row_index, true));
+            }
+        }
+    }
+    let requests = candidates
+        .iter()
+        .map(
+            |(context_revision, source_input, source_revision)| ProvenanceResolutionRequest {
+                context_revision,
+                source_input: source_input.as_deref(),
+                source_revision: source_revision.as_deref(),
+            },
+        )
+        .collect::<Vec<_>>();
+    let identities =
+        resolve_tracked_provenance(&mut *tx, system_id, visibility_user, &requests).await?;
+    for ((row_index, before), identity) in locations.into_iter().zip(identities) {
+        if before {
+            options[row_index].before_tracked_flakes.push(identity);
+        } else {
+            options[row_index].option_tracked_flakes.push(identity);
+        }
+    }
     let page = ConfigOptionsPageV2 {
         selected,
         snapshot_token: token,
@@ -2410,7 +2589,10 @@ pub(crate) async fn get_config_module_sources_v2(
     limit: i64,
     offset: i64,
 ) -> Result<ConfigModuleSourcesQueryV2> {
-    get_config_module_sources_v2_with_token(pool, system_id, revision, None, limit, offset).await
+    get_config_module_sources_v2_with_visibility(
+        pool, system_id, revision, None, None, limit, offset,
+    )
+    .await
 }
 
 /// Returns a bounded V2 module-source page and rejects a stale shared token.
@@ -2424,6 +2606,60 @@ pub(crate) async fn get_config_module_sources_v2_with_token(
     pool: &PgPool,
     system_id: Uuid,
     revision: &str,
+    requested_token: Option<&str>,
+    limit: i64,
+    offset: i64,
+) -> Result<ConfigModuleSourcesQueryV2> {
+    get_config_module_sources_v2_with_visibility(
+        pool,
+        system_id,
+        revision,
+        None,
+        requested_token,
+        limit,
+        offset,
+    )
+    .await
+}
+
+/// Returns a visibility-scoped V2 module-source page for a production API caller.
+///
+/// Tracked identities are resolved in the same repeatable-read transaction as
+/// the module-source aggregation. `visibility_user` must be `None` only after
+/// the caller has been authorized as an administrator. Otherwise, it must
+/// contain the authorized caller's user ID. The caller must authorize access to
+/// `system_id` before calling this function.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot read the snapshot or resolve its
+/// visibility-scoped tracked provenance.
+pub(crate) async fn get_config_module_sources_v2_for_user(
+    pool: &PgPool,
+    system_id: Uuid,
+    revision: &str,
+    visibility_user: Option<Uuid>,
+    requested_token: Option<&str>,
+    limit: i64,
+    offset: i64,
+) -> Result<ConfigModuleSourcesQueryV2> {
+    get_config_module_sources_v2_with_visibility(
+        pool,
+        system_id,
+        revision,
+        visibility_user,
+        requested_token,
+        limit,
+        offset,
+    )
+    .await
+}
+
+async fn get_config_module_sources_v2_with_visibility(
+    pool: &PgPool,
+    system_id: Uuid,
+    revision: &str,
+    visibility_user: Option<Uuid>,
     requested_token: Option<&str>,
     limit: i64,
     offset: i64,
@@ -2561,9 +2797,12 @@ pub(crate) async fn get_config_module_sources_v2_with_token(
                        value->>'source_path' AS source_path,
                        COUNT(DISTINCT option_key)::bigint AS option_count,
                        COUNT(*)::bigint AS definition_count,
-                       COUNT(*) FILTER (
-                           WHERE value->>'status' = 'active_surviving'
-                       )::bigint AS surviving_definition_count,
+                        COUNT(*) FILTER (
+                            WHERE value->>'status' = 'active_surviving'
+                        )::bigint AS surviving_definition_count,
+                        COUNT(DISTINCT option_key) FILTER (
+                            WHERE value->>'status' = 'active_surviving'
+                        )::bigint AS winning_option_count,
                        COUNT(*) FILTER (
                            WHERE value->>'status' = 'priority_discarded'
                        )::bigint AS discarded_definition_count,
@@ -2586,15 +2825,16 @@ pub(crate) async fn get_config_module_sources_v2_with_token(
             )
             SELECT module_stats.total, module_stats.invalid_count,
                    page.source_input, page.source_revision, page.source_path,
-                   page.option_count, page.definition_count,
-                   page.surviving_definition_count,
-                   page.discarded_definition_count,
+                    page.option_count, page.definition_count,
+                    page.surviving_definition_count,
+                    page.winning_option_count,
+                    page.discarded_definition_count,
                    page.overridden_option_count
             FROM module_stats
             LEFT JOIN LATERAL (
                 SELECT *
                 FROM module_rows
-                ORDER BY surviving_definition_count DESC,
+                ORDER BY winning_option_count DESC,
                          definition_count DESC,
                          source_input COLLATE "C" ASC NULLS LAST,
                          source_revision COLLATE "C" ASC NULLS LAST,
@@ -2655,9 +2895,24 @@ pub(crate) async fn get_config_module_sources_v2_with_token(
             option_count: row.try_get("option_count")?,
             definition_count: row.try_get("definition_count")?,
             surviving_definition_count: row.try_get("surviving_definition_count")?,
+            winning_option_count: row.try_get("winning_option_count")?,
             discarded_definition_count: row.try_get("discarded_definition_count")?,
             overridden_option_count: row.try_get("overridden_option_count")?,
+            tracked_flake: None,
         });
+    }
+    let requests = sources
+        .iter()
+        .map(|source| ProvenanceResolutionRequest {
+            context_revision: &selected.revision,
+            source_input: source.source_input.as_deref(),
+            source_revision: source.source_revision.as_deref(),
+        })
+        .collect::<Vec<_>>();
+    let identities =
+        resolve_tracked_provenance(&mut *tx, system_id, visibility_user, &requests).await?;
+    for (source, identity) in sources.iter_mut().zip(identities) {
+        source.tracked_flake = identity;
     }
     let page = ConfigModuleSourcesPageV2 {
         selected,
@@ -3030,6 +3285,87 @@ pub async fn missing_snapshot_lifecycle(
             ("in_progress" | "cancelling", Some("in_progress")) => SnapshotLifecycle::Running,
             ("failed", _) => SnapshotLifecycle::Failed,
             _ => SnapshotLifecycle::Unavailable,
+        };
+        Ok((
+            lifecycle,
+            error.map(|value| crate::security::snapshot_redaction::redact_evaluation_error(&value)),
+        ))
+    })
+    .transpose()
+}
+
+/// Returns commit-mode Config Inspector lifecycle when no V2 selector exists.
+///
+/// The function prefers the exact configuration-scoped durable job. Before a
+/// Config Inspector job exists, it reports the primary evaluation lifecycle
+/// that must complete before targeted inspection can be scheduled. The
+/// system-to-flake join prevents disclosure of revisions from another flake.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot load the persisted lifecycle.
+pub(crate) async fn missing_config_snapshot_lifecycle_v2(
+    pool: &PgPool,
+    system_id: Uuid,
+    revision: &str,
+) -> Result<Option<(SnapshotLifecycle, Option<String>)>> {
+    let row = sqlx::query(
+        r#"
+        SELECT commit.evaluation_status, commit.evaluation_error_message,
+               active_attempt.status AS active_attempt_status,
+               job.status AS job_status, job.error AS job_error
+        FROM systems system
+        JOIN commits commit ON commit.flake_id = system.flake_id
+        CROSS JOIN LATERAL (
+            SELECT COALESCE(
+                NULLIF(btrim(system.system_configuration_name), ''),
+                system.hostname
+            ) AS configuration_name
+        ) config
+        LEFT JOIN LATERAL (
+            SELECT candidate.status, candidate.error
+            FROM config_inspection_jobs candidate
+            WHERE candidate.commit_id = commit.id
+              AND candidate.configuration_name = config.configuration_name
+            ORDER BY candidate.created_at DESC, candidate.id DESC
+            LIMIT 1
+        ) job ON true
+        LEFT JOIN LATERAL (
+            SELECT attempt.status
+            FROM evaluation_attempts attempt
+            WHERE attempt.commit_id = commit.id
+              AND attempt.status IN ('queued', 'in_progress')
+            LIMIT 1
+        ) active_attempt ON true
+        WHERE system.id = $1 AND commit.git_commit_hash = $2
+          AND commit.source_archived = false
+        "#,
+    )
+    .bind(system_id)
+    .bind(revision)
+    .fetch_optional(pool)
+    .await?;
+
+    row.map(|row| -> Result<_> {
+        let primary_status: String = row.try_get("evaluation_status")?;
+        let primary_error: Option<String> = row.try_get("evaluation_error_message")?;
+        let active_attempt_status: Option<String> = row.try_get("active_attempt_status")?;
+        let job_status: Option<String> = row.try_get("job_status")?;
+        let job_error: Option<String> = row.try_get("job_error")?;
+        let (lifecycle, error) = match job_status.as_deref() {
+            Some("queued") => (SnapshotLifecycle::Queued, None),
+            Some("running") => (SnapshotLifecycle::Running, None),
+            Some("failed") => (SnapshotLifecycle::Failed, job_error),
+            Some("succeeded") => (SnapshotLifecycle::Unavailable, None),
+            Some(other) => anyhow::bail!("unknown Config Inspector job status {other:?}"),
+            None => match (primary_status.as_str(), active_attempt_status.as_deref()) {
+                ("pending", Some("queued")) => (SnapshotLifecycle::Queued, None),
+                ("in_progress" | "cancelling", Some("in_progress")) => {
+                    (SnapshotLifecycle::Running, None)
+                }
+                ("failed", _) => (SnapshotLifecycle::Failed, primary_error),
+                _ => (SnapshotLifecycle::Unavailable, None),
+            },
         };
         Ok((
             lifecycle,
@@ -4499,7 +4835,7 @@ pub async fn get_evaluation_module_sources_page(
         sources.push(EvaluationModuleSummary {
             source_input: row.try_get("source_input")?,
             source_revision: row.try_get("source_revision")?,
-            source_path,
+            source_path: Some(source_path),
             defined_count: row.try_get("defined_count")?,
             won_count: row.try_get("won_count")?,
             tracked_flake: None,
@@ -5095,10 +5431,11 @@ mod tests {
     fn option(path: &str, value: Value) -> EvaluatedOption {
         EvaluatedOption {
             path: path.into(),
-            declared_type: "string".into(),
+            declared_type: Some("string".into()),
+            metadata_error: None,
             value: SafeOptionValue::Scalar(value),
             definitions: vec![OptionDefinitionProvenance {
-                source_path: "/nix/store/source/module.nix".into(),
+                source_path: Some("/nix/store/source/module.nix".into()),
                 source_input: Some("self".into()),
                 source_revision: None,
                 value: None,
@@ -5108,7 +5445,7 @@ mod tests {
                 winner_note: None,
                 tracked_flake: None,
             }],
-            overridden: false,
+            overridden: Some(false),
         }
     }
 
@@ -5414,8 +5751,8 @@ mod tests {
 
         let bounded = bounded_option_payload(oversized).expect("bounding should not fail");
         assert_eq!(
-            bounded.declared_type,
-            "unknown (oversized evaluator payload)"
+            bounded.declared_type.as_deref(),
+            Some("unknown (oversized evaluator payload)")
         );
         assert_eq!(
             bounded.value,
@@ -7923,7 +8260,8 @@ mod tests {
         let commit = insert_test_commit(&pool, &repo_url, &"c".repeat(40)).await;
         let option = EvaluatedOption {
             path: "services.example.aliases".into(),
-            declared_type: "attribute set".into(),
+            declared_type: Some("attribute set".into()),
+            metadata_error: None,
             value: SafeOptionValue::AttributeSet(
                 serde_json::from_value(json!({
                     "GITHUB_PAT": "github-secret-value",
@@ -7940,7 +8278,7 @@ mod tests {
                 .expect("attribute set shape"),
             ),
             definitions: vec![OptionDefinitionProvenance {
-                source_path: "https://example.test/module.nix".into(),
+                source_path: Some("https://example.test/module.nix".into()),
                 source_input: Some("self".into()),
                 source_revision: Some("c".repeat(40)),
                 value: Some(json!({"kind": "scalar", "value": "documented module default"})),
@@ -7950,7 +8288,7 @@ mod tests {
                 winner_note: Some("A lower numeric module-system priority won.".into()),
                 tracked_flake: None,
             }],
-            overridden: false,
+            overridden: Some(false),
         };
         let mut tx = pool.begin().await.expect("transaction should begin");
         let snapshot_id = persist_available_snapshot_tx(&mut tx, commit.id, "host", vec![option])
@@ -8083,17 +8421,19 @@ mod tests {
         let options = vec![
             EvaluatedOption {
                 path: "services.example.apiTokenNumber".into(),
-                declared_type: "integer".into(),
+                declared_type: Some("integer".into()),
+                metadata_error: None,
                 value: SafeOptionValue::Scalar(json!(8675309)),
                 definitions: Vec::new(),
-                overridden: false,
+                overridden: Some(false),
             },
             EvaluatedOption {
                 path: "services.example.secretEnabled".into(),
-                declared_type: "boolean".into(),
+                declared_type: Some("boolean".into()),
+                metadata_error: None,
                 value: SafeOptionValue::Scalar(json!(true)),
                 definitions: Vec::new(),
-                overridden: false,
+                overridden: Some(false),
             },
         ];
         let mut tx = pool.begin().await.expect("transaction should begin");
@@ -8730,7 +9070,7 @@ mod tests {
                 .map(|source| (
                     source.source_input.as_deref(),
                     source.source_revision.as_deref(),
-                    source.source_path.as_str()
+                    source.source_path.as_deref()
                 ))
                 .collect::<std::collections::BTreeSet<_>>()
                 .len(),
@@ -8778,11 +9118,11 @@ mod tests {
                         && (
                             left.source_input.as_deref(),
                             left.source_revision.as_deref(),
-                            left.source_path.as_str()
+                            left.source_path.as_deref()
                         ) <= (
                             right.source_input.as_deref(),
                             right.source_revision.as_deref(),
-                            right.source_path.as_str()
+                            right.source_path.as_deref()
                         )),
                 "source pages must preserve the documented deterministic order"
             );
@@ -8918,7 +9258,7 @@ mod tests {
             .expect("available first page should return a snapshot token");
 
         let mut replacement = option("services.replacement.enable", json!(true));
-        replacement.definitions[0].source_path = "modules/replacement.nix".to_string();
+        replacement.definitions[0].source_path = Some("modules/replacement.nix".to_string());
         replacement.definitions[0].source_revision = Some(revision.clone());
         let mut tx = pool
             .begin()
@@ -8969,8 +9309,8 @@ mod tests {
         assert_eq!(replacement_page.total, 1);
         assert_eq!(replacement_page.sources.len(), 1);
         assert_eq!(
-            replacement_page.sources[0].source_path,
-            "modules/replacement.nix"
+            replacement_page.sources[0].source_path.as_deref(),
+            Some("modules/replacement.nix")
         );
         assert!(replacement_page.sources[0].tracked_flake.is_some());
     }
@@ -9769,18 +10109,18 @@ mod tests {
             option("services.summary.selfTwo", json!(false)),
         ];
         for (index, option) in options.iter_mut().enumerate() {
-            option.definitions[0].source_path = "modules/self.nix".into();
+            option.definitions[0].source_path = Some("modules/self.nix".into());
             option.definitions[0].source_revision = Some(selected_revision.clone());
             option.definitions[0].winning = index == 0;
-            option.overridden = index != 0;
+            option.overridden = Some(index != 0);
         }
         let mut mismatched_self = option("services.summary.mismatchedSelf", json!(true));
-        mismatched_self.definitions[0].source_path = "modules/mismatched-self.nix".into();
+        mismatched_self.definitions[0].source_path = Some("modules/mismatched-self.nix".into());
         mismatched_self.definitions[0].source_revision = Some("0".repeat(40));
         options.push(mismatched_self);
         for (index, (input, revision)) in provenance.into_iter().enumerate() {
             let mut value = option(&format!("services.summary.external{index}"), json!(index));
-            value.definitions[0].source_path = format!("modules/{input}.nix");
+            value.definitions[0].source_path = Some(format!("modules/{input}.nix"));
             value.definitions[0].source_input = Some(input);
             value.definitions[0].source_revision = Some(revision);
             options.push(value);
@@ -9811,7 +10151,7 @@ mod tests {
         let baseline_revision = "8".repeat(40);
         let baseline_commit = insert_test_commit(&pool, &source_url, &baseline_revision).await;
         let mut baseline_option = option("services.summary.selfOne", json!(false));
-        baseline_option.definitions[0].source_path = "modules/self.nix".into();
+        baseline_option.definitions[0].source_path = Some("modules/self.nix".into());
         baseline_option.definitions[0].source_revision = Some(baseline_revision.clone());
         let mut baseline_tx = pool
             .begin()
@@ -9957,7 +10297,7 @@ mod tests {
         let mismatched_self = module_page
             .sources
             .iter()
-            .find(|module| module.source_path == "modules/mismatched-self.nix")
+            .find(|module| module.source_path.as_deref() == Some("modules/mismatched-self.nix"))
             .expect("mismatched self provenance should remain visible but untracked");
         assert!(mismatched_self.tracked_flake.is_none());
         let visible_identity = module_page
@@ -11010,7 +11350,7 @@ mod tests {
         assert!(counts.iter().all(|count| *count == 0));
 
         let mut alternate = option("services.fixture.option0000", json!(true));
-        alternate.definitions[0].source_path = "/nix/store/source/other-module.nix".into();
+        alternate.definitions[0].source_path = Some("/nix/store/source/other-module.nix".into());
         let alternate_digest = alternate.content_digest();
         let alternate_search_text = alternate.search_text();
         let alternate_payload = json!({
@@ -12099,6 +12439,8 @@ mod tests {
             module_count: 0,
             completed_at: None,
             evaluation_duration_ms: None,
+            provenance_lock_digest: Some("d".repeat(64)),
+            baseline_provenance_lock_digest: Some("e".repeat(64)),
             first_parent_resolved: true,
             first_parent_revision: Some("c".repeat(40)),
             comparison: ConfigComparisonStateV2::Available {
@@ -12115,6 +12457,12 @@ mod tests {
             reason: ConfigComparisonUnavailableReasonV2::BaselineNotComparisonReady,
             baseline_revision: Some("c".repeat(40)),
         };
+        assert_ne!(token, config_snapshot_token_v2(&replaced));
+        replaced = selected.clone();
+        replaced.provenance_lock_digest = Some("f".repeat(64));
+        assert_ne!(token, config_snapshot_token_v2(&replaced));
+        replaced = selected.clone();
+        replaced.baseline_provenance_lock_digest = None;
         assert_ne!(token, config_snapshot_token_v2(&replaced));
         replaced = selected;
         replaced.first_parent_resolved = false;
@@ -12209,6 +12557,83 @@ mod tests {
                 .is_some_and(|option| option.path_components == ["services", "modified"])
                 && row.before.is_some()
         }));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn v2_token_rejects_replaced_flake_output_provenance_lock(pool: PgPool) {
+        let (system, _, child) = v2_reader_history_fixture(&pool).await;
+        let mut tx = pool
+            .begin()
+            .await
+            .expect("fixture transaction should begin");
+        persist_config_artifact_v2_deferred_tx(
+            &mut tx,
+            child.id,
+            "host",
+            v2_reader_artifact(
+                child.id,
+                vec![v2_option(&["services", "provenance-lock"], "value")],
+            ),
+        )
+        .await
+        .expect("V2 artifact should persist");
+        persist_flake_output_snapshot_tx(
+            &mut tx,
+            child.id,
+            &json!({"inputs": [{"node": "nixpkgs", "names": ["nixpkgs"], "source": "https://example.test/one.git", "locked_revision": "1".repeat(40)}]}),
+        )
+        .await
+        .expect("first flake output should persist");
+        tx.commit()
+            .await
+            .expect("fixture transaction should commit");
+
+        let first = query_config_options_page_v2(
+            &pool,
+            system.id,
+            &child.git_commit_hash,
+            "",
+            EvaluatedOptionFilter::All,
+            None,
+            100,
+            0,
+        )
+        .await
+        .expect("first V2 page should load");
+        let ConfigOptionsPageQueryV2::Page(first) = first else {
+            panic!("expected first V2 page");
+        };
+
+        let mut replacement_tx = pool
+            .begin()
+            .await
+            .expect("replacement transaction should begin");
+        persist_flake_output_snapshot_tx(
+            &mut replacement_tx,
+            child.id,
+            &json!({"inputs": [{"node": "nixpkgs", "names": ["nixpkgs"], "source": "https://example.test/two.git", "locked_revision": "2".repeat(40)}]}),
+        )
+        .await
+        .expect("replacement flake output should persist");
+        replacement_tx
+            .commit()
+            .await
+            .expect("replacement transaction should commit");
+
+        let stale = query_config_options_page_v2(
+            &pool,
+            system.id,
+            &child.git_commit_hash,
+            "",
+            EvaluatedOptionFilter::All,
+            Some(&first.snapshot_token),
+            100,
+            0,
+        )
+        .await
+        .expect("stale V2 page should return a typed result");
+        assert!(matches!(stale, ConfigOptionsPageQueryV2::SnapshotChanged));
     }
 
     #[sqlx::test]

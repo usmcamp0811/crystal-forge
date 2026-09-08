@@ -4872,7 +4872,7 @@ fn download_text_file(content: &str, filename: &str) {
 struct ConfigSourceTarget {
     // SECURITY: These fields are evaluator provenance only. The UI must not
     // infer or reconstruct source text from the safe option value.
-    source_path: String,
+    source_path: Option<String>,
     source_input: Option<String>,
     source_revision: Option<String>,
     safe_value: Option<JsonValue>,
@@ -4930,6 +4930,7 @@ fn unavailable_generation_commit(
 }
 
 const SOURCE_TEXT_UNAVAILABLE_MESSAGE: &str = "Crystal Forge retained the authoritative winning or overridden definition provenance, not arbitrary Nix source text. Source text can contain secrets, so no source code is inferred from the persisted safe value.";
+const SOURCE_PATH_UNAVAILABLE_LABEL: &str = "Source path unavailable";
 
 fn refresh_scope_is_current(
     active_selection: Option<&ModuleSourcesScope>,
@@ -4957,7 +4958,9 @@ struct ModuleSourceCollection {
     sources: Vec<EvaluationModuleSummary>,
 }
 
-fn module_source_key(source: &EvaluationModuleSummary) -> (Option<String>, Option<String>, String) {
+fn module_source_key(
+    source: &EvaluationModuleSummary,
+) -> (Option<String>, Option<String>, Option<String>) {
     (
         source.source_input.clone(),
         source.source_revision.clone(),
@@ -6272,6 +6275,17 @@ fn ConfigTab(
                                 {
                                     let module_for_open = module.clone();
                                     let input = module.source_input.as_deref().unwrap_or("untracked");
+                                    let source_path_label = module
+                                        .source_path
+                                        .as_deref()
+                                        .unwrap_or(SOURCE_PATH_UNAVAILABLE_LABEL);
+                                    let source_path_display = module
+                                        .source_path
+                                        .as_deref()
+                                        .map(short_source_path)
+                                        .unwrap_or_else(|| SOURCE_PATH_UNAVAILABLE_LABEL.to_string());
+                                    let source_available = module.source_path.is_some()
+                                        || module.tracked_flake.is_some();
                                     let input_class = if input == "self" {
                                         "cfg-module-kind cfg-module-self"
                                     } else if input == "nixpkgs" {
@@ -6281,10 +6295,11 @@ fn ConfigTab(
                                     };
                                     rsx! { button {
                                         class: "cfg-module focus-ring",
-                                        title: "{module.source_path}",
+                                        title: "{source_path_label}",
+                                        disabled: !source_available,
                                         onclick: move |_| source.set(Some(source_target_from_module(module_for_open.clone()))),
                                         span { class: "{input_class}", title: module.source_revision.clone().unwrap_or_default(), "{input}" }
-                                        span { class: "mono cfg-module-path", title: "{module.source_path}", "{short_source_path(&module.source_path)}" }
+                                        span { class: "mono cfg-module-path", title: "{source_path_label}", "{source_path_display}" }
                                         span { class: "cfg-module-count mono", "{module.won_count}/{module.defined_count}" }
                                     } }
                                 }
@@ -6462,9 +6477,17 @@ fn ConfigOptionRows(
         .iter()
         .find(|definition| definition.winning);
     let source_label = winning
-        .map(|definition| definition.source_path.as_str())
+        .and_then(|definition| definition.source_path.as_deref())
+        .or_else(|| winning.map(|_| SOURCE_PATH_UNAVAILABLE_LABEL))
         .unwrap_or("No provenance");
     let source_display = short_source_path(source_label);
+    let source_available = winning.is_some_and(|definition| {
+        definition.source_path.is_some() || definition.tracked_flake.is_some()
+    });
+    let declared_type_label = displayed_option
+        .declared_type
+        .as_deref()
+        .unwrap_or("Declared type unavailable");
     let source_input_label = winning
         .and_then(|definition| definition.source_input.as_deref())
         .unwrap_or("untracked");
@@ -6491,10 +6514,12 @@ fn ConfigOptionRows(
                     button {
                         class: "cfg-src focus-ring",
                         title: "{source_label}",
+                        disabled: !source_available,
                         onclick: { let definition = definition.clone(); move |event| { event.stop_propagation(); on_source.call(definition.clone()); } },
                         span { class: "cfg-input", "{source_input_label}" }
                         span { class: "mono", title: "{source_label}", "{source_display}" }
-                        if displayed_option.overridden { span { class: "cfg-defcount", "{displayed_option.definitions.len()} defs" } }
+                        if displayed_option.overridden == Some(true) { span { class: "cfg-defcount", "{displayed_option.definitions.len()} defs" } }
+                        if displayed_option.overridden.is_none() { span { class: "cfg-defcount", "Override status unavailable" } }
                     }
                 } else { span { class: "fx-dim", "No provenance" } }
             }
@@ -6502,7 +6527,14 @@ fn ConfigOptionRows(
         if open {
             tr { class: "cfg-detail-row", td { colspan: "3",
                 div { class: "cfg-detail",
-                    div { class: "cfg-detail-row", span { class: "cfg-detail-label", "Type" } span { class: "mono cfg-detail-v", "{displayed_option.declared_type}" } }
+                    div { class: "cfg-detail-row",
+                        span { class: "cfg-detail-label", "Type" }
+                        if let Some(error) = &displayed_option.metadata_error {
+                            span { class: "mono cfg-detail-v cfg-val-err", "Metadata unavailable ({error.code}): {error.message}" }
+                        } else {
+                            span { class: "mono cfg-detail-v", "{declared_type_label}" }
+                        }
+                    }
                     div { class: "cfg-detail-row",
                         span { class: "cfg-detail-label", "Comparison" }
                         ConfigValueDiff {
@@ -6522,13 +6554,17 @@ fn ConfigOptionRows(
                                 {
                                     let input_label = definition.source_input.as_deref().unwrap_or("untracked");
                                     let status_label = definition.status.as_deref().unwrap_or(if definition.winning { "winning" } else { "definition" });
+                                    let source_path_label = definition.source_path.as_deref().unwrap_or(SOURCE_PATH_UNAVAILABLE_LABEL);
+                                    let source_available = definition.source_path.is_some()
+                                        || definition.tracked_flake.is_some();
                                     rsx! { button {
                                         class: if definition.winning { "cfg-def win focus-ring" } else { "cfg-def focus-ring" },
-                                        title: "{definition.source_path}",
+                                        title: "{source_path_label}",
+                                        disabled: !source_available,
                                         onclick: { let definition = definition.clone(); move |event| { event.stop_propagation(); on_source.call(definition.clone()); } },
                                         Icon { name: if definition.winning { IconName::Check } else { IconName::X }, size: 11 }
                                         span { class: "cfg-input", "{input_label}" }
-                                        span { class: "mono cfg-def-file", "{definition.source_path}" }
+                                        span { class: "mono cfg-def-file", "{source_path_label}" }
                                         if let Some(revision) = &definition.source_revision { span { class: "mono cfg-def-note", "{short_revision(revision)}" } }
                                         span { class: "cfg-def-note", "{status_label}" }
                                         if let Some(priority) = definition.priority { span { class: "cfg-def-note mono", "priority {priority}" } }
@@ -6536,7 +6572,8 @@ fn ConfigOptionRows(
                                     } }
                                 }
                             }
-                            if displayed_option.definitions.is_empty() { span { class: "fx-dim", "No definition provenance was emitted." } }
+                            if displayed_option.overridden.is_none() { span { class: "fx-dim", "Definition provenance and override status are unavailable." } }
+                            else if displayed_option.definitions.is_empty() { span { class: "fx-dim", "No definition provenance was emitted." } }
                         }
                     }
                     if let Some(before) = row.before.as_ref().filter(|_| row.option.is_some() && row.changed == Some(true)) {
@@ -6547,13 +6584,17 @@ fn ConfigOptionRows(
                                     {
                                         let input_label = definition.source_input.as_deref().unwrap_or("untracked");
                                         let status_label = definition.status.as_deref().unwrap_or(if definition.winning { "winning" } else { "definition" });
+                                        let source_path_label = definition.source_path.as_deref().unwrap_or(SOURCE_PATH_UNAVAILABLE_LABEL);
+                                        let source_available = definition.source_path.is_some()
+                                            || definition.tracked_flake.is_some();
                                         rsx! { button {
                                             class: if definition.winning { "cfg-def win focus-ring" } else { "cfg-def focus-ring" },
-                                            title: "{definition.source_path}",
+                                            title: "{source_path_label}",
+                                            disabled: !source_available,
                                             onclick: { let definition = definition.clone(); move |event| { event.stop_propagation(); on_source.call(definition.clone()); } },
                                             Icon { name: if definition.winning { IconName::Check } else { IconName::X }, size: 11 }
                                             span { class: "cfg-input", "{input_label}" }
-                                            span { class: "mono cfg-def-file", "{definition.source_path}" }
+                                            span { class: "mono cfg-def-file", "{source_path_label}" }
                                             if let Some(revision) = &definition.source_revision { span { class: "mono cfg-def-note", "{short_revision(revision)}" } }
                                             span { class: "cfg-def-note", "{status_label}" }
                                             if let Some(priority) = definition.priority { span { class: "cfg-def-note mono", "priority {priority}" } }
@@ -6561,7 +6602,8 @@ fn ConfigOptionRows(
                                         } }
                                     }
                                 }
-                                if before.definitions.is_empty() { span { class: "fx-dim", "No baseline definition provenance was emitted." } }
+                                if before.overridden.is_none() { span { class: "fx-dim", "Baseline definition provenance and override status are unavailable." } }
+                                else if before.definitions.is_empty() { span { class: "fx-dim", "No baseline definition provenance was emitted." } }
                             }
                         }
                     }
@@ -6712,6 +6754,11 @@ fn ConfigSourceTray(
         .as_deref()
         .unwrap_or("unavailable")
         .to_string();
+    let source_path_label = target
+        .source_path
+        .as_deref()
+        .unwrap_or(SOURCE_PATH_UNAVAILABLE_LABEL)
+        .to_string();
     let safe_value = target
         .safe_value
         .as_ref()
@@ -6744,7 +6791,7 @@ fn ConfigSourceTray(
                 else { trap_local_dialog_focus(&event, SOURCE_TRAY_ID); }
             },
             header { class: "fl-tray-head",
-                div { style: "min-width:0", div { class: "fl-tray-title mono cfg-tray-title", title: "{target.source_path}", "{target.source_path}" } div { class: "fl-tray-sub", "{input_label} @ {revision_label} · read-only provenance" } }
+                div { style: "min-width:0", div { class: "fl-tray-title mono cfg-tray-title", title: "{source_path_label}", "{source_path_label}" } div { class: "fl-tray-sub", "{input_label} @ {revision_label} · read-only provenance" } }
                 div { style: "display:flex;gap:6px",
                     if let Some(identity) = target.tracked_flake.clone() {
                         button {
@@ -6778,7 +6825,7 @@ fn ConfigSourceTray(
                     dl { class: "cfg-source-provenance",
                         div { dt { "Input" } dd { class: "mono", "{input_label}" } }
                         div { dt { "Locked revision" } dd { class: "mono", "{revision_label}" } }
-                        div { dt { "Binding path / location" } dd { class: "mono", "{target.source_path}" } }
+                        div { dt { "Binding path / location" } dd { class: "mono", "{source_path_label}" } }
                         div { dt { "Definition state" } dd { "{target.status_label}" } }
                         if let Some(priority) = target.priority { div { dt { "Priority" } dd { class: "mono", "{priority}" } } }
                         if target.safe_value.is_some() { div { dt { "Persisted safe value" } dd { class: "mono", "{safe_value}" } } }

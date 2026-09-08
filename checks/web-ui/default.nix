@@ -495,6 +495,33 @@ in pkgs.testers.runNixOSTest {
     from cf_test.vm_helpers import wait_for_git_server_ready
     wait_for_git_server_ready(gitserver, timeout=120)
 
+    # The live Config workflow needs derivations that are not already owned by
+    # the watched fixture flake. Give it a dedicated repository with distinct
+    # system values so Config Inspector can bind the exact carrier paths.
+    gitserver.succeed(
+        """
+        worktree=$(mktemp -d)
+        ${pkgs.git}/bin/git clone /srv/git/crystal-forge.git "$worktree"
+        ${pkgs.git}/bin/git -C "$worktree" checkout --orphan task440-root
+        ${pkgs.git}/bin/git -C "$worktree" config user.name "Web UI test"
+        ${pkgs.git}/bin/git -C "$worktree" config user.email "web-ui@example.test"
+        sed -i 's/networking.hostName = "cf-test-sys"/networking.hostName = "task440-live"/' "$worktree/flake.nix"
+        sed -i 's/networking.hostName = "test-agent"/networking.hostName = "task440-agent"/' "$worktree/flake.nix"
+        ${pkgs.git}/bin/git -C "$worktree" add flake.nix
+        ${pkgs.git}/bin/git -C "$worktree" commit -m "Create TASK-440 live fixture"
+        ${pkgs.git}/bin/git -C "$worktree" branch -D main
+        ${pkgs.git}/bin/git -C "$worktree" branch -m main
+        ${pkgs.git}/bin/git clone --bare "$worktree" /srv/git/task440.git
+        ${pkgs.git}/bin/git --git-dir=/srv/git/task440.git update-server-info
+        chown -R cgit:git /srv/git/task440.git
+        chmod -R u+rwX,go+rX /srv/git/task440.git
+        """
+    )
+    task440_live_repo_url = "http://gitserver/task440"
+    task440_live_commit_hash = gitserver.succeed(
+        "${pkgs.git}/bin/git --git-dir=/srv/git/task440.git rev-parse HEAD"
+    ).strip()
+
     if run_mega_phases:
         atticCache.wait_for_unit("atticd.service")
         atticCache.wait_for_open_port(8080)
@@ -621,6 +648,11 @@ in pkgs.testers.runNixOSTest {
     test_profile = "${testProfile}"
     test_steps = ${if testSteps == null then "None" else "\"${testSteps}\""}
     test_steps_env = f" CF_UI_TEST_STEPS={test_steps}" if test_steps else ""
+    live_fixture_env = (
+        f" CF_TEST_REAL_REPO_URL={task440_live_repo_url}"
+        f" CF_TEST_REAL_COMMIT_HASH={task440_live_commit_hash}"
+        f" CF_TEST_REAL_CONFIGURATION_NAME={os.environ['CF_TEST_REAL_CONFIGURATION_NAME']}"
+    )
     result_timeout = ${toString playwrightResultTimeout}
 
     # Deployment-policy fixture state. Browser steps that read the policy
@@ -640,7 +672,7 @@ in pkgs.testers.runNixOSTest {
     # Run the integration test script
     machine.succeed("rm -f /tmp/web-ui-tests/integration.exit /tmp/screenshots/results.json /tmp/screenshots/fatal.json")
     machine.succeed(
-        f"nohup sh -c 'env CF_UI_BASELINES_DIR=/tmp/web-ui-baselines CF_UI_TEST_PROFILE={test_profile}{test_steps_env} ${pkgs.nodejs}/bin/node /tmp/web-ui-tests/integration-test.js http://127.0.0.1:${
+        f"nohup sh -c 'env CF_UI_BASELINES_DIR=/tmp/web-ui-baselines CF_UI_TEST_PROFILE={test_profile}{test_steps_env}{live_fixture_env} ${pkgs.nodejs}/bin/node /tmp/web-ui-tests/integration-test.js http://127.0.0.1:${
           toString CF_TEST_SERVER_PORT
         } /tmp/screenshots; status=$?; printf \"%s\\n\" \"$status\" > /tmp/web-ui-tests/integration.exit' > /tmp/web-ui-tests/integration.log 2>&1 </dev/null &"
     )

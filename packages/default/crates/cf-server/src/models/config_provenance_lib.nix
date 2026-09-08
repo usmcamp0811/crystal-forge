@@ -33,9 +33,21 @@ let
     && payload ? class
     && builtins.isList payload.modules;
 
+  # COMPATIBILITY: Older target libraries return only a module list from
+  # collectModules and do not expose configuration.graph. Without both graphs,
+  # this adapter cannot prove that replay used the authoritative module graph.
   helperCapabilitiesAvailable =
     moduleTypePayloadAvailable
-    && builtins.all (name: builtins.hasAttr name lib.modules) helperNames;
+    && builtins.all (name: builtins.hasAttr name lib.modules) helperNames
+    && configuration ? graph
+    && builtins.isList configuration.graph;
+
+  collectModulesResultSupported = result:
+    builtins.isAttrs result
+    && result ? modules
+    && builtins.isList result.modules
+    && result ? graph
+    && builtins.isList result.graph;
 
   priorityOf = definition:
     (lib.modules.filterOverrides' [ definition ]).highestPrio;
@@ -193,7 +205,8 @@ let
         ];
         orderWorks = map (definition: definition.value) order == [ "early" "late" ];
       in
-        normalizedFunction && pushDownWorks && falseDischarged
+        collectModulesResultSupported collected
+          && normalizedFunction && pushDownWorks && falseDischarged
           && priorityWorks && orderWorks && rawIndexWorks;
 
   canonicalGraph = node: {

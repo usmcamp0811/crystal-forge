@@ -1039,11 +1039,11 @@ pub struct EvaluationModuleSummary {
     pub source_input: Option<String>,
     /// Evaluator-provided full source revision.
     pub source_revision: Option<String>,
-    /// Exact Nix module source path.
-    pub source_path: String,
+    /// Exact Nix module source path, when available.
+    pub source_path: Option<String>,
     /// Number of definitions emitted by this source.
     pub defined_count: i64,
-    /// Number of definitions that won the module merge.
+    /// Number of options with a winning definition from this source.
     pub won_count: i64,
     /// Server-issued navigation identity after visibility checks.
     pub tracked_flake: Option<TrackedFlakeIdentity>,
@@ -1238,8 +1238,8 @@ pub struct SafeEvaluationError {
 /// Identifies one option definition and its source provenance.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OptionDefinitionProvenance {
-    /// Source path reported by the Nix module system.
-    pub source_path: String,
+    /// Source path reported by the Nix module system, when available.
+    pub source_path: Option<String>,
     /// Source input when tracked metadata resolved it.
     pub source_input: Option<String>,
     /// Full source revision when resolved.
@@ -1267,14 +1267,18 @@ pub struct OptionDefinitionProvenance {
 pub struct EvaluatedOption {
     /// Full option path.
     pub path: String,
-    /// Declared NixOS option type.
-    pub declared_type: String,
+    /// Declared NixOS option type, when metadata supplied it.
+    pub declared_type: Option<String>,
+    /// Safe metadata evaluation failure, distinct from a missing declared type.
+    #[serde(default)]
+    pub metadata_error: Option<SafeEvaluationError>,
     /// Tagged evaluated value or explicit failure.
     pub value: SafeOptionValue,
     /// Complete provenance emitted by the evaluator.
     pub definitions: Vec<OptionDefinitionProvenance>,
-    /// Whether lower-priority definitions are proven to exist.
-    pub overridden: bool,
+    /// Whether provenance proves that lower-priority definitions exist.
+    /// `None` means definition provenance was unavailable.
+    pub overridden: Option<bool>,
 }
 
 /// Reports the result of an explicit evaluation action.
@@ -5411,7 +5415,81 @@ pub struct UpdatePolicyMappingRequest {
 
 #[cfg(test)]
 mod tests {
-    use super::{ComplianceControlEvidence, XccdfPreviewResponse};
+    use super::{
+        ComplianceControlEvidence, EvaluatedOption, EvaluationModuleSummary, XccdfPreviewResponse,
+    };
+
+    #[test]
+    fn config_dtos_deserialize_missing_failed_and_known_v1_states() {
+        let missing: EvaluatedOption = serde_json::from_value(serde_json::json!({
+            "path": "services.example.missing",
+            "declared_type": null,
+            "metadata_error": null,
+            "value": {"kind": "scalar", "value": true},
+            "definitions": [{
+                "source_path": null,
+                "source_input": "self",
+                "source_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "value": null,
+                "winning": true
+            }],
+            "overridden": null
+        }))
+        .expect("missing V2 metadata and provenance should deserialize");
+        assert!(missing.declared_type.is_none());
+        assert!(missing.metadata_error.is_none());
+        assert!(missing.definitions[0].source_path.is_none());
+        assert!(missing.overridden.is_none());
+
+        let failed: EvaluatedOption = serde_json::from_value(serde_json::json!({
+            "path": "services.example.failed",
+            "declared_type": null,
+            "metadata_error": {
+                "code": "metadata_not_evaluated",
+                "message": "Option metadata did not evaluate"
+            },
+            "value": {"kind": "scalar", "value": false},
+            "definitions": [],
+            "overridden": null
+        }))
+        .expect("failed V2 metadata should deserialize");
+        assert_eq!(
+            failed
+                .metadata_error
+                .as_ref()
+                .map(|error| error.code.as_str()),
+            Some("metadata_not_evaluated")
+        );
+
+        let known_v1: EvaluatedOption = serde_json::from_value(serde_json::json!({
+            "path": "services.example.known",
+            "declared_type": "boolean",
+            "value": {"kind": "scalar", "value": true},
+            "definitions": [{
+                "source_path": "modules/example.nix",
+                "source_input": "self",
+                "source_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "value": true,
+                "winning": true
+            }],
+            "overridden": false
+        }))
+        .expect("known legacy V1 fields should deserialize");
+        assert_eq!(known_v1.declared_type.as_deref(), Some("boolean"));
+        assert!(known_v1.metadata_error.is_none());
+        assert_eq!(known_v1.overridden, Some(false));
+
+        let module: EvaluationModuleSummary = serde_json::from_value(serde_json::json!({
+            "source_input": "self",
+            "source_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "source_path": null,
+            "defined_count": 1,
+            "won_count": 1,
+            "tracked_flake": null
+        }))
+        .expect("nullable V2 module source path should deserialize");
+        assert!(module.source_path.is_none());
+    }
 
     #[test]
     fn compliance_requirement_identity_is_additive_and_rolling_compatible() {

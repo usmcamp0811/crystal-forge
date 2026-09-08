@@ -29,11 +29,17 @@ use crate::handlers::api::rbac::{
     authenticated_user_roles, extract_request_origin, require_viewer_or_above,
 };
 use crate::models::auth_identity::AuthRole;
+use crate::models::config_snapshot_artifact::{
+    ConfigDefinitionArtifactV2, ConfigDefinitionStatusV2, ConfigOptionArtifactV2,
+    ConfigOptionMetadataArtifactV2, ConfigOptionProvenanceArtifactV2,
+};
 use crate::models::evaluation_snapshots::{
-    AgentFingerprintStatus, EvaluatedOptionCounts, EvaluatedOptionsPage, EvaluatedOptionsParams,
-    EvaluationDrift, EvaluationModuleSourcesPage, EvaluationModuleSourcesParams,
-    SelectedEvaluationSummary, SelectedEvaluationSummaryParams, SevenDayDriftStatus,
-    SnapshotLifecycle, SnapshotRevisionMode,
+    AgentFingerprintStatus, EvaluatedOption, EvaluatedOptionCounts, EvaluatedOptionRow,
+    EvaluatedOptionsPage, EvaluatedOptionsParams, EvaluationDrift, EvaluationModuleSourcesPage,
+    EvaluationModuleSourcesParams, EvaluationModuleSummary, OptionChangeKind,
+    OptionDefinitionProvenance, SelectedEvaluationSummary, SelectedEvaluationSummaryParams,
+    SevenDayDriftStatus, SnapshotLifecycle, SnapshotRevisionMode, TrackedFlakeIdentity,
+    typed_option_diff,
 };
 use crate::queries::build_jobs::enqueue_build_job_for_derivation;
 use crate::queries::cve_scans::{get_scan_by_id, resolve_system_cve_scan_target};
@@ -291,45 +297,28 @@ pub async fn get_system_evaluated_options(
     if let Err(message) = validate_evaluated_options_params(&params) {
         return bad_request(message);
     }
-    let selected = match params.mode {
-        SnapshotRevisionMode::Commit => {
-            crate::queries::evaluation_snapshots::select_commit_snapshot(
-                &pool,
-                system_id,
-                &params.revision,
-            )
-            .await
-        }
-        SnapshotRevisionMode::Generation => {
-            let Some(generation) = params.generation else {
-                return bad_request("generation is required in generation mode");
-            };
-            crate::queries::evaluation_snapshots::select_generation_snapshot(
-                &pool, system_id, generation,
-            )
-            .await
-        }
+    if params.mode == SnapshotRevisionMode::Commit {
+        return get_commit_evaluated_options_v2(
+            &pool,
+            system_id,
+            (caller_role != Role::Admin).then_some(user_id),
+            &params,
+        )
+        .await;
+    }
+    let Some(generation) = params.generation else {
+        return bad_request("generation is required in generation mode");
     };
+    let selected = crate::queries::evaluation_snapshots::select_generation_snapshot(
+        &pool, system_id, generation,
+    )
+    .await;
     let selected = match selected {
         Ok(Some(value)) => value,
         Ok(None) if params.snapshot_token.is_some() => {
             return evaluation_snapshot_changed(
                 "Evaluation snapshot changed; reload options from offset 0",
             );
-        }
-        Ok(None) if params.mode == SnapshotRevisionMode::Commit => {
-            let lifecycle = match crate::queries::evaluation_snapshots::missing_snapshot_lifecycle(
-                &pool,
-                system_id,
-                &params.revision,
-            )
-            .await
-            {
-                Ok(Some(value)) => value,
-                Ok(None) => return not_found(),
-                Err(_) => return internal_error("Failed to load evaluation lifecycle"),
-            };
-            return (StatusCode::OK, Json(empty_options_page(&params, lifecycle))).into_response();
         }
         Ok(None) => {
             return (
@@ -410,47 +399,20 @@ pub async fn get_system_evaluation_summary(
     }) {
         return bad_request("snapshot_token must be a 64-character hexadecimal digest");
     }
-    let selected = match params.mode {
-        SnapshotRevisionMode::Commit => {
-            crate::queries::evaluation_snapshots::select_commit_snapshot(
-                &pool,
-                system_id,
-                &params.revision,
-            )
-            .await
-        }
-        SnapshotRevisionMode::Generation => {
-            let Some(generation) = params.generation else {
-                return bad_request("generation is required in generation mode");
-            };
-            crate::queries::evaluation_snapshots::select_generation_snapshot(
-                &pool, system_id, generation,
-            )
-            .await
-        }
+    if params.mode == SnapshotRevisionMode::Commit {
+        return get_commit_evaluation_summary_v2(&pool, system_id, &params).await;
+    }
+    let Some(generation) = params.generation else {
+        return bad_request("generation is required in generation mode");
     };
+    let selected = crate::queries::evaluation_snapshots::select_generation_snapshot(
+        &pool, system_id, generation,
+    )
+    .await;
     let selected = match selected {
         Ok(Some(value)) => value,
         Ok(None) if params.snapshot_token.is_some() => {
             return evaluation_snapshot_changed("Evaluation snapshot changed; reload Config data");
-        }
-        Ok(None) if params.mode == SnapshotRevisionMode::Commit => {
-            let lifecycle = match crate::queries::evaluation_snapshots::missing_snapshot_lifecycle(
-                &pool,
-                system_id,
-                &params.revision,
-            )
-            .await
-            {
-                Ok(Some(value)) => value,
-                Ok(None) => return not_found(),
-                Err(_) => return internal_error("Failed to load evaluation lifecycle"),
-            };
-            return (
-                StatusCode::OK,
-                Json(empty_evaluation_summary(&params, lifecycle)),
-            )
-                .into_response();
         }
         Ok(None) => {
             return (
@@ -524,50 +486,28 @@ pub async fn get_system_evaluation_module_sources(
     if let Err(message) = validate_evaluation_module_sources_params(&params) {
         return bad_request(message);
     }
-
-    let selected = match params.mode {
-        SnapshotRevisionMode::Commit => {
-            crate::queries::evaluation_snapshots::select_commit_snapshot(
-                &pool,
-                system_id,
-                &params.revision,
-            )
-            .await
-        }
-        SnapshotRevisionMode::Generation => {
-            let Some(generation) = params.generation else {
-                return bad_request("generation is required in generation mode");
-            };
-            crate::queries::evaluation_snapshots::select_generation_snapshot(
-                &pool, system_id, generation,
-            )
-            .await
-        }
+    if params.mode == SnapshotRevisionMode::Commit {
+        return get_commit_evaluation_module_sources_v2(
+            &pool,
+            system_id,
+            (caller_role != Role::Admin).then_some(user_id),
+            &params,
+        )
+        .await;
+    }
+    let Some(generation) = params.generation else {
+        return bad_request("generation is required in generation mode");
     };
+    let selected = crate::queries::evaluation_snapshots::select_generation_snapshot(
+        &pool, system_id, generation,
+    )
+    .await;
     let selected = match selected {
         Ok(Some(value)) => value,
         Ok(None) if params.snapshot_token.is_some() => {
             return evaluation_snapshot_changed(
                 "Evaluation snapshot changed; reload module sources from offset 0",
             );
-        }
-        Ok(None) if params.mode == SnapshotRevisionMode::Commit => {
-            let lifecycle = match crate::queries::evaluation_snapshots::missing_snapshot_lifecycle(
-                &pool,
-                system_id,
-                &params.revision,
-            )
-            .await
-            {
-                Ok(Some(value)) => value,
-                Ok(None) => return not_found(),
-                Err(_) => return internal_error("Failed to load evaluation lifecycle"),
-            };
-            return (
-                StatusCode::OK,
-                Json(empty_evaluation_module_sources(&params, lifecycle)),
-            )
-                .into_response();
         }
         Ok(None) => {
             return (
@@ -608,6 +548,393 @@ pub async fn get_system_evaluation_module_sources(
             tracing::error!(system_id = %system_id, error = %error, "failed to query evaluation module sources");
             internal_error("Failed to load evaluation module sources")
         }
+    }
+}
+
+async fn get_commit_evaluated_options_v2(
+    pool: &PgPool,
+    system_id: Uuid,
+    visibility_user: Option<Uuid>,
+    params: &EvaluatedOptionsParams,
+) -> axum::response::Response {
+    match crate::queries::evaluation_snapshots::query_config_options_page_v2_for_user(
+        pool,
+        system_id,
+        &params.revision,
+        visibility_user,
+        &params.search,
+        params.filter,
+        params.snapshot_token.as_deref(),
+        params.limit.unwrap_or(50),
+        params.offset.unwrap_or(0),
+    )
+    .await
+    {
+        Ok(crate::queries::evaluation_snapshots::ConfigOptionsPageQueryV2::Page(page)) => {
+            (StatusCode::OK, Json(config_options_page_v2_to_api(page))).into_response()
+        }
+        Ok(crate::queries::evaluation_snapshots::ConfigOptionsPageQueryV2::NoSnapshot) => {
+            commit_missing_options_response(pool, system_id, params).await
+        }
+        Ok(crate::queries::evaluation_snapshots::ConfigOptionsPageQueryV2::SnapshotChanged) => {
+            evaluation_snapshot_changed("Evaluation snapshot changed; reload options from offset 0")
+        }
+        Err(error) => {
+            tracing::error!(system_id = %system_id, error = %error, "failed to query V2 evaluated options");
+            internal_error("Failed to load evaluated options")
+        }
+    }
+}
+
+async fn get_commit_evaluation_summary_v2(
+    pool: &PgPool,
+    system_id: Uuid,
+    params: &SelectedEvaluationSummaryParams,
+) -> axum::response::Response {
+    match crate::queries::evaluation_snapshots::get_config_summary_v2_with_token(
+        pool,
+        system_id,
+        &params.revision,
+        params.snapshot_token.as_deref(),
+    )
+    .await
+    {
+        Ok(crate::queries::evaluation_snapshots::ConfigSummaryQueryV2::Summary(summary)) => {
+            (StatusCode::OK, Json(config_summary_v2_to_api(summary))).into_response()
+        }
+        Ok(crate::queries::evaluation_snapshots::ConfigSummaryQueryV2::NoSnapshot) => {
+            commit_missing_summary_response(pool, system_id, params).await
+        }
+        Ok(crate::queries::evaluation_snapshots::ConfigSummaryQueryV2::SnapshotChanged) => {
+            evaluation_snapshot_changed("Evaluation snapshot changed; reload Config data")
+        }
+        Err(error) => {
+            tracing::error!(system_id = %system_id, error = %error, "failed to query V2 evaluation summary");
+            internal_error("Failed to load evaluation summary")
+        }
+    }
+}
+
+async fn get_commit_evaluation_module_sources_v2(
+    pool: &PgPool,
+    system_id: Uuid,
+    visibility_user: Option<Uuid>,
+    params: &EvaluationModuleSourcesParams,
+) -> axum::response::Response {
+    match crate::queries::evaluation_snapshots::get_config_module_sources_v2_for_user(
+        pool,
+        system_id,
+        &params.revision,
+        visibility_user,
+        params.snapshot_token.as_deref(),
+        params.limit.unwrap_or(50),
+        params.offset.unwrap_or(0),
+    )
+    .await
+    {
+        Ok(crate::queries::evaluation_snapshots::ConfigModuleSourcesQueryV2::Page(page)) => {
+            (StatusCode::OK, Json(config_module_sources_v2_to_api(page))).into_response()
+        }
+        Ok(crate::queries::evaluation_snapshots::ConfigModuleSourcesQueryV2::NoSnapshot) => {
+            commit_missing_module_sources_response(pool, system_id, params).await
+        }
+        Ok(crate::queries::evaluation_snapshots::ConfigModuleSourcesQueryV2::SnapshotChanged) => {
+            evaluation_snapshot_changed(
+                "Evaluation snapshot changed; reload module sources from offset 0",
+            )
+        }
+        Err(error) => {
+            tracing::error!(system_id = %system_id, error = %error, "failed to query V2 evaluation module sources");
+            internal_error("Failed to load evaluation module sources")
+        }
+    }
+}
+
+async fn commit_missing_options_response(
+    pool: &PgPool,
+    system_id: Uuid,
+    params: &EvaluatedOptionsParams,
+) -> axum::response::Response {
+    match crate::queries::evaluation_snapshots::missing_config_snapshot_lifecycle_v2(
+        pool,
+        system_id,
+        &params.revision,
+    )
+    .await
+    {
+        Ok(Some(lifecycle)) => {
+            (StatusCode::OK, Json(empty_options_page(params, lifecycle))).into_response()
+        }
+        Ok(None) => not_found(),
+        Err(_) => internal_error("Failed to load evaluation lifecycle"),
+    }
+}
+
+async fn commit_missing_summary_response(
+    pool: &PgPool,
+    system_id: Uuid,
+    params: &SelectedEvaluationSummaryParams,
+) -> axum::response::Response {
+    match crate::queries::evaluation_snapshots::missing_config_snapshot_lifecycle_v2(
+        pool,
+        system_id,
+        &params.revision,
+    )
+    .await
+    {
+        Ok(Some(lifecycle)) => (
+            StatusCode::OK,
+            Json(empty_evaluation_summary(params, lifecycle)),
+        )
+            .into_response(),
+        Ok(None) => not_found(),
+        Err(_) => internal_error("Failed to load evaluation lifecycle"),
+    }
+}
+
+async fn commit_missing_module_sources_response(
+    pool: &PgPool,
+    system_id: Uuid,
+    params: &EvaluationModuleSourcesParams,
+) -> axum::response::Response {
+    match crate::queries::evaluation_snapshots::missing_config_snapshot_lifecycle_v2(
+        pool,
+        system_id,
+        &params.revision,
+    )
+    .await
+    {
+        Ok(Some(lifecycle)) => (
+            StatusCode::OK,
+            Json(empty_evaluation_module_sources(params, lifecycle)),
+        )
+            .into_response(),
+        Ok(None) => not_found(),
+        Err(_) => internal_error("Failed to load evaluation lifecycle"),
+    }
+}
+
+fn config_options_page_v2_to_api(
+    page: crate::queries::evaluation_snapshots::ConfigOptionsPageV2,
+) -> EvaluatedOptionsPage {
+    let comparison_available = matches!(
+        page.selected.comparison,
+        crate::queries::evaluation_snapshots::ConfigComparisonStateV2::Available { .. }
+    );
+    let baseline_revision = match &page.selected.comparison {
+        crate::queries::evaluation_snapshots::ConfigComparisonStateV2::Available {
+            baseline_revision,
+            ..
+        } => Some(baseline_revision.clone()),
+        crate::queries::evaluation_snapshots::ConfigComparisonStateV2::Unavailable { .. } => None,
+    };
+    let available = page.selected.lifecycle == SnapshotLifecycle::Available;
+    EvaluatedOptionsPage {
+        lifecycle: page.selected.lifecycle,
+        revision: page.selected.revision,
+        generation: None,
+        generation_snapshot_id: None,
+        snapshot_token: available.then_some(page.snapshot_token),
+        baseline_revision,
+        baseline_generation: None,
+        comparison_available,
+        error: page.selected.error,
+        module_count: if available {
+            page.selected.module_count
+        } else {
+            0
+        },
+        evaluation_duration_ms: available
+            .then_some(page.selected.evaluation_duration_ms)
+            .flatten(),
+        counts: EvaluatedOptionCounts {
+            all: page.counts.all,
+            overridden: page.counts.overridden,
+            changed: page.counts.changed,
+        },
+        total: page.total,
+        offset: page.offset,
+        limit: page.limit,
+        options: page
+            .options
+            .into_iter()
+            .map(|row| {
+                let option = row
+                    .option
+                    .map(|option| config_option_v2_to_api(option, row.option_tracked_flakes));
+                let before = row
+                    .before
+                    .map(|option| config_option_v2_to_api(option, row.before_tracked_flakes));
+                let diff = comparison_available.then(|| {
+                    config_option_diff_v2_to_api(before.as_ref(), option.as_ref(), row.changed)
+                });
+                EvaluatedOptionRow {
+                    diff,
+                    option,
+                    before,
+                    changed: row.changed,
+                }
+            })
+            .collect(),
+    }
+}
+
+fn config_option_diff_v2_to_api(
+    before: Option<&EvaluatedOption>,
+    option: Option<&EvaluatedOption>,
+    changed: Option<bool>,
+) -> crate::models::evaluation_snapshots::TypedOptionDiff {
+    let mut diff = typed_option_diff(before, option);
+    // INVARIANT: V2 content digests include metadata and provenance that the
+    // compatibility DTO cannot represent. The database comparison therefore
+    // remains authoritative for the row-level change classification.
+    diff.kind = match (before.is_some(), option.is_some(), changed) {
+        (false, true, _) => OptionChangeKind::Added,
+        (true, false, _) => OptionChangeKind::Removed,
+        (true, true, Some(true)) => OptionChangeKind::Modified,
+        _ => OptionChangeKind::Unchanged,
+    };
+    diff
+}
+
+fn config_option_v2_to_api(
+    option: ConfigOptionArtifactV2,
+    tracked_flakes: Vec<Option<TrackedFlakeIdentity>>,
+) -> EvaluatedOption {
+    let (declared_type, metadata_error) = match option.metadata {
+        ConfigOptionMetadataArtifactV2::Available { declared_type, .. } => (declared_type, None),
+        ConfigOptionMetadataArtifactV2::Failed { error } => (None, Some(error)),
+    };
+    let (definitions, overridden) = match option.provenance {
+        ConfigOptionProvenanceArtifactV2::Available {
+            definitions,
+            override_state,
+        } => (
+            definitions
+                .into_iter()
+                .zip(tracked_flakes.into_iter().chain(std::iter::repeat(None)))
+                .map(|(definition, tracked_flake)| {
+                    config_definition_v2_to_api(definition, tracked_flake)
+                })
+                .collect(),
+            Some(override_state),
+        ),
+        ConfigOptionProvenanceArtifactV2::Unavailable => (Vec::new(), None),
+    };
+    EvaluatedOption {
+        path: config_option_path_v2_to_api(&option.path_components),
+        declared_type,
+        metadata_error,
+        value: option.effective_value,
+        definitions,
+        overridden,
+    }
+}
+
+// INVARIANT: Quoting non-identifier components keeps the display path and the
+// existing API row identity injective when a literal component contains a dot.
+fn config_option_path_v2_to_api(path_components: &[String]) -> String {
+    path_components
+        .iter()
+        .map(|component| {
+            let mut chars = component.chars();
+            let starts_like_identifier = chars
+                .next()
+                .is_some_and(|character| character.is_ascii_alphabetic() || character == '_');
+            let remains_identifier = chars.all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '\'')
+            });
+            if starts_like_identifier && remains_identifier {
+                component.clone()
+            } else {
+                serde_json::Value::String(component.clone()).to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+fn config_definition_v2_to_api(
+    definition: ConfigDefinitionArtifactV2,
+    tracked_flake: Option<TrackedFlakeIdentity>,
+) -> OptionDefinitionProvenance {
+    let (winning, status) = match definition.status {
+        ConfigDefinitionStatusV2::ActiveSurviving => (true, "winning"),
+        ConfigDefinitionStatusV2::PriorityDiscarded => (false, "overridden"),
+    };
+    OptionDefinitionProvenance {
+        source_path: definition.source_path,
+        source_input: definition.source_input,
+        source_revision: definition.source_revision,
+        value: definition
+            .value
+            .and_then(|value| serde_json::to_value(value).ok()),
+        winning,
+        priority: Some(definition.priority),
+        status: Some(status.to_string()),
+        winner_note: None,
+        tracked_flake,
+    }
+}
+
+fn config_summary_v2_to_api(
+    summary: crate::queries::evaluation_snapshots::ConfigSummaryV2,
+) -> SelectedEvaluationSummary {
+    let agent_fingerprint = match summary.drift {
+        EvaluationDrift::Matches => AgentFingerprintStatus::Matches,
+        EvaluationDrift::Differs => AgentFingerprintStatus::Differs,
+        EvaluationDrift::Unavailable => AgentFingerprintStatus::Unavailable,
+    };
+    SelectedEvaluationSummary {
+        lifecycle: summary.selected.lifecycle,
+        revision: summary.selected.revision,
+        generation: None,
+        error: summary.selected.error,
+        snapshot_token: summary.snapshot_token,
+        baseline_generation: None,
+        module_source_total: summary.module_source_total,
+        completed_at: summary.completed_at,
+        evaluation_duration_ms: summary.evaluation_duration_ms,
+        option_total: summary.option_total,
+        selected_store_path: summary.selected_store_path,
+        closure_package_count: summary.closure_package_count,
+        closure_size_bytes: summary.closure_size_bytes,
+        running_store_path: summary.running_store_path,
+        running_profile_matches: summary.running_profile_matches,
+        // INVARIANT: Host deltas are materialized only for schema-V1 snapshots
+        // selected by evaluation_snapshot_selections. Targeted schema-V2 Config
+        // snapshots never join that primary same-commit host corpus.
+        host_delta_count: None,
+        agent_fingerprint,
+        seven_day_drift: summary.seven_day_drift,
+        drift: summary.drift,
+    }
+}
+
+fn config_module_sources_v2_to_api(
+    page: crate::queries::evaluation_snapshots::ConfigModuleSourcesPageV2,
+) -> EvaluationModuleSourcesPage {
+    EvaluationModuleSourcesPage {
+        lifecycle: page.selected.lifecycle,
+        revision: page.selected.revision,
+        generation: None,
+        error: page.selected.error,
+        snapshot_token: page.snapshot_token,
+        total: page.total,
+        offset: page.offset,
+        limit: page.limit,
+        sources: page
+            .sources
+            .into_iter()
+            .map(|source| EvaluationModuleSummary {
+                source_input: source.source_input,
+                source_revision: source.source_revision,
+                source_path: source.source_path,
+                defined_count: source.definition_count,
+                won_count: source.winning_option_count,
+                tracked_flake: source.tracked_flake,
+            })
+            .collect(),
     }
 }
 
@@ -3400,13 +3727,22 @@ mod tests {
     use super::*;
     use crate::auth::session::{SESSION_COOKIE_NAME, hash_token};
     use crate::models::auth_identity::AuthRole;
+    use crate::models::config_inspector::option_key;
+    use crate::models::config_snapshot_artifact::{
+        CONFIG_OPTION_ARTIFACT_SCHEMA_VERSION_V2, ConfigInspectionArtifactV2,
+        ConfigProvenanceArtifactStateV2, DefinitionValueArtifactStateV2,
+    };
+    use crate::models::evaluation_snapshots::{SafeEvaluationError, SafeOptionValue};
     use crate::models::public_key::PublicKey;
     use crate::models::systems::System;
     use crate::queries::auth_identity::{create_user_session, sync_user_role};
     use crate::queries::commits::{get_commit_by_hash, insert_commit_with_metadata};
     use crate::queries::derivations::insert_derivation;
     use crate::queries::environments::create_environment;
-    use crate::queries::evaluation_snapshots::persist_available_snapshot_tx;
+    use crate::queries::evaluation_snapshots::{
+        persist_available_snapshot_tx, persist_config_artifact_v2_tx,
+        persist_flake_output_snapshot_tx,
+    };
     use crate::queries::flakes::insert_flake;
     use crate::queries::systems::insert_system;
     use crate::queries::users::insert_user;
@@ -3415,6 +3751,15 @@ mod tests {
     use chrono::Utc;
     use ed25519_dalek::SigningKey;
     use sqlx::postgres::PgPoolOptions;
+
+    async fn response_json<T: serde::de::DeserializeOwned>(
+        response: axum::response::Response,
+    ) -> T {
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body should read");
+        serde_json::from_slice(&bytes).expect("response body should decode")
+    }
 
     #[test]
     fn snapshot_revisions_require_full_immutable_sha_identity() {
@@ -3427,6 +3772,33 @@ mod tests {
         assert_ne!(first, second);
         assert!(!is_full_commit_sha(shared_prefix));
         assert!(!is_full_commit_sha(&format!("{}z", "a".repeat(39))));
+    }
+
+    #[test]
+    fn v2_digest_change_remains_modified_after_compatibility_mapping() {
+        let mapped = EvaluatedOption {
+            path: "services.example.enable".into(),
+            declared_type: Some("boolean".into()),
+            metadata_error: None,
+            value: SafeOptionValue::Scalar(serde_json::json!(true)),
+            definitions: Vec::new(),
+            overridden: Some(false),
+        };
+
+        let diff = config_option_diff_v2_to_api(Some(&mapped), Some(&mapped), Some(true));
+
+        assert_eq!(diff.kind, OptionChangeKind::Modified);
+    }
+
+    #[test]
+    fn v2_api_paths_preserve_structured_component_identity() {
+        let quoted_component = config_option_path_v2_to_api(&["a.b".to_string(), "c".to_string()]);
+        let separate_components =
+            config_option_path_v2_to_api(&["a".to_string(), "b.c".to_string()]);
+
+        assert_eq!(quoted_component, "\"a.b\".c");
+        assert_eq!(separate_components, "a.\"b.c\"");
+        assert_ne!(quoted_component, separate_components);
     }
 
     #[test]
@@ -4023,6 +4395,754 @@ mod tests {
             .execute(&pool)
             .await
             .expect("environment cleanup should succeed");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn commit_config_handlers_serve_only_selected_v2_artifacts(pool: PgPool) {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let hostname = format!("v2-api-{suffix}");
+        let repo_url = format!("https://example.test/v2-api-{suffix}.git");
+        let parent_revision = "b".repeat(40);
+        let revision = "c".repeat(40);
+        let hidden_revision = "d".repeat(40);
+        let user = insert_user(
+            &pool,
+            &format!("v2-api-{suffix}@example.test"),
+            Some("V2 API Test"),
+        )
+        .await
+        .expect("test user should persist");
+        sync_user_role(&pool, user.id, AuthRole::Viewer)
+            .await
+            .expect("viewer role should persist");
+        let environment = create_environment(
+            &pool,
+            &format!("v2-api-{suffix}"),
+            None,
+            "#112233",
+            true,
+            "manual",
+            false,
+            false,
+            false,
+        )
+        .await
+        .expect("test environment should persist");
+        sqlx::query(
+            "INSERT INTO user_environment_memberships (user_id, environment_id) VALUES ($1, $2)",
+        )
+        .bind(user.id)
+        .bind(environment.id)
+        .execute(&pool)
+        .await
+        .expect("viewer environment membership should persist");
+        let session_token = format!("v2-api-session-{suffix}");
+        create_user_session(
+            &pool,
+            user.id,
+            hash_token(&session_token),
+            Utc::now() + chrono::Duration::hours(1),
+            None,
+            None,
+            "local".into(),
+        )
+        .await
+        .expect("session should persist");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            format!("{}={}", SESSION_COOKIE_NAME, session_token)
+                .parse()
+                .expect("cookie should parse"),
+        );
+
+        let flake = insert_flake(
+            &pool,
+            &format!("v2-api-{suffix}"),
+            &repo_url,
+            "main",
+            "cf_systems_only",
+        )
+        .await
+        .expect("test flake should persist");
+        let key = SigningKey::from_bytes(&[45; 32]);
+        let system = insert_system(
+            &pool,
+            &System {
+                id: Uuid::new_v4(),
+                hostname: hostname.clone(),
+                environment_id: Some(environment.id),
+                is_active: true,
+                public_key: PublicKey::from_verifying_key(key.verifying_key()),
+                flake_id: Some(flake.id),
+                derivation: String::new(),
+                system_configuration_name: Some(hostname.clone()),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                desired_target: None,
+                deployment_policy: "manual".into(),
+            },
+        )
+        .await
+        .expect("test system should persist");
+        let hidden_environment = create_environment(
+            &pool,
+            &format!("v2-api-hidden-{suffix}"),
+            None,
+            "#445566",
+            true,
+            "manual",
+            false,
+            false,
+            false,
+        )
+        .await
+        .expect("hidden environment should persist");
+        let hidden_repo_url = format!("https://example.test/v2-api-hidden-{suffix}.git");
+        let hidden_flake = insert_flake(
+            &pool,
+            &format!("v2-api-hidden-{suffix}"),
+            &hidden_repo_url,
+            "main",
+            "cf_systems_only",
+        )
+        .await
+        .expect("hidden flake should persist");
+        let hidden_key = SigningKey::from_bytes(&[46; 32]);
+        insert_system(
+            &pool,
+            &System {
+                id: Uuid::new_v4(),
+                hostname: format!("v2-api-hidden-{suffix}"),
+                environment_id: Some(hidden_environment.id),
+                is_active: true,
+                public_key: PublicKey::from_verifying_key(hidden_key.verifying_key()),
+                flake_id: Some(hidden_flake.id),
+                derivation: String::new(),
+                system_configuration_name: Some(format!("v2-api-hidden-{suffix}")),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                desired_target: None,
+                deployment_policy: "manual".into(),
+            },
+        )
+        .await
+        .expect("hidden system should persist");
+        insert_commit_with_metadata(
+            &pool,
+            &parent_revision,
+            &repo_url,
+            Utc::now() - chrono::Duration::minutes(1),
+            Some("V2 API parent fixture"),
+            Some("test"),
+        )
+        .await
+        .expect("test parent commit should persist");
+        insert_commit_with_metadata(
+            &pool,
+            &revision,
+            &repo_url,
+            Utc::now(),
+            Some("V2 API fixture"),
+            Some("test"),
+        )
+        .await
+        .expect("test commit should persist");
+        insert_commit_with_metadata(
+            &pool,
+            &hidden_revision,
+            &hidden_repo_url,
+            Utc::now(),
+            Some("V2 API hidden provenance fixture"),
+            Some("test"),
+        )
+        .await
+        .expect("hidden commit should persist");
+        let commit = get_commit_by_hash(&pool, &revision)
+            .await
+            .expect("test commit should load");
+        let parent_commit = get_commit_by_hash(&pool, &parent_revision)
+            .await
+            .expect("test parent commit should load");
+        sqlx::query(
+            "UPDATE commits SET first_parent_sha = $2, first_parent_resolved = true WHERE id = $1",
+        )
+        .bind(commit.id)
+        .bind(&parent_revision)
+        .execute(&pool)
+        .await
+        .expect("test first-parent identity should persist");
+        let derivation = insert_derivation(&pool, Some(&commit), &hostname, "nixos")
+            .await
+            .expect("test derivation should persist");
+        let carrier_drv_path = format!("/nix/store/{suffix}-v2-api.drv");
+        sqlx::query("UPDATE derivations SET derivation_path = $2 WHERE id = $1")
+            .bind(derivation.id)
+            .bind(&carrier_drv_path)
+            .execute(&pool)
+            .await
+            .expect("carrier path should persist");
+        let parent_derivation = insert_derivation(&pool, Some(&parent_commit), &hostname, "nixos")
+            .await
+            .expect("parent derivation should persist");
+        let parent_carrier_drv_path = format!("/nix/store/{suffix}-v2-api-parent.drv");
+        sqlx::query("UPDATE derivations SET derivation_path = $2 WHERE id = $1")
+            .bind(parent_derivation.id)
+            .bind(&parent_carrier_drv_path)
+            .execute(&pool)
+            .await
+            .expect("parent carrier path should persist");
+
+        let v1_option = EvaluatedOption {
+            path: "v1.only".into(),
+            declared_type: Some("string".into()),
+            metadata_error: None,
+            value: SafeOptionValue::Scalar(serde_json::json!("legacy")),
+            definitions: Vec::new(),
+            overridden: Some(false),
+        };
+        let path_components = vec!["services".to_string(), "v2-api".to_string()];
+        let selected_option_key = option_key(&path_components);
+        let definition = ConfigDefinitionArtifactV2 {
+            option_key: selected_option_key.clone(),
+            ordinal: 0,
+            source_path: None,
+            source_input: Some("self".into()),
+            source_revision: Some(revision.clone()),
+            module_key: None,
+            priority: 100,
+            status: ConfigDefinitionStatusV2::ActiveSurviving,
+            surviving_merge_order: Some(0),
+            value: Some(SafeOptionValue::Scalar(serde_json::json!(true))),
+        };
+        let second_surviving_definition = ConfigDefinitionArtifactV2 {
+            ordinal: 1,
+            surviving_merge_order: Some(1),
+            ..definition.clone()
+        };
+        let artifact = ConfigInspectionArtifactV2 {
+            artifact_version: CONFIG_OPTION_ARTIFACT_SCHEMA_VERSION_V2,
+            target_key: "a".repeat(64),
+            source_out_path: format!("/nix/store/{suffix}-source"),
+            carrier_drv_path: carrier_drv_path.clone(),
+            provenance_state: ConfigProvenanceArtifactStateV2::Available {
+                adapter_version: 1,
+                target_lib_version: None,
+                target_module_system_path: None,
+                provenance_digest: "b".repeat(64),
+                definition_value_enrichment: DefinitionValueArtifactStateV2::Available {
+                    adapter_version: 1,
+                    provenance_digest: "b".repeat(64),
+                },
+            },
+            options: vec![
+                ConfigOptionArtifactV2 {
+                    option_key: selected_option_key,
+                    path_components,
+                    metadata: ConfigOptionMetadataArtifactV2::Available {
+                        option_type: Some("option".into()),
+                        loc: vec!["services".into(), "v2-api".into()],
+                        declared_type: None,
+                        declarations: Vec::new(),
+                        declaration_positions: Vec::new(),
+                        highest_prio: Some(100),
+                        is_defined: true,
+                        surviving_definition_sources: Vec::new(),
+                    },
+                    effective_value: SafeOptionValue::Scalar(serde_json::json!(true)),
+                    provenance: ConfigOptionProvenanceArtifactV2::Available {
+                        definitions: vec![definition, second_surviving_definition],
+                        override_state: false,
+                    },
+                },
+                ConfigOptionArtifactV2 {
+                    option_key: option_key(&[
+                        "services".to_string(),
+                        "v2-api-metadata-failed".to_string(),
+                    ]),
+                    path_components: vec![
+                        "services".to_string(),
+                        "v2-api-metadata-failed".to_string(),
+                    ],
+                    metadata: ConfigOptionMetadataArtifactV2::Failed {
+                        error: SafeEvaluationError {
+                            code: "metadata_not_evaluated".into(),
+                            message: "Option metadata did not evaluate".into(),
+                        },
+                    },
+                    effective_value: SafeOptionValue::Scalar(serde_json::json!(false)),
+                    provenance: ConfigOptionProvenanceArtifactV2::Available {
+                        definitions: Vec::new(),
+                        override_state: false,
+                    },
+                },
+                ConfigOptionArtifactV2 {
+                    option_key: option_key(&[
+                        "services".to_string(),
+                        "zz-v2-api-hidden".to_string(),
+                    ]),
+                    path_components: vec!["services".to_string(), "zz-v2-api-hidden".to_string()],
+                    metadata: ConfigOptionMetadataArtifactV2::Available {
+                        option_type: Some("option".into()),
+                        loc: vec!["services".into(), "zz-v2-api-hidden".into()],
+                        declared_type: Some("boolean".into()),
+                        declarations: Vec::new(),
+                        declaration_positions: Vec::new(),
+                        highest_prio: Some(100),
+                        is_defined: true,
+                        surviving_definition_sources: Vec::new(),
+                    },
+                    effective_value: SafeOptionValue::Scalar(serde_json::json!(true)),
+                    provenance: ConfigOptionProvenanceArtifactV2::Available {
+                        definitions: vec![ConfigDefinitionArtifactV2 {
+                            option_key: option_key(&[
+                                "services".to_string(),
+                                "zz-v2-api-hidden".to_string(),
+                            ]),
+                            ordinal: 0,
+                            source_path: Some("modules/hidden.nix".into()),
+                            source_input: Some("hidden".into()),
+                            source_revision: Some(hidden_revision.clone()),
+                            module_key: None,
+                            priority: 100,
+                            status: ConfigDefinitionStatusV2::ActiveSurviving,
+                            surviving_merge_order: Some(0),
+                            value: Some(SafeOptionValue::Scalar(serde_json::json!(true))),
+                        }],
+                        override_state: false,
+                    },
+                },
+            ],
+        };
+        let mut parent_artifact = artifact.clone();
+        parent_artifact.target_key = "e".repeat(64);
+        parent_artifact.source_out_path = format!("/nix/store/{suffix}-parent-source");
+        parent_artifact.carrier_drv_path = parent_carrier_drv_path;
+        parent_artifact.options[0].effective_value =
+            SafeOptionValue::Scalar(serde_json::json!(false));
+        if let ConfigOptionProvenanceArtifactV2::Available { definitions, .. } =
+            &mut parent_artifact.options[0].provenance
+        {
+            definitions[0].source_revision = Some(parent_revision.clone());
+        }
+        let mut parent_tx = pool
+            .begin()
+            .await
+            .expect("parent V2 snapshot transaction should begin");
+        persist_config_artifact_v2_tx(&mut parent_tx, parent_commit.id, &hostname, parent_artifact)
+            .await
+            .expect("parent V2 snapshot should persist");
+        parent_tx
+            .commit()
+            .await
+            .expect("parent V2 snapshot should commit");
+
+        let mut tx = pool
+            .begin()
+            .await
+            .expect("snapshot transaction should begin");
+        persist_flake_output_snapshot_tx(
+            &mut tx,
+            commit.id,
+            &serde_json::json!({
+                "declared_systems": [hostname.clone()],
+                "exported_modules": [],
+                "inputs": [{
+                    "node": "hidden",
+                    "names": ["hidden"],
+                    "source": hidden_repo_url,
+                    "locked_revision": hidden_revision,
+                }],
+            }),
+        )
+        .await
+        .expect("selected flake output should persist");
+        persist_available_snapshot_tx(&mut tx, commit.id, &hostname, vec![v1_option])
+            .await
+            .expect("V1 snapshot should persist");
+        tx.commit().await.expect("V1 snapshot should commit");
+        sqlx::query("UPDATE commits SET evaluation_status = 'complete' WHERE id = $1")
+            .bind(commit.id)
+            .execute(&pool)
+            .await
+            .expect("V1 evaluation lifecycle should complete");
+
+        let v1_only_response = get_system_evaluated_options(
+            State(pool.clone()),
+            headers.clone(),
+            Path(system.id),
+            Query(EvaluatedOptionsParams {
+                revision: revision.clone(),
+                ..EvaluatedOptionsParams::default()
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(v1_only_response.status(), StatusCode::OK);
+        let v1_only: EvaluatedOptionsPage = response_json(v1_only_response).await;
+        assert_eq!(v1_only.lifecycle, SnapshotLifecycle::Unavailable);
+        assert!(v1_only.options.is_empty());
+        let config_jobs: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM config_inspection_jobs WHERE commit_id = $1")
+                .bind(commit.id)
+                .fetch_one(&pool)
+                .await
+                .expect("Config job count should load");
+        assert_eq!(
+            config_jobs, 0,
+            "Config reads must not enqueue inspection work"
+        );
+
+        let config_job_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO config_inspection_jobs (commit_id, derivation_id, configuration_name, carrier_drv_path, status) VALUES ($1, $2, $3, $4, 'queued') RETURNING id",
+        )
+        .bind(commit.id)
+        .bind(derivation.id)
+        .bind(&hostname)
+        .bind(&carrier_drv_path)
+        .fetch_one(&pool)
+        .await
+        .expect("queued Config job should persist");
+        let queued_response = get_system_evaluated_options(
+            State(pool.clone()),
+            headers.clone(),
+            Path(system.id),
+            Query(EvaluatedOptionsParams {
+                revision: revision.clone(),
+                ..EvaluatedOptionsParams::default()
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(queued_response.status(), StatusCode::OK);
+        let queued: EvaluatedOptionsPage = response_json(queued_response).await;
+        assert_eq!(queued.lifecycle, SnapshotLifecycle::Queued);
+        sqlx::query(
+            "UPDATE config_inspection_jobs SET status = 'succeeded', started_at = now(), completed_at = now(), updated_at = now() WHERE id = $1",
+        )
+        .bind(config_job_id)
+        .execute(&pool)
+        .await
+        .expect("Config job should become terminal");
+
+        let mut tx = pool
+            .begin()
+            .await
+            .expect("V2 snapshot transaction should begin");
+        persist_config_artifact_v2_tx(&mut tx, commit.id, &hostname, artifact)
+            .await
+            .expect("V2 snapshot should persist");
+        tx.commit().await.expect("V2 snapshot should commit");
+        let persisted_v2_host_delta: Option<i64> = sqlx::query_scalar(
+            "SELECT snapshot.host_delta_count FROM config_snapshot_selections selection JOIN evaluation_snapshots snapshot ON snapshot.id = selection.current_snapshot_id WHERE selection.commit_id = $1 AND selection.configuration_name = $2",
+        )
+        .bind(commit.id)
+        .bind(&hostname)
+        .fetch_one(&pool)
+        .await
+        .expect("V2 host delta state should load");
+        assert_eq!(
+            persisted_v2_host_delta, None,
+            "targeted V2 snapshots are excluded from the primary host corpus"
+        );
+
+        let options_response = get_system_evaluated_options(
+            State(pool.clone()),
+            headers.clone(),
+            Path(system.id),
+            Query(EvaluatedOptionsParams {
+                revision: revision.clone(),
+                ..EvaluatedOptionsParams::default()
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(options_response.status(), StatusCode::OK);
+        let options: EvaluatedOptionsPage = response_json(options_response).await;
+        assert_eq!(options.counts.all, 3);
+        assert_eq!(options.counts.changed, Some(1));
+        assert!(options.comparison_available);
+        assert_eq!(options.options.len(), 3);
+        let option = options.options[0]
+            .option
+            .as_ref()
+            .expect("selected V2 option should exist");
+        assert_eq!(option.path, "services.v2-api");
+        assert_ne!(option.path, "v1.only");
+        assert_eq!(option.declared_type, None);
+        assert!(option.metadata_error.is_none());
+        assert_eq!(option.overridden, Some(false));
+        assert_eq!(
+            options.options[0]
+                .before
+                .as_ref()
+                .map(|before| &before.value),
+            Some(&SafeOptionValue::Scalar(serde_json::json!(false)))
+        );
+        assert_eq!(options.options[0].changed, Some(true));
+        assert_eq!(
+            options.options[0].diff.as_ref().map(|diff| diff.kind),
+            Some(OptionChangeKind::Modified)
+        );
+        assert_eq!(option.definitions[0].status.as_deref(), Some("winning"));
+        assert_eq!(option.definitions[0].source_path, None);
+        assert_eq!(
+            option.definitions[0]
+                .tracked_flake
+                .as_ref()
+                .map(|identity| identity.revision.as_str()),
+            Some(revision.as_str())
+        );
+        let failed_metadata = options.options[1]
+            .option
+            .as_ref()
+            .expect("metadata-failed V2 option should exist");
+        assert_eq!(failed_metadata.declared_type, None);
+        assert_eq!(
+            failed_metadata
+                .metadata_error
+                .as_ref()
+                .map(|error| error.code.as_str()),
+            Some("metadata_not_evaluated")
+        );
+        assert_eq!(failed_metadata.overridden, Some(false));
+        let hidden_option = options.options[2]
+            .option
+            .as_ref()
+            .expect("hidden-provenance V2 option should exist");
+        assert_eq!(hidden_option.path, "services.zz-v2-api-hidden");
+        assert!(hidden_option.definitions[0].tracked_flake.is_none());
+        let options_json = serde_json::to_value(&options).expect("V2 page should serialize");
+        assert_eq!(
+            options_json["options"][0]["option"]["declared_type"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            options_json["options"][0]["option"]["metadata_error"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            options_json["options"][0]["option"]["definitions"][0]["source_path"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            options_json["options"][0]["option"]["overridden"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            options_json["options"][1]["option"]["metadata_error"]["code"],
+            serde_json::json!("metadata_not_evaluated")
+        );
+        assert_eq!(
+            options_json["options"][1]["option"]["overridden"],
+            serde_json::json!(false)
+        );
+        let encoded_options = serde_json::to_string(&options_json).expect("V2 JSON should encode");
+        for placeholder in [
+            "Declared type unavailable",
+            "Source path unavailable",
+            "Override status unavailable",
+            "unknown",
+        ] {
+            assert!(!encoded_options.contains(placeholder));
+        }
+        let token = options
+            .snapshot_token
+            .clone()
+            .expect("available V2 page should have a token");
+
+        let summary_response = get_system_evaluation_summary(
+            State(pool.clone()),
+            headers.clone(),
+            Path(system.id),
+            Query(SelectedEvaluationSummaryParams {
+                revision: revision.clone(),
+                snapshot_token: Some(token.clone()),
+                ..SelectedEvaluationSummaryParams::default()
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(summary_response.status(), StatusCode::OK);
+        let summary: SelectedEvaluationSummary = response_json(summary_response).await;
+        assert_eq!(summary.snapshot_token.as_deref(), Some(token.as_str()));
+        assert_eq!(summary.option_total, 3);
+        assert_eq!(summary.module_source_total, 2);
+        assert_eq!(summary.host_delta_count, None);
+
+        let sources_response = get_system_evaluation_module_sources(
+            State(pool.clone()),
+            headers.clone(),
+            Path(system.id),
+            Query(EvaluationModuleSourcesParams {
+                revision: revision.clone(),
+                snapshot_token: Some(token.clone()),
+                ..EvaluationModuleSourcesParams::default()
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(sources_response.status(), StatusCode::OK);
+        let sources: EvaluationModuleSourcesPage = response_json(sources_response).await;
+        assert_eq!(sources.snapshot_token.as_deref(), Some(token.as_str()));
+        assert_eq!(sources.total, 2);
+        let self_source = sources
+            .sources
+            .iter()
+            .find(|source| source.source_input.as_deref() == Some("self"))
+            .expect("self module source should exist");
+        assert_eq!(self_source.source_path, None);
+        assert_eq!(self_source.defined_count, 2);
+        assert_eq!(self_source.won_count, 1);
+        assert_eq!(
+            self_source
+                .tracked_flake
+                .as_ref()
+                .map(|identity| identity.revision.as_str()),
+            Some(revision.as_str())
+        );
+        let hidden_source = sources
+            .sources
+            .iter()
+            .find(|source| source.source_input.as_deref() == Some("hidden"))
+            .expect("hidden module source should exist");
+        assert!(hidden_source.tracked_flake.is_none());
+
+        let replacement_path = vec!["services".to_string(), "stage-two-unavailable".to_string()];
+        let replacement = ConfigInspectionArtifactV2 {
+            artifact_version: CONFIG_OPTION_ARTIFACT_SCHEMA_VERSION_V2,
+            target_key: "d".repeat(64),
+            source_out_path: format!("/nix/store/{suffix}-source"),
+            carrier_drv_path: carrier_drv_path.clone(),
+            provenance_state: ConfigProvenanceArtifactStateV2::Unavailable {
+                reason_code: "stage2_unavailable".into(),
+                diagnostic: None,
+            },
+            options: vec![ConfigOptionArtifactV2 {
+                option_key: option_key(&replacement_path),
+                path_components: replacement_path,
+                metadata: ConfigOptionMetadataArtifactV2::Available {
+                    option_type: Some("option".into()),
+                    loc: vec!["services".into(), "stage-two-unavailable".into()],
+                    declared_type: Some("boolean".into()),
+                    declarations: Vec::new(),
+                    declaration_positions: Vec::new(),
+                    highest_prio: Some(100),
+                    is_defined: true,
+                    surviving_definition_sources: Vec::new(),
+                },
+                effective_value: SafeOptionValue::Scalar(serde_json::json!(false)),
+                provenance: ConfigOptionProvenanceArtifactV2::Unavailable,
+            }],
+        };
+        let mut tx = pool
+            .begin()
+            .await
+            .expect("replacement transaction should begin");
+        persist_config_artifact_v2_tx(&mut tx, commit.id, &hostname, replacement)
+            .await
+            .expect("replacement V2 snapshot should persist");
+        tx.commit().await.expect("replacement should commit");
+
+        let stale_response = get_system_evaluated_options(
+            State(pool.clone()),
+            headers.clone(),
+            Path(system.id),
+            Query(EvaluatedOptionsParams {
+                revision: revision.clone(),
+                snapshot_token: Some(token.clone()),
+                ..EvaluatedOptionsParams::default()
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(stale_response.status(), StatusCode::CONFLICT);
+        let stale: ApiError = response_json(stale_response).await;
+        assert_eq!(stale.error, "snapshot_changed");
+
+        let stale_summary_response = get_system_evaluation_summary(
+            State(pool.clone()),
+            headers.clone(),
+            Path(system.id),
+            Query(SelectedEvaluationSummaryParams {
+                revision: revision.clone(),
+                snapshot_token: Some(token.clone()),
+                ..SelectedEvaluationSummaryParams::default()
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(stale_summary_response.status(), StatusCode::CONFLICT);
+        let stale_summary: ApiError = response_json(stale_summary_response).await;
+        assert_eq!(stale_summary.error, "snapshot_changed");
+
+        let stale_sources_response = get_system_evaluation_module_sources(
+            State(pool.clone()),
+            headers.clone(),
+            Path(system.id),
+            Query(EvaluationModuleSourcesParams {
+                revision: revision.clone(),
+                snapshot_token: Some(token),
+                ..EvaluationModuleSourcesParams::default()
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(stale_sources_response.status(), StatusCode::CONFLICT);
+        let stale_sources: ApiError = response_json(stale_sources_response).await;
+        assert_eq!(stale_sources.error, "snapshot_changed");
+
+        let unavailable_provenance_response = get_system_evaluated_options(
+            State(pool),
+            headers,
+            Path(system.id),
+            Query(EvaluatedOptionsParams {
+                revision,
+                ..EvaluatedOptionsParams::default()
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(unavailable_provenance_response.status(), StatusCode::OK);
+        let unavailable_provenance: EvaluatedOptionsPage =
+            response_json(unavailable_provenance_response).await;
+        assert_eq!(
+            unavailable_provenance.lifecycle,
+            SnapshotLifecycle::Available
+        );
+        assert!(!unavailable_provenance.comparison_available);
+        assert_eq!(unavailable_provenance.counts.changed, None);
+        assert_eq!(unavailable_provenance.options.len(), 1);
+        assert!(
+            unavailable_provenance.options[0]
+                .option
+                .as_ref()
+                .expect("replacement option should exist")
+                .definitions
+                .is_empty()
+        );
+        let unavailable_option = unavailable_provenance.options[0]
+            .option
+            .as_ref()
+            .expect("replacement option should exist");
+        assert_eq!(unavailable_option.overridden, None);
+        let unavailable_json =
+            serde_json::to_value(&unavailable_provenance).expect("V2 page should serialize");
+        assert_eq!(
+            unavailable_json["options"][0]["option"]["overridden"],
+            serde_json::Value::Null
+        );
+        let encoded_unavailable =
+            serde_json::to_string(&unavailable_json).expect("V2 JSON should encode");
+        for placeholder in [
+            "Declared type unavailable",
+            "Source path unavailable",
+            "Override status unavailable",
+            "unknown",
+        ] {
+            assert!(!encoded_unavailable.contains(placeholder));
+        }
     }
 
     #[tokio::test]

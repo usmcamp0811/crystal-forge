@@ -224,8 +224,8 @@ pub struct EvaluationModuleSummary {
     pub source_input: Option<String>,
     /// Full source revision emitted by the evaluator, when known.
     pub source_revision: Option<String>,
-    /// Exact source path emitted by the Nix module system.
-    pub source_path: String,
+    /// Exact source path emitted by the Nix module system, when available.
+    pub source_path: Option<String>,
     /// Number of option definitions emitted by this source.
     pub defined_count: i64,
     /// Number of options for which this source supplied the winning definition.
@@ -727,8 +727,8 @@ pub struct SafeEvaluationError {
 /// Identifies one option definition and its source provenance.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OptionDefinitionProvenance {
-    /// Source path reported by the Nix module system.
-    pub source_path: String,
+    /// Source path reported by the Nix module system, when available.
+    pub source_path: Option<String>,
     /// Source input name when it can be resolved from tracked flake metadata.
     pub source_input: Option<String>,
     /// Full source revision when it can be resolved.
@@ -756,14 +756,18 @@ pub struct OptionDefinitionProvenance {
 pub struct EvaluatedOption {
     /// Full option path.
     pub path: String,
-    /// Declared NixOS option type.
-    pub declared_type: String,
+    /// Declared NixOS option type, when metadata supplied it.
+    pub declared_type: Option<String>,
+    /// Safe metadata evaluation failure, distinct from a missing declared type.
+    #[serde(default)]
+    pub metadata_error: Option<SafeEvaluationError>,
     /// Tagged evaluated value or explicit failure.
     pub value: SafeOptionValue,
     /// Complete definition provenance emitted by the evaluator.
     pub definitions: Vec<OptionDefinitionProvenance>,
-    /// True when evaluator metadata proves that lower-priority definitions exist.
-    pub overridden: bool,
+    /// Whether evaluator provenance proves that discarded definitions exist.
+    /// `None` means definition provenance was unavailable.
+    pub overridden: Option<bool>,
 }
 
 impl EvaluatedOption {
@@ -776,13 +780,20 @@ impl EvaluatedOption {
     pub fn redacted(mut self) -> Self {
         let option_path = self.path.clone();
         self.path = redact_text(&self.path);
-        self.declared_type = redact_text(&self.declared_type);
+        self.declared_type = self.declared_type.take().map(|value| redact_text(&value));
+        self.metadata_error = self.metadata_error.take().map(|error| SafeEvaluationError {
+            code: redact_text(&error.code),
+            message: redact_evaluation_error(&error.message),
+        });
         self.value = redact_safe_value(&option_path, self.value);
         for definition in &mut self.definitions {
             // SECURITY: Tracked identities are response-only. Never include a
             // database-derived navigation capability in persisted evaluator data.
             definition.tracked_flake = None;
-            definition.source_path = redact_text(&definition.source_path);
+            definition.source_path = definition
+                .source_path
+                .take()
+                .map(|value| redact_text(&value));
             definition.source_input = definition.source_input.take().map(|v| redact_text(&v));
             definition.source_revision = definition.source_revision.take().map(|v| redact_text(&v));
             definition.value = definition
@@ -803,23 +814,35 @@ impl EvaluatedOption {
     /// The digest excludes the option path because the same payload can be
     /// shared by different configurations and option paths.
     pub fn content_digest(&self) -> [u8; 32] {
-        let payload = serde_json::json!({
+        let mut payload = serde_json::json!({
             "declared_type": self.declared_type,
             "value": self.value,
             "definitions": self.definitions,
             "overridden": self.overridden,
         });
+        if let Some(error) = &self.metadata_error {
+            payload["metadata_error"] = serde_json::json!(error);
+        }
         let bytes = serde_json::to_vec(&payload).unwrap_or_default();
         Sha256::digest(bytes).into()
     }
 
     /// Returns bounded searchable text built only from redacted fields.
     pub fn search_text(&self) -> String {
-        let mut text = format!("{} ", self.declared_type);
+        let mut text = self.declared_type.clone().unwrap_or_default();
+        if let Some(error) = &self.metadata_error {
+            text.push(' ');
+            text.push_str(&error.code);
+            text.push(' ');
+            text.push_str(&error.message);
+        }
+        text.push(' ');
         text.push_str(&serde_json::to_string(&self.value).unwrap_or_default());
         for definition in &self.definitions {
-            text.push(' ');
-            text.push_str(&definition.source_path);
+            if let Some(source_path) = &definition.source_path {
+                text.push(' ');
+                text.push_str(source_path);
+            }
             if let Some(input) = &definition.source_input {
                 text.push(' ');
                 text.push_str(input);
@@ -1034,6 +1057,40 @@ mod tests {
     }
 
     #[test]
+    fn legacy_v1_option_json_preserves_known_metadata_and_provenance() {
+        let option: EvaluatedOption = serde_json::from_value(json!({
+            "path": "services.example.enable",
+            "declared_type": "boolean",
+            "value": {"kind": "scalar", "value": true},
+            "definitions": [{
+                "source_path": "modules/example.nix",
+                "source_input": "self",
+                "source_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "value": true,
+                "winning": true
+            }],
+            "overridden": false
+        }))
+        .expect("legacy V1 option JSON should deserialize");
+
+        assert_eq!(option.declared_type.as_deref(), Some("boolean"));
+        assert!(option.metadata_error.is_none());
+        assert_eq!(option.overridden, Some(false));
+        assert_eq!(
+            option.definitions[0].source_path.as_deref(),
+            Some("modules/example.nix")
+        );
+        let encoded = serde_json::to_value(option).expect("V1 option should serialize");
+        assert_eq!(encoded["declared_type"], json!("boolean"));
+        assert_eq!(encoded["metadata_error"], Value::Null);
+        assert_eq!(
+            encoded["definitions"][0]["source_path"],
+            json!("modules/example.nix")
+        );
+        assert_eq!(encoded["overridden"], json!(false));
+    }
+
+    #[test]
     fn tracked_flake_identity_is_response_only() {
         let identity = TrackedFlakeIdentity {
             flake_id: 7,
@@ -1042,7 +1099,7 @@ mod tests {
             revision: "a".repeat(40),
         };
         let mut definition = OptionDefinitionProvenance {
-            source_path: "module.nix".into(),
+            source_path: Some("module.nix".into()),
             source_input: Some("self".into()),
             source_revision: Some("a".repeat(40)),
             value: None,
@@ -1061,10 +1118,11 @@ mod tests {
 
         definition = EvaluatedOption {
             path: "services.example.enable".into(),
-            declared_type: "boolean".into(),
+            declared_type: Some("boolean".into()),
+            metadata_error: None,
             value: SafeOptionValue::Scalar(json!(true)),
             definitions: vec![definition],
-            overridden: false,
+            overridden: Some(false),
         }
         .redacted()
         .definitions
@@ -1082,10 +1140,11 @@ mod tests {
     fn redaction_precedes_digest_and_search_indexing() {
         let option = EvaluatedOption {
             path: "services.example.password".into(),
-            declared_type: "string".into(),
+            declared_type: Some("string".into()),
+            metadata_error: None,
             value: SafeOptionValue::Scalar(json!({"token": "secret-value"})),
             definitions: vec![OptionDefinitionProvenance {
-                source_path: "https://user:pass@example.test/flake?token=hidden".into(),
+                source_path: Some("https://user:pass@example.test/flake?token=hidden".into()),
                 source_input: Some("nixpkgs".into()),
                 source_revision: Some("a".repeat(40)),
                 value: Some(json!({"api_key": "another-secret"})),
@@ -1095,7 +1154,7 @@ mod tests {
                 winner_note: Some("higher-priority secret note".into()),
                 tracked_flake: None,
             }],
-            overridden: false,
+            overridden: Some(false),
         }
         .redacted();
 
@@ -1141,10 +1200,11 @@ mod tests {
         for value in values {
             let option = EvaluatedOption {
                 path: "services.example.token".into(),
-                declared_type: "anything".into(),
+                declared_type: Some("anything".into()),
+                metadata_error: None,
                 value,
                 definitions: vec![OptionDefinitionProvenance {
-                    source_path: "module.nix".into(),
+                    source_path: Some("module.nix".into()),
                     source_input: None,
                     source_revision: None,
                     value: Some(json!("default-secret")),
@@ -1154,7 +1214,7 @@ mod tests {
                     winner_note: None,
                     tracked_flake: None,
                 }],
-                overridden: false,
+                overridden: Some(false),
             }
             .redacted();
             let encoded = serde_json::to_string(&option).unwrap();
@@ -1175,7 +1235,8 @@ mod tests {
     fn safe_strings_remain_distinct_and_secret_keys_are_not_serialized() {
         let option = EvaluatedOption {
             path: "services.example.aliases".into(),
-            declared_type: "attribute set".into(),
+            declared_type: Some("attribute set".into()),
+            metadata_error: None,
             value: SafeOptionValue::AttributeSet(
                 serde_json::from_value(json!({
                     "GITHUB_PAT": "github-secret",
@@ -1186,7 +1247,7 @@ mod tests {
                 .unwrap(),
             ),
             definitions: vec![OptionDefinitionProvenance {
-                source_path: "https://example.test/module.nix".into(),
+                source_path: Some("https://example.test/module.nix".into()),
                 source_input: Some("self".into()),
                 source_revision: Some("a".repeat(40)),
                 value: Some(json!({"kind": "scalar", "value": "documented default"})),
@@ -1196,7 +1257,7 @@ mod tests {
                 winner_note: Some("A lower numeric module-system priority won.".into()),
                 tracked_flake: None,
             }],
-            overridden: false,
+            overridden: Some(false),
         }
         .redacted();
 
@@ -1219,7 +1280,8 @@ mod tests {
         let package = |name: &str, version: &str| {
             EvaluatedOption {
                 path: "environment.systemPackages".into(),
-                declared_type: "list of package".into(),
+                declared_type: Some("list of package".into()),
+                metadata_error: None,
                 value: SafeOptionValue::List(vec![SafeOptionValue::Package(SafePackageValue {
                     name: Some(format!("{name}-{version}")),
                     pname: Some(name.into()),
@@ -1229,7 +1291,7 @@ mod tests {
                     )),
                 })]),
                 definitions: Vec::new(),
-                overridden: false,
+                overridden: Some(false),
             }
             .redacted()
         };
@@ -1248,10 +1310,11 @@ mod tests {
     fn identical_redacted_payloads_deduplicate_across_paths() {
         let make = |path: &str| EvaluatedOption {
             path: path.into(),
-            declared_type: "boolean".into(),
+            declared_type: Some("boolean".into()),
+            metadata_error: None,
             value: SafeOptionValue::Scalar(json!(true)),
             definitions: Vec::new(),
-            overridden: false,
+            overridden: Some(false),
         };
 
         assert_eq!(make("a").content_digest(), make("b").content_digest());
@@ -1275,7 +1338,8 @@ mod tests {
     fn package_collection_diff_preserves_additions_and_removals() {
         let option = |packages: &[&str]| EvaluatedOption {
             path: "environment.systemPackages".into(),
-            declared_type: "list of package".into(),
+            declared_type: Some("list of package".into()),
+            metadata_error: None,
             value: SafeOptionValue::List(
                 packages
                     .iter()
@@ -1290,7 +1354,7 @@ mod tests {
                     .collect(),
             ),
             definitions: Vec::new(),
-            overridden: false,
+            overridden: Some(false),
         };
         let before = option(&["curl", "git"]);
         let after = option(&["git", "jq"]);
@@ -1308,10 +1372,11 @@ mod tests {
     fn removed_option_is_explicit() {
         let before = EvaluatedOption {
             path: "services.old.enable".into(),
-            declared_type: "boolean".into(),
+            declared_type: Some("boolean".into()),
+            metadata_error: None,
             value: SafeOptionValue::Scalar(json!(true)),
             definitions: Vec::new(),
-            overridden: false,
+            overridden: Some(false),
         };
         let diff = typed_option_diff(Some(&before), None);
         assert_eq!(diff.kind, OptionChangeKind::Removed);
