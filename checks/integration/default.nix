@@ -267,6 +267,46 @@ in pkgs.testers.runNixOSTest {
     server.succeed(
       "test \"$(systemctl show crystal-forge-hardening.service -p OOMPolicy --value)\" = stop"
     )
+    server.wait_for_unit("crystal-forge-config-inspector.service")
+    server.succeed(
+      "test \"$(systemctl show crystal-forge-config-inspector.service -p Slice --value)\" = crystal-forge-config-inspector.slice"
+    )
+    server.succeed(
+      "systemctl show crystal-forge-config-inspector.slice -p ControlGroup --value"
+      " | grep -F /crystal-forge.slice/crystal-forge-config.slice/crystal-forge-config-inspector.slice"
+    )
+    server.succeed(
+      "test \"$(systemctl show crystal-forge-config-inspector.slice -p MemoryHigh --value)\" = 8589934592"
+    )
+    server.succeed(
+      "test \"$(systemctl show crystal-forge-config-inspector.slice -p MemoryMax --value)\" = 12884901888"
+    )
+    server.succeed(
+      "test \"$(systemctl show crystal-forge-config-inspector.slice -p MemorySwapMax --value)\" = 536870912"
+    )
+    server.succeed(
+      "test \"$(systemctl show crystal-forge-config-inspector.slice -p CPUQuotaPerSecUSec --value)\" = 2s"
+    )
+    server.succeed(
+      "test \"$(systemctl show crystal-forge-config-inspector.slice -p TasksMax --value)\" = 512"
+    )
+    server.succeed(
+      "test \"$(systemctl show crystal-forge-config-inspector.service -p KillMode --value)\" = control-group"
+    )
+    server.succeed(
+      "test \"$(systemctl show crystal-forge-config-inspector.service -p OOMPolicy --value)\" = stop"
+    )
+    server.succeed(
+      "test \"$(systemctl show crystal-forge-config-inspector.service -p Restart --value)\" = on-failure"
+    )
+    server.succeed(
+      "systemctl show crystal-forge-config-inspector.service -p ExecStart --value"
+      " | grep -F crystal-forge-config-inspector-worker"
+    )
+    server.succeed(
+      "readlink /proc/$(systemctl show crystal-forge-config-inspector.service -p MainPID --value)/exe"
+      " | grep -E '/bin/config-inspector-worker$'"
+    )
 
     # Wait for Grafana (needed for -m dashboard tests).
     print("Waiting for Grafana to start...")

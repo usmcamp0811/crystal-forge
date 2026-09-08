@@ -387,11 +387,12 @@
   # unrelated components in the unit's closure, so any change to any component
   # would rebuild and re-copy this closure.
   #
-  #   serverScript          server            -> cfg.server.package
-  #   hardeningWorkerScript hardening-worker  -> cfg.server.package
-  #   builderScript         builder           -> cfg.build.package
-  #   agentScript           agent             -> cfg.client.package
-  #   builder API key setup cf-keygen         -> cf-keygen-drv
+  #   serverScript                 server                  -> cfg.server.package
+  #   hardeningWorkerScript        hardening-worker        -> cfg.server.package
+  #   configInspectorWorkerScript  config-inspector-worker -> cfg.server.package
+  #   builderScript                builder                 -> cfg.build.package
+  #   agentScript                  agent                   -> cfg.client.package
+  #   builder API key setup        cf-keygen               -> cf-keygen-drv
   #
   # INVARIANT: a script may only run binaries provided by the package it
   # references. Adding a binary invocation here requires confirming that the
@@ -423,6 +424,11 @@
   hardeningWorkerScript = pkgs.writeShellScript "crystal-forge-hardening-worker" ''
     export CRYSTAL_FORGE_CONFIG="${serverConfigPath}"
     exec ${cfg.server.package}/bin/hardening-worker "$@"
+  '';
+
+  configInspectorWorkerScript = pkgs.writeShellScript "crystal-forge-config-inspector-worker" ''
+    export CRYSTAL_FORGE_CONFIG="${serverConfigPath}"
+    exec ${cfg.server.package}/bin/config-inspector-worker "$@"
   '';
 
   builderScript = pkgs.writeShellScript "crystal-forge-builder" ''
@@ -1563,7 +1569,8 @@ in {
         default = pkgs.crystal-forge.default.cf-server-drv;
         defaultText = lib.literalExpression "pkgs.crystal-forge.default.cf-server-drv";
         description = lib.mdDoc ''
-          Package providing the `server` and `hardening-worker` binaries.
+          Package providing the `server`, `hardening-worker`, and
+          `config-inspector-worker` binaries.
 
           The default is the production server, which embeds the web UI and
           therefore depends on the web UI build.
@@ -2079,9 +2086,10 @@ in {
     ];
 
     # Aggregate resource boundary that caps the combined memory of the API
-    # server, the hardening worker, and all their Nix subprocess descendants.
-    # crystal-forge-server.service and crystal-forge-hardening.service must
-    # both set Slice = "crystal-forge.slice" to be covered by this boundary.
+    # server, the hardening worker, the Config Inspector worker, and all their
+    # Nix subprocess descendants. crystal-forge-server.service attaches
+    # directly. crystal-forge-hardening.service and
+    # crystal-forge-config-inspector.service attach through nested slices.
     systemd.slices.crystal-forge = lib.mkIf cfg.server.enable {
       description = "Crystal Forge aggregate resource boundary";
       sliceConfig = {
@@ -2097,14 +2105,18 @@ in {
     # so the LEFTMOST prefix segments determine ancestry:
     #
     #   crystal-forge-hardening.slice
-    #       → parent: crystal-forge.slice   ✓  (what we want)
+    #       → parent: crystal-forge.slice   ✓
+    #
+    #   crystal-forge-config-inspector.slice
+    #       → parent: crystal-forge-config.slice
+    #       → ancestor: crystal-forge.slice ✓
     #
     #   hardening-crystal-forge.slice
     #       → parent: hardening.slice       ✗  (root level, NOT under crystal-forge)
     #
-    # IMPORTANT: The slice attribute name and the Slice= assignment in
-    # crystal-forge-hardening.service MUST both use "crystal-forge-hardening"
-    # to achieve nesting under crystal-forge.slice.  Do not swap the words.
+    # IMPORTANT: Each slice attribute name and its service Slice= assignment
+    # MUST use the same "crystal-forge-*" name to achieve nesting under
+    # crystal-forge.slice. Do not swap the words.
     systemd.slices.crystal-forge-hardening = lib.mkIf (cfg.server.enable && cfg.hardening.enable) {
       description = "Crystal Forge hardening worker resource boundary";
       sliceConfig = {
@@ -2113,6 +2125,17 @@ in {
         MemorySwapMax = cfg.hardening.systemd_memory_swap_max;
         CPUQuota = toString cfg.hardening.systemd_cpu_quota + "%";
         TasksMax = cfg.hardening.systemd_tasks_max;
+      };
+    };
+
+    systemd.slices.crystal-forge-config-inspector = lib.mkIf cfg.server.enable {
+      description = "Crystal Forge Config Inspector resource boundary";
+      sliceConfig = {
+        MemoryHigh = "8G";
+        MemoryMax = "12G";
+        MemorySwapMax = "512M";
+        CPUQuota = "200%";
+        TasksMax = 512;
       };
     };
 
@@ -2638,6 +2661,63 @@ in {
         KillMode = "control-group";
         # If the kernel OOM-kills something in this cgroup, stop the whole
         # service rather than leaving a partially-alive worker.
+        OOMPolicy = "stop";
+        Restart = "on-failure";
+        RestartSec = 30;
+        NoNewPrivileges = true;
+        PrivateTmp = true;
+        ProtectSystem = "strict";
+        ProtectHome = true;
+        ReadWritePaths = ["/var/lib/crystal-forge" "/var/cache/crystal-forge-nix"];
+        ProtectKernelTunables = true;
+        ProtectKernelModules = true;
+        ProtectControlGroups = true;
+      };
+    };
+
+    systemd.services.crystal-forge-config-inspector = lib.mkIf cfg.server.enable {
+      description = "Crystal Forge Config Inspector Worker";
+      wantedBy = ["multi-user.target"];
+      after = ["crystal-forge-server.service"] ++ lib.optional cfg.local-database "postgresql.service";
+      wants = ["crystal-forge-server.service"] ++ lib.optional cfg.local-database "postgresql.service";
+      startLimitIntervalSec = 300;
+      startLimitBurst = 2;
+
+      path = with pkgs; [nix nix-eval-jobs git openssh coreutils];
+      environment = {
+        RUST_LOG = cfg.log_level;
+        TZDIR = "${pkgs.tzdata}/share/zoneinfo";
+        LOCALE_ARCHIVE = "${pkgs.glibcLocales}/lib/locale/locale-archive";
+        NIX_REMOTE = "daemon";
+        HOME = "/var/lib/crystal-forge";
+        XDG_CONFIG_HOME = "/var/lib/crystal-forge/.config";
+        NIX_REGISTRY = "/dev/null";
+        NIX_CONFIG_DIR = "/dev/null";
+        NIX_USER_CONF_FILES = "/dev/null";
+        NIX_CONFIG = ''
+          experimental-features = nix-command flakes
+          flake-registry =
+        '';
+        GIT_SSH_COMMAND = "ssh -i /var/lib/crystal-forge/.ssh/id_ed25519 -o UserKnownHostsFile=/var/lib/crystal-forge/.ssh/known_hosts -o StrictHostKeyChecking=yes";
+        NIX_USER_CACHE_DIR = "/var/cache/crystal-forge-nix";
+      };
+
+      preStart = ''
+        mkdir -p /run/crystal-forge
+        ${configScriptServer}
+      '';
+      serviceConfig = {
+        Type = "exec";
+        ExecStart = configInspectorWorkerScript;
+        User = "crystal-forge";
+        Group = "crystal-forge";
+        WorkingDirectory = "/var/lib/crystal-forge";
+        # The dash hierarchy nests this slice under crystal-forge.slice.
+        Slice = "crystal-forge-config-inspector.slice";
+        EnvironmentFile = ["-${cfg.env-file}"];
+        # Kill nix-eval-jobs and all descendants when the service stops or OOMs.
+        KillMode = "control-group";
+        # Stop the complete service if the kernel OOM-kills a cgroup process.
         OOMPolicy = "stop";
         Restart = "on-failure";
         RestartSec = 30;
