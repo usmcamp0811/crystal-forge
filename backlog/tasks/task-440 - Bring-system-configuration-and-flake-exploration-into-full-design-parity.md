@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-08 22:56'
+updated_date: '2026-09-08 22:58'
 labels:
   - design-parity
   - web-ui
@@ -28,6 +28,7 @@ references:
   - TASK-454
   - git commit a41d41e8
   - git commit 1ccee7cf6aa59c3dc66f80ba02ed0817d2c0c9ba
+  - git commit 4ad7490e881e2a457b2fb6be95758392fd7af45a
 documentation:
   - docs/design/CrystalForge/app.jsx
   - docs/design/CrystalForge/components/SystemDetail.jsx
@@ -176,6 +177,8 @@ Starting bounded V2 Config summary and module-source DB-only reader slice from d
 2026-09-08 V2 public-contract regression pass: widened Config DTOs now preserve nullable declared type and source paths, safe metadata failure, and unknown override state through server JSON and Web UI deserialization. Commit-mode handler coverage proves JSON nulls, known V1 false/string values, no semantic placeholder strings, V1/V2 selector isolation, Stage-2 provenance unavailability, shared/stale tokens, side-effect-free reads, and targeted V2 host_delta_count exclusion from the primary V1 host corpus. The Config token now binds selected and first-parent flake-output content digests, with a PostgreSQL regression proving replacement returns SnapshotChanged. Source controls are disabled when both source path and independently authorized tracked identity are unavailable. Focused server unit tests, Web UI DTO test, SQLX_OFFLINE cf-server --tests check, the PostgreSQL handler regression, and the provenance-lock PostgreSQL regression pass with existing warnings. Broad Nix/browser gates remain pending.
 
 2026-09-08 finish-line Config API/UI slice verification: Commit-mode Config handlers now use schema-V2 selectors/readers while generation mode remains schema V1. Public DTOs preserve nullable declared type, metadata failure, override state, and source paths. Commit tokens bind selected/baseline V2 artifacts and flake-output digests. Visibility-scoped provenance, first-parent comparison, stale-token handling, side-effect-free reads, distinct winning-option counts, legacy Nixpkgs 25.05 extraction, and live browser rendering of `networking.hostName` have focused regression coverage. Final lightweight checks passed: `git diff --check`; `node --check checks/web-ui/tests/integration-test.js`; `nix develop -c cargo fmt --manifest-path packages/default/Cargo.toml --package cf-server -- --check`; and `nix develop -c rustfmt --edition 2024 --check packages/web-ui/src/api/models.rs packages/web-ui/src/views/system_detail.rs`. The focused PostgreSQL handler regression, offline cf-server tests check, server-regressions Nix gate, and focused TASK-440 Config lifecycle browser workflow also passed earlier in this slice. AC #24 is left unproven because the available evidence does not establish the exact 1920x1080 light/dark and 900x900 visual contract. AC #27 remains unproven: the broad integration retry reproduces an existing fixture failure where `feature/experimental` has zero commits, and the full Web UI retry encountered unrelated `environments--light` and `compliance--dark` design-render timeouts even though all 16 TASK-440 design targets rendered.
+
+2026-09-08 finish-line Config API/UI slice committed and pushed as `4ad7490e881e2a457b2fb6be95758392fd7af45a` with message `TASK-440: Serve Config Inspector V2 artifacts`. Local HEAD, `origin/TASK-440-system-config-flake-parity`, the public GitLab branch API, and MR !323 `diff_refs.head_sha` all match that exact SHA. MR !323 is open, targets `dev`, has no conflicts, and GitLab reports `detailed_merge_status: ci_still_running`. The public MR pipelines endpoint currently returns an empty list; authenticated `glab mr view` could not inspect job details because the stored OAuth grant is expired. The task remains In Progress because AC #24 and AC #27 are not proven. No merge or deployment was performed.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
