@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-09 14:58'
+updated_date: '2026-09-09 15:23'
 labels:
   - design-parity
   - web-ui
@@ -31,6 +31,9 @@ references:
   - git commit 4ad7490e881e2a457b2fb6be95758392fd7af45a
   - TASK-461
   - git commit 3a95b2b973ca9050c1d28dffd47357ae7a109bfa
+  - git commit d6a122eaa0b0c700b963ebfe342a544d0c8d290c
+  - git commit a15392835a72decd7592c7d59c6ea78ba251bcac
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2833655396'
 documentation:
   - docs/design/CrystalForge/app.jsx
   - docs/design/CrystalForge/components/SystemDetail.jsx
@@ -195,6 +198,8 @@ Root-cause diagnosis found that the 12l cleanup retained an unrelated `test-agen
 2026-09-09 focused 12l fixture sequencing correction implemented without production changes. The cleanup now removes Config Inspector jobs whose commit or configuration does not match the live fixture before starting the serial worker; production claim ordering, worker concurrency, and the 300-second poll are unchanged. Verification passed: `nix develop -c node --check checks/web-ui/tests/integration-test.js`; `git diff --check`; and `CF_UI_TEST_STEPS=12l-task440-config-lifecycle nix build --impure .#checks.x86_64-linux.web-ui --no-link -L` (1/1 workflow passed with dark and light captures). The broad Web UI suite was not run because broader cross-workflow isolation remains TASK-461 scope. No commit or push was performed; TASK-440 remains In Progress and AC #24/#27 remain unchecked.
 
 2026-09-09 pre-deployment preparation stopped at the required ancestry gate. After `git fetch origin`, local HEAD remained `c36f16ffe3adf976e44c3d5f8666e27ee39323e5`, remote TASK-440 remained `3a95b2b973ca9050c1d28dffd47357ae7a109bfa`, and `origin/dev` remained the maintainer-observed `f9f647bee829e9d9dd8e6180d283f0255753cd2b`. However, `git merge-base HEAD origin/dev` returned `50340003ea2757bc98df2a371bf8a4eda6c3758f`, and `git merge-base --is-ancestor origin/dev HEAD` exited 1. Per the explicit STOP instruction, no further audit, verification, commit, push, MR, or pipeline action was performed. Both intentional uncommitted files remain unchanged.
+
+2026-09-09 pre-deployment branch preparation resumed after the user explicitly authorized commit and push despite the previously reported ancestry mismatch. Audits confirmed the pagination diff only restores dotted C-collation ordering and adds dotted-projection collision coverage while preserving the bounded repeatable-read/read-only V2 reader, page-before-hydration, two-digests-per-row bound, filters/search, and token fencing. The 12l diff only removes non-target commit/configuration inspection jobs before starting the real serial worker; it changes no production behavior or timeout. Focused PostgreSQL tests passed against disposable PostgreSQL 17: dotted pagination ordering 1/1 and 15k bounded hydration 1/1. Timings were page zero 100.632 ms, next page 108.494 ms, Changed 75.289 ms, Search 356.910 ms, with 49 hydrated digests. Node syntax and `git diff --check` passed. A fresh `--rebuild` 12l run executed the live chain and reported 1/1 workflow passed with dark/light captures, but Nix then rejected the rebuilt output as nondeterministic because screenshot output differed; the required non-rebuild command subsequently exited successfully. Created `d6a122eaa0b0c700b963ebfe342a544d0c8d290c` (`TASK-440: Preserve Config pagination order`) and `a15392835a72decd7592c7d59c6ea78ba251bcac` (`TASK-440: Isolate Config Inspector lifecycle fixture`). Lease-protected force push from exact old remote `3a95b2b973ca9050c1d28dffd47357ae7a109bfa` succeeded. Local and remote heads match and the worktree is clean. Pipeline 2833655396 is running. GitLab currently reports `detailed_merge_status=conflict` while `has_conflicts=false`; no merge or deployment was performed. TASK-440 remains In Progress and AC #24/#27 remain unchecked.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
