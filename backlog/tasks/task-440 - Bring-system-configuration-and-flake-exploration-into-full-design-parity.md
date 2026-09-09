@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-09 15:23'
+updated_date: '2026-09-09 15:34'
 labels:
   - design-parity
   - web-ui
@@ -164,6 +164,8 @@ Focused Web UI VM verification exposed a test-harness environment propagation de
 Focused correction pass from exact HEAD `4ad7490e881e2a457b2fb6be95758392fd7af45a`: keep V2 selection/token/count/total authority in the existing read-only repeatable-read transaction; change the production V2 page query to select and order only narrow selected/baseline identities and digests before LIMIT/OFFSET; fetch at most the distinct selected/baseline payload digests referenced by the bounded page in a second query inside the same transaction; decode and resolve tracked provenance only for returned rows. Preserve global search through redacted `search_text`, digest-based Changed semantics including removed baseline rows, fail-closed missing/malformed page payloads, and unit-separator/C-collation ordering. Add adversarial ordering and production-scale ~15,000-option PostgreSQL regressions with All/Overridden/Changed/search/token/side-effect assertions, hydration bounds, practical measurements, and EXPLAIN evidence. No migration, V1 fallback, generation-mode change, UI workaround, timeout increase, integration change, rebase, merge, or deployment. Run focused DB checks, offline cargo lib/all-target checks, format/diff checks, architecture guards, 12l alone, 12l/12m/12n together, server-regressions, then one broad Web UI check. Commit only if all TASK-440-attributable requirements pass.
 
 Focused 12l fixture sequencing correction approved on 2026-09-09: before starting the serial Config Inspector worker, remove queued fixture jobs that do not match both the live fixture commit and `configurationName`. Preserve production claim ordering, worker serialization, and the 300-second readiness bound. Verify JavaScript syntax and rerun only `12l-task440-config-lifecycle` through the repository Web UI test runner. Do not change product behavior, worker concurrency, timeout policy, or unrelated broad-suite isolation.
+
+Production remediation assigned on 2026-09-09: (1) add direct runtime parity to `configInspectorWorkerScript` so a configured cache encryption key file is existence-checked and read into `CRYSTAL_FORGE_CACHE_ENCRYPTION_KEY` immediately before exec; add a NixOS integration fixture that creates an unknown random test key at runtime before Crystal Forge starts and proves the real running worker has a non-empty variable without printing its value, while retaining ExecStart and slice/cgroup assertions; verify and commit/push as `TASK-440: Propagate Config Inspector encryption key`; (2) change only System Config lifecycle labels/details and adjacent Web UI enum documentation so queued/running describe source-agnostic configuration evidence preparation; update unit/browser expectations, verify focused lifecycle coverage, and commit/push as `TASK-440: Make Config lifecycle status truthful`. No migration, backend fallback change, worker ownership/concurrency change, retry of historical jobs, merge, or deployment.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
