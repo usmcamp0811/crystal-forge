@@ -3005,6 +3005,14 @@ pub struct TrustPolicyVersionResponse {
     pub trusted_at: Option<DateTime<Utc>>,
 }
 
+/// Requests publication of one immutable policy version.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PublishPolicyVersionRequest {
+    /// Supplies the server-authoritative digest for optimistic validation when
+    /// available.
+    pub expected_semantic_digest: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrustBundleVersionRequest {
     pub trusted: bool,

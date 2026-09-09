@@ -2666,11 +2666,17 @@ pub async fn trust_policy_version(
 }
 
 /// Publish a policy version (makes it immutable / accepted).
+///
+/// # Errors
+///
+/// Returns an error when request serialization, transport, or publication
+/// fails.
 pub async fn publish_policy_version(
     version_id: &Uuid,
+    request: &PublishPolicyVersionRequest,
 ) -> Result<serde_json::Value, ApiClientError> {
     let url = format!("{}/policy-versions/{}/publish", base_url(), version_id);
-    send_json_with_csrf("POST", &url, None::<&()>).await
+    send_json_with_csrf("POST", &url, Some(request)).await
 }
 
 /// Create a new mutable draft from a published policy version.

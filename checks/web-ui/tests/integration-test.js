@@ -10511,14 +10511,55 @@ const steps = [
         method: "POST",
         body: JSON.stringify({ trusted: true, review_note: "TASK-433 partial deletion regression" }),
       });
-      await phase6Api(page, `/api/v1/policy-versions/${immutablePolicy.current_version_id}/publish`, {
-        method: "POST",
-        body: JSON.stringify({ expected_semantic_digest: null }),
-      });
+      const immutableDigest = runFixtureSql(`
+        SELECT semantic_digest FROM deployment_policy_versions
+        WHERE id='${immutablePolicy.current_version_id}'::uuid;
+      `);
       await page.reload({ waitUntil: "domcontentloaded" });
       await collapseOnboardingCoach(page);
       await openSecurityPolicyTab(page);
       const search = page.getByPlaceholder("Search policies…").first();
+      await search.fill(`${prefix} 061`);
+      const immutableCard = page.locator(`[data-policy-card][data-policy-name="${prefix} 061"]`);
+      await immutableCard.click();
+      const immutableDrawer = page.locator("#policy-detail-dialog");
+      await assertVisible(immutableDrawer, "Trusted draft policy must open in the policy drawer");
+      const publishPath = `/api/v1/policy-versions/${immutablePolicy.current_version_id}/publish`;
+      const [publishRequest, publishResponse] = await Promise.all([
+        page.waitForRequest((request) => new URL(request.url()).pathname === publishPath && request.method() === "POST"),
+        page.waitForResponse((response) => new URL(response.url()).pathname === publishPath && response.request().method() === "POST"),
+        immutableDrawer.getByRole("button", { name: "Publish", exact: true }).click(),
+      ]);
+      const publishContentType = publishRequest.headers()["content-type"] || "";
+      if (!publishContentType.includes("application/json")) {
+        throw new Error(`Policy publication must send application/json, got ${publishContentType || "no Content-Type"}`);
+      }
+      const publishBody = publishRequest.postDataJSON();
+      if (publishBody?.expected_semantic_digest !== immutableDigest) {
+        throw new Error(`Policy publication sent the wrong digest: ${JSON.stringify(publishBody)}`);
+      }
+      if (publishResponse.status() !== 200) {
+        throw new Error(`Policy publication failed with HTTP ${publishResponse.status()}: ${await publishResponse.text()}`);
+      }
+      await assertVisible(immutableDrawer.getByText("Published", { exact: true }), "Successful publication must update the drawer status");
+      const publicationState = JSON.parse(runFixtureSql(`
+        SELECT json_build_object(
+          'state', version.publication_state,
+          'isCurrentPublished', policy.current_published_version_id=version.id,
+          'draftCleared', policy.current_draft_version_id IS NULL
+        )::text
+        FROM deployment_policy_versions version
+        JOIN deployment_policies policy ON policy.id=version.policy_id
+        WHERE version.id='${immutablePolicy.current_version_id}'::uuid;
+      `));
+      if (publicationState.state !== "accepted" || !publicationState.isCurrentPublished || !publicationState.draftCleared) {
+        throw new Error(`Policy publication did not commit accepted/current state: ${JSON.stringify(publicationState)}`);
+      }
+      await immutableDrawer.getByRole("button", { name: "Close policy detail" }).click();
+      await assertHidden(immutableDrawer, "Published policy drawer must close from its close control");
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await collapseOnboardingCoach(page);
+      await openSecurityPolicyTab(page);
       await search.fill(prefix);
       const group = page.locator(".pol-group").filter({ hasText: "TASK433-REGRESSION" }).first();
       await group.waitFor({ state: "visible", timeout: 15000 });

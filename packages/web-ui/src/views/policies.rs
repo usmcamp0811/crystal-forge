@@ -1524,6 +1524,7 @@ pub fn PolicyDrawer(
                         {
                             let vid = version_id.unwrap();
                             let pid = policy.id;
+                            let expected_semantic_digest = displayed_policy.semantic_digest.clone();
                             rsx! {
                                 if let Some(status) = action_status.read().as_ref() {
                                     span { class: "chip chip-info", style: "font-size:10px;", "{status}" }
@@ -1555,8 +1556,14 @@ pub fn PolicyDrawer(
                                             move |_| {
                                                 busy.set(true);
                                                 let v = vid;
+                                                let expected_semantic_digest = expected_semantic_digest.clone();
                                                 spawn(async move {
-                                                    match crate::api::client::publish_policy_version(&v).await {
+                                                    match crate::api::client::publish_policy_version(
+                                                        &v,
+                                                        &crate::api::models::PublishPolicyVersionRequest {
+                                                            expected_semantic_digest,
+                                                        },
+                                                    ).await {
                                                         Ok(_) => { busy.set(false); action_status.set(Some("Published".into())); }
                                                         Err(e) => { busy.set(false); action_status.set(Some(format!("Error: {e}"))); }
                                                     }
