@@ -806,6 +806,9 @@ in pkgs.testers.runNixOSTest {
       "02-registration",
       "05-login-submit",
       "12-systems",
+      "12e2-systems-edit-modal-key-rotation",
+      "12e3-system-detail-key-rotation-reopen",
+      "12e4-systems-update-key-row-action",
       "13-flakes",
       "15j-builds-latest-per-flake-populated",
       "15k-builds-latest-combined-filters-empty-clear",
@@ -845,6 +848,24 @@ in pkgs.testers.runNixOSTest {
       "20e-policies-multirule-rules-only-no-expression-required",
       "task433-canonical-poam-lifecycle",
     ]
+    # TASK-435. Agent key rotation is a security boundary: these three
+    # workflows are its only end-to-end acceptance evidence, and the harness
+    # deliberately lets noncritical steps fail without blocking. Guard the
+    # policy itself so a future edit cannot silently demote them back to
+    # advisory. Checked against critical_tests, not the per-run selection, so
+    # the invariant holds under focused profiles too.
+    required_task435_tests = [
+      "12e2-systems-edit-modal-key-rotation",
+      "12e3-system-detail-key-rotation-reopen",
+      "12e4-systems-update-key-row-action",
+    ]
+    demoted_task435 = [name for name in required_task435_tests if name not in critical_tests]
+    if demoted_task435:
+        raise Exception(
+            "TASK-435 key-rotation workflows must stay in critical_tests: "
+            f"{demoted_task435}"
+        )
+
     selected_critical_tests = (
       critical_tests
       if not test_steps

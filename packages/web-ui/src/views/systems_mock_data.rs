@@ -367,6 +367,17 @@ pub(super) fn build_system_detail(
 ) -> SystemDetail {
     let last_seen = base_time - Duration::hours(last_seen_offset_hours);
     let is_active = !matches!(health_status, HealthStatus::Offline);
+    // Deterministic per-system agent key fingerprint, derived through the same
+    // helper the real server uses so mocked detail matches the live shape.
+    let public_key_fingerprint = {
+        use base64::Engine;
+        use ed25519_dalek::SigningKey;
+
+        let seed = [(id % 251) as u8 + 1; 32];
+        let verifying_key = SigningKey::from_bytes(&seed).verifying_key();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(verifying_key.to_bytes());
+        crate::components::system::key_rotation::public_key_fingerprint(&encoded)
+    };
     let store_path = if matches!(deployment_status, DeploymentStatus::Unknown) {
         None
     } else {
@@ -422,5 +433,20 @@ pub(super) fn build_system_detail(
         boot_id: None,
         restart_type: None,
         last_restart_at: None,
+        public_key_fingerprint,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mock_system_details;
+
+    #[test]
+    fn every_mock_system_has_a_valid_agent_key_fingerprint() {
+        assert!(
+            mock_system_details()
+                .iter()
+                .all(|system| system.public_key_fingerprint.is_some())
+        );
     }
 }

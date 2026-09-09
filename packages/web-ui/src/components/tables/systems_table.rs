@@ -313,7 +313,7 @@ pub fn SystemsTable(
                                         }
                                     }
                                 }
-                                // Row actions: Deploy | Edit (matching design SystemRow)
+                                // Row actions: Deploy | Update Key | Edit
                                 td {
                                     div {
                                         class: "row-actions",
@@ -327,6 +327,18 @@ pub fn SystemsTable(
                                                 on_deploy.call(system.id);
                                             },
                                             Icon { name: IconName::Deploy, size: 14 }
+                                        }
+                                        // Existing public-key update flow
+                                        button {
+                                            class: "btn-icon focus-ring",
+                                            title: "Update Key",
+                                            "aria-label": "Update Key",
+                                            "data-testid": "system-update-key",
+                                            onclick: move |evt| {
+                                                evt.stop_propagation();
+                                                on_update_key.call(system.id);
+                                            },
+                                            Icon { name: IconName::Key, size: 14 }
                                         }
                                         // Edit
                                         button {

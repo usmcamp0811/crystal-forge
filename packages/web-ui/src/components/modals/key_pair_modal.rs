@@ -13,27 +13,11 @@ pub struct GeneratedKeyPair {
     pub private_key: String,
 }
 
-/// Generate a new Ed25519 key pair for system authentication.
-pub fn generate_key_pair() -> GeneratedKeyPair {
+#[cfg(any(test, target_arch = "wasm32"))]
+fn key_pair_from_secret(secret: [u8; 32]) -> GeneratedKeyPair {
     use base64::Engine;
     use base64::engine::general_purpose::STANDARD;
     use ed25519_dalek::SigningKey;
-    use wasm_bindgen::JsCast;
-
-    let mut secret = [0_u8; 32];
-    let mut filled = false;
-    if let Some(win) = web_sys::window() {
-        if let Ok(crypto) = win.crypto() {
-            if crypto.get_random_values_with_u8_array(&mut secret).is_ok() {
-                filled = true;
-            }
-        }
-    }
-    if !filled {
-        for byte in &mut secret {
-            *byte = (js_sys::Math::random() * 256.0) as u8;
-        }
-    }
 
     let signing_key = SigningKey::from_bytes(&secret);
     let verifying_key = signing_key.verifying_key();
@@ -44,21 +28,49 @@ pub fn generate_key_pair() -> GeneratedKeyPair {
     }
 }
 
+/// Generate a new Ed25519 key pair for system authentication.
+///
+/// Generation fails closed when browser Web Crypto is unavailable. An
+/// authentication private key must never fall back to a non-cryptographic RNG.
+pub fn generate_key_pair() -> Result<GeneratedKeyPair, String> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let window = web_sys::window().ok_or_else(|| {
+            "Secure key generation is unavailable because this browser has no window context."
+                .to_string()
+        })?;
+        let crypto = window.crypto().map_err(|_| {
+            "Secure key generation requires the browser Web Crypto API.".to_string()
+        })?;
+        let mut secret = [0_u8; 32];
+        crypto
+            .get_random_values_with_u8_array(&mut secret)
+            .map_err(|_| {
+                "Secure random key generation failed. Check browser security settings and try again."
+                    .to_string()
+            })?;
+        Ok(key_pair_from_secret(secret))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        Err("Secure key generation is available only in a browser with Web Crypto.".to_string())
+    }
+}
+
 /// Modal displaying a generated key pair for a new system.
 ///
 /// Shows both public and private keys with instructions for secure handling.
 /// The private key should be stored securely and installed on the target system.
 #[component]
 pub fn KeyPairModal(
-    /// The generated key pair to display (if None, generates a new one)
-    keys: Option<GeneratedKeyPair>,
+    /// The securely generated key pair to display.
+    keys: GeneratedKeyPair,
     /// Called when the modal is closed
     on_close: EventHandler<()>,
     /// Called when the user wants to use the public key in a form
     on_use_public_key: EventHandler<()>,
 ) -> Element {
-    let key_pair = keys.unwrap_or_else(generate_key_pair);
-
     rsx! {
         div {
             class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 cf-modal-overlay",
@@ -79,7 +91,7 @@ pub fn KeyPairModal(
                     p { class: "text-xs uppercase tracking-wide text-gray-500", "Public Key" }
                     pre {
                         class: "rounded-lg border border-gray-700 bg-gray-950 p-3 text-xs text-gray-200 font-mono overflow-x-auto",
-                        "{key_pair.public_key}"
+                        "{keys.public_key}"
                     }
                 }
 
@@ -88,7 +100,7 @@ pub fn KeyPairModal(
                     p { class: "text-xs uppercase tracking-wide text-gray-500", "Private Key" }
                     pre {
                         class: "rounded-lg border border-gray-700 bg-gray-950 p-3 text-xs text-gray-200 font-mono overflow-x-auto",
-                        "{key_pair.private_key}"
+                        "{keys.private_key}"
                     }
                 }
 
@@ -115,5 +127,33 @@ pub fn KeyPairModal(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deterministic_secret_derives_matching_ed25519_keypair() {
+        use base64::Engine;
+        use base64::engine::general_purpose::STANDARD;
+        use ed25519_dalek::SigningKey;
+
+        let secret = [7_u8; 32];
+        let pair = key_pair_from_secret(secret);
+        let signing_key = SigningKey::from_bytes(&secret);
+
+        assert_eq!(pair.private_key, STANDARD.encode(secret));
+        assert_eq!(
+            pair.public_key,
+            STANDARD.encode(signing_key.verifying_key().to_bytes())
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn generation_fails_closed_outside_browser_web_crypto() {
+        assert!(generate_key_pair().is_err());
     }
 }
