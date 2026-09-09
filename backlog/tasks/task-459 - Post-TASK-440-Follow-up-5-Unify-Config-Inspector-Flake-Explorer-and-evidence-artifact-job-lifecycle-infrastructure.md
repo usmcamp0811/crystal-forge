@@ -6,14 +6,20 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-09-06 23:08'
+updated_date: '2026-09-09 03:33'
 labels: []
 dependencies:
   - TASK-440
   - TASK-456
+references:
+  - git commit e1b7434899e23f43770632e59d80a76a8fc8459e
+  - TASK-440.1
 documentation:
   - >-
     backlog/docs/doc-24 -
     Crystal-Forge-Evaluation-Evidence-Build-Admission-and-Deployment-Gating-Architecture.md
+  - docs/design/CrystalForge/components/FlakeExplorer.jsx
+  - docs/design/CrystalForge/data-flake-explorer.js
 priority: medium
 type: enhancement
 ordinal: 468000
@@ -61,4 +67,5 @@ This task depends on the evidence identity/version contract defined by the sibli
 - [ ] #5 Existing immutable-artifact retention and lifecycle correctness established for ConfigArtifactV2 by TASK-440 is preserved, and equivalent guarantees are established for Flake Explorer artifacts where they now share infrastructure.
 - [ ] #6 No unintended external API/DTO contract change occurs for existing Config Inspector or Flake Explorer consumers; any identified necessary change is explicitly documented and approved.
 - [ ] #7 Targeted server tests and relevant Nix checks (including the config-inspector check) pass after the refactor.
+- [ ] #8 The shared infrastructure preserves distinct evaluation build cache-observation and scan artifact identities required by TASK-440.1 without implementing Pipeline presentation or making artifact reads launch work
 <!-- AC:END -->
