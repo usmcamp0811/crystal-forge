@@ -189,7 +189,7 @@ async fn cleanup_never_scanned_system_fixture(pool: &PgPool, system_id: Uuid, de
         .expect("never-scanned derivation should be deleted");
 }
 
-async fn insert_scan_backed_system_fixture(pool: &PgPool) -> (Uuid, String, i32, Uuid) {
+async fn insert_scan_backed_system_fixture(pool: &PgPool) -> (Uuid, String, String, i32, Uuid) {
     let (system_id, hostname, derivation_id) = insert_never_scanned_system_fixture(pool).await;
     let store_path = format!("/nix/store/scan-backed-{}", Uuid::new_v4().simple());
     sqlx::query("UPDATE derivations SET derivation_path = $1, store_path = $2 WHERE id = $3")
@@ -222,12 +222,14 @@ async fn insert_scan_backed_system_fixture(pool: &PgPool) -> (Uuid, String, i32,
     .fetch_one(pool)
     .await
     .expect("scan-backed fixture should be inserted");
-    (system_id, hostname, derivation_id, scan_id)
+    (system_id, hostname, store_path, derivation_id, scan_id)
 }
 
 async fn cleanup_scan_backed_system_fixture(
     pool: &PgPool,
     system_id: Uuid,
+    hostname: &str,
+    store_path: &str,
     derivation_id: i32,
     scan_id: Uuid,
 ) {
@@ -236,6 +238,12 @@ async fn cleanup_scan_backed_system_fixture(
         .execute(pool)
         .await
         .expect("scan-backed fixture scan should be deleted");
+    sqlx::query("DELETE FROM system_states WHERE hostname = $1 AND store_path = $2")
+        .bind(hostname)
+        .bind(store_path)
+        .execute(pool)
+        .await
+        .expect("scan-backed fixture system state should be deleted");
     cleanup_never_scanned_system_fixture(pool, system_id, derivation_id).await;
 }
 
@@ -417,13 +425,21 @@ async fn system_scan_queue_normalizes_never_scanned_derivation() {
 #[serial(scan_trigger_source)]
 async fn scan_queue_projections_return_persisted_trigger_source() {
     let pool = test_pool_from_env().await;
-    let (system_id, hostname, derivation_id, scan_id) =
+    let (system_id, hostname, store_path, derivation_id, scan_id) =
         insert_scan_backed_system_fixture(&pool).await;
 
     let queue = get_scan_queue(&pool, 500).await;
     let deployed = get_scan_deployed(&pool, 500, None).await;
     let system_queue = get_scan_queue_for_system(&pool, system_id, 500).await;
-    cleanup_scan_backed_system_fixture(&pool, system_id, derivation_id, scan_id).await;
+    cleanup_scan_backed_system_fixture(
+        &pool,
+        system_id,
+        &hostname,
+        &store_path,
+        derivation_id,
+        scan_id,
+    )
+    .await;
 
     let queue_row = queue
         .expect("queue query should return")

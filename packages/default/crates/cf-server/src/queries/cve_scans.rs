@@ -1241,23 +1241,24 @@ async fn save_scan_results_for_owner(
 ///
 /// Returns an error when the scan query fails.
 pub async fn get_latest_scan(pool: &PgPool, derivation_id: i32) -> Result<Option<CveScan>> {
-    let scan = sqlx::query_as::<_, CveScan>(
+    let scan = sqlx::query_as!(
+        CveScan,
         r#"
         SELECT 
             id,
-            derivation_id,
+            derivation_id as "derivation_id!",
             scheduled_at,
             completed_at,
-            status,
-            attempts,
-            scanner_name,
+            status as "status!: ScanStatus",
+            attempts as "attempts!",
+            scanner_name as "scanner_name!",
             scanner_version,
-            total_packages,
-            total_vulnerabilities,
-            critical_count,
-            high_count,
-            medium_count,
-            low_count,
+            total_packages as "total_packages!",
+            total_vulnerabilities as "total_vulnerabilities!",
+            critical_count as "critical_count!",
+            high_count as "high_count!",
+            medium_count as "medium_count!",
+            low_count as "low_count!",
             scan_duration_ms,
             scan_metadata,
             trigger_source,
@@ -1267,8 +1268,8 @@ pub async fn get_latest_scan(pool: &PgPool, derivation_id: i32) -> Result<Option
         ORDER BY created_at DESC
         LIMIT 1
         "#,
+        derivation_id
     )
-    .bind(derivation_id)
     .fetch_optional(pool)
     .await?;
 
