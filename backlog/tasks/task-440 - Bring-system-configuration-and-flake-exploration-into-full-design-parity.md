@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-09 22:35'
+updated_date: '2026-09-09 22:36'
 labels:
   - design-parity
   - web-ui
@@ -39,6 +39,7 @@ references:
   - git commit c07a239f510f554555c8c89195108857be6c9d56
   - git commit 24bd1d0e9950c918e698773efa936c2e2326f6c7
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2834497659'
+  - git commit df58dbd6b408cfa1d718dd766690f3834201f033
 documentation:
   - docs/design/CrystalForge/app.jsx
   - docs/design/CrystalForge/components/SystemDetail.jsx
@@ -217,6 +218,8 @@ Root-cause diagnosis found that the 12l cleanup retained an unrelated `test-agen
 2026-09-09 bounded runtime/UI remediation completed in two commits and pushed to MR !323. Commit `c07a239f510f554555c8c89195108857be6c9d56` (`TASK-440: Fix STIG option declaration collisions`) gives each production `mkStigModule` control unique active/inactive child option declarations and adds multi-control plus duplicate-name regressions. Verification passed: STIG check, Config Inspector check, evaluator snapshot isolation check, and `git diff --check`. Commit `24bd1d0e9950c918e698773efa936c2e2326f6c7` (`TASK-440: Match tray expand icon design`) adds canonical maximize/minimize icons and converts the policy, compliance bundle, compliance evidence, and POA&M detail tray controls to icon-only buttons with dynamic accessible labels/titles while preserving pressed state and expansion behavior. Verification passed: targeted rustfmt, focused source regression, Web UI package build, WASM cargo check, and `git diff --check`. No integration-test.js, design-source, migration, XCCDF export, merge, or deployment changes were made. The complete Web UI VM check was intentionally left to exact-head CI. Local HEAD, remote-tracking HEAD, and `git ls-remote` match at `24bd1d0e9950c918e698773efa936c2e2326f6c7`; the worktree is clean. Exact-head pipeline 2834497659 is running. TASK-440 remains In Progress and AC #24/#27 remain unchecked.
 
 2026-09-09 Commit B implementation and verification from exact parent 997d7d4826db9ca7c6723254c700a122c01a469c: the require_cve_check XCCDF branch now deserializes the existing server CveCheckConfig, so sparse persisted JSON uses max_critical=0, max_high=None, require_high_justification=false, strict=true, and when_no_scan=Block while malformed explicit members still fail. The writer continues to serialize the original sparse config-json and adds no strict XML representation. Four focused writer tests passed. A disposable PostgreSQL cluster at /tmp/opencode/task440-cve-commit-b/data was verified as database postgres, user postgres, data directory under /tmp/opencode, address 127.0.0.1:55441, CREATEDB=true, SUPERUSER=true; repository migrations 1 through 253 applied. The seed-shaped trusted/accepted CVE publication regression passed and proved accepted bundle state, draft pointer cleared, published pointer set, one publication audit committed, sparse policy config unchanged, and post-commit XCCDF export successful. The CVE malformed-config rollback and retained custom-check malformed-XCCDF rollback regressions passed; both leave publication state/pointers atomic, and the CVE test also proves published_at remains null and no publication audit commits. SQLX_OFFLINE offline cf-server lib check, cargo fmt check, git diff check, and checks.x86_64-linux.xccdf-schema passed; schema validation accepted all generated writer documents. Existing compiler and OpenSCAP advisory warnings remain. No independent policy-type failure was exposed. Scope audit found only xml_writer.rs, compliance.rs tests/helpers, server-regressions enrollment, and deployment-policy-checks.md changed; no migration, DB row, semantic digest algorithm, publication behavior, evaluator/gate, UI, history, deployment, TASK-441, rebase, merge, or push change.
+
+Commit B was created locally as df58dbd6b408cfa1d718dd766690f3834201f033 with exact title `TASK-440: Preserve CVE policy XCCDF defaults`. Its sole parent is required Commit A 997d7d4826db9ca7c6723254c700a122c01a469c, and the range from Commit A contains exactly one commit. The worktree is clean. No push was performed; origin/TASK-440-system-config-flake-parity remains 24bd1d0e9950c918e698773efa936c2e2326f6c7. TASK-440 remains In Progress with AC #24 and #27 unchanged.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
