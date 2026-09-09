@@ -2263,7 +2263,7 @@ async fn query_config_options_page_v2_for_visibility(
         }
         EvaluatedOptionFilter::Changed => query.push(" AND false"),
     };
-    query.push(" ORDER BY array_to_string(identities.path_components, U&'\\001f') COLLATE \"C\", identities.option_key COLLATE \"C\" LIMIT ");
+    query.push(" ORDER BY array_to_string(identities.path_components, '.') COLLATE \"C\", identities.option_key COLLATE \"C\" LIMIT ");
     query.push_bind(limit);
     query.push(" OFFSET ");
     query.push_bind(offset);
@@ -13529,7 +13529,7 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
-    async fn v2_reader_paginates_by_canonical_component_order(pool: PgPool) {
+    async fn v2_reader_preserves_existing_dotted_pagination_order(pool: PgPool) {
         let (system, _, child) = v2_reader_history_fixture(&pool).await;
         let components = vec![
             vec!["a".to_string()],
@@ -13550,7 +13550,7 @@ mod tests {
             .iter()
             .map(|path| {
                 (
-                    path.join("\u{1f}"),
+                    path.join("."),
                     crate::models::config_inspector::option_key(path),
                     path.clone(),
                 )
@@ -13563,7 +13563,8 @@ mod tests {
                 .then_with(|| left.1.as_bytes().cmp(right.1.as_bytes()))
         });
         let options = components
-            .into_iter()
+            .iter()
+            .cloned()
             .enumerate()
             .map(|(index, path)| v2_option_with_components(path, &format!("value-{index}")))
             .collect();
@@ -13608,6 +13609,23 @@ mod tests {
                     .path_components
             }));
         }
+        let mut collision_expected = components
+            .iter()
+            .filter(|path| path.join(".") == "a.b.c")
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(collision_expected.len(), 2);
+        collision_expected.sort_by(|left, right| {
+            crate::models::config_inspector::option_key(left)
+                .as_bytes()
+                .cmp(crate::models::config_inspector::option_key(right).as_bytes())
+        });
+        let collision_actual = actual
+            .iter()
+            .filter(|path| path.join(".") == "a.b.c")
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(collision_actual, collision_expected);
         assert_eq!(
             actual,
             expected
@@ -13897,7 +13915,7 @@ mod tests {
              AND baseline.option_key = identities.option_key
              AND baseline.path_components = identities.path_components
             WHERE selected.content_digest IS DISTINCT FROM baseline.content_digest
-            ORDER BY array_to_string(identities.path_components, U&'\001f') COLLATE "C",
+            ORDER BY array_to_string(identities.path_components, '.') COLLATE "C",
                      identities.option_key COLLATE "C"
             LIMIT 25
             "#,
@@ -13939,7 +13957,7 @@ mod tests {
             SELECT option_key, path_components, content_digest
             FROM evaluation_snapshot_options
             WHERE snapshot_id = $1 AND option_key IS NOT NULL
-            ORDER BY array_to_string(path_components, U&'\001f') COLLATE "C",
+            ORDER BY array_to_string(path_components, '.') COLLATE "C",
                      option_key COLLATE "C"
             LIMIT 25
             "#,
