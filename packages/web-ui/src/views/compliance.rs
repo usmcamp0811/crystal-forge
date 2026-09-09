@@ -956,7 +956,7 @@ pub fn ComplianceView(
                                         }
                                     }
                                     div { style: "display:flex;gap:6px;align-items:center;",
-                                        button { class: "btn btn-ghost xs focus-ring", aria_pressed: bundle_drawer_expanded(), onclick: move |_| bundle_drawer_expanded.toggle(), if bundle_drawer_expanded() { "Restore" } else { "Expand" } }
+                                        button { class: "btn-icon focus-ring", aria_pressed: bundle_drawer_expanded(), aria_label: if bundle_drawer_expanded() { "Restore compliance bundle drawer" } else { "Expand compliance bundle drawer" }, title: if bundle_drawer_expanded() { "Restore compliance bundle drawer" } else { "Expand compliance bundle drawer" }, onclick: move |_| bundle_drawer_expanded.toggle(), Icon { name: if bundle_drawer_expanded() { IconName::Minimize } else { IconName::Maximize }, size: 15 } }
                                         button { class: "btn-icon focus-ring", autofocus: true, aria_label: "Close bundle detail", onclick: move |_| drawer_open.set(false), Icon { name: IconName::X, size: 16 } }
                                     }
                                 }
@@ -964,7 +964,7 @@ pub fn ComplianceView(
                                 header { class: "fl-tray-head",
                                     div { style: "display:flex;align-items:center;gap:12px;min-width:0;flex:1;", Icon { name: IconName::Shield, size: 18 }, span { id: "compliance-bundle-drawer-title", style: "font-size:11px;color:var(--cf-text-muted);", "Compliance bundle · {bundle.name}" } }
                                     div { style: "display:flex;gap:6px;",
-                                        button { class: "btn btn-ghost xs focus-ring", aria_pressed: bundle_drawer_expanded(), onclick: move |_| bundle_drawer_expanded.toggle(), if bundle_drawer_expanded() { "Restore" } else { "Expand" } }
+                                        button { class: "btn-icon focus-ring", aria_pressed: bundle_drawer_expanded(), aria_label: if bundle_drawer_expanded() { "Restore compliance bundle drawer" } else { "Expand compliance bundle drawer" }, title: if bundle_drawer_expanded() { "Restore compliance bundle drawer" } else { "Expand compliance bundle drawer" }, onclick: move |_| bundle_drawer_expanded.toggle(), Icon { name: if bundle_drawer_expanded() { IconName::Minimize } else { IconName::Maximize }, size: 15 } }
                                         button {
                                             class: "btn-icon focus-ring",
                                             "data-testid": "compliance-drawer-close",

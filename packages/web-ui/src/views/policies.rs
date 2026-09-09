@@ -1496,11 +1496,12 @@ pub fn PolicyDrawer(
                 }
                 div { style: "display: flex; gap: 6px; align-items: center;",
                     button {
-                        class: "btn btn-ghost focus-ring xs",
+                        class: "btn-icon focus-ring",
                         aria_pressed: expanded(),
-                        title: if expanded() { "Restore policy drawer width" } else { "Expand policy drawer" },
+                        aria_label: if expanded() { "Restore policy drawer" } else { "Expand policy drawer" },
+                        title: if expanded() { "Restore policy drawer" } else { "Expand policy drawer" },
                         onclick: move |_| expanded.toggle(),
-                        if expanded() { "Restore" } else { "Expand" }
+                        Icon { name: if expanded() { IconName::Minimize } else { IconName::Maximize }, size: 15 }
                     }
                     if !is_core && is_editable {
                         button {
@@ -2521,6 +2522,41 @@ mod catalog_scaling_tests {
                 .count()
                 >= 2
         );
+    }
+
+    #[test]
+    fn tray_expand_controls_are_icon_only_and_accessibly_named() {
+        let policy = include_str!("policies.rs");
+        let bundle = include_str!("compliance.rs");
+        let evidence = include_str!("../components/compliance/mod.rs");
+        let poam = include_str!("../components/poam/mod.rs");
+        let icon = include_str!("../components/icon.rs");
+
+        for (source, label, expanded_class) in [
+            (policy, "policy drawer", "policy-drawer-expanded"),
+            (
+                bundle,
+                "compliance bundle drawer",
+                "compliance-drawer-expanded",
+            ),
+            (
+                evidence,
+                "compliance evidence drawer",
+                "compliance-drawer-expanded",
+            ),
+            (poam, "POA&M detail", "poam-tray-expanded"),
+        ] {
+            assert!(source.contains("class: \"btn-icon focus-ring\""), "{label}");
+            assert!(source.contains(&format!("\"Expand {label}\"")), "{label}");
+            assert!(source.contains(&format!("\"Restore {label}\"")), "{label}");
+            assert!(source.contains("aria_pressed:"), "{label}");
+            assert!(source.contains("expanded.toggle()"), "{label}");
+            assert!(source.contains("IconName::Maximize"), "{label}");
+            assert!(source.contains("IconName::Minimize"), "{label}");
+            assert!(source.contains(expanded_class), "{label}");
+        }
+        assert!(icon.contains("IconName::Maximize =>"));
+        assert!(icon.contains("IconName::Minimize =>"));
     }
 
     #[test]

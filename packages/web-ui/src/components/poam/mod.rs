@@ -1044,7 +1044,7 @@ pub fn PoamDetailTray(props: PoamDetailTrayProps) -> Element {
             header { class: "poam-tray-head",
                 div { class: "poam-tray-title", Icon { name: IconName::Gear, size: 18 } div { div { id: "poam-detail-title", class: "poam-title-line", span { class: "mono poam-human-id", "{detail.poam.human_id}" } StatusChip { poam: detail.poam.clone() } RiskChip { risk: detail.poam.risk } } p { "{detail.poam.title}" } } }
                 div { class: "poam-tray-head-actions",
-                    button { class: "btn btn-ghost xs focus-ring", aria_pressed: expanded(), onclick: move |_| expanded.toggle(), if expanded() { "Restore" } else { "Expand" } }
+                    button { class: "btn-icon focus-ring", aria_pressed: expanded(), aria_label: if expanded() { "Restore POA&M detail" } else { "Expand POA&M detail" }, title: if expanded() { "Restore POA&M detail" } else { "Expand POA&M detail" }, onclick: move |_| expanded.toggle(), Icon { name: if expanded() { IconName::Minimize } else { IconName::Maximize }, size: 15 } }
                     button { class: "btn-icon focus-ring", autofocus: true, aria_label: "Close", disabled: busy().is_some(), onclick: move |_| close.call(()), Icon { name: IconName::X, size: 16 } }
                 }
             }

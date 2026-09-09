@@ -870,10 +870,12 @@ pub fn EvidenceDrawer(props: EvidenceDrawerProps) -> Element {
                         }
                     }
                     button {
-                        class: "btn btn-ghost xs focus-ring",
+                        class: "btn-icon focus-ring",
                         aria_pressed: expanded(),
+                        aria_label: if expanded() { "Restore compliance evidence drawer" } else { "Expand compliance evidence drawer" },
+                        title: if expanded() { "Restore compliance evidence drawer" } else { "Expand compliance evidence drawer" },
                         onclick: move |_| expanded.toggle(),
-                        if expanded() { "Restore" } else { "Expand" }
+                        Icon { name: if expanded() { IconName::Minimize } else { IconName::Maximize }, size: 15 }
                     }
                     button {
                         class: "btn-icon focus-ring",
