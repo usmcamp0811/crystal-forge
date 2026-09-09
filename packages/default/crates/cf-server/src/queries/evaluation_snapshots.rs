@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use sqlx::{Executor, PgPool, Postgres, QueryBuilder, Row, Transaction};
+use sqlx::{Executor, PgConnection, PgPool, Postgres, QueryBuilder, Row, Transaction};
 use uuid::Uuid;
 
 use crate::models::config_inspector::option_key as canonical_option_key;
@@ -1955,11 +1955,37 @@ fn corrupt_v2_page(
     }
 }
 
+async fn hydrate_config_option_payloads_v2(
+    executor: &mut PgConnection,
+    digests: &[Vec<u8>],
+) -> Result<std::collections::HashMap<Vec<u8>, Value>> {
+    if digests.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let mut query = QueryBuilder::<Postgres>::new(
+        "SELECT digest, payload FROM evaluation_option_contents WHERE digest IN (",
+    );
+    let mut separated = query.separated(", ");
+    for digest in digests {
+        separated.push_bind(digest);
+    }
+    separated.push_unseparated(")");
+    let rows = query.build().fetch_all(executor).await?;
+    let mut payloads = std::collections::HashMap::with_capacity(rows.len());
+    for row in rows {
+        let digest: Vec<u8> = row.try_get("digest")?;
+        payloads.insert(digest, row.try_get("payload")?);
+    }
+    Ok(payloads)
+}
+
 /// Reads a bounded current commit-mode V2 options page in one repeatable-read transaction.
 ///
 /// Counts and rows use authoritative V2 option identity (`option_key` plus
-/// `path_components`). The function is database-only and returns typed absence or
-/// stale-token results instead of mutating state or falling back to V1.
+/// `path_components`). The query selects the bounded page before it fetches at
+/// most two payload digests per row. The function is database-only and returns
+/// typed absence or stale-token results instead of mutating state or falling
+/// back to V1.
 pub(crate) async fn query_config_options_page_v2(
     pool: &PgPool,
     system_id: Uuid,
@@ -2091,10 +2117,12 @@ async fn query_config_options_page_v2_for_visibility(
             (SELECT COUNT(*)::bigint
              FROM (
                  SELECT option_key, path_components
-                 FROM evaluation_snapshot_options WHERE snapshot_id = $1
+                 FROM evaluation_snapshot_options
+                 WHERE snapshot_id = $1 AND option_key IS NOT NULL
                  UNION
                  SELECT option_key, path_components
-                 FROM evaluation_snapshot_options WHERE snapshot_id = $2
+                 FROM evaluation_snapshot_options
+                 WHERE snapshot_id = $2 AND option_key IS NOT NULL
              ) identities
              LEFT JOIN evaluation_snapshot_options selected
                ON selected.snapshot_id = $1
@@ -2131,77 +2159,99 @@ async fn query_config_options_page_v2_for_visibility(
         EvaluatedOptionFilter::Overridden => "overridden",
         EvaluatedOptionFilter::Changed => "changed",
     };
-    let total: i64 = sqlx::query_scalar(
-        r#"
-        WITH identities AS (
-            SELECT option_key, path_components
-            FROM evaluation_snapshot_options WHERE snapshot_id = $1
-            UNION
-            SELECT option_key, path_components
-            FROM evaluation_snapshot_options
-            WHERE snapshot_id = $2 AND $5 = 'changed'
+    // PERFORMANCE: Without search, the active total is exactly one of the
+    // revision-global counts already computed above. Avoid repeating corpus
+    // joins, especially payload-table joins that are needed only for search.
+    let total = if search.is_empty() {
+        match filter {
+            EvaluatedOptionFilter::All => counts.all,
+            EvaluatedOptionFilter::Overridden => counts.overridden,
+            EvaluatedOptionFilter::Changed => counts.changed.unwrap_or(0),
+        }
+    } else {
+        sqlx::query_scalar(
+            r#"
+            WITH identities AS (
+                SELECT option_key, path_components
+                FROM evaluation_snapshot_options
+                WHERE snapshot_id = $1 AND option_key IS NOT NULL
+                UNION
+                SELECT option_key, path_components
+                FROM evaluation_snapshot_options
+                WHERE snapshot_id = $2 AND option_key IS NOT NULL AND $4 = 'changed'
+            )
+            SELECT COUNT(*)::bigint
+            FROM identities
+            LEFT JOIN evaluation_snapshot_options selected
+              ON selected.snapshot_id = $1
+             AND selected.option_key = identities.option_key
+             AND selected.path_components = identities.path_components
+            LEFT JOIN evaluation_option_contents selected_content
+              ON selected_content.digest = selected.content_digest
+            LEFT JOIN evaluation_snapshot_options baseline
+              ON baseline.snapshot_id = $2
+             AND baseline.option_key = identities.option_key
+             AND baseline.path_components = identities.path_components
+            LEFT JOIN evaluation_option_contents baseline_content
+              ON baseline_content.digest = baseline.content_digest
+            WHERE lower(array_to_string(identities.path_components, '.') || ' ' ||
+                  COALESCE(selected_content.search_text, '') || ' ' ||
+                  COALESCE(baseline_content.search_text, '')) LIKE $3 ESCAPE '\'
+              AND (($4 = 'all' AND selected.snapshot_id IS NOT NULL)
+                OR ($4 = 'overridden' AND selected.is_overridden IS TRUE)
+                OR ($4 = 'changed' AND $2::uuid IS NOT NULL
+                    AND selected.content_digest IS DISTINCT FROM baseline.content_digest))
+            "#,
         )
-        SELECT COUNT(*)::bigint
-        FROM identities
-        LEFT JOIN evaluation_snapshot_options selected
-          ON selected.snapshot_id = $1
-         AND selected.option_key = identities.option_key
-         AND selected.path_components = identities.path_components
-        LEFT JOIN evaluation_option_contents selected_content
-          ON selected_content.digest = selected.content_digest
-        LEFT JOIN evaluation_snapshot_options baseline
-          ON baseline.snapshot_id = $2
-         AND baseline.option_key = identities.option_key
-         AND baseline.path_components = identities.path_components
-        LEFT JOIN evaluation_option_contents baseline_content
-          ON baseline_content.digest = baseline.content_digest
-        WHERE ($3 = '' OR lower(array_to_string(identities.path_components, '.') || ' ' ||
-              COALESCE(selected_content.search_text, '') || ' ' ||
-              COALESCE(baseline_content.search_text, '')) LIKE $4 ESCAPE '\')
-          AND (($5 = 'all' AND selected.snapshot_id IS NOT NULL)
-            OR ($5 = 'overridden' AND selected.is_overridden IS TRUE)
-            OR ($5 = 'changed' AND $2::uuid IS NOT NULL
-                AND selected.content_digest IS DISTINCT FROM baseline.content_digest))
-        "#,
-    )
-    .bind(selected.id)
-    .bind(baseline_id)
-    .bind(&search)
-    .bind(&search_pattern)
-    .bind(filter_name)
-    .fetch_one(&mut *tx)
-    .await?;
+        .bind(selected.id)
+        .bind(baseline_id)
+        .bind(&search_pattern)
+        .bind(filter_name)
+        .fetch_one(&mut *tx)
+        .await?
+    };
 
+    // PERFORMANCE: Select and sort only narrow identity/digest rows before
+    // loading JSON payloads. A page references at most two payloads per row.
     let mut query = QueryBuilder::<Postgres>::new(
         "WITH identities AS (SELECT option_key, path_components FROM evaluation_snapshot_options WHERE snapshot_id = ",
     );
     query.push_bind(selected.id);
+    query.push(" AND option_key IS NOT NULL");
     if matches!(filter, EvaluatedOptionFilter::Changed) && baseline_id.is_some() {
         query.push(
             " UNION SELECT option_key, path_components FROM evaluation_snapshot_options WHERE snapshot_id = ",
         );
         query.push_bind(baseline_id);
+        query.push(" AND option_key IS NOT NULL");
     }
     query.push(
         ") SELECT identities.option_key, identities.path_components, \
              selected.snapshot_id AS selected_present, selected.content_digest AS selected_digest, \
-             selected_content.payload AS selected_payload, \
-             baseline.snapshot_id AS baseline_present, baseline_content.payload AS baseline_payload, \
+             baseline.snapshot_id AS baseline_present, baseline.content_digest AS baseline_digest, \
              selected.content_digest IS DISTINCT FROM baseline.content_digest AS changed \
              FROM identities \
              LEFT JOIN evaluation_snapshot_options selected \
                ON selected.snapshot_id = ",
     );
     query.push_bind(selected.id);
-    query.push(" AND selected.option_key = identities.option_key AND selected.path_components = identities.path_components \
-             LEFT JOIN evaluation_option_contents selected_content ON selected_content.digest = selected.content_digest \
-             LEFT JOIN evaluation_snapshot_options baseline ON baseline.snapshot_id = ");
+    query.push(
+        " AND selected.option_key = identities.option_key AND selected.path_components = identities.path_components \
+          LEFT JOIN evaluation_snapshot_options baseline ON baseline.snapshot_id = ",
+    );
     query.push_bind(baseline_id);
-    query.push(" AND baseline.option_key = identities.option_key AND baseline.path_components = identities.path_components \
-             LEFT JOIN evaluation_option_contents baseline_content ON baseline_content.digest = baseline.content_digest \
-             WHERE true");
+    query.push(
+        " AND baseline.option_key = identities.option_key AND baseline.path_components = identities.path_components ",
+    );
     if !search.is_empty() {
-        query.push(" AND lower(array_to_string(identities.path_components, '.') || ' ' || COALESCE(selected_content.search_text, '') || ' ' || COALESCE(baseline_content.search_text, '')) LIKE ");
+        query.push(
+            " LEFT JOIN evaluation_option_contents selected_search_content ON selected_search_content.digest = selected.content_digest \
+               LEFT JOIN evaluation_option_contents baseline_search_content ON baseline_search_content.digest = baseline.content_digest ",
+        );
+    }
+    query.push(" WHERE true");
+    if !search.is_empty() {
+        query.push(" AND lower(array_to_string(identities.path_components, '.') || ' ' || COALESCE(selected_search_content.search_text, '') || ' ' || COALESCE(baseline_search_content.search_text, '')) LIKE ");
         query.push_bind(&search_pattern);
         query.push(" ESCAPE CHR(92)");
     }
@@ -2213,11 +2263,26 @@ async fn query_config_options_page_v2_for_visibility(
         }
         EvaluatedOptionFilter::Changed => query.push(" AND false"),
     };
-    query.push(" ORDER BY array_to_string(identities.path_components, '.') COLLATE \"C\", identities.option_key COLLATE \"C\" LIMIT ");
+    query.push(" ORDER BY array_to_string(identities.path_components, U&'\\001f') COLLATE \"C\", identities.option_key COLLATE \"C\" LIMIT ");
     query.push_bind(limit);
     query.push(" OFFSET ");
     query.push_bind(offset);
     let rows = query.build().fetch_all(&mut *tx).await?;
+
+    let mut requested_digests = std::collections::BTreeSet::new();
+    for row in &rows {
+        if let Some(digest) = row.try_get::<Option<Vec<u8>>, _>("selected_digest")? {
+            requested_digests.insert(digest);
+        }
+        if let Some(digest) = row.try_get::<Option<Vec<u8>>, _>("baseline_digest")? {
+            requested_digests.insert(digest);
+        }
+    }
+    // INVARIANT: Payload transfer and JSON decoding are bounded independently
+    // of snapshot size. Deduplication can only reduce the two-per-row maximum.
+    let requested_digests = requested_digests.into_iter().collect::<Vec<_>>();
+    debug_assert!(requested_digests.len() <= rows.len().saturating_mul(2));
+    let payloads = hydrate_config_option_payloads_v2(&mut *tx, &requested_digests).await?;
     let decoded = rows
         .into_iter()
         .map(|row| -> Result<ConfigOptionRowV2> {
@@ -2226,8 +2291,12 @@ async fn query_config_options_page_v2_for_visibility(
             let selected_present: Option<Uuid> = row.try_get("selected_present")?;
             let baseline_present: Option<Uuid> = row.try_get("baseline_present")?;
             let option = if selected_present.is_some() {
-                let payload: Value = row
-                    .try_get::<Option<Value>, _>("selected_payload")?
+                let digest: Vec<u8> = row
+                    .try_get::<Option<Vec<u8>>, _>("selected_digest")?
+                    .context("certified V2 selected option has no content digest")?;
+                let payload = payloads
+                    .get(&digest)
+                    .cloned()
                     .context("certified V2 selected option has no content payload")?;
                 Some(config_option_v2_from_persisted(
                     option_key.clone(),
@@ -2238,8 +2307,12 @@ async fn query_config_options_page_v2_for_visibility(
                 None
             };
             let before = if baseline_present.is_some() {
-                let payload: Value = row
-                    .try_get::<Option<Value>, _>("baseline_payload")?
+                let digest: Vec<u8> = row
+                    .try_get::<Option<Vec<u8>>, _>("baseline_digest")?
+                    .context("certified V2 baseline option has no content digest")?;
+                let payload = payloads
+                    .get(&digest)
+                    .cloned()
                     .context("certified V2 baseline option has no content payload")?;
                 Some(config_option_v2_from_persisted(
                     option_key,
@@ -2266,8 +2339,8 @@ async fn query_config_options_page_v2_for_visibility(
             return Ok(ConfigOptionsPageQueryV2::Page(page));
         }
     };
-    // PERFORMANCE: Resolve every selected and baseline definition in one
-    // visibility-scoped query while the immutable artifact transaction is open.
+    // PERFORMANCE: Resolve definitions from returned selected and baseline rows
+    // in one visibility-scoped query while the artifact transaction is open.
     let baseline_revision = match &selected.comparison {
         ConfigComparisonStateV2::Available {
             baseline_revision, ..
@@ -5392,6 +5465,8 @@ fn parse_lifecycle(value: String) -> Result<SnapshotLifecycle> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
+
     use chrono::Utc;
     use ed25519_dalek::SigningKey;
     use serde_json::json;
@@ -11483,6 +11558,26 @@ mod tests {
         }
     }
 
+    fn mark_v2_option_overridden(option: &mut ConfigOptionArtifactV2) {
+        let ConfigOptionProvenanceArtifactV2::Available {
+            definitions,
+            override_state,
+        } = &mut option.provenance
+        else {
+            panic!("test option provenance should be available");
+        };
+        let ordinal = definitions.len() as u64;
+        definitions.push(v2_definition(
+            &option.option_key,
+            ordinal,
+            None,
+            None,
+            Some("overridden-module.nix"),
+            ConfigDefinitionStatusV2::PriorityDiscarded,
+        ));
+        *override_state = true;
+    }
+
     fn v2_definition(
         option_key: &str,
         ordinal: u64,
@@ -13430,6 +13525,550 @@ mod tests {
             .collect()
         );
         assert_ne!(rows.iter().next(), rows.iter().nth(1));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn v2_reader_paginates_by_canonical_component_order(pool: PgPool) {
+        let (system, _, child) = v2_reader_history_fixture(&pool).await;
+        let components = vec![
+            vec!["a".to_string()],
+            vec!["a".to_string(), "\u{1e}".to_string()],
+            vec!["a".to_string(), "\u{1f}".to_string()],
+            vec!["a".to_string(), " ".to_string()],
+            vec!["a".to_string(), "!".to_string()],
+            vec!["a".to_string(), "'quoted'".to_string()],
+            vec!["a".to_string(), ".".to_string()],
+            vec!["a".to_string(), "B".to_string()],
+            vec!["a".to_string(), r"\slash".to_string()],
+            vec!["a".to_string(), "b".to_string()],
+            vec!["a".to_string(), "b.c".to_string()],
+            vec!["a".to_string(), "b".to_string(), "c".to_string()],
+            vec!["a.b".to_string()],
+        ];
+        let mut expected = components
+            .iter()
+            .map(|path| {
+                (
+                    path.join("\u{1f}"),
+                    crate::models::config_inspector::option_key(path),
+                    path.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        expected.sort_by(|left, right| {
+            left.0
+                .as_bytes()
+                .cmp(right.0.as_bytes())
+                .then_with(|| left.1.as_bytes().cmp(right.1.as_bytes()))
+        });
+        let options = components
+            .into_iter()
+            .enumerate()
+            .map(|(index, path)| v2_option_with_components(path, &format!("value-{index}")))
+            .collect();
+        let mut tx = pool
+            .begin()
+            .await
+            .expect("ordering transaction should begin");
+        persist_config_artifact_v2_deferred_tx(
+            &mut tx,
+            child.id,
+            "host",
+            v2_reader_artifact(child.id, options),
+        )
+        .await
+        .expect("ordering artifact should persist");
+        tx.commit()
+            .await
+            .expect("ordering transaction should commit");
+
+        let mut actual = Vec::new();
+        let mut token = None;
+        for offset in (0..expected.len()).step_by(3) {
+            let result = query_config_options_page_v2(
+                &pool,
+                system.id,
+                &child.git_commit_hash,
+                "",
+                EvaluatedOptionFilter::All,
+                token.as_deref(),
+                3,
+                offset as i64,
+            )
+            .await
+            .expect("ordered page should execute");
+            let ConfigOptionsPageQueryV2::Page(page) = result else {
+                panic!("expected ordered page");
+            };
+            token.get_or_insert(page.snapshot_token);
+            actual.extend(page.options.into_iter().map(|row| {
+                row.option
+                    .expect("All rows should contain selected options")
+                    .path_components
+            }));
+        }
+        assert_eq!(
+            actual,
+            expected
+                .into_iter()
+                .map(|(_, _, path)| path)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn v2_reader_bounds_payload_hydration_for_large_corpus(pool: PgPool) {
+        const OPTION_COUNT: usize = 15_000;
+        const PAGE_SIZE: i64 = 25;
+
+        let (system, parent, child) = v2_reader_history_fixture(&pool).await;
+        let baseline = (0..OPTION_COUNT)
+            .map(|index| {
+                v2_option_with_components(
+                    vec![
+                        "services".to_string(),
+                        "scale".to_string(),
+                        format!("{index:05}"),
+                    ],
+                    &format!("baseline-{index}"),
+                )
+            })
+            .collect();
+        let mut selected = (1..=OPTION_COUNT)
+            .map(|index| {
+                let value = if index == OPTION_COUNT - 1 {
+                    "needle-outside-first-page".to_string()
+                } else if index % 1_000 == 0 {
+                    format!("changed-{index}")
+                } else {
+                    format!("baseline-{index}")
+                };
+                let mut option = v2_option_with_components(
+                    vec![
+                        "services".to_string(),
+                        "scale".to_string(),
+                        format!("{index:05}"),
+                    ],
+                    &value,
+                );
+                if index % 997 == 0 {
+                    mark_v2_option_overridden(&mut option);
+                }
+                option
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(selected.len(), OPTION_COUNT);
+
+        let mut parent_tx = pool
+            .begin()
+            .await
+            .expect("large parent transaction should begin");
+        persist_config_artifact_v2_deferred_tx(
+            &mut parent_tx,
+            parent.id,
+            "host",
+            v2_reader_artifact(parent.id, baseline),
+        )
+        .await
+        .expect("large parent artifact should persist");
+        parent_tx
+            .commit()
+            .await
+            .expect("large parent transaction should commit");
+        let mut child_tx = pool
+            .begin()
+            .await
+            .expect("large child transaction should begin");
+        persist_config_artifact_v2_deferred_tx(
+            &mut child_tx,
+            child.id,
+            "host",
+            v2_reader_artifact(child.id, std::mem::take(&mut selected)),
+        )
+        .await
+        .expect("large child artifact should persist");
+        child_tx
+            .commit()
+            .await
+            .expect("large child transaction should commit");
+
+        let read_state = || async {
+            sqlx::query_scalar::<_, Value>(
+                r#"
+                SELECT jsonb_build_object(
+                    'config_selections', (SELECT count(*) FROM config_snapshot_selections),
+                    'primary_selections', (SELECT count(*) FROM evaluation_snapshot_selections),
+                    'snapshots', (SELECT count(*) FROM evaluation_snapshots),
+                    'snapshot_options', (SELECT count(*) FROM evaluation_snapshot_options),
+                    'inspection_jobs', (SELECT count(*) FROM config_inspection_jobs),
+                    'build_jobs', (SELECT count(*) FROM build_jobs),
+                    'pending_deployments', (SELECT count(*) FROM pending_system_deployments),
+                    'deployment_reservations', (SELECT count(*) FROM deployment_request_reservations),
+                    'commit_states', (
+                        SELECT jsonb_agg(jsonb_build_array(id, evaluation_status) ORDER BY id)
+                        FROM commits
+                    )
+                )
+                "#,
+            )
+            .fetch_one(&pool)
+            .await
+            .expect("read-side state should load")
+        };
+        let state_before = read_state().await;
+
+        let started = Instant::now();
+        let first = query_config_options_page_v2(
+            &pool,
+            system.id,
+            &child.git_commit_hash,
+            "",
+            EvaluatedOptionFilter::All,
+            None,
+            PAGE_SIZE,
+            0,
+        )
+        .await
+        .expect("large first page should execute");
+        let first_elapsed = started.elapsed();
+        let ConfigOptionsPageQueryV2::Page(first) = first else {
+            panic!("expected large first page");
+        };
+        assert_eq!(first.counts.all, OPTION_COUNT as i64);
+        assert_eq!(first.counts.overridden, 15);
+        assert_eq!(first.counts.changed, Some(32));
+        assert_eq!(first.total, OPTION_COUNT as i64);
+        assert_eq!(first.options.len(), PAGE_SIZE as usize);
+        assert_eq!(
+            first.options[0]
+                .option
+                .as_ref()
+                .expect("All page should contain selected option")
+                .path_components,
+            ["services", "scale", "00001"]
+        );
+
+        let started = Instant::now();
+        let next = query_config_options_page_v2(
+            &pool,
+            system.id,
+            &child.git_commit_hash,
+            "",
+            EvaluatedOptionFilter::All,
+            Some(&first.snapshot_token),
+            PAGE_SIZE,
+            PAGE_SIZE,
+        )
+        .await
+        .expect("large next page should execute");
+        let next_elapsed = started.elapsed();
+        let ConfigOptionsPageQueryV2::Page(next) = next else {
+            panic!("expected large next page");
+        };
+        assert_eq!(next.total, OPTION_COUNT as i64);
+        assert_eq!(next.options.len(), PAGE_SIZE as usize);
+        assert_eq!(
+            next.options[0]
+                .option
+                .as_ref()
+                .expect("next All page should contain selected option")
+                .path_components,
+            ["services", "scale", "00026"]
+        );
+
+        let overridden = query_config_options_page_v2(
+            &pool,
+            system.id,
+            &child.git_commit_hash,
+            "",
+            EvaluatedOptionFilter::Overridden,
+            None,
+            PAGE_SIZE,
+            0,
+        )
+        .await
+        .expect("large Overridden page should execute");
+        let ConfigOptionsPageQueryV2::Page(overridden) = overridden else {
+            panic!("expected large Overridden page");
+        };
+        assert_eq!(overridden.counts.overridden, 15);
+        assert_eq!(overridden.total, 15);
+        assert_eq!(overridden.options.len(), 15);
+
+        let started = Instant::now();
+        let changed = query_config_options_page_v2(
+            &pool,
+            system.id,
+            &child.git_commit_hash,
+            "",
+            EvaluatedOptionFilter::Changed,
+            None,
+            PAGE_SIZE,
+            0,
+        )
+        .await
+        .expect("large Changed page should execute");
+        let changed_elapsed = started.elapsed();
+        let ConfigOptionsPageQueryV2::Page(changed) = changed else {
+            panic!("expected large Changed page");
+        };
+        assert_eq!(changed.counts.changed, Some(32));
+        assert_eq!(changed.total, 32);
+        assert_eq!(changed.options.len(), PAGE_SIZE as usize);
+        assert!(
+            changed
+                .options
+                .iter()
+                .any(|row| row.option.is_none() && row.before.is_some()),
+            "Changed must include the removed baseline option"
+        );
+
+        let started = Instant::now();
+        let search = query_config_options_page_v2(
+            &pool,
+            system.id,
+            &child.git_commit_hash,
+            "needle-outside-first-page",
+            EvaluatedOptionFilter::All,
+            None,
+            PAGE_SIZE,
+            0,
+        )
+        .await
+        .expect("large search should execute");
+        let search_elapsed = started.elapsed();
+        let ConfigOptionsPageQueryV2::Page(search) = search else {
+            panic!("expected large search page");
+        };
+        assert_eq!(search.total, 1);
+        assert_eq!(search.options.len(), 1);
+        assert_eq!(
+            search.options[0]
+                .option
+                .as_ref()
+                .expect("search result should contain selected option")
+                .path_components,
+            ["services", "scale", "14999"]
+        );
+        assert_eq!(
+            state_before,
+            read_state().await,
+            "Config reads must not write"
+        );
+
+        let (selected_id, baseline_id): (Uuid, Uuid) = sqlx::query_as(
+            r#"
+            SELECT selected.current_snapshot_id, baseline.current_snapshot_id
+            FROM config_snapshot_selections selected
+            JOIN commits child ON child.id = selected.commit_id
+            JOIN commits parent ON parent.flake_id = child.flake_id
+                               AND parent.git_commit_hash = child.first_parent_sha
+            JOIN config_snapshot_selections baseline
+              ON baseline.commit_id = parent.id
+             AND baseline.configuration_name = selected.configuration_name
+            WHERE selected.commit_id = $1 AND selected.configuration_name = 'host'
+            "#,
+        )
+        .bind(child.id)
+        .fetch_one(&pool)
+        .await
+        .expect("large selected and baseline IDs should load");
+        let digest_rows: Vec<(Option<Vec<u8>>, Option<Vec<u8>>)> = sqlx::query_as(
+            r#"
+            WITH identities AS (
+                SELECT option_key, path_components
+                FROM evaluation_snapshot_options
+                WHERE snapshot_id = $1 AND option_key IS NOT NULL
+                UNION
+                SELECT option_key, path_components
+                FROM evaluation_snapshot_options
+                WHERE snapshot_id = $2 AND option_key IS NOT NULL
+            )
+            SELECT selected.content_digest, baseline.content_digest
+            FROM identities
+            LEFT JOIN evaluation_snapshot_options selected
+              ON selected.snapshot_id = $1
+             AND selected.option_key = identities.option_key
+             AND selected.path_components = identities.path_components
+            LEFT JOIN evaluation_snapshot_options baseline
+              ON baseline.snapshot_id = $2
+             AND baseline.option_key = identities.option_key
+             AND baseline.path_components = identities.path_components
+            WHERE selected.content_digest IS DISTINCT FROM baseline.content_digest
+            ORDER BY array_to_string(identities.path_components, U&'\001f') COLLATE "C",
+                     identities.option_key COLLATE "C"
+            LIMIT 25
+            "#,
+        )
+        .bind(selected_id)
+        .bind(baseline_id)
+        .fetch_all(&pool)
+        .await
+        .expect("bounded page digests should load");
+        let hydration_digests = digest_rows
+            .into_iter()
+            .flat_map(|(selected, baseline)| [selected, baseline])
+            .flatten()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        assert!(hydration_digests.len() > PAGE_SIZE as usize);
+        assert!(hydration_digests.len() <= 2 * PAGE_SIZE as usize);
+        let mut hydration_tx = pool
+            .begin()
+            .await
+            .expect("hydration transaction should begin");
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            .execute(&mut *hydration_tx)
+            .await
+            .expect("hydration transaction should become read-only");
+        let hydrated = hydrate_config_option_payloads_v2(&mut *hydration_tx, &hydration_digests)
+            .await
+            .expect("bounded payload hydration should execute");
+        assert_eq!(hydrated.len(), hydration_digests.len());
+        hydration_tx
+            .rollback()
+            .await
+            .expect("hydration transaction should roll back");
+
+        let identity_plan = sqlx::query(
+            r#"
+            EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT)
+            SELECT option_key, path_components, content_digest
+            FROM evaluation_snapshot_options
+            WHERE snapshot_id = $1 AND option_key IS NOT NULL
+            ORDER BY array_to_string(path_components, U&'\001f') COLLATE "C",
+                     option_key COLLATE "C"
+            LIMIT 25
+            "#,
+        )
+        .bind(selected_id)
+        .fetch_all(&pool)
+        .await
+        .expect("bounded identity query should explain")
+        .into_iter()
+        .map(|row| row.get::<String, _>("QUERY PLAN"))
+        .collect::<Vec<_>>()
+        .join("\n");
+        assert!(identity_plan.contains("Limit"));
+        assert!(!identity_plan.contains("evaluation_option_contents"));
+
+        let mut hydration_plan_query = QueryBuilder::<Postgres>::new(
+            "EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT) SELECT digest, payload FROM evaluation_option_contents WHERE digest IN (",
+        );
+        let mut separated = hydration_plan_query.separated(", ");
+        for digest in &hydration_digests {
+            separated.push_bind(digest);
+        }
+        separated.push_unseparated(")");
+        let hydration_plan = hydration_plan_query
+            .build()
+            .fetch_all(&pool)
+            .await
+            .expect("bounded hydration query should explain")
+            .into_iter()
+            .map(|row| row.get::<String, _>("QUERY PLAN"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(hydration_plan.contains("evaluation_option_contents_pkey"));
+        eprintln!(
+            "TASK-440 15k timings: page_zero={:.3}ms next_page={:.3}ms changed={:.3}ms search={:.3}ms hydration_digests={}\nidentity plan:\n{}\nhydration plan:\n{}",
+            first_elapsed.as_secs_f64() * 1_000.0,
+            next_elapsed.as_secs_f64() * 1_000.0,
+            changed_elapsed.as_secs_f64() * 1_000.0,
+            search_elapsed.as_secs_f64() * 1_000.0,
+            hydration_digests.len(),
+            identity_plan,
+            hydration_plan,
+        );
+
+        let original_token = first.snapshot_token;
+        let mut selected_replacement_tx = pool
+            .begin()
+            .await
+            .expect("selected replacement transaction should begin");
+        persist_config_artifact_v2_deferred_tx(
+            &mut selected_replacement_tx,
+            child.id,
+            "host",
+            v2_reader_artifact(
+                child.id,
+                vec![v2_option(&["services", "replacement"], "selected")],
+            ),
+        )
+        .await
+        .expect("selected replacement should persist");
+        selected_replacement_tx
+            .commit()
+            .await
+            .expect("selected replacement should commit");
+        assert!(matches!(
+            query_config_options_page_v2(
+                &pool,
+                system.id,
+                &child.git_commit_hash,
+                "",
+                EvaluatedOptionFilter::All,
+                Some(&original_token),
+                PAGE_SIZE,
+                PAGE_SIZE,
+            )
+            .await
+            .expect("stale large selected token should classify"),
+            ConfigOptionsPageQueryV2::SnapshotChanged
+        ));
+
+        let fresh = query_config_options_page_v2(
+            &pool,
+            system.id,
+            &child.git_commit_hash,
+            "",
+            EvaluatedOptionFilter::All,
+            None,
+            PAGE_SIZE,
+            0,
+        )
+        .await
+        .expect("fresh selected page should execute");
+        let ConfigOptionsPageQueryV2::Page(fresh) = fresh else {
+            panic!("expected fresh selected page");
+        };
+        let mut baseline_replacement_tx = pool
+            .begin()
+            .await
+            .expect("baseline replacement transaction should begin");
+        persist_config_artifact_v2_deferred_tx(
+            &mut baseline_replacement_tx,
+            parent.id,
+            "host",
+            v2_reader_artifact(
+                parent.id,
+                vec![v2_option(&["services", "replacement"], "baseline")],
+            ),
+        )
+        .await
+        .expect("baseline replacement should persist");
+        baseline_replacement_tx
+            .commit()
+            .await
+            .expect("baseline replacement should commit");
+        assert!(matches!(
+            query_config_options_page_v2(
+                &pool,
+                system.id,
+                &child.git_commit_hash,
+                "",
+                EvaluatedOptionFilter::All,
+                Some(&fresh.snapshot_token),
+                PAGE_SIZE,
+                PAGE_SIZE,
+            )
+            .await
+            .expect("stale large baseline token should classify"),
+            ConfigOptionsPageQueryV2::SnapshotChanged
+        ));
     }
 
     #[sqlx::test]
