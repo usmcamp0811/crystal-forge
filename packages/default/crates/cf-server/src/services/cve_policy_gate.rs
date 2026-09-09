@@ -327,6 +327,7 @@ mod tests {
             medium_count: 0,
             low_count: 0,
             scan_duration_ms: None,
+            trigger_source: None,
             scan_metadata: None,
             created_at: Some(Utc::now()),
         });
@@ -375,6 +376,7 @@ mod tests {
             medium_count: 0,
             low_count: 0,
             scan_duration_ms: None,
+            trigger_source: None,
             scan_metadata: None,
             created_at: Some(Utc::now()),
         });
@@ -424,6 +426,7 @@ mod tests {
             medium_count: 0,
             low_count: 0,
             scan_duration_ms: None,
+            trigger_source: None,
             scan_metadata: None,
             created_at: Some(Utc::now()),
         });
@@ -471,6 +474,7 @@ mod tests {
             medium_count: 0,
             low_count: 0,
             scan_duration_ms: None,
+            trigger_source: None,
             scan_metadata: None,
             created_at: Some(Utc::now()),
         });

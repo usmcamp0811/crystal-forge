@@ -1,6 +1,6 @@
 use crate::derivations::utils::get_store_path_from_drv;
 use crate::derivations::{Derivation, DerivationType};
-use crate::models::cve_scans::{CveScan, ScanStatus};
+use crate::models::cve_scans::{CveScan, CveScanTriggerSource, ScanStatus};
 use crate::queries::attention;
 use crate::vulnix::vulnix_parser::{VulnixParser, VulnixScanOutput};
 use anyhow::Result;
@@ -365,6 +365,8 @@ pub async fn get_targets_needing_cve_scan(
 ///
 /// A created claim owns terminal writes through its `execution_id`. Callers
 /// MUST acquire its advisory lock and heartbeat the token before scanner work.
+/// The caller supplies the immutable [`CveScanTriggerSource`] that explains why
+/// the new scan was created. An existing active scan is returned unchanged.
 ///
 /// # Errors
 ///
@@ -374,6 +376,7 @@ pub async fn create_cve_scan(
     derivation_id: i32,
     scanner_name: &str,
     scanner_version: Option<String>,
+    trigger_source: CveScanTriggerSource,
 ) -> Result<CreateCveScanOutcome> {
     let scan_id = Uuid::new_v4();
     let mut tx = pool.begin().await?;
@@ -389,7 +392,7 @@ pub async fn create_cve_scan(
             id, derivation_id, scanner_name, scanner_version,
             status, total_packages, total_vulnerabilities,
             critical_count, high_count, medium_count, low_count,
-            attempts, scan_metadata
+            attempts, scan_metadata, trigger_source
         ) VALUES (
             $1, $2, $3, $4,
             'in_progress', 0, 0,
@@ -399,7 +402,7 @@ pub async fn create_cve_scan(
                 'execution_id', gen_random_uuid(),
                 'execution_started_at', NOW(),
                 'execution_heartbeat_at', NOW()
-            )
+            ), $5
         )
         ON CONFLICT (derivation_id) WHERE status IN ('pending', 'in_progress')
         DO NOTHING
@@ -413,6 +416,7 @@ pub async fn create_cve_scan(
     .bind(derivation_id)
     .bind(scanner_name)
     .bind(scanner_version)
+    .bind(trigger_source.as_str())
     .fetch_optional(&mut *tx)
     .await?;
 
@@ -1237,34 +1241,34 @@ async fn save_scan_results_for_owner(
 ///
 /// Returns an error when the scan query fails.
 pub async fn get_latest_scan(pool: &PgPool, derivation_id: i32) -> Result<Option<CveScan>> {
-    let scan = sqlx::query_as!(
-        CveScan,
+    let scan = sqlx::query_as::<_, CveScan>(
         r#"
         SELECT 
             id,
-            derivation_id as "derivation_id!",
+            derivation_id,
             scheduled_at,
             completed_at,
-            status as "status!: ScanStatus",
-            attempts as "attempts!",
-            scanner_name as "scanner_name!",
+            status,
+            attempts,
+            scanner_name,
             scanner_version,
-            total_packages as "total_packages!",
-            total_vulnerabilities as "total_vulnerabilities!",
-            critical_count as "critical_count!",
-            high_count as "high_count!",
-            medium_count as "medium_count!",
-            low_count as "low_count!",
+            total_packages,
+            total_vulnerabilities,
+            critical_count,
+            high_count,
+            medium_count,
+            low_count,
             scan_duration_ms,
             scan_metadata,
+            trigger_source,
             created_at
         FROM cve_scans
         WHERE derivation_id = $1
         ORDER BY created_at DESC
         LIMIT 1
         "#,
-        derivation_id
     )
+    .bind(derivation_id)
     .fetch_optional(pool)
     .await?;
 
@@ -1631,13 +1635,13 @@ pub async fn enqueue_fleet_cve_scans(
                 id, derivation_id, scanner_name, scanner_version,
                 status, total_packages, total_vulnerabilities,
                 critical_count, high_count, medium_count, low_count,
-                attempts
+                attempts, trigger_source
             )
             SELECT
                 gen_random_uuid(), t.derivation_id, $1, $2,
                 'pending', 0, 0,
                 0, 0, 0, 0,
-                0
+                0, 'manual'
             FROM targets t
             ON CONFLICT (derivation_id) WHERE status IN ('pending', 'in_progress')
             DO NOTHING
@@ -2924,10 +2928,16 @@ mod tests {
     async fn get_targets_needing_cve_scan_excludes_in_progress(pool: PgPool) {
         let (derivation_id, _) = setup_test_derivation(&pool).await;
 
-        let _scan_id = create_cve_scan(&pool, derivation_id, "vulnix", None)
-            .await
-            .expect("scan should be created")
-            .id();
+        let _scan_id = create_cve_scan(
+            &pool,
+            derivation_id,
+            "vulnix",
+            None,
+            CveScanTriggerSource::Manual,
+        )
+        .await
+        .expect("scan should be created")
+        .id();
 
         let targets = get_targets_needing_cve_scan(&pool, Some(10), &[], None)
             .await
@@ -2990,9 +3000,15 @@ mod tests {
         let already_active = setup_fleet_fixture(&pool).await;
         let available = setup_fleet_fixture(&pool).await;
 
-        create_cve_scan(&pool, already_active.running_id, "vulnix", None)
-            .await
-            .expect("one eligible target should already have an active scan");
+        create_cve_scan(
+            &pool,
+            already_active.running_id,
+            "vulnix",
+            None,
+            CveScanTriggerSource::Manual,
+        )
+        .await
+        .expect("one eligible target should already have an active scan");
 
         // An active scan unrelated to the fleet must not affect either outcome
         // count. This guards against the old test's broad assumption that the
@@ -3005,9 +3021,15 @@ mod tests {
         )
         .await
         .expect("unrelated derivation should be inserted");
-        create_cve_scan(&pool, unrelated.id, "vulnix", None)
-            .await
-            .expect("unrelated active scan should be inserted");
+        create_cve_scan(
+            &pool,
+            unrelated.id,
+            "vulnix",
+            None,
+            CveScanTriggerSource::Manual,
+        )
+        .await
+        .expect("unrelated active scan should be inserted");
 
         let before = get_fleet_cve_scan_targets(&pool)
             .await
@@ -3684,7 +3706,7 @@ mod tests {
         assert_eq!(status, "in_progress");
         assert!(revoked, "revocation must retain active-scan uniqueness");
         assert!(matches!(
-            create_cve_scan(&pool, derivation.id, "vulnix", Some("test".to_string()))
+            create_cve_scan(&pool, derivation.id, "vulnix", Some("test".to_string()), CveScanTriggerSource::Manual)
                 .await
                 .expect("replacement claim should observe the active revocation"),
             CreateCveScanOutcome::Existing(id) if id == scan_id
@@ -4264,10 +4286,16 @@ mod tests {
 
         // Create a scan, then strip its lease metadata to model a legacy row
         // from before execution tokens existed.
-        let scan_id = create_cve_scan(&pool, derivation_id, "vulnix", None)
-            .await
-            .expect("scan should be created")
-            .id();
+        let scan_id = create_cve_scan(
+            &pool,
+            derivation_id,
+            "vulnix",
+            None,
+            CveScanTriggerSource::Manual,
+        )
+        .await
+        .expect("scan should be created")
+        .id();
 
         // Artificially age the scan so it appears stale.
         sqlx::query(
@@ -4333,10 +4361,16 @@ mod tests {
             .await
             .expect("dedicated CVE test database should be reachable");
         let (derivation_id, _) = setup_test_derivation(&pool).await;
-        let scan_id = create_cve_scan(&pool, derivation_id, "vulnix", None)
-            .await
-            .expect("legacy scan fixture should be created")
-            .id();
+        let scan_id = create_cve_scan(
+            &pool,
+            derivation_id,
+            "vulnix",
+            None,
+            CveScanTriggerSource::Manual,
+        )
+        .await
+        .expect("legacy scan fixture should be created")
+        .id();
         sqlx::query(
             r#"
             UPDATE cve_scans
@@ -4546,9 +4580,15 @@ mod tests {
             .await
             .expect("dedicated CVE test database should be reachable");
         let (derivation_id, _) = setup_test_derivation(&pool).await;
-        let claim = match create_cve_scan(&pool, derivation_id, "vulnix", None)
-            .await
-            .expect("lock-owned scan should be created")
+        let claim = match create_cve_scan(
+            &pool,
+            derivation_id,
+            "vulnix",
+            None,
+            CveScanTriggerSource::Manual,
+        )
+        .await
+        .expect("lock-owned scan should be created")
         {
             CreateCveScanOutcome::Created(claim) => claim,
             CreateCveScanOutcome::Existing(_) => panic!("lock-owned scan must be new"),

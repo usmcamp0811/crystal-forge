@@ -718,6 +718,7 @@ pub async fn get_cve_scan_status(
             }
             .to_string(),
             scanner_name: scan.scanner_name,
+            trigger: scan.trigger_source,
             scheduled_at: scan.scheduled_at,
             completed_at: scan.completed_at,
             attempts: scan.attempts,

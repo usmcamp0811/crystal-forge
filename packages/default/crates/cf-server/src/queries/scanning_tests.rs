@@ -336,6 +336,7 @@ async fn scan_queue_normalizes_never_scanned_derivation() {
     assert_eq!(row.critical_count, 0);
     assert_eq!(row.high_count, 0);
     assert_eq!(row.medium_count, 0);
+    assert_eq!(row.trigger_source, None);
 }
 
 /// Ensures the system queue normalizes absent `cve_scans` values for a derivation.
@@ -357,4 +358,5 @@ async fn system_scan_queue_normalizes_never_scanned_derivation() {
     assert_eq!(row.critical_count, 0);
     assert_eq!(row.high_count, 0);
     assert_eq!(row.medium_count, 0);
+    assert_eq!(row.trigger_source, None);
 }

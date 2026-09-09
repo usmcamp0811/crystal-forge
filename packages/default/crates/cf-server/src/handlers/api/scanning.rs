@@ -103,7 +103,7 @@ fn scan_queue_row_to_response(
         freshness: r.freshness,
         is_current: r.is_current,
         is_latest_per_flake: r.is_latest_per_flake,
-        trigger: None,
+        trigger: r.trigger_source,
     }
 }
 

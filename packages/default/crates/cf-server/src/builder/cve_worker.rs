@@ -32,6 +32,7 @@ use crate::derivations::utils::{
 };
 use crate::log::{WorkerState, WorkerStatus, get_cve_status};
 use crate::models::cache_destination::CacheDestination;
+use crate::models::cve_scans::CveScanTriggerSource;
 use crate::queries::cache_destinations::get_cache_destination;
 use crate::queries::cve_scans::{
     CreateCveScanOutcome, CveScanExecutionClaim, acknowledge_revoked_cve_scan_execution,
@@ -515,6 +516,7 @@ async fn scan_cycle_with_runner<R: CveScanRunner + Sync>(
                         vulnix_runner,
                         vulnix_version.clone(),
                         derivation,
+                        CveScanTriggerSource::PostBuild,
                         enabled_rx,
                     )
                     .await
@@ -564,6 +566,7 @@ async fn scan_cycle_with_runner<R: CveScanRunner + Sync>(
                     vulnix_runner,
                     vulnix_version.clone(),
                     derivation,
+                    CveScanTriggerSource::Scheduled,
                     enabled_rx,
                 )
                 .await
@@ -621,6 +624,7 @@ async fn scan_one<R: CveScanRunner + Sync>(
     vulnix_runner: &R,
     vulnix_version: Option<String>,
     derivation: &crate::derivations::Derivation,
+    trigger_source: CveScanTriggerSource,
     enabled_rx: &tokio::sync::RwLock<bool>,
 ) -> Result<()> {
     set_cve_status_working(&format!("scanning {}", derivation.derivation_name)).await;
@@ -644,8 +648,14 @@ async fn scan_one<R: CveScanRunner + Sync>(
             return Ok(());
         }
 
-        let scan_claim =
-            create_cve_scan(pool, derivation.id, "vulnix", vulnix_version.clone()).await?;
+        let scan_claim = create_cve_scan(
+            pool,
+            derivation.id,
+            "vulnix",
+            vulnix_version.clone(),
+            trigger_source,
+        )
+        .await?;
         // Release the guard as soon as the claim is committed.  From here the
         // scan is authorized and runs to completion even if disable fires later.
         drop(enabled_guard);
@@ -1497,9 +1507,15 @@ mod tests {
         .execute(&pool)
         .await
         .expect("completed cache push should be inserted");
-        let claim = match create_cve_scan(&pool, derivation.id, "vulnix", None)
-            .await
-            .expect("recorded-path scan should be created")
+        let claim = match create_cve_scan(
+            &pool,
+            derivation.id,
+            "vulnix",
+            None,
+            CveScanTriggerSource::Manual,
+        )
+        .await
+        .expect("recorded-path scan should be created")
         {
             CreateCveScanOutcome::Created(claim) => claim,
             CreateCveScanOutcome::Existing(_) => panic!("recorded-path scan must be new"),
@@ -2145,9 +2161,15 @@ mod tests {
         let derivation = crate::queries::derivations::get_derivation_by_id(&pool, derivation.id)
             .await
             .expect("handoff derivation should reload");
-        let claim = match create_cve_scan(&pool, derivation.id, "vulnix", None)
-            .await
-            .expect("handoff claim should be created")
+        let claim = match create_cve_scan(
+            &pool,
+            derivation.id,
+            "vulnix",
+            None,
+            CveScanTriggerSource::Manual,
+        )
+        .await
+        .expect("handoff claim should be created")
         {
             CreateCveScanOutcome::Created(claim) => claim,
             CreateCveScanOutcome::Existing(_) => panic!("handoff claim must be new"),
@@ -2190,7 +2212,7 @@ mod tests {
             1
         );
         assert!(matches!(
-            create_cve_scan(&pool, derivation.id, "vulnix", None)
+            create_cve_scan(&pool, derivation.id, "vulnix", None, CveScanTriggerSource::Manual)
                 .await
                 .expect("replacement probe should succeed"),
             CreateCveScanOutcome::Existing(id) if id == claim.scan_id
@@ -2204,9 +2226,15 @@ mod tests {
         assert!(error.to_string().contains("lost execution ownership"));
         assert_eq!(runner.calls.load(Ordering::SeqCst), 0);
 
-        let replacement = match create_cve_scan(&pool, derivation.id, "vulnix", None)
-            .await
-            .expect("replacement claim should be created after acknowledgment")
+        let replacement = match create_cve_scan(
+            &pool,
+            derivation.id,
+            "vulnix",
+            None,
+            CveScanTriggerSource::Manual,
+        )
+        .await
+        .expect("replacement claim should be created after acknowledgment")
         {
             CreateCveScanOutcome::Created(claim) => claim,
             CreateCveScanOutcome::Existing(_) => panic!("replacement must be new"),
@@ -2287,6 +2315,7 @@ mod tests {
                 &first_runner,
                 Some("test".to_string()),
                 &first_derivation,
+                CveScanTriggerSource::Manual,
                 &first_enabled,
             )
             .await
@@ -2413,6 +2442,7 @@ mod tests {
                 &second_runner,
                 Some("test".to_string()),
                 &second_derivation,
+                CveScanTriggerSource::Manual,
                 &second_enabled,
             )
             .await
@@ -2703,9 +2733,15 @@ mod tests {
         .await
         .expect("test derivation should be inserted");
 
-        let claim = create_cve_scan(&pool, derivation.id, "test-vulnix", None)
-            .await
-            .expect("execution claim should be created");
+        let claim = create_cve_scan(
+            &pool,
+            derivation.id,
+            "test-vulnix",
+            None,
+            CveScanTriggerSource::Manual,
+        )
+        .await
+        .expect("execution claim should be created");
         let CreateCveScanOutcome::Created(claim) = claim else {
             panic!("expected a newly created execution claim");
         };

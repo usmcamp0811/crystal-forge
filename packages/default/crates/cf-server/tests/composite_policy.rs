@@ -13,6 +13,7 @@ use crystal_forge::compliance::xccdf::export_models::{XccdfBundleExport, XccdfPo
 use crystal_forge::compliance::xccdf::importer::validate_cf_native_document;
 use crystal_forge::compliance::xccdf::package::process_xccdf_bytes;
 use crystal_forge::compliance::xccdf::xml_writer::write_bundle_xccdf_export;
+use crystal_forge::models::cve_scans::CveScanTriggerSource;
 use crystal_forge::models::deployment_policies::{
     AssignedPolicy, CompositePolicyConfig, CompositeRuleOutcome, CreateDeploymentPolicyRequest,
     DeploymentPolicy, EnforcementOutcome, EnforcementPhase, PolicyCheckResult,
@@ -1042,9 +1043,15 @@ async fn created_scan(
     derivation_id: i32,
     scanner_name: &str,
 ) -> CveScanExecutionClaim {
-    match create_cve_scan(pool, derivation_id, scanner_name, None)
-        .await
-        .unwrap()
+    match create_cve_scan(
+        pool,
+        derivation_id,
+        scanner_name,
+        None,
+        CveScanTriggerSource::Manual,
+    )
+    .await
+    .unwrap()
     {
         CreateCveScanOutcome::Created(claim) => claim,
         CreateCveScanOutcome::Existing(scan_id) => {
@@ -2547,10 +2554,16 @@ async fn assessment_identity_rejects_mismatched_derivation_path_and_duplicate_co
     .await;
     assert!(duplicate.is_err());
 
-    let scan_id = create_cve_scan(&pool, context.derivation_id, "test", None)
-        .await
-        .unwrap()
-        .id();
+    let scan_id = create_cve_scan(
+        &pool,
+        context.derivation_id,
+        "test",
+        None,
+        CveScanTriggerSource::Manual,
+    )
+    .await
+    .unwrap()
+    .id();
     let (scan_order,): (i64,) =
         sqlx::query_as("SELECT composite_phase_order FROM cve_scans WHERE id = $1")
             .bind(scan_id)
@@ -2737,9 +2750,15 @@ async fn stale_finalization_and_owner_acknowledgment_never_deadlock(pool: PgPool
 async fn scan_result_persistence_locks_poam_before_the_scan_row(pool: PgPool) {
     let context = assessment_context(&pool).await;
     persist_evaluation(&pool, &context, EnforcementOutcome::Pass).await;
-    let claim = match create_cve_scan(&pool, context.derivation_id, "vulnix", None)
-        .await
-        .unwrap()
+    let claim = match create_cve_scan(
+        &pool,
+        context.derivation_id,
+        "vulnix",
+        None,
+        CveScanTriggerSource::Manual,
+    )
+    .await
+    .unwrap()
     {
         CreateCveScanOutcome::Created(claim) => claim,
         CreateCveScanOutcome::Existing(_) => panic!("fixture scan must be newly created"),

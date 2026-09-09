@@ -1,4 +1,5 @@
 use crate::config::CrystalForgeConfig;
+use crate::models::cve_scans::CveScanTriggerSource;
 use crate::queries::cve_scans::{
     CreateCveScanOutcome, acknowledge_revoked_cve_scan_execution, acquire_execution_lock,
     create_cve_scan, get_active_scan_for_derivation, heartbeat_cve_scan_execution,
@@ -124,9 +125,15 @@ where
     R: ImmediateCveScanRunner,
     F: FnOnce() -> R + Send + 'static,
 {
-    let scan_claim = create_cve_scan(&pool, derivation_id, "vulnix", vulnix_version.clone())
-        .await
-        .map_err(CveScanError::Internal)?;
+    let scan_claim = create_cve_scan(
+        &pool,
+        derivation_id,
+        "vulnix",
+        vulnix_version.clone(),
+        CveScanTriggerSource::Manual,
+    )
+    .await
+    .map_err(CveScanError::Internal)?;
     let claim = match scan_claim {
         CreateCveScanOutcome::Created(claim) => claim,
         CreateCveScanOutcome::Existing(scan_id) => return Ok(scan_id),

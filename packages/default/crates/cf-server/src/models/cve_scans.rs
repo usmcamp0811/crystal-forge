@@ -21,7 +21,35 @@ pub struct CveScan {
     pub low_count: i32,
     pub scan_duration_ms: Option<i32>,
     pub scan_metadata: Option<serde_json::Value>,
+    /// Immutable attribution for the request that created this scan, or `None`
+    /// for legacy rows whose source is unknown.
+    pub trigger_source: Option<String>,
     pub created_at: Option<DateTime<Utc>>, // let Postgres default it
+}
+
+/// Identifies the first-party reason for creating a new CVE scan.
+///
+/// Persisted values are read as [`Option<String>`] so legacy `NULL` values and
+/// future trigger values remain representable without a decode failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CveScanTriggerSource {
+    /// A user explicitly requested the scan.
+    Manual,
+    /// The scan was created for a newly completed build.
+    PostBuild,
+    /// The scan was created by periodic or stale-rescan processing.
+    Scheduled,
+}
+
+impl CveScanTriggerSource {
+    /// Returns the stable database value for this trigger source.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::PostBuild => "post-build",
+            Self::Scheduled => "scheduled",
+        }
+    }
 }
 
 impl CveScan {
@@ -45,6 +73,7 @@ impl CveScan {
             low_count: 0,
             scan_duration_ms: None,
             scan_metadata: None,
+            trigger_source: None,
             created_at: Some(now),
         }
     }

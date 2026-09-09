@@ -1,5 +1,7 @@
+use crate::models::cve_scans::CveScanTriggerSource;
 use crate::queries::cve_scans::{
-    CreateCveScanOutcome, create_cve_scan, save_scan_results_with_store_path_override,
+    CreateCveScanOutcome, create_cve_scan, get_scan_by_id,
+    save_scan_results_with_store_path_override,
 };
 use crate::queries::derivations::insert_derivation;
 use crate::vulnix::vulnix_parser::VulnixEntry;
@@ -58,9 +60,15 @@ async fn save_scan_results_truncates_overlong_package_version() {
         .await
         .expect("should insert target derivation");
 
-    let claim = create_cve_scan(&pool, target.id, "vulnix", Some("test".to_string()))
-        .await
-        .expect("should create cve scan");
+    let claim = create_cve_scan(
+        &pool,
+        target.id,
+        "vulnix",
+        Some("test".to_string()),
+        CveScanTriggerSource::Manual,
+    )
+    .await
+    .expect("should create cve scan");
     let CreateCveScanOutcome::Created(claim) = claim else {
         panic!("test derivation should receive a new execution claim");
     };
@@ -113,16 +121,36 @@ async fn create_cve_scan_reuses_existing_active_scan() {
         .await
         .expect("should insert target derivation");
 
-    let first = create_cve_scan(&pool, target.id, "vulnix", Some("test".to_string()))
-        .await
-        .expect("first claim should succeed");
-    let second = create_cve_scan(&pool, target.id, "vulnix", Some("test".to_string()))
-        .await
-        .expect("second claim should return existing active scan");
+    let first = create_cve_scan(
+        &pool,
+        target.id,
+        "vulnix",
+        Some("test".to_string()),
+        CveScanTriggerSource::Manual,
+    )
+    .await
+    .expect("first claim should succeed");
+    let second = create_cve_scan(
+        &pool,
+        target.id,
+        "vulnix",
+        Some("test".to_string()),
+        CveScanTriggerSource::Scheduled,
+    )
+    .await
+    .expect("second claim should return existing active scan");
 
     assert!(matches!(first, CreateCveScanOutcome::Created(_)));
     assert!(matches!(second, CreateCveScanOutcome::Existing(_)));
     assert_eq!(first.id(), second.id());
+
+    let stored_trigger: Option<String> =
+        sqlx::query_scalar("SELECT trigger_source FROM cve_scans WHERE id = $1")
+            .bind(first.id())
+            .fetch_one(&pool)
+            .await
+            .expect("scan trigger source should be readable");
+    assert_eq!(stored_trigger.as_deref(), Some("manual"));
 
     let CreateCveScanOutcome::Created(first_claim) = first else {
         unreachable!("the first atomic claim was asserted to be newly created");
@@ -168,6 +196,56 @@ async fn create_cve_scan_reuses_existing_active_scan() {
         .expect("active-scan derivation should be deleted");
 }
 
+#[tokio::test]
+async fn scan_trigger_source_preserves_legacy_null_and_unknown_values() {
+    let Some(pool) = test_pool_from_env().await else {
+        return;
+    };
+    let target = insert_derivation(&pool, None, "task-337-trigger-round-trip", "nixos")
+        .await
+        .expect("target derivation should be inserted");
+    let CreateCveScanOutcome::Created(claim) = create_cve_scan(
+        &pool,
+        target.id,
+        "vulnix",
+        None,
+        CveScanTriggerSource::Manual,
+    )
+    .await
+    .expect("scan should be created") else {
+        panic!("test derivation should receive a new execution claim");
+    };
+
+    sqlx::query("UPDATE cve_scans SET trigger_source = NULL WHERE id = $1")
+        .bind(claim.scan_id)
+        .execute(&pool)
+        .await
+        .expect("legacy trigger value should be writable");
+    assert_eq!(
+        get_scan_by_id(&pool, claim.scan_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .trigger_source,
+        None
+    );
+
+    sqlx::query("UPDATE cve_scans SET trigger_source = 'future-trigger' WHERE id = $1")
+        .bind(claim.scan_id)
+        .execute(&pool)
+        .await
+        .expect("unknown trigger value should be writable");
+    assert_eq!(
+        get_scan_by_id(&pool, claim.scan_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .trigger_source
+            .as_deref(),
+        Some("future-trigger")
+    );
+}
+
 /// Ensures duplicate vulnix observations do not send duplicate package/CVE
 /// conflict keys to the bulk `package_vulnerabilities` upsert.
 #[tokio::test]
@@ -184,11 +262,15 @@ async fn save_scan_results_merges_duplicate_package_cve_observations() {
     )
     .await
     .expect("target derivation should be inserted");
-    let CreateCveScanOutcome::Created(claim) =
-        create_cve_scan(&pool, target.id, "vulnix", Some("test".to_string()))
-            .await
-            .expect("scan should be created")
-    else {
+    let CreateCveScanOutcome::Created(claim) = create_cve_scan(
+        &pool,
+        target.id,
+        "vulnix",
+        Some("test".to_string()),
+        CveScanTriggerSource::Manual,
+    )
+    .await
+    .expect("scan should be created") else {
         panic!("new target should receive an execution claim");
     };
 
@@ -307,6 +389,7 @@ async fn save_scan_results_sets_fleet_relevant_since_atomically_with_cve_attenti
         nixos_derivation_id,
         "vulnix",
         Some("test".to_string()),
+        CveScanTriggerSource::Manual,
     )
     .await
     .expect("create scan");

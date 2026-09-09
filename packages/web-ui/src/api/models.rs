@@ -581,7 +581,7 @@ pub struct ScanningQueueItemResponse {
     /// True when this derivation's commit is the latest known commit for its flake.
     #[serde(default)]
     pub is_latest_per_flake: bool,
-    /// Scan trigger source (not yet tracked server-side).
+    /// Persisted source that created this scan. `None` means legacy or unknown.
     #[serde(default)]
     pub trigger: Option<String>,
 }
@@ -3181,6 +3181,9 @@ pub struct CveScanStatusResponse {
     pub derivation_id: i32,
     pub status: String,
     pub scanner_name: String,
+    /// Persisted source that created this scan. `None` means legacy or unknown.
+    #[serde(default)]
+    pub trigger: Option<String>,
     pub scheduled_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
     pub attempts: i32,
