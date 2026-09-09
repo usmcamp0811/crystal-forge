@@ -201,9 +201,14 @@ async fn scan_trigger_source_preserves_legacy_null_and_unknown_values() {
     let Some(pool) = test_pool_from_env().await else {
         return;
     };
-    let target = insert_derivation(&pool, None, "task-337-trigger-round-trip", "nixos")
-        .await
-        .expect("target derivation should be inserted");
+    let target = insert_derivation(
+        &pool,
+        None,
+        &format!("task-337-trigger-round-trip-{}", Uuid::new_v4()),
+        "nixos",
+    )
+    .await
+    .expect("target derivation should be inserted");
     let CreateCveScanOutcome::Created(claim) = create_cve_scan(
         &pool,
         target.id,
@@ -244,6 +249,17 @@ async fn scan_trigger_source_preserves_legacy_null_and_unknown_values() {
             .as_deref(),
         Some("future-trigger")
     );
+
+    sqlx::query("DELETE FROM cve_scans WHERE derivation_id = $1")
+        .bind(target.id)
+        .execute(&pool)
+        .await
+        .expect("trigger-source fixture scan should be deleted");
+    sqlx::query("DELETE FROM derivations WHERE id = $1")
+        .bind(target.id)
+        .execute(&pool)
+        .await
+        .expect("trigger-source fixture derivation should be deleted");
 }
 
 /// Ensures duplicate vulnix observations do not send duplicate package/CVE

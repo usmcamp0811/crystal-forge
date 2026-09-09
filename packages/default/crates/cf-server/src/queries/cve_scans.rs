@@ -1358,6 +1358,7 @@ pub async fn get_scan_by_id(pool: &PgPool, scan_id: Uuid) -> Result<Option<CveSc
             low_count,
             scan_duration_ms,
             scan_metadata,
+            trigger_source,
             created_at
         FROM cve_scans
         WHERE id = $1

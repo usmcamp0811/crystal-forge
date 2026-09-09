@@ -189,6 +189,56 @@ async fn cleanup_never_scanned_system_fixture(pool: &PgPool, system_id: Uuid, de
         .expect("never-scanned derivation should be deleted");
 }
 
+async fn insert_scan_backed_system_fixture(pool: &PgPool) -> (Uuid, String, i32, Uuid) {
+    let (system_id, hostname, derivation_id) = insert_never_scanned_system_fixture(pool).await;
+    let store_path = format!("/nix/store/scan-backed-{}", Uuid::new_v4().simple());
+    sqlx::query("UPDATE derivations SET derivation_path = $1, store_path = $2 WHERE id = $3")
+        .bind(format!("{store_path}.drv"))
+        .bind(&store_path)
+        .bind(derivation_id)
+        .execute(pool)
+        .await
+        .expect("scan-backed derivation should be updated");
+    sqlx::query(
+        "INSERT INTO system_states (hostname, store_path, change_reason) VALUES ($1, $2, 'startup')",
+    )
+    .bind(&hostname)
+    .bind(&store_path)
+    .execute(pool)
+    .await
+    .expect("scan-backed system state should be inserted");
+    let scan_id: Uuid = sqlx::query_scalar(
+        r#"
+        INSERT INTO cve_scans (
+            derivation_id, scanner_name, status, completed_at,
+            total_packages, total_vulnerabilities, critical_count,
+            high_count, medium_count, low_count, trigger_source
+        )
+        VALUES ($1, 'test', 'completed', NOW(), 1, 1, 0, 1, 0, 0, 'manual')
+        RETURNING id
+        "#,
+    )
+    .bind(derivation_id)
+    .fetch_one(pool)
+    .await
+    .expect("scan-backed fixture should be inserted");
+    (system_id, hostname, derivation_id, scan_id)
+}
+
+async fn cleanup_scan_backed_system_fixture(
+    pool: &PgPool,
+    system_id: Uuid,
+    derivation_id: i32,
+    scan_id: Uuid,
+) {
+    sqlx::query("DELETE FROM cve_scans WHERE id = $1")
+        .bind(scan_id)
+        .execute(pool)
+        .await
+        .expect("scan-backed fixture scan should be deleted");
+    cleanup_never_scanned_system_fixture(pool, system_id, derivation_id).await;
+}
+
 async fn insert_waiting_stats_derivation(pool: &PgPool, name: &str) -> i32 {
     sqlx::query_scalar(
         r#"
@@ -359,4 +409,41 @@ async fn system_scan_queue_normalizes_never_scanned_derivation() {
     assert_eq!(row.high_count, 0);
     assert_eq!(row.medium_count, 0);
     assert_eq!(row.trigger_source, None);
+}
+
+/// Ensures every scan-backed scanning projection returns the persisted source.
+#[tokio::test]
+#[ignore = "requires live database connection"]
+#[serial(scan_trigger_source)]
+async fn scan_queue_projections_return_persisted_trigger_source() {
+    let pool = test_pool_from_env().await;
+    let (system_id, hostname, derivation_id, scan_id) =
+        insert_scan_backed_system_fixture(&pool).await;
+
+    let queue = get_scan_queue(&pool, 500).await;
+    let deployed = get_scan_deployed(&pool, 500, None).await;
+    let system_queue = get_scan_queue_for_system(&pool, system_id, 500).await;
+    cleanup_scan_backed_system_fixture(&pool, system_id, derivation_id, scan_id).await;
+
+    let queue_row = queue
+        .expect("queue query should return")
+        .into_iter()
+        .find(|row| row.hostname == hostname)
+        .expect("queue should include scan-backed derivation");
+    assert_eq!(queue_row.trigger_source.as_deref(), Some("manual"));
+
+    let deployed_row = deployed
+        .expect("deployed query should return")
+        .rows
+        .into_iter()
+        .find(|row| row.hostname == hostname)
+        .expect("deployed queue should include scan-backed derivation");
+    assert_eq!(deployed_row.trigger_source.as_deref(), Some("manual"));
+
+    let system_row = system_queue
+        .expect("system queue query should return")
+        .into_iter()
+        .find(|row| row.hostname == hostname)
+        .expect("system queue should include scan-backed derivation");
+    assert_eq!(system_row.trigger_source.as_deref(), Some("manual"));
 }
