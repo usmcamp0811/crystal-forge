@@ -101,8 +101,12 @@ pub fn UpdatePublicKeyModal(
                     }
                     textarea {
                         class: "w-full px-3 py-2 bg-gray-950 border border-gray-700 rounded {theme::text::PRIMARY} font-mono text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent",
+                        "data-testid": "update-public-key-input",
                         rows: 4,
-                        placeholder: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA...",
+                        // The endpoint takes the bare base64 agent key, never an
+                        // OpenSSH-armored key. Advertising `ssh-ed25519 …` here
+                        // guaranteed a rejected paste (TASK-435).
+                        placeholder: "Base64-encoded Ed25519 public key",
                         value: "{new_public_key}",
                         disabled: in_flight,
                         oninput: move |evt| {
@@ -112,7 +116,8 @@ pub fn UpdatePublicKeyModal(
                     }
                     p {
                         class: "mt-1 text-xs {theme::text::MUTED}",
-                        "Paste the base64-encoded Ed25519 public key"
+                        "data-testid": "update-public-key-format-help",
+                        "Paste the bare base64 Ed25519 public key (32 bytes decoded). An ssh-ed25519 prefix, OpenSSH armor, or trailing comment is not accepted."
                     }
                 }
 

@@ -6347,11 +6347,37 @@ const steps = [
         const updateModal = page.getByTestId("update-public-key-modal");
         await assertVisible(updateModal, "Expected Update Public Key modal", 10000);
 
+        // TASK-435: this endpoint takes the bare base64 agent key. The modal
+        // used to advertise an `ssh-ed25519 …` placeholder, which the shared
+        // validator and the server both reject, so assert the advertised format
+        // contract directly instead of scanning the page for a substring.
+        const keyInput = updateModal.getByTestId("update-public-key-input");
+        await assertVisible(keyInput, "Expected the Update Key public-key input", 10000);
+        const placeholder = (await keyInput.getAttribute("placeholder")) || "";
+        if (/ssh-ed25519/i.test(placeholder)) {
+          throw new Error(
+            `Update Key placeholder must not advertise the rejected OpenSSH format, got: ${placeholder}`,
+          );
+        }
+        if (!/base64/i.test(placeholder) || !/ed25519/i.test(placeholder)) {
+          throw new Error(
+            `Update Key placeholder must describe the base64 Ed25519 format, got: ${placeholder}`,
+          );
+        }
+        const formatHelp =
+          (
+            await updateModal.getByTestId("update-public-key-format-help").textContent()
+          )?.trim() || "";
+        // The help may name the OpenSSH form only to reject it, so assert the
+        // rejection rather than the absence of the term.
+        if (!/base64/i.test(formatHelp) || !/not accepted/i.test(formatHelp)) {
+          throw new Error(
+            `Update Key help must state the accepted base64 format and reject OpenSSH, got: ${formatHelp}`,
+          );
+        }
+
         const validPublicKey = generateAgentPublicKey();
-        await fillDioxusInput(
-          updateModal.locator("textarea").first(),
-          validPublicKey,
-        );
+        await fillDioxusInput(keyInput, validPublicKey);
         await updateModal.getByRole("button", { name: "Update Key", exact: true }).click();
         await updateModal
           .waitFor({ state: "hidden", timeout: 10000 })
