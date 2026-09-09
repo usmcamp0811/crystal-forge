@@ -758,14 +758,18 @@ fn write_custom_check(
     let rules = pv.config.get("rules").and_then(|v| v.as_array());
     let has_rules = rules.map(|r| !r.is_empty()).unwrap_or(false);
 
-    let mode = pv
-        .config
-        .get("mode")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| XccdfWriterError::MissingConfig {
-            policy_type: pv.policy_type.clone(),
-            field: "mode",
-        })?;
+    // COMPATIBILITY: Legacy single-expression policies predate `mode`.
+    // Project the runtime default into XCCDF without changing stored config or
+    // its semantic digest.
+    let mode = match pv.config.get("mode") {
+        None => "all",
+        Some(value) => value
+            .as_str()
+            .ok_or_else(|| XccdfWriterError::MissingConfig {
+                policy_type: pv.policy_type.clone(),
+                field: "mode",
+            })?,
+    };
     if !matches!(mode, "all" | "any") {
         return Err(XccdfWriterError::MissingConfig {
             policy_type: pv.policy_type.clone(),
@@ -2139,28 +2143,36 @@ mod tests {
     }
 
     #[test]
-    fn custom_check_single_expression() {
-        let pv = test_policy(
-            "custom_check",
-            ImplementationState::Native,
-            json!({
-                "expression": "cfg.config.networking.firewall.enable",
-                "description": "Firewall enabled",
-                "field_name": "firewallEnabled",
-                "strict": true,
-                "mode": "all",
-                "context": "nixos-configuration-v1",
-                "binding": "cfg"
-            }),
-        );
+    fn custom_check_legacy_expression_without_mode_exports_one_rule_as_all() {
+        let config = json!({
+            "expression": "cfg.config.networking.firewall.enable",
+            "description": "Firewall enabled",
+            "field_name": "firewallEnabled",
+            "strict": true,
+            "context": "nixos-configuration-v1",
+            "binding": "cfg"
+        });
+        let pv = test_policy("custom_check", ImplementationState::Native, config.clone());
+        let expected_digest = pv.semantic_digest.clone();
         let snap = make_single_policy_snapshot(vec![pv]);
         let xml = write_bundle_xccdf_export(&snap).unwrap();
-        assert!(xml.contains("cf:custom-check"));
-        assert!(xml.contains("cf:rule"));
-        assert!(xml.contains("cf:expression"));
-        assert!(xml.contains("language=\"nix\""));
-        assert!(xml.contains("cfg.config.networking.firewall.enable"));
-        assert!(xml.contains("firewallEnabled"));
+        assert!(xml.contains("<cf:custom-check mode=\"all\""));
+        assert_eq!(xml.matches("<cf:rule ").count(), 1);
+        assert!(xml.contains("field-name=\"firewallEnabled\""));
+        assert!(xml.contains("strict=\"true\""));
+        assert!(xml.contains(
+            "<cf:expression language=\"nix\">cfg.config.networking.firewall.enable</cf:expression>"
+        ));
+
+        let parsed = parse_xccdf(
+            xml.as_bytes(),
+            Some("legacy-custom-check.xml"),
+            &InterchangeLimits::default(),
+        )
+        .unwrap();
+        let metadata = parsed.rules[0].cf_policy_meta.as_ref().unwrap();
+        assert_eq!(metadata.config.as_ref(), Some(&config));
+        assert_eq!(metadata.digest.as_deref(), Some(expected_digest.as_str()));
     }
 
     #[test]
@@ -2188,6 +2200,26 @@ mod tests {
     }
 
     #[test]
+    fn custom_check_multi_rule_without_mode_defaults_to_all() {
+        let pv = test_policy(
+            "custom_check",
+            ImplementationState::Native,
+            json!({
+                "context": "nixos-configuration-v1",
+                "binding": "cfg",
+                "rules": [
+                    {"expression": "a", "field_name": "a", "strict": true},
+                    {"expression": "b", "field_name": "b", "strict": false}
+                ]
+            }),
+        );
+        let xml = write_bundle_xccdf_export(&make_single_policy_snapshot(vec![pv])).unwrap();
+
+        assert!(xml.contains("<cf:custom-check mode=\"all\""));
+        assert_eq!(xml.matches("<cf:rule ").count(), 2);
+    }
+
+    #[test]
     fn custom_check_multi_rule_any() {
         let pv = test_policy(
             "custom_check",
@@ -2202,6 +2234,27 @@ mod tests {
         let snap = make_single_policy_snapshot(vec![pv]);
         let xml = write_bundle_xccdf_export(&snap).unwrap();
         assert!(xml.contains("mode=\"any\""));
+    }
+
+    #[test]
+    fn custom_check_non_string_mode_is_rejected() {
+        let pv = test_policy(
+            "custom_check",
+            ImplementationState::Native,
+            json!({
+                "mode": false,
+                "context": "nixos-configuration-v1",
+                "binding": "cfg",
+                "expression": "true",
+                "field_name": "enabled",
+                "strict": true
+            }),
+        );
+
+        assert!(matches!(
+            write_bundle_xccdf_export(&make_single_policy_snapshot(vec![pv])),
+            Err(XccdfWriterError::MissingConfig { field: "mode", .. })
+        ));
     }
 
     #[test]
