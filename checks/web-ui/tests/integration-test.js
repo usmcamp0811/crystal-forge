@@ -4894,9 +4894,12 @@ async function runTask440LiveSnapshotEvaluation(page) {
     }
 
     if (controlsConfigWorker) {
+      // The serial worker must start with only this fixture's target. Other
+      // systems can enqueue same-commit jobs and consume the readiness budget.
       runFixtureSql(`
         DELETE FROM config_inspection_jobs
-        WHERE commit_id <> ${Number(fixture.commitId)};
+        WHERE commit_id <> ${Number(fixture.commitId)}
+           OR configuration_name <> '${fixture.configurationName}';
       `);
       execFileSync("systemctl", ["start", "crystal-forge-config-inspector.service"]);
     }
