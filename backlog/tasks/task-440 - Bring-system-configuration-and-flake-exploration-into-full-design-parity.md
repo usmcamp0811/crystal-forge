@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-08 22:58'
+updated_date: '2026-09-09 00:57'
 labels:
   - design-parity
   - web-ui
@@ -155,6 +155,8 @@ Finish-line V2 Config API slice from accepted service commit 1ccee7cf: (1) confi
 Public-contract clarification approved on 2026-09-08: preserve V2 missing/failure states by widening only existing Config DTO fields. Change definition and module source paths plus declared type to `Option<String>`; add optional `metadata_error`; change `overridden` to `Option<bool>`. V1 mappings wrap known values in `Some`. Mirror fields in the Web UI, render placeholders only in Dioxus, disable source-path interaction when absent, audit this adapter for lossy coercions, and add exact JSON/deserialization regressions before resuming the existing finish-line gates.
 
 Focused Web UI VM verification exposed a test-harness environment propagation defect: the driver sets the real git fixture variables only in its own process, while the browser Node process runs inside the machine without them and falls back to example.invalid. Pass the existing real repository, commit, and configuration fixture values into the browser process, then rerun the exact seven TASK-440 workflows before broad gates. This is test-only and does not change product behavior.
+
+Focused correction pass from exact HEAD `4ad7490e881e2a457b2fb6be95758392fd7af45a`: keep V2 selection/token/count/total authority in the existing read-only repeatable-read transaction; change the production V2 page query to select and order only narrow selected/baseline identities and digests before LIMIT/OFFSET; fetch at most the distinct selected/baseline payload digests referenced by the bounded page in a second query inside the same transaction; decode and resolve tracked provenance only for returned rows. Preserve global search through redacted `search_text`, digest-based Changed semantics including removed baseline rows, fail-closed missing/malformed page payloads, and unit-separator/C-collation ordering. Add adversarial ordering and production-scale ~15,000-option PostgreSQL regressions with All/Overridden/Changed/search/token/side-effect assertions, hydration bounds, practical measurements, and EXPLAIN evidence. No migration, V1 fallback, generation-mode change, UI workaround, timeout increase, integration change, rebase, merge, or deployment. Run focused DB checks, offline cargo lib/all-target checks, format/diff checks, architecture guards, 12l alone, 12l/12m/12n together, server-regressions, then one broad Web UI check. Commit only if all TASK-440-attributable requirements pass.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
