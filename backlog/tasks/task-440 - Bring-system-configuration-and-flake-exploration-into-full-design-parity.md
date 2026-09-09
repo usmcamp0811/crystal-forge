@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-09 02:45'
+updated_date: '2026-09-09 02:46'
 labels:
   - design-parity
   - web-ui
@@ -30,6 +30,7 @@ references:
   - git commit 1ccee7cf6aa59c3dc66f80ba02ed0817d2c0c9ba
   - git commit 4ad7490e881e2a457b2fb6be95758392fd7af45a
   - TASK-461
+  - git commit 3a95b2b973ca9050c1d28dffd47357ae7a109bfa
 documentation:
   - docs/design/CrystalForge/app.jsx
   - docs/design/CrystalForge/components/SystemDetail.jsx
@@ -184,6 +185,8 @@ Starting bounded V2 Config summary and module-source DB-only reader slice from d
 2026-09-08 finish-line Config API/UI slice committed and pushed as `4ad7490e881e2a457b2fb6be95758392fd7af45a` with message `TASK-440: Serve Config Inspector V2 artifacts`. Local HEAD, `origin/TASK-440-system-config-flake-parity`, the public GitLab branch API, and MR !323 `diff_refs.head_sha` all match that exact SHA. MR !323 is open, targets `dev`, has no conflicts, and GitLab reports `detailed_merge_status: ci_still_running`. The public MR pipelines endpoint currently returns an empty list; authenticated `glab mr view` could not inspect job details because the stored OAuth grant is expired. The task remains In Progress because AC #24 and AC #27 are not proven. No merge or deployment was performed.
 
 2026-09-09 bounded V2 Config page correction verification: The production reader now selects narrow V2 identities and selected/baseline digests before LIMIT/OFFSET, hydrates only distinct page payloads in the same read-only repeatable-read transaction, and reuses revision-global counts for unsearched totals. The 15,000-option PostgreSQL regression measured page zero at 121.441 ms, next page at 129.130 ms, Changed at 91.599 ms, and out-of-page search at 408.710 ms, versus approximately 4 seconds before the final total-query optimization. A 25-row Changed page hydrated 49 distinct digests; EXPLAIN showed a 5.488 ms bounded identity query with no evaluation_option_contents access and a 0.178 ms primary-key hydration query. All 10 focused V2 reader PostgreSQL tests passed. Offline cf-server lib and all-target checks, cargo fmt, git diff check, config-inspector, evaluator-snapshot-isolation, 12l alone, 12l/12m/12n together, and server-regressions passed with existing warnings. The one required broad web-ui run failed after many unrelated state-leak failures; its 12l instance also failed to select a V2 snapshot after both inspection jobs had succeeded, although 12l passed in both isolated runs. Recorded the broad harness isolation defect as TASK-461 and made no out-of-scope harness change. AC #24 and #27 remain unchecked.
+
+2026-09-09 correction committed and pushed as `3a95b2b973ca9050c1d28dffd47357ae7a109bfa` with message `TASK-440: Bound Config option page reads`. The worktree is clean. Local HEAD, the local remote-tracking ref, `git ls-remote`, the public GitLab MR API SHA, and MR !323 `diff_refs.head_sha` all match. MR !323 remains open against `dev`, with no merge or deployment performed. TASK-440 remains In Progress; AC #24 and #27 remain unchecked.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
