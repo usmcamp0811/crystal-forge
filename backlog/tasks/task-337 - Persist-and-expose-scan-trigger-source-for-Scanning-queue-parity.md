@@ -4,7 +4,7 @@ title: Persist and expose scan trigger source for Scanning queue parity
 status: To Do
 assignee: []
 created_date: '2026-06-01 02:01'
-updated_date: '2026-06-01 02:02'
+updated_date: '2026-09-09 03:32'
 labels:
   - backend
   - scanning
@@ -18,6 +18,10 @@ references:
   - packages/default/src/handlers/api/scanning.rs
   - packages/default/src/api/models.rs
   - packages/web-ui/src/api/models.rs
+  - git commit e1b7434899e23f43770632e59d80a76a8fc8459e
+documentation:
+  - docs/design/CrystalForge/components/ScanningView.jsx
+  - docs/design/CrystalForge/data-scanning.js
 modified_files:
   - packages/default/migrations
   - packages/default/src/queries/scanning.rs
@@ -85,6 +89,8 @@ Medium — touches DB schema and multiple scan write paths; risk is incorrect or
 - [ ] #3 Manual, scheduled, and on-build scan paths set an appropriate trigger value
 - [ ] #4 Query/handler tests cover trigger mapping
 - [ ] #5 SQLx metadata is regenerated and committed when required
+- [ ] #6 Trigger values use one documented canonical wire representation across manual scheduled and post-build creation paths and legacy or unknown values remain safely representable
+- [ ] #7 Exact scan-detail and log APIs can return the persisted trigger for the same scan execution without deriving it in the frontend
 <!-- AC:END -->
 
 ## Implementation Notes
