@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-09 14:34'
+updated_date: '2026-09-09 14:58'
 labels:
   - design-parity
   - web-ui
@@ -193,6 +193,8 @@ Starting bounded V2 Config summary and module-source DB-only reader slice from d
 Root-cause diagnosis found that the 12l cleanup retained an unrelated `test-agent` Config Inspector job because it filtered only by commit ID. The target `cf-test-sys` job and unrelated job shared timestamps, so UUID ordering selected the serial execution order. The user authorized continuation with the identified next step.
 
 2026-09-09 focused 12l fixture sequencing correction implemented without production changes. The cleanup now removes Config Inspector jobs whose commit or configuration does not match the live fixture before starting the serial worker; production claim ordering, worker concurrency, and the 300-second poll are unchanged. Verification passed: `nix develop -c node --check checks/web-ui/tests/integration-test.js`; `git diff --check`; and `CF_UI_TEST_STEPS=12l-task440-config-lifecycle nix build --impure .#checks.x86_64-linux.web-ui --no-link -L` (1/1 workflow passed with dark and light captures). The broad Web UI suite was not run because broader cross-workflow isolation remains TASK-461 scope. No commit or push was performed; TASK-440 remains In Progress and AC #24/#27 remain unchecked.
+
+2026-09-09 pre-deployment preparation stopped at the required ancestry gate. After `git fetch origin`, local HEAD remained `c36f16ffe3adf976e44c3d5f8666e27ee39323e5`, remote TASK-440 remained `3a95b2b973ca9050c1d28dffd47357ae7a109bfa`, and `origin/dev` remained the maintainer-observed `f9f647bee829e9d9dd8e6180d283f0255753cd2b`. However, `git merge-base HEAD origin/dev` returned `50340003ea2757bc98df2a371bf8a4eda6c3758f`, and `git merge-base --is-ancestor origin/dev HEAD` exited 1. Per the explicit STOP instruction, no further audit, verification, commit, push, MR, or pipeline action was performed. Both intentional uncommitted files remain unchanged.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
