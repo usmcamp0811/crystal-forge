@@ -6917,8 +6917,8 @@ fn optional_count_label(count: Option<i64>) -> String {
 
 fn snapshot_lifecycle_label(lifecycle: SnapshotLifecycle) -> &'static str {
     match lifecycle {
-        SnapshotLifecycle::Queued => "Evaluation queued",
-        SnapshotLifecycle::Running => "Evaluation running",
+        SnapshotLifecycle::Queued => "Configuration evidence queued",
+        SnapshotLifecycle::Running => "Configuration evidence in progress",
         SnapshotLifecycle::Failed => "Evaluation failed",
         SnapshotLifecycle::Available => "Available",
         SnapshotLifecycle::Unavailable => "Snapshot unavailable",
@@ -6956,10 +6956,10 @@ fn snapshot_lifecycle_chip(lifecycle: SnapshotLifecycle) -> &'static str {
 fn snapshot_lifecycle_message(lifecycle: SnapshotLifecycle, error: Option<&str>) -> String {
     match lifecycle {
         SnapshotLifecycle::Queued => {
-            "Authorized evaluation work is queued. This read did not start evaluation.".into()
+            "Configuration evidence is waiting to be prepared for this revision.".into()
         }
         SnapshotLifecycle::Running => {
-            "A worker is extracting this revision's reusable snapshot.".into()
+            "Configuration evidence is still being prepared for this revision.".into()
         }
         SnapshotLifecycle::Failed => error
             .unwrap_or("Evaluation failed without a persisted diagnostic.")
@@ -10693,8 +10693,8 @@ mod tests {
         SnapshotRevisionMode, Tab, build_history_events, classify_history_entry,
         fitted_config_page_size, map_agent_events_to_logs, map_history_entries_to_commit_history,
         natural_config_side_height, package_identities, query_value, query_with_parameter,
-        render_safe_option_value, snapshot_lifecycle_message, tab_from_query, tab_from_route,
-        unavailable_generation_commit, visible_config_response,
+        render_safe_option_value, snapshot_lifecycle_label, snapshot_lifecycle_message,
+        tab_from_query, tab_from_route, unavailable_generation_commit, visible_config_response,
     };
     use crate::api::models::{
         SafeEvaluationError, SafePackageValue, SystemAgentEvent, SystemGeneration,
@@ -11030,12 +11030,27 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_copy_distinguishes_unavailable_running_and_failed() {
+    fn lifecycle_copy_distinguishes_unavailable_pending_and_failed() {
         assert!(
             snapshot_lifecycle_message(SnapshotLifecycle::Unavailable, None)
                 .contains("No reusable")
         );
-        assert!(snapshot_lifecycle_message(SnapshotLifecycle::Running, None).contains("worker"));
+        assert_eq!(
+            snapshot_lifecycle_label(SnapshotLifecycle::Queued),
+            "Configuration evidence queued"
+        );
+        assert_eq!(
+            snapshot_lifecycle_message(SnapshotLifecycle::Queued, None),
+            "Configuration evidence is waiting to be prepared for this revision."
+        );
+        assert_eq!(
+            snapshot_lifecycle_label(SnapshotLifecycle::Running),
+            "Configuration evidence in progress"
+        );
+        assert_eq!(
+            snapshot_lifecycle_message(SnapshotLifecycle::Running, None),
+            "Configuration evidence is still being prepared for this revision."
+        );
         assert_eq!(
             snapshot_lifecycle_message(SnapshotLifecycle::Failed, Some("safe error")),
             "safe error"

@@ -889,9 +889,9 @@ pub struct FlakeRegistryItem {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SnapshotLifecycle {
-    /// Evaluation is waiting for a worker.
+    /// Configuration evidence is waiting to be prepared.
     Queued,
-    /// A worker is extracting the snapshot.
+    /// Configuration evidence is being prepared.
     Running,
     /// Evaluation ended with a safe diagnostic.
     Failed,

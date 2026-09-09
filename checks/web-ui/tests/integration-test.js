@@ -16716,14 +16716,28 @@ security.audit.enable = true;</fixtext>
         await assertVisible(page.getByText(text, { exact: true }), `Expected distinct unavailable summary state: ${text}`);
       }
       await page.getByRole("button", { name: "Evaluate this revision" }).click();
-      await assertVisible(page.getByText("Evaluation queued", { exact: true }), "Expected queued snapshot state");
+      const queuedState = page
+        .getByText("Configuration evidence queued", { exact: true })
+        .locator("xpath=ancestor::*[@role='status'][1]");
+      await assertVisible(queuedState, "Expected queued snapshot state");
+      await assertVisible(
+        queuedState.getByText("Configuration evidence is waiting to be prepared for this revision.", { exact: true }),
+        "Expected source-agnostic queued detail",
+      );
       for (const text of ["Module sources queued", "Evaluation summary queued", "Drift queued"]) {
         await assertVisible(page.getByText(text, { exact: true }), `Expected distinct queued summary state: ${text}`);
       }
 
       state.lifecycle = "running";
       await page.reload({ timeout: LOAD_TIMEOUT });
-      await assertVisible(page.getByText("Evaluation running", { exact: true }), "Expected running snapshot state", 15000);
+      const runningState = page
+        .getByText("Configuration evidence in progress", { exact: true })
+        .locator("xpath=ancestor::*[@role='status'][1]");
+      await assertVisible(runningState, "Expected running snapshot state", 15000);
+      await assertVisible(
+        runningState.getByText("Configuration evidence is still being prepared for this revision.", { exact: true }),
+        "Expected source-agnostic running detail",
+      );
       for (const text of ["Module sources running", "Evaluation summary running", "Drift running"]) {
         await assertVisible(page.getByText(text, { exact: true }), `Expected distinct running summary state: ${text}`);
       }
