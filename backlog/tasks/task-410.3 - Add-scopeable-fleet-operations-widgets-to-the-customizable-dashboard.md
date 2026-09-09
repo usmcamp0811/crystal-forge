@@ -4,6 +4,7 @@ title: Add scopeable fleet operations widgets to the customizable dashboard
 status: To Do
 assignee: []
 created_date: '2026-08-31 02:21'
+updated_date: '2026-09-09 03:32'
 labels:
   - dashboard
   - web-ui
@@ -14,6 +15,8 @@ dependencies:
 references:
   - git commit ac582592e8ffd787f103578c272d9f30162a9480
   - TASK-410.2
+  - git commit e1b7434899e23f43770632e59d80a76a8fc8459e
+  - TASK-410.4
 documentation:
   - docs/design/CrystalForge/components/DashboardWidgetsOps.jsx
   - docs/design/CrystalForge/components/DashboardView.jsx
@@ -50,4 +53,5 @@ Bring the Rust dashboard into parity with the fleet-operations dashboard changes
 - [ ] #8 Loading unknown partial-data empty error and authorization-scoped states are explicit and no missing backend value is replaced with fixture or deterministic mock data
 - [ ] #9 Keyboard focus controls accessible labels and narrow layout remain usable for every new customization and widget interaction
 - [ ] #10 The WASM check and authoritative web-ui check pass with assertion-based desktop narrow light dark customization persistence and navigation coverage plus MR screenshot evidence
+- [ ] #11 Widget instance identity and saved layout data remain portable into the named-dashboard persistence and import contract tracked by TASK-410.4 without relying on runtime-only keys
 <!-- AC:END -->
