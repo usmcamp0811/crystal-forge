@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-09 15:34'
+updated_date: '2026-09-09 16:34'
 labels:
   - design-parity
   - web-ui
@@ -34,6 +34,8 @@ references:
   - git commit d6a122eaa0b0c700b963ebfe342a544d0c8d290c
   - git commit a15392835a72decd7592c7d59c6ea78ba251bcac
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2833655396'
+  - git commit 24b9979f18e0e460d4c9efa9a964269b9c8449a2
+  - git commit ae0ef8b4507caa10ff7ae4bb09e76d73b8985b70
 documentation:
   - docs/design/CrystalForge/app.jsx
   - docs/design/CrystalForge/components/SystemDetail.jsx
@@ -202,6 +204,8 @@ Root-cause diagnosis found that the 12l cleanup retained an unrelated `test-agen
 2026-09-09 pre-deployment preparation stopped at the required ancestry gate. After `git fetch origin`, local HEAD remained `c36f16ffe3adf976e44c3d5f8666e27ee39323e5`, remote TASK-440 remained `3a95b2b973ca9050c1d28dffd47357ae7a109bfa`, and `origin/dev` remained the maintainer-observed `f9f647bee829e9d9dd8e6180d283f0255753cd2b`. However, `git merge-base HEAD origin/dev` returned `50340003ea2757bc98df2a371bf8a4eda6c3758f`, and `git merge-base --is-ancestor origin/dev HEAD` exited 1. Per the explicit STOP instruction, no further audit, verification, commit, push, MR, or pipeline action was performed. Both intentional uncommitted files remain unchanged.
 
 2026-09-09 pre-deployment branch preparation resumed after the user explicitly authorized commit and push despite the previously reported ancestry mismatch. Audits confirmed the pagination diff only restores dotted C-collation ordering and adds dotted-projection collision coverage while preserving the bounded repeatable-read/read-only V2 reader, page-before-hydration, two-digests-per-row bound, filters/search, and token fencing. The 12l diff only removes non-target commit/configuration inspection jobs before starting the real serial worker; it changes no production behavior or timeout. Focused PostgreSQL tests passed against disposable PostgreSQL 17: dotted pagination ordering 1/1 and 15k bounded hydration 1/1. Timings were page zero 100.632 ms, next page 108.494 ms, Changed 75.289 ms, Search 356.910 ms, with 49 hydrated digests. Node syntax and `git diff --check` passed. A fresh `--rebuild` 12l run executed the live chain and reported 1/1 workflow passed with dark/light captures, but Nix then rejected the rebuilt output as nondeterministic because screenshot output differed; the required non-rebuild command subsequently exited successfully. Created `d6a122eaa0b0c700b963ebfe342a544d0c8d290c` (`TASK-440: Preserve Config pagination order`) and `a15392835a72decd7592c7d59c6ea78ba251bcac` (`TASK-440: Isolate Config Inspector lifecycle fixture`). Lease-protected force push from exact old remote `3a95b2b973ca9050c1d28dffd47357ae7a109bfa` succeeded. Local and remote heads match and the worktree is clean. Pipeline 2833655396 is running. GitLab currently reports `detailed_merge_status=conflict` while `has_conflicts=false`; no merge or deployment was performed. TASK-440 remains In Progress and AC #24/#27 remain unchecked.
+
+2026-09-09 production remediation completed in the required two-commit sequence. Commit `24b9979f18e0e460d4c9efa9a964269b9c8449a2` (`TASK-440: Propagate Config Inspector encryption key`) makes the Config Inspector wrapper existence-check the configured runtime key file and export `CRYSTAL_FORGE_CACHE_ENCRYPTION_KEY` immediately before exec. The NixOS integration fixture creates an unknown printable key only inside the VM and proves the live worker has a non-empty variable without printing its value or placing it in systemd environment metadata. Both new real-wrapper assertions passed on two integration runs. The full integration check later failed in the unchanged branch fixture because `feature/experimental` produced 0 of 3 expected commits; no pass is claimed for the complete integration derivation. Commit `ae0ef8b4507caa10ff7ae4bb09e76d73b8985b70` (`TASK-440: Make Config lifecycle status truthful`) changes Config queued/running labels, details, enum documentation, unit expectations, and focused browser assertions to source-agnostic configuration-evidence wording. Verification passed: targeted rustfmt for both modified Rust files; focused lifecycle unit test (1/1); Web UI package build; Node syntax; `git diff --check`; and authoritative `12l-task440-config-lifecycle` Web UI check (1/1 with dark and light captures). The repository-wide Web UI cargo fmt check remains blocked by existing unrelated formatting drift in flake_timeline.rs, coach_panel.rs, and dashboard.rs. Both commits are pushed; local and remote heads match at `ae0ef8b4507caa10ff7ae4bb09e76d73b8985b70`, and the worktree is clean. TASK-440 remains In Progress; AC #24 and #27 remain unchecked. No migration, backend fallback change, worker concurrency change, historical-job retry, merge, or deployment was performed.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
