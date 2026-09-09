@@ -428,6 +428,16 @@
 
   configInspectorWorkerScript = pkgs.writeShellScript "crystal-forge-config-inspector-worker" ''
     export CRYSTAL_FORGE_CONFIG="${serverConfigPath}"
+
+    ${lib.optionalString (cfg.cache.encryption_key_file != null) ''
+      if [ -f "${cfg.cache.encryption_key_file}" ]; then
+        export CRYSTAL_FORGE_CACHE_ENCRYPTION_KEY="$(cat "${cfg.cache.encryption_key_file}")"
+      else
+        echo "ERROR: Cache encryption key file not found: ${cfg.cache.encryption_key_file}" >&2
+        exit 1
+      fi
+    ''}
+
     exec ${cfg.server.package}/bin/config-inspector-worker "$@"
   '';
 

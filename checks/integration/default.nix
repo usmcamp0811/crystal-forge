@@ -15,6 +15,7 @@ let
   # Port 8000 for Crystal Forge server; Grafana occupies 3000 by default.
   CF_TEST_SERVER_PORT = 8000;
   GRAFANA_PORT = 3000;
+  cacheEncryptionKeyPath = "/run/crystal-forge-test-cache-encryption-key";
 
   # Components this check actually runs.
   #
@@ -74,6 +75,27 @@ in pkgs.testers.runNixOSTest {
         "d /var/lib/crystal-forge/.cache/nix 0755 crystal-forge crystal-forge -"
         "Z /var/lib/crystal-forge/.cache/nix - crystal-forge crystal-forge -"
       ];
+
+      # The test key is generated only inside the running VM. Its value never
+      # enters the Nix store, test output, or a systemd Environment setting.
+      systemd.services.crystal-forge-test-cache-key = {
+        description = "Create the Crystal Forge integration-test cache key";
+        requiredBy = [
+          "crystal-forge-server.service"
+          "crystal-forge-config-inspector.service"
+        ];
+        before = [
+          "crystal-forge-server.service"
+          "crystal-forge-config-inspector.service"
+        ];
+        path = [ pkgs.coreutils ];
+        serviceConfig.Type = "oneshot";
+        script = ''
+          umask 077
+          head -c 32 /dev/urandom | base64 > ${cacheEncryptionKeyPath}
+          chown crystal-forge:crystal-forge ${cacheEncryptionKeyPath}
+        '';
+      };
 
       # local-database = true (below) and dashboards.enable = true both contribute
       # to services.postgresql.initialScript via the crystal-forge module.
@@ -147,6 +169,7 @@ in pkgs.testers.runNixOSTest {
         build.enable = false;
 
         cache = {
+          encryption_key_file = cacheEncryptionKeyPath;
           push_after_build = false;
           push_to = null;
         };
@@ -306,6 +329,14 @@ in pkgs.testers.runNixOSTest {
     server.succeed(
       "readlink /proc/$(systemctl show crystal-forge-config-inspector.service -p MainPID --value)/exe"
       " | grep -E '/bin/config-inspector-worker$'"
+    )
+    server.succeed(
+      "pid=$(systemctl show crystal-forge-config-inspector.service -p MainPID --value);"
+      " grep -zq '^CRYSTAL_FORGE_CACHE_ENCRYPTION_KEY=.' /proc/$pid/environ"
+    )
+    server.succeed(
+      "! systemctl show crystal-forge-config-inspector.service -p Environment --value"
+      " | grep -q CRYSTAL_FORGE_CACHE_ENCRYPTION_KEY"
     )
 
     # Wait for Grafana (needed for -m dashboard tests).
