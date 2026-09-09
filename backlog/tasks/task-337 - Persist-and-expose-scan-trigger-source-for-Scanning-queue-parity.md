@@ -4,7 +4,7 @@ title: Persist and expose scan trigger source for Scanning queue parity
 status: To Do
 assignee: []
 created_date: '2026-06-01 02:01'
-updated_date: '2026-09-09 03:32'
+updated_date: '2026-09-09 03:33'
 labels:
   - backend
   - scanning
@@ -24,10 +24,12 @@ documentation:
   - docs/design/CrystalForge/data-scanning.js
 modified_files:
   - packages/default/migrations
-  - packages/default/src/queries/scanning.rs
-  - packages/default/src/handlers/api/scanning.rs
-  - packages/default/src/api/models.rs
-  - packages/default/src/bin/cve_worker.rs
+  - packages/default/crates/cf-server/src/queries/cve_scans.rs
+  - packages/default/crates/cf-server/src/queries/scanning.rs
+  - packages/default/crates/cf-server/src/handlers/api/scanning.rs
+  - packages/default/crates/cf-server/src/api/
+  - packages/default/crates/cf-server/src/builder/cve_worker.rs
+  - packages/web-ui/src/api/models.rs
 priority: medium
 ordinal: 3300
 ---
