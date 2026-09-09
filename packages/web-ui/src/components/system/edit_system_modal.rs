@@ -192,7 +192,7 @@ pub fn EditSystemModal(
         let candidate = candidate_public_key.clone();
         move |_| {
             // Duplicate-submit guard: one click sequence must produce one request.
-            if *rotate_in_flight.read() || *copy_in_flight.read() {
+            if *rotate_in_flight.read() {
                 return;
             }
             let Some(new_public_key) = candidate.clone() else {
@@ -284,7 +284,7 @@ pub fn EditSystemModal(
     }
 
     let handle_save = move |_| {
-        if rotate_in_flight() || copy_in_flight() {
+        if rotate_in_flight() {
             return;
         }
         is_saving.set(true);
@@ -339,7 +339,7 @@ pub fn EditSystemModal(
             class: "modal-backdrop",
             "data-testid": "edit-system-modal-backdrop",
             onclick: move |_| {
-                if !rotate_in_flight() && !copy_in_flight() {
+                if !rotate_in_flight() {
                     on_close.call(());
                 }
             },
@@ -347,7 +347,7 @@ pub fn EditSystemModal(
             div {
                 class: "modal",
                 "data-testid": "edit-system-modal",
-                "aria-busy": rotate_in_flight() || copy_in_flight(),
+                "aria-busy": rotate_in_flight(),
                 style: "width:min(620px,96vw); max-height:92vh;",
                 onclick: move |e| e.stop_propagation(),
 
@@ -372,9 +372,9 @@ pub fn EditSystemModal(
                         style: "width: fit-content; margin: 0;",
                         button {
                             class: if *active_tab.read() == Tab::General { "active" } else { "" },
-                            disabled: rotate_in_flight() || copy_in_flight(),
+                            disabled: rotate_in_flight(),
                             onclick: move |_| {
-                                if !rotate_in_flight() && !copy_in_flight() {
+                                if !rotate_in_flight() {
                                     active_tab.set(Tab::General);
                                 }
                             },
@@ -385,9 +385,9 @@ pub fn EditSystemModal(
                         }
                         button {
                             class: if *active_tab.read() == Tab::Deployment { "active" } else { "" },
-                            disabled: rotate_in_flight() || copy_in_flight(),
+                            disabled: rotate_in_flight(),
                             onclick: move |_| {
-                                if !rotate_in_flight() && !copy_in_flight() {
+                                if !rotate_in_flight() {
                                     active_tab.set(Tab::Deployment);
                                 }
                             },
@@ -398,9 +398,9 @@ pub fn EditSystemModal(
                         }
                         button {
                             class: if *active_tab.read() == Tab::Security { "active" } else { "" },
-                            disabled: rotate_in_flight() || copy_in_flight(),
+                            disabled: rotate_in_flight(),
                             onclick: move |_| {
-                                if !rotate_in_flight() && !copy_in_flight() {
+                                if !rotate_in_flight() {
                                     active_tab.set(Tab::Security);
                                 }
                             },
@@ -411,9 +411,9 @@ pub fn EditSystemModal(
                         }
                         button {
                             class: if *active_tab.read() == Tab::Danger { "active" } else { "" },
-                            disabled: rotate_in_flight() || copy_in_flight(),
+                            disabled: rotate_in_flight(),
                             onclick: move |_| {
-                                if !rotate_in_flight() && !copy_in_flight() {
+                                if !rotate_in_flight() {
                                     active_tab.set(Tab::Danger);
                                 }
                             },
@@ -778,12 +778,12 @@ pub fn EditSystemModal(
                                             class: "btn btn-ghost focus-ring",
                                             "data-testid": "rotate-key-button",
                                             style: "margin-top: 4px;",
-                                                onclick: move |_| {
-                                                    rotate_error.set(None);
-                                                    rotate_warning.set(None);
-                                                    copy_error.set(None);
-                                                    rotating_key.set(true);
-                                                },
+                                            onclick: move |_| {
+                                                rotate_error.set(None);
+                                                rotate_warning.set(None);
+                                                copy_error.set(None);
+                                                rotating_key.set(true);
+                                            },
                                             span { style: "margin-right: 4px; display:inline-flex; vertical-align:text-bottom;",
                                                 Icon { name: IconName::Sync, size: 12 }
                                             }
@@ -797,22 +797,22 @@ pub fn EditSystemModal(
                                         button {
                                             class: if *key_mode.read() == KeyMode::Generate { "active" } else { "" },
                                             "data-testid": "key-mode-generate",
-                                            disabled: rotate_in_flight() || copy_in_flight(),
+                                            disabled: rotate_in_flight(),
                                             onclick: move |_| key_mode.set(KeyMode::Generate),
                                             "Generate new keypair"
                                         }
                                         button {
                                             class: if *key_mode.read() == KeyMode::Paste { "active" } else { "" },
                                             "data-testid": "key-mode-paste",
-                                            disabled: rotate_in_flight() || copy_in_flight(),
+                                            disabled: rotate_in_flight(),
                                             onclick: move |_| {
                                                 key_mode.set(KeyMode::Paste);
                                                 // Switching away discards any generated
                                                 // material so the private key is never
                                                 // left dangling out of view.
-                                                 generated_keys.set(None);
-                                                 private_key_copied.set(false);
-                                                 copy_error.set(None);
+                                                generated_keys.set(None);
+                                                private_key_copied.set(false);
+                                                copy_error.set(None);
                                             },
                                             "Paste existing public key"
                                         }
@@ -1012,15 +1012,15 @@ pub fn EditSystemModal(
                                         button {
                                             class: "btn btn-ghost focus-ring",
                                             "data-testid": "rotate-cancel-button",
-                                            disabled: rotate_in_flight() || copy_in_flight(),
+                                            disabled: rotate_in_flight(),
                                             onclick: move |_| cancel_rotation(),
                                             "Cancel"
                                         }
                                         button {
                                             class: "btn focus-ring",
                                             "data-testid": "rotate-confirm-button",
-                                            disabled: rotate_in_flight() || copy_in_flight() || candidate_public_key.is_none(),
-                                            style: if candidate_public_key.is_some() && !rotate_in_flight() && !copy_in_flight() {
+                                            disabled: rotate_in_flight() || candidate_public_key.is_none(),
+                                            style: if candidate_public_key.is_some() && !rotate_in_flight() {
                                                 "background: #dc2626; color: white;"
                                             } else {
                                                 "background: var(--cf-subtle-bg); color: var(--cf-text-muted);"
@@ -1076,11 +1076,11 @@ pub fn EditSystemModal(
                         class: "btn btn-ghost focus-ring",
                         "data-testid": "edit-system-footer-cancel",
                         onclick: move |_| {
-                            if !rotate_in_flight() && !copy_in_flight() {
+                            if !rotate_in_flight() {
                                 on_close.call(());
                             }
                         },
-                        disabled: is_saving() || rotate_in_flight() || copy_in_flight(),
+                        disabled: is_saving() || rotate_in_flight(),
                         "Cancel"
                     }
 
@@ -1090,7 +1090,6 @@ pub fn EditSystemModal(
                         onclick: handle_save,
                         disabled: is_saving()
                             || rotate_in_flight()
-                            || copy_in_flight()
                             || hostname.read().trim().is_empty(),
 
                         if is_saving() {

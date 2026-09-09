@@ -4807,6 +4807,30 @@ const steps = [
           throw new Error("Resolved clipboard write did not receive the displayed private key");
         }
 
+        // A Clipboard API promise can stay pending indefinitely. Only the copy
+        // button may lock; the operator must retain cancel and confirm paths.
+        await page.evaluate(() => {
+          Object.defineProperty(navigator, "clipboard", {
+            configurable: true,
+            value: { writeText: () => new Promise(() => {}) },
+          });
+        });
+        await copyButton.click();
+        await assertVisible(
+          section.getByText("Copying…", { exact: true }).first(),
+          "Expected pending clipboard state on the copy button",
+          10000,
+        );
+        for (const [control, label] of [
+          [section.locator("[data-testid='rotate-cancel-button']").first(), "rotate Cancel"],
+          [confirmButton, "rotation Confirm"],
+          [modal.locator("[data-testid='edit-system-footer-cancel']").first(), "modal Cancel"],
+        ]) {
+          if (!(await control.isEnabled())) {
+            throw new Error(`A pending clipboard write must not disable ${label}`);
+          }
+        }
+
         // First confirm fails: no success state, key material retained.
         await confirmButton.click();
         await page.waitForTimeout(900);
@@ -5077,6 +5101,7 @@ const steps = [
       });
 
       try {
+        await suppressOnboardingCoach(page);
         await page.goto(`${baseUrl}/systems/${systemId}`, { timeout: LOAD_TIMEOUT });
         await collapseOnboardingCoach(page);
         const editButton = page.getByRole("button", { name: "Edit", exact: true }).first();

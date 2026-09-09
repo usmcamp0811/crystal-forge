@@ -140,10 +140,10 @@ mod tests {
     fn fingerprint_matches_the_server_display_format() {
         let fingerprint = public_key_fingerprint(&sample_public_key()).expect("valid key");
 
-        assert!(fingerprint.starts_with("SHA256:"));
-        // Unpadded base64, exactly as `PublicKey::fingerprint()` emits.
-        assert!(!fingerprint.contains('='));
-        assert_eq!(fingerprint.len(), "SHA256:".len() + 43);
+        assert_eq!(
+            fingerprint,
+            "SHA256:/oEsEvOrTOasXbaaw1L5BssbEe9D+zPiUu9/9VImOIk"
+        );
     }
 
     #[test]
