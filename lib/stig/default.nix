@@ -37,8 +37,8 @@ with lib; rec {
   * @return A NixOS module with:
   *         - options:
   *           - All extraOptions (if provided)
-  *           - crystal-forge.stig.active: attrset tracking enabled controls
-  *           - crystal-forge.stig.inactive: attrset tracking disabled controls with justifications
+  *           - crystal-forge.stig.active.${name}: tracking data for this enabled control
+  *           - crystal-forge.stig.inactive.${name}: tracking data for this disabled control
   *           - crystal-forge.stig.${name}.enable: boolean toggle (defaults to true)
   *           - crystal-forge.stig.${name}.justification: list of strings (required if disabled)
   *
@@ -172,15 +172,17 @@ with lib; rec {
       extraOptions
       // {
         crystal-forge.stig = with types; {
-          active = mkOption {
-            type = attrsOf (attrsOf anything);
-            default = {};
-            description = "Tracking of active STIG controls with their SRG, CCI, and applied configuration";
+          active = optionalAttrs cfg.enable {
+            ${name} = mkOption {
+              type = attrsOf anything;
+              description = "Tracking data for active STIG control '${name}'.";
+            };
           };
-          inactive = mkOption {
-            type = attrsOf (attrsOf anything);
-            default = {};
-            description = "Tracking of inactive STIG controls with justifications and unapplied configuration";
+          inactive = optionalAttrs (!cfg.enable) {
+            ${name} = mkOption {
+              type = attrsOf anything;
+              description = "Tracking data for inactive STIG control '${name}'.";
+            };
           };
           ${name} = {
             enable = mkOption {
@@ -200,16 +202,20 @@ with lib; rec {
       (mkIf cfg.enable (overrideAttrs stigConfig))
       {
         crystal-forge.stig = {
-          active.${name} = mkIf cfg.enable {
-            srg = srgList;
-            cci = cciList;
-            config = stigConfig;
+          active = optionalAttrs cfg.enable {
+            ${name} = {
+              srg = srgList;
+              cci = cciList;
+              config = stigConfig;
+            };
           };
-          inactive.${name} = mkIf (!cfg.enable) {
-            srg = srgList;
-            cci = cciList;
-            justification = cfg.justification;
-            config = stigConfig;
+          inactive = optionalAttrs (!cfg.enable) {
+            ${name} = {
+              srg = srgList;
+              cci = cciList;
+              justification = cfg.justification;
+              config = stigConfig;
+            };
           };
         };
         assertions = [
