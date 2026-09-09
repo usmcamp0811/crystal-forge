@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-09 02:46'
+updated_date: '2026-09-09 14:18'
 labels:
   - design-parity
   - web-ui
@@ -159,6 +159,8 @@ Public-contract clarification approved on 2026-09-08: preserve V2 missing/failur
 Focused Web UI VM verification exposed a test-harness environment propagation defect: the driver sets the real git fixture variables only in its own process, while the browser Node process runs inside the machine without them and falls back to example.invalid. Pass the existing real repository, commit, and configuration fixture values into the browser process, then rerun the exact seven TASK-440 workflows before broad gates. This is test-only and does not change product behavior.
 
 Focused correction pass from exact HEAD `4ad7490e881e2a457b2fb6be95758392fd7af45a`: keep V2 selection/token/count/total authority in the existing read-only repeatable-read transaction; change the production V2 page query to select and order only narrow selected/baseline identities and digests before LIMIT/OFFSET; fetch at most the distinct selected/baseline payload digests referenced by the bounded page in a second query inside the same transaction; decode and resolve tracked provenance only for returned rows. Preserve global search through redacted `search_text`, digest-based Changed semantics including removed baseline rows, fail-closed missing/malformed page payloads, and unit-separator/C-collation ordering. Add adversarial ordering and production-scale ~15,000-option PostgreSQL regressions with All/Overridden/Changed/search/token/side-effect assertions, hydration bounds, practical measurements, and EXPLAIN evidence. No migration, V1 fallback, generation-mode change, UI workaround, timeout increase, integration change, rebase, merge, or deployment. Run focused DB checks, offline cargo lib/all-target checks, format/diff checks, architecture guards, 12l alone, 12l/12m/12n together, server-regressions, then one broad Web UI check. Commit only if all TASK-440-attributable requirements pass.
+
+Focused 12l fixture sequencing correction approved on 2026-09-09: before starting the serial Config Inspector worker, remove queued fixture jobs that do not match both the live fixture commit and `configurationName`. Preserve production claim ordering, worker serialization, and the 300-second readiness bound. Verify JavaScript syntax and rerun only `12l-task440-config-lifecycle` through the repository Web UI test runner. Do not change product behavior, worker concurrency, timeout policy, or unrelated broad-suite isolation.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -187,6 +189,8 @@ Starting bounded V2 Config summary and module-source DB-only reader slice from d
 2026-09-09 bounded V2 Config page correction verification: The production reader now selects narrow V2 identities and selected/baseline digests before LIMIT/OFFSET, hydrates only distinct page payloads in the same read-only repeatable-read transaction, and reuses revision-global counts for unsearched totals. The 15,000-option PostgreSQL regression measured page zero at 121.441 ms, next page at 129.130 ms, Changed at 91.599 ms, and out-of-page search at 408.710 ms, versus approximately 4 seconds before the final total-query optimization. A 25-row Changed page hydrated 49 distinct digests; EXPLAIN showed a 5.488 ms bounded identity query with no evaluation_option_contents access and a 0.178 ms primary-key hydration query. All 10 focused V2 reader PostgreSQL tests passed. Offline cf-server lib and all-target checks, cargo fmt, git diff check, config-inspector, evaluator-snapshot-isolation, 12l alone, 12l/12m/12n together, and server-regressions passed with existing warnings. The one required broad web-ui run failed after many unrelated state-leak failures; its 12l instance also failed to select a V2 snapshot after both inspection jobs had succeeded, although 12l passed in both isolated runs. Recorded the broad harness isolation defect as TASK-461 and made no out-of-scope harness change. AC #24 and #27 remain unchecked.
 
 2026-09-09 correction committed and pushed as `3a95b2b973ca9050c1d28dffd47357ae7a109bfa` with message `TASK-440: Bound Config option page reads`. The worktree is clean. Local HEAD, the local remote-tracking ref, `git ls-remote`, the public GitLab MR API SHA, and MR !323 `diff_refs.head_sha` all match. MR !323 remains open against `dev`, with no merge or deployment performed. TASK-440 remains In Progress; AC #24 and #27 remain unchecked.
+
+Root-cause diagnosis found that the 12l cleanup retained an unrelated `test-agent` Config Inspector job because it filtered only by commit ID. The target `cf-test-sys` job and unrelated job shared timestamps, so UUID ordering selected the serial execution order. The user authorized continuation with the identified next step.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
