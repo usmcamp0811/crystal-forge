@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-09 19:55'
+updated_date: '2026-09-09 21:02'
 labels:
   - design-parity
   - web-ui
@@ -171,6 +171,8 @@ Focused correction pass from exact HEAD `4ad7490e881e2a457b2fb6be95758392fd7af45
 Focused 12l fixture sequencing correction approved on 2026-09-09: before starting the serial Config Inspector worker, remove queued fixture jobs that do not match both the live fixture commit and `configurationName`. Preserve production claim ordering, worker serialization, and the 300-second readiness bound. Verify JavaScript syntax and rerun only `12l-task440-config-lifecycle` through the repository Web UI test runner. Do not change product behavior, worker concurrency, timeout policy, or unrelated broad-suite isolation.
 
 Production remediation assigned on 2026-09-09: (1) add direct runtime parity to `configInspectorWorkerScript` so a configured cache encryption key file is existence-checked and read into `CRYSTAL_FORGE_CACHE_ENCRYPTION_KEY` immediately before exec; add a NixOS integration fixture that creates an unknown random test key at runtime before Crystal Forge starts and proves the real running worker has a non-empty variable without printing its value, while retaining ExecStart and slice/cgroup assertions; verify and commit/push as `TASK-440: Propagate Config Inspector encryption key`; (2) change only System Config lifecycle labels/details and adjacent Web UI enum documentation so queued/running describe source-agnostic configuration evidence preparation; update unit/browser expectations, verify focused lifecycle coverage, and commit/push as `TASK-440: Make Config lifecycle status truthful`. No migration, backend fallback change, worker ownership/concurrency change, retry of historical jobs, merge, or deployment.
+
+Deployed-review remediation from exact branch SHA `24bd1d0e9950c918e698773efa936c2e2326f6c7`: (A) add an Admin-authorized and non-disclosing system Config-inspection POST route that atomically resolves the exact existing NixOS derivation and reuses the established Config Inspector enqueue state machine; return a typed 409 prerequisite without touching the primary evaluation queue; update the commit-mode Web UI action, lifecycle error handling, documentation, and focused DB/API/browser regressions; verify and commit as `TASK-440: Queue targeted Config inspections`. (B) deserialize `require_cve_check` writer input through the authoritative server `CveCheckConfig` defaults, preserve sparse JSON and explicit malformed-value rejection, add focused writer plus real publication/rollback regressions and narrow default documentation, verify and commit as `TASK-440: Preserve CVE policy XCCDF defaults`. Audit from the starting SHA, recheck the unchanged remote branch, push both commits, and leave TASK-440 In Progress with AC #24/#27 unchanged. No migration, evaluator redesign, worker concurrency change, deployment change, generation redesign, broad XCCDF refactor, TASK-441 work, rebase, merge, or deployment.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
