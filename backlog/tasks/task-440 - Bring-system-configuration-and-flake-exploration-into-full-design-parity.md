@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-09 00:57'
+updated_date: '2026-09-09 02:45'
 labels:
   - design-parity
   - web-ui
@@ -29,6 +29,7 @@ references:
   - git commit a41d41e8
   - git commit 1ccee7cf6aa59c3dc66f80ba02ed0817d2c0c9ba
   - git commit 4ad7490e881e2a457b2fb6be95758392fd7af45a
+  - TASK-461
 documentation:
   - docs/design/CrystalForge/app.jsx
   - docs/design/CrystalForge/components/SystemDetail.jsx
@@ -181,6 +182,8 @@ Starting bounded V2 Config summary and module-source DB-only reader slice from d
 2026-09-08 finish-line Config API/UI slice verification: Commit-mode Config handlers now use schema-V2 selectors/readers while generation mode remains schema V1. Public DTOs preserve nullable declared type, metadata failure, override state, and source paths. Commit tokens bind selected/baseline V2 artifacts and flake-output digests. Visibility-scoped provenance, first-parent comparison, stale-token handling, side-effect-free reads, distinct winning-option counts, legacy Nixpkgs 25.05 extraction, and live browser rendering of `networking.hostName` have focused regression coverage. Final lightweight checks passed: `git diff --check`; `node --check checks/web-ui/tests/integration-test.js`; `nix develop -c cargo fmt --manifest-path packages/default/Cargo.toml --package cf-server -- --check`; and `nix develop -c rustfmt --edition 2024 --check packages/web-ui/src/api/models.rs packages/web-ui/src/views/system_detail.rs`. The focused PostgreSQL handler regression, offline cf-server tests check, server-regressions Nix gate, and focused TASK-440 Config lifecycle browser workflow also passed earlier in this slice. AC #24 is left unproven because the available evidence does not establish the exact 1920x1080 light/dark and 900x900 visual contract. AC #27 remains unproven: the broad integration retry reproduces an existing fixture failure where `feature/experimental` has zero commits, and the full Web UI retry encountered unrelated `environments--light` and `compliance--dark` design-render timeouts even though all 16 TASK-440 design targets rendered.
 
 2026-09-08 finish-line Config API/UI slice committed and pushed as `4ad7490e881e2a457b2fb6be95758392fd7af45a` with message `TASK-440: Serve Config Inspector V2 artifacts`. Local HEAD, `origin/TASK-440-system-config-flake-parity`, the public GitLab branch API, and MR !323 `diff_refs.head_sha` all match that exact SHA. MR !323 is open, targets `dev`, has no conflicts, and GitLab reports `detailed_merge_status: ci_still_running`. The public MR pipelines endpoint currently returns an empty list; authenticated `glab mr view` could not inspect job details because the stored OAuth grant is expired. The task remains In Progress because AC #24 and AC #27 are not proven. No merge or deployment was performed.
+
+2026-09-09 bounded V2 Config page correction verification: The production reader now selects narrow V2 identities and selected/baseline digests before LIMIT/OFFSET, hydrates only distinct page payloads in the same read-only repeatable-read transaction, and reuses revision-global counts for unsearched totals. The 15,000-option PostgreSQL regression measured page zero at 121.441 ms, next page at 129.130 ms, Changed at 91.599 ms, and out-of-page search at 408.710 ms, versus approximately 4 seconds before the final total-query optimization. A 25-row Changed page hydrated 49 distinct digests; EXPLAIN showed a 5.488 ms bounded identity query with no evaluation_option_contents access and a 0.178 ms primary-key hydration query. All 10 focused V2 reader PostgreSQL tests passed. Offline cf-server lib and all-target checks, cargo fmt, git diff check, config-inspector, evaluator-snapshot-isolation, 12l alone, 12l/12m/12n together, and server-regressions passed with existing warnings. The one required broad web-ui run failed after many unrelated state-leak failures; its 12l instance also failed to select a V2 snapshot after both inspection jobs had succeeded, although 12l passed in both isolated runs. Recorded the broad harness isolation defect as TASK-461 and made no out-of-scope harness change. AC #24 and #27 remain unchecked.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
