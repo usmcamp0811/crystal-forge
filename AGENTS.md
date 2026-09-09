@@ -27,6 +27,7 @@ Do not change files, backlog state, branches, or merge requests for a read-only 
 9. Do not merge an MR unless the user explicitly authorizes it.
 10. Ask before making a decision that materially changes public behavior, compatibility, persistence, security boundaries, architecture, or task scope.
 11. Don't rely on utilities to be installed like python or glab.. just use `nix run nixpkgs#glab` for these type of things
+12. Treat source documentation as part of correctness. A behavior change is incomplete when its affected contracts, invariants, rationale, failure behavior, or other required documentation are stale or missing.
 
 ## Repository architecture
 
@@ -77,6 +78,177 @@ Before the first implementation write:
 Do not pretend that `git status` in one worktree proves another worktree is clean. Exact commands and recovery rules are in [docs/agent/worktrees.md](docs/agent/worktrees.md).
 
 ## Implementation standards
+
+### Source documentation and technical writing
+
+These rules apply to source comments, Rust documentation comments, architecture notes, design notes, task notes, MR descriptions, user-facing technical text, and other technical prose created or modified by an agent.
+
+The key words **MUST**, **MUST NOT**, **SHOULD**, **SHOULD NOT**, and **MAY** in this section are normative and are interpreted as described by [IETF BCP 14](https://www.rfc-editor.org/info/bcp14), [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119), and [RFC 8174](https://www.rfc-editor.org/rfc/rfc8174).
+
+Agents MUST use these published standards as the baseline instead of inventing an ad hoc documentation style:
+
+- [The Rust Style Guide](https://doc.rust-lang.org/style-guide/) controls Rust source and comment formatting.
+- [The rustdoc Book](https://doc.rust-lang.org/rustdoc/) controls Rust API documentation behavior and doctests.
+- [Rust RFC 1574](https://rust-lang.github.io/rfcs/1574-more-api-documentation-conventions.html) controls Rust API documentation conventions.
+- [Rust API Guidelines](https://rust-lang.github.io/api-guidelines/documentation.html) controls expectations for complete and useful Rust public API documentation.
+- [ASD-STE100 Simplified Technical English, Issue 9](https://www.asd-ste100.org/) controls technical prose style, subject to necessary Rust, Nix, SQL, protocol, product, and Crystal Forge terminology.
+- [ISO/IEC/IEEE 42010:2022](https://www.iso.org/standard/74393.html) applies when an agent creates or materially changes architecture descriptions. Source comments MUST NOT be used as a substitute for required architecture documentation.
+
+Repository-specific rules below are intentionally stricter when needed. Do not interpret any cited guideline as permission to weaken an explicit rule in this file.
+
+#### Documentation objective
+
+Code MUST communicate its intended semantics, not only its mechanics.
+
+A competent maintainer MUST be able to determine the contract and the reasons for non-obvious behavior without reverse-engineering unrelated code, database constraints, tests, historical commits, or author intent.
+
+When applicable, documentation MUST make these concepts explicit:
+
+- contracts, preconditions, postconditions, and caller obligations;
+- invariants and properties that future changes must preserve;
+- state meanings, valid state transitions, terminal states, and forbidden transitions;
+- side effects and significant operations that intentionally do not occur;
+- error conditions, retry behavior, cancellation behavior, and partial-failure behavior;
+- concurrency, ownership, locking, ordering, atomicity, and race-prevention assumptions;
+- persistence behavior, transaction boundaries, uniqueness assumptions, and data-integrity requirements;
+- authorization, trust boundaries, security assumptions, redaction requirements, and sensitive-data handling;
+- external protocol, serialization, compatibility, versioning, and deployed-component assumptions;
+- units, ranges, thresholds, timeouts, sentinel values, and the reason for arbitrary-looking constants;
+- non-obvious business rules and domain semantics;
+- non-obvious performance tradeoffs or deliberate optimizations;
+- `unsafe` requirements and the local proof that each unsafe operation is valid.
+
+Do not rely on tests as the only description of an intended contract. Tests prove observed behavior. Documentation identifies which behavior is intentional and why.
+
+Do not use comment count, comment-to-code ratio, or documentation volume as a quality target. A comment that only restates identifiers, syntax, or immediately visible control flow SHOULD NOT exist.
+
+#### Required Rust documentation
+
+Every public item added or materially modified by a change MUST have useful rustdoc documentation. This includes crates, modules, structs, enums, traits, public fields, functions, methods, associated items, constants, statics, type aliases, and macros. Existing lint configuration does not waive this requirement.
+
+An agent MUST NOT add `allow(missing_docs)` or another suppression to avoid documenting code.
+
+Crate-level and module-level documentation MUST explain responsibility, boundaries, and important invariants when those facts are not already obvious from the surrounding architecture.
+
+Public type documentation MUST explain the semantic meaning of the type and any invariant that valid values maintain.
+
+Public enum documentation MUST explain the meaning of states or variants when they represent a lifecycle, protocol, status, policy, or domain state. Document valid and forbidden transitions when transition rules exist.
+
+Public function and method documentation MUST state the observable contract. Include the following sections when applicable:
+
+- `# Errors` for meaningful error conditions returned by fallible APIs.
+- `# Panics` for caller-reachable panic conditions.
+- `# Safety` for every `unsafe fn` and unsafe trait contract.
+- `# Examples` for non-trivial public APIs. Examples SHOULD be doctests and MUST remain valid when behavior changes.
+- `# Aborts` or `# Undefined Behavior` when those conditions are relevant.
+
+The first rustdoc sentence MUST be a concise summary and SHOULD use the RFC 1574 third-person singular present form, for example, `Returns`, `Creates`, or `Schedules`.
+
+Use intra-doc links for related Rust items when they improve understanding. Broken documentation links are defects.
+
+#### Required maintainer-facing comments
+
+Private code does not need comments merely because it is private. It MUST be documented when correct maintenance depends on information that cannot be reliably inferred from local names, types, and control flow.
+
+The following implementation concepts MUST have adjacent explanatory documentation when they occur:
+
+- concurrency control, lock ordering, worker ownership, deduplication, and race prevention;
+- transaction boundaries and multi-step persistence invariants;
+- security or authorization decisions whose placement or ordering matters;
+- retry, idempotency, recovery, lease, heartbeat, timeout, or cancellation semantics;
+- state-machine transitions and restrictions not enforced completely by the type system;
+- compatibility paths, legacy formats, deployed-version assumptions, and temporary workarounds;
+- algorithms whose correctness depends on a non-obvious invariant;
+- non-obvious performance optimizations or query-shape choices;
+- domain rules that would otherwise have to be inferred from implementation behavior;
+- arbitrary-looking constants, thresholds, limits, durations, or ordering choices whose source or constraint is external to the local expression;
+- deliberate lint suppressions or unusual language/toolchain workarounds.
+
+Use these labels consistently when they make the semantic category clearer:
+
+```rust
+// INVARIANT:
+// CONCURRENCY:
+// SAFETY:
+// SECURITY:
+// COMPATIBILITY:
+// PERFORMANCE:
+```
+
+The text after a label MUST state the property or rationale that must remain true. Do not add a label to an obvious comment solely to satisfy this rule.
+
+Every significant `unsafe` block MUST have an immediately preceding `// SAFETY:` comment that explains why the unsafe operation is valid at that exact location. The comment MUST identify the relevant lifetime, aliasing, initialization, bounds, ownership, thread-safety, FFI, or other safety invariant. Writing only what the unsafe expression does is insufficient.
+
+#### Comment and rustdoc formatting
+
+Rust comments MUST follow the current Rust Style Guide.
+
+In particular:
+
+- Prefer `//` to `/* ... */`.
+- Prefer `///` to `/** ... */`.
+- Use `//!` only for crate-level or module-level documentation.
+- Put ordinary comments on their own line unless an inline comment is substantially clearer.
+- Put one space after `//`, `///`, or `//!`.
+- Write ordinary comments as complete sentences unless a short annotation is clearer.
+- Start a normal sentence with a capital letter and end it with punctuation.
+- Limit lines that consist entirely of comments to 80 characters where the Rust Style Guide permits; never exceed the repository's normal Rust line-width rules.
+- Put rustdoc before item attributes as required by the Rust Style Guide.
+- Use Markdown in rustdoc according to RFC 1574 and rustdoc conventions.
+
+Do not commit commented-out production code. Version control retains removed implementations.
+
+`TODO` and `FIXME` comments MUST identify a tracked task unless the comment will be resolved in the same change. They MUST state the specific remaining condition, not only `fix this` or equivalent.
+
+Example:
+
+```rust
+// TODO(TASK-482): Remove the version-2 compatibility path after all
+// supported agents advertise protocol version 3.
+```
+
+#### Technical writing standard
+
+Technical prose MUST follow ASD-STE100 principles to the extent that they are compatible with exact software terminology.
+
+Agents MUST:
+
+- use short, direct, declarative sentences;
+- use active voice when the actor is known and active voice improves clarity;
+- use one term consistently for one concept instead of rotating through synonyms;
+- use exact identifiers, state names, units, boundaries, and conditions;
+- make cause and effect explicit;
+- make required, prohibited, optional, and conditional behavior explicit;
+- use project and domain terms consistently with the code and design documents;
+- prefer specific nouns over vague references such as `this`, `that`, `it`, or `they` when the referent could be ambiguous;
+- separate distinct requirements or actions instead of joining unrelated ideas in one long sentence;
+- state negative guarantees when they are part of the contract, such as operations that MUST NOT enqueue work, mutate state, reveal existence, or retry;
+- keep prose concise without omitting information needed for safe maintenance.
+
+Agents MUST NOT use filler or vague technical prose such as `it is important to note`, `basically`, `simply`, `as needed`, `appropriately`, `properly`, or `handle this` unless the sentence defines the exact condition or behavior.
+
+Project names, Rust identifiers, SQL identifiers, API names, protocol terms, security terms, and other necessary subject-specific vocabulary are permitted even when they are not in the ASD-STE100 general dictionary.
+
+#### Documentation maintenance and review gate
+
+Documentation is part of the implementation, not a follow-up activity.
+
+When behavior changes, the same change MUST update every affected source comment, rustdoc contract, architecture note, design document, example, and tracked technical description within the active task's scope.
+
+Stale documentation is a correctness defect. An agent MUST remove or correct a comment that no longer describes the resulting code.
+
+Before reporting implementation ready for review, the agent MUST inspect the diff specifically for documentation quality and confirm:
+
+- every new or materially changed public Rust item is documented;
+- required `# Errors`, `# Panics`, `# Safety`, and `# Examples` sections are present where applicable;
+- every significant unsafe block has a valid local `SAFETY` rationale;
+- non-obvious concurrency, persistence, security, compatibility, state, and performance semantics are documented;
+- no comment merely paraphrases obvious code;
+- no stale comment remains after implementation changes;
+- no untracked `TODO` or `FIXME` was introduced;
+- rustdoc examples and links affected by the change are verified when practical.
+
+If the repository already provides documentation lints or rustdoc checks, run them. For Rust API changes, run the applicable rustdoc build or doctest command through the repository's Nix environment when it is needed to verify the changed documentation. Do not modify repository-wide lint policy solely to make an unrelated task pass.
 
 ### Rust
 
@@ -136,6 +308,7 @@ Before opening an MR:
 - Update SQLx metadata when applicable.
 - Add MR screenshots for user-visible UI changes.
 - Record out-of-scope discoveries as Backlog tasks.
+- Confirm source documentation and technical prose satisfy the documentation standard above; undocumented required semantics or stale documentation block review.
 
 Then open the MR, move the task to `Review`, add the MR link to the task, and remove the lock or mark it as awaiting review according to Backlog.md conventions.
 

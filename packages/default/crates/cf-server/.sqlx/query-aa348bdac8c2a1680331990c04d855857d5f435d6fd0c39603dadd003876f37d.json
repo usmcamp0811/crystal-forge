@@ -1,0 +1,74 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT\n                rv.id,\n                rv.requirement_id,\n                rv.framework_version_id,\n                rv.external_id,\n                rv.title,\n                rv.kind,\n                rv.severity,\n                rv.parent_requirement_version_id,\n                rv.semantic_digest\n            FROM compliance_requirement_versions rv\n            WHERE rv.framework_version_id = $1\n              AND ($2::TEXT IS NULL OR rv.kind = $2)\n              AND (\n                  to_tsvector('english',\n                      COALESCE(rv.external_id, '') || ' ' || COALESCE(rv.title, ''))\n                      @@ plainto_tsquery('english', $3)\n                  OR rv.external_id ILIKE '%' || $3 || '%'\n                  OR rv.title ILIKE '%' || $3 || '%'\n                  OR rv.metadata->>'cci_ids' ILIKE '%' || $3 || '%'\n                  OR rv.metadata->>'srg_ids' ILIKE '%' || $3 || '%'\n              )\n            ORDER BY rv.external_id\n            LIMIT $4 OFFSET $5\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "requirement_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "framework_version_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "external_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "title",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "kind",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "severity",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "parent_requirement_version_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 8,
+        "name": "semantic_digest",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "aa348bdac8c2a1680331990c04d855857d5f435d6fd0c39603dadd003876f37d"
+}

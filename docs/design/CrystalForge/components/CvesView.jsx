@@ -1,6 +1,6 @@
 // CVE view — fleet-wide vulnerabilities
 
-function CvesView({ onOpenSystem }) {
+function CvesView({ onOpenSystem, focus, onClearFocus }) {
   const [query, setQuery] = React.useState("");
   const [sevFilter, setSevFilter] = React.useState("all");
   const [fixFilter, setFixFilter] = React.useState("all");
@@ -11,6 +11,13 @@ function CvesView({ onOpenSystem }) {
   const [expandedPkg, setExpandedPkg] = React.useState(null);
   const [selectedCve, setSelectedCve] = React.useState(null);
   const flashCrit = useAttentionFlash("cves", (CVE_STATS.critical || 0) > 0);
+  React.useEffect(() => {
+    if (!focus) return;
+    const c = CVES.find(x => x.id === focus.id) || CVES.find(x => x.pkg === focus.pkg);
+    if (c) { setQuery(c.id); setGroupMode("flat"); setSelectedCve(c); }
+    else setQuery(focus.id || focus.pkg || "");
+    onClearFocus?.();
+  }, [focus]);
 
   const packages = React.useMemo(() => [...new Set(CVES.map((c) => c.pkg))], []);
 
@@ -536,10 +543,11 @@ function CveDrawer({ cve, onClose, onOpenSystem }) {
     byEnv[s.environment].push(s);
   });
 
+  const [maximized, setMaximized] = React.useState(false);
   return (
     <>
       <div className="fl-tray-backdrop" onClick={onClose} />
-      <aside className="fl-tray" role="dialog" aria-label={cve.id}>
+      <aside className={`fl-tray${maximized?" fl-tray-max":""}`} role="dialog" aria-label={cve.id}>
         <header className="fl-tray-head">
           <div style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0, flex: 1 }}>
             <Icon name="shield" size={18} style={{ color: sevColor, flexShrink: 0 }} />
@@ -571,6 +579,7 @@ function CveDrawer({ cve, onClose, onOpenSystem }) {
                 <Icon name="file" size={11} /> Edit justification
               </button>
             )}
+            <button className="btn-icon focus-ring" title={maximized?"Restore":"Expand"} onClick={()=>setMaximized(m=>!m)}><Icon name={maximized?"minimize":"maximize"} size={15}/></button>
             <button className="btn-icon focus-ring" onClick={onClose}><Icon name="x" size={16} /></button>
           </div>
         </header>

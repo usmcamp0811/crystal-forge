@@ -42,6 +42,22 @@ Do not blindly run every command. Confirm the current attribute names with `nix 
 
 Use during implementation for isolated logic or a small component. Run formatting and the smallest relevant test selection.
 
+For a supported browser workflow, start `run-ui-dev` once and use the existing
+browser harness directly:
+
+```bash
+web-ui-test 12-systems
+```
+
+Pass more workflow names as separate arguments. The command keeps PostgreSQL,
+the Crystal Forge server, and Dioxus running between invocations. If a workflow
+requires VM-only infrastructure, the command rejects it and prints the
+authoritative NixOS invocation.
+
+`web-ui-test` is the fast development feedback loop. The NixOS Web UI check
+remains the reproducible authoritative verification boundary. Host-side
+success does not replace the relevant focused NixOS check before completion.
+
 ### Feature integration
 
 Use when acceptance criteria cross server/database, UI/API, builder/server, or agent/server boundaries. Start repository services through the devshell's process-compose workflow and exercise the actual path.

@@ -159,6 +159,17 @@ fn meaningful_generation_or_store_changed(
     store_changed || generation_changed
 }
 
+pub(crate) async fn find_system_id_by_hostname_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    hostname: &str,
+) -> Result<Option<Uuid>> {
+    sqlx::query_scalar("SELECT id FROM systems WHERE hostname = $1")
+        .bind(hostname)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(Into::into)
+}
+
 pub async fn lock_observed_system_state_by_hostname_tx(
     tx: &mut Transaction<'_, Postgres>,
     hostname: &str,

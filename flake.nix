@@ -6,6 +6,7 @@
     flake-utils.url = "github:numtide/flake-utils";
     process-compose-flake.url = "github:Platonic-Systems/process-compose-flake";
     services-flake.url = "github:juspay/services-flake";
+    crane.url = "github:ipetkov/crane";
     snowfall-lib = {
       url = "github:snowfallorg/lib";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -47,6 +48,7 @@
           oscal-fixture = channels.nixpkgs.crystal-forge.oscal-fixture;
           oscal-1-1-2-schemas = channels.nixpkgs.crystal-forge.oscal-1-1-2-schemas;
           xccdf-1-2-schemas = channels.nixpkgs.crystal-forge.xccdf-1-2-schemas;
+          nixos-options-metadata = channels.nixpkgs.crystal-forge.nixos-options-metadata;
         };
         apps.generate-design-targets = import ./apps/generate-design-targets/default.nix {
           lib = channels.nixpkgs.lib;

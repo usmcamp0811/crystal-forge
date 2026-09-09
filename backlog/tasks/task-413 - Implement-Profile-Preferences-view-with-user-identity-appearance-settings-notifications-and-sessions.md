@@ -3,10 +3,10 @@ id: TASK-413
 title: >-
   Implement Profile & Preferences view with user identity, appearance settings,
   notifications, and sessions
-status: In Progress
+status: To Do
 assignee: []
 created_date: '2026-07-31 13:46'
-updated_date: '2026-08-01 02:48'
+updated_date: '2026-09-02 02:54'
 labels:
   - web-ui
   - design-parity

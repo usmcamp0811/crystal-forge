@@ -521,6 +521,7 @@ pub async fn update_policy_mapping(
         FROM deployment_policy_versions pv
         WHERE m.id = $1
           AND m.policy_version_id = $2
+          AND m.provenance = 'manual'
           AND pv.id = m.policy_version_id
           AND pv.publication_state NOT IN ('accepted', 'deprecated')
         "#,
@@ -535,6 +536,19 @@ pub async fn update_policy_mapping(
     .context("failed to update policy requirement mapping")?;
 
     if affected.rows_affected() == 0 {
+        let imported: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM policy_requirement_mappings WHERE id = $1 AND policy_version_id = $2 AND provenance <> 'manual')",
+        )
+        .bind(mapping_id)
+        .bind(policy_version_id)
+        .fetch_one(&mut *tx)
+        .await
+        .context("failed to check mapping provenance")?;
+        if imported {
+            bail!(
+                "POLICY_MAPPING_IMPORTED: imported mappings are read-only; create a manual mapping instead"
+            );
+        }
         bail!(
             "POLICY_MAPPING_IMMUTABLE_OR_NOT_FOUND: mapping {mapping_id} was not found \
              or belongs to an immutable policy version"
@@ -564,6 +578,7 @@ pub async fn delete_policy_mapping(
         USING deployment_policy_versions pv
         WHERE m.id = $1
           AND m.policy_version_id = $2
+          AND m.provenance = 'manual'
           AND pv.id = m.policy_version_id
           AND pv.publication_state NOT IN ('accepted', 'deprecated')
         "#,
@@ -575,6 +590,19 @@ pub async fn delete_policy_mapping(
     .context("failed to delete policy requirement mapping")?;
 
     if affected.rows_affected() == 0 {
+        let imported: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM policy_requirement_mappings WHERE id = $1 AND policy_version_id = $2 AND provenance <> 'manual')",
+        )
+        .bind(mapping_id)
+        .bind(policy_version_id)
+        .fetch_one(&mut *tx)
+        .await
+        .context("failed to check mapping provenance")?;
+        if imported {
+            bail!(
+                "POLICY_MAPPING_IMPORTED: imported mappings are read-only; create a manual mapping instead"
+            );
+        }
         bail!(
             "POLICY_MAPPING_IMMUTABLE_OR_NOT_FOUND: mapping {mapping_id} was not found \
              or belongs to an immutable policy version"

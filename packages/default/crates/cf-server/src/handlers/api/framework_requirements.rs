@@ -36,6 +36,7 @@ use uuid::Uuid;
 
 use crate::api::models::ApiError;
 use crate::compliance::framework_model::attach_artifact_and_retry_framework_recovery;
+use crate::handlers::api::auth_session::require_csrf;
 use crate::handlers::api::rbac::{
     authenticated_user_roles, has_admin_role, has_operator_or_admin_role,
 };
@@ -78,6 +79,18 @@ fn not_found(message: &str) -> axum::response::Response {
         StatusCode::NOT_FOUND,
         Json(ApiError {
             error: "Not Found".to_string(),
+            message: message.to_string(),
+            details: None,
+        }),
+    )
+        .into_response()
+}
+
+fn conflict(message: &str) -> axum::response::Response {
+    (
+        StatusCode::CONFLICT,
+        Json(ApiError {
+            error: "Conflict".to_string(),
             message: message.to_string(),
             details: None,
         }),
@@ -328,6 +341,9 @@ pub async fn create_policy_requirement_mapping(
     if !has_operator_or_admin_role(&roles) {
         return forbidden();
     }
+    if let Err(response) = require_csrf(&headers) {
+        return response;
+    }
 
     // Validate field values.
     if !matches!(
@@ -386,6 +402,9 @@ pub async fn update_policy_requirement_mapping(
     if !has_operator_or_admin_role(&roles) {
         return forbidden();
     }
+    if let Err(response) = require_csrf(&headers) {
+        return response;
+    }
 
     if !matches!(
         request.relationship.as_str(),
@@ -416,7 +435,9 @@ pub async fn update_policy_requirement_mapping(
             .into_response(),
         Err(e) => {
             let msg = e.to_string();
-            if msg.contains("POLICY_MAPPING_IMMUTABLE_OR_NOT_FOUND") {
+            if msg.contains("POLICY_MAPPING_IMPORTED") {
+                conflict(&msg)
+            } else if msg.contains("POLICY_MAPPING_IMMUTABLE_OR_NOT_FOUND") {
                 not_found(&msg)
             } else {
                 tracing::error!(error = %e, mapping_id = %mapping_id, "failed to update policy requirement mapping");
@@ -516,12 +537,17 @@ pub async fn delete_policy_requirement_mapping(
     if !has_operator_or_admin_role(&roles) {
         return forbidden();
     }
+    if let Err(response) = require_csrf(&headers) {
+        return response;
+    }
 
     match delete_policy_mapping(&pool, policy_version_id, mapping_id).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => {
             let msg = e.to_string();
-            if msg.contains("POLICY_MAPPING_IMMUTABLE_OR_NOT_FOUND") {
+            if msg.contains("POLICY_MAPPING_IMPORTED") {
+                conflict(&msg)
+            } else if msg.contains("POLICY_MAPPING_IMMUTABLE_OR_NOT_FOUND") {
                 not_found(&msg)
             } else {
                 tracing::error!(error = %e, mapping_id = %mapping_id, "failed to delete policy requirement mapping");

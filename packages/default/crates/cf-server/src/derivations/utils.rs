@@ -355,15 +355,36 @@ pub fn normalize_flake_git_url(repo_url: &str) -> String {
 
 /// Build the base flake reference (git+url?rev=hash)
 pub fn build_flake_reference(repo_url: &str, commit_hash: &str) -> String {
-    // First normalize the URL so it's a valid Nix flake ref
     let normalized = normalize_flake_git_url(repo_url);
-
-    if normalized.contains("?rev=") {
-        normalized
-    } else {
-        let separator = if normalized.contains('?') { "&" } else { "?" };
-        format!("{normalized}{separator}rev={commit_hash}")
+    let (without_fragment, fragment) = normalized
+        .split_once('#')
+        .map_or((normalized.as_str(), None), |(base, fragment)| {
+            (base, Some(fragment))
+        });
+    let (base, query) = without_fragment
+        .split_once('?')
+        .map_or((without_fragment, ""), |(base, query)| (base, query));
+    let mut parameters = query
+        .split('&')
+        .filter(|parameter| !parameter.is_empty())
+        .filter(|parameter| parameter.split_once('=').map_or(*parameter, |(key, _)| key) != "rev")
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    parameters.push(format!("rev={commit_hash}"));
+    let mut reference = format!("{base}?{}", parameters.join("&"));
+    if let Some(fragment) = fragment {
+        reference.push('#');
+        reference.push_str(fragment);
     }
+    reference
+}
+
+pub fn flake_reference_revision(flake_ref: &str) -> Option<&str> {
+    let query = flake_ref.split_once('?')?.1.split('#').next()?;
+    query.split('&').find_map(|parameter| {
+        let (key, value) = parameter.split_once('=')?;
+        (key == "rev" && !value.is_empty()).then_some(value)
+    })
 }
 
 /// Build flake target for agent deployment (nixos-rebuild compatible)
@@ -766,11 +787,23 @@ mod tests {
             "git+https://github.com/ATALLC/nix-config?rev=def456",
             "abc123",
         );
-        // Already has ?rev= so it's returned as-is
         assert_eq!(
             result,
-            "git+https://github.com/ATALLC/nix-config?rev=def456"
+            "git+https://github.com/ATALLC/nix-config?rev=abc123"
         );
+    }
+
+    #[test]
+    fn test_build_flake_reference_replaces_rev_and_preserves_other_query_parameters() {
+        let result = build_flake_reference(
+            "git+https://github.com/ATALLC/nix-config?ref=main&rev=def456&shallow=1",
+            "abc123",
+        );
+        assert_eq!(
+            result,
+            "git+https://github.com/ATALLC/nix-config?ref=main&shallow=1&rev=abc123"
+        );
+        assert_eq!(flake_reference_revision(&result), Some("abc123"));
     }
 
     #[test]

@@ -1039,6 +1039,78 @@ mod tests {
         assert_eq!(a, b);
     }
 
+    fn composite_policy(config: Value) -> PolicyVersionCanonical {
+        PolicyVersionCanonical {
+            name: "composite".into(),
+            description: Some("typed rules".into()),
+            policy_type: "composite".into(),
+            implementation_state: "native".into(),
+            execution_phase: "multi-phase".into(),
+            config,
+            compliance_metadata: json!({}),
+            dependencies: json!([]),
+            opaque_xml_digest: None,
+            enabled_by_default: Some(true),
+        }
+    }
+
+    fn composite_digest_config() -> Value {
+        json!({
+            "schema_version": 1,
+            "mode": "all",
+            "rules": [
+                {
+                    "id": "20000000-0000-0000-0000-000000000001",
+                    "kind": "nixos_option",
+                    "config": {
+                        "path": "services.openssh.banner",
+                        "operator": "==",
+                        "value_type": "string",
+                        "value": "Authorized use only\nLine two"
+                    }
+                },
+                {
+                    "id": "20000000-0000-0000-0000-000000000002",
+                    "kind": "cve_block",
+                    "config": {"severity": "critical", "max_allowed": 0}
+                }
+            ]
+        })
+    }
+
+    #[test]
+    fn composite_digest_is_key_order_independent_but_structure_sensitive() {
+        let base = composite_digest_config();
+        let reordered_keys: Value = serde_json::from_str(
+            r#"{"rules":[{"kind":"nixos_option","config":{"value":"Authorized use only\nLine two","value_type":"string","operator":"==","path":"services.openssh.banner"},"id":"20000000-0000-0000-0000-000000000001"},{"config":{"max_allowed":0,"severity":"critical"},"id":"20000000-0000-0000-0000-000000000002","kind":"cve_block"}],"mode":"all","schema_version":1}"#,
+        )
+        .unwrap();
+        let digest = composite_policy(base.clone()).compute_digest();
+        assert_eq!(digest, composite_policy(reordered_keys).compute_digest());
+
+        let mut changes = Vec::new();
+        let mut rule_order = base.clone();
+        rule_order["rules"].as_array_mut().unwrap().swap(0, 1);
+        changes.push(rule_order);
+        let mut id = base.clone();
+        id["rules"][0]["id"] = json!("20000000-0000-0000-0000-000000000009");
+        changes.push(id);
+        let mut kind = base.clone();
+        kind["rules"][1]["kind"] = json!("packages_installed");
+        kind["rules"][1]["config"] = json!({"packages": ["openssl"]});
+        changes.push(kind);
+        let mut value = base.clone();
+        value["rules"][0]["config"]["value"] = json!("Authorized use only\nChanged");
+        changes.push(value);
+        let mut newline = base;
+        newline["rules"][0]["config"]["value"] = json!("Authorized use only\r\nLine two");
+        changes.push(newline);
+
+        for changed in changes {
+            assert_ne!(digest, composite_policy(changed).compute_digest());
+        }
+    }
+
     #[test]
     fn policy_digest_changes_when_implementation_state_changes() {
         let native = base_policy().compute_digest();

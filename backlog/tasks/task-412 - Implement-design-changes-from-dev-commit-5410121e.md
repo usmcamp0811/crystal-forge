@@ -1,11 +1,11 @@
 ---
 id: TASK-412
 title: Implement CF-XCCDF bundle and policy interchange and design updates
-status: In Progress
+status: Done
 assignee:
   - '@gpt-5.6-terra'
 created_date: '2026-08-01 01:04'
-updated_date: '2026-08-10 04:06'
+updated_date: '2026-09-02 02:42'
 labels:
   - design
   - frontend
@@ -43,7 +43,7 @@ modified_files:
   - packages/default/crates/cf-server/src/queries/deployment_policies.rs
 priority: high
 type: feature
-ordinal: 405500
+ordinal: 23000
 ---
 
 ## Description

@@ -43,8 +43,12 @@ pub enum Route {
     #[route("/environments")]
     EnvironmentsView {},
 
-    #[route("/systems/:id")]
-    SystemDetailView { id: String },
+    #[route("/systems/:id?:tab&:poam")]
+    SystemDetailView {
+        id: String,
+        tab: String,
+        poam: String,
+    },
 
     #[route("/flakes")]
     FlakesView {},
@@ -73,8 +77,15 @@ pub enum Route {
     #[route("/deployment-policies")]
     PoliciesView {},
 
-    #[route("/compliance")]
-    ComplianceView {},
+    #[route("/compliance?:bundle&:version&:system&:policy&:poam&:view")]
+    ComplianceView {
+        bundle: String,
+        version: String,
+        system: String,
+        policy: String,
+        poam: String,
+        view: String,
+    },
 
     #[route("/admin")]
     AdminView {},
@@ -110,7 +121,7 @@ impl Route {
             Route::DashboardView { .. } => "Dashboard".to_string(),
             Route::SystemsView { .. } => "Systems".to_string(),
             Route::EnvironmentsView { .. } => "Environments".to_string(),
-            Route::SystemDetailView { id } => format!("System: {id}"),
+            Route::SystemDetailView { id, .. } => format!("System: {id}"),
             Route::FlakesView { .. } => "Flakes".to_string(),
             Route::BuildsView { .. } => "Builds".to_string(),
             Route::EvaluationsView { .. } => "Evaluations".to_string(),

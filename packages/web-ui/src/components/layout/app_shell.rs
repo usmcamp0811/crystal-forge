@@ -13,6 +13,7 @@ use crate::api::models::{
 use crate::components::layout::sidebar::{
     MobileDrawer, PreferencesContext, SidebarContext, SidebarNav,
 };
+use crate::components::layout::topbar::load_account_notifications;
 use crate::components::layout::{AccountNotificationsContext, TopBar};
 use crate::components::layout::{
     BannerPlacement, DEV_MODE_BANNER_HEIGHT_PX, DevModeBanner, use_dev_mode_enabled,
@@ -168,12 +169,13 @@ pub fn AppShell() -> Element {
     let mut preference_save_in_flight = use_signal(|| false);
     let mut preference_save_user_id = use_signal(|| None::<String>);
     let mut preference_save_generation = use_signal(|| 0_u64);
-    let notification_items = use_signal(Vec::<UserNotificationDto>::new);
-    let unread_count = use_signal(|| 0_i64);
-    let notification_next_cursor = use_signal(|| None::<String>);
-    let notifications_loading = use_signal(|| false);
-    let notifications_loading_more = use_signal(|| false);
-    let notifications_error = use_signal(|| None::<String>);
+    let mut notification_items = use_signal(Vec::<UserNotificationDto>::new);
+    let mut unread_count = use_signal(|| 0_i64);
+    let mut notification_next_cursor = use_signal(|| None::<String>);
+    let mut notifications_loading = use_signal(|| false);
+    let mut notifications_loading_more = use_signal(|| false);
+    let mut notifications_error = use_signal(|| None::<String>);
+    let mut notification_poll_owner = use_signal(|| 0_u64);
     let save_update = Callback::new(move |update: UpdateUserPreferences| {
         save_error.set(None);
         preference_save_pending.with_mut(|pending| {
@@ -206,6 +208,66 @@ pub fn AppShell() -> Element {
         loading: notifications_loading,
         loading_more: notifications_loading_more,
         error: notifications_error,
+    });
+
+    let notification_auth = use_memo(move || {
+        let state = app_state.read();
+        let user_id = if matches!(state.auth_fetch_state, AuthFetchState::Loaded)
+            && auth::is_authenticated(&state.auth)
+        {
+            state
+                .auth
+                .as_ref()
+                .and_then(|auth| auth.user.as_ref().map(|user| user.id.clone()))
+        } else {
+            None
+        };
+        (user_id, state.auth_generation)
+    });
+
+    use_effect(move || {
+        let (auth_user_id, auth_generation) = notification_auth();
+
+        let owner = (*notification_poll_owner.peek()).saturating_add(1);
+        notification_poll_owner.set(owner);
+        let notification_ctx = AccountNotificationsContext {
+            items: notification_items,
+            unread_count,
+            next_cursor: notification_next_cursor,
+            loading: notifications_loading,
+            loading_more: notifications_loading_more,
+            error: notifications_error,
+        };
+
+        // Account-scoped request flags belong to the previous poll owner. A
+        // stale response cannot clear them after an authentication change.
+        notifications_loading.set(false);
+        notifications_loading_more.set(false);
+        notifications_error.set(None);
+
+        let Some(user_id) = auth_user_id else {
+            notification_items.set(Vec::new());
+            unread_count.set(0);
+            notification_next_cursor.set(None);
+            return;
+        };
+
+        spawn(async move {
+            loop {
+                if *notification_poll_owner.peek() != owner {
+                    break;
+                }
+                load_account_notifications(
+                    notification_ctx,
+                    app_state,
+                    Some(user_id.clone()),
+                    auth_generation,
+                    None,
+                    false,
+                );
+                gloo_timers::future::TimeoutFuture::new(30_000).await;
+            }
+        });
     });
 
     let breadcrumb_override = use_signal(|| None::<(String, String)>);

@@ -1,11 +1,11 @@
 ---
 id: TASK-410
 title: Refactor Dashboard view UI/UX for exact parity with latest design examples
-status: In Progress
+status: Done
 assignee:
   - opencode-agent
 created_date: '2026-05-31 15:14'
-updated_date: '2026-08-24 14:18'
+updated_date: '2026-09-02 02:41'
 labels:
   - ui
   - dashboard
@@ -30,7 +30,7 @@ modified_files:
   - checks/web-ui/tests/integration-test.js
   - checks/web-ui/coverage-manifest.json
 priority: high
-ordinal: 20000
+ordinal: 22000
 ---
 
 ## Description

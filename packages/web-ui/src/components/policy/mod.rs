@@ -7,12 +7,14 @@ mod grouping_schemes_modal;
 mod policy_card;
 mod policy_editor_modal;
 mod policy_interchange_modal;
+mod policy_row;
 mod types;
 
 pub use grouping_schemes_modal::GroupingSchemesModal;
 pub use policy_card::PolicyCard;
 pub use policy_editor_modal::PolicyEditorModal;
 pub use policy_interchange_modal::PolicyInterchangeModal;
+pub use policy_row::PolicyRow;
 pub use types::{
     POLICY_CATEGORIES, POLICY_TOML_SAMPLE, PolicyCategory, PolicyDefinition, PolicyFormat,
     PolicyRevisionSummary, PolicyRuleSummary, is_core_policy, is_policy_enabled,

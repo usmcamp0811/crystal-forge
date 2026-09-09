@@ -154,7 +154,7 @@ After you register the first admin user and log in, you'll see the **Setup Coach
 
 ### How the Coach Works
 
-- **Progress Tracking**: Shows 6 required setup steps with completion checkmarks
+- **Progress Tracking**: Shows nine setup steps with completion checkmarks
 - **Clickable Steps**: Click any step to navigate to the relevant page
 - **Contextual Callouts**: Destination pages show blue callouts pointing to the actions you need to take
 - **Progressive Guidance**: Form fields display hints as you fill them in, guiding you through each required field
@@ -166,11 +166,26 @@ After you register the first admin user and log in, you'll see the **Setup Coach
 
 **Expanded** (default): Shows the full checklist with progress
 
-**Minimized**: Collapses to a small "Setup Guide" tab showing completion count (e.g., "3/6")
+**Minimized**: Collapses to a small "Setup Guide" tab showing completion count (for example, "3/9")
 
 ![Coach Minimized](./screenshots/06g-onboarding-coach-minimized.png)
 
 **Dismissed**: Hides completely (can be reopened from admin)
+
+The final three steps use persisted production data. A policy step requires a
+user-created or imported policy version. A compliance bundle step requires a
+persisted bundle. A POA&M step requires a persisted POA&M in any lifecycle
+state. Create the POA&M from a failing control's evidence in **Compliance**.
+
+## POA&M Dashboard and Notifications
+
+The dashboard gets its POA&M Summary and Watchlist from server-computed APIs.
+Select a watchlist row to open that exact POA&M in Compliance. The notification
+inbox refreshes periodically and records one durable event for each overdue
+episode and each transition to awaiting verification. Opening, reading, or
+dismissing a notification does not create another event. Read and dismissed
+states persist across reloads. The **Policy violations** notification preference
+controls these POA&M events.
 
 ---
 

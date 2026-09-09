@@ -10,7 +10,13 @@ function DashboardView({ onNavigate }) {
         if (!parsed.find(w => w.id === "attestationTrust")) parsed.splice(1, 0, { id:"attestationTrust", cols:1 }, { id:"deployApprovals", cols:1 });
         if (!parsed.find(w => w.id === "poamSummary")) parsed.splice(1, 0, { id:"poamSummary", cols:1 });
         if (!parsed.find(w => w.id === "poamWatchlist")) parsed.push({ id:"poamWatchlist", cols:2 });
-        return parsed;
+        // Fleet-ops widgets, added later — append once so existing dashboards get them.
+        [{ id:"fleetDrift", cols:2, rows:2 }, { id:"rebootRequired", cols:1 },
+         { id:"closurePressure", cols:2, rows:2 }, { id:"rollbackReadiness", cols:1 },
+         { id:"deployHeatmap", cols:3 }].forEach(w => { if (!parsed.find(x => x.id === w.id)) parsed.push(w); });
+        if (!parsed.find(w => w.id === "fleetCalendar")) parsed.push({ id:"fleetCalendar", cols:3 });
+        // Retired widgets stay out of dashboards that already saved them.
+        return parsed.filter(w => w.id !== "cacheHitRate" && w.id !== "secretExpiry");
       }
     } catch {}
     return DEFAULT_DASHBOARD_LAYOUT;
@@ -25,14 +31,20 @@ function DashboardView({ onNavigate }) {
     try { localStorage.setItem("cf-dashboard-layout", JSON.stringify(next)); } catch {}
   };
 
+  // Scopeable widgets can be added more than once (one per environment), so each
+  // entry carries its own instance key; legacy entries fall back to their id.
+  const keyOf = (w) => w.key || w.id;
   const addWidget = (id) => {
-    if (layout.find(w => w.id === id)) return;
+    if (!SCOPEABLE.has(id) && layout.find(w => w.id === id)) return;
     const def = DASHBOARD_WIDGETS[id];
-    persist([...layout, { id, cols: def.defaultCols, rows: def.defaultRows || 1 }]);
+    persist([...layout, { key: `${id}-${Date.now().toString(36)}`, id, cols: def.defaultCols, rows: def.defaultRows || 1 }]);
   };
-  const removeWidget = (id) => persist(layout.filter(w => w.id !== id));
-  const setCols = (id, cols) => persist(layout.map(w => w.id === id ? { ...w, cols } : w));
-  const setRows = (id, rows) => persist(layout.map(w => w.id === id ? { ...w, rows } : w));
+  const removeWidget = (k) => persist(layout.filter(w => keyOf(w) !== k));
+  const patch = (k, p) => persist(layout.map(w => keyOf(w) === k ? { ...w, ...p } : w));
+  const setCols = (k, cols) => patch(k, { cols });
+  const setRows = (k, rows) => patch(k, { rows });
+  const setScope = (k, scope) => patch(k, { scope });
+  const setMetric = (k, metric) => patch(k, { metric });
   const reorder = (from, to) => {
     if (from === to || from == null || to == null) return;
     const next = [...layout];
@@ -45,7 +57,7 @@ function DashboardView({ onNavigate }) {
     setLayout(DEFAULT_DASHBOARD_LAYOUT);
   };
 
-  const available = Object.values(DASHBOARD_WIDGETS).filter(w => !layout.find(l => l.id === w.id));
+  const available = Object.values(DASHBOARD_WIDGETS).filter(w => SCOPEABLE.has(w.id) || !layout.find(l => l.id === w.id));
 
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
@@ -86,7 +98,7 @@ function DashboardView({ onNavigate }) {
           const def = DASHBOARD_WIDGETS[w.id];
           if (!def) return null;
           return (
-            <div key={w.id}
+            <div key={keyOf(w)}
               className={`dash-widget dash-cols-${w.cols} dash-rows-${w.rows || 1}${editMode ? " edit" : ""}${dragIdx === idx ? " dragging" : ""}${overIdx === idx && dragIdx !== idx ? " over" : ""}`}
               draggable={editMode}
               onDragStart={(e) => {
@@ -117,7 +129,7 @@ function DashboardView({ onNavigate }) {
                     <span className="dash-col-label">Width</span>
                     <div className="seg dash-col-seg">
                       {[1, 2, 3].map(c => (
-                        <button key={c} className={w.cols === c ? "active" : ""} onClick={() => setCols(w.id, c)} title={`Span ${c} of 3 columns`} aria-label={`Span ${c} of 3 columns`}>
+                        <button key={c} className={w.cols === c ? "active" : ""} onClick={() => setCols(keyOf(w), c)} title={`Span ${c} of 3 columns`} aria-label={`Span ${c} of 3 columns`}>
                           <span className="dash-wglyph">
                             {[0, 1, 2].map(i => <span key={i} className={`dash-wcell${i < c ? " on" : ""}`}/>)}
                           </span>
@@ -130,7 +142,7 @@ function DashboardView({ onNavigate }) {
                       <span className="dash-col-label">Height</span>
                       <div className="seg dash-col-seg">
                         {[1, 2, 3].map(r => (
-                          <button key={r} className={(w.rows || 1) === r ? "active" : ""} onClick={() => setRows(w.id, r)} title={r === 1 ? "Show fewer items" : `Show more items (${HEIGHT_COUNTS[r]})`} aria-label={`Height level ${r}`}>
+                          <button key={r} className={(w.rows || 1) === r ? "active" : ""} onClick={() => setRows(keyOf(w), r)} title={r === 1 ? "Show fewer items" : `Show more items (${HEIGHT_COUNTS[r]})`} aria-label={`Height level ${r}`}>
                             <span className="dash-hglyph">
                               {[0, 1, 2].map(i => <span key={i} className={`dash-hcell${i >= 3 - r ? " on" : ""}`}/>)}
                             </span>
@@ -141,12 +153,35 @@ function DashboardView({ onNavigate }) {
                   ) : (
                     <span className="dash-col-label dash-fixed-h" title="This widget sizes to its content">Fixed height</span>
                   )}
-                  <button className="btn-icon focus-ring dash-widget-remove" onClick={() => removeWidget(w.id)} title="Remove">
+                  {METRIC_OPTIONS[w.id] && (
+                    <span className="dash-size-group">
+                      <span className="dash-col-label">Metric</span>
+                      <select className="input focus-ring dash-scope-sel" value={w.metric || METRIC_OPTIONS[w.id][0][0]}
+                        onChange={(e) => setMetric(keyOf(w), e.target.value)} title="What this widget colours by">
+                        {METRIC_OPTIONS[w.id].map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                      </select>
+                    </span>
+                  )}
+                  {SCOPEABLE.has(w.id) && (
+                    <span className="dash-size-group">
+                      <span className="dash-col-label">Scope</span>
+                      <select className="input focus-ring dash-scope-sel" value={w.scope || "all"} onChange={(e) => setScope(keyOf(w), e.target.value)}
+                        title="Limit this widget to an environment">
+                        <option value="all">All systems</option>
+                        <optgroup label="Environment">
+                          {(typeof ENVIRONMENTS !== "undefined" ? ENVIRONMENTS : []).map(env => (
+                            <option key={env.name} value={`env:${env.name}`}>{env.name}</option>
+                          ))}
+                        </optgroup>
+                      </select>
+                    </span>
+                  )}
+                  <button className="btn-icon focus-ring dash-widget-remove" onClick={() => removeWidget(keyOf(w))} title="Remove">
                     <Icon name="x" size={13}/>
                   </button>
                 </div>
               )}
-              <Widget id={w.id} editMode={editMode} onNavigate={onNavigate} rows={w.rows || 1}/>
+              <Widget id={w.id} editMode={editMode} onNavigate={onNavigate} rows={w.rows || 1} scope={w.scope || "all"} metric={w.metric}/>
             </div>
           );
         })}
@@ -160,7 +195,8 @@ function DashboardView({ onNavigate }) {
 
       {pickerOpen && (
         <WidgetPicker
-          addedIds={new Set(layout.map(l => l.id))}
+          addedIds={new Set(layout.filter(l => !SCOPEABLE.has(l.id)).map(l => l.id))}
+          countsById={layout.reduce((a, l) => { a[l.id] = (a[l.id] || 0) + 1; return a; }, {})}
           onAdd={addWidget}
           onClose={() => setPickerOpen(false)}/>
       )}
@@ -173,10 +209,24 @@ function DashboardView({ onNavigate }) {
 // Everything else (stat rollups, the self-sizing git graph) stays fit-to-content.
 const HEIGHT_RESIZABLE = new Set([
   "deploymentTimeline", "recentCommits", "topAffected", "poamWatchlist",
+  "fleetDrift", "closurePressure", "deployHeatmap", "rollbackReadiness",
+  "rebootRequired", "fleetCalendar",
 ]);
+// Widgets whose content is a list of hosts, so limiting them to an environment
+// or a single system is meaningful.
+const SCOPEABLE = new Set([
+  "fleetDrift", "closurePressure", "rollbackReadiness", "deployHeatmap",
+  "rebootRequired", "fleetCalendar",
+]);
+
+// Widgets offering a metric choice in Customize: id → [value, label] options.
+const METRIC_OPTIONS = {
+  fleetCalendar: [["combined", "Compliance + drift"], ["compliance", "Compliance"], ["drift", "Drift"]],
+};
+
 // rows setting → how many list items the widget shows.
 const HEIGHT_COUNTS = { 1: 4, 2: 8, 3: 13 };
-function Widget({ id, editMode, onNavigate, rows }) {
+function Widget({ id, editMode, onNavigate, rows, scope, metric }) {
   switch (id) {
     case "fleetHealth":     return <WFleetHealth onNavigate={onNavigate}/>;
     case "heartbeatStatus": return <WHeartbeat onNavigate={onNavigate}/>;
@@ -194,7 +244,12 @@ function Widget({ id, editMode, onNavigate, rows }) {
     case "attestationTrust": return <WAttestationTrust onNavigate={onNavigate}/>;
     case "poamSummary":      return <WPoamSummary onNavigate={onNavigate}/>;
     case "poamWatchlist":    return <WPoamWatchlist onNavigate={onNavigate} rows={rows}/>;
-    default: return <div style={{ padding:14 }}>Unknown widget</div>;
+    default: {
+      // Widgets registered by other files (fleet-ops set) render through here.
+      const render = (window.DASH_WIDGET_RENDERERS || {})[id];
+      if (render) return render({ onNavigate, rows, editMode, scope, metric });
+      return <div style={{ padding:14 }}>Unknown widget</div>;
+    }
   }
 }
 
@@ -836,10 +891,16 @@ const WIDGET_CATEGORIES = {
   poamSummary:        "Security",
   poamWatchlist:      "Security",
   quickActions:       "Actions",
+  fleetDrift:         "Fleet",
+  rollbackReadiness:  "Fleet",
+  rebootRequired:     "Fleet",
+  closurePressure:    "Infrastructure",
+  deployHeatmap:      "Activity",
+  fleetCalendar:      "Activity",
 };
 const CATEGORY_ORDER = ["Fleet", "Pipeline", "Security", "Activity", "Infrastructure", "Actions"];
 
-function WidgetPicker({ addedIds, onAdd, onClose }) {
+function WidgetPicker({ addedIds, countsById = {}, onAdd, onClose }) {
   const all = Object.values(DASHBOARD_WIDGETS);
   const [query, setQuery] = React.useState("");
   const [cat, setCat] = React.useState("All");
@@ -935,10 +996,14 @@ function WidgetPicker({ addedIds, onAdd, onClose }) {
                   </button>
                 ) : (
                   <button className="btn btn-primary focus-ring" style={{ width: "100%", justifyContent: "center" }} onClick={() => onAdd(sel.id)}>
-                    <Icon name="plus" size={13} /> Add to dashboard
+                    <Icon name="plus" size={13} /> {countsById[sel.id] ? "Add another" : "Add to dashboard"}
                   </button>
                 )}
-                <div className="help" style={{ marginTop: 8, textAlign: "center" }}>Reorder & resize it after adding.</div>
+                <div className="help" style={{ marginTop: 8, textAlign: "center" }}>
+                  {SCOPEABLE.has(sel.id)
+                    ? `Reorder & resize after adding${countsById[sel.id] ? ` · ${countsById[sel.id]} already on the dashboard` : ""}. Add it once per environment to compare scopes.`
+                    : "Reorder & resize it after adding."}
+                </div>
               </div>
             </div>
           )}
@@ -952,4 +1017,4 @@ function WidgetPicker({ addedIds, onAdd, onClose }) {
   );
 }
 
-Object.assign(window, { DashboardView });
+Object.assign(window, { DashboardView, WidgetHeader, HEIGHT_COUNTS, SCOPEABLE, METRIC_OPTIONS });

@@ -1,0 +1,50 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            f.id,\n            f.name,\n            f.publisher,\n            f.canonical_source_key,\n            f.description,\n            COUNT(fv.id) AS \"version_count!\"\n        FROM compliance_frameworks f\n        LEFT JOIN compliance_framework_versions fv ON fv.framework_id = f.id\n        GROUP BY f.id\n        ORDER BY f.name\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "publisher",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "canonical_source_key",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "description",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "version_count!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      true,
+      null
+    ]
+  },
+  "hash": "85a5cf9607c81f2589b24f507adf0d5a2eca7ad33959e1fd8ac3ee7a64494f20"
+}

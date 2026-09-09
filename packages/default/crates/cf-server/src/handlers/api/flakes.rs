@@ -27,7 +27,10 @@ use crate::flake::commits::{
 use crate::flake::commits::{HistoryRewriteOutcome, sync_flake_recorded};
 use crate::flake::credentials::FlakeCredentialEnv;
 use crate::handlers::agent_request::CFState;
-use crate::handlers::api::rbac::{require_operator_or_admin, require_viewer_or_above};
+use crate::handlers::api::rbac::{
+    authenticated_user_roles, has_admin_role, has_viewer_or_above_role, require_operator_or_admin,
+    require_viewer_or_above,
+};
 use crate::handlers::api::systems::scan_ineligible_response;
 use crate::queries::admin::insert_admin_audit_event;
 use crate::queries::commits::insert_commit_with_metadata;
@@ -120,7 +123,10 @@ pub async fn get_flake_timelines(
     headers: HeaderMap,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
-    if require_viewer_or_above(&pool, &headers).await.is_none() {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden_viewer();
+    };
+    if !has_viewer_or_above_role(&roles) {
         return forbidden_viewer();
     }
 
@@ -169,7 +175,9 @@ pub async fn get_flake_timelines(
         "flakes"
     };
     let fetch_result = if use_dashboard_view {
-        fetch_dashboard_flake_timelines(&pool, max_commits, flake_ids.as_deref()).await
+        let visibility_user = (!has_admin_role(&roles)).then_some(user_id);
+        fetch_dashboard_flake_timelines(&pool, max_commits, flake_ids.as_deref(), visibility_user)
+            .await
     } else {
         // Database-only read path (TASK-397): no Git operations.
         // Ordering and visibility use the branch-commit snapshot when available,

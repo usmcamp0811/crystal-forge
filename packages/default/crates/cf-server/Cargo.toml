@@ -67,6 +67,7 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 serial_test = "3.2"
+tower = { version = "0.5", features = ["util"] }
 
 [lib]
 name = "crystal_forge"

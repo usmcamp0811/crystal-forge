@@ -1,7 +1,7 @@
 // Register System modal — opens from the "Add system" button on the Systems view.
 // Step 5 of onboarding; on success shows the Step 6 "deploy the agent" next-steps panel.
 
-function AddSystemModal({ onClose, coach }) {
+function AddSystemModal({ onClose, coach, prefill }) {
   const envList = (typeof ENVIRONMENTS !== "undefined" && ENVIRONMENTS.length)
     ? ENVIRONMENTS.map(e => e.name) : ["production", "staging", "dev", "edge", "lab"];
   const flakeList = (typeof FLAKES !== "undefined" && FLAKES.length) ? FLAKES : ["infrastructure"];
@@ -14,9 +14,11 @@ function AddSystemModal({ onClose, coach }) {
     branch: "main",
     deploymentPolicy: "inherit",
     reachability: "direct",
-    serverAddress: "",
     publicKey: "",
     tags: "",
+    // Prefill when the host is already declared in a flake and only needs
+    // registering (e.g. opened from the flake explorer's Systems tab).
+    ...(prefill || {}),
   });
   const [phase, setPhase] = React.useState("form"); // form | registered
   const set = (k, v) => setForm(p => ({ ...p, [k]: v }));
@@ -40,18 +42,60 @@ function AddSystemModal({ onClose, coach }) {
     setPhase("registered");
   };
 
+  const [section, setSection] = React.useState("host");
+  const sections = [
+    { id:"host",   label:"Host & environment", icon:"server" },
+    { id:"agent",  label:"Agent identity",     icon:"key" },
+    { id:"flake",  label:"Flake assignment",   icon:"git" },
+    { id:"policy", label:"Policy & tags",      icon:"shield" },
+  ];
+
+  if (phase === "registered") {
+    return (
+      <div className="modal-backdrop" onClick={onClose}>
+        <div className="modal" onClick={e => e.stopPropagation()} style={{ width: "min(620px,96vw)", maxHeight: "92vh" }}>
+          <AgentDeploySteps form={form} fingerprint={fingerprint} onClose={onClose} />
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal" onClick={e => e.stopPropagation()} style={{ width: "min(620px,96vw)", maxHeight: "92vh" }}>
-        {phase === "registered" ? (
-          <AgentDeploySteps form={form} fingerprint={fingerprint} onClose={onClose} />
-        ) : (
-          <>
-            <div className="modal-head">
-              <h2><Icon name="plus" size={14} style={{ marginRight: 6, verticalAlign: "text-bottom" }} /> Register system</h2>
-              <p>Add a NixOS host to the fleet and connect it to an environment and flake.</p>
+      <div className="pe-shell" onClick={e => e.stopPropagation()}>
+        <header className="pe-head">
+          <div style={{ minWidth:0, display:"flex", flexDirection:"column", gap:3 }}>
+            <div style={{ display:"flex", alignItems:"center", gap:9, minWidth:0 }}>
+              <Icon name="plus" size={15} style={{ color:"var(--cf-brand-purple)", flexShrink:0 }}/>
+              <span className="pe-head-title">{form.hostname || "Register system"}</span>
+              <span className="chip chip-info">{form.environment}</span>
+              <span className="chip chip-unknown mono" style={{ fontSize:10 }}>{form.flake} · {form.branch}</span>
+              {!keyValid && <span className="chip" title="An agent public key is required to register.">No agent key</span>}
             </div>
-            <div className="modal-body" style={{ overflowY: "auto" }}>
+            <span className="pe-head-sub">Add a NixOS host to the fleet and connect it to an environment and flake.</span>
+          </div>
+          <button className="btn-icon focus-ring" onClick={onClose} aria-label="Close"><Icon name="x" size={16}/></button>
+        </header>
+
+        <nav className="pe-rail">
+          {sections.map(s => (
+            <button key={s.id} className={`pe-rail-item focus-ring${section===s.id?" active":""}`} onClick={()=>setSection(s.id)}>
+              <Icon name={s.icon} size={13}/>
+              <span className="pe-rail-label">{s.label}</span>
+              {s.id === "host" && !form.hostname.trim() && <span className="pe-rail-badge warn">!</span>}
+              {s.id === "agent" && <span className={`pe-rail-badge${keyValid?"":" warn"}`}>{keyValid ? "ok" : "!"}</span>}
+              {s.id === "policy" && form.tags.trim() && <span className="pe-rail-badge">{form.tags.split(",").filter(x=>x.trim()).length}</span>}
+            </button>
+          ))}
+        </nav>
+
+        <div className="pe-body">
+          {section === "host" && (
+            <>
+              <div className="pe-sec-head">
+                <h3>Host &amp; environment</h3>
+                <p>What the host is called, which tier it belongs to, and how the server reaches it.</p>
+              </div>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
                 <div className="field">
                   <label>Hostname <span style={{ color: "#f87171" }}>*</span></label>
@@ -65,65 +109,93 @@ function AddSystemModal({ onClose, coach }) {
                 </div>
               </div>
               <div className="field">
-                <label>FQDN <span style={{ color: "var(--cf-text-muted)", fontWeight: 400 }}>· optional</span></label>
-                <input className="input focus-ring mono" value={form.fqdn} onChange={e => set("fqdn", e.target.value)} placeholder="web-server-1.prod.example.com" />
-              </div>
-
-              {/* Agent public key */}
-              <div style={{ marginTop: 8, padding: 14, border: "1px solid var(--cf-divider)", borderRadius: 10, background: "color-mix(in oklab,var(--cf-page-bg) 50%,var(--cf-card-bg))" }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 10, fontSize: 13, fontWeight: 600 }}>
-                  <Icon name="key" size={13} /> Agent identity
+                <label>FQDN or address <span style={{ color: "var(--cf-text-muted)", fontWeight: 400 }}>· optional</span></label>
+                <input className="input focus-ring mono" value={form.fqdn} onChange={e => set("fqdn", e.target.value)} placeholder="web-server-1.prod.example.com or 10.0.4.12" />
+                <div className="help">
+                  {form.reachability === "direct"
+                    ? "Where the server reaches this host — a resolvable name or an IP. Leave blank if the hostname alone resolves."
+                    : "Recorded for reference only; a pull-only agent connects outbound, so the server never dials this address."}
                 </div>
-                <div className="field">
-                  <label>Agent public key <span style={{ color: "#f87171" }}>*</span></label>
-                  <textarea className="input focus-ring mono" rows={3} value={form.publicKey} onChange={e => set("publicKey", e.target.value)}
-                    placeholder="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5… crystal-forge@hostname"
-                    style={{ fontSize: 11, resize: "vertical" }} />
-                  <div className="help">
-                    The agent generates its own keypair on first start. Grab the public half from the host (<span className="mono" style={{ fontSize: 10.5 }}>cat /var/lib/crystal-forge/host.key.pub</span>) and paste it here to register — the private key never leaves the host.
-                  </div>
-                  {form.publicKey.trim() && (
-                    <div style={{ marginTop: 10, padding: "9px 12px", borderRadius: 8,
-                      border: `1px solid ${keyValid ? "rgba(52,211,153,0.3)" : "rgba(248,113,113,0.35)"}`,
-                      background: keyValid ? "rgba(52,211,153,0.06)" : "rgba(248,113,113,0.06)",
-                      display: "flex", alignItems: "center", gap: 8 }}>
-                      <Icon name={keyValid ? "key" : "warn"} size={13} style={{ color: keyValid ? "#34d399" : "#f87171", flexShrink: 0 }} />
-                      {keyValid ? (
-                        <div style={{ minWidth: 0 }}>
-                          <div style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--cf-text-muted)", fontWeight: 600 }}>Fingerprint</div>
-                          <div className="mono" style={{ fontSize: 11.5, color: "var(--cf-text-primary)", wordBreak: "break-all" }}>{fingerprint}</div>
-                        </div>
-                      ) : (
-                        <span style={{ fontSize: 11.5, color: "#fca5a5" }}>Doesn't look like an SSH public key — expected it to start with <span className="mono">ssh-ed25519</span>.</span>
-                      )}
+              </div>
+              <div className="field">
+                <label className="focus-ring" style={{ display: "flex", gap: 9, alignItems: "flex-start", cursor: "pointer", margin: 0, textTransform: "none", letterSpacing: 0 }}>
+                  <input type="checkbox" checked={form.reachability === "direct"}
+                    onChange={e => set("reachability", e.target.checked ? "direct" : "pull")}
+                    style={{ accentColor: "var(--cf-brand-purple)", marginTop: 1 }} />
+                  <span style={{ minWidth: 0 }}>
+                    <span style={{ display: "block", fontSize: 13, fontWeight: 600 }}>Reachable by the server directly</span>
+                    <span className="help" style={{ display: "block", marginTop: 3, fontWeight: 400 }}>
+                      {form.reachability === "direct"
+                        ? "Same LAN / routable / VPN — enables server-initiated deploys and live log tail."
+                        : "Off: the agent is behind NAT or a firewall and only reaches out. Deploys apply on its next check-in."}
+                    </span>
+                  </span>
+                </label>
+              </div>
+            </>
+          )}
+
+          {section === "agent" && (
+            <>
+              <div className="pe-sec-head">
+                <h3>Agent identity</h3>
+                <p>The agent generates its own keypair on first start. Paste the public half to register — the private key never leaves the host.</p>
+              </div>
+              <div className="field">
+                <label>Agent public key <span style={{ color: "#f87171" }}>*</span></label>
+                <textarea className="input focus-ring mono" rows={4} value={form.publicKey} onChange={e => set("publicKey", e.target.value)}
+                  placeholder="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5… crystal-forge@hostname"
+                  style={{ fontSize: 11, resize: "vertical" }} />
+                <div className="help">
+                  Grab it from the host: <span className="mono" style={{ fontSize: 10.5 }}>cat /var/lib/crystal-forge/host.key.pub</span>
+                </div>
+              </div>
+              {form.publicKey.trim() && (
+                <div className={`sd-callout ${keyValid ? "sd-callout-ok" : "sd-callout-danger"}`}>
+                  <Icon name={keyValid ? "key" : "warn"} size={13} style={{ color: keyValid ? "#34d399" : "#f87171", flexShrink: 0 }} />
+                  {keyValid ? (
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--cf-text-muted)", fontWeight: 600 }}>Fingerprint</div>
+                      <div className="mono" style={{ fontSize: 11.5, color: "var(--cf-text-primary)", wordBreak: "break-all" }}>{fingerprint}</div>
                     </div>
+                  ) : (
+                    <div style={{ fontSize: 11.5 }}>Doesn't look like an SSH public key — expected it to start with <span className="mono">ssh-ed25519</span>.</div>
                   )}
                 </div>
-              </div>
+              )}
+            </>
+          )}
 
-              {/* Flake assignment */}
-              <div style={{ marginTop: 8, padding: 14, border: "1px solid var(--cf-divider)", borderRadius: 10, background: "color-mix(in oklab,var(--cf-page-bg) 50%,var(--cf-card-bg))" }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 10, fontSize: 13, fontWeight: 600 }}>
-                  <Icon name="git" size={13} /> Flake assignment
+          {section === "flake" && (
+            <>
+              <div className="pe-sec-head">
+                <h3>Flake assignment</h3>
+                <p>Which flake and branch declare this host's configuration.</p>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+                <div className="field">
+                  <label>Flake</label>
+                  <select className="input focus-ring" value={form.flake} onChange={e => set("flake", e.target.value)}>
+                    {flakeList.map(fl => <option key={fl}>{fl}</option>)}
+                  </select>
                 </div>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
-                  <div className="field">
-                    <label>Flake</label>
-                    <select className="input focus-ring" value={form.flake} onChange={e => set("flake", e.target.value)}>
-                      {flakeList.map(f => <option key={f}>{f}</option>)}
-                    </select>
-                  </div>
-                  <div className="field" style={{ marginTop: 0 }}>
-                    <label>Branch</label>
-                    <input className="input focus-ring mono" value={form.branch} onChange={e => set("branch", e.target.value)} />
-                  </div>
-                </div>
-                <div className="help" style={{ marginTop: 6 }}>
-                  Crystal Forge looks for <span className="mono">nixosConfigurations.{form.hostname || "&lt;hostname&gt;"}</span> in this flake.
+                <div className="field" style={{ marginTop: 0 }}>
+                  <label>Branch</label>
+                  <input className="input focus-ring mono" value={form.branch} onChange={e => set("branch", e.target.value)} />
                 </div>
               </div>
+              <div className="help">
+                Crystal Forge looks for <span className="mono">nixosConfigurations.{form.hostname || "<hostname>"}</span> in this flake.
+              </div>
+            </>
+          )}
 
-              {/* Deployment policy */}
+          {section === "policy" && (
+            <>
+              <div className="pe-sec-head">
+                <h3>Policy &amp; tags</h3>
+                <p>How deploys reach this host, and the labels used to group and filter it.</p>
+              </div>
               <div className="field">
                 <label>Deployment policy</label>
                 <div className="seg" style={{ width: "fit-content", flexWrap: "wrap" }}>
@@ -138,30 +210,8 @@ function AddSystemModal({ onClose, coach }) {
                   {form.deploymentPolicy === "pinned" && "Stay on a chosen commit until manually changed (set the pin from System Detail after registering)."}
                 </div>
               </div>
-
-              {/* Reachability */}
               <div className="field">
-                <label>Reachability</label>
-                <div className="seg" style={{ width: "fit-content" }}>
-                  {[{ v: "direct", l: "Direct / LAN" }, { v: "pull", l: "Agent pull-only" }].map(o => (
-                    <button key={o.v} className={form.reachability === o.v ? "active" : ""} onClick={() => set("reachability", o.v)}>{o.l}</button>
-                  ))}
-                </div>
-                <div className="help">
-                  {form.reachability === "direct"
-                    ? "Server can reach the agent (same LAN / routable / VPN). Enables server-initiated deploys and live log tail."
-                    : "Agent is behind NAT/firewall and only reaches out. Deploys apply on the agent's next check-in."}
-                </div>
-              </div>
-              {form.reachability === "direct" && (
-                <div className="field">
-                  <label>Server-reachable address <span style={{ color: "var(--cf-text-muted)", fontWeight: 400 }}>· optional</span></label>
-                  <input className="input focus-ring mono" value={form.serverAddress} onChange={e => set("serverAddress", e.target.value)} placeholder="10.0.4.12 or host.lan" style={{ fontSize: 12 }} />
-                </div>
-              )}
-
-              <div className="field">
-                <label>Tags <span style={{ color: "var(--cf-text-muted)", fontWeight: 400 }}>· optional · free-form labels for grouping &amp; filtering</span></label>
+                <label>Tags <span style={{ color: "var(--cf-text-muted)", fontWeight: 400 }}>· optional</span></label>
                 <input className="input focus-ring" value={form.tags} onChange={e => set("tags", e.target.value)} placeholder="e.g. web, stig-enforced" />
                 {(() => {
                   const used = form.tags.split(",").map(x=>x.trim()).filter(Boolean);
@@ -178,15 +228,25 @@ function AddSystemModal({ onClose, coach }) {
                   );
                 })()}
               </div>
-            </div>
-            <div className="modal-foot">
-              <button className="btn btn-ghost focus-ring" onClick={onClose}>Cancel</button>
-              <button className="btn btn-primary focus-ring" onClick={register} disabled={!canRegister}>
-                <Icon name="check" size={13} /> Register system
-              </button>
-            </div>
-          </>
-        )}
+            </>
+          )}
+        </div>
+
+        <footer className="pe-foot">
+          <span className="pe-foot-state">
+            {form.hostname.trim() ? form.hostname : "Unnamed host"}
+            <span className="pe-foot-dot">·</span>
+            {form.environment}
+            <span className="pe-foot-dot">·</span>
+            {keyValid ? "agent key valid" : "agent key required"}
+          </span>
+          <div style={{ display:"flex", gap:8 }}>
+            <button className="btn btn-ghost focus-ring" onClick={onClose}>Cancel</button>
+            <button className="btn btn-primary focus-ring" onClick={register} disabled={!canRegister}>
+              <Icon name="check" size={13} /> Register system
+            </button>
+          </div>
+        </footer>
       </div>
     </div>
   );

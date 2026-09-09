@@ -73,6 +73,9 @@ pub async fn run_user_notification_email_producer_pass(
     }
 
     if email_transport_available(config) {
+        // Digest enqueue checks each user's durable source cursor. A process
+        // pass remains globally bounded; later passes advance fair progress and
+        // enqueue an immutable period only after that user's history is caught up.
         crate::queries::user_notifications::enqueue_due_weekly_digest_deliveries(
             pool,
             &config.notification_email_digest_schedule,
@@ -354,7 +357,11 @@ async fn render_immediate_delivery(
         WHERE user_notifications.id = $1
           AND user_notifications.user_id = $2
           AND user_notifications.dismissed_at IS NULL
-          AND notification_visible_to_user($2, user_notifications.source_type, user_notifications.source_id)
+           AND notification_visible_to_user_snapshot(
+                $2, user_notifications.source_type, user_notifications.source_id,
+                user_notifications.authorization_scope,
+                user_notifications.authorization_environment_ids
+           )
           AND (
                 (user_notifications.category = 'deploy_failures' AND p.deploy_failures)
              OR (user_notifications.category = 'build_failures' AND p.build_failures)
@@ -426,7 +433,11 @@ async fn render_digest_delivery(
            AND user_notifications.dismissed_at IS NULL
           AND user_notifications.created_at >= $2
           AND user_notifications.created_at < $3
-          AND notification_visible_to_user($1, user_notifications.source_type, user_notifications.source_id)
+           AND notification_visible_to_user_snapshot(
+                $1, user_notifications.source_type, user_notifications.source_id,
+                user_notifications.authorization_scope,
+                user_notifications.authorization_environment_ids
+           )
           AND (
                 (user_notifications.category = 'deploy_failures' AND p.deploy_failures)
              OR (user_notifications.category = 'build_failures' AND p.build_failures)
@@ -464,7 +475,11 @@ async fn render_digest_delivery(
            AND user_notifications.dismissed_at IS NULL
           AND user_notifications.created_at >= $2
           AND user_notifications.created_at < $3
-          AND notification_visible_to_user($1, user_notifications.source_type, user_notifications.source_id)
+           AND notification_visible_to_user_snapshot(
+                $1, user_notifications.source_type, user_notifications.source_id,
+                user_notifications.authorization_scope,
+                user_notifications.authorization_environment_ids
+           )
           AND (
                 (user_notifications.category = 'deploy_failures' AND p.deploy_failures)
              OR (user_notifications.category = 'build_failures' AND p.build_failures)
@@ -977,7 +992,129 @@ mod tests {
         assert_eq!(delivery_count, 0);
     }
 
+    #[tokio::test]
+    #[ignore = "requires migrated CRYSTAL_FORGE_TEST_DATABASE_URL"]
+    async fn weekly_digest_producer_defers_until_bounded_source_backlog_drains() {
+        let pool = test_pool().await;
+        let user_id = Uuid::new_v4();
+        let fixture = Uuid::new_v4().simple().to_string();
+        sqlx::query(
+            "INSERT INTO users (id, username, first_name, last_name, email)
+             VALUES ($1, $2, 'Digest', 'Drain', $3)",
+        )
+        .bind(user_id)
+        .bind(format!("digest-drain-{fixture}"))
+        .bind(format!("digest-drain-{fixture}@example.test"))
+        .execute(&pool)
+        .await
+        .expect("insert digest-drain user");
+        sqlx::query("INSERT INTO user_role_assignments (user_id, role) VALUES ($1, 'viewer')")
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .expect("assign digest-drain role");
+        sqlx::query(
+            "INSERT INTO user_notification_preferences (
+                 user_id, weekly_digest, delivery_channel, weekly_digest_enabled_at,
+                 build_failures_email_enabled_at, initialized_at
+             ) VALUES (
+                 $1, TRUE, 'email', date_trunc('week', NOW()) - INTERVAL '14 days',
+                 date_trunc('week', NOW()) - INTERVAL '14 days',
+                 date_trunc('week', NOW()) - INTERVAL '14 days'
+             )",
+        )
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .expect("insert digest-drain preferences");
+        sqlx::query(
+            "INSERT INTO attention_occurrences
+                (id, category, subject_type, subject_id, source_occurrence_key,
+                 opened_at, last_observed_at)
+             SELECT gen_random_uuid(), 'builds', 'builds', $1 || series::text,
+                    $2 || series::text,
+                    date_trunc('week', NOW()) - INTERVAL '1 day',
+                    date_trunc('week', NOW()) - INTERVAL '1 day'
+             FROM generate_series(1, 300) series",
+        )
+        .bind(format!("digest-drain-subject-{fixture}-"))
+        .bind(format!("digest-drain-key-{fixture}-"))
+        .execute(&pool)
+        .await
+        .expect("insert digest source backlog");
+
+        let mut config = email_config(3);
+        config.notification_email_digest_schedule = "weekly_utc".to_string();
+        run_user_notification_email_producer_pass(&pool, &config)
+            .await
+            .expect("run first bounded producer pass");
+
+        let first_materialized: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM user_notifications
+             WHERE user_id = $1 AND source_id LIKE $2",
+        )
+        .bind(user_id)
+        .bind(format!("digest-drain-subject-{fixture}-%"))
+        .fetch_one(&pool)
+        .await
+        .expect("count first bounded digest batch");
+        assert!(first_materialized <= 8);
+        let first_digest_runs: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM user_notification_weekly_digest_runs WHERE user_id = $1",
+        )
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count deferred digest runs");
+        assert_eq!(first_digest_runs, 0);
+
+        for _ in 0..100 {
+            run_user_notification_email_producer_pass(&pool, &config)
+                .await
+                .expect("continue bounded digest materialization");
+            let materialized: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM user_notifications
+                 WHERE user_id = $1 AND source_id LIKE $2",
+            )
+            .bind(user_id)
+            .bind(format!("digest-drain-subject-{fixture}-%"))
+            .fetch_one(&pool)
+            .await
+            .expect("count digest drain progress");
+            if materialized == 300 {
+                break;
+            }
+        }
+
+        let materialized: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM user_notifications
+             WHERE user_id = $1 AND source_id LIKE $2",
+        )
+        .bind(user_id)
+        .bind(format!("digest-drain-subject-{fixture}-%"))
+        .fetch_one(&pool)
+        .await
+        .expect("count drained digest notifications");
+        assert_eq!(materialized, 300);
+        let digest_runs: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM user_notification_weekly_digest_runs WHERE user_id = $1",
+        )
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count digest runs after drain");
+        assert_eq!(digest_runs, 1);
+    }
+
     async fn insert_queued_immediate_delivery(pool: &PgPool, attempt_count: i32) -> (Uuid, Uuid) {
+        sqlx::query(
+            "UPDATE user_notification_email_deliveries
+             SET state = 'cancelled'
+             WHERE state IN ('pending', 'sending')",
+        )
+        .execute(pool)
+        .await
+        .expect("isolate immediate-delivery worker fixture");
         let user_id = Uuid::new_v4();
         let notification_id = Uuid::new_v4();
         let source_id = Uuid::new_v4().to_string();
@@ -1039,6 +1176,14 @@ mod tests {
     }
 
     async fn insert_queued_weekly_digest_delivery(pool: &PgPool) -> Uuid {
+        sqlx::query(
+            "UPDATE user_notification_email_deliveries
+             SET state = 'cancelled'
+             WHERE state IN ('pending', 'sending')",
+        )
+        .execute(pool)
+        .await
+        .expect("isolate weekly-digest worker fixture");
         let user_id = Uuid::new_v4();
         let in_period_id = Uuid::new_v4();
         let suppressed_period_id = Uuid::new_v4();

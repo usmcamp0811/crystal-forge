@@ -3,14 +3,13 @@
 function EditSystemModal({ sys, onClose }) {
   const [form, setForm] = React.useState(() => ({
     hostname: sys.hostname,
-    fqdn: sys.fqdn,
+    fqdn: sys.fqdn || sys.serverAddress || sys.ipv4 || "",
     environment: sys.environment,
     flake: sys.flake,
     branch: sys.branch,
     deploymentPolicy: sys.deploymentPolicy,
     heartbeatIntervalSec: sys.heartbeatIntervalSec,
     reachability: sys.reachability || "direct",
-    serverAddress: sys.serverAddress || sys.ipv4 || "",
     description: "",
     tags: sys.tags.join(", "),
     pinnedCommit: sys.commit,
@@ -65,37 +64,68 @@ function EditSystemModal({ sys, onClose }) {
     { sha: "44102fa",   msg: "stig: harden sshd defaults",     author: "mreyes",  when: "2w ago" },
   ], [sys.id]);
 
+  const SECTIONS = [
+    { id:"general",    label:"General",     icon:"server" },
+    { id:"deployment", label:"Deployment",  icon:"deploy" },
+    { id:"security",   label:"Security",    icon:"key" },
+    { id:"danger",     label:"Danger zone", icon:"warn", danger:true },
+  ];
+
+  React.useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape" && !confirmDelete) onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose, confirmDelete]);
+
+  if (confirmDelete) {
+    return (
+      <div className="modal-backdrop" onClick={onClose}>
+        <div className="modal" onClick={e=>e.stopPropagation()} style={{ width:"min(560px,96vw)" }}>
+          <DeleteSystemConfirm sys={sys} onCancel={()=>setConfirmDelete(false)} onConfirm={onClose}/>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal" onClick={e=>e.stopPropagation()} style={{ width:"min(620px,96vw)", maxHeight:"92vh" }}>
-        {confirmDelete ? (
-          <DeleteSystemConfirm sys={sys} onCancel={()=>setConfirmDelete(false)} onConfirm={onClose}/>
-        ) : (
-          <>
-            <div className="modal-head">
-              <h2>
-                <Icon name="gear" size={14} style={{ marginRight:6, verticalAlign:"text-bottom" }}/>
-                Edit {sys.hostname}
-              </h2>
-              <p>Update system registration, flake assignment, and deployment policy.</p>
-            </div>
-            <div style={{ padding:"14px 20px 0" }}>
-              <div className="seg" role="tablist" style={{ width:"100%" }}>
-                <button className={tab==="general"?"active":""} style={{ flex:1, justifyContent:"center" }} onClick={()=>setTab("general")}><Icon name="server" size={12}/> General</button>
-                <button className={tab==="deployment"?"active":""} style={{ flex:1, justifyContent:"center" }} onClick={()=>setTab("deployment")}><Icon name="deploy" size={12}/> Deployment</button>
-                <button className={tab==="security"?"active":""} style={{ flex:1, justifyContent:"center" }} onClick={()=>setTab("security")}><Icon name="key" size={12}/> Security</button>
-                <button className={tab==="danger"?"active":""} style={{ flex:1, justifyContent:"center", color: tab==="danger"?undefined:"#f87171" }} onClick={()=>setTab("danger")}><Icon name="warn" size={12}/> Danger zone</button>
+      <div className="pe-shell" onClick={e=>e.stopPropagation()}>
+            <header className="pe-head">
+              <div style={{ minWidth:0, display:"flex", flexDirection:"column", gap:3 }}>
+                <div style={{ display:"flex", alignItems:"center", gap:9, minWidth:0 }}>
+                  <Icon name="gear" size={15} style={{ color:"var(--cf-brand-purple)", flexShrink:0 }}/>
+                  <span className="pe-head-title mono">{form.hostname}</span>
+                  <span className="chip chip-info">{form.environment}</span>
+                  <span className="chip chip-unknown mono" style={{ fontSize:10 }}>{form.flake}</span>
+                </div>
+                <span className="pe-head-sub">System registration, flake assignment, deployment policy, and agent identity.</span>
               </div>
-            </div>
-            <div className="modal-body" style={{ overflowY:"auto", minHeight:420 }}>
+              <button className="btn-icon focus-ring" onClick={onClose} aria-label="Close"><Icon name="x" size={16}/></button>
+            </header>
+
+            <nav className="pe-rail">
+              {SECTIONS.map(sc => (
+                <button key={sc.id} className={`pe-rail-item focus-ring${tab===sc.id?" active":""}`}
+                  style={sc.danger && tab!==sc.id ? { color:"#f87171" } : null} onClick={()=>setTab(sc.id)}>
+                  <Icon name={sc.icon} size={13}/>
+                  <span className="pe-rail-label">{sc.label}</span>
+                </button>
+              ))}
+            </nav>
+
+            <div className="pe-body">
               {tab === "general" && (
               <>
+              <div className="pe-sec-head">
+                <h3>General</h3>
+                <p style={{ margin:0, fontSize:12, color:"var(--cf-text-muted)" }}>Identity, environment, and how the server reaches this host.</p>
+              </div>
               <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:14 }}>
                 <div className="field">
                   <label>Hostname</label>
                   <input className="input focus-ring mono" value={form.hostname} onChange={e=>set("hostname",e.target.value)}/>
                 </div>
-                <div className="field">
+                <div className="field" style={{ marginTop:0 }}>
                   <label>Environment</label>
                   <select className="input focus-ring" value={form.environment} onChange={e=>set("environment",e.target.value)}>
                     {["production","staging","dev","edge","lab"].map(e=><option key={e}>{e}</option>)}
@@ -103,42 +133,32 @@ function EditSystemModal({ sys, onClose }) {
                 </div>
               </div>
               <div className="field">
-                <label>FQDN</label>
-                <input className="input focus-ring mono" value={form.fqdn} onChange={e=>set("fqdn",e.target.value)}/>
+                <label>FQDN or address <span style={{ color:"var(--cf-text-muted)", fontWeight:400 }}>· optional</span></label>
+                <input className="input focus-ring mono" value={form.fqdn} onChange={e=>set("fqdn",e.target.value)} placeholder="web-server-1.prod.example.com or 10.0.4.12"/>
+                <div className="help">
+                  {form.reachability === "direct"
+                    ? "Where the server reaches this host — a resolvable name or an IP. Leave blank if the hostname alone resolves."
+                    : "Recorded for reference only; a pull-only agent connects outbound, so the server never dials this address."}
+                </div>
+              </div>
+              <div className="field">
+                <label className="focus-ring" style={{ display:"flex", gap:9, alignItems:"flex-start", cursor:"pointer", margin:0, textTransform:"none", letterSpacing:0 }}>
+                  <input type="checkbox" checked={form.reachability === "direct"}
+                    onChange={e=>set("reachability", e.target.checked ? "direct" : "pull")}
+                    style={{ accentColor:"var(--cf-brand-purple)", marginTop:1 }}/>
+                  <span style={{ minWidth:0 }}>
+                    <span style={{ display:"block", fontSize:13, fontWeight:600 }}>Reachable by the server directly</span>
+                    <span className="help" style={{ display:"block", marginTop:3, fontWeight:400 }}>
+                      {form.reachability === "direct"
+                        ? "Same LAN / routable / VPN — enables server-initiated deploys and live log tail."
+                        : "Off: the agent is behind NAT or a firewall and only reaches out. Deploys apply on its next check-in."}
+                    </span>
+                  </span>
+                </label>
               </div>
 
-              {/* Reachability */}
-              <div style={{ marginTop:8, padding:14, border:"1px solid var(--cf-divider)", borderRadius:10, background:"color-mix(in oklab,var(--cf-page-bg) 50%,var(--cf-card-bg))" }}>
-                <div style={{ display:"flex", alignItems:"center", gap:6, marginBottom:10, fontSize:13, fontWeight:600 }}>
-                  <Icon name="server" size={13}/> Reachability
-                </div>
-                <div className="field">
-                  <label>How the server reaches this system</label>
-                  <div className="seg" style={{ width:"fit-content" }}>
-                    {[
-                      { v:"direct", l:"Direct / LAN" },
-                      { v:"pull",   l:"Agent pull-only" },
-                    ].map(o => (
-                      <button key={o.v} className={form.reachability===o.v?"active":""} onClick={()=>set("reachability",o.v)}>{o.l}</button>
-                    ))}
-                  </div>
-                  <div className="help">
-                    {form.reachability === "direct"
-                      ? "Server can open connections to the agent (same LAN / routable / VPN). Enables server-initiated deploys and live log tail."
-                      : "Agent is behind NAT/firewall and only reaches out to the server. Deploys are applied when the agent next checks in — no inbound connection."}
-                  </div>
-                </div>
-                {form.reachability === "direct" && (
-                  <div className="field" style={{ marginTop:10 }}>
-                    <label>Server-reachable address</label>
-                    <input className="input focus-ring mono" value={form.serverAddress} onChange={e=>set("serverAddress",e.target.value)} placeholder="10.0.4.12 or host.lan" style={{ fontSize:12 }}/>
-                    <div className="help">Address/host the Crystal Forge server uses to reach the agent.</div>
-                  </div>
-                )}
-              </div>
-
-              <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:14, marginTop:8 }}>
-                <div className="field">
+              <div style={{ marginTop:8 }}>
+                <div className="field" style={{ marginTop:0 }}>
                   <label>Tags <span style={{ color:"var(--cf-text-muted)", fontWeight:400 }}>· free-form labels for grouping &amp; filtering</span></label>
                   <input className="input focus-ring" value={form.tags} onChange={e=>set("tags",e.target.value)} placeholder="e.g. builder, stig-enforced"/>
                   {(() => {
@@ -167,19 +187,23 @@ function EditSystemModal({ sys, onClose }) {
 
               {tab === "deployment" && (
               <>
+              <div className="pe-sec-head">
+                <h3>Deployment</h3>
+                <p style={{ margin:0, fontSize:12, color:"var(--cf-text-muted)" }}>Which flake this system tracks, and how it picks up new configuration.</p>
+              </div>
               {/* Flake assignment */}
               <div style={{ padding:14, border:"1px solid var(--cf-divider)", borderRadius:10, background:"color-mix(in oklab,var(--cf-page-bg) 50%,var(--cf-card-bg))" }}>
                 <div style={{ display:"flex", alignItems:"center", gap:6, marginBottom:10, fontSize:13, fontWeight:600 }}>
                   <Icon name="git" size={13}/> Flake assignment
                 </div>
                 <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:14 }}>
-                  <div className="field">
+                  <div className="field" style={{ marginTop:0 }}>
                     <label>Flake</label>
                     <select className="input focus-ring" value={form.flake} onChange={e=>set("flake",e.target.value)}>
                       {FLAKES.map(f=><option key={f}>{f}</option>)}
                     </select>
                   </div>
-                  <div className="field">
+                  <div className="field" style={{ marginTop:0 }}>
                     <label>Branch</label>
                     <input className="input focus-ring mono" value={form.branch} onChange={e=>set("branch",e.target.value)}/>
                   </div>
@@ -262,6 +286,10 @@ function EditSystemModal({ sys, onClose }) {
 
               {tab === "security" && (
               <>
+              <div className="pe-sec-head">
+                <h3>Security</h3>
+                <p style={{ margin:0, fontSize:12, color:"var(--cf-text-muted)" }}>The Ed25519 key the agent presents on every heartbeat.</p>
+              </div>
               <div style={{ marginTop:8, padding:14, border:"1px solid var(--cf-divider)", borderRadius:10, background:"color-mix(in oklab,var(--cf-page-bg) 50%,var(--cf-card-bg))" }}>
                 <div style={{ display:"flex", alignItems:"center", gap:6, marginBottom:10, fontSize:13, fontWeight:600 }}>
                   <Icon name="key" size={13}/> Agent identity
@@ -361,21 +389,32 @@ function EditSystemModal({ sys, onClose }) {
 
               {tab === "danger" && (
                 <div>
-                  <div style={{ fontSize:11, fontWeight:600, textTransform:"uppercase", letterSpacing:"0.08em", color:"var(--cf-text-muted)", marginBottom:8 }}>Danger zone</div>
+                  <div className="pe-sec-head">
+                    <h3>Danger zone</h3>
+                    <p style={{ margin:0, fontSize:12, color:"var(--cf-text-muted)" }}>Unregistering stops deploys — the agent keeps running its current generation.</p>
+                  </div>
                   <button className="btn btn-ghost focus-ring" onClick={()=>setConfirmDelete(true)} style={{ color:"#f87171", borderColor:"rgba(248,113,113,0.3)" }}>
                     <Icon name="x" size={12}/> Remove system from registry
                   </button>
                 </div>
               )}
             </div>
-            <div className="modal-foot">
-              <button className="btn btn-ghost focus-ring" onClick={onClose}>Cancel</button>
-              <button className="btn btn-primary focus-ring" onClick={onClose}>
-                <Icon name="check" size={13}/> Save changes
-              </button>
-            </div>
-          </>
-        )}
+            <footer className="pe-foot">
+              <span className="pe-foot-state">
+                {form.flake}@{form.branch}
+                <span className="pe-foot-dot">·</span>
+                {(typeof POLICIES !== "undefined" ? POLICIES : []).find(p => p.id === form.deploymentPolicy)?.name || form.deploymentPolicy}
+                <span className="pe-foot-dot">·</span>
+                heartbeat {form.heartbeatIntervalSec}s
+                {rotated && <><span className="pe-foot-dot">·</span><span style={{ color:"#34d399" }}>key rotated</span></>}
+              </span>
+              <div style={{ display:"flex", gap:8 }}>
+                <button className="btn btn-ghost focus-ring" onClick={onClose}>Cancel</button>
+                <button className="btn btn-primary focus-ring" onClick={onClose}>
+                  <Icon name="check" size={13}/> Save changes
+                </button>
+              </div>
+            </footer>
       </div>
     </div>
   );

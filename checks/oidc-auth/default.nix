@@ -190,6 +190,11 @@ in
 
           server = {
             enable = true;
+            # This check exercises the OIDC authorization flow over HTTP and
+            # never opens the browser UI, so the core server build is
+            # sufficient. Using it keeps the web UI derivation out of this
+            # check, so a Dioxus change does not rebuild the OIDC VMs.
+            package = pkgs.crystal-forge.default.cf-server-core-drv;
             port = CF_TEST_SERVER_PORT;
             host = "0.0.0.0";
             auth_mode = "oidc";

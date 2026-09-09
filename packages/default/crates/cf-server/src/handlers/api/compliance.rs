@@ -36,12 +36,13 @@ use crate::compliance::xccdf::export_models::{
 };
 use crate::compliance::xccdf::import_models::XccdfImportPlan;
 use crate::compliance::xccdf::importer::{
-    build_policy_records, check_document_class, validate_cf_native_document, validate_import_plan,
-    validate_sha256_match,
+    build_policy_records, check_document_class, validate_cf_native_document_async,
+    validate_import_plan, validate_sha256_match,
 };
 use crate::compliance::xccdf::package::{ProcessingError, process_xccdf_bytes};
 use crate::compliance::xccdf::reconciliation::{NativeReconcileFailure, ReconcileConflict};
 use crate::compliance::xccdf::xml_writer::{XccdfWriterError, write_bundle_xccdf_export};
+use crate::handlers::api::auth_session::require_csrf;
 use crate::handlers::api::rbac::{authenticated_user_roles, has_admin_role};
 use crate::queries::compliance::{
     BundleDeleteOutcome, BundleDraftDerivationError, BundleDraftIntent, BundleValidationError,
@@ -58,12 +59,36 @@ use crate::queries::framework_requirements::{
     find_policy_candidates, preview_framework_reconciliation_with_hierarchy,
     preview_requirement_reconciliation,
 };
+use crate::queries::systems::{find_system_access_row, get_user_environment_membership_ids};
 
 const MAX_GROUPING_SCHEME_NAME_BYTES: usize = 255;
 const MAX_GROUPING_GROUP_ID_BYTES: usize = 128;
 const MAX_GROUPING_GROUP_NAME_BYTES: usize = 255;
 const MAX_GROUPING_DESCRIPTION_BYTES: usize = 4_096;
 const MAX_GROUPING_QUERY_BYTES: usize = 4_096;
+
+/// Returns whether the caller can inspect data in an environment scope.
+///
+/// Admins have fleet-wide access. Other roles must have an explicit environment
+/// membership. A missing environment ID is inaccessible to non-admin callers.
+///
+/// # Errors
+///
+/// Returns an HTTP 500 response when environment memberships cannot be loaded.
+async fn can_view_environment_scope(
+    pool: &PgPool,
+    user_id: Uuid,
+    roles: &[crate::models::auth_identity::AuthRole],
+    environment_id: Option<Uuid>,
+) -> Result<bool, axum::response::Response> {
+    if has_admin_role(roles) {
+        return Ok(true);
+    }
+    let memberships = get_user_environment_membership_ids(pool, user_id)
+        .await
+        .map_err(|_| internal_error("Failed to load environment memberships"))?;
+    Ok(environment_id.is_some_and(|id| memberships.contains(&id)))
+}
 
 /// `GET /api/v1/compliance/grouping-schemes`
 pub async fn list_compliance_grouping_schemes(
@@ -325,11 +350,22 @@ pub async fn get_policy_version_usage(
     headers: HeaderMap,
     Path(version_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    if authenticated_user_roles(&pool, &headers).await.is_none() {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
-    }
+    };
+    // SECURITY: Policy usage contains hostnames and environment names. Admins
+    // can inspect the fleet, but other roles can inspect only their environment
+    // memberships. An empty membership list must therefore remain restrictive.
+    let visible_environment_ids = if has_admin_role(&roles) {
+        None
+    } else {
+        match get_user_environment_membership_ids(&pool, user_id).await {
+            Ok(ids) => Some(ids.into_iter().collect::<Vec<_>>()),
+            Err(_) => return internal_error("Failed to load environment memberships"),
+        }
+    };
 
-    match load_policy_version_usage(&pool, version_id).await {
+    match load_policy_version_usage(&pool, version_id, visible_environment_ids.as_deref()).await {
         Ok(Some(usage)) => (StatusCode::OK, Json(usage)).into_response(),
         Ok(None) => not_found(),
         Err(_) => internal_error("Failed to load policy version usage"),
@@ -427,8 +463,27 @@ pub async fn get_compliance_system_evidence(
     Path((bundle_id, system_id)): Path<(Uuid, Uuid)>,
     Query(query): Query<BundleVersionQuery>,
 ) -> impl IntoResponse {
-    if authenticated_user_roles(&pool, &headers).await.is_none() {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
+    };
+    let system = match find_system_access_row(&pool, system_id).await {
+        Ok(Some(system)) => system,
+        Ok(None) => return not_found(),
+        Err(_) => return internal_error("Failed to load system"),
+    };
+    if !has_admin_role(&roles) {
+        let environment_ids = match get_user_environment_membership_ids(&pool, user_id).await {
+            Ok(environment_ids) => environment_ids,
+            Err(_) => return internal_error("Failed to load environment memberships"),
+        };
+        if system
+            .environment_id
+            .is_none_or(|environment_id| !environment_ids.contains(&environment_id))
+        {
+            // SECURITY: Return Not Found so callers cannot enumerate systems
+            // outside their environment memberships.
+            return not_found();
+        }
     }
 
     match get_system_evidence(&pool, bundle_id, system_id, query.version_id).await {
@@ -906,6 +961,9 @@ pub async fn trust_policy_version(
     if !has_admin_role(&roles) {
         return forbidden();
     }
+    if let Err(response) = require_csrf(&headers) {
+        return response;
+    }
 
     let new_trust_state = if payload.trusted {
         "trusted"
@@ -1033,6 +1091,9 @@ pub async fn trust_bundle_version(
     if !has_admin_role(&roles) {
         return forbidden();
     }
+    if let Err(response) = require_csrf(&headers) {
+        return response;
+    }
 
     let new_trust_state = if payload.trusted {
         "trusted"
@@ -1157,6 +1218,9 @@ pub async fn publish_policy_version(
 
     if !has_admin_role(&roles) {
         return forbidden();
+    }
+    if let Err(response) = require_csrf(&headers) {
+        return response;
     }
 
     // Begin transaction immediately after RBAC
@@ -1303,6 +1367,9 @@ pub async fn create_policy_draft(
     if !has_admin_role(&roles) {
         return forbidden();
     }
+    if let Err(response) = require_csrf(&headers) {
+        return response;
+    }
 
     let mut tx = match pool.begin().await {
         Ok(tx) => tx,
@@ -1418,6 +1485,9 @@ pub async fn publish_bundle_version(
 
     if !has_admin_role(&roles) {
         return forbidden();
+    }
+    if let Err(response) = require_csrf(&headers) {
+        return response;
     }
 
     // Begin transaction immediately after RBAC
@@ -1809,6 +1879,9 @@ pub async fn create_bundle_draft(
 
     if !has_admin_role(&roles) {
         return forbidden();
+    }
+    if let Err(response) = require_csrf(&headers) {
+        return response;
     }
 
     let mut tx = match pool.begin().await {
@@ -2716,6 +2789,9 @@ pub async fn create_assignment(
     if !has_admin_role(&roles) {
         return forbidden();
     }
+    if let Err(response) = require_csrf(&headers) {
+        return response;
+    }
 
     // Validate and normalize reason
     match validate_assignment_reason(&payload.reason) {
@@ -2743,6 +2819,9 @@ pub async fn update_assignment(
     };
     if !has_admin_role(&roles) {
         return forbidden();
+    }
+    if let Err(response) = require_csrf(&headers) {
+        return response;
     }
 
     // Load existing assignment and its current immutable snapshot atomically
@@ -2825,18 +2904,19 @@ pub async fn get_assignment(
     headers: HeaderMap,
     Path(assignment_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
     };
     if !crate::handlers::api::rbac::has_viewer_or_above_role(&roles) {
         return forbidden();
     }
 
-    let row = sqlx::query_as::<_, (Uuid, Option<Uuid>, Option<Uuid>, Option<Uuid>, String, Option<Uuid>, Option<Uuid>, Option<String>, Option<String>, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>, bool)>(
-            "SELECT a.id, av.id, bv.bundle_id, av.bundle_version_id, a.scope_type, a.environment_id, a.system_id, av.enforcement_mode, av.assignment_overlay_digest, a.created_at, a.updated_at, a.active \
+    let row = sqlx::query_as::<_, (Uuid, Option<Uuid>, Option<Uuid>, Option<Uuid>, String, Option<Uuid>, Option<Uuid>, Option<Uuid>, Option<String>, Option<String>, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>, bool)>(
+            "SELECT a.id, av.id, bv.bundle_id, av.bundle_version_id, a.scope_type, a.environment_id, a.system_id, COALESCE(a.environment_id, s.environment_id), av.enforcement_mode, av.assignment_overlay_digest, a.created_at, a.updated_at, a.active \
          FROM compliance_bundle_assignments a \
          LEFT JOIN compliance_bundle_assignment_versions av ON av.id = a.current_version_id \
          LEFT JOIN compliance_bundle_versions bv ON bv.id = av.bundle_version_id \
+         LEFT JOIN systems s ON s.id = a.system_id \
          WHERE a.id = $1",
     )
     .bind(assignment_id)
@@ -2851,6 +2931,7 @@ pub async fn get_assignment(
         scope_type,
         env_id,
         sys_id,
+        target_environment_id,
         mode,
         digest,
         created_at,
@@ -2864,6 +2945,15 @@ pub async fn get_assignment(
             return internal_error("Failed to load assignment");
         }
     };
+
+    // SECURITY: Assignment existence, inactive state, and policy overlays are
+    // sensitive. Return the same 404 as an unknown assignment when a scoped
+    // caller does not belong to the assignment target's environment.
+    match can_view_environment_scope(&pool, user_id, &roles, target_environment_id).await {
+        Ok(true) => {}
+        Ok(false) => return not_found(),
+        Err(response) => return response,
+    }
 
     // Deactivated assignments have no current immutable snapshot.
     // Return a 410 Gone so the UI knows the assignment has been removed.
@@ -3117,6 +3207,9 @@ pub async fn delete_assignment(
     if !has_admin_role(&roles) {
         return forbidden();
     }
+    if let Err(response) = require_csrf(&headers) {
+        return response;
+    }
     deactivate_assignment_inner(
         &pool,
         user_id,
@@ -3265,11 +3358,30 @@ pub async fn list_environment_assignments(
     headers: HeaderMap,
     Path(environment_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
     };
     if !crate::handlers::api::rbac::has_viewer_or_above_role(&roles) {
         return forbidden();
+    }
+
+    let exists = match sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM environments WHERE id = $1)",
+    )
+    .bind(environment_id)
+    .fetch_one(&pool)
+    .await
+    {
+        Ok(exists) => exists,
+        Err(_) => return internal_error("Failed to load environment"),
+    };
+    if !exists {
+        return not_found();
+    }
+    match can_view_environment_scope(&pool, user_id, &roles, Some(environment_id)).await {
+        Ok(true) => {}
+        Ok(false) => return not_found(),
+        Err(response) => return response,
     }
 
     match list_assignments_for_scope(&pool, "environment", environment_id).await {
@@ -3291,11 +3403,22 @@ pub async fn list_system_assignments(
     headers: HeaderMap,
     Path(system_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
     };
     if !crate::handlers::api::rbac::has_viewer_or_above_role(&roles) {
         return forbidden();
+    }
+
+    let system = match find_system_access_row(&pool, system_id).await {
+        Ok(Some(system)) => system,
+        Ok(None) => return not_found(),
+        Err(_) => return internal_error("Failed to load system"),
+    };
+    match can_view_environment_scope(&pool, user_id, &roles, system.environment_id).await {
+        Ok(true) => {}
+        Ok(false) => return not_found(),
+        Err(response) => return response,
     }
 
     match list_assignments_for_scope(&pool, "system", system_id).await {
@@ -3322,11 +3445,22 @@ pub async fn get_system_effective_policies(
     headers: HeaderMap,
     Path(system_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
     };
     if !crate::handlers::api::rbac::has_viewer_or_above_role(&roles) {
         return forbidden();
+    }
+
+    let access_row = match find_system_access_row(&pool, system_id).await {
+        Ok(Some(system)) => system,
+        Ok(None) => return not_found(),
+        Err(_) => return internal_error("Failed to load system"),
+    };
+    match can_view_environment_scope(&pool, user_id, &roles, access_row.environment_id).await {
+        Ok(true) => {}
+        Ok(false) => return not_found(),
+        Err(response) => return response,
     }
 
     // Verify the system exists and load its health/environment data.
@@ -3368,6 +3502,7 @@ pub async fn get_system_effective_policies(
                 &pool,
                 &system,
                 &set.policies,
+                &set.effective_set_digest,
                 assignment_status,
             )
             .await
@@ -3399,7 +3534,7 @@ pub async fn get_assignment_effective_policies(
     headers: HeaderMap,
     Path(assignment_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
     };
     if !crate::handlers::api::rbac::has_viewer_or_above_role(&roles) {
@@ -3408,21 +3543,40 @@ pub async fn get_assignment_effective_policies(
 
     // Bundle version and enforcement mode are immutable snapshot fields. The
     // mutable lineage row only provides the target scope and active state.
-    let row = sqlx::query_as::<_, (Option<Uuid>, Option<Uuid>, Option<String>, String, Option<Uuid>, Option<Uuid>, bool)>(
-        "SELECT av.id, av.bundle_version_id, av.enforcement_mode, a.scope_type, a.environment_id, a.system_id, a.active \
+    let row = sqlx::query_as::<_, (Option<Uuid>, Option<Uuid>, Option<String>, String, Option<Uuid>, Option<Uuid>, Option<Uuid>, bool)>(
+        "SELECT av.id, av.bundle_version_id, av.enforcement_mode, a.scope_type, a.environment_id, a.system_id, COALESCE(a.environment_id, s.environment_id), a.active \
          FROM compliance_bundle_assignments a \
          LEFT JOIN compliance_bundle_assignment_versions av ON av.id = a.current_version_id \
+         LEFT JOIN systems s ON s.id = a.system_id \
          WHERE a.id = $1",
     )
     .bind(assignment_id)
     .fetch_optional(&pool)
     .await;
 
-    let (current_version_id, bv_id, mode, scope_type, env_id, sys_id, active) = match row {
+    let (
+        current_version_id,
+        bv_id,
+        mode,
+        scope_type,
+        env_id,
+        sys_id,
+        target_environment_id,
+        active,
+    ) = match row {
         Ok(Some(r)) => r,
         Ok(None) => return not_found(),
         Err(_) => return internal_error("Failed to load assignment"),
     };
+
+    // SECURITY: Check scope before exposing whether the assignment is active or
+    // returning any immutable overlay data. Unknown and inaccessible IDs are
+    // intentionally indistinguishable.
+    match can_view_environment_scope(&pool, user_id, &roles, target_environment_id).await {
+        Ok(true) => {}
+        Ok(false) => return not_found(),
+        Err(response) => return response,
+    }
 
     let Some((current_version_id, bv_id, mode)) = current_version_id
         .zip(bv_id)
@@ -3550,7 +3704,7 @@ pub async fn preview_assignment(
     headers: HeaderMap,
     Json(payload): Json<crate::api::models::PreviewAssignmentRequest>,
 ) -> impl IntoResponse {
-    let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
     };
     if !crate::handlers::api::rbac::has_viewer_or_above_role(&roles) {
@@ -3570,29 +3724,29 @@ pub async fn preview_assignment(
             .into_response();
     }
 
-    let target_exists: bool = if scope_type == "environment" {
-        match sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS(SELECT 1 FROM environments WHERE id = $1)",
-        )
-        .bind(payload.scope_id)
-        .fetch_one(&pool)
-        .await
+    let target_environment_id: Option<Option<Uuid>> = if scope_type == "environment" {
+        match sqlx::query_scalar::<_, Uuid>("SELECT id FROM environments WHERE id = $1")
+            .bind(payload.scope_id)
+            .fetch_optional(&pool)
+            .await
         {
-            Ok(exists) => exists,
+            Ok(environment_id) => environment_id.map(Some),
             Err(_) => return internal_error("Failed to verify assignment environment"),
         }
     } else {
-        match sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM systems WHERE id = $1)")
-            .bind(payload.scope_id)
-            .fetch_one(&pool)
-            .await
+        match sqlx::query_scalar::<_, Option<Uuid>>(
+            "SELECT environment_id FROM systems WHERE id = $1",
+        )
+        .bind(payload.scope_id)
+        .fetch_optional(&pool)
+        .await
         {
-            Ok(exists) => exists,
+            Ok(environment_id) => environment_id,
             Err(_) => return internal_error("Failed to verify assignment system"),
         }
     };
 
-    if !target_exists {
+    let Some(target_environment_id) = target_environment_id else {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({
@@ -3602,6 +3756,21 @@ pub async fn preview_assignment(
             })),
         )
             .into_response();
+    };
+    match can_view_environment_scope(&pool, user_id, &roles, target_environment_id).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "error": "Target not found",
+                    "message": format!("{} {} does not exist", scope_type, payload.scope_id),
+                    "code": "ASSIGNMENT_TARGET_NOT_FOUND"
+                })),
+            )
+                .into_response();
+        }
+        Err(response) => return response,
     }
 
     let target = if scope_type == "environment" {
@@ -3774,10 +3943,24 @@ pub struct CfNativeReconciliationPreview {
     pub import_trust_state: String, // untrusted
 }
 
+#[cfg(test)]
+fn validate_imported_policy_configs(
+    records: &[crate::compliance::xccdf::import_models::ImportedPolicyRecord],
+) -> Result<(), String> {
+    for record in records {
+        crate::models::deployment_policies::validate_policy_type_config(
+            &record.policy_type,
+            &record.config,
+        )?;
+    }
+    Ok(())
+}
+
 /// Compute CF-native reconciliation data for preview.
 pub(crate) async fn compute_cf_native_reconciliation(
     pool: &PgPool,
     parsed: &crate::compliance::xccdf::models::ParsedXccdf,
+    policy_records: Option<Vec<crate::compliance::xccdf::import_models::ImportedPolicyRecord>>,
 ) -> Result<Option<CfNativeReconciliationPreview>, String> {
     use crate::compliance::xccdf::models::DocumentClass;
     use crate::compliance::xccdf::reconciliation::{
@@ -3790,8 +3973,15 @@ pub(crate) async fn compute_cf_native_reconciliation(
     }
 
     // Validate CF-native document to get policy records
-    let (_validated, policy_records) = validate_cf_native_document(parsed)
-        .map_err(|e| format!("CF-native validation failed: {}", e.message))?;
+    let policy_records = match policy_records {
+        Some(records) => records,
+        None => {
+            validate_cf_native_document_async(parsed)
+                .await
+                .map_err(|e| format!("CF-native validation failed: {}", e.message))?
+                .1
+        }
+    };
 
     let bundle_meta = match &parsed.cf_bundle_meta {
         Some(m) => m,
@@ -4465,20 +4655,42 @@ pub async fn xccdf_preview(
             .into_response();
     }
 
-    // Compute CF-native reconciliation data for CfNativeExact documents
-    let cf_native_reconciliation = match compute_cf_native_reconciliation(&pool, &parsed).await {
-        Ok(recon) => recon,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "error": "CF-native reconciliation failed",
-                    "message": e,
-                })),
-            )
-                .into_response();
+    let cf_native_policy_records = if matches!(
+        parsed.class,
+        crate::compliance::xccdf::models::DocumentClass::CfNativeExact
+    ) {
+        match validate_cf_native_document_async(&parsed).await {
+            Ok((_, records)) => Some(records),
+            Err(error) => {
+                return (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(serde_json::json!({
+                        "error": error.code,
+                        "message": error.message,
+                    })),
+                )
+                    .into_response();
+            }
         }
+    } else {
+        None
     };
+
+    // Compute CF-native reconciliation data for CfNativeExact documents
+    let cf_native_reconciliation =
+        match compute_cf_native_reconciliation(&pool, &parsed, cf_native_policy_records).await {
+            Ok(recon) => recon,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": "CF-native reconciliation failed",
+                        "message": e,
+                    })),
+                )
+                    .into_response();
+            }
+        };
     let foreign_stig_reconciliation =
         match compute_foreign_stig_reconciliation(&pool, &parsed, &original_sha256).await {
             Ok(reconciliation) => reconciliation,
@@ -4763,7 +4975,11 @@ pub async fn xccdf_import(
             .into_response();
     }
 
-    if let Some(err) = check_document_class(&pkg.parsed) {
+    if !matches!(
+        pkg.parsed.class,
+        crate::compliance::xccdf::models::DocumentClass::CfNativeExact
+    ) && let Some(err) = check_document_class(&pkg.parsed)
+    {
         let status = if err.code == "CF_NATIVE_DIGEST_MISMATCH" {
             StatusCode::CONFLICT
         } else {
@@ -4784,7 +5000,8 @@ pub async fn xccdf_import(
         pkg.parsed.class,
         crate::compliance::xccdf::models::DocumentClass::CfNativeExact
     ) {
-        let (validated, policy_records) = match validate_cf_native_document(&pkg.parsed) {
+        let (validated, policy_records) = match validate_cf_native_document_async(&pkg.parsed).await
+        {
             Ok(value) => value,
             Err(err) => {
                 let status = if err.code == "CF_NATIVE_DIGEST_MISMATCH" {
@@ -6258,7 +6475,7 @@ pub async fn policy_interchange_import(
     };
 
     // Validate no duplicate version IDs within the document (shared validator)
-    if let Err(message) = validate_policy_interchange_document(&policies) {
+    if let Err(message) = validate_policy_interchange_document_async(&policies).await {
         return policy_interchange_invalid_response(&message).into_response();
     }
 
@@ -7049,7 +7266,7 @@ pub async fn policy_interchange_preview(
     };
 
     // Validate no duplicate version IDs within the document (shared validator)
-    if let Err(message) = validate_policy_interchange_document(&policies) {
+    if let Err(message) = validate_policy_interchange_document_async(&policies).await {
         return (
             StatusCode::UNPROCESSABLE_ENTITY,
             Json(serde_json::json!({
@@ -7117,10 +7334,47 @@ fn policy_interchange_invalid_response(message: &str) -> impl IntoResponse {
         .into_response()
 }
 
+#[cfg(test)]
 fn validate_policy_interchange_document(policies: &[NormalizedPolicyImport]) -> Result<(), String> {
     // Check for duplicate version IDs within the document
     let mut seen_versions = std::collections::HashSet::new();
     for policy in policies {
+        let composite = crate::models::deployment_policies::validate_policy_type_config(
+            &policy.policy_type,
+            &policy.config,
+        )?;
+        if composite.is_some() && policy.execution_phase != "multi-phase" {
+            return Err(format!(
+                "composite policy version {} must use execution_phase multi-phase",
+                policy.version_id
+            ));
+        }
+        if !seen_versions.insert(policy.version_id) {
+            return Err(format!(
+                "Duplicate version ID {} in import document",
+                policy.version_id
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn validate_policy_interchange_document_async(
+    policies: &[NormalizedPolicyImport],
+) -> Result<(), String> {
+    let mut seen_versions = std::collections::HashSet::new();
+    for policy in policies {
+        let composite = crate::models::deployment_policies::validate_policy_type_config_async(
+            &policy.policy_type,
+            &policy.config,
+        )
+        .await?;
+        if composite.is_some() && policy.execution_phase != "multi-phase" {
+            return Err(format!(
+                "composite policy version {} must use execution_phase multi-phase",
+                policy.version_id
+            ));
+        }
         if !seen_versions.insert(policy.version_id) {
             return Err(format!(
                 "Duplicate version ID {} in import document",
@@ -15382,6 +15636,244 @@ packages = ["git"]
 
         let result = validate_policy_interchange_document(&policies);
         assert!(result.is_ok(), "should accept unique version IDs");
+    }
+
+    #[test]
+    fn generic_interchange_cannot_bypass_composite_validation() {
+        let policies = vec![NormalizedPolicyImport {
+            lineage_id: Uuid::new_v4(),
+            version_id: Uuid::new_v4(),
+            name: "invalid composite".into(),
+            description: None,
+            policy_type: "composite".into(),
+            implementation_state: "native".into(),
+            execution_phase: "multi-phase".into(),
+            config: serde_json::json!({
+                "schema_version": 1,
+                "mode": "all",
+                "rules": [{
+                    "id": Uuid::nil(),
+                    "kind": "cve_block",
+                    "config": {"severity": "critical", "max_allowed": 0}
+                }]
+            }),
+            compliance_metadata: serde_json::json!({}),
+            dependencies: serde_json::json!([]),
+            opaque_xml: None,
+            enabled_by_default: Some(false),
+            semantic_digest: "not-reached".into(),
+            version: "1.0".into(),
+        }];
+
+        let error = validate_policy_interchange_document(&policies).unwrap_err();
+        assert!(error.contains("id must not be nil"));
+    }
+
+    #[test]
+    fn generic_interchange_accepts_target_specific_nixos_option_semantics() {
+        let policies = vec![NormalizedPolicyImport {
+            lineage_id: Uuid::new_v4(),
+            version_id: Uuid::new_v4(),
+            name: "target-specific composite".into(),
+            description: None,
+            policy_type: "composite".into(),
+            implementation_state: "native".into(),
+            execution_phase: "multi-phase".into(),
+            config: serde_json::json!({
+                "schema_version": 1,
+                "mode": "all",
+                "rules": [{
+                    "id": "10000000-0000-0000-0000-000000000001",
+                    "kind": "nixos_option",
+                    "config": {
+                        "path": "networking.firewall.backend",
+                        "operator": "==",
+                        "value_type": "enum",
+                        "value": "target-specific-backend"
+                    }
+                }]
+            }),
+            compliance_metadata: serde_json::json!({}),
+            dependencies: serde_json::json!([]),
+            opaque_xml: None,
+            enabled_by_default: Some(false),
+            semantic_digest: "target-specific-digest".into(),
+            version: "1.0".into(),
+        }];
+
+        validate_policy_interchange_document(&policies)
+            .expect("interchange validation must not enforce the CF baseline enum domain");
+    }
+
+    #[test]
+    fn cf_native_validation_accepts_target_specific_nixos_option_semantics() {
+        let records = vec![
+            crate::compliance::xccdf::import_models::ImportedPolicyRecord {
+                policy_id: Uuid::new_v4(),
+                policy_version_id: Uuid::new_v4(),
+                source_rule_id: "target-specific-rule".into(),
+                source_rule_order: 0,
+                implementation_state: "native".into(),
+                policy_type: "composite".into(),
+                version: Some("1.0".into()),
+                execution_phase: "multi-phase".into(),
+                config: serde_json::json!({
+                    "schema_version": 1,
+                    "mode": "all",
+                    "rules": [{
+                        "id": "10000000-0000-0000-0000-000000000001",
+                        "kind": "nixos_option",
+                        "config": {
+                            "path": "networking.firewall.backend",
+                            "operator": "==",
+                            "value_type": "unknown",
+                            "value": "target-specific-backend"
+                        }
+                    }]
+                }),
+                dependencies: serde_json::json!([]),
+                enabled_by_default: false,
+                portable: true,
+                semantic_digest: Some("target-specific-digest".into()),
+                selected: true,
+                policy_order: 0,
+                name: "target-specific composite".into(),
+                description: None,
+                compliance_metadata: serde_json::json!({}),
+                opaque_xml: None,
+                mapped_policy_version_id: None,
+                mapped_policy_proof: None,
+                mapping_semantics: None,
+                evidence_requirements: vec![],
+            },
+        ];
+
+        validate_imported_policy_configs(&records)
+            .expect("CF-native validation must not enforce the CF baseline type");
+    }
+
+    fn all_supported_composite_rules() -> serde_json::Value {
+        serde_json::json!({
+            "schema_version": 1,
+            "mode": "all",
+            "rules": [
+                {"id": "50000000-0000-0000-0000-000000000001", "kind": "nixos_option", "config": {"path": "networking.firewall.enable", "operator": "==", "value_type": "boolean", "value": true}},
+                {"id": "50000000-0000-0000-0000-000000000002", "kind": "packages_installed", "config": {"packages": ["openssh"]}},
+                {"id": "50000000-0000-0000-0000-000000000003", "kind": "packages_absent", "config": {"packages": ["telnet"]}},
+                {"id": "50000000-0000-0000-0000-000000000004", "kind": "custom_eval", "config": {"expression": "config.networking.firewall.enable", "message": "firewall required"}},
+                {"id": "50000000-0000-0000-0000-000000000005", "kind": "cve_block", "config": {"severity": "critical", "max_allowed": 0}},
+                {"id": "50000000-0000-0000-0000-000000000006", "kind": "eval_passed", "config": {}},
+                {"id": "50000000-0000-0000-0000-000000000007", "kind": "pin_required", "config": {}},
+                {"id": "50000000-0000-0000-0000-000000000008", "kind": "time_window", "config": {"days": ["mon"], "from": "09:00", "to": "17:00", "tz": "UTC"}}
+            ]
+        })
+    }
+
+    #[test]
+    fn composite_json_toml_and_cf_native_interchange_preserve_all_supported_rules() {
+        let config = all_supported_composite_rules();
+        let expected_kinds = [
+            "nixos_option",
+            "packages_installed",
+            "packages_absent",
+            "custom_eval",
+            "cve_block",
+            "eval_passed",
+            "pin_required",
+            "time_window",
+        ];
+        let document = serde_json::json!({
+            "name": "all composite rules",
+            "policy_type": "composite",
+            "execution_phase": "multi-phase",
+            "config": config,
+        });
+        for (filename, bytes) in [
+            (
+                "policy.json",
+                serde_json::to_vec(&document).expect("JSON serialization"),
+            ),
+            (
+                "policy.toml",
+                json_to_toml(&document)
+                    .expect("TOML serialization")
+                    .into_bytes(),
+            ),
+        ] {
+            let parsed = parse_policy_interchange_upload(&MultipartUpload {
+                bytes,
+                filename: Some(filename.to_string()),
+            })
+            .expect("interchange parse");
+            validate_policy_interchange_document(&parsed).expect("interchange validation");
+            assert_eq!(parsed[0].config, config);
+            for (rule, expected_kind) in parsed[0].config["rules"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .zip(expected_kinds)
+            {
+                assert_eq!(
+                    rule["kind"], expected_kind,
+                    "AC3 import/export [{expected_kind}] via {filename}"
+                );
+            }
+        }
+
+        let records = vec![
+            crate::compliance::xccdf::import_models::ImportedPolicyRecord {
+                policy_id: Uuid::new_v4(),
+                policy_version_id: Uuid::new_v4(),
+                source_rule_id: "all-composite-rules".into(),
+                source_rule_order: 0,
+                implementation_state: "native".into(),
+                policy_type: "composite".into(),
+                version: Some("1.0".into()),
+                execution_phase: "multi-phase".into(),
+                config: config.clone(),
+                dependencies: serde_json::json!([]),
+                enabled_by_default: false,
+                portable: true,
+                semantic_digest: None,
+                selected: true,
+                policy_order: 0,
+                name: "all composite rules".into(),
+                description: None,
+                compliance_metadata: serde_json::json!({}),
+                opaque_xml: None,
+                mapped_policy_version_id: None,
+                mapped_policy_proof: None,
+                mapping_semantics: None,
+                evidence_requirements: vec![],
+            },
+        ];
+        validate_imported_policy_configs(&records).expect("CF-native validation");
+        assert_eq!(records[0].config, config);
+        for (rule, expected_kind) in records[0].config["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .zip(expected_kinds)
+        {
+            assert_eq!(
+                rule["kind"], expected_kind,
+                "AC3 CF-native import/export [{expected_kind}]"
+            );
+        }
+    }
+
+    #[test]
+    fn composite_interchange_rejects_unsupported_approval_and_rollout_rules() {
+        for kind in ["approval_required", "rollout_percent"] {
+            let mut config = all_supported_composite_rules();
+            config["rules"][0]["kind"] = serde_json::json!(kind);
+            let error = crate::models::deployment_policies::validate_policy_type_config(
+                "composite",
+                &config,
+            )
+            .unwrap_err();
+            assert!(error.contains("unknown variant"), "{kind}: {error}");
+        }
     }
 
     // ──────────────────────────────────────────────────────────────────────────────

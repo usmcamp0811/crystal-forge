@@ -1,9 +1,10 @@
 // Compliance view — bundle catalog + per-system control evidence + export
 
-function ComplianceView({ onOpenSystem, onOpenPolicy, selectedBundleId, selectedBundleView, onClearBundle, onClearBundleView, selectedFinding, onClearFinding }) {
+function ComplianceView({ onOpenSystem, onOpenPolicy, selectedBundleId, selectedBundleView, onClearBundle, onClearBundleView, selectedFinding, onClearFinding, onReturn }) {
   usePoamStore();
   const [bundleId, setBundleId] = React.useState(null);
   const [focusPolicy, setFocusPolicy] = React.useState(null);
+  const [viaFinding, setViaFinding] = React.useState(false);
   const [drawerOpen, setDrawerOpen] = React.useState(false);
   const [drawerView, setDrawerView] = React.useState("overview");
   const [policyDrawerId, setPolicyDrawerId] = React.useState(null);
@@ -18,7 +19,7 @@ function ComplianceView({ onOpenSystem, onOpenPolicy, selectedBundleId, selected
     if (!selectedFinding) return;
     const b = COMPLIANCE_BUNDLES.find(x => x.id === selectedFinding.bundleId)
       || COMPLIANCE_BUNDLES.find(x => (x.policyIds || []).includes(selectedFinding.policyId));
-    if (b) { setBundleId(b.id); setDrawerOpen(true); setDrawerView("overview"); setSelectedSysId(selectedFinding.sysId); setFocusPolicy(selectedFinding.policyId); }
+    if (b) { setBundleId(b.id); setDrawerOpen(true); setDrawerView("overview"); setSelectedSysId(selectedFinding.sysId); setFocusPolicy(selectedFinding.policyId); setViaFinding(true); }
     onClearFinding?.();
   }, [selectedFinding]);
   const [activeFw, setActiveFw] = React.useState("all");
@@ -135,7 +136,7 @@ function ComplianceView({ onOpenSystem, onOpenPolicy, selectedBundleId, selected
           bundle={bundle}
           sys={drillSys}
           focusPolicyId={focusPolicy}
-          onClose={() => { setSelectedSysId(null); setFocusPolicy(null); }}
+          onClose={() => { setSelectedSysId(null); setFocusPolicy(null); if (viaFinding) { setViaFinding(false); onReturn?.(); } }}
           onOpenSystem={onOpenSystem}
         />
       )}
@@ -151,7 +152,7 @@ function ComplianceView({ onOpenSystem, onOpenPolicy, selectedBundleId, selected
         <ExportEvidenceModal bundle={bundle} stats={stats} onClose={() => setExportOpen(false)}/>
       )}
       {newBundleOpen && (
-        <NewBundleModal onClose={() => setNewBundleOpen(false)}/>
+        <BundleEditor onClose={() => setNewBundleOpen(false)}/>
       )}
       {importOpen && (
         <ImportStigModal
@@ -166,7 +167,7 @@ function ComplianceView({ onOpenSystem, onOpenPolicy, selectedBundleId, selected
         />
       )}
       {editBundleOpen && bundle && (
-        <NewBundleModal
+        <BundleEditor
           bundle={bundle}
           onClose={() => setEditBundleOpen(false)}
           onDelete={() => {
@@ -300,12 +301,13 @@ function BundleListTable({ bundles, query, setQuery, activeFw, setActiveFw, sele
 function BundleDetailDrawer({ bundle, stats, filter, setFilter, applicableSystems, onClose, onEdit, onSelectRevision, onOpenSystem, onOpenPolicy, view, setView }) {
   const lineage = React.useMemo(() => groupBundlesByLineage(COMPLIANCE_BUNDLES).find(g => g.revisions.some(r => r.id === bundle.id)), [bundle.id]);
   const [revisionsOpen, setRevisionsOpen] = React.useState(false);
+  const [maximized, setMaximized] = React.useState(false);
   const coverage = typeof bundleRequirementCoverage === "function" ? bundleRequirementCoverage(bundle) : null;
 
   return (
     <>
       <div className="fl-tray-backdrop" onClick={onClose}/>
-      <aside className="fl-tray" style={{ width:"min(900px, 96vw)" }}>
+      <aside className="fl-tray" style={{ width: maximized ? "min(1360px, 100vw)" : "min(900px, 96vw)" }}>
         <header className="fl-tray-head">
           {view === "coverage" ? (
             <div style={{ display:"flex", alignItems:"center", gap:10, minWidth:0, flex:1 }}>
@@ -331,7 +333,8 @@ function BundleDetailDrawer({ bundle, stats, filter, setFilter, applicableSystem
           )}
           <div style={{ display:"flex", gap:6 }}>
             {view === "overview" && <button className="btn btn-ghost focus-ring xs" onClick={onEdit}><Icon name="edit" size={12}/> Edit bundle</button>}
-            <button className="btn-icon focus-ring" onClick={onClose}><Icon name="x" size={16}/></button>
+            <button className="btn-icon focus-ring" title={maximized?"Restore":"Expand"} onClick={()=>setMaximized(m=>!m)}><Icon name={maximized?"minimize":"maximize"} size={15}/></button>
+            <button className="btn-icon focus-ring" onClick={onClose} aria-label="Close"><Icon name="x" size={16}/></button>
           </div>
         </header>
 
@@ -551,7 +554,6 @@ function BundleHeader({ bundle, stats, onEdit }) {
           <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
             {bundle.requiredEnvs.map(env => <EnvBadge key={env} env={env}/>)}
           </div>
-          <button className="btn btn-ghost focus-ring" onClick={onEdit}><Icon name="edit" size={13}/> Edit bundle</button>
         </div>
       </div>
       <p style={{ margin:0, fontSize:13, color:"var(--cf-text-secondary)", lineHeight:1.5 }}>{bundle.description}</p>
@@ -683,6 +685,7 @@ function BundleDrilldown({ bundle, filter, setFilter, applicableSystems, onOpenS
 function ControlsEvidenceDrawer({ bundle, sys, onClose, onOpenSystem, showSystemLink, onOpenBundle, focusPolicyId }) {
   usePoamStore();
   const [activeIdx, setActiveIdx] = React.useState(0);
+  const [maximized, setMaximized] = React.useState(false);
   const assignment = resolveComplianceAssignment(sys, bundle.lineageId || bundle.id);
   const evidenceList = bundle.policyIds.map(pid => evidenceForControl(bundle, pid, sys));
   const active = evidenceList[activeIdx];
@@ -755,7 +758,7 @@ function ControlsEvidenceDrawer({ bundle, sys, onClose, onOpenSystem, showSystem
   return (
     <>
       <div className="fl-tray-backdrop" onClick={onClose}/>
-      <aside className="fl-tray" style={{ width:"min(960px, 96vw)" }}>
+      <aside className="fl-tray" style={{ width: maximized ? "min(1360px, 100vw)" : "min(960px, 96vw)" }}>
         <header className="fl-tray-head">
           <div style={{ display:"flex", alignItems:"center", gap:12, minWidth:0, flex:1 }}>
             <Icon name="shield" size={18} style={{ color:"var(--cf-brand-purple)", flexShrink:0 }}/>
@@ -781,7 +784,8 @@ function ControlsEvidenceDrawer({ bundle, sys, onClose, onOpenSystem, showSystem
                 <Icon name="arrow-right" size={11}/> View bundle
               </button>
             )}
-            <button className="btn-icon focus-ring" onClick={onClose}><Icon name="x" size={16}/></button>
+            <button className="btn-icon focus-ring" title={maximized?"Restore":"Expand"} onClick={()=>setMaximized(m=>!m)}><Icon name={maximized?"minimize":"maximize"} size={15}/></button>
+            <button className="btn-icon focus-ring" onClick={onClose} aria-label="Close"><Icon name="x" size={16}/></button>
           </div>
         </header>
 
@@ -1203,236 +1207,6 @@ function ExportEvidenceModal({ bundle, stats, onClose }) {
             <Icon name="download" size={13}/> Download {formatMeta[format].name}
           </button>
         </div>
-      </div>
-    </div>
-  );
-}
-
-/* ── Bundle form modal: create or edit ── */
-function NewBundleModal({ onClose, bundle: editBundle, onDelete }) {
-  const isEdit = !!editBundle;
-  const [form, setForm] = React.useState({
-    name: editBundle?.name || "",
-    framework: editBundle?.framework || "DISA STIG",
-    version: editBundle?.version || "",
-    description: editBundle?.description || "",
-    requiredEnvs: editBundle?.requiredEnvs ? [...editBundle.requiredEnvs] : ["production"],
-    policyIds: editBundle?.policyIds ? [...editBundle.policyIds] : [],
-  });
-  const [query, setQuery] = React.useState("");
-  const set = (k, v) => setForm(p => ({ ...p, [k]: v }));
-  const [customFrameworks, setCustomFrameworks] = React.useState(() => loadCustomFrameworks());
-  const [newFrameworkOpen, setNewFrameworkOpen] = React.useState(false);
-  const [newFrameworkName, setNewFrameworkName] = React.useState("");
-  const onFrameworkChange = (v) => {
-    if (v === "__new__") { setNewFrameworkOpen(true); return; }
-    set("framework", v);
-  };
-  const saveNewFramework = () => {
-    const name = newFrameworkName.trim();
-    if (!name) return;
-    const next = [...customFrameworks, { id: `fw-${Date.now()}`, name }];
-    setCustomFrameworks(next);
-    saveCustomFrameworks(next);
-    set("framework", name);
-    setNewFrameworkOpen(false);
-    setNewFrameworkName("");
-  };
-
-  const policies = (typeof POLICIES !== "undefined" ? POLICIES : []).filter(p => p.publicationState !== "deprecated");
-  const filtered = policies.filter(p =>
-    !query || p.name.toLowerCase().includes(query.toLowerCase()) || (p.description||"").toLowerCase().includes(query.toLowerCase())
-  );
-  const togglePolicy = (id) => set("policyIds", form.policyIds.includes(id)
-    ? form.policyIds.filter(x => x !== id)
-    : [...form.policyIds, id]);
-  const toggleEnv = (env) => set("requiredEnvs", form.requiredEnvs.includes(env)
-    ? form.requiredEnvs.filter(x => x !== env)
-    : [...form.requiredEnvs, env]);
-
-  const canSave = form.name.trim() && form.policyIds.length > 0;
-  const [confirmDel, setConfirmDel] = React.useState(false);
-
-  const save = () => {
-    if (isEdit) {
-      Object.assign(editBundle, {
-        name: form.name.trim(), framework: form.framework, version: form.version,
-        description: form.description, requiredEnvs: form.requiredEnvs, policyIds: form.policyIds,
-        lastReview: "just now",
-      });
-    } else {
-      window.__cfCoach?.complete("compliance");
-    }
-    onClose();
-  };
-
-  return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal" onClick={e=>e.stopPropagation()} style={{ width:"min(760px,97vw)", maxHeight:"92vh" }}>
-        {confirmDel ? (
-          <DeleteBundleConfirm bundle={editBundle} onCancel={() => setConfirmDel(false)} onConfirm={() => { onDelete?.(); onClose(); }}/>
-        ) : (
-        <>
-        <div className="modal-head">
-          <h2><Icon name="shield" size={14} style={{ marginRight:6, verticalAlign:"text-bottom" }}/>{isEdit ? "Edit compliance bundle" : "New compliance bundle"}</h2>
-          <p>A bundle represents a standard (a STIG, NIST baseline, or your own) — assembled from granular policies that each assert one thing.</p>
-        </div>
-        <div className="modal-body" style={{ overflowY:"auto" }}>
-          <div style={{ display:"grid", gridTemplateColumns:"2fr 1fr", gap:14 }}>
-            <div className="field" style={{ marginTop:0 }}>
-              <label>Bundle name</label>
-              <input className="input focus-ring" value={form.name} onChange={e=>set("name",e.target.value)} placeholder="e.g. Anduril NixOS STIG (v1r2)"/>
-            </div>
-            <div className="field" style={{ marginTop:0 }}>
-              <label>Version / revision</label>
-              <input className="input focus-ring mono" value={form.version} onChange={e=>set("version",e.target.value)} placeholder="v1r5" style={{ fontSize:12 }}/>
-            </div>
-          </div>
-          <div style={{ display:"grid", gridTemplateColumns:"1fr 2fr", gap:14, marginTop:14 }}>
-            <div className="field" style={{ marginTop:0 }}>
-              <label>Framework</label>
-              {newFrameworkOpen ? (
-                <div style={{ display:"flex", gap:6 }}>
-                  <input className="input focus-ring" autoFocus value={newFrameworkName} onChange={e=>setNewFrameworkName(e.target.value)}
-                    placeholder="e.g. Acme Internal Baseline" onKeyDown={e=>{ if(e.key==="Enter") saveNewFramework(); if(e.key==="Escape") setNewFrameworkOpen(false); }}/>
-                  <button className="btn btn-ghost focus-ring xs" onClick={saveNewFramework} disabled={!newFrameworkName.trim()}>Add</button>
-                  <button className="btn btn-ghost focus-ring xs" onClick={()=>setNewFrameworkOpen(false)}>Cancel</button>
-                </div>
-              ) : (
-                <select className="input focus-ring" value={form.framework} onChange={e=>onFrameworkChange(e.target.value)}>
-                  <optgroup label="Standard">
-                    {BUILTIN_FRAMEWORKS.map(f => <option key={f}>{f}</option>)}
-                  </optgroup>
-                  {customFrameworks.length > 0 && (
-                    <optgroup label="Custom">
-                      {customFrameworks.map(f => <option key={f.name}>{f.name}</option>)}
-                    </optgroup>
-                  )}
-                  <option value="__new__">+ Define new framework…</option>
-                </select>
-              )}
-            </div>
-            <div className="field" style={{ marginTop:0 }}>
-              <label>Description</label>
-              <input className="input focus-ring" value={form.description} onChange={e=>set("description",e.target.value)} placeholder="What this bundle verifies"/>
-            </div>
-          </div>
-
-          <div className="field">
-            <label>Applies to environments</label>
-            <div style={{ display:"flex", flexWrap:"wrap", gap:6 }}>
-              {ENVIRONMENTS.map(env => {
-                const on = form.requiredEnvs.includes(env.name);
-                return (
-                  <button key={env.name} className="focus-ring" onClick={()=>toggleEnv(env.name)}
-                    style={{
-                      padding:"4px 10px", borderRadius:99, fontSize:11, cursor:"pointer",
-                      border:`1px solid ${on ? env.color : "var(--cf-card-border)"}`,
-                      background: on ? `color-mix(in oklab, ${env.color} 14%, var(--cf-card-bg))` : "transparent",
-                      color: on ? env.color : "var(--cf-text-secondary)",
-                      display:"inline-flex", alignItems:"center", gap:6, fontFamily:"inherit",
-                    }}>
-                    <span style={{ width:6, height:6, borderRadius:"50%", background: env.color }}/>
-                    {env.name}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
-          {/* Policy picker */}
-          <div style={{ padding:14, border:"1px solid var(--cf-divider)", borderRadius:10, background:"color-mix(in oklab,var(--cf-page-bg) 50%,var(--cf-card-bg))" }}>
-            <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:8, marginBottom:10 }}>
-              <div style={{ fontSize:13, fontWeight:600, display:"flex", alignItems:"center", gap:6 }}>
-                <Icon name="file" size={13}/> Controls in this bundle
-                <span className="chip chip-info" style={{ fontSize:10 }}>{form.policyIds.length} selected</span>
-              </div>
-              <div className="filter-search" style={{ maxWidth:200, margin:0 }}>
-                <Icon name="search"/>
-                <input className="input focus-ring" placeholder="Filter policies…" value={query} onChange={e=>setQuery(e.target.value)}/>
-              </div>
-            </div>
-            <div style={{ display:"flex", flexDirection:"column", gap:10, maxHeight:280, overflowY:"auto" }}>
-              {(() => {
-                const { mapped, other } = (typeof splitPoliciesForBundleFramework === "function")
-                  ? splitPoliciesForBundleFramework(filtered, form.framework)
-                  : { mapped: [], other: filtered };
-                const renderRow = (p, custom) => {
-                  const on = form.policyIds.includes(p.id);
-                  return (
-                    <button key={p.id} className="focus-ring" onClick={()=>togglePolicy(p.id)}
-                      style={{
-                        all:"unset", cursor:"pointer", display:"flex", gap:10, alignItems:"flex-start",
-                        padding:"9px 11px", borderRadius:8,
-                        border:`1px solid ${on ? "var(--cf-brand-purple)" : "var(--cf-divider)"}`,
-                        background: on ? "color-mix(in oklab, var(--cf-brand-purple) 9%, var(--cf-card-bg))" : "var(--cf-card-bg)",
-                      }}>
-                      <div style={{
-                        width:16, height:16, borderRadius:5, flexShrink:0, marginTop:1,
-                        border:`1.5px solid ${on ? "var(--cf-brand-purple)" : "var(--cf-card-border)"}`,
-                        background: on ? "var(--cf-brand-purple)" : "transparent",
-                        display:"grid", placeItems:"center",
-                      }}>
-                        {on && <Icon name="check" size={11} style={{ color:"#fff" }}/>}
-                      </div>
-                      <div style={{ minWidth:0, flex:1 }}>
-                        <div style={{ display:"flex", alignItems:"center", gap:8, flexWrap:"wrap" }}>
-                          <span className="mono" style={{ fontSize:12, fontWeight:600 }}>{p.name}</span>
-                          <span className={`chip ${p.type === "builtin" ? "chip-unknown" : "chip-info"}`} style={{ fontSize:9 }}>{p.type}</span>
-                          {custom && <span className="chip chip-warning" style={{ fontSize:9 }}>Custom addition</span>}
-                        </div>
-                        <div style={{ fontSize:11, color:"var(--cf-text-muted)", marginTop:2 }}>{p.description}</div>
-                        {custom && <div style={{ fontSize:10, color:"var(--cf-text-muted)", marginTop:2 }}>No mapping to {form.framework || "this framework"}</div>}
-                      </div>
-                    </button>
-                  );
-                };
-                return (
-                  <>
-                    {mapped.length > 0 && (
-                      <div>
-                        <div style={{ fontSize:10.5, fontWeight:600, textTransform:"uppercase", letterSpacing:"0.06em", color:"var(--cf-text-muted)", margin:"2px 0 6px" }}>Mapped to {form.framework || "this framework"}</div>
-                        <div style={{ display:"flex", flexDirection:"column", gap:4 }}>{mapped.map(p=>renderRow(p,false))}</div>
-                      </div>
-                    )}
-                    {other.length > 0 && (
-                      <div>
-                        <div style={{ fontSize:10.5, fontWeight:600, textTransform:"uppercase", letterSpacing:"0.06em", color:"var(--cf-text-muted)", margin:"2px 0 6px" }}>Other reusable policies</div>
-                        <div style={{ display:"flex", flexDirection:"column", gap:4 }}>{other.map(p=>renderRow(p,mapped.length>0))}</div>
-                      </div>
-                    )}
-                  </>
-                );
-              })()}
-              {filtered.length === 0 && (
-                <div style={{ fontSize:12, color:"var(--cf-text-muted)", padding:"16px 0", textAlign:"center" }}>No policies match. Define new policies in the Policies view.</div>
-              )}
-            </div>
-          </div>
-
-          {form.policyIds.length === 0 && (
-            <div className="help" style={{ color:"#fbbf24" }}>
-              <Icon name="warn" size={10} style={{ verticalAlign:"middle" }}/> Select at least one policy. A bundle is a collection of policies that together represent a standard.
-            </div>
-          )}
-
-          {isEdit && (
-            <div style={{ marginTop:10, paddingTop:14, borderTop:"1px solid var(--cf-divider)" }}>
-              <div style={{ fontSize:11, fontWeight:600, textTransform:"uppercase", letterSpacing:"0.08em", color:"var(--cf-text-muted)", marginBottom:8 }}>Danger zone</div>
-              <button className="btn btn-ghost focus-ring" onClick={()=>setConfirmDel(true)} style={{ color:"#f87171", borderColor:"rgba(248,113,113,0.3)" }}>
-                <Icon name="trash" size={12}/> Delete bundle
-              </button>
-            </div>
-          )}
-        </div>
-        <div className="modal-foot">
-          <button className="btn btn-ghost focus-ring" onClick={onClose}>Cancel</button>
-          <button className="btn btn-primary focus-ring" disabled={!canSave} onClick={save}>
-            <Icon name="check" size={13}/> {isEdit ? "Save changes" : "Create bundle"}
-          </button>
-        </div>
-        </>
-        )}
       </div>
     </div>
   );

@@ -56,6 +56,9 @@ pub struct PolicyDefinition {
     pub bundle_usage_count: i64,
     /// Evidence specs from the current version's deployment policy.
     pub evidence_specs: Option<Vec<crate::api::models::EvidenceSpec>>,
+    /// Authoritative imported-origin provenance for the current version.
+    /// Empty for policies authored in Crystal Forge. Read-only.
+    pub provenance: Vec<crate::api::models::PolicyOriginProvenance>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -97,6 +100,8 @@ pub struct PolicyRevisionSummary {
     pub created_by_display: Option<String>,
     /// Evidence collection specifications for ATO audits.
     pub evidence_specs: Vec<crate::api::models::EvidenceSpec>,
+    /// Authoritative imported-origin provenance for this exact revision.
+    pub provenance: Vec<crate::api::models::PolicyOriginProvenance>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -144,12 +149,13 @@ impl PolicyCategory {
         }
     }
 
+    /// Returns the theme-aware semantic CSS color for this category.
     pub fn color(self) -> &'static str {
         match self {
-            Self::Deployment => "#60a5fa",
-            Self::Pipeline => "#a78bfa",
-            Self::Rollout => "#fbbf24",
-            Self::Security => "#f87171",
+            Self::Deployment => "var(--cf-policy-blue)",
+            Self::Pipeline => "var(--cf-policy-violet)",
+            Self::Rollout => "var(--cf-policy-amber)",
+            Self::Security => "var(--cf-policy-red)",
         }
     }
 
@@ -197,7 +203,66 @@ pub fn is_policy_version_editable(policy: &PolicyDefinition) -> bool {
         .is_none_or(|state| state.eq_ignore_ascii_case("draft"))
 }
 
+/// Whether a policy has authoritative imported origin provenance.
+///
+/// Origin is decided by persisted provenance only. It is never inferred from
+/// the policy name, description, or any other display string.
+pub fn policy_is_imported(policy: &PolicyDefinition) -> bool {
+    !policy.provenance.is_empty()
+}
+
+impl PolicyCategory {
+    /// Parse a persisted category value. Unknown/legacy values return `None` so
+    /// the caller can fall back to inference.
+    pub fn from_id(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "deployment" => Some(Self::Deployment),
+            "pipeline" => Some(Self::Pipeline),
+            "rollout" => Some(Self::Rollout),
+            "security" => Some(Self::Security),
+            _ => None,
+        }
+    }
+}
+
+/// Enforcement rule kinds recommended for a category.
+///
+/// Recommendations are guidance only: every category can hold every kind, and
+/// nothing outside this list is removed, filtered, or blocked from saving.
+pub fn recommended_enforcement(category: PolicyCategory) -> &'static [&'static str] {
+    match category {
+        PolicyCategory::Deployment => &["eval_passed", "time_window"],
+        PolicyCategory::Pipeline => &["eval_passed", "pin_required", "cve_block"],
+        PolicyCategory::Rollout => &["time_window"],
+        PolicyCategory::Security => &[
+            "nixos_option",
+            "packages_absent",
+            "cve_block",
+            "custom_eval",
+        ],
+    }
+}
+
+/// Rule kinds present on the policy that are unusual for `category`.
+///
+/// Used purely for an informational notice; callers must never mutate rules
+/// based on this result.
+pub fn off_category_rule_kinds(category: PolicyCategory, rule_kinds: &[String]) -> Vec<String> {
+    let recommended = recommended_enforcement(category);
+    rule_kinds
+        .iter()
+        .filter(|kind| !recommended.contains(&kind.as_str()))
+        .cloned()
+        .collect()
+}
+
 pub fn policy_category(policy: &PolicyDefinition) -> PolicyCategory {
+    // A persisted category is authoritative. Inference exists only for legacy
+    // policies stored before classification metadata existed.
+    if let Some(category) = policy.category.as_deref().and_then(PolicyCategory::from_id) {
+        return category;
+    }
+
     let policy_type = normalized_policy_type(policy);
     let config = policy_config(policy).unwrap_or(serde_json::Value::Null);
 
@@ -224,7 +289,10 @@ pub fn policy_category(policy: &PolicyDefinition) -> PolicyCategory {
                 .get("kind")
                 .and_then(|value| value.as_str())
                 .unwrap_or_default();
-            matches!(kind, "packages_installed" | "nixos_option" | "custom_eval")
+            matches!(
+                kind,
+                "packages_installed" | "packages_absent" | "nixos_option" | "custom_eval"
+            )
         }) {
             return PolicyCategory::Security;
         }
@@ -390,26 +458,31 @@ fn rule_summary_from_json(rule: &serde_json::Value) -> PolicyRuleSummary {
         .get("kind")
         .and_then(|value| value.as_str())
         .unwrap_or_default();
+    // Composite rules nest their typed fields under `config`; legacy display
+    // fixtures keep them flat. Supporting both preserves old read-back while
+    // rendering the new representation accurately.
+    let config = rule.get("config").unwrap_or(rule);
     let label = match kind {
         "eval_passed" => "Evaluation must pass".to_string(),
         "build_succeeded" => "Build must succeed and be cacheable".to_string(),
         "cve_block" => {
-            let severity = rule
+            let severity = config
                 .get("severity")
                 .and_then(|value| value.as_str())
                 .unwrap_or("critical");
-            let max = rule
-                .get("maxAllowed")
+            let max = config
+                .get("max_allowed")
+                .or_else(|| config.get("maxAllowed"))
                 .and_then(|value| value.as_u64())
                 .unwrap_or(0);
             format!("Block deploy when {severity} CVEs exceed {max}")
         }
         "time_window" => {
-            let from = rule
+            let from = config
                 .get("from")
                 .and_then(|value| value.as_str())
                 .unwrap_or("09:00");
-            let to = rule
+            let to = config
                 .get("to")
                 .and_then(|value| value.as_str())
                 .unwrap_or("17:00");
@@ -434,7 +507,7 @@ fn rule_summary_from_json(rule: &serde_json::Value) -> PolicyRuleSummary {
             format!("Canary rollout: {percent}% at a time")
         }
         "packages_installed" => {
-            let packages = rule
+            let packages = config
                 .get("packages")
                 .and_then(|value| value.as_array())
                 .map(|items| {
@@ -447,23 +520,43 @@ fn rule_summary_from_json(rule: &serde_json::Value) -> PolicyRuleSummary {
                 .unwrap_or_default();
             format!("Packages installed: {packages}")
         }
+        "packages_absent" => {
+            let packages = config
+                .get("packages")
+                .and_then(|value| value.as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| item.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
+            format!("Packages absent: {packages}")
+        }
+        "pin_required" => "Evaluated source must resolve to an immutable revision".to_string(),
         "nixos_option" => {
-            let path = rule
+            let path = config
                 .get("path")
                 .and_then(|value| value.as_str())
                 .unwrap_or("option");
-            let op = rule
-                .get("op")
+            let op = config
+                .get("operator")
+                .or_else(|| config.get("op"))
                 .and_then(|value| value.as_str())
                 .unwrap_or("==");
-            let value = rule
+            let value = config
                 .get("value")
-                .and_then(|value| value.as_str())
-                .unwrap_or("expected");
+                .map(|value| match value {
+                    serde_json::Value::String(value) => value.clone(),
+                    other => other.to_string(),
+                })
+                .unwrap_or_else(|| "expected".to_string());
             format!("config.{path} {op} {value}")
         }
-        "custom_eval" => rule
-            .get("message")
+        "custom_eval" => config
+            .get("description")
+            .or_else(|| config.get("message"))
             .and_then(|value| value.as_str())
             .unwrap_or("Custom Nix expression must pass")
             .to_string(),
@@ -518,3 +611,40 @@ description = "SSH must be enabled"
 field_name = "sshEnabled"
 strict = true
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn time_window_summary_reads_nested_composite_config() {
+        let summary = rule_summary_from_json(&serde_json::json!({
+            "kind": "time_window",
+            "config": {
+                "days": ["sat", "sun"],
+                "from": "01:00",
+                "to": "03:00",
+                "tz": "UTC"
+            }
+        }));
+        assert_eq!(summary.label, "Deploy window: 01:00-03:00");
+    }
+
+    #[test]
+    fn exposed_package_absent_and_pin_rules_have_read_back_summaries() {
+        let absent = rule_summary_from_json(&serde_json::json!({
+            "kind": "packages_absent",
+            "config": { "packages": ["telnet", "rsh"] }
+        }));
+        assert_eq!(absent.label, "Packages absent: telnet, rsh");
+
+        let pin = rule_summary_from_json(&serde_json::json!({
+            "kind": "pin_required",
+            "config": {}
+        }));
+        assert_eq!(
+            pin.label,
+            "Evaluated source must resolve to an immutable revision"
+        );
+    }
+}

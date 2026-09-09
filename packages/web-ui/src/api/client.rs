@@ -65,6 +65,30 @@ pub async fn fetch_dashboard() -> Result<DashboardSummary, ApiClientError> {
     fetch_json(&url).await
 }
 
+/// Fetch persisted deployment, build, and evaluation activity.
+pub async fn fetch_dashboard_activity(
+    limit: Option<i64>,
+) -> Result<Vec<DashboardActivity>, ApiClientError> {
+    let limit = limit.unwrap_or(30).clamp(1, 200);
+    let url = format!("{}/dashboard/activity?limit={limit}", base_url());
+    fetch_json(&url).await
+}
+
+/// Search the packaged NixOS option metadata index. The server clamps the
+/// limit too; clamping here keeps browser requests bounded by construction.
+pub async fn search_nixos_options(
+    query: &str,
+    limit: usize,
+) -> Result<Vec<NixosOptionMetadata>, ApiClientError> {
+    let url = format!(
+        "{}/nixos/options?query={}&limit={}",
+        base_url(),
+        js_sys::encode_uri_component(query),
+        limit.clamp(1, 50)
+    );
+    fetch_json(&url).await
+}
+
 /// Fetch admin-only CVE dashboard summary.
 pub async fn fetch_cve_dashboard_summary() -> Result<CveDashboardSummary, ApiClientError> {
     let url = format!("{}/cves/summary", base_url());
@@ -1359,6 +1383,24 @@ pub async fn fetch_policy_deletion_eligibility(
     fetch_json(&url).await
 }
 
+/// Bulk-delete multiple deployment policies (Admin only) from the catalog's
+/// multi-select toolbar. The response always resolves every requested id
+/// into either `deleted` or `skipped` — it never fails outright because one
+/// policy is blocked.
+pub async fn bulk_delete_deployment_policies(
+    policy_ids: &[Uuid],
+) -> Result<BulkDeletePoliciesResponse, ApiClientError> {
+    let url = format!("{}/deployment-policies/bulk-delete", base_url());
+    send_json_with_csrf(
+        "POST",
+        &url,
+        Some(&BulkDeletePoliciesRequest {
+            policy_ids: policy_ids.to_vec(),
+        }),
+    )
+    .await
+}
+
 /// Fetch all flakes from registry.
 pub async fn fetch_flakes() -> Result<Vec<FlakeRegistryItem>, ApiClientError> {
     let url = format!("{}/flakes", base_url());
@@ -2033,7 +2075,7 @@ async fn send_empty_with_csrf<B: serde::Serialize>(
     Ok(())
 }
 
-async fn send_request_with_csrf(
+pub(crate) async fn send_request_with_csrf(
     method: &str,
     url: &str,
     body: Option<&str>,

@@ -454,6 +454,11 @@ impl DashboardSummaryBuilder {
             build_queue: Some(BuildQueueSummary {
                 building_count: 1,
                 queued_count: 0,
+                failed_24h_count: 0,
+                active_workers: 0,
+                total_workers: 0,
+                used_slots: 0,
+                total_slots: 0,
                 items: vec![],
                 timestamp: Utc::now(),
             }),
@@ -490,6 +495,7 @@ impl DashboardSummaryBuilder {
             total_systems: self.total_systems,
             active_builds: self.active_builds,
             build_queue: self.build_queue.clone(),
+            cache_health: None,
             recent_deployments: self.recent_deployments.clone(),
             timestamp: Utc::now(),
         }

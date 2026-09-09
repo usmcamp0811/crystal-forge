@@ -1,12 +1,19 @@
+//! Coordinates automatic and agent-side system deployment.
+//!
+//! The server-side manager resolves effective policies for each auto-latest
+//! system, evaluates legacy advanced gates, and delegates the final desired
+//! target write to atomic composite authorization.
+
 use crate::compliance::resolver::{
-    AssignmentMode, EffectivePolicy, ResolutionOutcome, resolve_system_effective_policies,
+    AssignmentMode, EffectivePolicy, ResolutionOutcome,
+    resolve_systems_effective_policies_for_deployment_batch,
 };
 use crate::config::CrystalForgeConfig;
 use crate::models::deployment_policies::{
     ApprovalConfig, CanaryConfig, CveThresholdConfig, DeploymentPolicyRecord, TimeWindowConfig,
 };
 use crate::models::systems::DeploymentPolicy;
-use crate::queries::deployment::{get_systems_with_auto_latest_policy, update_desired_target};
+use crate::queries::deployment::get_systems_with_auto_latest_policy;
 use crate::queries::deployment_policies::get_deployment_policies_by_versions;
 use crate::queries::derivations::get_latest_deployable_targets_for_flake_hosts;
 use crate::server::load_cve_policies;
@@ -22,8 +29,9 @@ use tokio::time::{Instant, sleep};
 use tracing::{debug, error, info, warn};
 pub mod agent;
 pub use agent::*;
-/// Manages automatic deployment policies for systems
-/// Only handles auto_latest policy - manual and pinned policies are set by admin intervention
+/// Manages automatic target selection for systems with `auto_latest` policy.
+///
+/// Manual and pinned targets remain under administrator control.
 pub struct DeploymentPolicyManager {
     config: CrystalForgeConfig,
     pool: PgPool,
@@ -107,12 +115,20 @@ fn map_cve_threshold_decision(
 }
 
 impl DeploymentPolicyManager {
+    /// Creates a deployment policy manager for one server configuration and pool.
     pub fn new(config: CrystalForgeConfig, pool: PgPool) -> Self {
         Self { config, pool }
     }
 
-    /// Main deployment policy management loop
-    /// Only processes systems with auto_latest policy - manual/pinned policies don't need automatic updates
+    /// Runs the automatic deployment policy management loop.
+    ///
+    /// Each polling pass logs and contains its own failure so later passes can
+    /// continue. Manual and pinned systems are not changed.
+    ///
+    /// # Errors
+    ///
+    /// The loop currently runs until cancellation and does not return a
+    /// recoverable error during normal operation.
     pub async fn run(&self) -> Result<()> {
         let interval = self.config.deployment.deployment_poll_interval;
         info!(
@@ -216,16 +232,21 @@ impl DeploymentPolicyManager {
             HashMap::new();
         let mut all_policy_version_ids: HashSet<uuid::Uuid> = HashSet::new();
         let mut failed_policy_lookup_systems: HashSet<uuid::Uuid> = HashSet::new();
+        let system_ids = systems.iter().map(|system| system.id).collect::<Vec<_>>();
+        let mut resolved_by_system =
+            resolve_systems_effective_policies_for_deployment_batch(&self.pool, &system_ids)
+                .await
+                .context("Failed to batch-resolve effective deployment policies")?;
         for system in &systems {
-            let policy_ids = match resolve_system_effective_policies(&self.pool, system.id).await {
-                Ok(ResolutionOutcome::Resolved(set)) => set
+            let policy_ids = match resolved_by_system.remove(&system.id) {
+                Some(ResolutionOutcome::Resolved(set)) => set
                     .policies
                     .into_iter()
                     // Report-only policies are evaluated by compliance paths but
                     // must never block or alter deployment configuration.
                     .filter(|policy| matches!(policy.effective_mode, AssignmentMode::Enforce))
                     .collect::<Vec<EffectivePolicy>>(),
-                Ok(ResolutionOutcome::Conflict(conflicts)) => {
+                Some(ResolutionOutcome::Conflict(conflicts)) => {
                     warn!(
                         "Effective policy conflict for {} ({}): {}; skipping deployment update",
                         system.hostname,
@@ -239,17 +260,22 @@ impl DeploymentPolicyManager {
                     failed_policy_lookup_systems.insert(system.id);
                     continue;
                 }
-                Err(err) => {
+                None => {
                     warn!(
-                        "Failed to load effective deployment policies for {} ({}): {:#}; skipping deployment update",
-                        system.hostname, system.id, err
+                        "Effective deployment policy batch omitted {} ({}); skipping deployment update",
+                        system.hostname, system.id
                     );
                     failed_policy_lookup_systems.insert(system.id);
                     continue;
                 }
             };
             for policy in &policy_ids {
-                all_policy_version_ids.insert(policy.policy_version_id);
+                // Composite policy records are decoded and freshness-checked by
+                // the final serializable authorization transaction. Do not load
+                // them a second time for the legacy advanced-gate pass.
+                if policy.policy_type != "composite" {
+                    all_policy_version_ids.insert(policy.policy_version_id);
+                }
             }
             effective_policies_by_system.insert(system.id, policy_ids);
         }
@@ -263,6 +289,7 @@ impl DeploymentPolicyManager {
             .into_iter()
             .filter(|version_id| !policies_by_id.contains_key(version_id))
             .collect::<HashSet<_>>();
+        let cve_policies = load_cve_policies(&self.pool).await;
 
         let mut updated_count = 0;
 
@@ -355,7 +382,6 @@ impl DeploymentPolicyManager {
             }
 
             // Preserve legacy CVE gate behavior for require_cve_check policies.
-            let cve_policies = load_cve_policies(&self.pool).await;
             if !cve_policies.is_empty() {
                 match check_cve_policies(
                     &self.pool,
@@ -384,21 +410,31 @@ impl DeploymentPolicyManager {
                 }
             }
 
-            if let Err(e) =
-                update_desired_target(&self.pool, &system.hostname, Some(store_path)).await
+            match crate::services::composite_enforcement::authorize_and_set_system_target(
+                &self.pool,
+                system.id,
+                store_path,
+                "auto_desired_target",
+            )
+            .await
             {
-                error!(
-                    "Failed to set desired_target for {} -> {}: {:#}",
+                Ok(authorization) if authorization.allowed() => {
+                    info!(
+                        "📋 Updated desired target for {}: {:?} -> {}",
+                        system.hostname,
+                        system.desired_target.as_deref(),
+                        store_path
+                    );
+                    updated_count += 1;
+                }
+                Ok(authorization) => warn!(
+                    "🛑 Composite policy blocked atomic target update for {} -> {}: {}",
+                    system.hostname, store_path, authorization.detail
+                ),
+                Err(e) => error!(
+                    "Failed atomic composite authorization/target update for {} -> {}: {:#}",
                     system.hostname, store_path, e
-                );
-            } else {
-                info!(
-                    "📋 Updated desired target for {}: {:?} -> {}",
-                    system.hostname,
-                    system.desired_target.as_deref(),
-                    store_path
-                );
-                updated_count += 1;
+                ),
             }
         }
 
@@ -419,6 +455,9 @@ impl DeploymentPolicyManager {
         };
 
         for effective_policy in effective_policies {
+            if effective_policy.policy_type == "composite" {
+                continue;
+            }
             let policy_id = &effective_policy.policy_version_id;
             if failed_policy_loads.contains(policy_id) {
                 return AdvancedGateDecision::Block(format!(
@@ -588,6 +627,9 @@ impl DeploymentPolicyManager {
                         }
                     }
                 }
+                // Composite policies are authorized once for the complete set
+                // in the atomic desired-target update below.
+                "composite" => {}
                 _ => {}
             }
         }
@@ -602,7 +644,14 @@ struct PolicyUpdateStats {
     systems_updated: usize,
 }
 
-/// Spawn the deployment policy manager as a background task
+/// Spawns the deployment policy manager as a background task.
+///
+/// The returned task logs a terminal manager error instead of propagating it
+/// through the join result.
+///
+/// # Errors
+///
+/// This function currently performs no fallible setup before spawning.
 pub async fn spawn_deployment_policy_manager(
     config: CrystalForgeConfig,
     pool: PgPool,
@@ -685,5 +734,26 @@ mod tests {
             AdvancedGateDecision::Block(reason) => assert!(reason.contains("critical")),
             _ => panic!("expected block decision"),
         }
+    }
+
+    #[test]
+    fn auto_latest_uses_batch_policy_and_global_cve_queries() {
+        let source = include_str!("mod.rs");
+        let production_source = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("deployment module has production source");
+        assert_eq!(
+            production_source
+                .matches("resolve_systems_effective_policies_for_deployment_batch(&self.pool")
+                .count(),
+            1
+        );
+        assert_eq!(
+            production_source
+                .matches("load_cve_policies(&self.pool).await")
+                .count(),
+            1
+        );
     }
 }

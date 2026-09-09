@@ -114,6 +114,9 @@
         port = lib.mkDefault port;
         enable = lib.mkDefault true;
         host = lib.mkDefault "0.0.0.0";
+        # mkServerNode is a backend test helper. Use the core server unless a
+        # caller explicitly overrides the package to test embedded UI serving.
+        package = lib.mkDefault pkgs.crystal-forge.default.cf-server-core-drv;
       };
 
       # Default to empty systems - will be overridden by agent logic or user config
@@ -174,10 +177,17 @@
           GRANT ALL PRIVILEGES ON DATABASE crystal_forge TO crystal_forge;
         '';
       };
+      # Only the core server build is placed on PATH. Callers that need the
+      # builder or the agent on this node should add the specific component
+      # package through `extraConfig`, and callers that need the embedded web
+      # UI should override `services.crystal-forge.server.package` through
+      # `crystalForgeConfig`. The service default above also uses this exact
+      # core package; placing it on PATH is not a substitute for selecting the
+      # service package.
       environment.systemPackages = with pkgs; [
         git
         jq
-        crystal-forge.default
+        crystal-forge.default.cf-server-core-drv
         crystal-forge.cf-test-suite.runTests
         crystal-forge.cf-test-suite.testRunner
       ];

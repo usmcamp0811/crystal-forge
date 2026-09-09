@@ -1,6 +1,6 @@
 // Evaluations view — active queue + history with bulk-select + drawer + toast + keyboard nav
 
-function EvalsView({ focus, onClearFocus, onOpenSystem, onOpenPolicy }) {
+function EvalsView({ focus, onClearFocus, onOpenSystem, onOpenPolicy, onOpenFinding }) {
   const [tab, setTab] = React.useState("active");
   const hasFailed = (typeof HISTORY_EVALS !== "undefined" ? HISTORY_EVALS : []).some(e => e.status === "failed");
   // History tab pulses continuously while there are failures not yet looked at.
@@ -19,6 +19,7 @@ function EvalsView({ focus, onClearFocus, onOpenSystem, onOpenPolicy }) {
   const [filterStatus, setFilterStatus] = React.useState("all");
   const [filterFlake, setFilterFlake]   = React.useState("all");
   const [drawerEv, setDrawerEv]   = React.useState(null);
+  const [drawerRestore, setDrawerRestore] = React.useState(null);
   const [latestOnly, setLatestOnly] = React.useState(false);
   const latestHistIds = React.useMemo(() => latestPerFlake(HISTORY_EVALS), []);
   const [evals, setEvals]         = React.useState(ACTIVE_EVALS);
@@ -30,8 +31,8 @@ function EvalsView({ focus, onClearFocus, onOpenSystem, onOpenPolicy }) {
     const find = (list) => list.find(bySha) || list.find(byFlakeStatus) || list.find(byFlake);
     const inHist = find(HISTORY_EVALS);
     const inActive = !inHist && find(ACTIVE_EVALS);
-    if (inHist) { setTab("history"); setQuery(""); setDrawerEv(inHist); }
-    else if (inActive) { setTab("active"); setQuery(""); setDrawerEv(inActive); }
+    if (inHist) { setTab("history"); setQuery(""); setDrawerEv(inHist); setDrawerRestore(focus.restoreState || null); }
+    else if (inActive) { setTab("active"); setQuery(""); setDrawerEv(inActive); setDrawerRestore(focus.restoreState || null); }
     else { setQuery(focus.flake || focus.sha || ""); }
     onClearFocus?.();
   }, [focus]);
@@ -272,7 +273,7 @@ function EvalsView({ focus, onClearFocus, onOpenSystem, onOpenPolicy }) {
         )}
       </div>
 
-      {drawerEv && <EvalDrawer ev={drawerEv} onClose={()=>setDrawerEv(null)} onCancel={cancelEval} onOpenSystem={onOpenSystem} onOpenPolicy={onOpenPolicy}/>}
+      {drawerEv && <EvalDrawer ev={drawerEv} onClose={()=>{setDrawerEv(null);setDrawerRestore(null);}} onCancel={cancelEval} onOpenSystem={onOpenSystem} onOpenPolicy={onOpenPolicy} onOpenFinding={onOpenFinding} restoreState={drawerRestore}/>}
 
       <BulkBar count={activeSel.size} onClear={activeSel.clear}>
         <button className="btn btn-danger xs focus-ring" onClick={bulkCancel}>

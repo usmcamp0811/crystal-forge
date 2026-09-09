@@ -3,15 +3,20 @@
   config,
   ...
 }: let
-  sql-jobs = ./jobs/.;
+  # A path literal inside a flake carries the complete flake source context.
+  # Copy the jobs into a content-addressed filtered path so an unrelated source
+  # edit does not change this package and every VM that enables the service.
+  sql-jobs = builtins.path {
+    path = ./jobs;
+    name = "crystal-forge-postgres-jobs";
+  };
 
   # Create a derivation that bundles the script and jobs together
   run-postgres-jobs-with-jobs = pkgs.stdenv.mkDerivation {
     pname = "run-postgres-jobs";
     version = "0.1.0";
 
-    src = ./.;
-
+    dontUnpack = true;
     dontBuild = true;
 
     installPhase = ''

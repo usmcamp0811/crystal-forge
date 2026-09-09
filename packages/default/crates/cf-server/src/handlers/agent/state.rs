@@ -75,6 +75,22 @@ pub async fn update(
         let pool = pool.clone();
         Box::pin(async move {
             let mut tx = pool.begin().await?;
+            crate::services::composite_enforcement::lock_poam_derivations_for_store_path_tx(
+                &mut tx,
+                payload.store_path.as_deref(),
+            )
+            .await?;
+            let system_id = crate::queries::system_events::find_system_id_by_hostname_tx(
+                &mut tx,
+                &payload.hostname,
+            )
+            .await?;
+            if let Some(system_id) = system_id {
+                crate::services::composite_enforcement::lock_poam_findings_for_system_tx(
+                    &mut tx, system_id,
+                )
+                .await?;
+            }
             let previous_observed =
                 lock_observed_system_state_by_hostname_tx(&mut tx, &payload.hostname).await?;
 

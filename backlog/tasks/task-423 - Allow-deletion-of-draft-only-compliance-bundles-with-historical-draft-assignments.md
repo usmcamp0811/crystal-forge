@@ -18,7 +18,7 @@ references:
     packages/default/crates/cf-server/migrations/0204_compliance_assignment_versions.sql
 priority: high
 type: bug
-ordinal: 418000
+ordinal: 452000
 ---
 
 ## Description

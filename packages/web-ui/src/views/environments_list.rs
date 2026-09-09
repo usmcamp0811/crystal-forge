@@ -886,7 +886,7 @@ fn EnvPanel(props: EnvPanelProps) -> Element {
                                                 class: "chip chip-info sd-commit-sha-link",
                                                 style: "background:unset;",
                                                 title: "{a.bundle_name} · {a.bundle_version} — open Compliance",
-                                                onclick: move |_| { nav.push(Route::ComplianceView {}); },
+                                                onclick: move |_| { nav.push(Route::ComplianceView { bundle: String::new(), version: String::new(), system: String::new(), policy: String::new(), poam: String::new(), view: String::new() }); },
                                                 Icon { name: IconName::Shield, size: 9 }
                                                 " {a.framework}"
                                             }
@@ -993,7 +993,7 @@ fn EnvPanelSystems(props: EnvPanelSystemsProps) -> Element {
                                     let nav = nav.clone();
                                     let system_id = system.id.to_string();
                                     move |_| {
-                                        nav.push(Route::SystemDetailView { id: system_id.clone() });
+                                        nav.push(Route::SystemDetailView { id: system_id.clone(), tab: String::new(), poam: String::new() });
                                     }
                                 },
                                 span { class: "status-dot", style: "--status-color: {system_status_color(&system.health_status)};" }

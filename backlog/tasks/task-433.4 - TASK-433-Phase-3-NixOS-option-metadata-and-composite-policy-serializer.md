@@ -1,11 +1,11 @@
 ---
 id: TASK-433.4
 title: 'TASK-433 Phase 3: NixOS option metadata and composite policy serializer'
-status: Review
+status: Done
 assignee:
   - '@opencode-agent'
 created_date: '2026-08-23 01:42'
-updated_date: '2026-08-25 01:57'
+updated_date: '2026-09-02 02:41'
 labels:
   - design-parity
   - policy
@@ -39,7 +39,7 @@ modified_files:
 parent_task_id: TASK-433
 priority: high
 type: feature
-ordinal: 436000
+ordinal: 18000
 ---
 
 ## Description

@@ -1,0 +1,70 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            rv.id,\n            rv.requirement_id,\n            rv.framework_version_id,\n            rv.external_id,\n            rv.title,\n            rv.kind,\n            rv.severity,\n            rv.parent_requirement_version_id,\n            rv.semantic_digest\n        FROM compliance_requirement_versions rv\n        WHERE rv.parent_requirement_version_id = $1\n        ORDER BY rv.external_id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "requirement_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "framework_version_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "external_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "title",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "kind",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "severity",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "parent_requirement_version_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 8,
+        "name": "semantic_digest",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "765cff0ae03a51aa2e4fce4a9667b879b9065e3bf4ec0b4849c4008b892ae25b"
+}

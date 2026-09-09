@@ -26,6 +26,7 @@ pub mod flakes;
 pub mod framework_requirements;
 pub mod hardening_scans;
 pub mod navigation;
+pub mod poam;
 pub mod scanning;
 pub mod status;
 pub mod system_events;

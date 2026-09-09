@@ -66,11 +66,11 @@ use crate::api::models::CveDashboardVulnerability;
 use crate::api::models::CveScanFreshnessRow;
 use crate::api::models::CveSummary;
 use crate::api::models::DashboardSummary;
-use crate::handlers::api::rbac::require_admin;
-use crate::handlers::api::rbac::require_viewer_or_above;
+use crate::handlers::api::rbac::{authenticated_user_roles, has_admin_role, require_admin};
 use crate::queries::dashboard::{
-    fetch_active_builds, fetch_build_queue, fetch_cve_summary, fetch_deployment_status,
-    fetch_fleet_health, fetch_recent_deployments, fetch_total_systems,
+    fetch_active_builds_for_user, fetch_activity_for_user, fetch_build_queue_for_user,
+    fetch_cache_health_for_user, fetch_cve_summary_for_user, fetch_deployment_status_for_user,
+    fetch_fleet_health_for_user, fetch_recent_deployments_for_user, fetch_total_systems_for_user,
 };
 
 /// `GET /api/v1/dashboard/summary`
@@ -81,11 +81,15 @@ pub async fn dashboard_summary(
     State(pool): State<PgPool>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    if require_viewer_or_above(&pool, &headers).await.is_none() {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+    if !crate::handlers::api::rbac::has_viewer_or_above_role(&roles) {
         return forbidden();
     }
+    let visibility_user = (!has_admin_role(&roles)).then_some(user_id);
 
-    let result = build_dashboard_summary(&pool).await;
+    let result = build_dashboard_summary(&pool, visibility_user).await;
 
     match result {
         Ok(summary) => (StatusCode::OK, Json(summary)).into_response(),
@@ -96,6 +100,39 @@ pub async fn dashboard_summary(
                 Json(serde_json::json!({
                     "error": "internal_error",
                     "message": "Failed to build dashboard summary"
+                })),
+            )
+                .into_response()
+        }
+    }
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct DashboardActivityParams {
+    pub limit: Option<i64>,
+}
+
+pub async fn dashboard_activity(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Query(params): Query<DashboardActivityParams>,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+    if !crate::handlers::api::rbac::has_viewer_or_above_role(&roles) {
+        return forbidden();
+    }
+    let visibility_user = (!has_admin_role(&roles)).then_some(user_id);
+    match fetch_activity_for_user(&pool, visibility_user, params.limit.unwrap_or(30)).await {
+        Ok(activity) => (StatusCode::OK, Json(activity)).into_response(),
+        Err(error) => {
+            error!("Dashboard activity query failed: {error:#}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": "internal_error",
+                    "message": "Failed to load dashboard activity"
                 })),
             )
                 .into_response()
@@ -500,7 +537,10 @@ pub async fn cve_scan_freshness(
 }
 
 /// Build the full dashboard summary by running parallel queries.
-async fn build_dashboard_summary(pool: &PgPool) -> anyhow::Result<DashboardSummary> {
+async fn build_dashboard_summary(
+    pool: &PgPool,
+    visibility_user: Option<uuid::Uuid>,
+) -> anyhow::Result<DashboardSummary> {
     // Run all queries concurrently.
     let (
         fleet_health,
@@ -510,14 +550,16 @@ async fn build_dashboard_summary(pool: &PgPool) -> anyhow::Result<DashboardSumma
         active_builds,
         build_queue,
         recent_deployments,
+        cache_health,
     ) = tokio::try_join!(
-        fetch_fleet_health(pool),
-        fetch_deployment_status(pool),
-        fetch_cve_summary(pool),
-        fetch_total_systems(pool),
-        fetch_active_builds(pool),
-        fetch_build_queue(pool, 100),
-        fetch_recent_deployments(pool),
+        fetch_fleet_health_for_user(pool, visibility_user),
+        fetch_deployment_status_for_user(pool, visibility_user),
+        fetch_cve_summary_for_user(pool, visibility_user),
+        fetch_total_systems_for_user(pool, visibility_user),
+        fetch_active_builds_for_user(pool, visibility_user),
+        fetch_build_queue_for_user(pool, 100, visibility_user),
+        fetch_recent_deployments_for_user(pool, visibility_user),
+        fetch_cache_health_for_user(pool, visibility_user),
     )?;
 
     Ok(DashboardSummary {
@@ -527,6 +569,7 @@ async fn build_dashboard_summary(pool: &PgPool) -> anyhow::Result<DashboardSumma
         total_systems,
         active_builds,
         build_queue: Some(build_queue),
+        cache_health: Some(cache_health),
         recent_deployments,
         timestamp: Utc::now(),
     })
@@ -536,6 +579,196 @@ async fn build_dashboard_summary(pool: &PgPool) -> anyhow::Result<DashboardSumma
 mod tests {
     use super::*;
     use sqlx::postgres::PgPoolOptions;
+    use uuid::Uuid;
+
+    /// Connect to the migrated, repository-owned test database.
+    async fn visibility_test_pool() -> PgPool {
+        let db_url = std::env::var("CRYSTAL_FORGE_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .expect("CRYSTAL_FORGE_TEST_DATABASE_URL or DATABASE_URL must be set");
+        PgPool::connect(&db_url)
+            .await
+            .expect("failed to connect to the migrated test database")
+    }
+
+    /// Create a viewer user with an authenticated session and return
+    /// `(user_id, request headers carrying the session cookie)`.
+    async fn viewer_session(pool: &PgPool, suffix: &str) -> (Uuid, HeaderMap) {
+        use crate::auth::session::{SESSION_COOKIE_NAME, hash_token};
+        use crate::models::auth_identity::AuthRole;
+        use crate::queries::auth_identity::{create_user_session, sync_user_role};
+
+        let user_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO users (id, username, first_name, last_name, email, user_type) \
+             VALUES ($1, $2, 'Dashboard', 'Viewer', $3, 'human')",
+        )
+        .bind(user_id)
+        .bind(format!("dash-viewer-{suffix}"))
+        .bind(format!("dash-viewer-{suffix}@example.invalid"))
+        .execute(pool)
+        .await
+        .expect("insert viewer user");
+
+        sync_user_role(pool, user_id, AuthRole::Viewer)
+            .await
+            .expect("assign viewer role");
+
+        let token = format!("dash-session-{suffix}");
+        create_user_session(
+            pool,
+            user_id,
+            hash_token(&token),
+            Utc::now() + chrono::Duration::hours(1),
+            Some("test-agent".to_string()),
+            Some("127.0.0.1".to_string()),
+            "local".to_string(),
+        )
+        .await
+        .expect("create viewer session");
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::COOKIE,
+            format!("{SESSION_COOKIE_NAME}={token}")
+                .parse()
+                .expect("session cookie header"),
+        );
+        (user_id, headers)
+    }
+
+    /// Execute the real handler and deserialize its JSON body.
+    async fn dashboard_summary_body(pool: &PgPool, headers: HeaderMap) -> DashboardSummary {
+        let response = dashboard_summary(State(pool.clone()), headers)
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read dashboard summary body");
+        serde_json::from_slice(&bytes).expect("decode dashboard summary body")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires migrated CRYSTAL_FORGE_TEST_DATABASE_URL"]
+    async fn visibility_dashboard_summary_scopes_every_aggregate_for_viewer_session() {
+        let pool = visibility_test_pool().await;
+        let suffix = Uuid::new_v4().simple().to_string();
+        let visible_env = Uuid::new_v4();
+        let hidden_env = Uuid::new_v4();
+        for (id, label) in [(visible_env, "visible"), (hidden_env, "hidden")] {
+            sqlx::query("INSERT INTO environments (id, name) VALUES ($1, $2)")
+                .bind(id)
+                .bind(format!("sum-{label}-{}", &suffix[..12]))
+                .execute(&pool)
+                .await
+                .expect("insert environment");
+        }
+
+        let (user_id, headers) = viewer_session(&pool, &suffix).await;
+        sqlx::query(
+            "INSERT INTO user_environment_memberships (user_id, environment_id) VALUES ($1, $2)",
+        )
+        .bind(user_id)
+        .bind(visible_env)
+        .execute(&pool)
+        .await
+        .expect("grant visible environment membership");
+
+        let flake_id: i32 = sqlx::query_scalar(
+            "INSERT INTO flakes (name, repo_url, branch) VALUES ($1, $2, 'main') RETURNING id",
+        )
+        .bind(format!("sum-flake-{suffix}"))
+        .bind(format!("https://example.invalid/sum-{suffix}.git"))
+        .fetch_one(&pool)
+        .await
+        .expect("insert flake");
+        let commit_id: i32 = sqlx::query_scalar(
+            "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp) VALUES ($1, $2, NOW()) RETURNING id",
+        )
+        .bind(flake_id)
+        .bind(format!("sum-commit-{suffix}"))
+        .fetch_one(&pool)
+        .await
+        .expect("insert commit");
+
+        let visible_host = format!("sum-visible-{}", &suffix[..12]);
+        let hidden_host = format!("sum-hidden-{}", &suffix[..12]);
+        for (environment_id, hostname, key_byte) in [
+            (visible_env, visible_host.clone(), 51_u8),
+            (hidden_env, hidden_host.clone(), 52_u8),
+        ] {
+            sqlx::query(
+                "INSERT INTO systems (id, hostname, system_configuration_name, public_key, is_active, derivation, deployment_policy, environment_id, flake_id) \
+                 VALUES ($1, $2, $2, $3, TRUE, '', 'manual', $4, $5)",
+            )
+            .bind(Uuid::new_v4())
+            .bind(hostname)
+            .bind(vec![key_byte; 32])
+            .bind(environment_id)
+            .bind(flake_id)
+            .execute(&pool)
+            .await
+            .expect("insert system");
+        }
+
+        // One non-terminal derivation per environment.
+        for hostname in [visible_host.clone(), hidden_host.clone()] {
+            sqlx::query(
+                "INSERT INTO derivations (commit_id, derivation_name, derivation_target, derivation_type, status_id) \
+                 VALUES ($1, $2, $2, 'nixos', 4)",
+            )
+            .bind(commit_id)
+            .bind(hostname)
+            .execute(&pool)
+            .await
+            .expect("insert derivation");
+        }
+
+        let summary = dashboard_summary_body(&pool, headers).await;
+
+        assert_eq!(summary.total_systems, 1);
+        assert_eq!(summary.fleet_health.total(), 1);
+        assert_eq!(summary.deployment_status.total(), 1);
+        assert_eq!(summary.active_builds, 1);
+        assert!(
+            summary
+                .recent_deployments
+                .iter()
+                .all(|deployment| deployment.hostname != hidden_host)
+        );
+        let cache_health = summary.cache_health.expect("cache health is reported");
+        assert!(cache_health.used_bytes.is_none());
+        assert!(cache_health.capacity_bytes.is_none());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires migrated CRYSTAL_FORGE_TEST_DATABASE_URL"]
+    async fn visibility_dashboard_summary_is_empty_for_viewer_without_memberships() {
+        let pool = visibility_test_pool().await;
+        let suffix = Uuid::new_v4().simple().to_string();
+        let (_user_id, headers) = viewer_session(&pool, &suffix).await;
+
+        let summary = dashboard_summary_body(&pool, headers).await;
+
+        assert_eq!(summary.total_systems, 0);
+        assert_eq!(summary.fleet_health.total(), 0);
+        assert_eq!(summary.deployment_status.total(), 0);
+        assert_eq!(summary.cve_summary.total(), 0);
+        assert_eq!(summary.active_builds, 0);
+        assert!(summary.recent_deployments.is_empty());
+        let build_queue = summary.build_queue.expect("build queue is reported");
+        assert_eq!(build_queue.building_count, 0);
+        assert_eq!(build_queue.queued_count, 0);
+        assert_eq!(build_queue.failed_24h_count, 0);
+        assert!(build_queue.items.is_empty());
+        assert!(build_queue.used_slots <= build_queue.total_slots);
+        let cache_health = summary.cache_health.expect("cache health is reported");
+        assert_eq!(cache_health.successful_pushes_24h, 0);
+        assert_eq!(cache_health.failed_pushes_24h, 0);
+        assert!(cache_health.used_bytes.is_none());
+        assert!(cache_health.capacity_bytes.is_none());
+    }
 
     #[tokio::test]
     async fn dashboard_summary_requires_authenticated_role() {
@@ -546,6 +779,23 @@ mod tests {
         let response = dashboard_summary(State(pool), HeaderMap::new())
             .await
             .into_response();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn dashboard_activity_requires_authenticated_role() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
+            .expect("lazy pool should construct");
+
+        let response = dashboard_activity(
+            State(pool),
+            HeaderMap::new(),
+            Query(DashboardActivityParams::default()),
+        )
+        .await
+        .into_response();
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }

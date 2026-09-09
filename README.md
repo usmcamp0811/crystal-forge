@@ -56,17 +56,23 @@ services.crystal-forge.server.auth_mode = "dev";  # Use local, not dev!
 
 ### Guided Onboarding Coach
 
-First-time admins are greeted with a **non-blocking guided setup coach** that walks through the 6 essential configuration steps:
+First-time admins are greeted with a **non-blocking guided setup coach** that walks through nine configuration steps:
 
 ![Onboarding Coach](./docs/screenshots/06a-onboarding-coach-dashboard.png)
 
-- **6-Step Guided Tour**: Environment → Flake → Builder → Cache → System → Agent
+- **9-Step Guided Tour**: Environment → Flake → Builder → Cache → System → Agent → Policy → Compliance Bundle → POA&M
 - **Progressive Field Callouts**: In-context guidance as you fill in each form
 - **Progress Tracking**: Live completion status with checkmarks
 - **Non-Blocking**: Navigate freely while the coach remains available
 - **Minimize/Dismiss**: Collapsible panel with relaunch from Server Management
 
 See the **[Onboarding Guide](./docs/onboarding-guide.md)** for a complete walkthrough.
+
+The dashboard includes a server-derived POA&M summary and an ordered watchlist.
+Watchlist rows open the exact POA&M in Compliance. Overdue and
+awaiting-verification events also appear in the durable notification inbox.
+These events use the **Policy violations** notification preference and retain
+their read or dismissed state across page reloads.
 
 ### Role-Based Access Control
 
