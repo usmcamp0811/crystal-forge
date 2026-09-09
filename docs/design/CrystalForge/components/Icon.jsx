@@ -33,6 +33,8 @@ const Icon = ({ name, size = 16, ...rest }) => {
     case "chevron-down":  return <svg {...common}><path d="m6 9 6 6 6-6"/></svg>;
     case "chevron-up":    return <svg {...common}><path d="m6 15 6-6 6 6"/></svg>;
     case "arrow-left": return <svg {...common}><path d="M19 12H5M11 19l-7-7 7-7"/></svg>;
+    case "clock":     return <svg {...common}><circle cx="12" cy="12" r="9"/><path d="M12 7v5.2l3.4 2"/></svg>;
+    case "cache":     return <svg {...common}><ellipse cx="12" cy="5.5" rx="8" ry="2.8"/><path d="M4 5.5v6c0 1.55 3.58 2.8 8 2.8s8-1.25 8-2.8v-6"/><path d="M4 11.5v6c0 1.55 3.58 2.8 8 2.8s8-1.25 8-2.8v-6"/></svg>;
     case "terminal": return <svg {...common}><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3M13 15h4"/></svg>;
     case "history": return <svg {...common}><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5M12 7v5l3 2"/></svg>;
     case "rollback": return <svg {...common}><path d="M3 7h11a6 6 0 1 1 0 12H8"/><path d="m8 3-5 4 5 4"/></svg>;

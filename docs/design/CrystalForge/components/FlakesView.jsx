@@ -1,6 +1,6 @@
 // Flakes view — registry table/cards + side-tray commit explorer
 
-function FlakesView({ defaultView, focus, onClearFocus, onTrayClose, onOpenEval, onOpenBuild, onOpenSystems, onOpenSystem }) {
+function FlakesView({ onNavigate, defaultView, focus, onClearFocus, onTrayClose, onOpenEval, onOpenBuild, onOpenSystems, onOpenSystem }) {
   const [viewMode, setViewMode] = React.useState(defaultView || "table");
   React.useEffect(() => { if (defaultView) setViewMode(defaultView); }, [defaultView]);
   const [query, setQuery]       = React.useState("");
@@ -73,7 +73,7 @@ function FlakesView({ defaultView, focus, onClearFocus, onTrayClose, onOpenEval,
       }
 
       {/* Side tray */}
-      {trayFlake && <FlakeTray flake={trayFlake} focusSha={focusSha} onClose={() => { setTrayFlake(null); setFocusSha(null); onTrayClose?.(); }} onEdit={() => { setEditFlake(trayFlake); }} onOpenEval={onOpenEval} onOpenBuild={onOpenBuild} onOpenSystems={onOpenSystems} onOpenSystem={onOpenSystem} />}
+      {trayFlake && <FlakeTray onNavigate={onNavigate} flake={trayFlake} focusSha={focusSha} onClose={() => { setTrayFlake(null); setFocusSha(null); onTrayClose?.(); }} onEdit={() => { setEditFlake(trayFlake); }} onOpenEval={onOpenEval} onOpenBuild={onOpenBuild} onOpenSystems={onOpenSystems} onOpenSystem={onOpenSystem} />}
 
       {addOpen && <FlakeFormModal mode="add" onClose={()=>setAddOpen(false)}/>}
       {editFlake && <FlakeFormModal mode="edit" flake={editFlake} onClose={()=>setEditFlake(null)}/>}
@@ -82,7 +82,7 @@ function FlakesView({ defaultView, focus, onClearFocus, onTrayClose, onOpenEval,
 }
 
 /* ── Side tray: history + diff ─────────────────────────────────────── */
-function FlakeTray({ flake, focusSha, focusMeta, onClose, onEdit, onOpenEval, onOpenBuild, onOpenSystems, onOpenSystem }) {
+function FlakeTray({ onNavigate, flake, focusSha, focusMeta, onClose, onEdit, onOpenEval, onOpenBuild, onOpenSystems, onOpenSystem }) {
   const commits = FLAKE_COMMITS[flake.id] || [];
   // If the deep-linked commit isn't in the tracked list, synthesize a stub so the
   // tray can still focus it (e.g. a short sha referenced from a deployment) — using
@@ -146,6 +146,13 @@ function FlakeTray({ flake, focusSha, focusMeta, onClose, onEdit, onOpenEval, on
   React.useEffect(() => { setPane("commits"); }, [flake.id]);
   React.useEffect(() => { if (focusSha) setPane("commits"); }, [focusSha]);
   const prevSha = idx >= 0 && allCommits[idx + 1] ? allCommits[idx + 1].sha : null;
+  // Scan-blocked count at the selected commit — drives the Pipeline tab's alert dot.
+  const pipelineAlert = React.useMemo(() => {
+    try {
+      const pl = getFlakePipeline(flake, selCommit ? selCommit.sha : flake.latestCommit, ageDaysOf(selCommit && selCommit.at));
+      return pl.counts.blocked;
+    } catch { return 0; }
+  }, [flake.id, selCommit && selCommit.sha]);
   const outputs = React.useMemo(
     () => window.getFlakeOutputs(flake, selCommit ? selCommit.sha : flake.latestCommit, prevSha),
     [flake.id, selCommit?.sha, prevSha]
@@ -203,6 +210,7 @@ function FlakeTray({ flake, focusSha, focusMeta, onClose, onEdit, onOpenEval, on
         <nav className="fx-tabs">
           {[
             { k:"commits", l:"Commits", n:allCommits.length },
+            { k:"pipeline", l:"Pipeline", n:outputs.counts.declared, alert:pipelineAlert },
             { k:"systems", l:"Systems", n:outputs.counts.declared, alert:outputs.counts.orphaned || outputs.counts.declaredOnly },
             { k:"modules", l:"Modules", n:outputs.counts.modules },
             { k:"inputs",  l:"Inputs",  n:outputs.counts.inputs, alert:outputs.counts.staleInputs },
@@ -216,6 +224,7 @@ function FlakeTray({ flake, focusSha, focusMeta, onClose, onEdit, onOpenEval, on
 
         {pane !== "commits" ? (
           <div className="fx-body">
+            {pane === "pipeline" && <FlakePipelinePane flake={flake} out={outputs} commit={selCommit} onPickCommit={()=>setPane("commits")} onOpenSystem={onOpenSystem} onNavigate={onNavigate}/>}
             {pane === "systems" && <FlakeSystemsPane flake={flake} out={outputs} commit={selCommit} onPickCommit={()=>setPane("commits")} onOpenSystem={onOpenSystem}/>}
             {pane === "modules" && <FlakeModulesPane flake={flake} out={outputs} commit={selCommit} onPickCommit={()=>setPane("commits")}/>}
             {pane === "inputs"  && <FlakeInputsPane flake={flake} out={outputs} commit={selCommit} onPickCommit={()=>setPane("commits")}/>}
