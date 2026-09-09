@@ -4,6 +4,7 @@ title: Bring Scanning queue and scan-log interactions to updated design parity
 status: Backlog
 assignee: []
 created_date: '2026-09-09 03:32'
+updated_date: '2026-09-09 03:33'
 labels:
   - scanning
   - web-ui
@@ -13,8 +14,10 @@ labels:
 dependencies:
   - TASK-326.1
   - TASK-337
+  - TASK-448
 references:
   - git commit e1b7434899e23f43770632e59d80a76a8fc8459e
+  - TASK-448
 documentation:
   - docs/design/CrystalForge/components/ScanningView.jsx
   - docs/design/CrystalForge/data-scanning.js
