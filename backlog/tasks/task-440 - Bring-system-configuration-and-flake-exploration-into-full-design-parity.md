@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-09 14:18'
+updated_date: '2026-09-09 14:34'
 labels:
   - design-parity
   - web-ui
@@ -191,6 +191,8 @@ Starting bounded V2 Config summary and module-source DB-only reader slice from d
 2026-09-09 correction committed and pushed as `3a95b2b973ca9050c1d28dffd47357ae7a109bfa` with message `TASK-440: Bound Config option page reads`. The worktree is clean. Local HEAD, the local remote-tracking ref, `git ls-remote`, the public GitLab MR API SHA, and MR !323 `diff_refs.head_sha` all match. MR !323 remains open against `dev`, with no merge or deployment performed. TASK-440 remains In Progress; AC #24 and #27 remain unchecked.
 
 Root-cause diagnosis found that the 12l cleanup retained an unrelated `test-agent` Config Inspector job because it filtered only by commit ID. The target `cf-test-sys` job and unrelated job shared timestamps, so UUID ordering selected the serial execution order. The user authorized continuation with the identified next step.
+
+2026-09-09 focused 12l fixture sequencing correction implemented without production changes. The cleanup now removes Config Inspector jobs whose commit or configuration does not match the live fixture before starting the serial worker; production claim ordering, worker concurrency, and the 300-second poll are unchanged. Verification passed: `nix develop -c node --check checks/web-ui/tests/integration-test.js`; `git diff --check`; and `CF_UI_TEST_STEPS=12l-task440-config-lifecycle nix build --impure .#checks.x86_64-linux.web-ui --no-link -L` (1/1 workflow passed with dark and light captures). The broad Web UI suite was not run because broader cross-workflow isolation remains TASK-461 scope. No commit or push was performed; TASK-440 remains In Progress and AC #24/#27 remain unchecked.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
