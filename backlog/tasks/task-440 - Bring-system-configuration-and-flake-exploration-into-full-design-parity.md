@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-10 14:19'
+updated_date: '2026-09-10 17:45'
 labels:
   - design-parity
   - web-ui
@@ -257,6 +257,8 @@ Commit B was created locally as df58dbd6b408cfa1d718dd766690f3834201f033 with ex
 2026-09-10 XCCDF research found a contract conflict. The normative CF-XCCDF v0.1 profile defines `binding=cfg` as the full NixOS configuration and requires `cfg.config.*`, while current API/runtime canonicalizes and evaluates `config.*` with `config = cfg.config`. Current writer requires persisted context/binding even though migration-seeded, API-created, editor-created, and assisted-import custom checks generally omit them. The valid no-enforcement persisted shape conflicts with XSD `minOccurs=1`. Implementing a projection without a contract decision would silently change interchange semantics.
 
 2026-09-10 Config Inspector research found unguarded `attrNames`, child WHNF, and `_type` forcing in `packages/default/crates/cf-server/src/models/config_inspector.nix`; `SNAPSHOT_EXTRACTION_PRELUDE` demonstrates guarded traversal but its synthetic unreadable-option encoding is incompatible with V2. V2 has no option-enumeration completeness field or unreadable-subtree/root diagnostic, and `comparison_ready` ignores enumeration completeness. Preserving healthy rows around poison truthfully therefore requires a semantic model/persistence/API extension, likely a migration. Per the assigned stop condition, implementation is blocked pending scope and contract direction. No files changed.
+
+2026-09-10 local implementation produced two unpushed commits: `cf88d1675eeb9a3d5824c2f4340f2f9b4fd9b2c1` (`TASK-440: Align custom-check XCCDF context`) and `300d69f3810318f2e022688aba4e3e039f2df874` (`TASK-440: Represent partial Config inventories`). Focused checks passed, but independent semantic review blocks push. XCCDF P1 findings: empty `rules` plus top-level expression exports as no enforcement while runtime executes the expression; authentic historical V1 digests are checked after normalization and can fail; lexical checks miss quoted/dynamic attribute selection; native import bypasses ordinary custom-check expression/field validation; declared policy type can contradict typed custom-check implementation. Direct source/import normal evaluator pass/fail parity and a representative multi-policy clean-destination bundle round trip are also not proven. Config P1 findings: Stage 2 always filters provenance with list-based `builtins.elem`, causing O(options²) behavior even for complete inventories; diagnostics are unbounded in Nix and Rust rejects the entire useful artifact at 129 prefixes instead of deterministically bounding them. Additional P2 findings cover collation-dependent diagnostic ordering and misleading partial drift/module UI reasons. Worktree is clean; neither commit was pushed. Correcting these defects while retaining exactly two final commits requires rewriting the newly created local commits, but the prompt prohibits amend/squash. Awaiting explicit direction on whether these two unpushed commits may be recreated/amended or whether follow-up commits are preferred.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
