@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-10 03:21'
+updated_date: '2026-09-10 03:42'
 labels:
   - design-parity
   - web-ui
@@ -183,6 +183,8 @@ Commit B from exact parent 997d7d4826db9ca7c6723254c700a122c01a469c: deserialize
 Commit A final-audit correction from parent 24bd1d0e: acquire the shared snapshot-writer transaction lock before all automatic and targeted Config enqueue resolution/readiness work; reject active queued/running rows whose derivation or carrier differs from the newly resolved target with a typed retryable conflict and no mutation; enforce CSRF on the retained whole-commit prerequisite mutation after authentication/role checks; strengthen focused PostgreSQL/API and live 12l coverage; correct lifecycle and prerequisite documentation without changing primary evaluator semantics; run focused DB/API, syntax, formatting, offline server, Web UI, and 12l checks; audit exactly the 11 Commit A files; create one local commit named TASK-440: Queue targeted Config inspections; do not push or alter the stash.
 
 Final Commit A P1 correction: update `missing_config_snapshot_lifecycle_v2` to resolve the same unique completed NixOS derivation/carrier used by targeted inspection and select only jobs matching both `derivation_id` and `carrier_drv_path`. Preserve the existing primary-evaluation fallback when no exact job matches and retain the read-only system-to-flake non-disclosure join. Add a focused isolated-PostgreSQL regression for obsolete queued/failed identities and exact matching lifecycle, run the requested focused lifecycle tests and structural gates, then audit and commit only A files without popping the corrected B stash or pushing.
+
+Final deployed-review policy-draft remediation from exact SHA `b0018e497dd4a30ddb334b77bd2d74bf5d056763`: add matching Web UI `CreatePolicyDraftRequest`/response DTOs, send `Some(&CreatePolicyDraftRequest { new_version: None })` from the accepted-policy Create draft action so the shared client emits JSON and Content-Type while preserving CSRF, and extend the existing focused real policy catalog browser workflow to assert the exact request plus persisted draft lineage/current pointers/source immutability and refreshed UI. Run focused Web UI/client, browser, server lifecycle, WASM/package, formatting, syntax/manifest, and diff checks. Audit the narrow scope, commit as `TASK-440: Send policy draft JSON`, recheck the unchanged remote starting SHA, push normally, and leave TASK-440 In Progress with AC #24/#27 unchanged. No server production change, migration, Config Inspector, XCCDF, bundle publication, evaluator, generation, deployment, TASK-441, rebase, merge, or deployment.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
