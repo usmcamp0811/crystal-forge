@@ -4,6 +4,7 @@ title: Repair policy draft lifecycle server regression CSRF setup
 status: Backlog
 assignee: []
 created_date: '2026-09-10 05:32'
+updated_date: '2026-09-10 05:50'
 labels:
   - server
   - tests
@@ -31,3 +32,13 @@ The ignored `policy_draft_derived_from_published` cf-server regression fails at 
 - [ ] #2 The regression reaches draft creation and passes against an isolated repository-managed PostgreSQL database.
 - [ ] #3 Production CSRF enforcement and policy draft behavior remain unchanged.
 <!-- AC:END -->
+
+## Comments
+
+<!-- COMMENTS:BEGIN -->
+author: openai-agent
+created: 2026-09-10 05:50
+---
+Superseded by TASK-440 commit `1e986cd2351652e866f9b72bff956a312fc0827a`. The focused policy-draft lifecycle fixture now sends matching CSRF credentials and passes against isolated PostgreSQL. No separate implementation remains.
+---
+<!-- COMMENTS:END -->
