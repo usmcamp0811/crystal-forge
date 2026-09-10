@@ -3018,6 +3018,26 @@ pub struct PublishPolicyVersionRequest {
     pub expected_semantic_digest: Option<String>,
 }
 
+/// Requests a new mutable draft from the current published policy version.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreatePolicyDraftRequest {
+    /// Overrides the server-derived version when present.
+    pub new_version: Option<String>,
+}
+
+/// Describes a policy draft created from an immutable published version.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreatePolicyDraftResponse {
+    /// Identifies the new mutable policy version.
+    pub version_id: Uuid,
+    /// Contains the explicit or server-derived version string.
+    pub version: String,
+    /// Contains the new version's publication state.
+    pub publication_state: String,
+    /// Identifies the immutable published source version.
+    pub derived_from_version_id: Uuid,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrustBundleVersionRequest {
     pub trusted: bool,
@@ -5429,8 +5449,32 @@ pub struct UpdatePolicyMappingRequest {
 #[cfg(test)]
 mod tests {
     use super::{
-        ComplianceControlEvidence, EvaluatedOption, EvaluationModuleSummary, XccdfPreviewResponse,
+        ComplianceControlEvidence, CreatePolicyDraftRequest, CreatePolicyDraftResponse,
+        EvaluatedOption, EvaluationModuleSummary, XccdfPreviewResponse,
     };
+
+    #[test]
+    fn policy_draft_dtos_preserve_the_exact_server_contract() {
+        let request = CreatePolicyDraftRequest { new_version: None };
+        assert_eq!(
+            serde_json::to_string(&request).expect("serialize policy draft request"),
+            r#"{"new_version":null}"#
+        );
+
+        let version_id = uuid::Uuid::from_u128(1);
+        let source_id = uuid::Uuid::from_u128(2);
+        let response: CreatePolicyDraftResponse = serde_json::from_value(serde_json::json!({
+            "version_id": version_id,
+            "version": "2.0.0",
+            "publication_state": "draft",
+            "derived_from_version_id": source_id
+        }))
+        .expect("deserialize policy draft response");
+        assert_eq!(response.version_id, version_id);
+        assert_eq!(response.version, "2.0.0");
+        assert_eq!(response.publication_state, "draft");
+        assert_eq!(response.derived_from_version_id, source_id);
+    }
 
     #[test]
     fn config_dtos_deserialize_missing_failed_and_known_v1_states() {

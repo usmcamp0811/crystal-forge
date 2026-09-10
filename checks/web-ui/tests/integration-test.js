@@ -10712,6 +10712,126 @@ const steps = [
       await assertCount(group.locator('[data-policy-card]'), 1, "Only the immutable policy may remain after accepted server mutations");
       await collapseOnboardingCoach(page);
       await captureWorkflowViewportState(page, stepName, "partial-delete-result", "narrowDesktop");
+
+      const acceptedVersionId = immutablePolicy.current_version_id;
+      const pointersBefore = JSON.parse(runFixtureSql(`
+        SELECT json_build_object(
+          'currentDraftVersionId', current_draft_version_id,
+          'currentPublishedVersionId', current_published_version_id
+        )::text
+        FROM deployment_policies
+        WHERE id='${immutablePolicyId}'::uuid;
+      `));
+      if (pointersBefore.currentDraftVersionId !== null || pointersBefore.currentPublishedVersionId !== acceptedVersionId) {
+        throw new Error(`Accepted policy prerequisite pointers are invalid: ${JSON.stringify(pointersBefore)}`);
+      }
+
+      await page.getByRole("button", { name: "Cancel", exact: true }).click();
+      await immutableCard.click();
+      await assertVisible(immutableDrawer, "Accepted policy must reopen for real draft creation");
+      const createDraftPath = `/api/v1/policies/${immutablePolicyId}/drafts`;
+      const expectedCsrf = await page.evaluate(() => document.cookie
+        .split(";")
+        .map((cookie) => cookie.trim())
+        .find((cookie) => cookie.startsWith("__Host-cf-csrf="))
+        ?.slice("__Host-cf-csrf=".length));
+      if (!expectedCsrf) throw new Error("Policy draft request requires the authenticated CSRF cookie");
+      const acceptedSourceBefore = JSON.parse(runFixtureSql(`
+        SELECT to_jsonb(source_version)::text
+        FROM deployment_policy_versions source_version
+        WHERE source_version.id='${acceptedVersionId}'::uuid;
+      `));
+      const [draftRequest, draftResponse] = await Promise.all([
+        page.waitForRequest((request) => new URL(request.url()).pathname === createDraftPath && request.method() === "POST"),
+        page.waitForResponse((response) => new URL(response.url()).pathname === createDraftPath && response.request().method() === "POST"),
+        immutableDrawer.getByRole("button", { name: "Create draft", exact: true }).click(),
+      ]);
+      if (draftRequest.postData() === null) throw new Error("Policy draft POST must not be bodyless");
+      if (draftRequest.postData() !== '{"new_version":null}') {
+        throw new Error(`Policy draft POST must send the exact default request JSON: ${draftRequest.postData()}`);
+      }
+      if (JSON.stringify(draftRequest.postDataJSON()) !== '{"new_version":null}') {
+        throw new Error(`Policy draft POST parsed body is incorrect: ${JSON.stringify(draftRequest.postDataJSON())}`);
+      }
+      const draftContentType = draftRequest.headers()["content-type"] || "";
+      if (!draftContentType.includes("application/json")) {
+        throw new Error(`Policy draft creation must send application/json, got ${draftContentType || "no Content-Type"}`);
+      }
+      if (draftRequest.headers()["x-csrf-token"] !== expectedCsrf) {
+        throw new Error("Policy draft request CSRF header must match the authenticated CSRF cookie");
+      }
+      if (draftResponse.status() === 415) throw new Error("Correct policy draft JSON must not return HTTP 415");
+      if (draftResponse.status() !== 201) {
+        throw new Error(`Policy draft creation failed with HTTP ${draftResponse.status()}: ${await draftResponse.text()}`);
+      }
+      const draftBody = await draftResponse.json();
+      if (!draftBody.version_id || !draftBody.version || draftBody.publication_state !== "draft" || draftBody.derived_from_version_id !== acceptedVersionId) {
+        throw new Error(`Policy draft response is invalid: ${JSON.stringify(draftBody)}`);
+      }
+      const acceptedSourceAfter = JSON.parse(runFixtureSql(`
+        SELECT to_jsonb(source_version)::text
+        FROM deployment_policy_versions source_version
+        WHERE source_version.id='${acceptedVersionId}'::uuid;
+      `));
+      if (acceptedSourceBefore.id !== acceptedVersionId || acceptedSourceBefore.policy_id !== immutablePolicyId || acceptedSourceBefore.publication_state !== "accepted") {
+        throw new Error(`Policy draft source must be the exact accepted version: ${JSON.stringify(acceptedSourceBefore)}`);
+      }
+      const acceptedSourceImmutableColumns = [
+        "id", "policy_id", "version", "publication_state", "published_at", "name", "description",
+        "policy_type", "implementation_state", "execution_phase", "config", "compliance_metadata",
+        "dependencies", "semantic_digest", "digest_algorithm", "canonicalization_version",
+        "source_artifact_id", "opaque_xml", "derived_from_version_id", "created_by", "created_at",
+        "enabled_by_default", "trust_state", "trusted_by", "trusted_at", "trust_review_note",
+        "mapping_digest",
+      ];
+      const missingAcceptedSourceColumns = acceptedSourceImmutableColumns.filter((column) =>
+        !Object.hasOwn(acceptedSourceBefore, column) || !Object.hasOwn(acceptedSourceAfter, column));
+      if (missingAcceptedSourceColumns.length !== 0) {
+        throw new Error(`Accepted source snapshot omitted immutable columns: ${missingAcceptedSourceColumns.join(", ")}`);
+      }
+      const acceptedSourceChanges = Object.fromEntries(acceptedSourceImmutableColumns
+        .filter((column) => !isDeepStrictEqual(acceptedSourceBefore[column], acceptedSourceAfter[column]))
+        .map((column) => [column, { before: acceptedSourceBefore[column], after: acceptedSourceAfter[column] }]));
+      if (Object.keys(acceptedSourceChanges).length !== 0 || acceptedSourceAfter.publication_state !== "accepted") {
+        throw new Error(`Creating a policy draft changed the accepted source version: ${JSON.stringify(acceptedSourceChanges)}`);
+      }
+      await assertVisible(immutableDrawer.getByText("Draft created", { exact: true }), "Successful draft creation must update the drawer status");
+
+      const lifecycle = JSON.parse(runFixtureSql(`
+        SELECT json_build_object(
+          'currentDraftVersionId', policy.current_draft_version_id,
+          'currentPublishedVersionId', policy.current_published_version_id,
+          'draftPolicyId', draft.policy_id,
+          'draftState', draft.publication_state,
+          'draftVersion', draft.version,
+          'derivedFromVersionId', draft.derived_from_version_id
+        )::text
+        FROM deployment_policies policy
+        JOIN deployment_policy_versions draft ON draft.id=policy.current_draft_version_id
+        JOIN deployment_policy_versions source ON source.id=policy.current_published_version_id
+        WHERE policy.id='${immutablePolicyId}'::uuid;
+      `));
+      if (lifecycle.currentDraftVersionId !== draftBody.version_id || lifecycle.draftPolicyId !== immutablePolicyId || lifecycle.draftState !== "draft") {
+        throw new Error(`Policy draft row/current pointer did not persist: ${JSON.stringify(lifecycle)}`);
+      }
+      if (lifecycle.currentPublishedVersionId !== acceptedVersionId || lifecycle.derivedFromVersionId !== acceptedVersionId) {
+        throw new Error(`Policy draft lineage changed the published pointer: ${JSON.stringify(lifecycle)}`);
+      }
+      if (lifecycle.draftVersion !== draftBody.version) {
+        throw new Error(`Server-derived policy version does not match its response: ${JSON.stringify(lifecycle)}`);
+      }
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await collapseOnboardingCoach(page);
+      await openSecurityPolicyTab(page);
+      const refreshedSearch = page.getByPlaceholder("Search policies…").first();
+      await refreshedSearch.fill(`${prefix} 061`);
+      const refreshedCard = page.locator(`[data-policy-card][data-policy-name="${prefix} 061"]`);
+      await assertVisible(refreshedCard.getByText("draft", { exact: true }), "Catalog refresh must show the current draft state");
+      await refreshedCard.click();
+      const refreshedDrawer = page.locator("#policy-detail-dialog");
+      await assertVisible(refreshedDrawer.getByRole("button", { name: "Edit", exact: true }), "Current policy draft must be editable after refresh");
+      await assertVisible(refreshedDrawer.getByRole("button", { name: "Trust", exact: true }), "Current policy draft must expose its draft lifecycle action");
+      await assertHidden(refreshedDrawer.getByRole("button", { name: "Create draft", exact: true }), "Current editable draft must replace the accepted-policy draft action");
     },
   },
   {

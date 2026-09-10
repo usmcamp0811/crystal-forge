@@ -2709,9 +2709,17 @@ pub async fn publish_policy_version(
 }
 
 /// Create a new mutable draft from a published policy version.
-pub async fn create_policy_draft(policy_id: &Uuid) -> Result<serde_json::Value, ApiClientError> {
+///
+/// # Errors
+///
+/// Returns [`ApiClientError`] when the request cannot be sent or the server
+/// rejects the draft creation.
+pub async fn create_policy_draft(
+    policy_id: &Uuid,
+    request: &CreatePolicyDraftRequest,
+) -> Result<CreatePolicyDraftResponse, ApiClientError> {
     let url = format!("{}/policies/{}/drafts", base_url(), policy_id);
-    send_json_with_csrf("POST", &url, None::<&()>).await
+    send_json_with_csrf("POST", &url, Some(request)).await
 }
 
 /// Trust or reject a bundle version.

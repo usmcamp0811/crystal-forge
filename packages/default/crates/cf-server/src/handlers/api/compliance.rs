@@ -9716,11 +9716,14 @@ mod tests {
         // Publish via API first
         let base = spawn_phase1_server(pool.clone()).await;
         let client = reqwest::Client::new();
+        let csrf = format!("policy-draft-csrf-{}", Uuid::new_v4().simple());
+        let cookie = format!("{SESSION_COOKIE_NAME}={token}; {CSRF_COOKIE_NAME}={csrf}");
         let pub_r = client
             .post(format!(
                 "{base}/api/v1/policy-versions/{version_id}/publish"
             ))
-            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .header("cookie", &cookie)
+            .header(CSRF_HEADER_NAME.as_str(), &csrf)
             .json(&serde_json::json!({"expected_semantic_digest": digest}))
             .send()
             .await
@@ -9730,7 +9733,8 @@ mod tests {
         // Create draft
         let draft_r = client
             .post(format!("{base}/api/v1/policies/{policy_id}/drafts"))
-            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .header("cookie", &cookie)
+            .header(CSRF_HEADER_NAME.as_str(), &csrf)
             .json(&serde_json::json!({"new_version": "2.0.0-draft"}))
             .send()
             .await
@@ -9857,7 +9861,8 @@ mod tests {
 
         let second = client
             .post(format!("{base}/api/v1/policies/{policy_id}/drafts"))
-            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .header("cookie", &cookie)
+            .header(CSRF_HEADER_NAME.as_str(), &csrf)
             .json(&serde_json::json!({"new_version": "3.0.0-draft"}))
             .send()
             .await

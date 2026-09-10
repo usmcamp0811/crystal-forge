@@ -1583,7 +1583,10 @@ pub fn PolicyDrawer(
                                             move |_| {
                                                 busy.set(true);
                                                 spawn(async move {
-                                                    match crate::api::client::create_policy_draft(&pid).await {
+                                                    match crate::api::client::create_policy_draft(
+                                                        &pid,
+                                                        &crate::api::models::CreatePolicyDraftRequest { new_version: None },
+                                                    ).await {
                                                         Ok(_) => { busy.set(false); action_status.set(Some("Draft created".into())); }
                                                         Err(e) => { busy.set(false); action_status.set(Some(format!("Error: {e}"))); }
                                                     }
@@ -2557,6 +2560,20 @@ mod catalog_scaling_tests {
         }
         assert!(icon.contains("IconName::Maximize =>"));
         assert!(icon.contains("IconName::Minimize =>"));
+    }
+
+    #[test]
+    fn accepted_policy_draft_action_sends_the_json_dto() {
+        let view = include_str!("policies.rs");
+        let client = include_str!("../api/client.rs");
+
+        assert!(view.contains("CreatePolicyDraftRequest { new_version: None }"));
+        assert!(client.contains("request: &CreatePolicyDraftRequest"));
+        assert!(client.contains("Result<CreatePolicyDraftResponse, ApiClientError>"));
+        assert!(client.contains("send_json_with_csrf(\"POST\", &url, Some(request)).await"));
+        assert!(!client.contains(
+            "send_json_with_csrf(\"POST\", &url, None::<&()>).await\n}\n\n/// Trust or reject a bundle version"
+        ));
     }
 
     #[test]
