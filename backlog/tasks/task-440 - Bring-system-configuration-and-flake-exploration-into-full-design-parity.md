@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-10 04:33'
+updated_date: '2026-09-10 04:39'
 labels:
   - design-parity
   - web-ui
@@ -187,6 +187,8 @@ Final Commit A P1 correction: update `missing_config_snapshot_lifecycle_v2` to r
 Final deployed-review policy-draft remediation from exact SHA `b0018e497dd4a30ddb334b77bd2d74bf5d056763`: add matching Web UI `CreatePolicyDraftRequest`/response DTOs, send `Some(&CreatePolicyDraftRequest { new_version: None })` from the accepted-policy Create draft action so the shared client emits JSON and Content-Type while preserving CSRF, and extend the existing focused real policy catalog browser workflow to assert the exact request plus persisted draft lineage/current pointers/source immutability and refreshed UI. Run focused Web UI/client, browser, server lifecycle, WASM/package, formatting, syntax/manifest, and diff checks. Audit the narrow scope, commit as `TASK-440: Send policy draft JSON`, recheck the unchanged remote starting SHA, push normally, and leave TASK-440 In Progress with AC #24/#27 unchanged. No server production change, migration, Config Inspector, XCCDF, bundle publication, evaluator, generation, deployment, TASK-441, rebase, merge, or deployment.
 
 Final bounded policy-draft JSON remediation from exact clean HEAD `b0018e497dd4a30ddb334b77bd2d74bf5d056763`: mirror the server `CreatePolicyDraftRequest` and `CreatePolicyDraftResponse` in the Web UI; make `create_policy_draft(policy_id, request)` send `Some(request)` through the existing CSRF JSON sender; pass `{ new_version: None }` only from the accepted-policy production button; add focused DTO serialization and client/view source guards; extend `20af-policy-catalog-selection-delete-regressions` after its strict capture to prove the real production request, CSRF, response, persisted lineage/pointers/source immutability, and refreshed editable state. Do not change server production code or any excluded subsystem. Verify targeted Web UI tests, changed-file rustfmt, Node/manifest/static checks, wasm/offline/package build, the authoritative focused Web UI workflow, and the existing isolated-PostgreSQL server policy draft lifecycle regression; stop if valid JSON exposes an independent lifecycle failure; audit and create exactly one local commit titled `TASK-440: Send policy draft JSON` without pushing.
+
+Diagnostic-only policy-draft follow-up: instrument `20af-policy-catalog-selection-delete-regressions` to snapshot every `deployment_policy_versions` column for the exact accepted source UUID immediately before and after the production Create draft POST, emit complete rows and a per-column `IS DISTINCT` equivalent comparison, and rerun only 20af. If any column changes, stop without server changes. If no column changes, replace the hash assertion with explicit immutable semantic-field and identity/state assertions, then finish only the already-declared client/browser verification.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
