@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-10 20:01'
+updated_date: '2026-09-10 20:02'
 labels:
   - design-parity
   - web-ui
@@ -263,6 +263,8 @@ Commit B was created locally as df58dbd6b408cfa1d718dd766690f3834201f033 with ex
 2026-09-10 local implementation produced two unpushed commits: `cf88d1675eeb9a3d5824c2f4340f2f9b4fd9b2c1` (`TASK-440: Align custom-check XCCDF context`) and `300d69f3810318f2e022688aba4e3e039f2df874` (`TASK-440: Represent partial Config inventories`). Focused checks passed, but independent semantic review blocks push. XCCDF P1 findings: empty `rules` plus top-level expression exports as no enforcement while runtime executes the expression; authentic historical V1 digests are checked after normalization and can fail; lexical checks miss quoted/dynamic attribute selection; native import bypasses ordinary custom-check expression/field validation; declared policy type can contradict typed custom-check implementation. Direct source/import normal evaluator pass/fail parity and a representative multi-policy clean-destination bundle round trip are also not proven. Config P1 findings: Stage 2 always filters provenance with list-based `builtins.elem`, causing O(options²) behavior even for complete inventories; diagnostics are unbounded in Nix and Rust rejects the entire useful artifact at 129 prefixes instead of deterministically bounding them. Additional P2 findings cover collation-dependent diagnostic ordering and misleading partial drift/module UI reasons. Worktree is clean; neither commit was pushed. Correcting these defects while retaining exactly two final commits requires rewriting the newly created local commits, but the prompt prohibits amend/squash. Awaiting explicit direction on whether these two unpushed commits may be recreated/amended or whether follow-up commits are preferred.
 
 2026-09-10 corrected Commit B verification: bounded Stage-1 diagnostics now retain 128 entries while traversal continues and certifies truncation; Stage 2 projects exact healthy Stage-1 paths, uses one option-key attrset, and balances option-tree merges. Added persistence/API/UI truncation state and corrected the existing API fixture to mark its claimed derivation complete. Passed real-Nix config-inspector and evaluator-snapshot-isolation checks; 42 config_inspector model tests; 13 config_snapshot_artifact model tests; focused partial selector, API mapping, API handler, and migration 0254 tests against isolated PostgreSQL 17; all-target offline cf-server check; Web UI WASM check; SQLx prepare --check against a freshly migrated isolated database; server/Web UI formatting; Node syntax; and git diff checks. SQLx reported only pre-existing potentially unused metadata, with no metadata update required. Commit A files and parent SHA matched acecec5a71ff99fe0c4d1f59e6d5f54d4f616687. The disposable PostgreSQL cluster on port 55441 was stopped and removed. Commit-B amend remains pending.
+
+2026-09-10 corrected Commit B amended successfully: old temporary B `f1b4127bfe239cf2fe4f32e5194e852c855ade41` was replaced by `c8597b73` with exact subject `TASK-440: Represent partial Config inventories`. Commit A remains the exact parent `acecec5a71ff99fe0c4d1f59e6d5f54d4f616687`; the branch has exactly two local commits above `origin/TASK-440-system-config-flake-parity` at `1e986cd2351652e866f9b72bff956a312fc0827a`, and the task worktree is clean. No push, merge, deployment, or task status change was performed.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
