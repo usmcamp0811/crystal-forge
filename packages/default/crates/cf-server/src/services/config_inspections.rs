@@ -6,7 +6,10 @@
 
 use anyhow::{Context, Result, bail};
 use chrono::Duration as ChronoDuration;
+use serde::Serialize;
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};
+use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::Duration;
 use std::{future::Future, pin::Pin};
@@ -46,6 +49,52 @@ const STAGE1_APPLY: &str = "derivation: if derivation.meta ? crystalForgeInspect
 const STAGE2_APPLY: &str = "derivation: if derivation.meta ? crystalForgeDefinitionValues then derivation.meta.crystalForgeDefinitionValues else derivation.meta";
 const CONFIG_INSPECTION_QUEUE_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const CONFIG_INSPECTION_STALE_THRESHOLD: ChronoDuration = ChronoDuration::minutes(10);
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Stage2AllowedSelection<'a> {
+    option_keys: &'a [String],
+    option_paths: &'a [Vec<String>],
+}
+
+struct Stage2AllowedSelectionFile {
+    file: tempfile::NamedTempFile,
+}
+
+impl Stage2AllowedSelectionFile {
+    fn create(option_keys: &[String], option_paths: &[Vec<String>]) -> Result<Self> {
+        let mut file = tempfile::Builder::new()
+            .prefix("crystal-forge-config-stage2-")
+            .suffix(".json")
+            .tempfile()
+            .context("create private Config Inspector Stage 2 selection file")?;
+        // SECURITY: Option path components can contain sensitive names. Create
+        // and retain an owner-only file, and let tempfile remove it on every
+        // success, error, and cancellation path.
+        file.as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o600))
+            .context("secure Config Inspector Stage 2 selection file")?;
+        serde_json::to_writer(
+            file.as_file_mut(),
+            &Stage2AllowedSelection {
+                option_keys,
+                option_paths,
+            },
+        )
+        .context("serialize Config Inspector Stage 2 option identities")?;
+        file.as_file_mut()
+            .flush()
+            .context("flush Config Inspector Stage 2 option identities")?;
+        Ok(Self { file })
+    }
+
+    fn path_for_nix(&self) -> Result<&str> {
+        self.file
+            .path()
+            .to_str()
+            .context("Config Inspector Stage 2 selection path is not UTF-8")
+    }
+}
 
 /// Returns whether the dedicated Config Inspector worker may run.
 ///
@@ -393,6 +442,16 @@ async fn execute_nix_stages(
     )
     .await?;
     let stage1 = reconcile_stage1(stage1_output, target, claim)?;
+    let stage1_option_keys = stage1
+        .options
+        .iter()
+        .map(|option| option.key.clone())
+        .collect::<Vec<_>>();
+    let stage1_option_paths = stage1
+        .options
+        .iter()
+        .map(|option| option.path_components.clone())
+        .collect::<Vec<_>>();
 
     if !crate::queries::config_inspections::heartbeat_config_inspection_execution(
         pool,
@@ -407,14 +466,20 @@ async fn execute_nix_stages(
         return Ok(None);
     }
 
+    let stage2_selection =
+        Stage2AllowedSelectionFile::create(&stage1_option_keys, &stage1_option_paths)?;
+    let stage2_expression =
+        build_definition_values_expression(target, stage2_selection.path_for_nix()?);
     let stage2_output = run_stage(
         nix_eval_jobs_program,
-        &build_definition_values_expression(target),
+        &stage2_expression,
         STAGE2_APPLY,
         credentials,
         "Config Inspector Stage 2",
     )
-    .await?;
+    .await;
+    drop(stage2_selection);
+    let stage2_output = stage2_output?;
     let stage2 = reconcile_definition_values_output(stage2_output.stdout.bytes.as_slice(), &stage1)
         .context("reconcile Config Inspector Stage 2")?;
     let assembled = assemble_config_inspection(stage1, stage2)
@@ -783,7 +848,7 @@ mod tests {
     fn stage_commands_are_bounded_and_targeted() {
         let target = InspectionTarget::new("git+https://example.test/repo?rev=abc", "host");
         let stage1 = build_inspector_expression(&target);
-        let stage2 = build_definition_values_expression(&target);
+        let stage2 = build_definition_values_expression(&target, "/tmp/allowed-options.json");
         let command = build_stage_command(Path::new("nix-eval-jobs"), &stage1, STAGE1_APPLY, None);
         let args: Vec<String> = command
             .as_std()
@@ -803,6 +868,71 @@ mod tests {
         assert_eq!(STAGE_STDOUT_LIMIT, 256 * 1024 * 1024);
         assert_eq!(STAGE_STDERR_LIMIT, 256 * 1024);
         assert_eq!(STAGE_DEADLINE, Duration::from_secs(300));
+    }
+
+    #[test]
+    fn stage2_option_identities_use_private_bounded_file_transport() {
+        let option_paths = (0..16_001)
+            .map(|index| {
+                vec![
+                    "sensitive-option-name".to_string(),
+                    format!("branch-{index:05}"),
+                    "leaf".to_string(),
+                ]
+            })
+            .collect::<Vec<_>>();
+        let option_keys = (0..option_paths.len())
+            .map(|index| format!("{index:064x}"))
+            .collect::<Vec<_>>();
+        let selection = Stage2AllowedSelectionFile::create(&option_keys, &option_paths)
+            .expect("Stage 2 selection file should be created");
+        let selection_path = selection.file.path().to_path_buf();
+        let metadata = std::fs::metadata(&selection_path)
+            .expect("Stage 2 selection metadata should be readable");
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+
+        let payload = std::fs::read(&selection_path)
+            .expect("Stage 2 selection payload should be readable by its owner");
+        assert!(payload.len() > 128 * 1024);
+        let decoded: serde_json::Value =
+            serde_json::from_slice(&payload).expect("Stage 2 selection payload should be JSON");
+        assert_eq!(
+            decoded["optionKeys"],
+            serde_json::to_value(&option_keys).expect("option keys should serialize")
+        );
+        assert_eq!(
+            decoded["optionPaths"],
+            serde_json::to_value(&option_paths).expect("option paths should serialize")
+        );
+
+        let expression = build_definition_values_expression(
+            &InspectionTarget::new("git+https://example.test/repo?rev=abc", "host"),
+            selection
+                .path_for_nix()
+                .expect("temporary path should be representable in Nix"),
+        );
+        assert!(expression.len() < 128 * 1024);
+        assert!(!expression.contains("sensitive-option-name"));
+        let command =
+            build_stage_command(Path::new("nix-eval-jobs"), &expression, STAGE2_APPLY, None);
+        assert!(
+            command
+                .as_std()
+                .get_args()
+                .all(|argument| argument.to_string_lossy().len() < 128 * 1024)
+        );
+        assert!(
+            command
+                .as_std()
+                .get_args()
+                .all(|argument| { !argument.to_string_lossy().contains("sensitive-option-name") })
+        );
+        assert!(command.as_std().get_envs().all(|(_, value)| {
+            value.is_none_or(|value| !value.to_string_lossy().contains("sensitive-option-name"))
+        }));
+
+        drop(selection);
+        assert!(!selection_path.exists());
     }
 
     #[test]

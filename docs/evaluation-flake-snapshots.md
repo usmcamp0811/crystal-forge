@@ -17,9 +17,10 @@ revision-scoped flake-output projection. PRIMARY MUST NOT inspect per-host optio
 trees or module graphs. After PRIMARY succeeds, an exact commit and configuration
 can have one durable Config Inspector job. The separate Config Inspector worker
 reuses the evaluated carrier derivation and persists a V2 artifact without
-changing build or deployment eligibility. Unsupported, failed, or incomplete
-inspection remains explicitly unavailable; the worker does not fabricate an
-empty available snapshot.
+changing build or deployment eligibility. Unsupported or failed inspection and
+an unreadable option-tree root remain explicitly unavailable. Unreadable
+non-root prefixes produce a partial artifact that retains healthy sibling
+options. The worker does not fabricate an empty available snapshot.
 
 Snapshot persistence redacts metadata before storage. The server does not
 serialize the NixOS `config` tree. Missing exploration artifacts do not change
@@ -75,6 +76,14 @@ definitions. The server computes this scalar after redaction and per-option
 bounding. Response-only tracked identities do not affect it. Existing snapshots
 are backfilled with the same tuple semantics.
 
+Migration `0254_partial_config_option_inventories.sql` marks existing certified
+schema-V2 snapshots as complete with empty, non-truncated diagnostics. Before
+0254, Stage 1 constructed the complete global option index before persistence,
+and reconciliation required every indexed metadata and value result. A
+successful certified V2 snapshot therefore could not represent a partial
+inventory. Schema-V1 rows retain null inventory fields and no V2 completeness
+claim. The migration does not infer or destructively rewrite option content.
+
 Snapshot GET handlers and query functions are database-only. They MUST NOT
 invoke Nix, inspect Git, fetch a repository, enqueue work, or perform per-host
 evaluation. A missing snapshot remains a read result. The explicit targeted
@@ -122,7 +131,7 @@ Config snapshot reads use these states:
 | `queued` | An exact Config Inspector target is waiting for the inspection worker. |
 | `running` | The Config Inspector worker owns the exact target. |
 | `failed` | Targeted inspection ended and a redacted diagnostic is available. |
-| `available` | A complete, schema-valid persisted snapshot can be read. |
+| `available` | A schema-valid complete or explicitly partial persisted snapshot can be read. |
 | `unavailable` | No reusable snapshot exists, or persisted content is missing, corrupt, incompatible, or over a storage/response bound. |
 
 Commit-mode Config reads derive `queued` and `running` from the exact active
@@ -131,7 +140,9 @@ active job does not become reusable when its derivation ID or carrier path
 differs from the newly resolved target. The targeted mutation returns the
 retryable `409 config_inspection_target_conflict` response and does not mutate
 that job. Corrupt content and an unsupported snapshot schema degrade to
-`unavailable`; the API does not return a partial corpus as available.
+`unavailable`. An unreadable non-root option prefix produces an explicitly
+partial available artifact when healthy options remain. An unreadable
+option-tree root produces `unavailable` because no meaningful inventory exists.
 
 Primary evaluation fallback and flake-output reads have a separate lifecycle.
 Their `queued`, `running`, and `failed` states come from the commit evaluation
@@ -144,8 +155,9 @@ mutation applies system and environment authorization before revision
 disclosure. In one transaction, it resolves the exact immutable commit,
 effective configuration, completed NixOS derivation, and non-empty carrier
 `.drv` path. It reuses exactly matching queued or running work, retries after
-terminal history, and suppresses work for an available comparison-ready V2
-artifact only when the carrier matches. Enqueue takes the snapshot-writer
+terminal history, and suppresses work for an integrity-valid available V2
+artifact only when the carrier matches. This includes a reusable partial
+artifact. Enqueue takes the snapshot-writer
 transaction lock before target row locks or readiness checks, so same-carrier
 publication and enqueue cannot both commit a redundant job. A missing carrier
 returns `409 config_inspection_prerequisite`
@@ -199,8 +211,18 @@ The current hard bounds are:
   becomes unavailable rather than returning partial unmarked data.
 - 16 KiB of searchable text per option after redaction.
 - 16 option-tree levels before a non-empty deeper subtree becomes an explicit
-  `over_depth` failed value. This guard bounds cyclic or recursively generated
-  attribute sets; it does not silently truncate the ordinary option count.
+  partial-inventory diagnostic. This guard bounds cyclic or recursively
+  generated attribute sets. The option count then covers observed options only.
+- 128 retained unreadable-prefix diagnostics. Guarded traversal continues after
+  this detail budget is full. The artifact certifies truncation when additional
+  prefixes exist; diagnostic overflow does not make the artifact unavailable.
+
+Stage 2 projects the exact healthy Stage-1 paths and builds one option-key
+attribute set. Membership lookup is logarithmic in the Nix attribute set rather
+than a repeated linear list scan. For `O` observed options and `D` provenance
+rows, filtering changes from `O(O * D)` list membership (quadratic when `D`
+scales with `O`) to `O(O log O + D log O)`, including index construction.
+Complete and partial inventories use the same indexed path.
 
 Foreign keys and immutability triggers prevent mutation or direct removal of
 artifact content and references. Server startup and the 15-minute maintenance
@@ -290,7 +312,10 @@ Redaction runs before persistence, content hashing, search indexing, diffing,
 logging of evaluator-controlled diagnostics, or API serialization. The policy
 covers option values, nested collection and submodule values, package fields,
 module defaults, evaluator errors, source metadata, lock metadata, winner
-notes, and repository URLs.
+notes, repository URLs, and dynamic option-inventory diagnostic path
+components. Empty or over-limit diagnostic components use one fixed redaction
+marker. The server sorts and deduplicates diagnostics after redaction. A
+redaction collision marks diagnostic detail as truncated.
 
 The policy replaces all scalar leaves under a sensitive option path. It also
 removes nested fields whose normalized names indicate passwords, secrets,
@@ -395,6 +420,10 @@ characters. Counts are revision-global; `total` reflects the active search and
 filter. Generation mode selects immutable schema-V1 artifacts through retained
 generation identity. Commit mode selects only schema-V2 artifacts through
 `config_snapshot_selections`; it never falls back to the V1 commit selector.
+Schema-V2 responses classify the inventory as `complete`, `partial`, or
+`unavailable`. Partial responses expose bounded redacted diagnostics and the
+healthy observed option and module rows. Their counts and totals cover only the
+observed corpus. They never claim a complete option count.
 Evaluated-options, module-source, and summary responses return the same opaque
 token. The generation token binds the selected artifact, selected retained
 identity, exact comparison artifact, and comparison retained identity. The
@@ -410,6 +439,13 @@ data. A generation-mode options or summary response exposes
 `baseline_generation` when comparison is available. Integrity, counts, totals,
 rows, baseline, provenance, and summary state are read in read-only
 `REPEATABLE READ` transactions.
+
+Comparison requires a complete selected inventory. A partial inventory has no
+Changed count or Changed rows and cannot produce selected-versus-baseline drift.
+Search and the All and Overridden filters remain available over observed rows.
+Stage 2 excludes every unreadable Stage-1 prefix before provenance replay, so it
+does not schedule definition-value jobs for identities that Stage 1 could not
+observe.
 
 Flake output pages apply one clamped 1-100 `limit` and 0-100,000 `offset` to
 each top-level collection and reconciliation page. Clients merge continuation
@@ -470,8 +506,10 @@ not exist. Non-available lifecycle responses contain no summary facts and use
 zero totals. The server and UI display unavailable states; they do not infer a
 metric from another field or replace unknown data with zero.
 
-The module-source endpoint groups the complete persisted definition corpus by
-the same exact tuple. `won_count` counts distinct options with at least one
+The module-source endpoint groups the persisted observed definition corpus by
+the same exact tuple. For a complete inventory this is the complete definition
+corpus. For a partial inventory it excludes unreadable option prefixes.
+`won_count` counts distinct options with at least one
 surviving definition from the tuple; multiple surviving definitions for one
 option count once. It returns bounded pages ordered by winning option count
 descending, definition count descending, then input, revision, and path in

@@ -981,11 +981,44 @@ pub struct EvaluatedOptionCounts {
     pub changed: Option<i64>,
 }
 
+/// Classifies whether the server observed the complete option inventory.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OptionInventoryState {
+    /// Every option-tree subtree was enumerated.
+    Complete,
+    /// Healthy observed options are available with unreadable prefixes.
+    Partial,
+    /// No meaningful option inventory is available.
+    #[default]
+    Unavailable,
+}
+
+/// Identifies one bounded unreadable option-tree prefix.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OptionInventoryDiagnostic {
+    /// Exact unreadable option path components.
+    pub path_components: Vec<String>,
+    /// Stable failure category.
+    pub code: String,
+    /// Stable redacted diagnostic.
+    pub message: String,
+}
+
 /// Returns one bounded page of evaluated options.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvaluatedOptionsPage {
     /// Selected snapshot lifecycle.
     pub lifecycle: SnapshotLifecycle,
+    /// Completeness of the observed option inventory.
+    #[serde(default)]
+    pub option_inventory_state: OptionInventoryState,
+    /// Bounded unreadable prefixes for a partial inventory.
+    #[serde(default)]
+    pub option_inventory_diagnostics: Vec<OptionInventoryDiagnostic>,
+    /// True when bounding or redaction deduplication omitted diagnostic detail.
+    #[serde(default)]
+    pub option_inventory_diagnostics_truncated: bool,
     /// Full selected revision SHA.
     pub revision: String,
     /// Selected local generation identity in generation mode.
@@ -1035,7 +1068,7 @@ pub struct TrackedFlakeIdentity {
     pub revision: String,
 }
 
-/// Aggregates one exact module source across the complete selected snapshot.
+/// Aggregates one exact module source across the observed selected inventory.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EvaluationModuleSummary {
     /// Evaluator-provided flake input name.
@@ -1093,6 +1126,15 @@ pub enum SevenDayDriftStatus {
 pub struct SelectedEvaluationSummary {
     /// Selected snapshot lifecycle.
     pub lifecycle: SnapshotLifecycle,
+    /// Completeness of the observed option inventory.
+    #[serde(default)]
+    pub option_inventory_state: OptionInventoryState,
+    /// Bounded unreadable prefixes for a partial inventory.
+    #[serde(default)]
+    pub option_inventory_diagnostics: Vec<OptionInventoryDiagnostic>,
+    /// True when bounding or redaction deduplication omitted diagnostic detail.
+    #[serde(default)]
+    pub option_inventory_diagnostics_truncated: bool,
     /// Full selected revision SHA.
     pub revision: String,
     /// Selected retained generation in generation mode.
@@ -1105,13 +1147,13 @@ pub struct SelectedEvaluationSummary {
     /// Preceding retained generation used as the generation-mode baseline.
     #[serde(default)]
     pub baseline_generation: Option<i32>,
-    /// Authoritative number of module sources in the complete snapshot.
+    /// Authoritative number of module sources in the observed inventory.
     pub module_source_total: i64,
     /// Snapshot completion timestamp.
     pub completed_at: Option<DateTime<Utc>>,
     /// End-to-end evaluator duration in milliseconds.
     pub evaluation_duration_ms: Option<i64>,
-    /// Authoritative option count for the complete snapshot.
+    /// Exact count of observed persisted option rows.
     pub option_total: i64,
     /// Exact selected NixOS toplevel store path.
     pub selected_store_path: Option<String>,
@@ -1138,6 +1180,15 @@ pub struct SelectedEvaluationSummary {
 pub struct EvaluationModuleSourcesPage {
     /// Selected snapshot lifecycle.
     pub lifecycle: SnapshotLifecycle,
+    /// Completeness of the observed option inventory.
+    #[serde(default)]
+    pub option_inventory_state: OptionInventoryState,
+    /// Bounded unreadable prefixes for a partial inventory.
+    #[serde(default)]
+    pub option_inventory_diagnostics: Vec<OptionInventoryDiagnostic>,
+    /// True when bounding or redaction deduplication omitted diagnostic detail.
+    #[serde(default)]
+    pub option_inventory_diagnostics_truncated: bool,
     /// Full selected revision SHA.
     pub revision: String,
     /// Selected retained generation in generation mode.
@@ -1146,7 +1197,7 @@ pub struct EvaluationModuleSourcesPage {
     pub error: Option<String>,
     /// Opaque persisted snapshot token that binds continuation pages.
     pub snapshot_token: Option<String>,
-    /// Authoritative number of sources in the complete snapshot.
+    /// Authoritative number of sources in the observed inventory.
     pub total: i64,
     /// Applied zero-based offset.
     pub offset: i64,

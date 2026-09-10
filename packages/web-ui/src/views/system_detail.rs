@@ -39,7 +39,7 @@ use crate::api::models::{
     FlakeSummary, HardeningJustificationResponse, HardeningScanEligibilityResponse,
     HardeningServiceResultResponse, HealthStatus, LogLevel, ManualDeploymentAction,
     ManualDeploymentConversionState, ManualDeploymentPolicyState, ManualDeploymentRequestState,
-    OptionChangeKind, OptionDefinitionProvenance, SafeOptionValue,
+    OptionChangeKind, OptionDefinitionProvenance, OptionInventoryState, SafeOptionValue,
     SaveHardeningJustificationRequest, SelectedEvaluationSummary, SevenDayDriftStatus,
     SnapshotLifecycle, SnapshotRevisionMode, SystemAgentEvent, SystemCommitHistory,
     SystemComplianceBundle, SystemDeploymentProgress, SystemDetail, SystemGeneration,
@@ -4951,6 +4951,7 @@ struct ModuleSourceCollection {
     scope: ModuleSourcesScope,
     snapshot_token: Option<String>,
     lifecycle: SnapshotLifecycle,
+    option_inventory_state: OptionInventoryState,
     error: Option<String>,
     total: i64,
     next_offset: i64,
@@ -4986,6 +4987,7 @@ fn module_source_collection_from_page(
         scope,
         snapshot_token: page.snapshot_token,
         lifecycle: page.lifecycle,
+        option_inventory_state: page.option_inventory_state,
         error: page.error,
         total: page.total,
         next_offset: page.offset.saturating_add(raw_len),
@@ -5003,6 +5005,7 @@ fn merge_module_source_page(
         || page.revision != accumulated.scope.revision
         || page.generation != accumulated.scope.generation
         || page.snapshot_token != accumulated.snapshot_token
+        || page.option_inventory_state != accumulated.option_inventory_state
         || page.total != accumulated.total
         || page.offset != accumulated.next_offset
     {
@@ -5662,6 +5665,39 @@ fn ConfigTab(
     let comparison_available = loaded_response
         .as_ref()
         .is_some_and(|value| value.comparison_available);
+    let option_inventory_partial = response
+        .as_ref()
+        .is_some_and(|value| value.option_inventory_state == OptionInventoryState::Partial);
+    let option_inventory_notice = response.as_ref().and_then(|value| {
+        (value.option_inventory_state == OptionInventoryState::Partial).then(|| {
+            let paths = value
+                .option_inventory_diagnostics
+                .iter()
+                .take(3)
+                .map(|diagnostic| diagnostic.path_components.join("."))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let diagnostic_count = value.option_inventory_diagnostics.len();
+            let prefix_label = if diagnostic_count == 1 {
+                "prefix"
+            } else {
+                "prefixes"
+            };
+            let displayed_detail = if diagnostic_count > 3 {
+                format!(" Showing first 3: {paths}.")
+            } else {
+                format!(": {paths}.")
+            };
+            let omitted = if value.option_inventory_diagnostics_truncated {
+                " Additional unreadable prefixes were omitted by inspection."
+            } else {
+                ""
+            };
+            format!(
+                "This inventory is partial. Counts include observed options only; Changed and drift are unavailable. Recorded {diagnostic_count} unreadable {prefix_label}{displayed_detail}{omitted}",
+            )
+        })
+    });
     let baseline = response
         .as_ref()
         .and_then(|value| value.baseline_revision.clone());
@@ -5704,6 +5740,9 @@ fn ConfigTab(
         selected_revision.is_some() && (loading_summary() || summary.read().is_none());
     let summary_available =
         !loading_summary() && summary_lifecycle == Some(SnapshotLifecycle::Available);
+    let summary_inventory_partial = summary_response
+        .as_ref()
+        .is_some_and(|value| value.option_inventory_state == OptionInventoryState::Partial);
     let option_total_label = summary_response
         .as_ref()
         .filter(|_| summary_available)
@@ -5753,6 +5792,9 @@ fn ConfigTab(
     let module_lifecycle = module_collection
         .as_ref()
         .map(|collection| collection.lifecycle);
+    let module_inventory_partial = module_collection.as_ref().is_some_and(|collection| {
+        collection.option_inventory_state == OptionInventoryState::Partial
+    });
     let module_total_mismatch = summary_response
         .as_ref()
         .filter(|_| summary_available && module_lifecycle == Some(SnapshotLifecycle::Available))
@@ -6143,7 +6185,7 @@ fn ConfigTab(
                     div { class: "cfg-toolbar",
                         div { class: "seg",
                             for (value, label, count) in [
-                                (EvaluatedOptionFilter::All, "All", Some(counts.all)),
+                                (EvaluatedOptionFilter::All, if option_inventory_partial { "All observed" } else { "All" }, Some(counts.all)),
                                 (EvaluatedOptionFilter::Overridden, "Overridden", Some(counts.overridden)),
                                 (EvaluatedOptionFilter::Changed, "Changed", counts.changed),
                             ] {
@@ -6178,7 +6220,7 @@ fn ConfigTab(
                             class: "cfg-count",
                             role: "status",
                             "aria-live": "polite",
-                            if loading_options() { "Querying… showing {range_start}–{range_end} of {total}" } else { "{range_start}–{range_end} of {total}" }
+                            if loading_options() { "Querying… showing {range_start}–{range_end} of {total} inspected" } else { "{range_start}–{range_end} of {total} inspected" }
                         }
                         if total > active_page_size {
                         div { class: "cfg-pager",
@@ -6201,6 +6243,13 @@ fn ConfigTab(
                     }
                     if !comparison_available {
                         div { class: "cfg-comparison-note", "No comparison is available for this revision." }
+                    }
+                    if let Some(notice) = option_inventory_notice {
+                        div {
+                            class: "cfg-comparison-note",
+                            role: "status",
+                            "{notice}"
+                        }
                     }
                     div {
                         class: if loading_options() { "cfg-table-wrap loading" } else { "cfg-table-wrap" },
@@ -6244,6 +6293,7 @@ fn ConfigTab(
                         span { class: "sd-card-meta",
                             if module_loading() { "loading" }
                             else if module_initial_error.read().is_some() || module_total_mismatch { "error" }
+                            else if module_lifecycle == Some(SnapshotLifecycle::Available) && module_inventory_partial { "{module_total} observed modules · won / defined" }
                             else if module_lifecycle == Some(SnapshotLifecycle::Available) { "{module_total} modules · won / defined" }
                             else { "{summary_lifecycle_short(module_lifecycle.unwrap_or(SnapshotLifecycle::Unavailable))}" }
                         }
@@ -6330,7 +6380,8 @@ fn ConfigTab(
                                 class: "cfg-module-status mono",
                                 role: "status",
                                 "aria-live": "polite",
-                                "Loaded {module_loaded} of {module_total} module sources"
+                                if module_inventory_partial { "Loaded {module_loaded} of {module_total} observed module sources" }
+                                else { "Loaded {module_loaded} of {module_total} module sources" }
                             }
                             if module_has_more && module_continuation_error.read().is_none() {
                                 button {
@@ -6385,7 +6436,7 @@ fn ConfigTab(
                         }
                     } else {
                         div { class: "sd-drift-row", span { class: "sd-drift-label", "Toplevel" } span { class: "mono sd-drift-val cfg-drv", title: selected_store_path.clone().unwrap_or_default(), "{selected_store_label}" } }
-                        div { class: "sd-drift-row", span { class: "sd-drift-label", "Evaluated options" } span { class: "mono sd-drift-val", "{option_total_label}" } }
+                        div { class: "sd-drift-row", span { class: "sd-drift-label", if summary_inventory_partial { "Observed options" } else { "Evaluated options" } } span { class: "mono sd-drift-val", "{option_total_label}" } }
                         div { class: "sd-drift-row", span { class: "sd-drift-label", "Host delta" } span { class: "mono sd-drift-val", title: "Selected option states that differ from the same-commit modal configuration", "{host_delta_label}" } }
                         div { class: "sd-drift-row", span { class: "sd-drift-label", "Packages" } span { class: "mono sd-drift-val", "{closure_package_label}" } }
                         div { class: "sd-drift-row", span { class: "sd-drift-label", "Closure size" } span { class: "mono sd-drift-val", "{closure_size_label}" } }
@@ -6418,12 +6469,15 @@ fn ConfigTab(
                         div { class: "sd-drift-row", span { class: "sd-drift-label", "Agent fingerprint" } span { class: "mono sd-drift-val", "{agent_fingerprint_label}" } }
                         if drift == EvaluationDrift::Matches { div { class: "cfg-drift-explainer", "The selected and running store paths are exactly equal." } }
                         else if drift == EvaluationDrift::Differs { div { class: "cfg-drift-explainer cfg-drift-warning", "The selected and running store paths are different." } }
+                        else if summary_inventory_partial { div { class: "cfg-drift-explainer", "Drift is unavailable because the evaluated option inventory is incomplete." } }
                         else { div { class: "cfg-drift-explainer", "Drift is unavailable until both exact store paths are known." } }
-                        match seven_day_drift {
+                        if summary_inventory_partial {
+                            div { class: "cfg-limit-note", "Seven-day drift is unavailable because the evaluated option inventory is incomplete." }
+                        } else { match seven_day_drift {
                             SevenDayDriftStatus::NoObservedDrift => rsx! { div { class: "sd-callout sd-callout-info cfg-drift-history", Icon { name: IconName::Check, size: 13 } div { "No configuration drift was observed in the last 7 days." } } },
                             SevenDayDriftStatus::ObservedDrift => rsx! { div { class: "sd-callout sd-callout-warn cfg-drift-history", Icon { name: IconName::Warn, size: 13 } div { "A different running configuration was observed in the last 7 days." } } },
                             SevenDayDriftStatus::InsufficientCoverage => rsx! { div { class: "cfg-limit-note", "Seven-day drift is unavailable because continuous agent observation coverage is incomplete." } },
-                        }
+                        } }
                     }
                 }
             }

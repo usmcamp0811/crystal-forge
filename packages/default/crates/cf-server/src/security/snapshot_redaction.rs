@@ -32,6 +32,20 @@ pub fn redact_option_value(path: &str, value: &Value) -> Value {
     redact_typed_value_for_path(value, is_sensitive_path(path))
 }
 
+/// Returns a safe dynamic path component for persisted snapshot diagnostics.
+///
+/// A component whose complete name indicates sensitive content is replaced in
+/// full. Other components use the same deterministic text policy as evaluator
+/// diagnostics.
+pub fn redact_path_component(input: &str) -> String {
+    let redacted = redact_text(input);
+    if is_sensitive_field(input) {
+        REDACTED_VALUE.to_string()
+    } else {
+        redacted
+    }
+}
+
 fn redact_typed_value_for_path(value: &Value, sensitive_context: bool) -> Value {
     match value {
         Value::Null | Value::Bool(_) | Value::Number(_) if sensitive_context => {
@@ -543,8 +557,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        REDACTED_VALUE, redact_flake_output, redact_json, redact_option_value, redact_text,
-        redact_typed_value,
+        REDACTED_VALUE, redact_flake_output, redact_json, redact_option_value,
+        redact_path_component, redact_text, redact_typed_value,
     };
 
     #[test]
@@ -573,6 +587,15 @@ mod tests {
         for secret in ["hunter2", "abc123", "user:pass", "query-secret"] {
             assert!(!serialized.contains(secret));
         }
+    }
+
+    #[test]
+    fn redacts_sensitive_dynamic_path_components_in_full() {
+        assert_eq!(
+            redact_path_component("api_token=typed-diagnostic-secret"),
+            REDACTED_VALUE
+        );
+        assert_eq!(redact_path_component("services"), "services");
     }
 
     #[test]

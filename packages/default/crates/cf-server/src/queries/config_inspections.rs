@@ -371,7 +371,13 @@ async fn enqueue_resolved_config_inspection_targets_tx(
             WHERE snapshot.schema_version = 2
               AND snapshot.integrity_version = 2
               AND snapshot.lifecycle = 'available'
-              AND snapshot.comparison_ready = TRUE
+              AND (
+                    snapshot.option_inventory_complete = FALSE
+                    OR (
+                      snapshot.option_inventory_complete = TRUE
+                      AND snapshot.comparison_ready = TRUE
+                    )
+                  )
               AND snapshot.carrier_drv_path = supplied.carrier_drv_path
         )
         INSERT INTO config_inspection_jobs (
@@ -519,7 +525,13 @@ pub(crate) async fn queue_or_reuse_targeted_config_inspection(
                    AND snapshot.schema_version = 2
                    AND snapshot.integrity_version = 2
                    AND snapshot.lifecycle = 'available'
-                   AND snapshot.comparison_ready = TRUE
+                    AND (
+                          snapshot.option_inventory_complete = FALSE
+                          OR (
+                            snapshot.option_inventory_complete = TRUE
+                            AND snapshot.comparison_ready = TRUE
+                          )
+                        )
                    AND snapshot.carrier_drv_path = $3
                )
         "#,
@@ -1070,9 +1082,10 @@ mod tests {
         configuration_name: &str,
         carrier_drv_path: &str,
         comparison_ready: bool,
+        option_inventory_complete: bool,
     ) {
         let snapshot_id = Uuid::new_v4();
-        let digest = vec![7_u8; 32];
+        let digest = vec![if comparison_ready { 7_u8 } else { 8_u8 }; 32];
         let payload = json!({
             "metadata": {
                 "state": "available",
@@ -1139,15 +1152,24 @@ mod tests {
             })
         };
         sqlx::query(
-            "INSERT INTO evaluation_option_contents (digest, schema_version, payload, search_text) VALUES ($1, 2, $2, 'test')",
+            "INSERT INTO evaluation_option_contents (digest, schema_version, payload, search_text) VALUES ($1, 2, $2, 'test') ON CONFLICT (digest) DO NOTHING",
         )
         .bind(&digest)
         .bind(payload)
         .execute(pool)
         .await
         .expect("V2 option content should persist");
+        let diagnostics = if option_inventory_complete {
+            json!([])
+        } else {
+            json!([{
+                "path": ["omitted"],
+                "code": "unreadable_option_subtree",
+                "message": "Option subtree could not be inspected"
+            }])
+        };
         sqlx::query(
-            "INSERT INTO evaluation_snapshots (id, commit_id, configuration_name, schema_version, lifecycle, option_count, module_count, content_bytes, target_key, source_out_path, carrier_drv_path, provenance_state, comparison_ready) VALUES ($1, $2, $3, 2, 'available', 1, 1, 1, $4, $5, $6, $7, $8)",
+            "INSERT INTO evaluation_snapshots (id, commit_id, configuration_name, schema_version, lifecycle, option_count, module_count, content_bytes, target_key, source_out_path, carrier_drv_path, provenance_state, comparison_ready, option_inventory_complete, option_inventory_diagnostics, option_inventory_diagnostics_truncated) VALUES ($1, $2, $3, 2, 'available', 1, 1, 1, $4, $5, $6, $7, $8, $9, $10, FALSE)",
         )
         .bind(snapshot_id)
         .bind(commit_id)
@@ -1157,6 +1179,8 @@ mod tests {
         .bind(carrier_drv_path)
         .bind(provenance_state)
         .bind(comparison_ready)
+        .bind(option_inventory_complete)
+        .bind(diagnostics)
         .execute(pool)
         .await
         .expect("V2 snapshot should persist");
@@ -1175,7 +1199,7 @@ mod tests {
             .await
             .expect("V2 snapshot should certify");
         sqlx::query(
-            "INSERT INTO config_snapshot_selections (commit_id, configuration_name, current_snapshot_id) VALUES ($1, $2, $3)",
+            "INSERT INTO config_snapshot_selections (commit_id, configuration_name, current_snapshot_id) VALUES ($1, $2, $3) ON CONFLICT (commit_id, configuration_name) DO UPDATE SET current_snapshot_id = EXCLUDED.current_snapshot_id, updated_at = now()",
         )
         .bind(commit_id)
         .bind(configuration_name)
@@ -1191,6 +1215,9 @@ mod tests {
             target_key: "a".repeat(64),
             source_out_path: "/nix/store/config-inspection-source".to_string(),
             carrier_drv_path: carrier_drv_path.to_string(),
+            option_inventory_complete: true,
+            option_inventory_diagnostics: Vec::new(),
+            option_inventory_diagnostics_truncated: false,
             provenance_state: ConfigProvenanceArtifactStateV2::Available {
                 adapter_version: 1,
                 target_lib_version: None,
@@ -1352,7 +1379,7 @@ mod tests {
             .await
             .expect("retry completion should persist")
         );
-        insert_v2_snapshot(&pool, commit_id, &name, &carrier_drv_path, true).await;
+        insert_v2_snapshot(&pool, commit_id, &name, &carrier_drv_path, true, true).await;
         let ready = queue_or_reuse_targeted_config_inspection(&pool, system_id, &revision)
             .await
             .expect("ready target should resolve");
@@ -1365,6 +1392,34 @@ mod tests {
             })
         ));
         assert_eq!(job_count(&pool, commit_id).await, 2);
+
+        insert_v2_snapshot(&pool, commit_id, &name, &carrier_drv_path, false, false).await;
+        let partial = queue_or_reuse_targeted_config_inspection(&pool, system_id, &revision)
+            .await
+            .expect("certified partial target should resolve");
+        assert!(matches!(
+            partial,
+            TargetedConfigInspectionOutcome::Resolved(QueueConfigInspectionResponse {
+                lifecycle: SnapshotLifecycle::Available,
+                queued: false,
+                ..
+            })
+        ));
+        assert_eq!(job_count(&pool, commit_id).await, 2);
+
+        insert_v2_snapshot(&pool, commit_id, &name, &carrier_drv_path, false, true).await;
+        let unready = queue_or_reuse_targeted_config_inspection(&pool, system_id, &revision)
+            .await
+            .expect("complete unready target should retry");
+        assert!(matches!(
+            unready,
+            TargetedConfigInspectionOutcome::Resolved(QueueConfigInspectionResponse {
+                lifecycle: SnapshotLifecycle::Queued,
+                queued: true,
+                ..
+            })
+        ));
+        assert_eq!(job_count(&pool, commit_id).await, 3);
 
         let primary: (String, Option<i32>, i64) = sqlx::query_as(
             "SELECT evaluation_status, evaluation_attempt_count, (SELECT COUNT(*) FROM evaluation_attempts WHERE commit_id = commits.id) FROM commits WHERE id = $1",
@@ -1390,7 +1445,7 @@ mod tests {
                 .expect("missing prerequisite should be explicit"),
             TargetedConfigInspectionOutcome::PrerequisiteMissing
         );
-        assert_eq!(job_count(&pool, commit_id).await, 2);
+        assert_eq!(job_count(&pool, commit_id).await, 3);
         assert_eq!(
             queue_or_reuse_targeted_config_inspection(&pool, Uuid::new_v4(), &revision)
                 .await
@@ -1992,7 +2047,7 @@ mod tests {
     async fn enqueue_suppresses_only_ready_same_carrier_v2(pool: PgPool) {
         let (commit_id, derivation_id, drv_path) = fixture(&pool, "host").await;
         let target = successful_system(derivation_id, "host", &drv_path);
-        insert_v2_snapshot(&pool, commit_id, "host", &drv_path, true).await;
+        insert_v2_snapshot(&pool, commit_id, "host", &drv_path, true, true).await;
 
         let summary =
             enqueue_config_inspection_jobs_for_successful_systems(&pool, commit_id, &[target])
@@ -2004,10 +2059,25 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
-    async fn enqueue_allows_incomplete_or_different_v2_and_terminal_retries(pool: PgPool) {
+    async fn enqueue_reuses_certified_partial_same_carrier_v2(pool: PgPool) {
         let (commit_id, derivation_id, drv_path) = fixture(&pool, "host").await;
         let target = successful_system(derivation_id, "host", &drv_path);
-        insert_v2_snapshot(&pool, commit_id, "host", &drv_path, false).await;
+        insert_v2_snapshot(&pool, commit_id, "host", &drv_path, false, false).await;
+
+        let summary =
+            enqueue_config_inspection_jobs_for_successful_systems(&pool, commit_id, &[target])
+                .await
+                .expect("certified partial V2 artifact should suppress work");
+        assert_eq!(summary.inserted_jobs, 0);
+        assert_eq!(job_count(&pool, commit_id).await, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn enqueue_retries_complete_unready_v2_and_terminal_history(pool: PgPool) {
+        let (commit_id, derivation_id, drv_path) = fixture(&pool, "host").await;
+        let target = successful_system(derivation_id, "host", &drv_path);
+        insert_v2_snapshot(&pool, commit_id, "host", &drv_path, false, true).await;
 
         let first = enqueue_config_inspection_jobs_for_successful_systems(
             &pool,
@@ -2015,7 +2085,7 @@ mod tests {
             &[target.clone()],
         )
         .await
-        .expect("incomplete V2 should enqueue");
+        .expect("complete unready V2 should enqueue");
         assert_eq!(first.inserted_jobs, 1);
         sqlx::query(
             "UPDATE config_inspection_jobs SET status = 'failed', started_at = now(), completed_at = now(), error = 'test failure', updated_at = now() WHERE commit_id = $1",
@@ -2069,6 +2139,7 @@ mod tests {
                     commit_id,
                     configuration_name,
                     &format!("{drv_path}-other"),
+                    true,
                     true,
                 )
                 .await;

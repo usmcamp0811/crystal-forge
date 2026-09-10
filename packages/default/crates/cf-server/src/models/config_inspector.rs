@@ -9,7 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -24,6 +24,9 @@ const DEFINITION_VALUE_PREFIX: &str = "def_value_";
 const META_PREFIX: &str = "meta_";
 const VALUE_PREFIX: &str = "value_";
 pub(crate) const EXPECTED_PROVENANCE_ADAPTER_VERSION: u64 = 1;
+const MAX_OPTION_INVENTORY_DIAGNOSTICS: usize = 128;
+const MAX_OPTION_INVENTORY_PATH_COMPONENTS: usize = 16;
+const MAX_OPTION_INVENTORY_PATH_COMPONENT_CHARS: usize = 256;
 
 /// Identifies the exact requested configuration shared by both inspector stages.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,16 +69,13 @@ fn format_digest(input: &[u8]) -> String {
 /// sibling configurations or evaluates exported modules.
 pub(crate) fn build_inspector_expression(target: &InspectionTarget) -> String {
     let source = include_str!("config_inspector.nix");
-    let provenance_source = include_str!("config_provenance.nix");
     let provenance_lib_source = include_str!("config_provenance_lib.nix");
     let value_encoding_source = include_str!("config_value_encoding.nix");
     format!(
-        "let\n  flakeRef = {flake_ref};\n  configurationName = {configuration_name};\n  targetKey = {target_key};\n  flake = builtins.getFlake flakeRef;\n  configuration = builtins.getAttr configurationName flake.nixosConfigurations;\n  valueEncoder = ({value_encoding_source});\n  inspector = ({source}) {{ inherit flake configuration targetKey; encodeValue = valueEncoder configuration.pkgs.lib; }};\n  provenance = ({provenance_source}) {{ inherit flake configuration; provenanceLib = ({provenance_lib_source}); }};\nin\n  inspector // {{ {provenance_attribute} = provenance; }}",
+        "let\n  flakeRef = {flake_ref};\n  configurationName = {configuration_name};\n  targetKey = {target_key};\n  flake = builtins.getFlake flakeRef;\n  configuration = builtins.getAttr configurationName flake.nixosConfigurations;\n  valueEncoder = ({value_encoding_source});\nin\n  ({source}) {{ inherit flake configuration targetKey; provenanceLib = ({provenance_lib_source}); encodeValue = valueEncoder configuration.pkgs.lib; }}",
         source = source,
-        provenance_source = provenance_source,
         provenance_lib_source = provenance_lib_source,
         value_encoding_source = value_encoding_source,
-        provenance_attribute = PROVENANCE_ATTRIBUTE,
         target_key = nix_string_pub(&target.target_key),
         flake_ref = nix_string_pub(&target.flake_ref),
         configuration_name = nix_string_pub(&target.configuration_name),
@@ -87,19 +87,26 @@ pub(crate) fn build_inspector_expression(target: &InspectionTarget) -> String {
 ///
 /// The expression reuses the provenance replay and safe-value encoder but
 /// remains a separate nix-eval-jobs root. Every value job uses the selected
-/// configuration's `system.build.toplevel` as its carrier.
-pub(crate) fn build_definition_values_expression(target: &InspectionTarget) -> String {
+/// configuration's `system.build.toplevel` as its carrier. It reads the exact
+/// allowed option keys and paths from the specified JSON file under impure
+/// evaluation. The caller must keep that owner-only file alive until the
+/// evaluator exits.
+pub(crate) fn build_definition_values_expression(
+    target: &InspectionTarget,
+    allowed_selection_path: &str,
+) -> String {
     let source = include_str!("config_definition_values.nix");
     let provenance_lib_source = include_str!("config_provenance_lib.nix");
     let value_encoding_source = include_str!("config_value_encoding.nix");
     format!(
-        "let\n  flakeRef = {flake_ref};\n  configurationName = {configuration_name};\n  targetKey = {target_key};\n  flake = builtins.getFlake flakeRef;\n  configuration = builtins.getAttr configurationName flake.nixosConfigurations;\n  valueEncoder = ({value_encoding_source});\n  jobs = ({source}) {{ inherit flake configuration targetKey; provenanceLib = ({provenance_lib_source}); encodeValue = valueEncoder configuration.pkgs.lib; }};\nin\njobs",
+        "let\n  flakeRef = {flake_ref};\n  configurationName = {configuration_name};\n  targetKey = {target_key};\n  allowedSelection = builtins.fromJSON (builtins.readFile {allowed_selection_path});\n  allowedOptionKeys = allowedSelection.optionKeys;\n  allowedOptionPaths = allowedSelection.optionPaths;\n  flake = builtins.getFlake flakeRef;\n  configuration = builtins.getAttr configurationName flake.nixosConfigurations;\n  valueEncoder = ({value_encoding_source});\n  jobs = ({source}) {{ inherit flake configuration targetKey allowedOptionKeys allowedOptionPaths; provenanceLib = ({provenance_lib_source}); encodeValue = valueEncoder configuration.pkgs.lib; }};\nin\njobs",
         source = source,
         provenance_lib_source = provenance_lib_source,
         value_encoding_source = value_encoding_source,
         target_key = nix_string_pub(&target.target_key),
         flake_ref = nix_string_pub(&target.flake_ref),
         configuration_name = nix_string_pub(&target.configuration_name),
+        allowed_selection_path = nix_string_pub(allowed_selection_path),
     )
 }
 
@@ -112,10 +119,27 @@ pub(crate) struct ConfigInspectorResult {
     pub carrier_drv_path: String,
     /// Resolved immutable source path returned by `builtins.getFlake`.
     pub source_out_path: String,
+    /// Whether Stage 1 enumerated the complete option tree.
+    pub option_inventory_complete: bool,
+    /// Bounded unreadable option-tree prefixes in deterministic traversal order.
+    pub option_inventory_diagnostics: Vec<OptionInventoryDiagnostic>,
+    /// Whether additional diagnostics existed after the retained detail budget.
+    pub option_inventory_diagnostics_truncated: bool,
     /// Options in the deterministic order supplied by the Nix index.
     pub options: Vec<InspectedOption>,
     /// Raw-definition provenance, or an explicit unavailable state.
     pub provenance: InspectionProvenance,
+}
+
+/// Identifies one option-tree prefix that Stage 1 could not enumerate.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, serde::Serialize)]
+pub(crate) struct OptionInventoryDiagnostic {
+    /// Exact unreadable option-tree prefix components.
+    pub path: Vec<String>,
+    /// Stable failure category.
+    pub code: String,
+    /// Stable diagnostic. Artifact conversion redacts its dynamic path first.
+    pub message: String,
 }
 
 /// Represents one option after independent metadata and value reconciliation.
@@ -207,7 +231,7 @@ pub(crate) struct RawDefinition {
 }
 
 /// Classifies a raw definition using the target module-system result.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum RawDefinitionStatus {
     /// Definition participates at the winning priority.
@@ -309,6 +333,34 @@ struct RawDefinitionPayload {
     surviving_merge_order: Option<u64>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CanonicalProvenance<'a> {
+    definitions_by_option: Vec<CanonicalDefinitionsForOption<'a>>,
+    provenance_adapter_version: u64,
+    target_lib_version: &'a Option<String>,
+    target_module_system_path: &'a Option<String>,
+}
+
+#[derive(Serialize)]
+struct CanonicalDefinitionsForOption<'a> {
+    definitions: Vec<CanonicalRawDefinition<'a>>,
+    option_key: &'a str,
+    path: &'a [String],
+}
+
+#[derive(Serialize)]
+struct CanonicalRawDefinition<'a> {
+    module_key: &'a Option<String>,
+    ordinal: u64,
+    priority: i64,
+    source_input: &'a Option<String>,
+    source_path: &'a Option<String>,
+    source_revision: &'a Option<String>,
+    status: RawDefinitionStatus,
+    surviving_merge_order: Option<u64>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct IndexPayload {
     kind: String,
@@ -317,6 +369,12 @@ struct IndexPayload {
     #[serde(rename = "sourceOutPath")]
     source_out_path: String,
     options: Vec<IndexEntry>,
+    #[serde(rename = "optionInventoryComplete")]
+    option_inventory_complete: bool,
+    #[serde(rename = "optionInventoryDiagnostics")]
+    option_inventory_diagnostics: Vec<OptionInventoryDiagnostic>,
+    #[serde(rename = "optionInventoryDiagnosticsTruncated")]
+    option_inventory_diagnostics_truncated: bool,
     #[serde(default)]
     origins: Vec<Origin>,
 }
@@ -554,6 +612,9 @@ pub(crate) fn reconcile_inspector_output(
         target_key,
         carrier_drv_path,
         source_out_path,
+        option_inventory_complete: index.option_inventory_complete,
+        option_inventory_diagnostics: index.option_inventory_diagnostics,
+        option_inventory_diagnostics_truncated: index.option_inventory_diagnostics_truncated,
         options,
         provenance,
     })
@@ -591,6 +652,11 @@ fn validate_index(index: &IndexPayload) -> Result<()> {
     }
     let mut keys = HashSet::new();
     let mut paths = HashSet::new();
+    validate_raw_option_inventory(
+        index.option_inventory_complete,
+        &index.option_inventory_diagnostics,
+        index.option_inventory_diagnostics_truncated,
+    )?;
     for entry in &index.options {
         if !keys.insert(entry.key.clone()) {
             bail!("duplicate Config inspector index key {}", entry.key);
@@ -604,6 +670,66 @@ fn validate_index(index: &IndexPayload) -> Result<()> {
         if option_key(&entry.path) != entry.key {
             bail!("Config inspector index key does not hash its path");
         }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_option_inventory(
+    complete: bool,
+    diagnostics: &[OptionInventoryDiagnostic],
+    diagnostics_truncated: bool,
+) -> Result<()> {
+    validate_option_inventory_impl(complete, diagnostics, diagnostics_truncated, true)
+}
+
+fn validate_raw_option_inventory(
+    complete: bool,
+    diagnostics: &[OptionInventoryDiagnostic],
+    diagnostics_truncated: bool,
+) -> Result<()> {
+    validate_option_inventory_impl(complete, diagnostics, diagnostics_truncated, false)
+}
+
+fn validate_option_inventory_impl(
+    complete: bool,
+    diagnostics: &[OptionInventoryDiagnostic],
+    diagnostics_truncated: bool,
+    require_persistable_components: bool,
+) -> Result<()> {
+    if complete != (diagnostics.is_empty() && !diagnostics_truncated) {
+        bail!("Config inspector option inventory state contradicts its diagnostics");
+    }
+    if !complete && diagnostics.is_empty() {
+        bail!("partial Config inspector option inventory has no diagnostic detail");
+    }
+    if diagnostics.len() > MAX_OPTION_INVENTORY_DIAGNOSTICS {
+        bail!("Config inspector option inventory diagnostics exceed the limit");
+    }
+    let mut previous: Option<Vec<u8>> = None;
+    for diagnostic in diagnostics {
+        if diagnostic.path.is_empty()
+            || diagnostic.path.len() > MAX_OPTION_INVENTORY_PATH_COMPONENTS
+            || (require_persistable_components
+                && diagnostic.path.iter().any(|component| {
+                    component.is_empty()
+                        || component.chars().count() > MAX_OPTION_INVENTORY_PATH_COMPONENT_CHARS
+                }))
+        {
+            bail!("Config inspector option inventory diagnostic path is invalid");
+        }
+        let expected_message = match diagnostic.code.as_str() {
+            "unreadable_option_subtree" => "Option subtree could not be inspected",
+            "option_subtree_depth_exceeded" => "Option subtree exceeds the traversal depth limit",
+            _ => bail!("Config inspector option inventory diagnostic code is invalid"),
+        };
+        if diagnostic.message != expected_message {
+            bail!("Config inspector option inventory diagnostic message is invalid");
+        }
+        let encoded_path = serde_json::to_vec(&diagnostic.path)?;
+        if previous.as_ref().is_some_and(|path| path >= &encoded_path) {
+            bail!("Config inspector option inventory diagnostics are not ordered uniquely");
+        }
+        previous = Some(encoded_path);
     }
     Ok(())
 }
@@ -655,6 +781,42 @@ fn unavailable_provenance(
     }
 }
 
+fn canonical_provenance_digest(
+    adapter_version: u64,
+    target_lib_version: &Option<String>,
+    target_module_system_path: &Option<String>,
+    definitions_by_option: &[RawDefinitionsForOption],
+) -> Result<String> {
+    let definitions_by_option = definitions_by_option
+        .iter()
+        .map(|option| CanonicalDefinitionsForOption {
+            definitions: option
+                .definitions
+                .iter()
+                .map(|definition| CanonicalRawDefinition {
+                    module_key: &definition.module_key,
+                    ordinal: definition.ordinal,
+                    priority: definition.priority,
+                    source_input: &definition.source_input,
+                    source_path: &definition.source_path,
+                    source_revision: &definition.source_revision,
+                    status: definition.status,
+                    surviving_merge_order: definition.surviving_merge_order,
+                })
+                .collect(),
+            option_key: &option.option_key,
+            path: &option.path,
+        })
+        .collect();
+    let canonical = CanonicalProvenance {
+        definitions_by_option,
+        provenance_adapter_version: adapter_version,
+        target_lib_version,
+        target_module_system_path,
+    };
+    Ok(format_digest(&serde_json::to_vec(&canonical)?))
+}
+
 fn reconcile_provenance(payload: ProvenancePayload, index: &IndexPayload) -> InspectionProvenance {
     if payload.adapter_version != EXPECTED_PROVENANCE_ADAPTER_VERSION {
         return unavailable_provenance("unsupported_adapter_version", None);
@@ -666,7 +828,7 @@ fn reconcile_provenance(payload: ProvenancePayload, index: &IndexPayload) -> Ins
         );
     }
 
-    let Some(provenance_digest) = payload.provenance_digest.filter(|digest| is_digest(digest))
+    let Some(mut provenance_digest) = payload.provenance_digest.filter(|digest| is_digest(digest))
     else {
         return unavailable_provenance("malformed_payload", None);
     };
@@ -684,11 +846,19 @@ fn reconcile_provenance(payload: ProvenancePayload, index: &IndexPayload) -> Ins
     let mut definitions_by_option = Vec::with_capacity(definitions_by_option_payload.len());
 
     for option in definitions_by_option_payload {
+        let indexed_path = index_paths.get(option.option_key.as_str());
+        if indexed_path.is_none() {
+            if index.option_inventory_complete {
+                return unavailable_provenance("provenance_integrity_failure", None);
+            }
+            // INVARIANT: The exact Stage-1 index is the completeness authority.
+            // Diagnostic paths are bounded and can be redacted, so they cannot
+            // identify every omitted provenance group in a partial inventory.
+            continue;
+        }
         if !seen_options.insert(option.option_key.clone())
             || option_key(&option.path) != option.option_key
-            || index_paths
-                .get(option.option_key.as_str())
-                .is_none_or(|path| *path != option.path.as_slice())
+            || indexed_path.is_none_or(|path| *path != option.path.as_slice())
         {
             return unavailable_provenance("provenance_integrity_failure", None);
         }
@@ -741,6 +911,18 @@ fn reconcile_provenance(payload: ProvenancePayload, index: &IndexPayload) -> Ins
             path: option.path,
             definitions,
         });
+    }
+
+    if !index.option_inventory_complete {
+        provenance_digest = match canonical_provenance_digest(
+            payload.adapter_version,
+            &payload.target_lib_version,
+            &payload.target_module_system_path,
+            &definitions_by_option,
+        ) {
+            Ok(digest) => digest,
+            Err(_) => return unavailable_provenance("provenance_integrity_failure", None),
+        };
     }
 
     InspectionProvenance::Available {
@@ -824,6 +1006,12 @@ pub(crate) struct AssembledConfigInspection {
     pub source_out_path: String,
     /// Shared carrier derivation path.
     pub carrier_drv_path: String,
+    /// Whether Stage 1 enumerated the complete option tree.
+    pub option_inventory_complete: bool,
+    /// Bounded unreadable option-tree prefixes.
+    pub option_inventory_diagnostics: Vec<OptionInventoryDiagnostic>,
+    /// Whether the bounded diagnostic vector omits additional unreadable prefixes.
+    pub option_inventory_diagnostics_truncated: bool,
     /// Configuration-global provenance capture and enrichment state.
     pub provenance_state: AssembledConfigProvenanceState,
     /// Options in Stage-1 index order.
@@ -1228,6 +1416,9 @@ pub(crate) fn assemble_config_inspection(
         target_key,
         carrier_drv_path,
         source_out_path,
+        option_inventory_complete,
+        option_inventory_diagnostics,
+        option_inventory_diagnostics_truncated,
         options,
         provenance,
     } = stage1;
@@ -1409,6 +1600,9 @@ pub(crate) fn assemble_config_inspection(
         target_key,
         source_out_path,
         carrier_drv_path,
+        option_inventory_complete,
+        option_inventory_diagnostics,
+        option_inventory_diagnostics_truncated,
         provenance_state,
         options: assembled_options,
     })
@@ -1649,6 +1843,9 @@ mod tests {
             target_key: TEST_TARGET_KEY.to_string(),
             carrier_drv_path: "/nix/store/shared.drv".to_string(),
             source_out_path: TEST_SOURCE_OUT_PATH.to_string(),
+            option_inventory_complete: true,
+            option_inventory_diagnostics: Vec::new(),
+            option_inventory_diagnostics_truncated: false,
             options,
             provenance,
         }
@@ -1707,6 +1904,53 @@ mod tests {
         }
     }
 
+    fn unreadable_diagnostic(path: &str) -> OptionInventoryDiagnostic {
+        OptionInventoryDiagnostic {
+            path: vec![path.to_string()],
+            code: "unreadable_option_subtree".to_string(),
+            message: "Option subtree could not be inspected".to_string(),
+        }
+    }
+
+    #[test]
+    fn option_inventory_validation_enforces_bounded_partial_state_and_byte_order() {
+        assert!(validate_option_inventory(true, &[], false).is_ok());
+        assert!(
+            validate_option_inventory(false, &[unreadable_diagnostic("poison")], false).is_ok()
+        );
+        assert!(
+            validate_option_inventory(false, &[unreadable_diagnostic("[REDACTED]")], true).is_ok()
+        );
+
+        let raw_risky = [
+            unreadable_diagnostic(""),
+            unreadable_diagnostic(&"x".repeat(MAX_OPTION_INVENTORY_PATH_COMPONENT_CHARS + 1)),
+        ];
+        assert!(validate_raw_option_inventory(false, &raw_risky, false).is_ok());
+        assert!(validate_option_inventory(false, &raw_risky, false).is_err());
+
+        let bounded = (0..MAX_OPTION_INVENTORY_DIAGNOSTICS)
+            .map(|index| unreadable_diagnostic(&format!("poison{index:03}")))
+            .collect::<Vec<_>>();
+        assert!(validate_option_inventory(false, &bounded, true).is_ok());
+
+        let mut over_limit = bounded.clone();
+        over_limit.push(unreadable_diagnostic("poison128"));
+        assert!(validate_option_inventory(false, &over_limit, true).is_err());
+        assert!(validate_option_inventory(false, &[], false).is_err());
+        assert!(validate_option_inventory(true, &bounded, true).is_err());
+
+        let byte_ordered = [
+            unreadable_diagnostic("Zoo"),
+            unreadable_diagnostic("alpha"),
+            unreadable_diagnostic("\u{c5}ngstr\u{f6}m"),
+        ];
+        assert!(validate_option_inventory(false, &byte_ordered, false).is_ok());
+        let mut reversed = byte_ordered;
+        reversed.reverse();
+        assert!(validate_option_inventory(false, &reversed, false).is_err());
+    }
+
     fn reconcile_for_test(output: &str) -> Result<ConfigInspectorResult> {
         if output.contains(PROVENANCE_ATTRIBUTE) {
             reconcile_inspector_output(output.as_bytes(), &test_target())
@@ -1732,6 +1976,9 @@ mod tests {
                 "key": key,
                 "path": path,
             }],
+            "optionInventoryComplete": true,
+            "optionInventoryDiagnostics": [],
+            "optionInventoryDiagnosticsTruncated": false,
             "origins": [],
         })
     }
@@ -1768,14 +2015,18 @@ mod tests {
         assert!(expression.contains("configuration.pkgs.lib"));
         assert_eq!(expression.matches("builtins.getFlake").count(), 1);
         assert_eq!(
-            build_definition_values_expression(&target)
+            build_definition_values_expression(&target, "/tmp/allowed-options.json")
                 .matches("builtins.getFlake")
                 .count(),
             1
         );
-        assert!(build_definition_values_expression(&target).contains("builtins.listToAttrs"));
         assert!(
-            build_definition_values_expression(&target).contains("collectModulesResultSupported")
+            build_definition_values_expression(&target, "/tmp/allowed-options.json")
+                .contains("builtins.fromJSON (builtins.readFile")
+        );
+        assert!(
+            build_definition_values_expression(&target, "/tmp/allowed-options.json")
+                .contains("collectModulesResultSupported")
         );
         let inspector_source = include_str!("config_inspector.nix");
         assert_eq!(inspector_source.matches("builtins.getFlake").count(), 0);
@@ -2012,6 +2263,9 @@ mod tests {
                         { "key": dotted_component_key, "path": dotted_component },
                         { "key": special_key, "path": special },
                     ],
+                    "optionInventoryComplete": true,
+                    "optionInventoryDiagnostics": [],
+                    "optionInventoryDiagnosticsTruncated": false,
                     "origins": [],
                 }),
             ),
@@ -2176,14 +2430,19 @@ mod tests {
             .expect("Stage-1 fixture is valid")
     }
 
-    fn stage2_output(target_key: &str, drv_path: &str, identities: &[(&str, u64)]) -> String {
+    fn stage2_output_with_digest(
+        target_key: &str,
+        drv_path: &str,
+        provenance_digest: &str,
+        identities: &[(&str, u64)],
+    ) -> String {
         let index = json!({
             "kind": "definition_index",
             "targetKey": target_key,
             "sourceOutPath": TEST_SOURCE_OUT_PATH,
             "adapterVersion": EXPECTED_PROVENANCE_ADAPTER_VERSION,
             "supported": true,
-            "provenanceDigest": TEST_DIGEST,
+            "provenanceDigest": provenance_digest,
             "definitionCount": identities.len(),
             "definitions": identities.iter().map(|(option_key, ordinal)| json!({
                 "option_key": option_key,
@@ -2211,6 +2470,10 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn stage2_output(target_key: &str, drv_path: &str, identities: &[(&str, u64)]) -> String {
+        stage2_output_with_digest(target_key, drv_path, TEST_DIGEST, identities)
     }
 
     #[test]
@@ -2256,6 +2519,85 @@ mod tests {
             definitions_by_option[0].definitions[1].status,
             RawDefinitionStatus::ActiveSurviving
         );
+    }
+
+    #[test]
+    fn partial_provenance_uses_exact_observed_set_beyond_diagnostic_budget() {
+        let path = ["healthy", "after"];
+        let key = hash(&path);
+        let mut provenance = supported_provenance(&path, &key);
+        let healthy_group = provenance["definitionsByOption"][0].clone();
+        let mut groups = vec![healthy_group];
+        groups.extend((0..130).map(|index| {
+            let omitted_path = vec!["omitted".to_string(), format!("branch{index:03}")];
+            let omitted_key = option_key(&omitted_path);
+            let mut group = provenance["definitionsByOption"][0].clone();
+            group["option_key"] = json!(omitted_key);
+            group["path"] = json!(omitted_path);
+            group
+        }));
+        provenance["definitionsByOption"] = json!(groups);
+
+        let mut partial_index = index(&key, &path);
+        partial_index["optionInventoryComplete"] = json!(false);
+        partial_index["optionInventoryDiagnostics"] = json!(
+            (0..MAX_OPTION_INVENTORY_DIAGNOSTICS)
+                .map(|index| unreadable_diagnostic(&format!("poison{index:03}")))
+                .collect::<Vec<_>>()
+        );
+        partial_index["optionInventoryDiagnosticsTruncated"] = json!(true);
+        let output = [
+            result(INDEX_ATTRIBUTE, partial_index),
+            result(&format!("meta_{key}"), metadata(&key, &path)),
+            result(
+                &format!("value_{key}"),
+                json!({
+                    "kind": "value",
+                    "key": key,
+                    "value": { "kind": "scalar", "value": "after" },
+                }),
+            ),
+            result(PROVENANCE_ATTRIBUTE, provenance.clone()),
+        ]
+        .iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+        let stage1 = reconcile_inspector_output(output.as_bytes(), &test_target())
+            .expect("partial provenance should reconcile");
+        let InspectionProvenance::Available {
+            provenance_digest,
+            definitions_by_option,
+            ..
+        } = &stage1.provenance
+        else {
+            panic!("partial provenance should remain available");
+        };
+        assert_ne!(provenance_digest, TEST_DIGEST);
+        assert_eq!(definitions_by_option.len(), 1);
+        assert_eq!(definitions_by_option[0].option_key, key);
+
+        let stage2_output = stage2_output_with_digest(
+            &stage1.target_key,
+            &stage1.carrier_drv_path,
+            provenance_digest,
+            &[(&key, 0), (&key, 1)],
+        );
+        assert!(matches!(
+            reconcile_definition_values_output(stage2_output.as_bytes(), &stage1),
+            Ok(DefinitionValueEnrichment::Available { values, .. }) if values.len() == 2
+        ));
+
+        let complete = reconcile_inspector_output(
+            output_with_provenance(&path, &key, provenance).as_bytes(),
+            &test_target(),
+        )
+        .expect("complete core inspection should remain available");
+        assert!(matches!(
+            complete.provenance,
+            InspectionProvenance::Unavailable { ref reason_code, .. }
+                if reason_code == "provenance_integrity_failure"
+        ));
     }
 
     #[test]

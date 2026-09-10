@@ -3314,6 +3314,9 @@ async function routeTask440SystemData(page, overrides = {}) {
     sevenDayDrift: "no_observed_drift",
     agentFingerprint: null,
     evaluationDrift: null,
+    optionInventoryState: "complete",
+    optionInventoryDiagnostics: [],
+    optionInventoryDiagnosticsTruncated: false,
     ...overrides,
   };
   state.holdModuleRevisions = new Set(overrides.holdModuleRevisions || state.holdModuleRevisions);
@@ -3458,7 +3461,7 @@ async function routeTask440SystemData(page, overrides = {}) {
     let rows = typedOptions;
     if (search) rows = rows.filter((row) => `${row.option.path} ${JSON.stringify(row)}`.toLowerCase().includes(search.toLowerCase()));
     if (filter === "overridden") rows = rows.filter((row) => row.option.overridden);
-    if (filter === "changed") rows = rows.filter((row) => row.changed === true);
+    if (filter === "changed") rows = state.optionInventoryState === "partial" ? [] : rows.filter((row) => row.changed === true);
     const expandedRows = Array.from({ length: 31 }, (_, index) => task440Option(
       `services.fixture.option${String(index + 1).padStart(2, "0")}`,
       "string",
@@ -3468,19 +3471,22 @@ async function routeTask440SystemData(page, overrides = {}) {
     if (!canonicalDesign && !search && filter === "all") rows = [...typedOptions, ...expandedRows];
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
       lifecycle: state.lifecycle,
+      option_inventory_state: state.lifecycle === "available" ? state.optionInventoryState : "unavailable",
+      option_inventory_diagnostics: state.lifecycle === "available" ? state.optionInventoryDiagnostics : [],
+      option_inventory_diagnostics_truncated: state.lifecycle === "available" && state.optionInventoryDiagnosticsTruncated,
       revision,
       generation,
       generation_snapshot_id: mode === "generation" && generation != null ? (generation === currentGeneration ? TASK_440_CURRENT_GENERATION_SNAPSHOT_ID : generation === currentGeneration - 1 ? TASK_440_PREVIOUS_GENERATION_SNAPSHOT_ID : TASK_440_BASELINE_GENERATION_SNAPSHOT_ID) : null,
       snapshot_token: state.lifecycle === "available" ? token : null,
-      baseline_revision: state.lifecycle === "available" && revision !== TASK_440_ROOT_SHA ? (mode === "generation" ? generationBaseline?.revision ?? null : TASK_440_ROOT_SHA) : null,
+      baseline_revision: state.lifecycle === "available" && state.optionInventoryState === "complete" && revision !== TASK_440_ROOT_SHA ? (mode === "generation" ? generationBaseline?.revision ?? null : TASK_440_ROOT_SHA) : null,
       baseline_generation: state.lifecycle === "available" ? generationBaseline?.generation ?? null : null,
-      comparison_available: state.lifecycle === "available" && revision !== TASK_440_ROOT_SHA,
+      comparison_available: state.lifecycle === "available" && state.optionInventoryState === "complete" && revision !== TASK_440_ROOT_SHA,
       error: state.lifecycle === "failed" ? "safe deterministic evaluation failure" : null,
       module_count: canonicalDesign ? 27 : 14,
       evaluation_duration_ms: canonicalDesign ? TASK_440_FIXTURE.canonicalConfig.evaluationDurationMs : 845,
       counts: canonicalDesign
         ? { all: TASK_440_FIXTURE.canonicalConfig.optionTotal, overridden: TASK_440_FIXTURE.canonicalConfig.overriddenTotal, changed: TASK_440_FIXTURE.canonicalConfig.changedTotal }
-        : { all: 38, overridden: 1, changed: revision === TASK_440_ROOT_SHA ? null : 22 },
+        : { all: 38, overridden: 1, changed: state.optionInventoryState === "partial" || revision === TASK_440_ROOT_SHA ? null : 22 },
       total: rows.length,
       offset,
       limit,
@@ -3533,6 +3539,9 @@ async function routeTask440SystemData(page, overrides = {}) {
     const generationBaseline = mode === "generation" ? task440GenerationBaseline(generation) : null;
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
       lifecycle: state.lifecycle,
+      option_inventory_state: state.lifecycle === "available" ? state.optionInventoryState : "unavailable",
+      option_inventory_diagnostics: state.lifecycle === "available" ? state.optionInventoryDiagnostics : [],
+      option_inventory_diagnostics_truncated: state.lifecycle === "available" && state.optionInventoryDiagnosticsTruncated,
       revision,
       generation,
       error: state.lifecycle === "failed" ? "safe deterministic evaluation failure" : null,
@@ -3550,7 +3559,7 @@ async function routeTask440SystemData(page, overrides = {}) {
        host_delta_count: state.lifecycle === "available" ? canonicalDesign ? TASK_440_FIXTURE.canonicalConfig.hostDeltaTotal : 17 : null,
       agent_fingerprint: state.agentFingerprint || (!selectedStore ? "unavailable" : selectedStore === (canonicalDesign ? "/nix/store/design-atlas-01-system" : "/nix/store/task440-current-system") ? "matches" : "differs"),
       seven_day_drift: state.lifecycle === "available" ? state.sevenDayDrift : "insufficient_coverage",
-      drift: state.evaluationDrift || (!selectedStore ? "unavailable" : selectedStore === (canonicalDesign ? "/nix/store/design-atlas-01-system" : "/nix/store/task440-current-system") ? "matches" : "differs"),
+      drift: state.optionInventoryState === "partial" ? "unavailable" : state.evaluationDrift || (!selectedStore ? "unavailable" : selectedStore === (canonicalDesign ? "/nix/store/design-atlas-01-system" : "/nix/store/task440-current-system") ? "matches" : "differs"),
     }) });
   });
 
@@ -3625,6 +3634,9 @@ async function routeTask440SystemData(page, overrides = {}) {
     }
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
       lifecycle,
+      option_inventory_state: lifecycle === "available" ? state.optionInventoryState : "unavailable",
+      option_inventory_diagnostics: lifecycle === "available" ? state.optionInventoryDiagnostics : [],
+      option_inventory_diagnostics_truncated: lifecycle === "available" && state.optionInventoryDiagnosticsTruncated,
       revision,
       generation,
       error: lifecycle === "failed" ? "safe deterministic module source failure" : null,
@@ -17088,6 +17100,38 @@ security.audit.enable = true;</fixtext>
       await page.goForward({ waitUntil: "domcontentloaded" });
       await assertVisible(page.getByRole("button", { name: "Generations" }), "Forward navigation did not restore current Config", 15000);
       if (page.url().includes("generation=73")) throw new Error("Forward navigation restored stale generation context");
+    },
+  },
+  {
+    name: "12la-task440-partial-config-inventory",
+    description: "TASK-440 partial Config inventory warning, observed rows, and fail-closed comparison",
+    action: async (page) => {
+      await routeSystemsWarningData(page);
+      const state = await routeTask440SystemData(page, {
+        optionInventoryState: "partial",
+        optionInventoryDiagnostics: [{
+          path_components: ["services", "poison"],
+          code: "unreadable_option_subtree",
+          message: "Option subtree could not be inspected",
+        }],
+        optionInventoryDiagnosticsTruncated: false,
+      });
+      await page.goto(`${baseUrl}/systems/${TASK_440_SYSTEM_ID}?tab=config&config_mode=commit&revision=${TASK_440_CURRENT_SHA}`, { timeout: LOAD_TIMEOUT });
+      await assertVisible(
+        page.getByText("This inventory is partial. Counts include observed options only; Changed and drift are unavailable. Recorded 1 unreadable prefix: services.poison.", { exact: true }),
+        "Expected explicit partial inventory warning",
+        15000,
+      );
+      await assertVisible(page.locator(".cfg-table tbody .cfg-row").first(), "Expected observed healthy option rows");
+      const changed = page.getByRole("button", { name: /^Changed/ });
+      if (!(await changed.isDisabled())) throw new Error("Changed must be disabled for a partial inventory");
+      await assertVisible(
+        page.getByText("No comparison is available for this revision.", { exact: true }),
+        "Expected partial inventory drift to fail closed",
+      );
+      if (state.optionRequests.some((request) => request.filter === "changed")) {
+        throw new Error("Partial inventory UI requested the unavailable Changed filter");
+      }
     },
   },
   {

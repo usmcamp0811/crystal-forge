@@ -13,6 +13,7 @@
       "12-systems": { "category": "mock" },
       "12a-systems-empty-state": { "category": "mock" },
       "12l-task440-config-lifecycle": { "category": "fixture" },
+      "12la-task440-partial-config-inventory": { "category": "mock" },
       "13j-task440-flake-states-panes-navigation": { "category": "mock" },
       "14d-task440-cross-surface-auth-navigation": { "category": "mock" }
     },
@@ -2297,6 +2298,18 @@
       "semanticAssertions": true,
       "interactions": true,
       "mockedData": false,
+      "critical": true,
+      "baseline": "none"
+    },
+    {
+      "name": "12la-task440-partial-config-inventory",
+      "description": "TASK-440 mocked partial Config inventory warning, observed rows, and fail-closed comparison; not live integration",
+      "route": "/systems/:id",
+      "designRef": "docs/design/CrystalForge/components/SystemDetail.jsx",
+      "profiles": ["ci_fast", "full"],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
       "critical": true,
       "baseline": "none"
     },

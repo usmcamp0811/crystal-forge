@@ -1,4 +1,4 @@
-{ flake, configuration, targetKey, encodeValue }:
+{ flake, configuration, targetKey, provenanceLib, encodeValue }:
 
 let
   lib = configuration.pkgs.lib;
@@ -6,26 +6,117 @@ let
 
   optionKey = path: builtins.hashString "sha256" (builtins.toJSON path);
 
-  isOption = value:
-    builtins.isAttrs value && (value._type or null) == "option";
+  optionTraversalDepthLimit = 16;
+  optionInventoryDiagnosticLimit = 128;
 
-  walkOptions = prefix: node:
-    builtins.concatLists (map (name:
-      let
-        path = prefix ++ [ name ];
-        value = builtins.getAttr name node;
-      in
-        if isOption value then [ path ]
-        else if builtins.isAttrs value then walkOptions path value
-        else [ ]
-    ) (builtins.attrNames node));
+  mergeTraversalResults = left: right:
+    let
+      remaining = optionInventoryDiagnosticLimit - builtins.length left.diagnostics;
+      retained = lib.sublist 0 (lib.min remaining (builtins.length right.diagnostics))
+        right.diagnostics;
+    in {
+      options = left.options ++ right.options;
+      diagnostics = left.diagnostics ++ retained;
+      diagnosticsTruncated = left.diagnosticsTruncated
+        || right.diagnosticsTruncated
+        || builtins.length right.diagnostics > remaining;
+    };
 
-  optionPaths = walkOptions [ ] configuration.options;
-  optionEntries = map (path: {
-    key = optionKey path;
-    inherit path;
-  }) optionPaths;
+  oneDiagnostic = diagnostic: {
+    options = [ ];
+    diagnostics = [ diagnostic ];
+    diagnosticsTruncated = false;
+  };
+
+  emptyTraversal = {
+    options = [ ];
+    diagnostics = [ ];
+    diagnosticsTruncated = false;
+  };
+
+  # Balanced merges avoid repeatedly copying a growing option list for wide
+  # option trees while preserving the canonical attr-name traversal order.
+  walkNames = depth: prefix: node: names:
+    let count = builtins.length names;
+    in if count == 0 then emptyTraversal
+    else if count == 1 then walkChild depth prefix node (builtins.head names)
+    else
+      let midpoint = builtins.div count 2;
+      in mergeTraversalResults
+        (walkNames depth prefix node (lib.sublist 0 midpoint names))
+        (walkNames depth prefix node (lib.sublist midpoint (count - midpoint) names));
+
+  walkChild = depth: prefix: node: name:
+    let
+      path = prefix ++ [ name ];
+      childAttempt = builtins.tryEval
+        (let child = builtins.getAttr name node; in builtins.seq child child);
+      child = childAttempt.value or null;
+      typeAttempt = if childAttempt.success && builtins.isAttrs child
+        then builtins.tryEval (child._type or null)
+        else { success = false; value = null; };
+    in if childAttempt.success && typeAttempt.success
+      && builtins.isAttrs child && typeAttempt.value == "option" then {
+        options = [ { inherit path; option = child; } ];
+        diagnostics = [ ];
+        diagnosticsTruncated = false;
+      }
+    else if !childAttempt.success || !builtins.isAttrs child || !typeAttempt.success then
+      oneDiagnostic {
+        inherit path;
+        code = "unreadable_option_subtree";
+        message = "Option subtree could not be inspected";
+      }
+    else
+      walkOptions (depth + 1) path child;
+
+  walkOptions = depth: prefix: node:
+    let namesAttempt = builtins.tryEval (builtins.attrNames node);
+    in if !namesAttempt.success then oneDiagnostic {
+        path = prefix;
+        code = "unreadable_option_subtree";
+        message = "Option subtree could not be inspected";
+      }
+    else if depth >= optionTraversalDepthLimit then
+      if namesAttempt.value == [ ] then {
+        options = [ ]; diagnostics = [ ]; diagnosticsTruncated = false;
+      } else oneDiagnostic {
+        path = prefix;
+        code = "option_subtree_depth_exceeded";
+        message = "Option subtree exceeds the traversal depth limit";
+      }
+    else walkNames depth prefix node namesAttempt.value;
+
+  traversal = walkOptions 0 [ ] configuration.options;
+  rootUnreadable = builtins.any (diagnostic: diagnostic.path == [ ])
+    traversal.diagnostics;
+  sortedDiagnostics = builtins.sort
+    (left: right: builtins.toJSON left.path < builtins.toJSON right.path)
+    traversal.diagnostics;
+  optionEntries = map (entry: entry // { key = optionKey entry.path; }) traversal.options;
   optionKeys = map (entry: entry.key) optionEntries;
+  optionKeySet = builtins.listToAttrs
+    (map (key: { name = key; value = true; }) optionKeys);
+  inventoryComplete = sortedDiagnostics == [ ];
+
+  mergeOptionTrees = trees:
+    let count = builtins.length trees;
+    in if count == 0 then { }
+       else if count == 1 then builtins.head trees
+       else
+         let midpoint = builtins.div count 2;
+         in lib.recursiveUpdate
+           (mergeOptionTrees (lib.sublist 0 midpoint trees))
+           (mergeOptionTrees (lib.sublist midpoint (count - midpoint) trees));
+  observedOptions = mergeOptionTrees (map (entry:
+    lib.setAttrByPath entry.path entry.option
+  ) optionEntries);
+  provenanceConfiguration = if inventoryComplete then configuration else
+    configuration // { options = observedOptions; };
+  provenance = provenanceLib {
+    inherit flake;
+    configuration = provenanceConfiguration;
+  };
 
   origin = name: input:
     let
@@ -39,14 +130,8 @@ let
   origins = [ (origin "self" flake) ]
     ++ lib.mapAttrsToList origin flake.inputs;
 
-  getOption = path:
-    builtins.foldl' (value: name: builtins.getAttr name value)
-      configuration.options path;
-
   metadataFor = entry:
-    let
-      option = getOption entry.path;
-    in {
+    let option = entry.option; in {
       kind = "metadata";
       key = entry.key;
       metadata = {
@@ -66,19 +151,24 @@ let
     };
 
   valueFor = entry:
-    let
-      option = getOption entry.path;
-    in {
+    let option = entry.option; in {
       kind = "value";
       key = entry.key;
       value = encodeValue 0 (option.type.name or "unknown") option.value;
     };
 
-  indexPayload = {
+  indexPayload = if rootUnreadable then
+    throw "Config inspector option inventory root is unavailable"
+  else {
     kind = "index";
     targetKey = targetKey;
     sourceOutPath = flake.outPath;
-    options = optionEntries;
+    options = map (entry: {
+      inherit (entry) key path;
+    }) optionEntries;
+    optionInventoryComplete = inventoryComplete;
+    optionInventoryDiagnostics = sortedDiagnostics;
+    optionInventoryDiagnosticsTruncated = traversal.diagnosticsTruncated;
     inherit origins;
   };
 
@@ -87,10 +177,18 @@ let
     meta = { crystalForgeInspector = payload; };
   };
 
+  provenanceJob = carrier // {
+    meta = { crystalForgeProvenance = provenance.provenance; };
+  };
+
   jobs = [
     {
       name = "__crystalForgeConfigIndex";
       value = withPayload indexPayload;
+    }
+    {
+      name = "__crystalForgeProvenance";
+      value = provenanceJob;
     }
   ]
   ++ map (entry: {
@@ -102,7 +200,7 @@ let
     value = withPayload (valueFor entry);
   }) optionEntries;
 in
-  if builtins.length optionKeys != builtins.length (lib.unique optionKeys) then
+  if builtins.length optionKeys != builtins.length (builtins.attrNames optionKeySet) then
     throw "Config inspector option-key collision"
   else
     builtins.listToAttrs jobs

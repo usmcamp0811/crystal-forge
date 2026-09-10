@@ -317,6 +317,15 @@ Query parameters:
 
 The response lifecycle is `queued`, `running`, `failed`, `available`, or
 `unavailable`. `counts` is revision-global and independent of search/filter.
+Every response includes `option_inventory_state`, which is `complete`,
+`partial`, or `unavailable`, and bounded `option_inventory_diagnostics`. Each
+partial diagnostic contains redacted `path_components`, a stable `code`, and a
+redacted `message`. The server canonicalizes and deduplicates path components
+after redaction. `option_inventory_diagnostics_truncated` is true when the
+128-entry bound or redaction collisions omit diagnostic detail. Traversal
+continues after the detail budget is full. A partial available response contains
+only options observed outside unreadable prefixes. Its counts, total, and module
+totals describe that observed corpus.
 Commit mode selects only schema-V2 Config Inspector artifacts through
 `config_snapshot_selections`. It does not fall back to a schema-V1 commit
 artifact. Generation mode retains schema-V1 selection through the exact retained
@@ -325,13 +334,18 @@ Generation-mode Config validity is independent of rollback lineage. A complete
 pre-0248 retained artifact remains readable after migration even though its
 unverified deployment/store lineage makes rollback ineligible.
 `total` is the number of rows for the active search/filter. Changed data and
-`counts.changed` are absent when no valid first-parent or preceding retained
-generation snapshot exists. `module_count` is the exact count of distinct
+`counts.changed` are absent when the selected inventory is partial or when no
+valid first-parent or preceding retained generation snapshot exists. A
+`changed` filter over a partial inventory returns no rows. Drift and other
+selected-versus-baseline facts are unavailable for a partial inventory.
+`module_count` is the exact count of distinct
 `(source_input, source_revision, source_path)` tuples after redaction and
 per-option bounding; it is not derived from the bounded option page.
 An available response includes an opaque `snapshot_token`. In commit mode, the
 token binds the selected and first-parent V2 artifacts, first-parent state, and
 the selected and first-parent flake-output digests used for tracked provenance.
+It also binds inventory completeness, retained diagnostics, and the certified
+truncation state.
 In generation mode, the token binds the exact selected artifact, retained
 identity, and comparison baseline identity. Generation responses also return
 `baseline_generation` when comparison is available. Continuations
@@ -379,7 +393,9 @@ count of distinct `(source_input, source_revision, source_path)` tuples after
 redaction and per-option bounding. Response-only tracked identities do not
 affect the count. Drift is `matches` only when selected and running store paths
 are exactly equal, `differs` only when both paths exist and differ, and
-`unavailable` otherwise.
+`unavailable` otherwise. A partial option inventory always reports drift and
+comparison-derived summary facts as unavailable. Scalar facts that do not
+require a complete inventory remain available.
 
 In generation mode, `host_delta_count` is materialized from the schema-V1 usable
 configuration snapshots at the selected commit. For each option path, the server
@@ -494,9 +510,13 @@ Authorization and environment visibility checks occur before revision
 validation or resolution. The server atomically resolves the system's exact
 active flake commit, effective configuration name, completed NixOS derivation,
 and non-empty carrier `.drv` path. It then queues or reuses only the exact
-Config Inspector target. A queued or running job is reused, terminal history
-permits a retry, and an available comparison-ready V2 artifact suppresses work
-only when its carrier path matches exactly. The enqueue decision acquires the
+Config Inspector target. A queued or running job is reused, and terminal history
+permits a retry. An available complete V2 artifact suppresses work only when it
+is comparison-ready. A certified partial V2 artifact also suppresses work
+because retrying cannot make its observed corpus more complete without a source
+change. A complete artifact with unavailable global provenance or Stage 2 does
+not suppress a retry. In both reusable states, the carrier path must match
+exactly. The enqueue decision acquires the
 snapshot-writer transaction lock before target row locks and readiness checks.
 If active work has a different derivation ID or carrier path, the endpoint
 returns retryable HTTP 409 with `error: config_inspection_target_conflict` and

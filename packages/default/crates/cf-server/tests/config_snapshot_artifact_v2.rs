@@ -158,7 +158,7 @@ async fn insert_snapshot(
     .await
     .expect("insert test content");
     sqlx::query(
-        "INSERT INTO evaluation_snapshots (id, commit_id, configuration_name, schema_version, lifecycle, option_count, module_count, content_bytes, target_key, source_out_path, carrier_drv_path, provenance_state, comparison_ready) VALUES ($1, $2, $3, $4, 'available', 1, $5, 1, $6, $7, $8, $9, $10)",
+        "INSERT INTO evaluation_snapshots (id, commit_id, configuration_name, schema_version, lifecycle, option_count, module_count, content_bytes, target_key, source_out_path, carrier_drv_path, provenance_state, comparison_ready, option_inventory_complete, option_inventory_diagnostics, option_inventory_diagnostics_truncated) VALUES ($1, $2, $3, $4, 'available', 1, $5, 1, $6, $7, $8, $9, $10, CASE WHEN $4 = 2 THEN true ELSE NULL END, CASE WHEN $4 = 2 THEN '[]'::jsonb ELSE NULL END, CASE WHEN $4 = 2 THEN false ELSE NULL END)",
     )
     .bind(snapshot_id)
     .bind(commit_id)

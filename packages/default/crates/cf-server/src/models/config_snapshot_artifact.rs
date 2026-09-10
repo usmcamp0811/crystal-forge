@@ -13,19 +13,22 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use super::config_inspector::option_key as canonical_option_key;
+use super::config_inspector::validate_option_inventory;
 use super::config_inspector::{
     AssembledConfigInspection, AssembledConfigProvenanceState, AssembledDefinition,
     AssembledOption, AssembledOptionProvenance, DefinitionValueEnrichmentState, InspectionMetadata,
-    InspectionValue, OverrideState, RawDefinitionStatus,
+    InspectionValue, OptionInventoryDiagnostic, OverrideState, RawDefinitionStatus,
 };
 use super::evaluation_snapshots::{SafeEvaluationError, SafeOptionValue};
 use crate::security::snapshot_redaction::{
-    REDACTED_VALUE, redact_evaluation_error, redact_json, redact_option_value, redact_text,
+    REDACTED_VALUE, redact_evaluation_error, redact_json, redact_option_value,
+    redact_path_component, redact_text,
 };
 
 /// Identifies the internal config artifact contract implemented by this module.
 pub(crate) const CONFIG_OPTION_ARTIFACT_SCHEMA_VERSION_V2: u32 = 2;
 const MAX_SEARCH_TEXT_CHARS: usize = 16_384;
+const MAX_DIAGNOSTIC_PATH_COMPONENT_CHARS: usize = 256;
 
 /// Contains one complete, versioned config inspection artifact.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -38,6 +41,12 @@ pub(crate) struct ConfigInspectionArtifactV2 {
     pub source_out_path: String,
     /// Shared evaluation carrier derivation path.
     pub carrier_drv_path: String,
+    /// Whether the artifact contains a complete option-tree enumeration.
+    pub option_inventory_complete: bool,
+    /// Bounded unreadable option-tree prefixes. Complete artifacts use an empty vector.
+    pub option_inventory_diagnostics: Vec<OptionInventoryDiagnostic>,
+    /// Whether bounding or redaction deduplication omitted diagnostic detail.
+    pub option_inventory_diagnostics_truncated: bool,
     /// Configuration-global provenance and enrichment state.
     pub provenance_state: ConfigProvenanceArtifactStateV2,
     /// Options in validated Stage-1 index order.
@@ -200,7 +209,7 @@ pub(crate) enum DefinitionValueArtifactStateV2 {
 
 /// Converts validated semantic inspection into the internal V2 artifact.
 pub(crate) fn config_artifact_v2_from_assembled(
-    assembled: AssembledConfigInspection,
+    mut assembled: AssembledConfigInspection,
 ) -> Result<ConfigInspectionArtifactV2> {
     if !is_key(&assembled.target_key) {
         bail!("invalid config artifact target key");
@@ -211,6 +220,14 @@ pub(crate) fn config_artifact_v2_from_assembled(
     if assembled.carrier_drv_path.is_empty() {
         bail!("config artifact carrier path is empty");
     }
+    let redaction_removed_detail =
+        redact_and_canonicalize_diagnostics(&mut assembled.option_inventory_diagnostics);
+    assembled.option_inventory_diagnostics_truncated |= redaction_removed_detail;
+    validate_option_inventory(
+        assembled.option_inventory_complete,
+        &assembled.option_inventory_diagnostics,
+        assembled.option_inventory_diagnostics_truncated,
+    )?;
     let provenance_state = config_provenance_artifact(&assembled.provenance_state)?;
 
     let mut option_keys = BTreeSet::new();
@@ -230,6 +247,9 @@ pub(crate) fn config_artifact_v2_from_assembled(
         target_key: assembled.target_key,
         source_out_path: assembled.source_out_path,
         carrier_drv_path: assembled.carrier_drv_path,
+        option_inventory_complete: assembled.option_inventory_complete,
+        option_inventory_diagnostics: assembled.option_inventory_diagnostics,
+        option_inventory_diagnostics_truncated: assembled.option_inventory_diagnostics_truncated,
         provenance_state,
         options,
     })
@@ -238,6 +258,12 @@ pub(crate) fn config_artifact_v2_from_assembled(
 impl ConfigInspectionArtifactV2 {
     /// Returns a redacted artifact safe for digesting, indexing, or persistence.
     pub(crate) fn redacted(mut self) -> Self {
+        for diagnostic in &mut self.option_inventory_diagnostics {
+            diagnostic.code = redact_text(&diagnostic.code);
+            diagnostic.message = redact_text(&diagnostic.message);
+        }
+        self.option_inventory_diagnostics_truncated |=
+            redact_and_canonicalize_diagnostics(&mut self.option_inventory_diagnostics);
         self.provenance_state = redact_global_provenance(self.provenance_state);
         self.options = self.options.into_iter().map(redact_option).collect();
         self
@@ -286,14 +312,45 @@ impl ConfigInspectionArtifactV2 {
 
     /// Reports whether this artifact supports a complete semantic comparison.
     pub(crate) fn comparison_ready(&self) -> bool {
-        matches!(
-            self.provenance_state,
-            ConfigProvenanceArtifactStateV2::Available {
-                definition_value_enrichment: DefinitionValueArtifactStateV2::Available { .. },
-                ..
-            }
-        )
+        self.option_inventory_complete
+            && matches!(
+                self.provenance_state,
+                ConfigProvenanceArtifactStateV2::Available {
+                    definition_value_enrichment: DefinitionValueArtifactStateV2::Available { .. },
+                    ..
+                }
+            )
     }
+
+    /// Returns the canonical redacted option-inventory diagnostics JSON value.
+    pub(crate) fn option_inventory_diagnostics_payload(&self) -> Result<Value, serde_json::Error> {
+        serde_json::to_value(&self.option_inventory_diagnostics)
+    }
+}
+
+fn redact_and_canonicalize_diagnostics(diagnostics: &mut Vec<OptionInventoryDiagnostic>) -> bool {
+    for diagnostic in diagnostics.iter_mut() {
+        for component in &mut diagnostic.path {
+            let redacted = redact_path_component(component);
+            *component = if redacted.is_empty()
+                || redacted.chars().count() > MAX_DIAGNOSTIC_PATH_COMPONENT_CHARS
+            {
+                REDACTED_VALUE.to_string()
+            } else {
+                redacted
+            };
+        }
+    }
+    diagnostics.sort_by_cached_key(|diagnostic| {
+        (
+            serde_json::to_vec(&diagnostic.path).unwrap_or_default(),
+            diagnostic.code.clone(),
+            diagnostic.message.clone(),
+        )
+    });
+    let original_len = diagnostics.len();
+    diagnostics.dedup_by(|right, left| right.path == left.path);
+    diagnostics.len() != original_len
 }
 
 /// Reconstructs one V2 option from its authoritative identity and persisted local payload.
@@ -969,6 +1026,9 @@ mod tests {
             target_key: KEY_A.to_string(),
             source_out_path: "/nix/store/flake-source".to_string(),
             carrier_drv_path: "/nix/store/carrier.drv".to_string(),
+            option_inventory_complete: true,
+            option_inventory_diagnostics: Vec::new(),
+            option_inventory_diagnostics_truncated: false,
             provenance_state,
             options,
         }
@@ -989,6 +1049,42 @@ mod tests {
                 message: "definition values unavailable".to_string(),
             }),
         }
+    }
+
+    #[test]
+    fn conversion_redacts_and_canonicalizes_dynamic_diagnostic_paths() {
+        let secret = "api_token=typed-diagnostic-secret";
+        let long_component = "x".repeat(MAX_DIAGNOSTIC_PATH_COMPONENT_CHARS + 1);
+        let diagnostic = |component: String| OptionInventoryDiagnostic {
+            path: vec![component],
+            code: "unreadable_option_subtree".to_string(),
+            message: "Option subtree could not be inspected".to_string(),
+        };
+        let mut input = assembled(Vec::new());
+        input.option_inventory_complete = false;
+        input.option_inventory_diagnostics = vec![
+            diagnostic("z-safe".to_string()),
+            diagnostic(secret.to_string()),
+            diagnostic(long_component.clone()),
+            diagnostic(String::new()),
+        ];
+
+        let artifact = config_artifact_v2_from_assembled(input).unwrap();
+
+        assert_eq!(artifact.option_inventory_diagnostics.len(), 2);
+        assert_eq!(
+            artifact.option_inventory_diagnostics[0].path,
+            vec![REDACTED_VALUE.to_string()]
+        );
+        assert_eq!(
+            artifact.option_inventory_diagnostics[1].path,
+            vec!["z-safe".to_string()]
+        );
+        assert!(artifact.option_inventory_diagnostics_truncated);
+        let payload = artifact.option_inventory_diagnostics_payload().unwrap();
+        let serialized = payload.to_string();
+        assert!(!serialized.contains(secret));
+        assert!(!serialized.contains(&long_component));
     }
 
     #[test]

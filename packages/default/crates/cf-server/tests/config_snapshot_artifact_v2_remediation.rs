@@ -381,27 +381,36 @@ async fn insert_v2_snapshot_minimal(
     .await
     .expect("insert content");
 
-    sqlx::query(
-        "INSERT INTO evaluation_snapshots (id, commit_id, configuration_name, schema_version, lifecycle, option_count, module_count, content_bytes, target_key, source_out_path, carrier_drv_path, provenance_state, comparison_ready) VALUES ($1, $2, $3, 2, 'available', 1, 1, 1, $4, $5, $6, $7, $8)"
+    let has_inventory_columns: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'evaluation_snapshots' AND column_name = 'option_inventory_complete')",
     )
-    .bind(snapshot_id)
-    .bind(commit_id)
-    .bind(configuration_name)
-    .bind(TARGET_KEY)
-    .bind("/nix/store/source")
-    .bind("/nix/store/carrier.drv")
-    .bind(json!({
-        "state": "available",
-        "adapter_version": 1,
-        "target_lib_version": null,
-        "target_module_system_path": null,
-        "provenance_digest": PROVENANCE_DIGEST,
-        "definition_value_enrichment": enrichment,
-    }))
-    .bind(comparison_ready)
-    .execute(pool)
+    .fetch_one(pool)
     .await
-    .expect("insert snapshot");
+    .expect("inspect inventory migration state");
+    let statement = if has_inventory_columns {
+        "INSERT INTO evaluation_snapshots (id, commit_id, configuration_name, schema_version, lifecycle, option_count, module_count, content_bytes, target_key, source_out_path, carrier_drv_path, provenance_state, comparison_ready, option_inventory_complete, option_inventory_diagnostics, option_inventory_diagnostics_truncated) VALUES ($1, $2, $3, 2, 'available', 1, 1, 1, $4, $5, $6, $7, $8, true, '[]'::jsonb, false)"
+    } else {
+        "INSERT INTO evaluation_snapshots (id, commit_id, configuration_name, schema_version, lifecycle, option_count, module_count, content_bytes, target_key, source_out_path, carrier_drv_path, provenance_state, comparison_ready) VALUES ($1, $2, $3, 2, 'available', 1, 1, 1, $4, $5, $6, $7, $8)"
+    };
+    sqlx::query(statement)
+        .bind(snapshot_id)
+        .bind(commit_id)
+        .bind(configuration_name)
+        .bind(TARGET_KEY)
+        .bind("/nix/store/source")
+        .bind("/nix/store/carrier.drv")
+        .bind(json!({
+            "state": "available",
+            "adapter_version": 1,
+            "target_lib_version": null,
+            "target_module_system_path": null,
+            "provenance_digest": PROVENANCE_DIGEST,
+            "definition_value_enrichment": enrichment,
+        }))
+        .bind(comparison_ready)
+        .execute(pool)
+        .await
+        .expect("insert snapshot");
 
     sqlx::query(
         "INSERT INTO evaluation_snapshot_options (snapshot_id, option_path, content_digest, is_overridden, option_key, path_components) VALUES ($1, 'services.test', $2, false, $3, $4)"
@@ -415,6 +424,184 @@ async fn insert_v2_snapshot_minimal(
     .expect("insert option");
 
     snapshot_id
+}
+
+#[sqlx::test(migrations = false)]
+#[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+async fn migration_0254_backfills_only_preexisting_v2_as_complete(pool: PgPool) {
+    apply_migrations_through(&pool, 253).await;
+    let v2_id = insert_v2_snapshot_minimal(&pool, "pre-0254-v2", true).await;
+    sqlx::query("UPDATE evaluation_snapshots SET integrity_version = 2 WHERE id = $1")
+        .bind(v2_id)
+        .execute(&pool)
+        .await
+        .expect("certify pre-0254 V2 artifact");
+    let commit_id: i32 =
+        sqlx::query_scalar("SELECT commit_id FROM evaluation_snapshots WHERE id = $1")
+            .bind(v2_id)
+            .fetch_one(&pool)
+            .await
+            .expect("load V2 commit");
+    let v1_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO evaluation_snapshots (id, commit_id, configuration_name, schema_version, lifecycle) VALUES ($1, $2, 'pre-0254-v1', 1, 'failed')")
+        .bind(v1_id)
+        .bind(commit_id)
+        .execute(&pool)
+        .await
+        .expect("insert pre-0254 V1 row");
+
+    apply_migration_version(&pool, 254).await;
+
+    let v2: (Option<bool>, Option<Value>, Option<bool>, i16) = sqlx::query_as(
+        "SELECT option_inventory_complete, option_inventory_diagnostics, option_inventory_diagnostics_truncated, integrity_version FROM evaluation_snapshots WHERE id = $1",
+    )
+    .bind(v2_id)
+    .fetch_one(&pool)
+    .await
+    .expect("load migrated V2 row");
+    assert_eq!(v2, (Some(true), Some(json!([])), Some(false), 2));
+    let v1: (Option<bool>, Option<Value>, Option<bool>) = sqlx::query_as(
+        "SELECT option_inventory_complete, option_inventory_diagnostics, option_inventory_diagnostics_truncated FROM evaluation_snapshots WHERE id = $1",
+    )
+    .bind(v1_id)
+    .fetch_one(&pool)
+    .await
+    .expect("load migrated V1 row");
+    assert_eq!(v1, (None, None, None));
+}
+
+#[sqlx::test]
+#[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+async fn migration_0254_validates_inventory_diagnostics_and_immutability(pool: PgPool) {
+    MIGRATOR.run(&pool).await.expect("apply migrations");
+    let valid_partial = json!([{
+        "path": ["services", "poison"],
+        "code": "unreadable_option_subtree",
+        "message": "Option subtree could not be inspected",
+    }]);
+    assert!(
+        sqlx::query_scalar::<_, bool>(
+            "SELECT evaluation_option_inventory_diagnostics_v2_valid($1, false, false)",
+        )
+        .bind(&valid_partial)
+        .fetch_one(&pool)
+        .await
+        .expect("validate partial diagnostics")
+    );
+    for invalid in [
+        json!([]),
+        json!([{"path": [], "code": "unreadable_option_subtree", "message": "Option subtree could not be inspected"}]),
+        json!([{"path": ["services", ""], "code": "unreadable_option_subtree", "message": "Option subtree could not be inspected"}]),
+        json!([{"path": ["services"], "code": "unknown", "message": "trace: secret"}]),
+    ] {
+        assert!(
+            !sqlx::query_scalar::<_, bool>(
+                "SELECT evaluation_option_inventory_diagnostics_v2_valid($1, false, false)",
+            )
+            .bind(invalid)
+            .fetch_one(&pool)
+            .await
+            .expect("reject invalid diagnostics")
+        );
+    }
+    assert!(
+        sqlx::query_scalar::<_, bool>(
+            "SELECT evaluation_option_inventory_diagnostics_v2_valid('[]'::jsonb, true, false)",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("validate complete inventory")
+    );
+    let bounded = Value::Array(
+        (0..128)
+            .map(|index| {
+                json!({
+                    "path": [format!("poison{index:03}")],
+                    "code": "unreadable_option_subtree",
+                    "message": "Option subtree could not be inspected",
+                })
+            })
+            .collect(),
+    );
+    assert!(
+        sqlx::query_scalar::<_, bool>(
+            "SELECT evaluation_option_inventory_diagnostics_v2_valid($1, false, true)",
+        )
+        .bind(&bounded)
+        .fetch_one(&pool)
+        .await
+        .expect("validate bounded truncated diagnostics")
+    );
+    let redaction_deduplicated = json!([{
+        "path": ["[REDACTED]"],
+        "code": "unreadable_option_subtree",
+        "message": "Option subtree could not be inspected",
+    }]);
+    assert!(
+        sqlx::query_scalar::<_, bool>(
+            "SELECT evaluation_option_inventory_diagnostics_v2_valid($1, false, true)",
+        )
+        .bind(redaction_deduplicated)
+        .fetch_one(&pool)
+        .await
+        .expect("validate truncated diagnostics after redaction deduplication")
+    );
+    let mut over_limit = bounded
+        .as_array()
+        .expect("bounded diagnostics array")
+        .clone();
+    over_limit.push(json!({
+        "path": ["poison128"],
+        "code": "unreadable_option_subtree",
+        "message": "Option subtree could not be inspected",
+    }));
+    assert!(
+        !sqlx::query_scalar::<_, bool>(
+            "SELECT evaluation_option_inventory_diagnostics_v2_valid($1, false, true)",
+        )
+        .bind(json!(over_limit))
+        .fetch_one(&pool)
+        .await
+        .expect("reject diagnostics above the retained detail budget")
+    );
+    let adversarial = json!([
+        {"path": ["Zoo"], "code": "unreadable_option_subtree", "message": "Option subtree could not be inspected"},
+        {"path": ["alpha"], "code": "unreadable_option_subtree", "message": "Option subtree could not be inspected"},
+        {"path": ["Ångström"], "code": "unreadable_option_subtree", "message": "Option subtree could not be inspected"},
+    ]);
+    assert!(
+        sqlx::query_scalar::<_, bool>(
+            "SELECT evaluation_option_inventory_diagnostics_v2_valid($1, false, false)"
+        )
+        .bind(&adversarial)
+        .fetch_one(&pool)
+        .await
+        .expect("validate bytewise mixed-case Unicode diagnostic ordering")
+    );
+    let mut reversed = adversarial.as_array().expect("array").clone();
+    reversed.reverse();
+    assert!(
+        !sqlx::query_scalar::<_, bool>(
+            "SELECT evaluation_option_inventory_diagnostics_v2_valid($1, false, false)"
+        )
+        .bind(json!(reversed))
+        .fetch_one(&pool)
+        .await
+        .expect("reject non-bytewise diagnostic ordering")
+    );
+
+    let snapshot_id = insert_v2_snapshot_minimal(&pool, "immutable-inventory", true).await;
+    sqlx::query("UPDATE evaluation_snapshots SET integrity_version = 2 WHERE id = $1")
+        .bind(snapshot_id)
+        .execute(&pool)
+        .await
+        .expect("certify inventory fixture");
+    assert!(sqlx::query("UPDATE evaluation_snapshots SET option_inventory_complete = false, option_inventory_diagnostics = $2, option_inventory_diagnostics_truncated = false WHERE id = $1")
+        .bind(snapshot_id)
+        .bind(valid_partial)
+        .execute(&pool)
+        .await
+        .is_err());
 }
 
 #[sqlx::test]

@@ -37,9 +37,9 @@ use crate::models::evaluation_snapshots::{
     AgentFingerprintStatus, EvaluatedOption, EvaluatedOptionCounts, EvaluatedOptionRow,
     EvaluatedOptionsPage, EvaluatedOptionsParams, EvaluationDrift, EvaluationModuleSourcesPage,
     EvaluationModuleSourcesParams, EvaluationModuleSummary, OptionChangeKind,
-    OptionDefinitionProvenance, SelectedEvaluationSummary, SelectedEvaluationSummaryParams,
-    SevenDayDriftStatus, SnapshotLifecycle, SnapshotRevisionMode, TrackedFlakeIdentity,
-    typed_option_diff,
+    OptionDefinitionProvenance, OptionInventoryDiagnostic, OptionInventoryState,
+    SelectedEvaluationSummary, SelectedEvaluationSummaryParams, SevenDayDriftStatus,
+    SnapshotLifecycle, SnapshotRevisionMode, TrackedFlakeIdentity, typed_option_diff,
 };
 use crate::queries::build_jobs::enqueue_build_job_for_derivation;
 use crate::queries::cve_scans::{get_scan_by_id, resolve_system_cve_scan_target};
@@ -717,6 +717,11 @@ async fn commit_missing_module_sources_response(
 fn config_options_page_v2_to_api(
     page: crate::queries::evaluation_snapshots::ConfigOptionsPageV2,
 ) -> EvaluatedOptionsPage {
+    let (
+        option_inventory_state,
+        option_inventory_diagnostics,
+        option_inventory_diagnostics_truncated,
+    ) = config_inventory_v2_to_api(&page.selected);
     let comparison_available = matches!(
         page.selected.comparison,
         crate::queries::evaluation_snapshots::ConfigComparisonStateV2::Available { .. }
@@ -731,6 +736,9 @@ fn config_options_page_v2_to_api(
     let available = page.selected.lifecycle == SnapshotLifecycle::Available;
     EvaluatedOptionsPage {
         lifecycle: page.selected.lifecycle,
+        option_inventory_state,
+        option_inventory_diagnostics,
+        option_inventory_diagnostics_truncated,
         revision: page.selected.revision,
         generation: None,
         generation_snapshot_id: None,
@@ -777,6 +785,35 @@ fn config_options_page_v2_to_api(
             })
             .collect(),
     }
+}
+
+fn config_inventory_v2_to_api(
+    selected: &crate::queries::evaluation_snapshots::ConfigSelectedSnapshotV2,
+) -> (OptionInventoryState, Vec<OptionInventoryDiagnostic>, bool) {
+    if selected.lifecycle != SnapshotLifecycle::Available {
+        return (OptionInventoryState::Unavailable, Vec::new(), false);
+    }
+    let state = match selected.option_inventory_complete {
+        Some(true) => OptionInventoryState::Complete,
+        Some(false) => OptionInventoryState::Partial,
+        None => OptionInventoryState::Unavailable,
+    };
+    let diagnostics = selected
+        .option_inventory_diagnostics
+        .iter()
+        .map(|diagnostic| OptionInventoryDiagnostic {
+            path_components: diagnostic.path.clone(),
+            code: diagnostic.code.clone(),
+            message: diagnostic.message.clone(),
+        })
+        .collect();
+    (
+        state,
+        diagnostics,
+        selected
+            .option_inventory_diagnostics_truncated
+            .unwrap_or(false),
+    )
 }
 
 fn config_option_diff_v2_to_api(
@@ -880,13 +917,27 @@ fn config_definition_v2_to_api(
 fn config_summary_v2_to_api(
     summary: crate::queries::evaluation_snapshots::ConfigSummaryV2,
 ) -> SelectedEvaluationSummary {
-    let agent_fingerprint = match summary.drift {
+    let (
+        option_inventory_state,
+        option_inventory_diagnostics,
+        option_inventory_diagnostics_truncated,
+    ) = config_inventory_v2_to_api(&summary.selected);
+    let inventory_complete = option_inventory_state == OptionInventoryState::Complete;
+    let drift = if inventory_complete {
+        summary.drift
+    } else {
+        EvaluationDrift::Unavailable
+    };
+    let agent_fingerprint = match drift {
         EvaluationDrift::Matches => AgentFingerprintStatus::Matches,
         EvaluationDrift::Differs => AgentFingerprintStatus::Differs,
         EvaluationDrift::Unavailable => AgentFingerprintStatus::Unavailable,
     };
     SelectedEvaluationSummary {
         lifecycle: summary.selected.lifecycle,
+        option_inventory_state,
+        option_inventory_diagnostics,
+        option_inventory_diagnostics_truncated,
         revision: summary.selected.revision,
         generation: None,
         error: summary.selected.error,
@@ -906,16 +957,28 @@ fn config_summary_v2_to_api(
         // snapshots never join that primary same-commit host corpus.
         host_delta_count: None,
         agent_fingerprint,
-        seven_day_drift: summary.seven_day_drift,
-        drift: summary.drift,
+        seven_day_drift: if inventory_complete {
+            summary.seven_day_drift
+        } else {
+            SevenDayDriftStatus::InsufficientCoverage
+        },
+        drift,
     }
 }
 
 fn config_module_sources_v2_to_api(
     page: crate::queries::evaluation_snapshots::ConfigModuleSourcesPageV2,
 ) -> EvaluationModuleSourcesPage {
+    let (
+        option_inventory_state,
+        option_inventory_diagnostics,
+        option_inventory_diagnostics_truncated,
+    ) = config_inventory_v2_to_api(&page.selected);
     EvaluationModuleSourcesPage {
         lifecycle: page.selected.lifecycle,
+        option_inventory_state,
+        option_inventory_diagnostics,
+        option_inventory_diagnostics_truncated,
         revision: page.selected.revision,
         generation: None,
         error: page.selected.error,
@@ -1108,6 +1171,9 @@ fn empty_options_page(
 ) -> EvaluatedOptionsPage {
     EvaluatedOptionsPage {
         lifecycle,
+        option_inventory_state: OptionInventoryState::Unavailable,
+        option_inventory_diagnostics: Vec::new(),
+        option_inventory_diagnostics_truncated: false,
         revision: params.revision.clone(),
         generation: params.generation,
         generation_snapshot_id: None,
@@ -1132,6 +1198,9 @@ fn empty_evaluation_summary(
 ) -> SelectedEvaluationSummary {
     SelectedEvaluationSummary {
         lifecycle,
+        option_inventory_state: OptionInventoryState::Unavailable,
+        option_inventory_diagnostics: Vec::new(),
+        option_inventory_diagnostics_truncated: false,
         revision: params.revision.clone(),
         generation: params.generation,
         error,
@@ -1159,6 +1228,9 @@ fn empty_evaluation_module_sources(
 ) -> EvaluationModuleSourcesPage {
     EvaluationModuleSourcesPage {
         lifecycle,
+        option_inventory_state: OptionInventoryState::Unavailable,
+        option_inventory_diagnostics: Vec::new(),
+        option_inventory_diagnostics_truncated: false,
         revision: params.revision.clone(),
         generation: params.generation,
         error,
@@ -3820,7 +3892,7 @@ mod tests {
         CSRF_COOKIE_NAME, CSRF_HEADER_NAME, SESSION_COOKIE_NAME, hash_token,
     };
     use crate::models::auth_identity::AuthRole;
-    use crate::models::config_inspector::option_key;
+    use crate::models::config_inspector::{OptionInventoryDiagnostic, option_key};
     use crate::models::config_snapshot_artifact::{
         CONFIG_OPTION_ARTIFACT_SCHEMA_VERSION_V2, ConfigInspectionArtifactV2,
         ConfigProvenanceArtifactStateV2, DefinitionValueArtifactStateV2,
@@ -3833,6 +3905,7 @@ mod tests {
     use crate::queries::derivations::insert_derivation;
     use crate::queries::environments::create_environment;
     use crate::queries::evaluation_snapshots::{
+        ConfigComparisonStateV2, ConfigComparisonUnavailableReasonV2, ConfigSelectedSnapshotV2,
         persist_available_snapshot_tx, persist_config_artifact_v2_tx,
         persist_flake_output_snapshot_tx,
     };
@@ -3852,6 +3925,48 @@ mod tests {
             .await
             .expect("response body should read");
         serde_json::from_slice(&bytes).expect("response body should decode")
+    }
+
+    #[test]
+    fn config_inventory_mapping_preserves_partial_truncated_state() {
+        let selected = ConfigSelectedSnapshotV2 {
+            id: Uuid::new_v4(),
+            commit_id: 1,
+            revision: "a".repeat(40),
+            configuration_name: "host".to_string(),
+            lifecycle: SnapshotLifecycle::Available,
+            error: None,
+            target_key: Some("b".repeat(64)),
+            source_out_path: Some("/nix/store/source".to_string()),
+            carrier_drv_path: Some("/nix/store/system.drv".to_string()),
+            provenance_state: None,
+            comparison_ready: Some(false),
+            option_inventory_complete: Some(false),
+            option_inventory_diagnostics: vec![OptionInventoryDiagnostic {
+                path: vec!["services".to_string(), "poison".to_string()],
+                code: "unreadable_option_subtree".to_string(),
+                message: "Option subtree could not be inspected".to_string(),
+            }],
+            option_inventory_diagnostics_truncated: Some(true),
+            option_count: 1,
+            module_count: 0,
+            completed_at: Some(Utc::now()),
+            evaluation_duration_ms: None,
+            provenance_lock_digest: None,
+            baseline_provenance_lock_digest: None,
+            first_parent_resolved: true,
+            first_parent_revision: None,
+            comparison: ConfigComparisonStateV2::Unavailable {
+                reason: ConfigComparisonUnavailableReasonV2::SelectedNotComparisonReady,
+                baseline_revision: None,
+            },
+        };
+
+        let (state, diagnostics, truncated) = config_inventory_v2_to_api(&selected);
+        assert_eq!(state, OptionInventoryState::Partial);
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].path_components, vec!["services", "poison"]);
+        assert!(truncated);
     }
 
     async fn mutation_headers(pool: &PgPool, role: AuthRole, suffix: &str) -> HeaderMap {
@@ -5050,12 +5165,14 @@ mod tests {
             .await
             .expect("test derivation should persist");
         let carrier_drv_path = format!("/nix/store/{suffix}-v2-api.drv");
-        sqlx::query("UPDATE derivations SET derivation_path = $2 WHERE id = $1")
-            .bind(derivation.id)
-            .bind(&carrier_drv_path)
-            .execute(&pool)
-            .await
-            .expect("carrier path should persist");
+        sqlx::query(
+            "UPDATE derivations SET derivation_path = $2, completed_at = now() WHERE id = $1",
+        )
+        .bind(derivation.id)
+        .bind(&carrier_drv_path)
+        .execute(&pool)
+        .await
+        .expect("carrier path should persist");
         let parent_derivation = insert_derivation(&pool, Some(&parent_commit), &hostname, "nixos")
             .await
             .expect("parent derivation should persist");
@@ -5096,6 +5213,9 @@ mod tests {
         };
         let artifact = ConfigInspectionArtifactV2 {
             artifact_version: CONFIG_OPTION_ARTIFACT_SCHEMA_VERSION_V2,
+            option_inventory_complete: true,
+            option_inventory_diagnostics: Vec::new(),
+            option_inventory_diagnostics_truncated: false,
             target_key: "a".repeat(64),
             source_out_path: format!("/nix/store/{suffix}-source"),
             carrier_drv_path: carrier_drv_path.clone(),
@@ -5483,8 +5603,26 @@ mod tests {
         assert!(hidden_source.tracked_flake.is_none());
 
         let replacement_path = vec!["services".to_string(), "stage-two-unavailable".to_string()];
+        let diagnostic_secret = "api_token=typed-diagnostic-secret";
+        let long_diagnostic_component = "x".repeat(257);
         let replacement = ConfigInspectionArtifactV2 {
             artifact_version: CONFIG_OPTION_ARTIFACT_SCHEMA_VERSION_V2,
+            option_inventory_complete: false,
+            option_inventory_diagnostics: (0..128)
+                .map(
+                    |index| crate::models::config_inspector::OptionInventoryDiagnostic {
+                        path: vec![match index {
+                            0 => diagnostic_secret.to_string(),
+                            1 => long_diagnostic_component.clone(),
+                            2 => String::new(),
+                            _ => format!("poison{index:03}"),
+                        }],
+                        code: "unreadable_option_subtree".to_string(),
+                        message: "Option subtree could not be inspected".to_string(),
+                    },
+                )
+                .collect(),
+            option_inventory_diagnostics_truncated: true,
             target_key: "d".repeat(64),
             source_out_path: format!("/nix/store/{suffix}-source"),
             carrier_drv_path: carrier_drv_path.clone(),
@@ -5517,6 +5655,18 @@ mod tests {
             .await
             .expect("replacement V2 snapshot should persist");
         tx.commit().await.expect("replacement should commit");
+        let persisted_diagnostics: serde_json::Value = sqlx::query_scalar(
+            "SELECT option_inventory_diagnostics FROM evaluation_snapshots WHERE commit_id = $1 AND configuration_name = $2 AND target_key = $3",
+        )
+        .bind(commit.id)
+        .bind(&hostname)
+        .bind("d".repeat(64))
+        .fetch_one(&pool)
+        .await
+        .expect("replacement diagnostics should persist");
+        let persisted_diagnostics = persisted_diagnostics.to_string();
+        assert!(!persisted_diagnostics.contains(diagnostic_secret));
+        assert!(!persisted_diagnostics.contains(&long_diagnostic_component));
 
         let stale_response = get_system_evaluated_options(
             State(pool.clone()),
@@ -5584,6 +5734,15 @@ mod tests {
             unavailable_provenance.lifecycle,
             SnapshotLifecycle::Available
         );
+        assert_eq!(
+            unavailable_provenance.option_inventory_state,
+            OptionInventoryState::Partial
+        );
+        assert_eq!(
+            unavailable_provenance.option_inventory_diagnostics.len(),
+            126
+        );
+        assert!(unavailable_provenance.option_inventory_diagnostics_truncated);
         assert!(!unavailable_provenance.comparison_available);
         assert_eq!(unavailable_provenance.counts.changed, None);
         assert_eq!(unavailable_provenance.options.len(), 1);
@@ -5608,6 +5767,8 @@ mod tests {
         );
         let encoded_unavailable =
             serde_json::to_string(&unavailable_json).expect("V2 JSON should encode");
+        assert!(!encoded_unavailable.contains(diagnostic_secret));
+        assert!(!encoded_unavailable.contains(&long_diagnostic_component));
         for placeholder in [
             "Declared type unavailable",
             "Source path unavailable",

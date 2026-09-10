@@ -134,10 +134,52 @@ let
            nixosConfigurations.good = lib.nixosSystem {
              system = builtins.currentSystem;
              modulesLocation = toString ./explicit-modules-location.nix;
-             modules = [ module disabler ];
-          };
-          nixosConfigurations.unrelatedBroken =
-            throw "unrelated configuration forced";
+              modules = [ module disabler ];
+           };
+            nixosConfigurations.partial =
+              let evaluated = lib.nixosSystem {
+                system = builtins.currentSystem;
+                modulesLocation = toString ./explicit-modules-location.nix;
+                modules = [ module disabler ];
+              };
+                  longComponent = lib.concatStrings (lib.replicate 257 "x");
+               in evaluated // {
+                 # Model a delayed module-system declaration failure without
+                 # invalidating config.system.build.toplevel or sibling options.
+                 # The scalar children model malformed but readable option-tree
+                 # entries that must not disappear silently.
+                options = evaluated.options // {
+                  "api_token=typed-diagnostic-secret" = "not an option subtree";
+                  ''${longComponent} = "not an option subtree";
+                  crystalForgeProbe = evaluated.options.crystalForgeProbe // {
+                    poison = throw "delayed module-system declaration subtree poisoned";
+                   };
+                };
+              };
+           nixosConfigurations.diagnosticStress =
+             let
+               evaluated = lib.nixosSystem {
+                 system = builtins.currentSystem;
+                 modules = [ module disabler ({ lib, ... }: {
+                   options.crystalForgeStress.zzzHealthy = lib.mkOption {
+                     type = lib.types.str;
+                   };
+                   config.crystalForgeStress.zzzHealthy = "healthy-after-budget";
+                 }) ];
+               };
+               poison = builtins.listToAttrs (builtins.genList (index: {
+                 name = "poison''${lib.fixedWidthString 3 "0" (toString index)}";
+                 value = throw "diagnostic stress poison ''${toString index}";
+               }) 130);
+              in evaluated // {
+               options = {
+                 crystalForgeStress = poison // {
+                   inherit (evaluated.options.crystalForgeStress) zzzHealthy;
+                 };
+               };
+             };
+           nixosConfigurations.unrelatedBroken =
+             throw "unrelated configuration forced";
           nixosModules.unrelatedBroken = { lib, ... }:
             with lib.namespace-change-me;
             { namespace-change-me.enable = true; };
@@ -167,7 +209,7 @@ let
                 };
                 system.stateVersion = "25.05";
               };
-            })
+             })
           ];
         };
       };
@@ -183,15 +225,12 @@ let
        configuration = builtins.getAttr configurationName flake.nixosConfigurations;
        targetKey = builtins.hashString "sha256" (builtins.toJSON [ flakeRef configurationName ]);
        valueEncoder = (${valueEncodingSource});
-        inspector = (${inspectorSource}) {
-          inherit flake configuration targetKey;
-         encodeValue = valueEncoder configuration.pkgs.lib;
-       };
-       provenance = (${provenanceSource}) {
-         inherit flake configuration;
-         provenanceLib = (${provenanceLibSource});
-       };
-    in inspector // { __crystalForgeProvenance = provenance; }
+         inspector = (${inspectorSource}) {
+           inherit flake configuration targetKey;
+          provenanceLib = (${provenanceLibSource});
+          encodeValue = valueEncoder configuration.pkgs.lib;
+        };
+    in inspector
   '';
 
   unsupportedCapabilityExpression = ''
@@ -216,6 +255,97 @@ let
       inherit configuration;
       provenanceLib = (${provenanceLibSource});
     }).meta.crystalForgeProvenance
+  '';
+
+  partialExpression = ''
+    let
+      flakeRef = "path:${fixture}";
+      configurationName = "partial";
+      flake = builtins.getFlake flakeRef;
+      configuration = builtins.getAttr configurationName flake.nixosConfigurations;
+      targetKey = builtins.hashString "sha256" (builtins.toJSON [ flakeRef configurationName ]);
+      valueEncoder = (${valueEncodingSource});
+      inspector = (${inspectorSource}) {
+        inherit flake configuration targetKey;
+        provenanceLib = (${provenanceLibSource});
+        encodeValue = valueEncoder configuration.pkgs.lib;
+      };
+    in inspector
+  '';
+
+  rootFailureExpression = ''
+    let
+      nixpkgs = import ${pkgs.path} { };
+      configuration = {
+        pkgs = nixpkgs;
+        config.system.build.toplevel = nixpkgs.runCommand "config-inspector-root-failure" { } "touch $out";
+        options = throw "option inventory root poisoned";
+      };
+      jobs = (${inspectorSource}) {
+        flake = { outPath = "/nix/store/root-failure-source"; inputs = { }; };
+        inherit configuration;
+        targetKey = builtins.hashString "sha256" "root-failure";
+        provenanceLib = (${provenanceLibSource});
+        encodeValue = (${valueEncodingSource}) nixpkgs.lib;
+      };
+    in { inherit (jobs) __crystalForgeConfigIndex; }
+  '';
+
+  partialDefinitionValuesExpression = ''
+    let
+      flakeRef = "path:${fixture}";
+      configurationName = "partial";
+      flake = builtins.getFlake flakeRef;
+      configuration = builtins.getAttr configurationName flake.nixosConfigurations;
+      targetKey = builtins.hashString "sha256" (builtins.toJSON [ flakeRef configurationName ]);
+      valueEncoder = (${valueEncodingSource});
+      inspector = (${inspectorSource}) {
+        inherit flake configuration targetKey;
+        provenanceLib = (${provenanceLibSource});
+        encodeValue = valueEncoder configuration.pkgs.lib;
+      };
+      allowedOptionKeys = map (entry: entry.key)
+        inspector.__crystalForgeConfigIndex.meta.crystalForgeInspector.options;
+      allowedOptionPaths = map (entry: entry.path)
+        inspector.__crystalForgeConfigIndex.meta.crystalForgeInspector.options;
+    in (${definitionValuesSource}) {
+      inherit flake configuration targetKey allowedOptionKeys allowedOptionPaths;
+      provenanceLib = (${provenanceLibSource});
+      encodeValue = valueEncoder configuration.pkgs.lib;
+    }
+  '';
+
+  diagnosticStressExpression = ''
+    let
+      flakeRef = "path:${fixture}";
+      configurationName = "diagnosticStress";
+      flake = builtins.getFlake flakeRef;
+      configuration = builtins.getAttr configurationName flake.nixosConfigurations;
+      targetKey = builtins.hashString "sha256" (builtins.toJSON [ flakeRef configurationName ]);
+      valueEncoder = (${valueEncodingSource});
+    in (${inspectorSource}) {
+      inherit flake configuration targetKey;
+      provenanceLib = (${provenanceLibSource});
+      encodeValue = valueEncoder configuration.pkgs.lib;
+    }
+  '';
+
+  diagnosticStressDefinitionValuesExpression = ''
+    let
+      flakeRef = "path:${fixture}";
+      configurationName = "diagnosticStress";
+      flake = builtins.getFlake flakeRef;
+      configuration = builtins.getAttr configurationName flake.nixosConfigurations;
+      targetKey = builtins.hashString "sha256" (builtins.toJSON [ flakeRef configurationName ]);
+      healthyPath = [ "crystalForgeStress" "zzzHealthy" ];
+      allowedOptionPaths = [ healthyPath ];
+      allowedOptionKeys = [ (builtins.hashString "sha256" (builtins.toJSON healthyPath)) ];
+      valueEncoder = (${valueEncodingSource});
+    in (${definitionValuesSource}) {
+      inherit flake configuration targetKey allowedOptionKeys allowedOptionPaths;
+      provenanceLib = (${provenanceLibSource});
+      encodeValue = valueEncoder configuration.pkgs.lib;
+    }
   '';
 
   definitionValuesExpression = ''
@@ -284,6 +414,11 @@ let
   unsupportedCapabilityFile = pkgs.writeText "crystal-forge-config-inspector-unsupported.nix" unsupportedCapabilityExpression;
   definitionValuesFile = pkgs.writeText "crystal-forge-config-definition-values.nix" definitionValuesExpression;
   legacyDefinitionValuesFile = pkgs.writeText "crystal-forge-config-definition-values-legacy.nix" legacyDefinitionValuesExpression;
+  partialFile = pkgs.writeText "crystal-forge-config-inspector-partial.nix" partialExpression;
+  rootFailureFile = pkgs.writeText "crystal-forge-config-inspector-root-failure.nix" rootFailureExpression;
+  partialDefinitionValuesFile = pkgs.writeText "crystal-forge-config-definition-values-partial.nix" partialDefinitionValuesExpression;
+  diagnosticStressFile = pkgs.writeText "crystal-forge-config-inspector-diagnostic-stress.nix" diagnosticStressExpression;
+  diagnosticStressDefinitionValuesFile = pkgs.writeText "crystal-forge-config-definition-values-diagnostic-stress.nix" diagnosticStressDefinitionValuesExpression;
 in
 pkgs.runCommand "crystal-forge-config-inspector-check" {
   nativeBuildInputs = [ pkgs.jq pkgs.nix pkgs.nix-eval-jobs ];
@@ -297,6 +432,108 @@ pkgs.runCommand "crystal-forge-config-inspector-check" {
   unsupported=$(nix eval "''${nix_args[@]}" --json --expr "import ${unsupportedCapabilityFile}")
   test "$(printf '%s' "$unsupported" | jq -r '.supported')" = false
   test "$(printf '%s' "$unsupported" | jq -r '.reasonCode')" = helper_capability_unavailable
+  ! grep -F 'builtins.elem option.option_key allowedOptionKeys' ${../../packages/default/crates/cf-server/src/models/config_definition_values.nix}
+  grep -F 'builtins.hasAttr option.option_key allowedOptionKeySet' ${../../packages/default/crates/cf-server/src/models/config_definition_values.nix} >/dev/null
+  ! grep -F 'lib.unique optionKeys' ${../../packages/default/crates/cf-server/src/models/config_inspector.nix}
+  ! grep -F "builtins.foldl'" ${../../packages/default/crates/cf-server/src/models/config_inspector.nix}
+
+  nix-eval-jobs \
+    --expr "import ${partialFile}" \
+    --impure --meta \
+    --apply 'derivation: if derivation.meta ? crystalForgeInspector then derivation.meta.crystalForgeInspector else derivation.meta.crystalForgeProvenance' \
+    --option experimental-features 'nix-command flakes' \
+    --workers 2 > partial.jsonl 2> partial.stderr
+  jq -e '
+    select(.attr == "__crystalForgeConfigIndex")
+    | .error == null
+    and .extraValue.optionInventoryComplete == false
+    and (.extraValue.optionInventoryDiagnostics | length) == 3
+    and ([.extraValue.optionInventoryDiagnostics[] | select(.path == ["crystalForgeProbe", "poison"])] | length == 1)
+    and ([.extraValue.optionInventoryDiagnostics[] | select(.path == ["api_token=typed-diagnostic-secret"])] | length == 1)
+    and ([.extraValue.optionInventoryDiagnostics[] | select((.path | length) == 1 and (.path[0] | length) == 257)] | length == 1)
+    and ([.extraValue.options[] | select(.path == ["crystalForgeProbe", "healthyBefore"])] | length == 1)
+    and ([.extraValue.options[] | select(.path == ["crystalForgeProbe", "healthyAfter"])] | length == 1)
+    and ([.extraValue.options[] | select(.path == ["crystalForgeProbe", "poison"])] | length == 0)
+  ' partial.jsonl >/dev/null
+  before_partial_hash=$(nix eval "''${nix_args[@]}" --raw --expr \
+    'builtins.hashString "sha256" (builtins.toJSON [ "crystalForgeProbe" "healthyBefore" ])')
+  after_partial_hash=$(nix eval "''${nix_args[@]}" --raw --expr \
+    'builtins.hashString "sha256" (builtins.toJSON [ "crystalForgeProbe" "healthyAfter" ])')
+  poison_partial_hash=$(nix eval "''${nix_args[@]}" --raw --expr \
+    'builtins.hashString "sha256" (builtins.toJSON [ "crystalForgeProbe" "poison" ])')
+  jq -e --arg attr "meta_$before_partial_hash" 'select(.attr == $attr) | .error == null' partial.jsonl >/dev/null
+  jq -e --arg attr "value_$before_partial_hash" 'select(.attr == $attr) | .error == null' partial.jsonl >/dev/null
+  jq -e --arg attr "meta_$after_partial_hash" 'select(.attr == $attr) | .error == null' partial.jsonl >/dev/null
+  jq -e --arg attr "value_$after_partial_hash" 'select(.attr == $attr) | .error == null' partial.jsonl >/dev/null
+  ! jq -e --arg meta "meta_$poison_partial_hash" --arg value "value_$poison_partial_hash" \
+    'select(.attr == $meta or .attr == $value)' partial.jsonl >/dev/null
+  test "$(jq -r 'select(.attr == "__crystalForgeConfigIndex") | .drvPath' partial.jsonl)" = \
+    "$(jq -r 'select(.attr == "meta_'"$before_partial_hash"'") | .drvPath' partial.jsonl)"
+
+  nix-eval-jobs \
+    --expr "import ${partialDefinitionValuesFile}" \
+    --impure --meta \
+    --apply 'derivation: derivation.meta.crystalForgeDefinitionValues' \
+    --option experimental-features 'nix-command flakes' \
+    --workers 2 > partial-definition-values.jsonl 2> partial-definition-values.stderr
+  jq -e 'select(.attr == "__crystalForgeDefinitionIndex") | .error == null and .extraValue.supported == true' \
+    partial-definition-values.jsonl >/dev/null
+  jq -e --arg prefix "def_value_''${before_partial_hash}_" \
+    'select(.attr | startswith($prefix)) | .error == null' partial-definition-values.jsonl >/dev/null
+  jq -e --arg prefix "def_value_''${after_partial_hash}_" \
+    'select(.attr | startswith($prefix)) | .error == null and .extraValue.value.value == "after"' partial-definition-values.jsonl >/dev/null
+  ! jq -e --arg prefix "def_value_''${poison_partial_hash}_" \
+    'select(.attr | startswith($prefix))' partial-definition-values.jsonl >/dev/null
+  test "$(jq -r 'select(.attr == "__crystalForgeConfigIndex") | .drvPath' partial.jsonl)" = \
+    "$(jq -r 'select(.attr == "__crystalForgeDefinitionIndex") | .drvPath' partial-definition-values.jsonl)"
+  test "$(jq -r 'select(.attr == "__crystalForgeProvenance") | .extraValue.provenanceDigest' partial.jsonl)" = \
+    "$(jq -r 'select(.attr == "__crystalForgeDefinitionIndex") | .extraValue.provenanceDigest' partial-definition-values.jsonl)"
+
+  nix-eval-jobs \
+    --expr "import ${diagnosticStressFile}" \
+    --impure --meta \
+    --apply 'derivation: if derivation.meta ? crystalForgeInspector then derivation.meta.crystalForgeInspector else derivation.meta.crystalForgeProvenance' \
+    --option experimental-features 'nix-command flakes' \
+    --workers 2 > diagnostic-stress.jsonl 2> diagnostic-stress.stderr
+  stress_healthy_hash=$(nix eval "''${nix_args[@]}" --raw --expr \
+    'builtins.hashString "sha256" (builtins.toJSON [ "crystalForgeStress" "zzzHealthy" ])')
+  jq -e --arg healthy "$stress_healthy_hash" '
+    select(.attr == "__crystalForgeConfigIndex")
+    | .error == null
+    and .extraValue.optionInventoryComplete == false
+    and .extraValue.optionInventoryDiagnosticsTruncated == true
+    and (.extraValue.optionInventoryDiagnostics | length) == 128
+    and (.extraValue.optionInventoryDiagnostics[0].path == ["crystalForgeStress", "poison000"])
+    and (.extraValue.optionInventoryDiagnostics[127].path == ["crystalForgeStress", "poison127"])
+    and ([.extraValue.options[] | select(.key == $healthy and .path == ["crystalForgeStress", "zzzHealthy"])] | length == 1)
+    and ([.extraValue.options[] | select(.path[0] == "crystalForgeStress" and (.path[1] | startswith("poison")))] | length == 0)
+  ' diagnostic-stress.jsonl >/dev/null
+  jq -e --arg attr "meta_$stress_healthy_hash" 'select(.attr == $attr) | .error == null' diagnostic-stress.jsonl >/dev/null
+  jq -e --arg attr "value_$stress_healthy_hash" 'select(.attr == $attr) | .error == null and .extraValue.value.value == "healthy-after-budget"' diagnostic-stress.jsonl >/dev/null
+  ! jq -e 'select(.attr | test("^(meta|value)_.*poison"))' diagnostic-stress.jsonl >/dev/null
+  jq -e 'select(.attr == "__crystalForgeProvenance") | .error == null and (.extraValue.definitionsByOption | length) == 1' diagnostic-stress.jsonl >/dev/null
+
+  nix-eval-jobs \
+    --expr "import ${diagnosticStressDefinitionValuesFile}" \
+    --impure --meta \
+    --apply 'derivation: derivation.meta.crystalForgeDefinitionValues' \
+    --option experimental-features 'nix-command flakes' \
+    --workers 1 > diagnostic-stress-definition-values.jsonl 2> diagnostic-stress-definition-values.stderr
+  jq -e 'select(.attr == "__crystalForgeDefinitionIndex") | .error == null and .extraValue.definitionCount == 1' diagnostic-stress-definition-values.jsonl >/dev/null
+  jq -e --arg prefix "def_value_''${stress_healthy_hash}_" 'select(.attr | startswith($prefix)) | .error == null' diagnostic-stress-definition-values.jsonl >/dev/null
+  test "$(wc -l < diagnostic-stress-definition-values.jsonl)" -eq 2
+  test "$(jq -r 'select(.attr == "__crystalForgeProvenance") | .extraValue.provenanceDigest' diagnostic-stress.jsonl)" = \
+    "$(jq -r 'select(.attr == "__crystalForgeDefinitionIndex") | .extraValue.provenanceDigest' diagnostic-stress-definition-values.jsonl)"
+
+  nix-eval-jobs \
+    --expr "import ${rootFailureFile}" \
+    --impure --meta \
+    --apply 'derivation: derivation.meta.crystalForgeInspector' \
+    --option experimental-features 'nix-command flakes' \
+    --workers 1 > root-failure.jsonl 2> root-failure.stderr || true
+  test "$(wc -l < root-failure.jsonl)" -eq 1
+  jq -e '.attr == "__crystalForgeConfigIndex" and .error != null and .drvPath == null' \
+    root-failure.jsonl >/dev/null
   target_key=$(nix eval "''${nix_args[@]}" --raw --expr \
     'builtins.hashString "sha256" (builtins.toJSON [ "path:${fixture}" "good" ])')
 

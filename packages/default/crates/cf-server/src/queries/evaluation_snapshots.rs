@@ -10,7 +10,10 @@ use sha2::{Digest, Sha256};
 use sqlx::{Executor, PgConnection, PgPool, Postgres, QueryBuilder, Row, Transaction};
 use uuid::Uuid;
 
-use crate::models::config_inspector::option_key as canonical_option_key;
+use crate::models::config_inspector::{
+    OptionInventoryDiagnostic as InternalOptionInventoryDiagnostic,
+    option_key as canonical_option_key,
+};
 use crate::models::config_snapshot_artifact::{
     ConfigInspectionArtifactV2, ConfigOptionArtifactV2, ConfigOptionProvenanceArtifactV2,
     ConfigProvenanceArtifactStateV2, config_option_v2_from_persisted,
@@ -19,9 +22,9 @@ use crate::models::evaluation_snapshots::{
     AgentFingerprintStatus, EvaluatedOption, EvaluatedOptionCounts, EvaluatedOptionFilter,
     EvaluatedOptionRow, EvaluatedOptionsPage, EvaluationDrift, EvaluationModuleSourcesPage,
     EvaluationModuleSummary, FlakeModuleDeclarationsPage, FlakeOutputPagination,
-    FlakeOutputSnapshotResponse, FlakeSystemFilter, QueueEvaluationResponse, ReconciledFlakeSystem,
-    SelectedEvaluationSummary, SevenDayDriftStatus, SnapshotLifecycle, TrackedFlakeIdentity,
-    flake_output_delta, typed_option_diff,
+    FlakeOutputSnapshotResponse, FlakeSystemFilter, OptionInventoryState, QueueEvaluationResponse,
+    ReconciledFlakeSystem, SelectedEvaluationSummary, SevenDayDriftStatus, SnapshotLifecycle,
+    TrackedFlakeIdentity, flake_output_delta, typed_option_diff,
 };
 
 /// Maximum option rows returned by one request.
@@ -211,6 +214,12 @@ pub(crate) struct ConfigSelectedSnapshotV2 {
     pub(crate) provenance_state: Option<ConfigProvenanceArtifactStateV2>,
     /// Whether complete V2 comparison inputs were persisted.
     pub(crate) comparison_ready: Option<bool>,
+    /// Whether the persisted V2 option inventory is complete.
+    pub(crate) option_inventory_complete: Option<bool>,
+    /// Bounded unreadable prefixes for a partial inventory.
+    pub(crate) option_inventory_diagnostics: Vec<InternalOptionInventoryDiagnostic>,
+    /// Whether the persisted diagnostic detail omits additional unreadable prefixes.
+    pub(crate) option_inventory_diagnostics_truncated: Option<bool>,
     /// Authoritative option count recorded by persistence.
     pub(crate) option_count: i64,
     /// Authoritative module count recorded by persistence.
@@ -363,7 +372,7 @@ pub(crate) struct ConfigModuleSourcesPageV2 {
     pub(crate) selected: ConfigSelectedSnapshotV2,
     /// Shared immutable token for options, summary, and module-source reads.
     pub(crate) snapshot_token: Option<String>,
-    /// Number of distinct source tuples in the complete selected snapshot.
+    /// Number of distinct source tuples in the observed selected inventory.
     pub(crate) total: i64,
     /// Bounded zero-based offset.
     pub(crate) offset: i64,
@@ -451,6 +460,7 @@ async fn persist_config_artifact_v2_with_content_limit_tx(
     let artifact = artifact.redacted();
     validate_config_artifact_v2(&artifact)?;
     let provenance_state = artifact.provenance_state_payload()?;
+    let option_inventory_diagnostics = artifact.option_inventory_diagnostics_payload()?;
 
     let carrier_matches: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM derivations WHERE commit_id = $1 AND derivation_type = 'nixos' AND derivation_name = $2 AND derivation_path = $3)",
@@ -517,11 +527,12 @@ async fn persist_config_artifact_v2_with_content_limit_tx(
             commit_id, configuration_name, schema_version, lifecycle,
             first_parent_sha, option_count, module_count, evaluation_duration_ms,
             content_bytes, target_key, source_out_path, carrier_drv_path,
-            provenance_state, comparison_ready, completed_at
+            provenance_state, comparison_ready, option_inventory_complete,
+            option_inventory_diagnostics, option_inventory_diagnostics_truncated, completed_at
         )
         SELECT $1, $2, 2, 'available', c.first_parent_sha, $3, $4,
                NULL::bigint,
-               $5, $6, $7, $8, $9, $10, now()
+               $5, $6, $7, $8, $9, $10, $11, $12, $13, now()
         FROM commits c
         WHERE c.id = $1
         RETURNING id
@@ -537,6 +548,9 @@ async fn persist_config_artifact_v2_with_content_limit_tx(
     .bind(&artifact.carrier_drv_path)
     .bind(&provenance_state)
     .bind(artifact.comparison_ready())
+    .bind(artifact.option_inventory_complete)
+    .bind(&option_inventory_diagnostics)
+    .bind(artifact.option_inventory_diagnostics_truncated)
     .fetch_one(&mut **tx)
     .await?;
 
@@ -624,6 +638,11 @@ fn validate_config_artifact_v2(artifact: &ConfigInspectionArtifactV2) -> Result<
     {
         bail!("invalid V2 config artifact identity");
     }
+    crate::models::config_inspector::validate_option_inventory(
+        artifact.option_inventory_complete,
+        &artifact.option_inventory_diagnostics,
+        artifact.option_inventory_diagnostics_truncated,
+    )?;
     let mut keys = std::collections::BTreeSet::new();
     for option in &artifact.options {
         if option.path_components.is_empty()
@@ -678,10 +697,12 @@ async fn persist_oversized_config_artifact_v2(
             commit_id, configuration_name, schema_version, lifecycle,
             first_parent_sha, option_count, module_count, content_bytes,
             target_key, source_out_path, carrier_drv_path, provenance_state,
-            comparison_ready, error, evaluation_duration_ms, completed_at
+            comparison_ready, option_inventory_complete,
+            option_inventory_diagnostics, option_inventory_diagnostics_truncated,
+            error, evaluation_duration_ms, completed_at
         )
         SELECT $1, $2, 2, 'unavailable', c.first_parent_sha, 0, 0, 0,
-               $3, $4, $5, $6, false,
+               $3, $4, $5, $6, false, $7, $8, $9,
                'Config inspection artifact exceeds persistence size limits', NULL::bigint, now()
         FROM commits c WHERE c.id = $1 RETURNING id
         "#,
@@ -692,6 +713,9 @@ async fn persist_oversized_config_artifact_v2(
     .bind(&artifact.source_out_path)
     .bind(&artifact.carrier_drv_path)
     .bind(provenance_state)
+    .bind(artifact.option_inventory_complete)
+    .bind(artifact.option_inventory_diagnostics_payload()?)
+    .bind(artifact.option_inventory_diagnostics_truncated)
     .fetch_one(&mut **tx)
     .await?;
     advance_config_snapshot_selection_v2_tx(tx, commit_id, configuration_name, snapshot_id).await?;
@@ -1571,6 +1595,9 @@ struct V2SnapshotRecord {
     carrier_drv_path: Option<String>,
     provenance_state: Option<Value>,
     comparison_ready: Option<bool>,
+    option_inventory_complete: Option<bool>,
+    option_inventory_diagnostics: Option<Value>,
+    option_inventory_diagnostics_truncated: Option<bool>,
     option_count: i64,
     module_count: i64,
     completed_at: Option<DateTime<Utc>>,
@@ -1601,6 +1628,12 @@ fn v2_snapshot_record_from_row(
         carrier_drv_path: row.try_get(format!("{prefix}_carrier_drv_path").as_str())?,
         provenance_state: row.try_get(format!("{prefix}_provenance_state").as_str())?,
         comparison_ready: row.try_get(format!("{prefix}_comparison_ready").as_str())?,
+        option_inventory_complete: row
+            .try_get(format!("{prefix}_option_inventory_complete").as_str())?,
+        option_inventory_diagnostics: row
+            .try_get(format!("{prefix}_option_inventory_diagnostics").as_str())?,
+        option_inventory_diagnostics_truncated: row
+            .try_get(format!("{prefix}_option_inventory_diagnostics_truncated").as_str())?,
         option_count: row.try_get(format!("{prefix}_option_count").as_str())?,
         module_count: row.try_get(format!("{prefix}_module_count").as_str())?,
         completed_at: row.try_get(format!("{prefix}_completed_at").as_str())?,
@@ -1633,6 +1666,18 @@ fn decode_v2_global_state(record: &V2SnapshotRecord) -> Result<ConfigProvenanceA
     .context("certified V2 snapshot has malformed provenance state")
 }
 
+fn decode_v2_inventory_diagnostics(
+    record: &V2SnapshotRecord,
+) -> Result<Vec<InternalOptionInventoryDiagnostic>> {
+    serde_json::from_value(
+        record
+            .option_inventory_diagnostics
+            .clone()
+            .context("certified V2 snapshot is missing option inventory diagnostics")?,
+    )
+    .context("certified V2 snapshot has malformed option inventory diagnostics")
+}
+
 fn selected_v2_from_record(
     selected: V2SnapshotRecord,
     first_parent_resolved: bool,
@@ -1649,6 +1694,7 @@ fn selected_v2_from_record(
         .clone()
         .or_else(|| unavailable_v2_error(&selected));
     let mut provenance_state = None;
+    let mut option_inventory_diagnostics = Vec::new();
     if selected.raw_lifecycle == "available" && !v2_record_is_certified(&selected) {
         lifecycle = SnapshotLifecycle::Unavailable;
         error = Some("Snapshot data is unavailable or corrupt".to_string());
@@ -1657,13 +1703,22 @@ fn selected_v2_from_record(
             || selected.source_out_path.is_none()
             || selected.carrier_drv_path.is_none()
             || selected.comparison_ready.is_none()
+            || selected.option_inventory_complete.is_none()
+            || selected.option_inventory_diagnostics.is_none()
+            || selected.option_inventory_diagnostics_truncated.is_none()
         {
             lifecycle = SnapshotLifecycle::Unavailable;
             error = Some("Snapshot data is unavailable or corrupt".to_string());
         } else {
-            match decode_v2_global_state(&selected) {
-                Ok(state) => provenance_state = Some(state),
-                Err(_) => {
+            match (
+                decode_v2_global_state(&selected),
+                decode_v2_inventory_diagnostics(&selected),
+            ) {
+                (Ok(state), Ok(diagnostics)) => {
+                    provenance_state = Some(state);
+                    option_inventory_diagnostics = diagnostics;
+                }
+                _ => {
                     lifecycle = SnapshotLifecycle::Unavailable;
                     error = Some("Snapshot data is unavailable or corrupt".to_string());
                 }
@@ -1733,6 +1788,9 @@ fn selected_v2_from_record(
         carrier_drv_path: selected.carrier_drv_path,
         provenance_state,
         comparison_ready: selected.comparison_ready,
+        option_inventory_complete: selected.option_inventory_complete,
+        option_inventory_diagnostics,
+        option_inventory_diagnostics_truncated: selected.option_inventory_diagnostics_truncated,
         option_count: selected.option_count,
         module_count: selected.module_count,
         completed_at: selected.completed_at,
@@ -1773,6 +1831,9 @@ where
                selected.carrier_drv_path AS selected_carrier_drv_path,
                selected.provenance_state AS selected_provenance_state,
                selected.comparison_ready AS selected_comparison_ready,
+               selected.option_inventory_complete AS selected_option_inventory_complete,
+               selected.option_inventory_diagnostics AS selected_option_inventory_diagnostics,
+               selected.option_inventory_diagnostics_truncated AS selected_option_inventory_diagnostics_truncated,
                selected.option_count::bigint AS selected_option_count,
                selected.module_count::bigint AS selected_module_count,
                selected.completed_at AS selected_completed_at,
@@ -1794,6 +1855,9 @@ where
                baseline.carrier_drv_path AS baseline_carrier_drv_path,
                baseline.provenance_state AS baseline_provenance_state,
                baseline.comparison_ready AS baseline_comparison_ready,
+               baseline.option_inventory_complete AS baseline_option_inventory_complete,
+               baseline.option_inventory_diagnostics AS baseline_option_inventory_diagnostics,
+               baseline.option_inventory_diagnostics_truncated AS baseline_option_inventory_diagnostics_truncated,
                baseline.option_count::bigint AS baseline_option_count,
                baseline.module_count::bigint AS baseline_module_count,
                baseline.completed_at AS baseline_completed_at,
@@ -1857,6 +1921,10 @@ where
         carrier_drv_path: row.try_get("selected_carrier_drv_path")?,
         provenance_state: row.try_get("selected_provenance_state")?,
         comparison_ready: row.try_get("selected_comparison_ready")?,
+        option_inventory_complete: row.try_get("selected_option_inventory_complete")?,
+        option_inventory_diagnostics: row.try_get("selected_option_inventory_diagnostics")?,
+        option_inventory_diagnostics_truncated: row
+            .try_get("selected_option_inventory_diagnostics_truncated")?,
         option_count: row.try_get("selected_option_count")?,
         module_count: row.try_get("selected_module_count")?,
         completed_at: row.try_get("selected_completed_at")?,
@@ -1907,6 +1975,15 @@ pub(crate) fn config_snapshot_token_v2(selected: &ConfigSelectedSnapshotV2) -> S
             .baseline_provenance_lock_digest
             .clone()
             .unwrap_or_default(),
+        selected
+            .option_inventory_complete
+            .unwrap_or_default()
+            .to_string(),
+        serde_json::to_string(&selected.option_inventory_diagnostics).unwrap_or_default(),
+        selected
+            .option_inventory_diagnostics_truncated
+            .unwrap_or_default()
+            .to_string(),
         match &selected.comparison {
             ConfigComparisonStateV2::Available {
                 baseline_id,
@@ -3215,6 +3292,9 @@ pub async fn get_selected_evaluation_summary_with_token(
 
     let summary = SelectedEvaluationSummary {
         lifecycle: selected.lifecycle,
+        option_inventory_state: OptionInventoryState::Complete,
+        option_inventory_diagnostics: Vec::new(),
+        option_inventory_diagnostics_truncated: false,
         revision: selected.revision.clone(),
         generation: selected.generation,
         error: selected.error.clone(),
@@ -4620,6 +4700,9 @@ fn empty_selected_evaluation_summary(
 ) -> SelectedEvaluationSummary {
     SelectedEvaluationSummary {
         lifecycle,
+        option_inventory_state: OptionInventoryState::Unavailable,
+        option_inventory_diagnostics: Vec::new(),
+        option_inventory_diagnostics_truncated: false,
         revision: selected.revision.clone(),
         generation: selected.generation,
         error,
@@ -4843,6 +4926,9 @@ pub async fn get_evaluation_module_sources_page(
         return Ok(EvaluationModuleSourcesQuery::Page(
             EvaluationModuleSourcesPage {
                 lifecycle,
+                option_inventory_state: OptionInventoryState::Unavailable,
+                option_inventory_diagnostics: Vec::new(),
+                option_inventory_diagnostics_truncated: false,
                 revision: selected.revision.clone(),
                 generation: selected.generation,
                 error: selected.error.clone(),
@@ -4859,6 +4945,9 @@ pub async fn get_evaluation_module_sources_page(
         return Ok(EvaluationModuleSourcesQuery::Page(
             EvaluationModuleSourcesPage {
                 lifecycle: SnapshotLifecycle::Unavailable,
+                option_inventory_state: OptionInventoryState::Unavailable,
+                option_inventory_diagnostics: Vec::new(),
+                option_inventory_diagnostics_truncated: false,
                 revision: selected.revision.clone(),
                 generation: selected.generation,
                 error: selected
@@ -4944,6 +5033,9 @@ pub async fn get_evaluation_module_sources_page(
 
     let page = EvaluationModuleSourcesPage {
         lifecycle: selected.lifecycle,
+        option_inventory_state: OptionInventoryState::Complete,
+        option_inventory_diagnostics: Vec::new(),
+        option_inventory_diagnostics_truncated: false,
         revision: selected.revision.clone(),
         generation: selected.generation,
         error: selected.error.clone(),
@@ -5065,6 +5157,9 @@ fn query_options_page_tx<'a>(
         if selected.lifecycle != SnapshotLifecycle::Available {
             return Ok(EvaluatedOptionsPage {
                 lifecycle: selected.lifecycle,
+                option_inventory_state: OptionInventoryState::Unavailable,
+                option_inventory_diagnostics: Vec::new(),
+                option_inventory_diagnostics_truncated: false,
                 revision: selected.revision.clone(),
                 generation: selected.generation,
                 generation_snapshot_id: selected.generation_snapshot_id,
@@ -5088,6 +5183,9 @@ fn query_options_page_tx<'a>(
         if !snapshot_is_usable(&mut **tx, selected.id).await? {
             return Ok(EvaluatedOptionsPage {
                 lifecycle: SnapshotLifecycle::Unavailable,
+                option_inventory_state: OptionInventoryState::Unavailable,
+                option_inventory_diagnostics: Vec::new(),
+                option_inventory_diagnostics_truncated: false,
                 revision: selected.revision.clone(),
                 generation: selected.generation,
                 generation_snapshot_id: selected.generation_snapshot_id,
@@ -5273,6 +5371,9 @@ fn query_options_page_tx<'a>(
             Ok(_) | Err(_) => {
                 return Ok(EvaluatedOptionsPage {
                     lifecycle: SnapshotLifecycle::Unavailable,
+                    option_inventory_state: OptionInventoryState::Unavailable,
+                    option_inventory_diagnostics: Vec::new(),
+                    option_inventory_diagnostics_truncated: false,
                     revision: selected.revision.clone(),
                     generation: selected.generation,
                     generation_snapshot_id: selected.generation_snapshot_id,
@@ -5348,6 +5449,9 @@ fn query_options_page_tx<'a>(
 
         Ok(EvaluatedOptionsPage {
             lifecycle: selected.lifecycle,
+            option_inventory_state: OptionInventoryState::Complete,
+            option_inventory_diagnostics: Vec::new(),
+            option_inventory_diagnostics_truncated: false,
             revision: selected.revision.clone(),
             generation: selected.generation,
             generation_snapshot_id: selected.generation_snapshot_id,
@@ -5486,6 +5590,7 @@ mod tests {
     use sqlx::PgPool;
 
     use crate::models::commits::Commit;
+    use crate::models::config_inspector::OptionInventoryDiagnostic as InternalOptionInventoryDiagnostic;
     use crate::models::config_snapshot_artifact::{
         CONFIG_OPTION_ARTIFACT_SCHEMA_VERSION_V2, ConfigDefinitionArtifactV2,
         ConfigDefinitionStatusV2, ConfigInspectionArtifactV2, ConfigOptionArtifactV2,
@@ -11803,6 +11908,9 @@ mod tests {
             target_key: "a".repeat(64),
             source_out_path: "/nix/store/source".to_string(),
             carrier_drv_path: "/nix/store/carrier.drv".to_string(),
+            option_inventory_complete: true,
+            option_inventory_diagnostics: Vec::new(),
+            option_inventory_diagnostics_truncated: false,
             provenance_state: ConfigProvenanceArtifactStateV2::Available {
                 adapter_version: 1,
                 target_lib_version: None,
@@ -11880,6 +11988,103 @@ mod tests {
             .await
             .expect("reader fixture child should load");
         (system, parent, child)
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn v2_partial_inventory_serves_observed_rows_and_disables_comparison(pool: PgPool) {
+        sqlx::migrate!().run(&pool).await.expect("apply migrations");
+        let (system, parent, child) = v2_reader_history_fixture(&pool).await;
+        let mut parent_tx = pool.begin().await.expect("begin parent persistence");
+        persist_config_artifact_v2_deferred_tx(
+            &mut parent_tx,
+            parent.id,
+            "host",
+            v2_reader_artifact(parent.id, vec![v2_option(&["services", "healthy"], "old")]),
+        )
+        .await
+        .expect("persist complete parent");
+        parent_tx.commit().await.expect("commit parent");
+
+        let mut partial = v2_reader_artifact(
+            child.id,
+            vec![
+                v2_option(&["services", "healthy"], "new"),
+                v2_option(&["services", "searchable"], "needle"),
+            ],
+        );
+        partial.option_inventory_complete = false;
+        partial.option_inventory_diagnostics = (0..128)
+            .map(|index| InternalOptionInventoryDiagnostic {
+                path: vec!["services".to_string(), format!("poison{index:03}")],
+                code: "unreadable_option_subtree".to_string(),
+                message: "Option subtree could not be inspected".to_string(),
+            })
+            .collect();
+        partial.option_inventory_diagnostics_truncated = true;
+        let mut child_tx = pool.begin().await.expect("begin partial persistence");
+        let partial_id =
+            persist_config_artifact_v2_deferred_tx(&mut child_tx, child.id, "host", partial)
+                .await
+                .expect("persist partial child");
+        child_tx.commit().await.expect("commit partial child");
+
+        let selected = select_config_snapshot_v2(&pool, system.id, &child.git_commit_hash)
+            .await
+            .expect("select partial artifact")
+            .expect("partial selector exists");
+        assert_eq!(selected.id, partial_id);
+        assert_eq!(selected.lifecycle, SnapshotLifecycle::Available);
+        assert_eq!(selected.option_inventory_complete, Some(false));
+        assert_eq!(selected.option_inventory_diagnostics.len(), 128);
+        assert_eq!(selected.option_inventory_diagnostics_truncated, Some(true));
+        assert_eq!(selected.comparison_ready, Some(false));
+        assert!(matches!(
+            selected.comparison,
+            ConfigComparisonStateV2::Unavailable { .. }
+        ));
+
+        for search in ["", "needle"] {
+            let ConfigOptionsPageQueryV2::Page(page) = query_config_options_page_v2(
+                &pool,
+                system.id,
+                &child.git_commit_hash,
+                search,
+                EvaluatedOptionFilter::All,
+                None,
+                50,
+                0,
+            )
+            .await
+            .expect("query observed partial rows") else {
+                panic!("partial selector must return a page");
+            };
+            assert_eq!(page.counts.all, 2);
+            assert_eq!(page.selected.option_inventory_diagnostics.len(), 128);
+            assert_eq!(
+                page.selected.option_inventory_diagnostics_truncated,
+                Some(true)
+            );
+            assert!(page.counts.changed.is_none());
+            assert_eq!(page.total, if search.is_empty() { 2 } else { 1 });
+            assert!(page.options.iter().all(|row| row.changed.is_none()));
+        }
+        let ConfigOptionsPageQueryV2::Page(changed) = query_config_options_page_v2(
+            &pool,
+            system.id,
+            &child.git_commit_hash,
+            "",
+            EvaluatedOptionFilter::Changed,
+            None,
+            50,
+            0,
+        )
+        .await
+        .expect("query unavailable Changed page") else {
+            panic!("partial selector must return a Changed page");
+        };
+        assert!(changed.counts.changed.is_none());
+        assert!(changed.options.is_empty());
     }
 
     #[sqlx::test]
@@ -12661,6 +12866,9 @@ mod tests {
             carrier_drv_path: Some("/nix/store/carrier.drv".to_string()),
             provenance_state: None,
             comparison_ready: Some(true),
+            option_inventory_complete: Some(true),
+            option_inventory_diagnostics: Vec::new(),
+            option_inventory_diagnostics_truncated: Some(false),
             option_count: 0,
             module_count: 0,
             completed_at: None,
@@ -12678,6 +12886,9 @@ mod tests {
         let mut replaced = selected.clone();
         replaced.id = Uuid::new_v4();
         assert_ne!(token, config_snapshot_token_v2(&replaced));
+        let mut truncated = selected.clone();
+        truncated.option_inventory_diagnostics_truncated = Some(true);
+        assert_ne!(token, config_snapshot_token_v2(&truncated));
         replaced = selected.clone();
         replaced.comparison = ConfigComparisonStateV2::Unavailable {
             reason: ConfigComparisonUnavailableReasonV2::BaselineNotComparisonReady,
