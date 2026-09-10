@@ -366,7 +366,7 @@ fn validate_package_pname(pname: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_custom_eval_syntax(expressions: &[&str]) -> Result<(), String> {
+pub(super) fn validate_custom_eval_syntax(expressions: &[&str]) -> Result<(), String> {
     // Parse every custom expression in one bounded subprocess. This keeps the
     // synchronous persistence API while avoiding one blocking process and
     // timeout for every rule on an async request path.
@@ -420,6 +420,14 @@ fn decode_policy_type_config(
     config: &serde_json::Value,
     validate_nix_syntax: bool,
 ) -> Result<Option<CompositePolicyConfig>, String> {
+    if policy_type == "custom_check" {
+        super::custom_check::validate_and_normalize_config(
+            config,
+            super::custom_check::ExpressionBinding::Current,
+            validate_nix_syntax,
+        )?;
+        return Ok(None);
+    }
     if policy_type != COMPOSITE_POLICY_TYPE {
         return Ok(None);
     }

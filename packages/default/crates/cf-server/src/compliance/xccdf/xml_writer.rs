@@ -40,6 +40,7 @@ use super::super::interchange::{
     CANONICALIZATION_VERSION, CF_NIX_FIX_SYSTEM, CF_POLICY_CHECK_SYSTEM, CF_XCCDF_NAMESPACE,
     DIGEST_ALGORITHM, XCCDF_1_2_NAMESPACE,
 };
+use super::custom_check::{CURRENT_BINDING, CURRENT_CONTEXT, CustomCheckRuleProjection};
 use super::export_models::{
     XccdfBundleExport, XccdfCheckBodyPart, XccdfGroupExport, XccdfPolicyExport, XccdfSourceMapping,
     XccdfStandardCheck,
@@ -760,93 +761,25 @@ fn write_custom_check(
     writer: &mut Writer<Cursor<&mut Vec<u8>>>,
     pv: &XccdfPolicyExport,
 ) -> Result<(), XccdfWriterError> {
-    let rules = pv.config.get("rules").and_then(|v| v.as_array());
-    let has_rules = rules.map(|r| !r.is_empty()).unwrap_or(false);
-
-    // COMPATIBILITY: Legacy single-expression policies predate `mode`.
-    // Project the runtime default into XCCDF without changing stored config or
-    // its semantic digest.
-    let mode = match pv.config.get("mode") {
-        None => "all",
-        Some(value) => value
-            .as_str()
-            .ok_or_else(|| XccdfWriterError::MissingConfig {
-                policy_type: pv.policy_type.clone(),
-                field: "mode",
-            })?,
-    };
-    if !matches!(mode, "all" | "any") {
-        return Err(XccdfWriterError::MissingConfig {
-            policy_type: pv.policy_type.clone(),
-            field: "mode (must be all or any)",
-        });
-    }
-    let context = pv
-        .config
-        .get("context")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| XccdfWriterError::MissingConfig {
-            policy_type: pv.policy_type.clone(),
-            field: "context",
-        })?;
-    let binding = pv
-        .config
-        .get("binding")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| XccdfWriterError::MissingConfig {
-            policy_type: pv.policy_type.clone(),
-            field: "binding",
-        })?;
+    let projection = super::custom_check::project_custom_check(
+        &pv.name,
+        pv.policy_id,
+        pv.description.as_deref(),
+        &pv.config,
+    )
+    .map_err(|_| XccdfWriterError::MissingConfig {
+        policy_type: pv.policy_type.clone(),
+        field: "valid custom_check config",
+    })?;
 
     let mut elem = BytesStart::new("cf:custom-check");
-    elem.push_attribute(("mode", mode));
-    elem.push_attribute(("context", context));
-    elem.push_attribute(("binding", binding));
+    elem.push_attribute(("mode", projection.mode.as_str()));
+    elem.push_attribute(("context", CURRENT_CONTEXT));
+    elem.push_attribute(("binding", CURRENT_BINDING));
     writer.write_event(Event::Start(elem))?;
 
-    if has_rules {
-        for rule in rules.unwrap() {
-            write_custom_check_rule(writer, pv, rule)?;
-        }
-    } else {
-        // Legacy single-expression form.
-        let field_name = pv
-            .config
-            .get("field_name")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| XccdfWriterError::MissingConfig {
-                policy_type: pv.policy_type.clone(),
-                field: "field_name",
-            })?;
-        let strict = pv
-            .config
-            .get("strict")
-            .and_then(|v| v.as_bool())
-            .ok_or_else(|| XccdfWriterError::MissingConfig {
-                policy_type: pv.policy_type.clone(),
-                field: "strict",
-            })?;
-        let expr = pv
-            .config
-            .get("expression")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| XccdfWriterError::MissingConfig {
-                policy_type: pv.policy_type.clone(),
-                field: "expression",
-            })?;
-        let mut rule_elem = BytesStart::new("cf:rule");
-        rule_elem.push_attribute(("field-name", field_name));
-        rule_elem.push_attribute(("strict", strict.to_string().as_str()));
-        writer.write_event(Event::Start(rule_elem))?;
-        if let Some(desc) = pv.config.get("description").and_then(|v| v.as_str()) {
-            cf_el(writer, "description", desc)?;
-        }
-        let mut expr_elem = BytesStart::new("cf:expression");
-        expr_elem.push_attribute(("language", "nix"));
-        writer.write_event(Event::Start(expr_elem))?;
-        writer.write_event(Event::Text(BytesText::new(expr)))?;
-        writer.write_event(Event::End(BytesEnd::new("cf:expression")))?;
-        writer.write_event(Event::End(BytesEnd::new("cf:rule")))?;
+    for rule in &projection.rules {
+        write_custom_check_rule(writer, rule)?;
     }
 
     writer.write_event(Event::End(BytesEnd::new("cf:custom-check")))?;
@@ -855,41 +788,17 @@ fn write_custom_check(
 
 fn write_custom_check_rule(
     writer: &mut Writer<Cursor<&mut Vec<u8>>>,
-    pv: &XccdfPolicyExport,
-    rule: &serde_json::Value,
+    rule: &CustomCheckRuleProjection,
 ) -> Result<(), XccdfWriterError> {
-    let field_name = rule
-        .get("field_name")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| XccdfWriterError::MissingConfig {
-            policy_type: pv.policy_type.clone(),
-            field: "rules[].field_name",
-        })?;
-    let strict = rule
-        .get("strict")
-        .and_then(|v| v.as_bool())
-        .ok_or_else(|| XccdfWriterError::MissingConfig {
-            policy_type: pv.policy_type.clone(),
-            field: "rules[].strict",
-        })?;
-    let expr = rule
-        .get("expression")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| XccdfWriterError::MissingConfig {
-            policy_type: pv.policy_type.clone(),
-            field: "rules[].expression",
-        })?;
     let mut elem = BytesStart::new("cf:rule");
-    elem.push_attribute(("field-name", field_name));
-    elem.push_attribute(("strict", strict.to_string().as_str()));
+    elem.push_attribute(("field-name", rule.field_name.as_str()));
+    elem.push_attribute(("strict", rule.strict.to_string().as_str()));
     writer.write_event(Event::Start(elem))?;
-    if let Some(desc) = rule.get("description").and_then(|v| v.as_str()) {
-        cf_el(writer, "description", desc)?;
-    }
+    cf_el(writer, "description", &rule.description)?;
     let mut expr_elem = BytesStart::new("cf:expression");
     expr_elem.push_attribute(("language", "nix"));
     writer.write_event(Event::Start(expr_elem))?;
-    writer.write_event(Event::Text(BytesText::new(expr)))?;
+    writer.write_event(Event::Text(BytesText::new(&rule.expression)))?;
     writer.write_event(Event::End(BytesEnd::new("cf:expression")))?;
     writer.write_event(Event::End(BytesEnd::new("cf:rule")))?;
     Ok(())
@@ -2150,23 +2059,22 @@ mod tests {
     #[test]
     fn custom_check_legacy_expression_without_mode_exports_one_rule_as_all() {
         let config = json!({
-            "expression": "cfg.config.networking.firewall.enable",
+            "expression": "config.networking.firewall.enable",
             "description": "Firewall enabled",
             "field_name": "firewallEnabled",
-            "strict": true,
-            "context": "nixos-configuration-v1",
-            "binding": "cfg"
+            "strict": true
         });
         let pv = test_policy("custom_check", ImplementationState::Native, config.clone());
         let expected_digest = pv.semantic_digest.clone();
         let snap = make_single_policy_snapshot(vec![pv]);
         let xml = write_bundle_xccdf_export(&snap).unwrap();
         assert!(xml.contains("<cf:custom-check mode=\"all\""));
+        assert!(xml.contains("context=\"nixos-configuration-v2\" binding=\"config\""));
         assert_eq!(xml.matches("<cf:rule ").count(), 1);
         assert!(xml.contains("field-name=\"firewallEnabled\""));
         assert!(xml.contains("strict=\"true\""));
         assert!(xml.contains(
-            "<cf:expression language=\"nix\">cfg.config.networking.firewall.enable</cf:expression>"
+            "<cf:expression language=\"nix\">config.networking.firewall.enable</cf:expression>"
         ));
 
         let parsed = parse_xccdf(
@@ -2187,8 +2095,6 @@ mod tests {
             ImplementationState::Native,
             json!({
                 "mode": "all",
-                "context": "nixos-configuration-v1",
-                "binding": "cfg",
                 "rules": [
                     {"expression": "a", "description": "Rule A", "field_name": "a", "strict": true},
                     {"expression": "b", "description": "Rule B", "field_name": "b", "strict": false}
@@ -2210,8 +2116,6 @@ mod tests {
             "custom_check",
             ImplementationState::Native,
             json!({
-                "context": "nixos-configuration-v1",
-                "binding": "cfg",
                 "rules": [
                     {"expression": "a", "field_name": "a", "strict": true},
                     {"expression": "b", "field_name": "b", "strict": false}
@@ -2231,8 +2135,6 @@ mod tests {
             ImplementationState::Native,
             json!({
                 "mode": "any",
-                "context": "nixos-configuration-v1",
-                "binding": "cfg",
                 "rules": [{"expression": "x", "field_name": "x", "strict": true}]
             }),
         );
@@ -2242,24 +2144,117 @@ mod tests {
     }
 
     #[test]
-    fn custom_check_non_string_mode_is_rejected() {
+    fn custom_check_single_expression_ignores_irrelevant_mode() {
         let pv = test_policy(
             "custom_check",
             ImplementationState::Native,
             json!({
                 "mode": false,
-                "context": "nixos-configuration-v1",
-                "binding": "cfg",
                 "expression": "true",
                 "field_name": "enabled",
                 "strict": true
             }),
         );
 
-        assert!(matches!(
-            write_bundle_xccdf_export(&make_single_policy_snapshot(vec![pv])),
-            Err(XccdfWriterError::MissingConfig { field: "mode", .. })
+        let xml = write_bundle_xccdf_export(&make_single_policy_snapshot(vec![pv])).unwrap();
+        assert!(xml.contains("<cf:custom-check mode=\"all\""));
+    }
+
+    #[test]
+    fn custom_check_empty_all_exports_without_dummy_rule() {
+        let config = json!({"mode": "all", "rules": []});
+        let pv = test_policy("custom_check", ImplementationState::Native, config.clone());
+        let xml = write_bundle_xccdf_export(&make_single_policy_snapshot(vec![pv])).unwrap();
+
+        assert!(xml.contains(
+            "<cf:custom-check mode=\"all\" context=\"nixos-configuration-v2\" binding=\"config\"></cf:custom-check>"
         ));
+        assert!(!xml.contains("<cf:rule "));
+        assert!(xml.contains("<cf:config-json>{&quot;mode&quot;:&quot;all&quot;,&quot;rules&quot;:[]}</cf:config-json>"));
+    }
+
+    #[test]
+    fn custom_check_empty_any_is_rejected() {
+        let pv = test_policy(
+            "custom_check",
+            ImplementationState::Native,
+            json!({"mode": "any", "rules": []}),
+        );
+
+        assert!(write_bundle_xccdf_export(&make_single_policy_snapshot(vec![pv])).is_err());
+    }
+
+    #[test]
+    fn current_custom_checks_round_trip_through_real_native_import() {
+        use crate::compliance::digest::{
+            BundleMembershipEntry, BundleVersionCanonical, PolicyVersionCanonical,
+        };
+        use crate::compliance::xccdf::importer::validate_cf_native_document;
+
+        for config in [
+            json!({
+                "expression": "config.networking.firewall.enable",
+                "description": "Firewall enabled",
+                "field_name": "firewallEnabled",
+                "strict": true
+            }),
+            json!({
+                "mode": "any",
+                "rules": [
+                    {"expression": "config.services.openssh.enable", "description": "SSH", "field_name": "ssh", "strict": true},
+                    {"expression": "config.services.nginx.enable", "description": "Nginx", "field_name": "nginx", "strict": false}
+                ]
+            }),
+            json!({"mode": "all", "rules": []}),
+        ] {
+            let mut policy =
+                test_policy("custom_check", ImplementationState::Native, config.clone());
+            policy.semantic_digest = PolicyVersionCanonical {
+                name: policy.name.clone(),
+                description: policy.description.clone(),
+                policy_type: policy.policy_type.clone(),
+                implementation_state: "native".into(),
+                execution_phase: policy.execution_phase.clone(),
+                config: config.clone(),
+                compliance_metadata: policy.compliance_metadata.clone(),
+                dependencies: policy.dependencies.clone(),
+                opaque_xml_digest: None,
+                enabled_by_default: Some(policy.enabled_default),
+            }
+            .compute_digest();
+            let expected_digest = policy.semantic_digest.clone();
+            let policy_version_id = policy.policy_version_id;
+            let mut snapshot = make_single_policy_snapshot(vec![policy]);
+            snapshot.semantic_digest = BundleVersionCanonical {
+                name: snapshot.name.clone(),
+                framework: snapshot.framework.clone(),
+                framework_version: snapshot.framework_version.clone(),
+                description: snapshot.description.clone(),
+                layer: snapshot.layer.clone(),
+                owner: snapshot.owner.clone(),
+                members: vec![BundleMembershipEntry {
+                    policy_version_id,
+                    selected: true,
+                }],
+            }
+            .compute_digest();
+
+            let xml = write_bundle_xccdf_export(&snapshot).unwrap();
+            let parsed = parse_xccdf(
+                xml.as_bytes(),
+                Some("current-custom-check.xml"),
+                &InterchangeLimits::default(),
+            )
+            .unwrap();
+            let (_, records) = validate_cf_native_document(&parsed).unwrap();
+
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].config, config);
+            assert_eq!(
+                records[0].semantic_digest.as_deref(),
+                Some(expected_digest.as_str())
+            );
+        }
     }
 
     #[test]
@@ -2389,12 +2384,12 @@ mod tests {
             (
                 "custom_check",
                 json!({
-                    "mode": "sometimes",
+                    "mode": "all",
                     "context": "nixos-configuration-v1",
                     "binding": "cfg",
                     "expression": "true",
                     "field_name": "enabled",
-                    "strict": true
+                    "strict": "invalid"
                 }),
             ),
             (
@@ -3174,13 +3169,13 @@ mod tests {
                         "binding": "cfg",
                         "rules": [
                             {
-                                "expression": "cfg.config.networking.firewall.enable",
+                                "expression": "config.networking.firewall.enable",
                                 "description": "Firewall enabled",
                                 "field_name": "firewallEnabled",
                                 "strict": true
                             },
                             {
-                                "expression": "cfg.config.services.openssh.enable",
+                                "expression": "config.services.openssh.enable",
                                 "description": "SSH enabled",
                                 "field_name": "sshEnabled",
                                 "strict": false

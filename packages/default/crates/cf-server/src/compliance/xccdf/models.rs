@@ -234,12 +234,42 @@ pub struct CfPolicyMeta {
     pub execution_phase: Option<String>,
     pub strict: Option<bool>,
     pub policy_type: Option<String>,
+    /// Preserves the typed custom-check projection for import reconciliation.
+    pub custom_check: Option<CfCustomCheck>,
     pub config: Option<serde_json::Value>,
     pub compliance_metadata: Option<serde_json::Value>,
     pub dependencies: Option<serde_json::Value>,
     pub digest: Option<String>,
     pub digest_algorithm: Option<String>,
     pub canonicalization_version: Option<String>,
+}
+
+/// Preserves one typed CF-XCCDF custom-check implementation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CfCustomCheck {
+    /// Selects whether all rules or any rule must pass.
+    pub mode: Option<String>,
+    /// Identifies the expression context contract.
+    pub context: Option<String>,
+    /// Identifies the root expression binding.
+    pub binding: Option<String>,
+    /// Preserves typed rules in document order.
+    pub rules: Vec<CfCustomCheckRule>,
+}
+
+/// Preserves one typed rule in a CF-XCCDF custom-check implementation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CfCustomCheckRule {
+    /// Identifies the evaluator result field.
+    pub field_name: Option<String>,
+    /// Determines whether a failed rule blocks deployment.
+    pub strict: Option<bool>,
+    /// Gives operator-facing detail for the rule.
+    pub description: Option<String>,
+    /// Gives the Nix expression exactly as encoded in XML.
+    pub expression: Option<String>,
+    /// Identifies the expression language.
+    pub language: Option<String>,
 }
 
 // ── Signature ─────────────────────────────────────────────────────────────────

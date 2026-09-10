@@ -14703,22 +14703,20 @@ packages = ["git"]
 
     #[tokio::test]
     #[ignore = "requires live database connection"]
-    async fn bundle_publication_and_xccdf_export_support_legacy_custom_check_without_mode() {
+    async fn bundle_publication_and_xccdf_export_support_custom_check_without_projection_fields() {
         let pool = test_pool_from_env().await;
         let (admin_id, token) = session_token_for_role(&pool, AuthRole::Admin).await;
         let csrf = format!("legacy-xccdf-csrf-{}", Uuid::new_v4().simple());
-        let legacy_config = serde_json::json!({
-            "expression": "cfg.config.networking.firewall.enable",
+        let custom_check_config = serde_json::json!({
+            "expression": "config.networking.firewall.enable",
             "description": "Firewall enabled",
             "field_name": "firewallEnabled",
-            "strict": true,
-            "context": "nixos-configuration-v1",
-            "binding": "cfg"
+            "strict": true
         });
         let (_, policy_version_id, policy_digest) = make_draft_policy_with_config(
             &pool,
             &format!("legacy-xccdf-{}", Uuid::new_v4().simple()),
-            &legacy_config,
+            &custom_check_config,
         )
         .await;
         db_trust_policy_version(&pool, policy_version_id, admin_id).await;
@@ -14781,8 +14779,8 @@ packages = ["git"]
 
         assert_eq!(policy_state, "accepted");
         assert_eq!(bundle_state, "accepted");
-        assert_eq!(stored_version_config, legacy_config);
-        assert_eq!(stored_policy_config, legacy_config);
+        assert_eq!(stored_version_config, custom_check_config);
+        assert_eq!(stored_policy_config, custom_check_config);
         assert_eq!(stored_policy_digest, policy_digest);
         assert_eq!(stored_bundle_digest, bundle_digest);
 
@@ -14803,11 +14801,12 @@ packages = ["git"]
             "XCCDF export must succeed: {xccdf}"
         );
         assert!(xccdf.contains("<cf:custom-check mode=\"all\""));
+        assert!(xccdf.contains("context=\"nixos-configuration-v2\" binding=\"config\""));
         assert_eq!(xccdf.matches("<cf:rule ").count(), 1);
         assert!(xccdf.contains("field-name=\"firewallEnabled\""));
         assert!(xccdf.contains("strict=\"true\""));
         assert!(xccdf.contains(
-            "<cf:expression language=\"nix\">cfg.config.networking.firewall.enable</cf:expression>"
+            "<cf:expression language=\"nix\">config.networking.firewall.enable</cf:expression>"
         ));
     }
 
@@ -14818,14 +14817,14 @@ packages = ["git"]
         let (admin_id, token) = session_token_for_role(&pool, AuthRole::Admin).await;
         let csrf = format!("invalid-xccdf-csrf-{}", Uuid::new_v4().simple());
         let invalid_config = serde_json::json!({
-            "mode": "sometimes",
+            "mode": "all",
             "expression": "true",
             "field_name": "enabled",
-            "strict": true,
+            "strict": "invalid",
             "context": "nixos-configuration-v1",
             "binding": "cfg"
         });
-        let (policy_id, policy_version_id, _) = make_draft_policy_with_config(
+        let (policy_id, policy_version_id, policy_digest) = make_draft_policy_with_config(
             &pool,
             &format!("invalid-xccdf-{}", Uuid::new_v4().simple()),
             &invalid_config,
@@ -14840,6 +14839,13 @@ packages = ["git"]
         )
         .await;
         db_trust_bundle_version(&pool, bundle_version_id, admin_id).await;
+        let audit_count_before: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM admin_audit_events WHERE target IN ($1, $2)")
+                .bind(policy_version_id.to_string())
+                .bind(bundle_version_id.to_string())
+                .fetch_one(&pool)
+                .await
+                .expect("count publication audits before failure");
 
         let base = spawn_phase1_server(pool.clone()).await;
         let response = reqwest::Client::new()
@@ -14860,15 +14866,24 @@ packages = ["git"]
             .expect("publish invalid custom-check bundle");
         assert_eq!(response.status().as_u16(), 500);
 
-        let (policy_state,): (String,) = sqlx::query_as(
-            "SELECT publication_state FROM deployment_policy_versions WHERE id = $1",
+        let (policy_state, policy_published_at, stored_policy_digest, stored_policy_config): (
+            String,
+            Option<chrono::DateTime<chrono::Utc>>,
+            String,
+            serde_json::Value,
+        ) = sqlx::query_as(
+            "SELECT publication_state, published_at, semantic_digest, config FROM deployment_policy_versions WHERE id = $1",
         )
         .bind(policy_version_id)
         .fetch_one(&pool)
         .await
         .expect("load rolled-back policy state");
-        let (bundle_state,): (String,) = sqlx::query_as(
-            "SELECT publication_state FROM compliance_bundle_versions WHERE id = $1",
+        let (bundle_state, bundle_published_at, stored_bundle_digest): (
+            String,
+            Option<chrono::DateTime<chrono::Utc>>,
+            String,
+        ) = sqlx::query_as(
+            "SELECT publication_state, published_at, semantic_digest FROM compliance_bundle_versions WHERE id = $1",
         )
         .bind(bundle_version_id)
         .fetch_one(&pool)
@@ -14888,13 +14903,26 @@ packages = ["git"]
         .fetch_one(&pool)
         .await
         .expect("load rolled-back bundle pointers");
+        let audit_count_after: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM admin_audit_events WHERE target IN ($1, $2)")
+                .bind(policy_version_id.to_string())
+                .bind(bundle_version_id.to_string())
+                .fetch_one(&pool)
+                .await
+                .expect("count publication audits after failure");
 
         assert_eq!(policy_state, "draft");
+        assert_eq!(policy_published_at, None);
+        assert_eq!(stored_policy_digest, policy_digest);
+        assert_eq!(stored_policy_config, invalid_config);
         assert_eq!(bundle_state, "draft");
+        assert_eq!(bundle_published_at, None);
+        assert_eq!(stored_bundle_digest, bundle_digest);
         assert_eq!(policy_draft, Some(policy_version_id));
         assert_eq!(policy_published, None);
         assert_eq!(bundle_draft, Some(bundle_version_id));
         assert_eq!(bundle_published, None);
+        assert_eq!(audit_count_after, audit_count_before);
     }
 
     /// Stale digest on accepted member should block bundle publication

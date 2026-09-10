@@ -4,6 +4,7 @@
 //! Parsed structures are typed Rust representations of XCCDF 1.2 and the
 //! Crystal Forge extension namespace.
 
+pub mod custom_check;
 pub mod disa_stig_adapter;
 pub mod exact_technical_match;
 pub mod export_models;

@@ -2079,7 +2079,8 @@ pub async fn commit_cf_native_import(
          "bundle_version_created": bundle_version_created,
         "conflict_count": 0,
         "trust_state": "untrusted",
-        "publication_state": "draft"
+        "publication_state": "draft",
+        "source_publication_state": bundle_meta.publication_state
     });
     sqlx::query(
         "INSERT INTO admin_audit_events (actor_user_id, actor_identifier, action, target, metadata) \
@@ -2155,13 +2156,14 @@ async fn create_native_policy_lineage_and_version(
 ) -> Result<()> {
     sqlx::query(
         "INSERT INTO deployment_policies (id, name, description, policy_type, config, enabled) \
-         VALUES ($1,$2,$3,$4,$5,false)",
+         VALUES ($1,$2,$3,$4,$5,$6)",
     )
     .bind(record.policy_id)
     .bind(&record.name)
     .bind(&record.description)
     .bind(&record.policy_type)
     .bind(&record.config)
+    .bind(record.enabled_by_default)
     .execute(&mut **tx)
     .await
     .context("failed to create CF-native policy lineage")?;
@@ -2380,6 +2382,38 @@ mod tests {
         ImportedMappingSemantics, ReviewedRelatedCandidate, SharedGroupAction, SharedGroupDecision,
     };
 
+    fn evaluate_custom_policies_with_nix(
+        assigned: &[crate::models::deployment_policies::AssignedPolicy],
+        config_fields: &str,
+    ) -> serde_json::Value {
+        let fields =
+            crate::models::deployment_policies::build_policy_fields_for_config_standalone(assigned)
+                .join("\n");
+        let expression = format!(
+            "let config = {{ {config_fields} }}; in {{\ncfAgentEnabled = true;\n{fields}\n}}"
+        );
+        let output = std::process::Command::new("nix")
+            .args([
+                "--extra-experimental-features",
+                "nix-command",
+                "--store",
+                "dummy://",
+                "eval",
+                "--json",
+                "--expr",
+                &expression,
+            ])
+            .output()
+            .expect("Nix evaluator must be available for operational parity");
+        assert!(
+            output.status.success(),
+            "Nix policy evaluation failed:\n{}\nExpression:\n{}",
+            String::from_utf8_lossy(&output.stderr),
+            expression
+        );
+        serde_json::from_slice(&output.stdout).expect("Nix policy result must be JSON")
+    }
+
     fn minimal_xccdf_bytes() -> Vec<u8> {
         br#"<?xml version="1.0" encoding="UTF-8"?>
 <Benchmark xmlns="http://checklists.nist.gov/xccdf/1.2" id="xccdf_test_benchmark">
@@ -2521,6 +2555,7 @@ mod tests {
             policy_version_id,
             strict,
             "1.0",
+            false,
         )
     }
 
@@ -2536,18 +2571,50 @@ mod tests {
         policy_version_id: Uuid,
         strict: bool,
         policy_version_label: &str,
+        legacy_binding: bool,
+    ) -> Vec<u8> {
+        let expression = if legacy_binding {
+            "cfg.config.services.crystal-forge-agent.enable"
+        } else {
+            "config.services.crystal-forge-agent.enable"
+        };
+        native_fixture_bytes_with_expression(
+            bundle_id,
+            bundle_version_id,
+            policy_id,
+            policy_version_id,
+            strict,
+            policy_version_label,
+            legacy_binding,
+            expression,
+        )
+    }
+
+    fn native_fixture_bytes_with_expression(
+        bundle_id: Uuid,
+        bundle_version_id: Uuid,
+        policy_id: Uuid,
+        policy_version_id: Uuid,
+        strict: bool,
+        policy_version_label: &str,
+        legacy_binding: bool,
+        expression: &str,
     ) -> Vec<u8> {
         use crate::compliance::digest::{BundleVersionCanonical, PolicyVersionCanonical};
         let bundle_name = format!("Native Fixture Bundle {bundle_id}");
         let policy_name = format!("Native Agent Requirement {policy_id}");
+        let context = if legacy_binding {
+            "nixos-configuration-v1"
+        } else {
+            "nixos-configuration-v2"
+        };
+        let binding = if legacy_binding { "cfg" } else { "config" };
         let config = serde_json::json!({
             "mode": "all",
-            "context": "nixos-configuration-v1",
-            "binding": "cfg",
             "rules": [{
                 "field_name": "agentEnabled",
                 "description": "The agent is enabled",
-                "expression": "cfg.config.services.crystal-forge-agent.enable",
+                "expression": expression,
                 "strict": strict
             }]
         });
@@ -2592,11 +2659,719 @@ mod tests {
       <cf:policy-identity policy-id="urn:uuid:{policy_id}" policy-version-id="urn:uuid:{policy_version_id}" publication-state="draft" enabled-default="true" implementation-state="native" selected="true" policy-order="0">
         <cf:policy-version>{policy_version_label}</cf:policy-version><cf:content-digest algorithm="sha-256" canonical-model="cf-model-json-1">{policy_digest}</cf:content-digest>
       </cf:policy-identity>
-    <check system="urn:crystal-forge:check-system:policy:1"><check-content><cf:policy schema-version="1" policy-type="custom_check"><cf:execution phase="nix-evaluation" strict="true"/><cf:implementation state="native"><cf:custom-check mode="all" context="nixos-configuration-v1" binding="cfg"><cf:rule field-name="agentEnabled" strict="true"><cf:description>The agent is enabled</cf:description><cf:expression language="nix">cfg.config.services.crystal-forge-agent.enable</cf:expression></cf:rule></cf:custom-check></cf:implementation><cf:config-json>{config}</cf:config-json><cf:compliance-metadata-json>{metadata}</cf:compliance-metadata-json><cf:dependencies-json>{dependencies}</cf:dependencies-json></cf:policy></check-content></check>
+    <check system="urn:crystal-forge:check-system:policy:1"><check-content><cf:policy schema-version="1" policy-type="custom_check"><cf:execution phase="nix-evaluation" strict="true"/><cf:implementation state="native"><cf:custom-check mode="all" context="{context}" binding="{binding}"><cf:rule field-name="agentEnabled" strict="true"><cf:description>The agent is enabled</cf:description><cf:expression language="nix">{expression}</cf:expression></cf:rule></cf:custom-check></cf:implementation><cf:config-json>{config}</cf:config-json><cf:compliance-metadata-json>{metadata}</cf:compliance-metadata-json><cf:dependencies-json>{dependencies}</cf:dependencies-json></cf:policy></check-content></check>
   </Rule>
 </Benchmark>"#
         );
         xml.into_bytes()
+    }
+
+    fn operational_custom_policy(
+        policy_order: i32,
+        name: &str,
+        config: serde_json::Value,
+    ) -> crate::compliance::xccdf::export_models::XccdfPolicyExport {
+        use crate::compliance::canonical::{ImplementationState, PublicationState};
+        use crate::compliance::digest::PolicyVersionCanonical;
+
+        let policy_id = Uuid::new_v4();
+        let policy_version_id = Uuid::new_v4();
+        let name = format!("{name}-{policy_id}");
+        let description = Some(format!("Operational {name}"));
+        let digest = PolicyVersionCanonical {
+            name: name.clone(),
+            description: description.clone(),
+            policy_type: "custom_check".into(),
+            implementation_state: "native".into(),
+            execution_phase: "nix-evaluation".into(),
+            config: config.clone(),
+            compliance_metadata: serde_json::json!({}),
+            dependencies: serde_json::json!([]),
+            opaque_xml_digest: None,
+            enabled_by_default: Some(true),
+        }
+        .compute_digest();
+        crate::compliance::xccdf::export_models::XccdfPolicyExport {
+            policy_id,
+            policy_version_id,
+            version: "1.0".into(),
+            publication_state: PublicationState::Accepted,
+            semantic_digest: digest,
+            digest_algorithm: crate::compliance::interchange::DIGEST_ALGORITHM.into(),
+            canonicalization_version: crate::compliance::interchange::CANONICALIZATION_VERSION
+                .into(),
+            name,
+            description,
+            policy_type: "custom_check".into(),
+            execution_phase: "nix-evaluation".into(),
+            implementation_state: ImplementationState::Native,
+            enabled_default: true,
+            selected: policy_order != 3,
+            policy_order,
+            config,
+            compliance_metadata: serde_json::json!({}),
+            dependencies: serde_json::json!([]),
+            opaque_xml: None,
+            source_mappings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn authentic_v1_digest_is_verified_before_current_normalization() {
+        let bundle_id = Uuid::new_v4();
+        let bundle_version_id = Uuid::new_v4();
+        let policy_id = Uuid::new_v4();
+        let policy_version_id = Uuid::new_v4();
+        let source_expression = r#"let paths = [ /etc/cfg.config ./cfg.config ../cfg.config modules/cfg.config/default.nix urn:cfg.config:value https://example.test/cfg.config ]; script = ''
+  ${cfg.config.actual}
+  echo ''${cfg.config.literal}
+  echo ''\${cfg.config.literal_backslash}
+''; in cfg.config.services.crystal-forge-agent.enable"#;
+        let canonical_expression = r#"let paths = [ /etc/cfg.config ./cfg.config ../cfg.config modules/cfg.config/default.nix urn:cfg.config:value https://example.test/cfg.config ]; script = ''
+  ${config.actual}
+  echo ''${cfg.config.literal}
+  echo ''\${cfg.config.literal_backslash}
+''; in config.services.crystal-forge-agent.enable"#;
+        let bytes = native_fixture_bytes_with_expression(
+            bundle_id,
+            bundle_version_id,
+            policy_id,
+            policy_version_id,
+            true,
+            "1.0",
+            true,
+            source_expression,
+        );
+        let pkg = make_package(bytes);
+        let source_digest = pkg.parsed.rules[0]
+            .cf_policy_meta
+            .as_ref()
+            .and_then(|meta| meta.digest.clone())
+            .unwrap();
+        let (_, records) =
+            crate::compliance::xccdf::importer::validate_cf_native_document(&pkg.parsed)
+                .expect("authentic V1 source digest and projection must validate");
+        let record = &records[0];
+        assert_eq!(
+            record.config["rules"][0]["expression"],
+            canonical_expression
+        );
+        assert_ne!(
+            record.semantic_digest.as_deref(),
+            Some(source_digest.as_str())
+        );
+
+        let snapshot = crate::compliance::xccdf::export_models::XccdfBundleExport {
+            bundle_id,
+            bundle_version_id,
+            version: "1.0".into(),
+            publication_state: crate::compliance::canonical::PublicationState::Draft,
+            semantic_digest: pkg.parsed.cf_bundle_meta.unwrap().digest.unwrap(),
+            digest_algorithm: crate::compliance::interchange::DIGEST_ALGORITHM.into(),
+            canonicalization_version: crate::compliance::interchange::CANONICALIZATION_VERSION
+                .into(),
+            name: format!("Native Fixture Bundle {bundle_id}"),
+            description: Some("Native fixture".into()),
+            framework: "CF-TEST".into(),
+            framework_version: Some("1.0".into()),
+            layer: "os".into(),
+            owner: "Tests".into(),
+            groups: Vec::new(),
+            policies: vec![crate::compliance::xccdf::export_models::XccdfPolicyExport {
+                policy_id,
+                policy_version_id,
+                version: "1.0".into(),
+                publication_state: crate::compliance::canonical::PublicationState::Draft,
+                semantic_digest: record.semantic_digest.clone().unwrap(),
+                digest_algorithm: crate::compliance::interchange::DIGEST_ALGORITHM.into(),
+                canonicalization_version: crate::compliance::interchange::CANONICALIZATION_VERSION
+                    .into(),
+                name: record.name.clone(),
+                description: record.description.clone(),
+                policy_type: record.policy_type.clone(),
+                execution_phase: record.execution_phase.clone(),
+                implementation_state: crate::compliance::canonical::ImplementationState::Native,
+                enabled_default: record.enabled_by_default,
+                selected: record.selected,
+                policy_order: record.policy_order,
+                config: record.config.clone(),
+                compliance_metadata: record.compliance_metadata.clone(),
+                dependencies: record.dependencies.clone(),
+                opaque_xml: record.opaque_xml.clone(),
+                source_mappings: Vec::new(),
+            }],
+        };
+        let reexport = crate::compliance::xccdf::xml_writer::write_bundle_xccdf_export(&snapshot)
+            .expect("normalized V1 record must be immediately exportable as V2");
+        assert!(reexport.contains("context=\"nixos-configuration-v2\" binding=\"config\""));
+        assert!(reexport.contains("modules/cfg.config/default.nix"));
+        assert!(reexport.contains("urn:cfg.config:value"));
+        assert!(!reexport.contains("in cfg.config.services"));
+    }
+
+    #[test]
+    fn v2_custom_check_accepts_bare_paths_and_uri_literals() {
+        let expression = r#"let paths = [ modules/cfg.config/default.nix urn:cfg.config:value ]; script = ''
+  ${config.actual}
+  echo ''${cfg.config.literal}
+  echo ''\${cfg.config.literal_backslash}
+''; in config.services.crystal-forge-agent.enable"#;
+        let bytes = native_fixture_bytes_with_expression(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            true,
+            "1.0",
+            false,
+            expression,
+        );
+        let pkg = make_package(bytes);
+        let source_digest = pkg.parsed.rules[0]
+            .cf_policy_meta
+            .as_ref()
+            .and_then(|meta| meta.digest.as_deref())
+            .expect("V2 fixture must carry its source digest");
+        let (_, records) =
+            crate::compliance::xccdf::importer::validate_cf_native_document(&pkg.parsed)
+                .expect("V2 must accept cfg.config text in path and URI literals");
+
+        assert_eq!(records[0].config["rules"][0]["expression"], expression);
+        assert_eq!(records[0].semantic_digest.as_deref(), Some(source_digest));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn v1_custom_check_digest_authentication_preserves_path_literals_on_import() {
+        let pool = test_pool().await.expect("DATABASE_URL required");
+        let user_id = ensure_test_user(&pool).await;
+        let bundle_id = Uuid::new_v4();
+        let bundle_version_id = Uuid::new_v4();
+        let policy_id = Uuid::new_v4();
+        let policy_version_id = Uuid::new_v4();
+        let source_expression =
+            "let policyPath = /etc/cfg.config; in cfg.config.services.crystal-forge-agent.enable";
+        let bytes = native_fixture_bytes_with_expression(
+            bundle_id,
+            bundle_version_id,
+            policy_id,
+            policy_version_id,
+            true,
+            "1.0",
+            true,
+            source_expression,
+        );
+        let pkg = make_package(bytes);
+        let source_digest = pkg.parsed.rules[0]
+            .cf_policy_meta
+            .as_ref()
+            .and_then(|meta| meta.digest.clone())
+            .expect("V1 fixture must carry its authentic source digest");
+        let (validated, records) =
+            crate::compliance::xccdf::importer::validate_cf_native_document(&pkg.parsed)
+                .expect("V1 source digest must authenticate before normalization");
+        let current_digest = records[0]
+            .semantic_digest
+            .clone()
+            .expect("normalization must compute the current canonical digest");
+        assert_ne!(source_digest, current_digest);
+        assert_eq!(
+            records[0].config["rules"][0]["expression"],
+            "let policyPath = /etc/cfg.config; in config.services.crystal-forge-agent.enable"
+        );
+
+        let committed = commit_cf_native_import(&pool, user_id, pkg, validated, records)
+            .await
+            .expect("V1 normalized import must persist naturally");
+        let (persisted_config, persisted_digest): (serde_json::Value, String) = sqlx::query_as(
+            "SELECT config, semantic_digest FROM deployment_policy_versions WHERE id = $1",
+        )
+        .bind(policy_version_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            persisted_config["rules"][0]["expression"],
+            "let policyPath = /etc/cfg.config; in config.services.crystal-forge-agent.enable"
+        );
+        assert_eq!(persisted_digest, current_digest);
+        cleanup_import(
+            &pool,
+            committed.bundle_id,
+            &committed.created_policy_version_ids,
+        )
+        .await;
+    }
+
+    #[test]
+    fn explicit_policy_type_cannot_contradict_typed_custom_check() {
+        let (bytes, ..) = native_fixture_bytes();
+        let xml = String::from_utf8(bytes).unwrap().replace(
+            "policy-type=\"custom_check\"",
+            "policy-type=\"require_packages\"",
+        );
+        let pkg = make_package(xml.into_bytes());
+        let error =
+            match crate::compliance::xccdf::importer::validate_cf_native_document(&pkg.parsed) {
+                Ok(_) => panic!("typed custom-check must agree with explicit policy type"),
+                Err(error) => error,
+            };
+        assert_eq!(error.code, "CF_NATIVE_PAYLOAD_INVALID");
+        assert!(error.message.contains("contains a typed custom-check"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn custom_check_export_import_preserves_runtime_and_gate_semantics() {
+        use crate::compliance::canonical::PublicationState;
+        use crate::compliance::digest::{BundleMembershipEntry, BundleVersionCanonical};
+        use crate::compliance::xccdf::export_models::XccdfBundleExport;
+        use crate::models::deployment_policies::{
+            AssignedPolicy, DeploymentPolicy, DeploymentPolicyRecord, PolicyCheckResult, RuleMode,
+        };
+
+        let pool = test_pool().await.expect("DATABASE_URL required");
+        let user_id = ensure_test_user(&pool).await;
+        let bundle_id = Uuid::new_v4();
+        let bundle_version_id = Uuid::new_v4();
+        let bundle_name = format!("Operational custom checks {bundle_id}");
+        let mut policies = vec![
+            operational_custom_policy(
+                0,
+                "single",
+                serde_json::json!({
+                    "expression": "config.services.single.enable",
+                    "field_name": "singleResult",
+                    "strict": true
+                }),
+            ),
+            operational_custom_policy(
+                1,
+                "multi",
+                serde_json::json!({
+                    "mode": "any",
+                    "strict": "ignored",
+                    "expression": {"malformed": true},
+                    "field_name": 42,
+                    "description": false,
+                    "rules": [
+                        {"field_name": "firstResult", "expression": "config.first", "strict": true, "description": "first"},
+                        {"field_name": "secondResult", "expression": "config.second", "strict": false, "description": "second"}
+                    ]
+                }),
+            ),
+            operational_custom_policy(
+                2,
+                "expression-empty-rules",
+                serde_json::json!({
+                    "expression": "config.services.compat.enable",
+                    "field_name": "compatResult",
+                    "strict": false,
+                    "rules": []
+                }),
+            ),
+            operational_custom_policy(
+                3,
+                "no-enforcement",
+                serde_json::json!({"mode": "all", "rules": []}),
+            ),
+        ];
+        policies[2].publication_state = PublicationState::Deprecated;
+        let members = policies
+            .iter()
+            .map(|policy| BundleMembershipEntry {
+                policy_version_id: policy.policy_version_id,
+                selected: policy.selected,
+            })
+            .collect::<Vec<_>>();
+        let bundle_digest = BundleVersionCanonical {
+            name: bundle_name.clone(),
+            framework: "CF-TEST".into(),
+            framework_version: Some("1.0".into()),
+            description: Some("XCCDF operational parity".into()),
+            layer: "os".into(),
+            owner: "Tests".into(),
+            members,
+        }
+        .compute_digest();
+        let snapshot = XccdfBundleExport {
+            bundle_id,
+            bundle_version_id,
+            version: "1.0".into(),
+            publication_state: PublicationState::Accepted,
+            semantic_digest: bundle_digest,
+            digest_algorithm: crate::compliance::interchange::DIGEST_ALGORITHM.into(),
+            canonicalization_version: crate::compliance::interchange::CANONICALIZATION_VERSION
+                .into(),
+            name: bundle_name,
+            description: Some("XCCDF operational parity".into()),
+            framework: "CF-TEST".into(),
+            framework_version: Some("1.0".into()),
+            layer: "os".into(),
+            owner: "Tests".into(),
+            groups: Vec::new(),
+            policies: policies.clone(),
+        };
+
+        let original = policies
+            .iter()
+            .map(|policy| DeploymentPolicyRecord {
+                id: policy.policy_id,
+                name: policy.name.clone(),
+                description: policy.description.clone(),
+                policy_type: policy.policy_type.clone(),
+                config: policy.config.clone(),
+                enabled: policy.selected,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                mapped_requirement_count: 0,
+                bundle_usage_count: 1,
+            })
+            .map(|record| crate::server::parse_deployment_policy_record(&record))
+            .collect::<Vec<_>>();
+
+        let xml = crate::compliance::xccdf::xml_writer::write_bundle_xccdf_export(&snapshot)
+            .expect("real XCCDF export");
+        assert_eq!(xml.matches("<cf:rule ").count(), 4);
+        let pkg = make_package(xml.into_bytes());
+        let (validated, records) =
+            crate::compliance::xccdf::importer::validate_cf_native_document(&pkg.parsed)
+                .expect("real native importer validation");
+        let committed = commit_cf_native_import(&pool, user_id, pkg, validated, records)
+            .await
+            .expect("real native destination import");
+        assert_eq!(committed.created_policy_versions, 4);
+
+        let persisted: Vec<(Uuid, String, String, bool, bool, serde_json::Value, String)> =
+            sqlx::query_as(
+                "SELECT pv.id, pv.publication_state, pv.trust_state, dp.enabled, \
+                    pv.enabled_by_default, pv.config, pv.semantic_digest \
+             FROM deployment_policy_versions pv \
+             JOIN deployment_policies dp ON dp.id = pv.policy_id \
+             WHERE pv.id = ANY($1)",
+            )
+            .bind(&committed.created_policy_version_ids)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(persisted.len(), 4);
+        for (
+            version_id,
+            publication_state,
+            trust_state,
+            enabled,
+            enabled_default,
+            config,
+            digest,
+        ) in &persisted
+        {
+            let expected = policies
+                .iter()
+                .find(|policy| policy.policy_version_id == *version_id)
+                .unwrap();
+            assert_eq!(publication_state, "draft");
+            assert_eq!(trust_state, "untrusted");
+            assert_eq!(
+                *enabled, expected.enabled_default,
+                "new native lineages must retain portable enablement"
+            );
+            assert!(
+                *enabled_default,
+                "portable enabled-default must be retained"
+            );
+            assert_eq!(
+                config, &expected.config,
+                "import must not change policy content"
+            );
+            assert_eq!(
+                digest, &expected.semantic_digest,
+                "V2 import must persist its natural current canonical digest"
+            );
+        }
+        let (bundle_state, current_draft, current_published): (
+            String,
+            Option<Uuid>,
+            Option<Uuid>,
+        ) = sqlx::query_as(
+            "SELECT bv.publication_state, b.current_draft_version_id, b.current_published_version_id \
+             FROM compliance_bundle_versions bv JOIN compliance_bundles b ON b.id = bv.bundle_id \
+             WHERE bv.id = $1",
+        )
+        .bind(bundle_version_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(bundle_state, "draft");
+        assert_eq!(current_draft, Some(bundle_version_id));
+        assert_eq!(current_published, None);
+
+        // SECURITY: Portable enablement does not bypass local eligibility
+        // gates. Mirror the existing Admin flow by trusting each mutable
+        // version, then publishing every policy before the bundle. This
+        // administrative activation does not refine semantic content.
+        let policy_ids = policies
+            .iter()
+            .map(|policy| policy.policy_id)
+            .collect::<Vec<_>>();
+        let policy_version_ids = policies
+            .iter()
+            .map(|policy| policy.policy_version_id)
+            .collect::<Vec<_>>();
+        let mut lifecycle = pool.begin().await.unwrap();
+        sqlx::query(
+            "UPDATE deployment_policy_versions SET trust_state = 'trusted', trusted_by = $2, \
+             trusted_at = NOW(), trust_review_note = 'Reviewed CF-native import' WHERE id = ANY($1)",
+        )
+        .bind(&policy_version_ids)
+        .bind(user_id)
+        .execute(&mut *lifecycle)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE deployment_policies SET current_draft_version_id = NULL \
+             WHERE id = ANY($1)",
+        )
+        .bind(&policy_ids)
+        .execute(&mut *lifecycle)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE deployment_policy_versions SET publication_state = 'accepted', published_at = NOW() \
+             WHERE id = ANY($1)",
+        )
+        .bind(&policy_version_ids)
+        .execute(&mut *lifecycle)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE deployment_policies dp SET current_published_version_id = pv.id \
+             FROM deployment_policy_versions pv WHERE pv.policy_id = dp.id AND pv.id = ANY($1)",
+        )
+        .bind(&policy_version_ids)
+        .execute(&mut *lifecycle)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE compliance_bundle_versions SET trust_state = 'trusted', trusted_by = $2, \
+             trusted_at = NOW(), trust_review_note = 'Reviewed CF-native import' WHERE id = $1",
+        )
+        .bind(bundle_version_id)
+        .bind(user_id)
+        .execute(&mut *lifecycle)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE compliance_bundles SET current_draft_version_id = NULL WHERE id = $1")
+            .bind(bundle_id)
+            .execute(&mut *lifecycle)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE compliance_bundle_versions SET publication_state = 'accepted', published_at = NOW() \
+             WHERE id = $1",
+        )
+        .bind(bundle_version_id)
+        .execute(&mut *lifecycle)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE compliance_bundles SET current_published_version_id = $1 WHERE id = $2",
+        )
+        .bind(bundle_version_id)
+        .bind(bundle_id)
+        .execute(&mut *lifecycle)
+        .await
+        .unwrap();
+        lifecycle.commit().await.unwrap();
+
+        let activated: Vec<(Uuid, serde_json::Value, String)> = sqlx::query_as(
+            "SELECT id, config, semantic_digest FROM deployment_policy_versions WHERE id = ANY($1)",
+        )
+        .bind(&policy_version_ids)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        for (version_id, config, digest) in activated {
+            let source = policies
+                .iter()
+                .find(|policy| policy.policy_version_id == version_id)
+                .unwrap();
+            assert_eq!(config, source.config);
+            assert_eq!(digest, source.semantic_digest);
+        }
+
+        let suffix = Uuid::new_v4().simple().to_string();
+        let flake_id: i32 =
+            sqlx::query_scalar("INSERT INTO flakes (name, repo_url) VALUES ($1, $2) RETURNING id")
+                .bind(format!("xccdf-operational-{suffix}"))
+                .bind(format!("https://example.invalid/{suffix}.git"))
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let environment_id: Uuid =
+            sqlx::query_scalar("INSERT INTO environments (name) VALUES ($1) RETURNING id")
+                .bind(format!("xccdf-operational-{suffix}"))
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let system_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO systems \
+             (hostname, system_configuration_name, flake_id, environment_id, is_active, public_key, derivation) \
+             VALUES ($1, 'xccdfOperational', $2, $3, TRUE, $4, '') RETURNING id",
+        )
+        .bind(format!("xccdf-operational-{suffix}"))
+        .bind(flake_id)
+        .bind(environment_id)
+        .bind(format!("ssh-ed25519 xccdf-operational-{suffix}"))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let assignment_id = Uuid::new_v4();
+        let assignment_version_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO compliance_bundle_assignments \
+             (id, bundle_id, bundle_version_id, scope_type, system_id, enforcement_mode, assignment_overlay_digest, active) \
+             VALUES ($1, $2, $3, 'system', $4, 'enforce', $5, TRUE)",
+        )
+        .bind(assignment_id)
+        .bind(bundle_id)
+        .bind(bundle_version_id)
+        .bind(system_id)
+        .bind(format!("assignment-{suffix}"))
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO compliance_bundle_assignment_versions \
+             (id, assignment_id, version_number, bundle_version_id, enforcement_mode, assignment_overlay_digest) \
+             VALUES ($1, $2, 1, $3, 'enforce', $4)",
+        )
+        .bind(assignment_version_id)
+        .bind(assignment_id)
+        .bind(bundle_version_id)
+        .bind(format!("assignment-version-{suffix}"))
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE compliance_bundle_assignments SET current_version_id = $1 WHERE id = $2",
+        )
+        .bind(assignment_version_id)
+        .bind(assignment_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let loaded = crate::server::load_policies_by_configuration_for_eval_test(&pool, flake_id)
+            .await
+            .expect("production evaluation loader must accept the imported policy set");
+        let imported = loaded
+            .get("xccdfOperational")
+            .expect("enabled accepted bundle must load selected policies");
+        assert_eq!(
+            imported.len(),
+            3,
+            "unselected no-enforcement policy must stay out"
+        );
+        let imported_by_version = imported
+            .iter()
+            .map(|policy| (policy.policy_id, policy))
+            .collect::<std::collections::HashMap<_, _>>();
+
+        let describe = |parsed: &Option<DeploymentPolicy>, index: usize| AssignedPolicy {
+            policy_id: policies[index].policy_id,
+            policy_name: policies[index].name.clone(),
+            policy: parsed.clone().expect("selected policy must parse"),
+        };
+        let original_assigned = (0..3)
+            .map(|index| describe(&original[index], index))
+            .collect::<Vec<_>>();
+        let imported_assigned = (0..3)
+            .map(|index| {
+                (*imported_by_version
+                    .get(&policies[index].policy_version_id)
+                    .expect("selected imported policy must be loaded"))
+                .clone()
+            })
+            .collect::<Vec<_>>();
+        for config_fields in [
+            "services.single.enable = true; first = false; second = true; services.compat.enable = true;",
+            "services.single.enable = false; first = false; second = false; services.compat.enable = false;",
+        ] {
+            let original_values =
+                evaluate_custom_policies_with_nix(&original_assigned, config_fields);
+            let imported_values =
+                evaluate_custom_policies_with_nix(&imported_assigned, config_fields);
+            assert_eq!(original_values, imported_values);
+            for index in 0..3 {
+                let original_result = PolicyCheckResult::from_assigned(
+                    "original".into(),
+                    &original_values,
+                    std::slice::from_ref(&original_assigned[index]),
+                )
+                .unwrap();
+                let imported_result = PolicyCheckResult::from_assigned(
+                    "imported".into(),
+                    &imported_values,
+                    std::slice::from_ref(&imported_assigned[index]),
+                )
+                .unwrap();
+                assert_eq!(
+                    original_result.meets_requirements,
+                    imported_result.meets_requirements
+                );
+                assert_eq!(original_result.custom_checks, imported_result.custom_checks);
+                assert_eq!(
+                    original_result.failed_policies,
+                    imported_result.failed_policies
+                );
+                if index == 0 {
+                    let expected = original_values["singleResult"].as_bool().unwrap();
+                    assert_eq!(original_result.meets_requirements, expected);
+                    assert_eq!(imported_result.meets_requirements, expected);
+                }
+                if index == 1 {
+                    let expected = original_values["secondResult"].as_bool().unwrap();
+                    assert_eq!(original_result.meets_requirements, expected);
+                    assert_eq!(imported_result.meets_requirements, expected);
+                }
+                if index == 2 && original_values["compatResult"] == false {
+                    assert!(original_result.meets_requirements);
+                    assert!(imported_result.meets_requirements);
+                }
+            }
+        }
+        assert!(matches!(
+            &imported_by_version[&policies[1].policy_version_id].policy,
+            DeploymentPolicy::CustomCheck {
+                mode: RuleMode::Any,
+                rules,
+                ..
+            } if rules[0].field_name == "firstResult"
+                && rules[0].strict
+                && rules[1].field_name == "secondResult"
+                && !rules[1].strict
+        ));
+        assert!(matches!(
+            &imported_by_version[&policies[2].policy_version_id].policy,
+            DeploymentPolicy::CustomCheck { rules, field_name, .. }
+                if rules.is_empty() && field_name == "compatResult"
+        ));
+
+        let membership: Vec<(Uuid, i32, bool)> = sqlx::query_as(
+            "SELECT policy_version_id, policy_order, selected \
+             FROM compliance_bundle_version_policies \
+             WHERE bundle_version_id = $1 ORDER BY policy_order",
+        )
+        .bind(bundle_version_id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(membership.len(), 4);
+        for (index, member) in membership.iter().enumerate() {
+            assert_eq!(member.0, policies[index].policy_version_id);
+            assert_eq!(member.1, index as i32);
+            assert_eq!(member.2, policies[index].selected);
+        }
     }
 
     /// Insert a test user and return its UUID. The user owns the imported
@@ -4770,6 +5545,54 @@ mod tests {
                 .unwrap();
         assert_eq!(policy_count, 1);
         assert_eq!(version_count, 1);
+
+        let (stored_config, stored_digest, enabled): (serde_json::Value, String, bool) =
+            sqlx::query_as(
+                "SELECT pv.config, pv.semantic_digest, dp.enabled \
+                 FROM deployment_policy_versions pv \
+                 JOIN deployment_policies dp ON dp.id = pv.policy_id \
+                 WHERE pv.id = $1",
+            )
+            .bind(policy_version_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(enabled, "exact reimport must preserve lineage enablement");
+        let expected_config = serde_json::json!({
+            "mode": "all",
+            "rules": [{
+                "field_name": "agentEnabled",
+                "description": "The agent is enabled",
+                "expression": "config.services.crystal-forge-agent.enable",
+                "strict": true
+            }]
+        });
+        assert_eq!(stored_config, expected_config);
+        assert_eq!(
+            stored_digest,
+            crate::compliance::digest::PolicyVersionCanonical {
+                name: format!("Native Agent Requirement {policy_id}"),
+                description: Some("Requires the Crystal Forge agent".into()),
+                policy_type: "custom_check".into(),
+                implementation_state: "native".into(),
+                execution_phase: "nix-evaluation".into(),
+                config: expected_config,
+                compliance_metadata: serde_json::json!({}),
+                dependencies: serde_json::json!([]),
+                opaque_xml_digest: None,
+                enabled_by_default: Some(true),
+            }
+            .compute_digest()
+        );
+
+        let membership: (Uuid, i32, bool) = sqlx::query_as(
+            "SELECT policy_version_id, policy_order, selected FROM compliance_bundle_version_policies WHERE bundle_version_id = $1",
+        )
+        .bind(bundle_version_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(membership, (policy_version_id, 0, true));
     }
 
     #[tokio::test]
@@ -5712,6 +6535,7 @@ mod tests {
             new_policy_version_id,
             true,
             "1.1",
+            false,
         );
 
         // Preview B: new_version for both, lineage witnesses, no blocking.

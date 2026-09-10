@@ -100,305 +100,15 @@ fn custom_field_name(name: &str, id: uuid::Uuid) -> String {
 }
 
 pub(crate) fn normalize_custom_policy_expression(expression: &str) -> (String, bool) {
-    let chars = expression.chars().collect::<Vec<_>>();
-    let legacy = "cfg.config.";
-    let legacy_chars = legacy.chars().collect::<Vec<_>>();
-    let mut output = String::with_capacity(expression.len());
-    let mut index = 0;
-    let mut state = LexicalState::Normal;
-
-    while index < chars.len() {
-        match state {
-            LexicalState::Normal => {
-                if chars[index] == '"' {
-                    state = LexicalState::DoubleQuoted;
-                    output.push(chars[index]);
-                    index += 1;
-                } else if chars[index] == '#' {
-                    state = LexicalState::LineComment;
-                    output.push(chars[index]);
-                    index += 1;
-                } else if chars[index] == '/' && chars.get(index + 1) == Some(&'*') {
-                    state = LexicalState::BlockComment;
-                    output.push('/');
-                    output.push('*');
-                    index += 2;
-                } else if chars[index] == '\'' && chars.get(index + 1) == Some(&'\'') {
-                    state = LexicalState::IndentedString;
-                    output.push('\'');
-                    output.push('\'');
-                    index += 2;
-                } else if index + legacy_chars.len() <= chars.len()
-                    && chars[index..index + legacy_chars.len()] == legacy_chars
-                    && (index == 0 || !is_nix_identifier_char(chars[index - 1]))
-                    && chars
-                        .get(index + legacy_chars.len())
-                        .is_some_and(|character| is_nix_identifier_char(*character))
-                {
-                    output.push_str("config.");
-                    index += legacy_chars.len();
-                } else {
-                    output.push(chars[index]);
-                    index += 1;
-                }
-            }
-            LexicalState::DoubleQuoted => {
-                let character = chars[index];
-                output.push(character);
-                index += 1;
-                if character == '\\' {
-                    if let Some(escaped) = chars.get(index) {
-                        output.push(*escaped);
-                        index += 1;
-                    }
-                } else if character == '"' {
-                    state = LexicalState::Normal;
-                }
-            }
-            LexicalState::IndentedString => {
-                if chars[index] == '\'' && chars.get(index + 1) == Some(&'\'') {
-                    if chars
-                        .get(index + 2)
-                        .is_some_and(|next| matches!(next, '$' | '\\' | '\''))
-                    {
-                        output.push('\'');
-                        output.push('\'');
-                        index += 2;
-                        continue;
-                    }
-                    output.push('\'');
-                    output.push('\'');
-                    index += 2;
-                    state = LexicalState::Normal;
-                } else {
-                    output.push(chars[index]);
-                    index += 1;
-                }
-            }
-            LexicalState::LineComment => {
-                let character = chars[index];
-                output.push(character);
-                index += 1;
-                if character == '\n' {
-                    state = LexicalState::Normal;
-                }
-            }
-            LexicalState::BlockComment => {
-                if chars[index] == '*' && chars.get(index + 1) == Some(&'/') {
-                    output.push('*');
-                    output.push('/');
-                    index += 2;
-                    state = LexicalState::Normal;
-                } else {
-                    output.push(chars[index]);
-                    index += 1;
-                }
-            }
-        }
-    }
-
-    let output = normalize_string_interpolations(&output);
-    let changed = output != expression;
-    (output, changed)
+    crate::models::custom_check::normalize_expression(expression)
 }
 
-/// Normalize legacy references inside Nix string interpolations. The main
-/// scanner intentionally treats string bodies as opaque, but `${...}` is an
-/// embedded Nix expression and must be scanned as code. Escaped `\${` remains
-/// literal; indented strings use the same rule for their interpolation body.
-fn normalize_string_interpolations(expression: &str) -> String {
-    let chars: Vec<char> = expression.chars().collect();
-    let mut output = String::with_capacity(expression.len());
-    let mut index = 0;
-    let mut string_kind = None::<bool>; // false = double quoted, true = indented
-    while index < chars.len() {
-        if string_kind.is_none() {
-            if chars[index] == '"' {
-                string_kind = Some(false);
-                output.push(chars[index]);
-                index += 1;
-                continue;
-            }
-            if chars[index] == '\'' && chars.get(index + 1) == Some(&'\'') {
-                string_kind = Some(true);
-                output.push('\'');
-                output.push('\'');
-                index += 2;
-                continue;
-            }
-            output.push(chars[index]);
-            index += 1;
-            continue;
-        }
-
-        let indented = string_kind == Some(true);
-        if !indented && chars[index] == '\\' {
-            output.push(chars[index]);
-            if let Some(next) = chars.get(index + 1) {
-                output.push(*next);
-                index += 2;
-            } else {
-                index += 1;
-            }
-            continue;
-        }
-        if indented && chars[index] == '\'' && chars.get(index + 1) == Some(&'\'') {
-            if chars.get(index + 2) == Some(&'\\') {
-                output.push('\'');
-                output.push('\'');
-                index += 2;
-                output.push(chars[index]);
-                index += 1;
-                if let Some(escaped) = chars.get(index) {
-                    output.push(*escaped);
-                    index += 1;
-                }
-                continue;
-            }
-            if chars
-                .get(index + 2)
-                .is_some_and(|next| matches!(next, '$' | '\''))
-            {
-                output.push('\'');
-                output.push('\'');
-                index += 2;
-                if let Some(escaped) = chars.get(index) {
-                    output.push(*escaped);
-                    index += 1;
-                }
-                continue;
-            }
-            output.push('\'');
-            output.push('\'');
-            index += 2;
-            string_kind = None;
-            continue;
-        }
-        if chars[index] == '$' && chars.get(index + 1) == Some(&'{') {
-            let start = index + 2;
-            if let Some(end) = interpolation_end(&chars, start) {
-                let inner: String = chars[start..end].iter().collect();
-                let (normalized, _) = normalize_custom_policy_expression(&inner);
-                output.push_str("${");
-                output.push_str(&normalized);
-                output.push('}');
-                index = end + 1;
-                continue;
-            }
-        }
-        if !indented && chars[index] == '"' {
-            output.push(chars[index]);
-            index += 1;
-            string_kind = None;
-        } else {
-            output.push(chars[index]);
-            index += 1;
-        }
-    }
-    output
-}
-
-fn interpolation_end(chars: &[char], mut index: usize) -> Option<usize> {
-    let mut depth = 1usize;
-    let mut state = LexicalState::Normal;
-    while index < chars.len() {
-        match state {
-            LexicalState::Normal => match chars[index] {
-                '"' => {
-                    state = LexicalState::DoubleQuoted;
-                    index += 1;
-                }
-                '#' => {
-                    state = LexicalState::LineComment;
-                    index += 1;
-                }
-                '/' if chars.get(index + 1) == Some(&'*') => {
-                    state = LexicalState::BlockComment;
-                    index += 2;
-                }
-                '\'' if chars.get(index + 1) == Some(&'\'') => {
-                    state = LexicalState::IndentedString;
-                    index += 2;
-                }
-                '{' => {
-                    depth += 1;
-                    index += 1;
-                }
-                '}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return Some(index);
-                    }
-                    index += 1;
-                }
-                _ => index += 1,
-            },
-            LexicalState::DoubleQuoted => {
-                if chars[index] == '\\' {
-                    index += 2;
-                } else if chars[index] == '$' && chars.get(index + 1) == Some(&'{') {
-                    let nested_start = index + 2;
-                    index = interpolation_end(chars, nested_start)? + 1;
-                } else if chars[index] == '"' {
-                    state = LexicalState::Normal;
-                    index += 1;
-                } else {
-                    index += 1;
-                }
-            }
-            LexicalState::IndentedString => {
-                if chars[index] == '\'' && chars.get(index + 1) == Some(&'\'') {
-                    if chars.get(index + 2) == Some(&'\\') {
-                        index += 3;
-                        if index < chars.len() {
-                            index += 1;
-                        }
-                    } else if chars
-                        .get(index + 2)
-                        .is_some_and(|next| matches!(next, '$' | '\''))
-                    {
-                        index += 3;
-                    } else {
-                        state = LexicalState::Normal;
-                        index += 2;
-                    }
-                } else if chars[index] == '$' && chars.get(index + 1) == Some(&'{') {
-                    let nested_start = index + 2;
-                    index = interpolation_end(chars, nested_start)? + 1;
-                } else {
-                    index += 1;
-                }
-            }
-            LexicalState::LineComment => {
-                if chars[index] == '\n' {
-                    state = LexicalState::Normal;
-                }
-                index += 1;
-            }
-            LexicalState::BlockComment => {
-                if chars[index] == '*' && chars.get(index + 1) == Some(&'/') {
-                    state = LexicalState::Normal;
-                    index += 2;
-                } else {
-                    index += 1;
-                }
-            }
-        }
-    }
-    None
-}
-
-#[derive(Clone, Copy)]
-enum LexicalState {
-    Normal,
-    DoubleQuoted,
-    IndentedString,
-    LineComment,
-    BlockComment,
-}
-
-fn is_nix_identifier_char(character: char) -> bool {
-    character.is_ascii_alphanumeric() || matches!(character, '_' | '-')
+/// Reports whether executable Nix code uses the canonical `config` binding.
+///
+/// String and comment text is ignored. References inside string interpolation
+/// are executable and are included.
+pub(crate) fn has_canonical_custom_policy_reference(expression: &str) -> bool {
+    crate::models::custom_check::has_current_reference(expression)
 }
 
 async fn run_post_finalize_derivation_side_effects(
@@ -623,7 +333,7 @@ async fn handle_evaluation_attempt_failure(
     Ok(())
 }
 
-fn parse_deployment_policy_record(
+pub(crate) fn parse_deployment_policy_record(
     record: &crate::models::deployment_policies::DeploymentPolicyRecord,
 ) -> Option<DeploymentPolicy> {
     let cfg = &record.config;
@@ -1368,6 +1078,15 @@ async fn load_policies_by_configuration_for_eval_legacy(
     }
 
     Ok(map)
+}
+
+/// Loads persisted evaluation policies through the production loader for tests.
+#[cfg(test)]
+pub(crate) async fn load_policies_by_configuration_for_eval_test(
+    pool: &PgPool,
+    flake_id: i32,
+) -> anyhow::Result<PoliciesByConfiguration> {
+    load_policies_by_configuration_for_eval(pool, flake_id).await
 }
 
 /// Load enabled `require_cve_check` policies from the database.
