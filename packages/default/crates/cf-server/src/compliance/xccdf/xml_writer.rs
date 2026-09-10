@@ -349,6 +349,20 @@ fn write_cf_policy(
     writer: &mut Writer<Cursor<&mut Vec<u8>>>,
     pv: &XccdfPolicyExport,
 ) -> Result<(), XccdfWriterError> {
+    let strict = if pv.policy_type == "require_cve_check"
+        && pv.implementation_state == ImplementationState::Native
+    {
+        serde_json::from_value::<crate::models::deployment_policies::CveCheckConfig>(
+            pv.config.clone(),
+        )
+        .map_err(|_| XccdfWriterError::MissingConfig {
+            policy_type: pv.policy_type.clone(),
+            field: "valid require_cve_check config",
+        })?
+        .strict
+    } else {
+        true
+    };
     let mut policy = BytesStart::new("cf:policy");
     policy.push_attribute(("schema-version", "1"));
     if pv.implementation_state != ImplementationState::Native {
@@ -358,7 +372,7 @@ fn write_cf_policy(
 
     let mut exec = BytesStart::new("cf:execution");
     exec.push_attribute(("phase", pv.execution_phase.as_str()));
-    exec.push_attribute(("strict", "true"));
+    exec.push_attribute(("strict", strict.to_string().as_str()));
     writer.write_event(Event::Empty(exec))?;
 
     write_implementation(writer, pv)?;
@@ -375,8 +389,8 @@ fn write_cf_policy(
 
 /// Write `<cf:implementation>` for a policy with `Native` implementation state.
 ///
-/// Returns `XccdfWriterError::MissingConfig` when a required configuration
-/// field is absent or has the wrong type rather than substituting a default.
+/// Returns `XccdfWriterError::MissingConfig` when required configuration is
+/// absent or malformed. Policy types with server defaults use those defaults.
 fn write_implementation(
     writer: &mut Writer<Cursor<&mut Vec<u8>>>,
     pv: &XccdfPolicyExport,
@@ -441,36 +455,27 @@ fn write_implementation(
             cf_empty(writer, "composite")?;
         }
         "require_cve_check" => {
-            let max_crit = pv
-                .config
-                .get("max_critical")
-                .and_then(|v| v.as_u64())
-                .ok_or_else(|| XccdfWriterError::MissingConfig {
+            let config =
+                serde_json::from_value::<crate::models::deployment_policies::CveCheckConfig>(
+                    pv.config.clone(),
+                )
+                .map_err(|_| XccdfWriterError::MissingConfig {
                     policy_type: pv.policy_type.clone(),
-                    field: "max_critical",
+                    field: "valid require_cve_check config",
                 })?;
-            let req_just = pv
-                .config
-                .get("require_high_justification")
-                .and_then(|v| v.as_bool())
-                .ok_or_else(|| XccdfWriterError::MissingConfig {
-                    policy_type: pv.policy_type.clone(),
-                    field: "require_high_justification",
-                })?;
-            let no_scan = pv
-                .config
-                .get("when_no_scan")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| XccdfWriterError::MissingConfig {
-                    policy_type: pv.policy_type.clone(),
-                    field: "when_no_scan",
-                })?;
+            let no_scan = match config.when_no_scan {
+                crate::models::deployment_policies::WhenNoScan::Block => "block",
+                crate::models::deployment_policies::WhenNoScan::Skip => "skip",
+            };
             let mut elem = BytesStart::new("cf:require-cve-check");
-            elem.push_attribute(("max-critical", max_crit.to_string().as_str()));
-            elem.push_attribute(("require-high-justification", req_just.to_string().as_str()));
+            elem.push_attribute(("max-critical", config.max_critical.to_string().as_str()));
+            elem.push_attribute((
+                "require-high-justification",
+                config.require_high_justification.to_string().as_str(),
+            ));
             elem.push_attribute(("when-no-scan", no_scan));
             writer.write_event(Event::Start(elem))?;
-            if let Some(max_high) = pv.config.get("max_high").and_then(|v| v.as_u64()) {
+            if let Some(max_high) = config.max_high {
                 cf_el(writer, "max-high", &max_high.to_string())?;
             }
             writer.write_event(Event::End(BytesEnd::new("cf:require-cve-check")))?;
@@ -2258,35 +2263,123 @@ mod tests {
     }
 
     #[test]
-    fn require_cve_check_policy_type() {
+    fn require_cve_check_explicit_values_are_preserved() {
         let pv = test_policy(
             "require_cve_check",
             ImplementationState::Native,
             json!({
-                "max_critical": 0,
+                "max_critical": 2,
                 "require_high_justification": true,
-                "when_no_scan": "block",
-                "max_high": 5
+                "strict": false,
+                "when_no_scan": "skip",
+                "max_high": 5,
             }),
         );
         let snap = make_single_policy_snapshot(vec![pv]);
         let xml = write_bundle_xccdf_export(&snap).unwrap();
         assert!(xml.contains("cf:require-cve-check"));
-        assert!(xml.contains("max-critical=\"0\""));
+        assert!(xml.contains("max-critical=\"2\""));
         assert!(xml.contains("require-high-justification=\"true\""));
-        assert!(xml.contains("when-no-scan=\"block\""));
-        assert!(xml.contains("cf:max-high"));
+        assert!(xml.contains("when-no-scan=\"skip\""));
+        assert!(xml.contains("<cf:max-high>5</cf:max-high>"));
+        assert!(xml.contains("<cf:execution phase=\"nix-evaluation\" strict=\"false\"/>"));
+        assert!(xml.contains("&quot;strict&quot;:false"));
     }
 
     #[test]
-    fn require_cve_check_missing_config_is_error() {
-        // Missing required fields
+    fn require_cve_check_complete_and_minimal_configs_use_the_same_defaults() {
+        let complete = test_policy(
+            "require_cve_check",
+            ImplementationState::Native,
+            json!({
+                "max_critical": 0,
+                "max_high": null,
+                "require_high_justification": false,
+                "strict": true,
+                "when_no_scan": "block",
+            }),
+        );
         let pv = test_policy("require_cve_check", ImplementationState::Native, json!({}));
-        let snap = make_single_policy_snapshot(vec![pv]);
-        assert!(matches!(
-            write_bundle_xccdf_export(&snap),
-            Err(XccdfWriterError::MissingConfig { .. })
-        ));
+        let complete_xml = write_bundle_xccdf_export(&make_single_policy_snapshot(vec![complete]))
+            .expect("complete CVE config");
+        let minimal_xml = write_bundle_xccdf_export(&make_single_policy_snapshot(vec![pv]))
+            .expect("minimal CVE config");
+
+        for xml in [&complete_xml, &minimal_xml] {
+            assert!(xml.contains("max-critical=\"0\""));
+            assert!(xml.contains("require-high-justification=\"false\""));
+            assert!(xml.contains("when-no-scan=\"block\""));
+            assert!(!xml.contains("<cf:max-high>"));
+            assert!(xml.contains("<cf:execution phase=\"nix-evaluation\" strict=\"true\"/>"));
+        }
+        assert!(minimal_xml.contains("<cf:config-json>{}</cf:config-json>"));
+    }
+
+    #[test]
+    fn require_cve_check_each_missing_field_uses_its_server_default() {
+        let fields = [
+            "max_critical",
+            "max_high",
+            "require_high_justification",
+            "strict",
+            "when_no_scan",
+        ];
+        for field in fields {
+            let mut config = json!({
+                "max_critical": 4,
+                "max_high": 7,
+                "require_high_justification": true,
+                "strict": false,
+                "when_no_scan": "skip",
+            });
+            config.as_object_mut().unwrap().remove(field);
+            let pv = test_policy("require_cve_check", ImplementationState::Native, config);
+            let xml = write_bundle_xccdf_export(&make_single_policy_snapshot(vec![pv]))
+                .unwrap_or_else(|error| panic!("missing {field} must use its default: {error}"));
+
+            assert!(xml.contains(if field == "max_critical" {
+                "max-critical=\"0\""
+            } else {
+                "max-critical=\"4\""
+            }));
+            assert!(xml.contains(if field == "require_high_justification" {
+                "require-high-justification=\"false\""
+            } else {
+                "require-high-justification=\"true\""
+            }));
+            assert!(xml.contains(if field == "when_no_scan" {
+                "when-no-scan=\"block\""
+            } else {
+                "when-no-scan=\"skip\""
+            }));
+            assert_eq!(
+                xml.contains("<cf:max-high>7</cf:max-high>"),
+                field != "max_high"
+            );
+            assert!(!xml.contains(&format!("&quot;{field}&quot;")));
+        }
+    }
+
+    #[test]
+    fn require_cve_check_malformed_members_are_rejected() {
+        let cases = [
+            json!({"max_critical": "0"}),
+            json!({"max_critical": -1}),
+            json!({"max_high": false}),
+            json!({"require_high_justification": "false"}),
+            json!({"strict": "true"}),
+            json!({"when_no_scan": "allow"}),
+        ];
+        for config in cases {
+            let pv = test_policy("require_cve_check", ImplementationState::Native, config);
+            assert!(matches!(
+                write_bundle_xccdf_export(&make_single_policy_snapshot(vec![pv])),
+                Err(XccdfWriterError::MissingConfig {
+                    field: "valid require_cve_check config",
+                    ..
+                })
+            ));
+        }
     }
 
     #[test]

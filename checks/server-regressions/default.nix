@@ -451,6 +451,15 @@ SQL
       handlers::api::setup_wizard::tests::setup_progress_counts_production_policy_bundle_and_poam_rows \
       -- --ignored --test-threads=1
     cargo test --offline --package cf-server --lib \
+      handlers::api::compliance::tests::publish_bundle_with_seed_shaped_cve_policy_commits_and_exports \
+      -- --ignored --test-threads=1
+    cargo test --offline --package cf-server --lib \
+      handlers::api::compliance::tests::publish_bundle_with_malformed_cve_config_rolls_back \
+      -- --ignored --test-threads=1
+    cargo test --offline --package cf-server --lib \
+      handlers::api::compliance::tests::bundle_publication_rolls_back_when_custom_check_xccdf_is_invalid \
+      -- --ignored --test-threads=1
+    cargo test --offline --package cf-server --lib \
       queries::compliance::tests::policy_requirement_identity_hydration_uses_exact_versions \
       -- --ignored --test-threads=1
     cargo test --offline --package cf-server --lib \
