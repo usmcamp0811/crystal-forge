@@ -7,9 +7,12 @@ use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Duration, Utc};
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use std::collections::BTreeMap;
+use std::fmt;
 use uuid::Uuid;
 
 use crate::models::evaluate_with_policies::SuccessfulSystemResult;
+use crate::models::evaluation_snapshots::{QueueConfigInspectionResponse, SnapshotLifecycle};
+use crate::queries::evaluation_snapshots::lock_snapshot_writer_tx;
 
 const MAX_CONFIG_INSPECTION_ATTEMPTS: i32 = 3;
 const MAX_CONFIG_INSPECTION_ERROR_CHARS: usize = 4096;
@@ -137,6 +140,46 @@ pub(crate) struct ConfigInspectionEnqueueSummary {
     pub inserted_jobs: usize,
 }
 
+/// Reports active Config Inspector work for an obsolete target identity.
+///
+/// The conflict is retryable after the active row reaches a terminal state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ConfigInspectionTargetConflict {
+    commit_id: i32,
+}
+
+impl fmt::Display for ConfigInspectionTargetConflict {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "active Config Inspector work does not match the newly resolved target for commit {}",
+            self.commit_id
+        )
+    }
+}
+
+impl std::error::Error for ConfigInspectionTargetConflict {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedConfigInspectionTarget {
+    derivation_id: i32,
+    configuration_name: String,
+    carrier_drv_path: String,
+}
+
+/// Describes the result of resolving and scheduling one system Config target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TargetedConfigInspectionOutcome {
+    /// The system does not own the requested active commit.
+    NotFound,
+    /// Primary evaluation has not persisted an exact usable carrier derivation.
+    PrerequisiteMissing,
+    /// Active work exists for an obsolete derivation or carrier identity.
+    ActiveTargetConflict,
+    /// The exact target was queued, reused, or already had a ready V2 artifact.
+    Resolved(QueueConfigInspectionResponse),
+}
+
 /// Returns whether automatic Config Inspector scheduling is enabled for a mode.
 pub(crate) fn should_schedule_config_inspections(execution_mode_is_mock: bool) -> bool {
     !execution_mode_is_mock
@@ -146,10 +189,10 @@ pub(crate) fn should_schedule_config_inspections(execution_mode_is_mock: bool) -
 ///
 /// The function resolves every supplied `(configuration_name, carrier_drv_path)`
 /// against the specified commit and locks the matching derivation rows for the
-/// complete validation and insert transaction. A ready V2 artifact for the
-/// same carrier suppresses new work. Active rows are deduplicated by the
-/// database partial unique index; terminal history does not suppress a later
-/// attempt.
+/// complete validation and insert transaction. The snapshot-writer transaction
+/// lock is acquired first. A ready V2 artifact for the same carrier suppresses
+/// new work. An active row is reused only when its derivation and carrier match
+/// the resolved target; terminal history does not suppress a later attempt.
 ///
 /// This function performs database work only. It does not spawn processes,
 /// evaluate Nix, access Git, mutate snapshots, or advance selectors.
@@ -191,6 +234,11 @@ pub(crate) async fn enqueue_config_inspection_jobs_for_successful_systems(
         .begin()
         .await
         .context("begin Config Inspector enqueue")?;
+    // CONCURRENCY: Publication and enqueue must serialize before either path
+    // locks or observes target rows. This is the shared snapshot-writer order.
+    lock_snapshot_writer_tx(&mut tx)
+        .await
+        .context("acquire Config Inspector enqueue snapshot writer lock")?;
     let resolved: Vec<(i32, String, String)> = sqlx::query_as(
         r#"
         WITH supplied AS (
@@ -221,12 +269,88 @@ pub(crate) async fn enqueue_config_inspection_jobs_for_successful_systems(
         );
     }
 
-    let derivation_ids: Vec<i32> = resolved.iter().map(|(id, _, _)| *id).collect();
-    let resolved_configuration_names: Vec<&str> =
-        resolved.iter().map(|(_, name, _)| name.as_str()).collect();
-    let resolved_carrier_drv_paths: Vec<&str> =
-        resolved.iter().map(|(_, _, path)| path.as_str()).collect();
+    let resolved = resolved
+        .into_iter()
+        .map(|(derivation_id, configuration_name, carrier_drv_path)| {
+            ResolvedConfigInspectionTarget {
+                derivation_id,
+                configuration_name,
+                carrier_drv_path,
+            }
+        })
+        .collect::<Vec<_>>();
+    if active_config_inspection_target_conflict_tx(&mut tx, commit_id, &resolved).await? {
+        return Err(ConfigInspectionTargetConflict { commit_id }.into());
+    }
+    let inserted_jobs =
+        enqueue_resolved_config_inspection_targets_tx(&mut tx, commit_id, &resolved).await?;
 
+    tx.commit()
+        .await
+        .context("commit Config Inspector enqueue")?;
+
+    Ok(ConfigInspectionEnqueueSummary {
+        requested_targets: resolved.len(),
+        inserted_jobs,
+    })
+}
+
+async fn active_config_inspection_target_conflict_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    commit_id: i32,
+    targets: &[ResolvedConfigInspectionTarget],
+) -> Result<bool> {
+    let derivation_ids: Vec<i32> = targets.iter().map(|target| target.derivation_id).collect();
+    let configuration_names: Vec<&str> = targets
+        .iter()
+        .map(|target| target.configuration_name.as_str())
+        .collect();
+    let carrier_drv_paths: Vec<&str> = targets
+        .iter()
+        .map(|target| target.carrier_drv_path.as_str())
+        .collect();
+    sqlx::query_scalar(
+        r#"
+        WITH supplied AS (
+            SELECT *
+            FROM unnest($1::integer[], $2::text[], $3::text[])
+                AS target(derivation_id, configuration_name, carrier_drv_path)
+        )
+        SELECT EXISTS (
+            SELECT 1
+            FROM supplied
+            JOIN config_inspection_jobs job
+              ON job.commit_id = $4
+             AND job.configuration_name = supplied.configuration_name
+             AND job.status IN ('queued', 'running')
+            WHERE job.derivation_id IS DISTINCT FROM supplied.derivation_id
+               OR job.carrier_drv_path IS DISTINCT FROM supplied.carrier_drv_path
+        )
+        "#,
+    )
+    .bind(&derivation_ids)
+    .bind(&configuration_names)
+    .bind(&carrier_drv_paths)
+    .bind(commit_id)
+    .fetch_one(&mut **tx)
+    .await
+    .context("validate active Config Inspector target identity")
+}
+
+async fn enqueue_resolved_config_inspection_targets_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    commit_id: i32,
+    targets: &[ResolvedConfigInspectionTarget],
+) -> Result<usize> {
+    let derivation_ids: Vec<i32> = targets.iter().map(|target| target.derivation_id).collect();
+    let configuration_names: Vec<&str> = targets
+        .iter()
+        .map(|target| target.configuration_name.as_str())
+        .collect();
+    let carrier_drv_paths: Vec<&str> = targets
+        .iter()
+        .map(|target| target.carrier_drv_path.as_str())
+        .collect();
     let inserted: Vec<Uuid> = sqlx::query_scalar(
         r#"
         WITH supplied AS (
@@ -269,21 +393,163 @@ pub(crate) async fn enqueue_config_inspection_jobs_for_successful_systems(
         "#,
     )
     .bind(&derivation_ids)
-    .bind(&resolved_configuration_names)
-    .bind(&resolved_carrier_drv_paths)
+    .bind(&configuration_names)
+    .bind(&carrier_drv_paths)
     .bind(commit_id)
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut **tx)
     .await
     .context("enqueue Config Inspector jobs")?;
+    Ok(inserted.len())
+}
 
+/// Resolves and queues one authorized system's exact Config Inspector target.
+///
+/// The transaction requires a completed primary commit evaluation and the
+/// exact persisted NixOS derivation produced for the system's effective
+/// configuration. It does not modify primary evaluation or build state.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot resolve or enqueue the target.
+pub(crate) async fn queue_or_reuse_targeted_config_inspection(
+    pool: &PgPool,
+    system_id: Uuid,
+    revision: &str,
+) -> Result<TargetedConfigInspectionOutcome> {
+    let mut tx = pool
+        .begin()
+        .await
+        .context("begin targeted Config Inspector enqueue")?;
+    // CONCURRENCY: This lock is first so publication cannot become available
+    // between the readiness decision and insertion of redundant work.
+    lock_snapshot_writer_tx(&mut tx)
+        .await
+        .context("acquire targeted Config Inspector snapshot writer lock")?;
+    let row = sqlx::query(
+        r#"
+        SELECT commit.id AS commit_id,
+               COALESCE(NULLIF(BTRIM(system.system_configuration_name), ''),
+                        system.hostname) AS configuration_name
+        FROM systems system
+        JOIN commits commit
+          ON commit.flake_id = system.flake_id
+         AND commit.git_commit_hash = $2
+         AND commit.source_archived = FALSE
+        WHERE system.id = $1
+        FOR SHARE OF system, commit
+        "#,
+    )
+    .bind(system_id)
+    .bind(revision)
+    .fetch_optional(&mut *tx)
+    .await
+    .context("resolve targeted Config Inspector system and commit")?;
+    let Some(row) = row else {
+        tx.rollback().await?;
+        return Ok(TargetedConfigInspectionOutcome::NotFound);
+    };
+    let commit_id: i32 = row.try_get("commit_id")?;
+    let configuration_name: String = row.try_get("configuration_name")?;
+    let derivation = sqlx::query_as::<_, (i32, String)>(
+        r#"
+        SELECT derivation.id, derivation.derivation_path
+        FROM derivations derivation
+        JOIN commits commit
+          ON commit.id = derivation.commit_id
+         AND commit.evaluation_status = 'complete'
+        WHERE derivation.commit_id = $1
+          AND derivation.derivation_type = 'nixos'
+          AND derivation.derivation_name = $2
+          AND derivation.completed_at IS NOT NULL
+          AND NULLIF(BTRIM(derivation.derivation_path), '') IS NOT NULL
+        FOR SHARE OF derivation
+        "#,
+    )
+    .bind(commit_id)
+    .bind(&configuration_name)
+    .fetch_optional(&mut *tx)
+    .await
+    .context("resolve exact completed Config Inspector carrier")?;
+    let Some((derivation_id, carrier_drv_path)) = derivation else {
+        tx.rollback().await?;
+        return Ok(TargetedConfigInspectionOutcome::PrerequisiteMissing);
+    };
+    let target = ResolvedConfigInspectionTarget {
+        derivation_id,
+        configuration_name: configuration_name.clone(),
+        carrier_drv_path,
+    };
+    if active_config_inspection_target_conflict_tx(
+        &mut tx,
+        commit_id,
+        std::slice::from_ref(&target),
+    )
+    .await?
+    {
+        tx.rollback().await?;
+        return Ok(TargetedConfigInspectionOutcome::ActiveTargetConflict);
+    }
+    let inserted = enqueue_resolved_config_inspection_targets_tx(
+        &mut tx,
+        commit_id,
+        std::slice::from_ref(&target),
+    )
+    .await?
+        == 1;
+    let (job_status, ready): (Option<String>, bool) = sqlx::query_as(
+        r#"
+        SELECT (
+                 SELECT job.status
+                 FROM config_inspection_jobs job
+                 WHERE job.commit_id = $1
+                   AND job.configuration_name = $2
+                   AND job.status IN ('queued', 'running')
+                 ORDER BY job.created_at DESC, job.id DESC
+                 LIMIT 1
+               ),
+               EXISTS (
+                 SELECT 1
+                 FROM config_snapshot_selections selection
+                 JOIN evaluation_snapshots snapshot
+                   ON snapshot.id = selection.current_snapshot_id
+                  AND snapshot.commit_id = $1
+                  AND snapshot.configuration_name = $2
+                 WHERE selection.commit_id = $1
+                   AND selection.configuration_name = $2
+                   AND snapshot.schema_version = 2
+                   AND snapshot.integrity_version = 2
+                   AND snapshot.lifecycle = 'available'
+                   AND snapshot.comparison_ready = TRUE
+                   AND snapshot.carrier_drv_path = $3
+               )
+        "#,
+    )
+    .bind(commit_id)
+    .bind(&configuration_name)
+    .bind(&target.carrier_drv_path)
+    .fetch_one(&mut *tx)
+    .await
+    .context("load targeted Config Inspector enqueue outcome")?;
+    let lifecycle = if ready {
+        SnapshotLifecycle::Available
+    } else {
+        match job_status.as_deref() {
+            Some("queued") => SnapshotLifecycle::Queued,
+            Some("running") => SnapshotLifecycle::Running,
+            other => bail!("targeted Config Inspector enqueue produced no active job: {other:?}"),
+        }
+    };
     tx.commit()
         .await
-        .context("commit Config Inspector enqueue")?;
-
-    Ok(ConfigInspectionEnqueueSummary {
-        requested_targets: resolved.len(),
-        inserted_jobs: inserted.len(),
-    })
+        .context("commit targeted Config Inspector enqueue")?;
+    Ok(TargetedConfigInspectionOutcome::Resolved(
+        QueueConfigInspectionResponse {
+            revision: revision.to_string(),
+            configuration_name,
+            lifecycle,
+            queued: inserted,
+        },
+    ))
 }
 
 /// Loads a durable job by ID for the future worker and reconciliation paths.
@@ -676,6 +942,13 @@ pub(crate) async fn recover_stale_config_inspection_jobs(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::config_snapshot_artifact::{
+        CONFIG_OPTION_ARTIFACT_SCHEMA_VERSION_V2, ConfigInspectionArtifactV2,
+        ConfigProvenanceArtifactStateV2, DefinitionValueArtifactStateV2,
+    };
+    use crate::queries::evaluation_snapshots::{
+        SNAPSHOT_WRITER_LOCK_KEY, persist_config_artifact_v2_deferred_tx,
+    };
     use serde_json::json;
     use sqlx::PgPool;
 
@@ -912,6 +1185,26 @@ mod tests {
         .expect("V2 selector should persist");
     }
 
+    fn available_v2_artifact(carrier_drv_path: &str) -> ConfigInspectionArtifactV2 {
+        ConfigInspectionArtifactV2 {
+            artifact_version: CONFIG_OPTION_ARTIFACT_SCHEMA_VERSION_V2,
+            target_key: "a".repeat(64),
+            source_out_path: "/nix/store/config-inspection-source".to_string(),
+            carrier_drv_path: carrier_drv_path.to_string(),
+            provenance_state: ConfigProvenanceArtifactStateV2::Available {
+                adapter_version: 1,
+                target_lib_version: None,
+                target_module_system_path: None,
+                provenance_digest: "b".repeat(64),
+                definition_value_enrichment: DefinitionValueArtifactStateV2::Available {
+                    adapter_version: 1,
+                    provenance_digest: "b".repeat(64),
+                },
+            },
+            options: Vec::new(),
+        }
+    }
+
     #[test]
     fn execution_mode_gate_only_allows_real_mode() {
         assert!(should_schedule_config_inspections(false));
@@ -931,6 +1224,337 @@ mod tests {
                 status
             );
         }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn targeted_enqueue_preserves_exact_identity_and_lifecycle_semantics(pool: PgPool) {
+        let name = format!("targeted-{}", Uuid::new_v4().simple());
+        let (commit_id, derivation_id, carrier_drv_path) = fixture(&pool, &name).await;
+        let (flake_id, revision): (i32, String) =
+            sqlx::query_as("SELECT flake_id, git_commit_hash FROM commits WHERE id = $1")
+                .bind(commit_id)
+                .fetch_one(&pool)
+                .await
+                .expect("commit identity should load");
+        let system_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO systems (hostname, public_key, flake_id, derivation, system_configuration_name) VALUES ($1, 'test-public-key', $2, '', $3) RETURNING id",
+        )
+        .bind(format!("host-{name}"))
+        .bind(flake_id)
+        .bind(&name)
+        .fetch_one(&pool)
+        .await
+        .expect("targeted system should persist");
+        sqlx::query(
+            "UPDATE commits SET evaluation_status = 'complete', evaluation_attempt_count = 7 WHERE id = $1",
+        )
+        .bind(commit_id)
+        .execute(&pool)
+        .await
+        .expect("primary commit should be complete");
+        sqlx::query("UPDATE derivations SET completed_at = now() WHERE id = $1")
+            .bind(derivation_id)
+            .execute(&pool)
+            .await
+            .expect("carrier should be complete");
+        let primary_before: (String, Option<i32>, i64) = sqlx::query_as(
+            "SELECT evaluation_status, evaluation_attempt_count, (SELECT COUNT(*) FROM evaluation_attempts WHERE commit_id = commits.id) FROM commits WHERE id = $1",
+        )
+        .bind(commit_id)
+        .fetch_one(&pool)
+        .await
+        .expect("initial primary state should load");
+
+        let first = queue_or_reuse_targeted_config_inspection(&pool, system_id, &revision)
+            .await
+            .expect("targeted enqueue should succeed");
+        let TargetedConfigInspectionOutcome::Resolved(first) = first else {
+            panic!("exact target should resolve");
+        };
+        assert_eq!(first.revision, revision);
+        assert_eq!(first.configuration_name, name);
+        assert_eq!(first.lifecycle, SnapshotLifecycle::Queued);
+        assert!(first.queued);
+        let row = get_config_inspection_job(
+            &pool,
+            sqlx::query_scalar("SELECT id FROM config_inspection_jobs WHERE commit_id = $1")
+                .bind(commit_id)
+                .fetch_one(&pool)
+                .await
+                .expect("job identity should load"),
+        )
+        .await
+        .expect("job should load")
+        .expect("job should exist");
+        assert_eq!(row.commit_id, commit_id);
+        assert_eq!(row.derivation_id, derivation_id);
+        assert_eq!(row.configuration_name, name);
+        assert_eq!(row.carrier_drv_path, carrier_drv_path);
+
+        let reused = queue_or_reuse_targeted_config_inspection(&pool, system_id, &revision)
+            .await
+            .expect("queued work should be reused");
+        assert!(matches!(
+            reused,
+            TargetedConfigInspectionOutcome::Resolved(QueueConfigInspectionResponse {
+                lifecycle: SnapshotLifecycle::Queued,
+                queued: false,
+                ..
+            })
+        ));
+        let claim = claim_next_config_inspection_job(&pool)
+            .await
+            .expect("claim should succeed")
+            .expect("queued target should be claimable");
+        let running = queue_or_reuse_targeted_config_inspection(&pool, system_id, &revision)
+            .await
+            .expect("running work should be reused");
+        assert!(matches!(
+            running,
+            TargetedConfigInspectionOutcome::Resolved(QueueConfigInspectionResponse {
+                lifecycle: SnapshotLifecycle::Running,
+                queued: false,
+                ..
+            })
+        ));
+        assert!(
+            complete_config_inspection_execution_failure(
+                &pool,
+                claim.job_id,
+                claim.execution_id,
+                "retryable failure",
+            )
+            .await
+            .expect("terminal failure should persist")
+        );
+        let retry = queue_or_reuse_targeted_config_inspection(&pool, system_id, &revision)
+            .await
+            .expect("terminal target should retry");
+        assert!(matches!(
+            retry,
+            TargetedConfigInspectionOutcome::Resolved(QueueConfigInspectionResponse {
+                lifecycle: SnapshotLifecycle::Queued,
+                queued: true,
+                ..
+            })
+        ));
+        let retry_claim = claim_next_config_inspection_job(&pool)
+            .await
+            .expect("retry claim should succeed")
+            .expect("retry should be claimable");
+        assert!(
+            complete_config_inspection_execution_success(
+                &pool,
+                retry_claim.job_id,
+                retry_claim.execution_id,
+            )
+            .await
+            .expect("retry completion should persist")
+        );
+        insert_v2_snapshot(&pool, commit_id, &name, &carrier_drv_path, true).await;
+        let ready = queue_or_reuse_targeted_config_inspection(&pool, system_id, &revision)
+            .await
+            .expect("ready target should resolve");
+        assert!(matches!(
+            ready,
+            TargetedConfigInspectionOutcome::Resolved(QueueConfigInspectionResponse {
+                lifecycle: SnapshotLifecycle::Available,
+                queued: false,
+                ..
+            })
+        ));
+        assert_eq!(job_count(&pool, commit_id).await, 2);
+
+        let primary: (String, Option<i32>, i64) = sqlx::query_as(
+            "SELECT evaluation_status, evaluation_attempt_count, (SELECT COUNT(*) FROM evaluation_attempts WHERE commit_id = commits.id) FROM commits WHERE id = $1",
+        )
+        .bind(commit_id)
+        .fetch_one(&pool)
+        .await
+        .expect("primary state should load");
+        assert_eq!(primary, primary_before);
+
+        let missing_revision = "f".repeat(40);
+        sqlx::query(
+            "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp, evaluation_status) VALUES ($1, $2, now(), 'complete')",
+        )
+        .bind(flake_id)
+        .bind(&missing_revision)
+        .execute(&pool)
+        .await
+        .expect("carrier-free commit should persist");
+        assert_eq!(
+            queue_or_reuse_targeted_config_inspection(&pool, system_id, &missing_revision)
+                .await
+                .expect("missing prerequisite should be explicit"),
+            TargetedConfigInspectionOutcome::PrerequisiteMissing
+        );
+        assert_eq!(job_count(&pool, commit_id).await, 2);
+        assert_eq!(
+            queue_or_reuse_targeted_config_inspection(&pool, Uuid::new_v4(), &revision)
+                .await
+                .expect("unknown system should not error"),
+            TargetedConfigInspectionOutcome::NotFound
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn publication_racing_automatic_enqueue_leaves_no_redundant_job(pool: PgPool) {
+        let name = format!("publication-race-{}", Uuid::new_v4().simple());
+        let (commit_id, derivation_id, carrier_drv_path) = fixture(&pool, &name).await;
+        let successful = successful_system(derivation_id, &name, &carrier_drv_path);
+        let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
+        let (publish_tx, publish_rx) = tokio::sync::oneshot::channel();
+        let publisher_pool = pool.clone();
+        let publisher_name = name.clone();
+        let publisher_carrier = carrier_drv_path.clone();
+        let publisher = tokio::spawn(async move {
+            let mut tx = publisher_pool
+                .begin()
+                .await
+                .expect("publisher transaction should begin");
+            lock_snapshot_writer_tx(&mut tx)
+                .await
+                .expect("publisher should acquire snapshot-writer lock");
+            locked_tx
+                .send(())
+                .expect("race coordinator should receive lock signal");
+            publish_rx
+                .await
+                .expect("race coordinator should release publication");
+            persist_config_artifact_v2_deferred_tx(
+                &mut tx,
+                commit_id,
+                &publisher_name,
+                available_v2_artifact(&publisher_carrier),
+            )
+            .await
+            .expect("same-carrier artifact should persist");
+            tx.commit().await.expect("publication should commit");
+        });
+        locked_rx
+            .await
+            .expect("publisher should report snapshot-writer ownership");
+
+        let enqueue_pool = pool.clone();
+        let enqueue = tokio::spawn(async move {
+            enqueue_config_inspection_jobs_for_successful_systems(
+                &enqueue_pool,
+                commit_id,
+                &[successful],
+            )
+            .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM pg_locks \
+                     WHERE locktype = 'advisory' AND classid::bigint = 0 \
+                       AND objid::bigint = $1 AND NOT granted)",
+                )
+                .bind(SNAPSHOT_WRITER_LOCK_KEY)
+                .fetch_one(&pool)
+                .await
+                .expect("snapshot-writer wait state should load");
+                if waiting {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("enqueue must wait while publication owns the snapshot-writer lock");
+        publish_tx
+            .send(())
+            .expect("publisher should still be waiting");
+        publisher.await.expect("publisher task should finish");
+        let summary = enqueue
+            .await
+            .expect("enqueue task should finish")
+            .expect("enqueue should observe the published artifact");
+        assert_eq!(summary.requested_targets, 1);
+        assert_eq!(summary.inserted_jobs, 0);
+        assert_eq!(job_count(&pool, commit_id).await, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn active_target_identity_mismatch_is_retryable_and_never_mutated(pool: PgPool) {
+        let name = format!("identity-conflict-{}", Uuid::new_v4().simple());
+        let (commit_id, derivation_id, carrier_drv_path) = fixture(&pool, &name).await;
+        let (flake_id, revision): (i32, String) =
+            sqlx::query_as("SELECT flake_id, git_commit_hash FROM commits WHERE id = $1")
+                .bind(commit_id)
+                .fetch_one(&pool)
+                .await
+                .expect("commit identity should load");
+        sqlx::query("UPDATE commits SET evaluation_status = 'complete' WHERE id = $1")
+            .bind(commit_id)
+            .execute(&pool)
+            .await
+            .expect("primary evaluation should be complete");
+        sqlx::query("UPDATE derivations SET completed_at = now() WHERE id = $1")
+            .bind(derivation_id)
+            .execute(&pool)
+            .await
+            .expect("exact carrier should be complete");
+        let system_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO systems (hostname, public_key, flake_id, derivation, system_configuration_name) VALUES ($1, 'test-public-key', $2, '', $3) RETURNING id",
+        )
+        .bind(format!("host-{name}"))
+        .bind(flake_id)
+        .bind(&name)
+        .fetch_one(&pool)
+        .await
+        .expect("targeted system should persist");
+        let obsolete_path = format!("/nix/store/{}-obsolete.drv", Uuid::new_v4().simple());
+        let obsolete_derivation_id: i32 = sqlx::query_scalar(
+            "INSERT INTO derivations (commit_id, derivation_type, derivation_name, derivation_path, status_id, attempt_count) VALUES ($1, 'nixos', 'obsolete-target', $2, (SELECT id FROM derivation_statuses ORDER BY id LIMIT 1), 0) RETURNING id",
+        )
+        .bind(commit_id)
+        .bind(&obsolete_path)
+        .fetch_one(&pool)
+        .await
+        .expect("obsolete carrier should persist");
+        let job_id = insert_queued_job(
+            &pool,
+            commit_id,
+            obsolete_derivation_id,
+            &name,
+            &obsolete_path,
+            Utc::now(),
+        )
+        .await;
+        let before = get_config_inspection_job(&pool, job_id)
+            .await
+            .expect("active job should load")
+            .expect("active job should exist");
+
+        let automatic = enqueue_config_inspection_jobs_for_successful_systems(
+            &pool,
+            commit_id,
+            &[successful_system(derivation_id, &name, &carrier_drv_path)],
+        )
+        .await
+        .expect_err("automatic enqueue must reject obsolete active identity");
+        assert_eq!(
+            automatic.downcast_ref::<ConfigInspectionTargetConflict>(),
+            Some(&ConfigInspectionTargetConflict { commit_id })
+        );
+        assert_eq!(
+            queue_or_reuse_targeted_config_inspection(&pool, system_id, &revision)
+                .await
+                .expect("targeted conflict should be typed"),
+            TargetedConfigInspectionOutcome::ActiveTargetConflict
+        );
+        let after = get_config_inspection_job(&pool, job_id)
+            .await
+            .expect("active job should reload")
+            .expect("active job should remain");
+        assert_eq!(after, before);
+        assert_eq!(job_count(&pool, commit_id).await, 1);
     }
 
     #[test]

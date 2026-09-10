@@ -714,23 +714,43 @@ pub async fn fetch_system_evaluation_module_sources(
     fetch_json(&url).await
 }
 
-/// Explicitly queues or reuses evaluation work for a full revision SHA.
+/// Queues or reuses targeted Config Inspector work for a full revision SHA.
 ///
 /// # Errors
 ///
-/// Returns [`ApiClientError`] when authorization, queueing, transport, or
-/// response decoding fails.
-pub async fn queue_system_evaluation(
+/// Returns [`QueueConfigInspectionError::Prerequisite`] when primary evaluation
+/// has not persisted the exact carrier. Other request failures return
+/// [`QueueConfigInspectionError::Request`].
+pub async fn queue_system_config_inspection(
     id: &uuid::Uuid,
     revision: &str,
-) -> Result<QueueEvaluationResponse, ApiClientError> {
+) -> Result<QueueConfigInspectionResponse, QueueConfigInspectionError> {
     let url = format!(
-        "{}/systems/{}/evaluations/{}",
+        "{}/systems/{}/config-inspections/{}",
         base_url(),
         id,
         encode_uri_component(revision)
     );
-    send_json_with_csrf("POST", &url, None::<&()>).await
+    let (status, text) = send_request_with_csrf("POST", &url, None)
+        .await
+        .map_err(QueueConfigInspectionError::Request)?;
+    if status == 409
+        && let Ok(error) = serde_json::from_str::<ApiError>(&text)
+        && error.error == "config_inspection_prerequisite"
+    {
+        return Err(QueueConfigInspectionError::Prerequisite(error.message));
+    }
+    if !(200..300).contains(&status) {
+        return Err(QueueConfigInspectionError::Request(
+            ApiClientError::Status {
+                code: status,
+                body: decode_api_error_message(&text),
+            },
+        ));
+    }
+    serde_json::from_str(&text).map_err(|error| {
+        QueueConfigInspectionError::Request(ApiClientError::Deserialize(error.to_string()))
+    })
 }
 
 /// Fetch CVE vulnerabilities for a single system.
@@ -2377,6 +2397,15 @@ pub enum ApiClientError {
     Status { code: u16, body: String },
     /// Failed to deserialize response JSON.
     Deserialize(String),
+}
+
+/// Classifies targeted Config Inspector mutation failures.
+#[derive(Debug, Clone)]
+pub enum QueueConfigInspectionError {
+    /// Primary evaluation has not persisted an exact carrier for the target.
+    Prerequisite(String),
+    /// The mutation failed for another API, transport, or decoding reason.
+    Request(ApiClientError),
 }
 
 impl std::fmt::Display for ApiClientError {

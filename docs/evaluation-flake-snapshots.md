@@ -77,8 +77,9 @@ are backfilled with the same tuple semantics.
 
 Snapshot GET handlers and query functions are database-only. They MUST NOT
 invoke Nix, inspect Git, fetch a repository, enqueue work, or perform per-host
-evaluation. A missing snapshot remains a read result. Only the explicit,
-authorized evaluation action can queue or reuse evaluation work.
+evaluation. A missing snapshot remains a read result. The explicit targeted
+Config inspection mutation can queue or reuse only an exact Config Inspector
+job after primary evaluation has persisted its carrier.
 
 This design does not add an agent or builder protocol field. Deployed agents
 continue to report state and generations through the existing protocol.
@@ -114,33 +115,55 @@ systems, exported module names, and resolved lock input revisions.
 
 ## Lifecycle
 
-Evaluation and flake-output reads use these states:
+Config snapshot reads use these states:
 
 | State | Meaning |
 | --- | --- |
-| `queued` | An authorized mutation placed the commit in the existing evaluation queue. |
-| `running` | The existing evaluator is processing the commit. |
-| `failed` | Evaluation ended and a redacted diagnostic is available. |
+| `queued` | An exact Config Inspector target is waiting for the inspection worker. |
+| `running` | The Config Inspector worker owns the exact target. |
+| `failed` | Targeted inspection ended and a redacted diagnostic is available. |
 | `available` | A complete, schema-valid persisted snapshot can be read. |
 | `unavailable` | No reusable snapshot exists, or persisted content is missing, corrupt, incompatible, or over a storage/response bound. |
 
-The read API derives queued and running states from the active commit attempt
-when no integrity-valid reusable snapshot exists. This active state overrides a
-failed or corrupt snapshot left by an earlier attempt. Corrupt content and an
-unsupported snapshot schema otherwise degrade to `unavailable`; the API does
-not return a partial corpus as available. The explicit action treats corrupt
-content as non-reusable and can therefore queue its reconstruction.
+Commit-mode Config reads derive `queued` and `running` from the exact active
+Config Inspector job when no integrity-valid reusable V2 snapshot exists. An
+active job does not become reusable when its derivation ID or carrier path
+differs from the newly resolved target. The targeted mutation returns the
+retryable `409 config_inspection_target_conflict` response and does not mutate
+that job. Corrupt content and an unsupported snapshot schema degrade to
+`unavailable`; the API does not return a partial corpus as available.
 
-The explicit evaluation action requires administrator authority because the
-primary evaluator processes a complete commit and can cross configuration and
-environment boundaries. It locks the commit and reuses available, queued, or
-running work. It queues only a missing terminal evaluation and sends a queue
-wakeup only when the database transition occurred. The commit transition and
-its new claimable `evaluation_attempts` lineage row commit atomically. After
-primary success, Config Inspector scheduling creates or reuses one active job
-for the exact configuration. The separate worker claims that job, persists the
-V2 artifact and selector atomically, and records a redacted terminal failure when
-inspection cannot produce a reusable artifact.
+Primary evaluation fallback and flake-output reads have a separate lifecycle.
+Their `queued`, `running`, and `failed` states come from the commit evaluation
+attempt, not from a Config Inspector job. An active primary attempt overrides a
+failed or corrupt primary artifact left by an earlier attempt. These states do
+not imply that configuration-scoped V2 inspection is queued or running.
+
+The Config UI calls only the targeted Config inspection mutation. This Admin
+mutation applies system and environment authorization before revision
+disclosure. In one transaction, it resolves the exact immutable commit,
+effective configuration, completed NixOS derivation, and non-empty carrier
+`.drv` path. It reuses exactly matching queued or running work, retries after
+terminal history, and suppresses work for an available comparison-ready V2
+artifact only when the carrier matches. Enqueue takes the snapshot-writer
+transaction lock before target row locks or readiness checks, so same-carrier
+publication and enqueue cannot both commit a redundant job. A missing carrier
+returns `409 config_inspection_prerequisite`
+without changing primary commit state, creating an evaluation attempt, sending
+an evaluator or build wakeup, or invoking Nix.
+
+The separate whole-commit evaluation mutation remains an explicitly named
+prerequisite option for callers that choose to request primary evaluation. It
+requires
+administrator authority because the primary evaluator processes a complete
+commit and can cross configuration and environment boundaries. A completed
+primary attempt produces a carrier only when that evaluation discovers and
+persists the exact successful NixOS target. The generic route does not guarantee
+carrier reconstruction. After applicable primary success, automatic scheduling
+and the targeted mutation use the same exact Config Inspector enqueue state
+machine. The separate worker claims that job,
+persists the V2 artifact and selector atomically, and records a redacted
+terminal failure when inspection cannot produce a reusable artifact.
 
 ## Persistence, Bounds, and Reclamation
 

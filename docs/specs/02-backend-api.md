@@ -160,7 +160,8 @@ Systems are the NixOS machines CF manages.
 | GET | `/systems/:id/evaluated-options` | Viewer+ | Read cached revision options |
 | GET | `/systems/:id/evaluation-summary` | Viewer+ | Read cached scalar revision summary |
 | GET | `/systems/:id/evaluation-module-sources` | Viewer+ | Read cached bounded module-source pages |
-| POST | `/systems/:id/evaluations/:revision` | Admin | Queue or reuse evaluation |
+| POST | `/systems/:id/config-inspections/:revision` | Admin | Queue or reuse targeted Config inspection |
+| POST | `/systems/:id/evaluations/:revision` | Admin | Explicit whole-commit evaluation prerequisite |
 
 ### Query Parameters
 
@@ -486,12 +487,39 @@ snapshot-wide module count from a bounded page.
 This GET is database-only. It does not evaluate Nix, inspect Git, fetch a
 repository, enqueue work, mutate snapshot state, or perform per-host work.
 
-### POST `/systems/:id/evaluations/:revision`
+### POST `/systems/:id/config-inspections/:revision`
+
+This mutation requires administrator authority and matching CSRF credentials.
+Authorization and environment visibility checks occur before revision
+validation or resolution. The server atomically resolves the system's exact
+active flake commit, effective configuration name, completed NixOS derivation,
+and non-empty carrier `.drv` path. It then queues or reuses only the exact
+Config Inspector target. A queued or running job is reused, terminal history
+permits a retry, and an available comparison-ready V2 artifact suppresses work
+only when its carrier path matches exactly. The enqueue decision acquires the
+snapshot-writer transaction lock before target row locks and readiness checks.
+If active work has a different derivation ID or carrier path, the endpoint
+returns retryable HTTP 409 with `error: config_inspection_target_conflict` and
+does not mutate that work.
+
+If the exact completed carrier is absent, the endpoint returns HTTP 409 with
+`error: config_inspection_prerequisite`. This response does not queue primary
+evaluation. The endpoint does not change commit evaluation status or attempts,
+notify primary evaluator or build queues, invoke Nix, or inspect another
+configuration. Unknown systems and revisions outside the system's flake return
+the same non-disclosing not-found response.
+
+### POST `/systems/:id/evaluations/:revision` (explicit prerequisite)
 
 This mutation requires administrator authority because the evaluator processes
-the complete commit. It queues a missing terminal evaluation or reuses
+the complete commit, and it requires matching CSRF credentials. It queues a
+missing terminal evaluation or reuses
 available, queued, or running work. The `queued` response field is true only
-when this request performed the queue transition.
+when this request performed the queue transition. The System Config UI does not
+call this route. A caller uses it only as an explicitly named whole-commit
+prerequisite when the targeted Config inspection route reports a missing
+carrier. Completion does not guarantee carrier reconstruction: the primary
+evaluator must discover and persist the exact successful NixOS target.
 
 ### GET `/flakes/:id/revisions/:revision/outputs`
 

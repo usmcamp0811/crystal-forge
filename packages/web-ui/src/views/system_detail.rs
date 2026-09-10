@@ -27,7 +27,7 @@ use crate::api::client::{
     fetch_system_cves, fetch_system_evaluated_options, fetch_system_evaluation_module_sources,
     fetch_system_evaluation_summary, fetch_system_hardening, fetch_system_hardening_justifications,
     fetch_system_hardening_scan_eligibility, get_system_deployment_progress,
-    queue_system_evaluation, request_system_generation_rollback, request_system_rollback,
+    queue_system_config_inspection, request_system_generation_rollback, request_system_rollback,
     request_system_sync, save_system_hardening_justification,
     verify_generation_closure as verify_generation_closure_request,
 };
@@ -5195,6 +5195,7 @@ fn ConfigTab(
     let mut refresh_generation = use_signal(|| 0_u64);
     let mut active_selection = use_signal(|| None::<ModuleSourcesScope>);
     let mut queueing_scope = use_signal(|| None::<ConfigRefreshScope>);
+    let mut inspection_prerequisite = use_signal(|| None::<String>);
     let mut poll_scheduled_scope = use_signal(|| None::<ConfigRefreshScope>);
     let mut summary = use_signal(|| None::<Result<SelectedEvaluationSummary, ApiClientError>>);
     let mut loading_summary = use_signal(|| false);
@@ -5207,7 +5208,7 @@ fn ConfigTab(
     let mut module_request_sequence = use_signal(|| 0_u64);
     let mut module_scope = use_signal(|| None::<ModuleSourcesScope>);
     let mut config_snapshot_token = use_signal(|| None::<String>);
-    let mut reevaluated_commit = use_signal(|| None::<String>);
+    let mut inspected_commit = use_signal(|| None::<String>);
 
     #[cfg(target_arch = "wasm32")]
     {
@@ -5334,6 +5335,7 @@ fn ConfigTab(
             module_loading_more.set(false);
             config_snapshot_token.set(None);
             queueing_scope.set(None);
+            inspection_prerequisite.set(None);
         });
     }
 
@@ -5654,9 +5656,9 @@ fn ConfigTab(
         lifecycle.or(module_lifecycle_hint),
         &generations,
     );
-    let show_commit_reevaluation = selected_mode == SnapshotRevisionMode::Commit
+    let show_commit_inspection = selected_mode == SnapshotRevisionMode::Commit
         && lifecycle == Some(SnapshotLifecycle::Available)
-        && reevaluated_commit.read().as_deref() == selected_revision.as_deref();
+        && inspected_commit.read().as_deref() == selected_revision.as_deref();
     let comparison_available = loaded_response
         .as_ref()
         .is_some_and(|value| value.comparison_available);
@@ -6018,10 +6020,10 @@ fn ConfigTab(
                         }
                     }
                 }
-                if show_commit_reevaluation {
+                if show_commit_inspection {
                     div {
                         class: "cfg-comparison-note",
-                        "Reevaluation of commit "
+                        "Inspection of commit "
                         span {
                             class: "mono",
                             title: selected_revision.clone().unwrap_or_default(),
@@ -6090,6 +6092,9 @@ fn ConfigTab(
                                 div {
                                     strong { "{snapshot_lifecycle_label(state)}" }
                                     p { "{message}" }
+                                    if let Some(prerequisite) = inspection_prerequisite.read().as_deref() {
+                                        p { class: "cfg-error", role: "alert", "Configuration inspection prerequisite: {prerequisite}" }
+                                    }
                                 }
                                 if allow_mutations
                                     && (state == SnapshotLifecycle::Unavailable || state == SnapshotLifecycle::Failed)
@@ -6099,10 +6104,11 @@ fn ConfigTab(
                                         disabled: queueing,
                                         onclick: move |_| {
                                             queueing_scope.set(Some(queue_scope.clone()));
+                                            inspection_prerequisite.set(None);
                                             let revision_for_queue = revision_for_queue.clone();
                                             let request_scope = queue_scope.clone();
                                             spawn(async move {
-                                                let result = queue_system_evaluation(&system.id, &revision_for_queue).await;
+                                                let result = queue_system_config_inspection(&system.id, &revision_for_queue).await;
                                                 if queueing_scope.peek().as_ref() != Some(&request_scope)
                                                     || !refresh_scope_is_current(
                                                         active_selection.peek().as_ref(),
@@ -6115,14 +6121,19 @@ fn ConfigTab(
                                                 queueing_scope.set(None);
                                                 match result {
                                                     Ok(_) => {
-                                                        reevaluated_commit.set(Some(revision_for_queue));
+                                                        inspected_commit.set(Some(revision_for_queue));
                                                         refresh_generation.set(request_scope.generation.saturating_add(1));
                                                     }
-                                                    Err(error) => options.set(Some(Err(error))),
+                                                    Err(crate::api::client::QueueConfigInspectionError::Prerequisite(message)) => {
+                                                        inspection_prerequisite.set(Some(message));
+                                                    }
+                                                    Err(crate::api::client::QueueConfigInspectionError::Request(error)) => {
+                                                        options.set(Some(Err(error)));
+                                                    }
                                                 }
                                             });
                                         },
-                                        if queueing { "Requesting…" } else { "Evaluate this revision" }
+                                        if queueing { "Requesting inspection…" } else { "Inspect configuration" }
                                     }
                                 }
                             }

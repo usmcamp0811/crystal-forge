@@ -2290,7 +2290,7 @@
     },
     {
       "name": "12l-task440-config-lifecycle",
-      "description": "TASK-440 real handler/PostgreSQL/evaluator snapshot retry regression plus mocked auxiliary Config lifecycle and provenance-safe legacy generation states",
+      "description": "TASK-440 real explicit primary prerequisite plus targeted Config Inspector handler/PostgreSQL regression, with mocked prerequisite, lifecycle, endpoint-isolation, and provenance-safe legacy generation states",
       "route": "/systems/:id",
       "designRef": "docs/design/CrystalForge/components/SystemDetail.jsx",
       "profiles": ["ci_fast", "full"],

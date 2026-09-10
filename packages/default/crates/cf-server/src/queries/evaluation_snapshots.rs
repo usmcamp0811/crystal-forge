@@ -3369,10 +3369,11 @@ pub async fn missing_snapshot_lifecycle(
 
 /// Returns commit-mode Config Inspector lifecycle when no V2 selector exists.
 ///
-/// The function prefers the exact configuration-scoped durable job. Before a
-/// Config Inspector job exists, it reports the primary evaluation lifecycle
-/// that must complete before targeted inspection can be scheduled. The
-/// system-to-flake join prevents disclosure of revisions from another flake.
+/// The function prefers the durable job for the current exact completed NixOS
+/// derivation and carrier. Before a matching Config Inspector job exists, it
+/// reports the primary evaluation lifecycle that must complete before targeted
+/// inspection can be scheduled. The system-to-flake join prevents disclosure
+/// of revisions from another flake.
 ///
 /// # Errors
 ///
@@ -3396,10 +3397,22 @@ pub(crate) async fn missing_config_snapshot_lifecycle_v2(
             ) AS configuration_name
         ) config
         LEFT JOIN LATERAL (
+            SELECT derivation.id, derivation.derivation_path
+            FROM derivations derivation
+            WHERE commit.evaluation_status = 'complete'
+              AND derivation.commit_id = commit.id
+              AND derivation.derivation_type = 'nixos'
+              AND derivation.derivation_name = config.configuration_name
+              AND derivation.completed_at IS NOT NULL
+              AND NULLIF(BTRIM(derivation.derivation_path), '') IS NOT NULL
+        ) target ON true
+        LEFT JOIN LATERAL (
             SELECT candidate.status, candidate.error
             FROM config_inspection_jobs candidate
             WHERE candidate.commit_id = commit.id
               AND candidate.configuration_name = config.configuration_name
+              AND candidate.derivation_id = target.id
+              AND candidate.carrier_drv_path = target.derivation_path
             ORDER BY candidate.created_at DESC, candidate.id DESC
             LIMIT 1
         ) job ON true
@@ -5622,6 +5635,124 @@ mod tests {
         )
         .await
         .expect("system insert should succeed")
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn missing_v2_lifecycle_ignores_obsolete_inspection_target(pool: PgPool) {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let revision = format!("{suffix:0>40}");
+        let repo_url = format!("https://example.test/lifecycle-target-{suffix}.git");
+        insert_flake(
+            &pool,
+            &format!("lifecycle-target-{suffix}"),
+            &repo_url,
+            "main",
+            "cf_systems_only",
+        )
+        .await
+        .expect("flake insert should succeed");
+        let commit = insert_test_commit(&pool, &repo_url, &revision).await;
+        let system = insert_test_system(&pool, commit.flake_id, &suffix).await;
+        sqlx::query(
+            "UPDATE commits SET evaluation_status = 'complete', evaluation_error_message = NULL WHERE id = $1",
+        )
+            .bind(commit.id)
+            .execute(&pool)
+            .await
+            .expect("primary evaluation completion should persist");
+
+        let exact = insert_derivation(&pool, Some(&commit), "host", "nixos")
+            .await
+            .expect("exact derivation should persist");
+        let exact_carrier = format!("/nix/store/{suffix}-current.drv");
+        sqlx::query(
+            "UPDATE derivations SET derivation_path = $2, completed_at = now() WHERE id = $1",
+        )
+        .bind(exact.id)
+        .bind(&exact_carrier)
+        .execute(&pool)
+        .await
+        .expect("exact completed carrier should persist");
+        let obsolete_carrier = format!("/nix/store/{suffix}-obsolete.drv");
+        let obsolete_id: i32 = sqlx::query_scalar(
+            "INSERT INTO derivations (commit_id, derivation_type, derivation_name, derivation_path, status_id, attempt_count, completed_at) VALUES ($1, 'nixos', $2, $3, (SELECT id FROM derivation_statuses ORDER BY id LIMIT 1), 0, now()) RETURNING id",
+        )
+        .bind(commit.id)
+        .bind(format!("obsolete-{suffix}"))
+        .bind(&obsolete_carrier)
+        .fetch_one(&pool)
+        .await
+        .expect("obsolete derivation should persist");
+        let obsolete_job_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO config_inspection_jobs (commit_id, derivation_id, configuration_name, carrier_drv_path, status) VALUES ($1, $2, 'host', $3, 'queued') RETURNING id",
+        )
+        .bind(commit.id)
+        .bind(obsolete_id)
+        .bind(&obsolete_carrier)
+        .fetch_one(&pool)
+        .await
+        .expect("obsolete active inspection should persist");
+
+        assert_eq!(
+            missing_config_snapshot_lifecycle_v2(&pool, system.id, &revision)
+                .await
+                .expect("queued obsolete lifecycle should load"),
+            Some((SnapshotLifecycle::Unavailable, None))
+        );
+        sqlx::query(
+            "UPDATE config_inspection_jobs SET status = 'failed', started_at = now(), completed_at = now(), error = 'obsolete failure', updated_at = now() WHERE id = $1",
+        )
+        .bind(obsolete_job_id)
+        .execute(&pool)
+        .await
+        .expect("obsolete inspection should become terminal");
+        assert_eq!(
+            missing_config_snapshot_lifecycle_v2(&pool, system.id, &revision)
+                .await
+                .expect("failed obsolete lifecycle should load"),
+            Some((SnapshotLifecycle::Unavailable, None))
+        );
+
+        sqlx::query(
+            "UPDATE commits SET evaluation_status = 'failed', evaluation_error_message = 'primary failure' WHERE id = $1",
+        )
+        .bind(commit.id)
+        .execute(&pool)
+        .await
+        .expect("primary evaluation failure should persist");
+        assert_eq!(
+            missing_config_snapshot_lifecycle_v2(&pool, system.id, &revision)
+                .await
+                .expect("primary failure lifecycle should load"),
+            Some((
+                SnapshotLifecycle::Failed,
+                Some("primary failure".to_string())
+            ))
+        );
+
+        sqlx::query(
+            "UPDATE commits SET evaluation_status = 'complete', evaluation_error_message = NULL WHERE id = $1",
+        )
+        .bind(commit.id)
+        .execute(&pool)
+        .await
+        .expect("primary evaluation completion should persist");
+        sqlx::query(
+            "INSERT INTO config_inspection_jobs (commit_id, derivation_id, configuration_name, carrier_drv_path, status) VALUES ($1, $2, 'host', $3, 'queued')",
+        )
+        .bind(commit.id)
+        .bind(exact.id)
+        .bind(&exact_carrier)
+        .execute(&pool)
+        .await
+        .expect("exact active inspection should persist");
+        assert_eq!(
+            missing_config_snapshot_lifecycle_v2(&pool, system.id, &revision)
+                .await
+                .expect("exact lifecycle should load"),
+            Some((SnapshotLifecycle::Queued, None))
+        );
     }
 
     async fn persist_test_snapshot(pool: &PgPool, commit: &Commit, value: &str) -> Uuid {

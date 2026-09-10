@@ -885,15 +885,18 @@ pub struct FlakeRegistryItem {
 // Evaluation and flake-output snapshot DTOs
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Identifies the durable lifecycle of a cached snapshot.
+/// Identifies the durable lifecycle exposed by a snapshot API.
+///
+/// Config V2 active states describe targeted Config Inspector work. Primary
+/// fallback and flake-output active states describe commit evaluation work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SnapshotLifecycle {
-    /// Configuration evidence is waiting to be prepared.
+    /// The lifecycle-specific work is queued.
     Queued,
-    /// Configuration evidence is being prepared.
+    /// The lifecycle-specific worker owns the work.
     Running,
-    /// Evaluation ended with a safe diagnostic.
+    /// The lifecycle-specific work ended with a safe diagnostic.
     Failed,
     /// The snapshot is available for database-only reads.
     Available,
@@ -1281,14 +1284,16 @@ pub struct EvaluatedOption {
     pub overridden: Option<bool>,
 }
 
-/// Reports the result of an explicit evaluation action.
+/// Reports the result of an explicit targeted Config Inspector action.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct QueueEvaluationResponse {
+pub struct QueueConfigInspectionResponse {
     /// Full requested revision SHA.
     pub revision: String,
+    /// Exact effective NixOS configuration name.
+    pub configuration_name: String,
     /// Lifecycle after the idempotent action.
     pub lifecycle: SnapshotLifecycle,
-    /// Whether this request changed the revision to queued.
+    /// Whether this request inserted a queued inspection job.
     pub queued: bool,
 }
 

@@ -3307,6 +3307,8 @@ async function routeTask440SystemData(page, overrides = {}) {
     optionRequests: [],
     summaryRequests: [],
     evaluationRequests: [],
+    inspectionRequests: [],
+    inspectionPrerequisite: false,
     rollbackRequests: [],
     requestOrdinal: 0,
     sevenDayDrift: "no_observed_drift",
@@ -3654,8 +3656,24 @@ async function routeTask440SystemData(page, overrides = {}) {
       return;
     }
     state.evaluationRequests.push({ method: request.method(), revision });
+    await route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "unexpected_primary_evaluation", message: "Config UI must not queue primary evaluation", details: null }) });
+  });
+
+  await page.route(new RegExp(`/api/v1/systems/${TASK_440_SYSTEM_ID}/config-inspections/([^/?]+)$`), async (route) => {
+    const request = route.request();
+    if (request.method() !== "POST") {
+      await route.fulfill({ status: 405, contentType: "application/json", body: JSON.stringify({ error: "method_not_allowed", message: "Method not allowed", details: null }) });
+      return;
+    }
+    const match = new URL(request.url()).pathname.match(/\/config-inspections\/([^/]+)$/);
+    const revision = match ? decodeURIComponent(match[1]) : "";
+    state.inspectionRequests.push({ method: request.method(), revision });
+    if (state.inspectionPrerequisite) {
+      await route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ error: "config_inspection_prerequisite", message: "The exact completed NixOS carrier is not available for this system revision.", details: null }) });
+      return;
+    }
     state.lifecycle = state.queueLifecycle;
-    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ revision, lifecycle: state.lifecycle, queued: true }) });
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ revision, configuration_name: "atlas-01", lifecycle: state.lifecycle, queued: true }) });
   });
 
   await page.route(new RegExp(`/api/v1/systems/${TASK_440_SYSTEM_ID}/deploy$`), async (route) => {
@@ -4836,7 +4854,7 @@ async function runTask440LiveSnapshotEvaluation(page) {
     "Expected live commit to begin without a reusable snapshot",
     15000,
   );
-    await page.getByRole("button", { name: "Evaluate this revision" }).click();
+    await phase6Api(page, `/api/v1/systems/${fixture.systemId}/evaluations/${fixture.revision}`, { method: "POST" });
 
     let completed = null;
     for (let attempt = 0; attempt < 180; attempt += 1) {
@@ -4872,7 +4890,10 @@ async function runTask440LiveSnapshotEvaluation(page) {
       if (Number(parsed.activeAttempts) > 1) {
         throw new Error(`TASK-440 live retry created multiple active attempts: ${state}`);
       }
-      if (parsed.commitStatus === "complete") {
+      const prerequisiteAttempt = parsed.attempts.find(
+        (attemptRow) => Number(attemptRow.attemptNumber) === Number(fixture.attemptNumber) + 1,
+      );
+      if (parsed.commitStatus === "complete" && prerequisiteAttempt?.status === "complete") {
         completed = parsed;
         break;
       }
@@ -4893,6 +4914,74 @@ async function runTask440LiveSnapshotEvaluation(page) {
       throw new Error(`TASK-440 live evaluation did not complete: ${state}`);
     }
 
+    const exactTargetState = runFixtureSql(`
+      WITH exact_target AS (
+        SELECT derivation.id, derivation.derivation_path
+        FROM derivations derivation
+        WHERE derivation.commit_id=${Number(fixture.commitId)}
+          AND derivation.derivation_type='nixos'
+          AND derivation.derivation_name='${fixture.configurationName}'
+          AND derivation.completed_at IS NOT NULL
+          AND NULLIF(BTRIM(derivation.derivation_path), '') IS NOT NULL
+      ), removed AS (
+        DELETE FROM config_inspection_jobs
+        WHERE commit_id=${Number(fixture.commitId)}
+          AND configuration_name='${fixture.configurationName}'
+        RETURNING id
+      )
+      SELECT json_build_object(
+        'derivationId', (SELECT id FROM exact_target),
+        'carrierPath', (SELECT derivation_path FROM exact_target),
+        'removedAutomaticJobs', (SELECT COUNT(*) FROM removed)
+      )::text;
+    `);
+    const exactTarget = JSON.parse(exactTargetState);
+    const remainingAutomaticJobs = runFixtureSql(`
+      SELECT COUNT(*)
+      FROM config_inspection_jobs
+      WHERE commit_id=${Number(fixture.commitId)}
+        AND configuration_name='${fixture.configurationName}';
+    `);
+    if (!exactTarget.derivationId || !exactTarget.carrierPath || Number(remainingAutomaticJobs) !== 0) {
+      throw new Error(`Could not isolate the exact targeted Config inspection from automatic scheduling: ${exactTargetState}`);
+    }
+    const attemptsBeforeInspection = completed.attempts.length;
+    await page.getByRole("button", { name: "Inspect configuration" }).click();
+    let targetedState = null;
+    for (let attempt = 0; attempt < 150; attempt += 1) {
+      targetedState = runFixtureSql(`
+        SELECT json_build_object(
+          'jobs', COUNT(*),
+          'activeJobs', COUNT(*) FILTER (WHERE status IN ('queued', 'running')),
+          'derivationIds', json_agg(DISTINCT derivation_id),
+          'configurationNames', json_agg(DISTINCT configuration_name),
+          'carrierPaths', json_agg(DISTINCT carrier_drv_path),
+          'attempts', (SELECT COUNT(*) FROM evaluation_attempts WHERE commit_id=${Number(fixture.commitId)}),
+          'commitStatus', (SELECT evaluation_status FROM commits WHERE id=${Number(fixture.commitId)})
+        )::text
+        FROM config_inspection_jobs
+        WHERE commit_id=${Number(fixture.commitId)}
+          AND configuration_name='${fixture.configurationName}';
+      `);
+      if (Number(JSON.parse(targetedState).jobs) > 0) break;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    const targeted = JSON.parse(targetedState);
+    if (
+      Number(targeted.jobs) !== 1
+      || Number(targeted.activeJobs) !== 1
+      || targeted.derivationIds?.length !== 1
+      || Number(targeted.derivationIds[0]) !== Number(exactTarget.derivationId)
+      || targeted.configurationNames?.length !== 1
+      || targeted.configurationNames[0] !== fixture.configurationName
+      || targeted.carrierPaths?.length !== 1
+      || targeted.carrierPaths[0] !== exactTarget.carrierPath
+      || Number(targeted.attempts) !== attemptsBeforeInspection
+      || targeted.commitStatus !== "complete"
+    ) {
+      throw new Error(`Targeted Config inspection changed primary state or failed exact reuse: ${targetedState}`);
+    }
+
     if (controlsConfigWorker) {
       // The serial worker must start with only this fixture's target. Other
       // systems can enqueue same-commit jobs and consume the readiness budget.
@@ -4904,18 +4993,33 @@ async function runTask440LiveSnapshotEvaluation(page) {
       execFileSync("systemctl", ["start", "crystal-forge-config-inspector.service"]);
     }
 
-    let snapshotAvailable = Number(completed.snapshotCount) === 1;
+    let snapshotAvailable = false;
     for (let attempt = 0; !snapshotAvailable && attempt < 300; attempt += 1) {
-      const snapshotCount = runFixtureSql(`
-        SELECT COUNT(*)
-        FROM config_snapshot_selections selection
-        JOIN evaluation_snapshots snapshot ON snapshot.id = selection.current_snapshot_id
-        WHERE selection.commit_id = ${Number(fixture.commitId)}
-          AND selection.configuration_name = '${fixture.configurationName}'
-          AND snapshot.lifecycle = 'available'
-          AND snapshot.integrity_version = 2;
+      const inspectionState = runFixtureSql(`
+        SELECT json_build_object(
+          'jobStatus', job.status,
+          'derivationId', job.derivation_id,
+          'carrierPath', job.carrier_drv_path,
+          'snapshotCount', (
+            SELECT COUNT(*)
+            FROM config_snapshot_selections selection
+            JOIN evaluation_snapshots snapshot ON snapshot.id = selection.current_snapshot_id
+            WHERE selection.commit_id = job.commit_id
+              AND selection.configuration_name = job.configuration_name
+              AND snapshot.lifecycle = 'available'
+              AND snapshot.integrity_version = 2
+              AND snapshot.carrier_drv_path = job.carrier_drv_path
+          )
+        )::text
+        FROM config_inspection_jobs job
+        WHERE job.commit_id=${Number(fixture.commitId)}
+          AND job.configuration_name='${fixture.configurationName}'
+          AND job.derivation_id=${Number(exactTarget.derivationId)}
+          AND job.carrier_drv_path=$carrier$${exactTarget.carrierPath}$carrier$;
       `);
-      snapshotAvailable = Number(snapshotCount) === 1;
+      const inspection = inspectionState ? JSON.parse(inspectionState) : null;
+      snapshotAvailable = inspection?.jobStatus === "succeeded"
+        && Number(inspection.snapshotCount) === 1;
       if (!snapshotAvailable) await new Promise((resolve) => setTimeout(resolve, 1000));
     }
     if (!snapshotAvailable) {
@@ -16736,7 +16840,7 @@ security.audit.enable = true;</fixtext>
   },
   {
     name: "12l-task440-config-lifecycle",
-    description: "TASK-440 live queue/evaluator/snapshot regression plus mocked auxiliary Config lifecycle and legacy-generation states",
+    description: "TASK-440 live explicit primary prerequisite and targeted Config Inspector regression plus mocked auxiliary lifecycle and legacy-generation states",
     action: async (page) => {
       await runTask440LiveSnapshotEvaluation(page);
       await routeSystemsWarningData(page);
@@ -16756,7 +16860,11 @@ security.audit.enable = true;</fixtext>
       for (const text of ["Module sources unavailable", "Evaluation summary unavailable", "Drift unavailable"]) {
         await assertVisible(page.getByText(text, { exact: true }), `Expected distinct unavailable summary state: ${text}`);
       }
-      await page.getByRole("button", { name: "Evaluate this revision" }).click();
+      state.inspectionPrerequisite = true;
+      await page.getByRole("button", { name: "Inspect configuration" }).click();
+      await assertVisible(page.getByText(/Configuration inspection prerequisite: The exact completed NixOS carrier is not available/i), "Expected distinct Config inspection prerequisite");
+      state.inspectionPrerequisite = false;
+      await page.getByRole("button", { name: "Inspect configuration" }).click();
       const queuedState = page
         .getByText("Configuration evidence queued", { exact: true })
         .locator("xpath=ancestor::*[@role='status'][1]");
@@ -16833,17 +16941,20 @@ security.audit.enable = true;</fixtext>
       await assertVisible(legacyGeneration.getByText("Historical generation configuration not retained", { exact: true }), "Expected explicit missing historical generation provenance", 15000);
       await assertVisible(legacyGeneration.getByText(/did not retain the exact evaluated configuration for that generation/i), "Expected exact generation retention warning");
       await assertVisible(legacyGeneration.getByText(/does not restore or recreate the historical generation configuration/i), "Expected commit reevaluation boundary");
-      await assertHidden(page.getByRole("button", { name: "Evaluate this revision" }), "Generation mode must not imply reevaluation repairs historical provenance");
+      await assertHidden(page.getByRole("button", { name: "Inspect configuration" }), "Generation mode must not imply targeted inspection repairs historical provenance");
       await page.getByRole("button", { name: "Inspect associated commit" }).click();
       await page.waitForURL((url) => url.searchParams.get("config_mode") === "commit" && url.searchParams.get("revision") === TASK_440_HISTORICAL_SHA);
-      await assertVisible(page.getByRole("button", { name: "Evaluate this revision" }), "Commit mode must permit authorized reevaluation");
+      await assertVisible(page.getByRole("button", { name: "Inspect configuration" }), "Commit mode must permit authorized targeted inspection");
       state.queueLifecycle = "available";
-      await page.getByRole("button", { name: "Evaluate this revision" }).click();
-      await assertVisible(page.locator(".cfg-comparison-note").filter({ hasText: `Reevaluation of commit ${TASK_440_HISTORICAL_SHA.slice(0, 7)}` }), "Expected fresh result to be labeled as commit reevaluation", 15000);
-      await assertVisible(page.locator(".cfg-table tbody .cfg-row").first(), "Expected commit data after successful reevaluation");
-      const evaluationRequest = state.evaluationRequests.at(-1);
-      if (evaluationRequest?.method !== "POST" || evaluationRequest?.revision !== TASK_440_HISTORICAL_SHA) {
-        throw new Error(`Expected exact associated-commit POST, got ${JSON.stringify(evaluationRequest)}`);
+      await page.getByRole("button", { name: "Inspect configuration" }).click();
+      await assertVisible(page.locator(".cfg-comparison-note").filter({ hasText: `Inspection of commit ${TASK_440_HISTORICAL_SHA.slice(0, 7)}` }), "Expected fresh result to be labeled as targeted commit inspection", 15000);
+      await assertVisible(page.locator(".cfg-table tbody .cfg-row").first(), "Expected commit data after successful inspection");
+      const inspectionRequest = state.inspectionRequests.at(-1);
+      if (inspectionRequest?.method !== "POST" || inspectionRequest?.revision !== TASK_440_HISTORICAL_SHA) {
+        throw new Error(`Expected exact associated-commit Config inspection POST, got ${JSON.stringify(inspectionRequest)}`);
+      }
+      if (state.evaluationRequests.length !== 0) {
+        throw new Error(`Config UI issued forbidden primary evaluation POSTs: ${JSON.stringify(state.evaluationRequests)}`);
       }
       state.lifecycle = "unavailable";
       await page.goBack({ waitUntil: "domcontentloaded" });

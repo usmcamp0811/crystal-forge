@@ -528,7 +528,11 @@ async fn main() -> anyhow::Result<()> {
         )
         .route(
             "/api/v1/systems/:id/evaluations/:revision",
-            post(systems::queue_system_evaluation_snapshot),
+            post(systems::queue_system_evaluation_prerequisite),
+        )
+        .route(
+            "/api/v1/systems/:id/config-inspections/:revision",
+            post(systems::queue_system_config_inspection),
         )
         .route(
             "/api/v1/systems/:id/verify-generation-closure",

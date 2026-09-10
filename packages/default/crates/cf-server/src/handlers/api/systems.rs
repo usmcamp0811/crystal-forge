@@ -954,7 +954,7 @@ fn evaluation_snapshot_changed(message: &str) -> axum::response::Response {
 ///
 /// The action requires administrator privileges because evaluation processes
 /// the complete commit. It applies non-disclosing system authorization first.
-pub async fn queue_system_evaluation_snapshot(
+pub async fn queue_system_evaluation_prerequisite(
     State(state): State<CFState>,
     headers: HeaderMap,
     Path((system_id, revision)): Path<(Uuid, String)>,
@@ -973,6 +973,9 @@ pub async fn queue_system_evaluation_snapshot(
     // who can see every environment, may trigger this whole-commit action.
     if caller_role != Role::Admin {
         return forbidden_mutation();
+    }
+    if let Err(response) = require_csrf(&headers) {
+        return response;
     }
     let memberships = match load_membership_environment_ids(&state.pool, user_id).await {
         Ok(value) => value,
@@ -1007,6 +1010,94 @@ pub async fn queue_system_evaluation_snapshot(
         Err(error) => {
             tracing::error!(system_id = %system_id, error = %error, "failed to queue evaluation snapshot");
             internal_error("Failed to queue evaluation")
+        }
+    }
+}
+
+fn config_inspection_prerequisite() -> axum::response::Response {
+    (
+        StatusCode::CONFLICT,
+        Json(ApiError {
+            error: "config_inspection_prerequisite".to_string(),
+            message: "The exact completed NixOS carrier is not available for this system revision. Complete the explicitly named whole-commit evaluation prerequisite before inspecting this configuration.".to_string(),
+            details: None,
+        }),
+    )
+        .into_response()
+}
+
+fn config_inspection_target_conflict() -> axum::response::Response {
+    (
+        StatusCode::CONFLICT,
+        Json(ApiError {
+            error: "config_inspection_target_conflict".to_string(),
+            message: "Active configuration inspection work targets an obsolete derivation or carrier. Retry after that work reaches a terminal state.".to_string(),
+            details: None,
+        }),
+    )
+        .into_response()
+}
+
+/// Queues or reuses targeted Config Inspector work for one exact system target.
+///
+/// Authorization and environment visibility checks run before revision
+/// validation or target resolution. The mutation requires an existing carrier
+/// from completed primary evaluation and never queues primary evaluation.
+pub async fn queue_system_config_inspection(
+    State(state): State<CFState>,
+    headers: HeaderMap,
+    Path((system_id, revision)): Path<(Uuid, String)>,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&state.pool, &headers).await else {
+        return forbidden();
+    };
+    let Some(caller_role) = highest_role(&roles) else {
+        return forbidden();
+    };
+    if caller_role != Role::Admin {
+        return forbidden_mutation();
+    }
+    if let Err(response) = require_csrf(&headers) {
+        return response;
+    }
+    let memberships = match load_membership_environment_ids(&state.pool, user_id).await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to load environment memberships"),
+    };
+    let access = match find_system_access_row(&state.pool, system_id).await {
+        Ok(Some(value)) => value,
+        Ok(None) => return not_found(),
+        Err(_) => return internal_error("Failed to load system"),
+    };
+    if !caller_role.can_access_system_environment(access.environment_id, &memberships) {
+        return not_found();
+    }
+    if !is_full_commit_sha(&revision) {
+        return bad_request("revision must be a full 40- or 64-character commit SHA");
+    }
+
+    match crate::queries::config_inspections::queue_or_reuse_targeted_config_inspection(
+        &state.pool,
+        system_id,
+        &revision,
+    )
+    .await
+    {
+        Ok(crate::queries::config_inspections::TargetedConfigInspectionOutcome::Resolved(
+            response,
+        )) => (StatusCode::OK, Json(response)).into_response(),
+        Ok(crate::queries::config_inspections::TargetedConfigInspectionOutcome::NotFound) => {
+            not_found()
+        }
+        Ok(crate::queries::config_inspections::TargetedConfigInspectionOutcome::PrerequisiteMissing) => {
+            config_inspection_prerequisite()
+        }
+        Ok(crate::queries::config_inspections::TargetedConfigInspectionOutcome::ActiveTargetConflict) => {
+            config_inspection_target_conflict()
+        }
+        Err(error) => {
+            tracing::error!(system_id = %system_id, error = %error, "failed to queue targeted Config Inspector work");
+            internal_error("Failed to queue configuration inspection")
         }
     }
 }
@@ -3725,7 +3816,9 @@ async fn record_system_mutation_audit(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::session::{SESSION_COOKIE_NAME, hash_token};
+    use crate::auth::session::{
+        CSRF_COOKIE_NAME, CSRF_HEADER_NAME, SESSION_COOKIE_NAME, hash_token,
+    };
     use crate::models::auth_identity::AuthRole;
     use crate::models::config_inspector::option_key;
     use crate::models::config_snapshot_artifact::{
@@ -3759,6 +3852,45 @@ mod tests {
             .await
             .expect("response body should read");
         serde_json::from_slice(&bytes).expect("response body should decode")
+    }
+
+    async fn mutation_headers(pool: &PgPool, role: AuthRole, suffix: &str) -> HeaderMap {
+        let short_suffix = &suffix[..suffix.len().min(24)];
+        let user = insert_user(
+            pool,
+            &format!("{short_suffix}@inspection.test"),
+            Some("Config Inspection Tester"),
+        )
+        .await
+        .expect("mutation user should persist");
+        sync_user_role(pool, user.id, role)
+            .await
+            .expect("mutation role should persist");
+        let session_token = format!("config-inspection-session-{suffix}");
+        create_user_session(
+            pool,
+            user.id,
+            hash_token(&session_token),
+            Utc::now() + chrono::Duration::hours(1),
+            None,
+            None,
+            "local".into(),
+        )
+        .await
+        .expect("mutation session should persist");
+        let csrf = format!("config-inspection-csrf-{suffix}");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            format!("{SESSION_COOKIE_NAME}={session_token}; {CSRF_COOKIE_NAME}={csrf}")
+                .parse()
+                .expect("cookie should parse"),
+        );
+        headers.insert(
+            CSRF_HEADER_NAME.clone(),
+            csrf.parse().expect("CSRF header should parse"),
+        );
+        headers
     }
 
     #[test]
@@ -4217,7 +4349,7 @@ mod tests {
     #[tokio::test]
     async fn queue_snapshot_action_requires_authentication_before_revision_disclosure() {
         let state = test_cf_state();
-        let response = queue_system_evaluation_snapshot(
+        let response = queue_system_evaluation_prerequisite(
             State(state),
             HeaderMap::new(),
             Path((Uuid::nil(), "a".repeat(40))),
@@ -4225,6 +4357,347 @@ mod tests {
         .await
         .into_response();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires an isolated migrated database"]
+    async fn whole_commit_prerequisite_requires_matching_csrf_credentials() {
+        let pool = test_pool_from_env().await;
+        let suffix = Uuid::new_v4().simple().to_string();
+        let flake_id: i32 = sqlx::query_scalar(
+            "INSERT INTO flakes (name, repo_url, branch) VALUES ($1, $2, 'main') RETURNING id",
+        )
+        .bind(format!("prerequisite-csrf-{suffix}"))
+        .bind(format!(
+            "https://example.test/prerequisite-csrf-{suffix}.git"
+        ))
+        .fetch_one(&pool)
+        .await
+        .expect("CSRF fixture flake should persist");
+        let revision = format!("{:0>40}", &suffix[..suffix.len().min(32)]);
+        let commit_id: i32 = sqlx::query_scalar(
+            "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp, evaluation_status) VALUES ($1, $2, now(), 'complete') RETURNING id",
+        )
+        .bind(flake_id)
+        .bind(&revision)
+        .fetch_one(&pool)
+        .await
+        .expect("CSRF fixture commit should persist");
+        let system_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO systems (hostname, public_key, flake_id, derivation) VALUES ($1, 'test-public-key', $2, '') RETURNING id",
+        )
+        .bind(format!("prerequisite-csrf-{suffix}"))
+        .bind(flake_id)
+        .fetch_one(&pool)
+        .await
+        .expect("CSRF fixture system should persist");
+        let valid_headers = mutation_headers(&pool, AuthRole::Admin, &suffix).await;
+        let state = CFState::new(
+            pool.clone(),
+            crate::config::ServerConfig::default(),
+            std::sync::Arc::new(crate::queue::QueueNotifier::new()),
+            crate::server::jobs::BackgroundJobRegistry::new(),
+        );
+        let initial_attempt_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM evaluation_attempts WHERE commit_id = $1")
+                .bind(commit_id)
+                .fetch_one(&pool)
+                .await
+                .expect("initial attempt count should load");
+        assert_eq!(initial_attempt_count, 1);
+
+        let mut missing = valid_headers.clone();
+        missing.remove(&CSRF_HEADER_NAME);
+        let missing_response = queue_system_evaluation_prerequisite(
+            State(state.clone()),
+            missing,
+            Path((system_id, revision.clone())),
+        )
+        .await
+        .into_response();
+        assert_eq!(missing_response.status(), StatusCode::FORBIDDEN);
+        let missing_body: ApiError = response_json(missing_response).await;
+        assert_eq!(missing_body.error, "csrf_validation_failed");
+
+        let mut mismatched = valid_headers.clone();
+        mismatched.insert(
+            CSRF_HEADER_NAME.clone(),
+            "different-csrf-token"
+                .parse()
+                .expect("mismatched CSRF header should parse"),
+        );
+        let mismatch_response = queue_system_evaluation_prerequisite(
+            State(state.clone()),
+            mismatched,
+            Path((system_id, revision.clone())),
+        )
+        .await
+        .into_response();
+        assert_eq!(mismatch_response.status(), StatusCode::FORBIDDEN);
+        let mismatch_body: ApiError = response_json(mismatch_response).await;
+        assert_eq!(mismatch_body.error, "csrf_validation_failed");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM evaluation_attempts WHERE commit_id = $1",
+            )
+            .bind(commit_id)
+            .fetch_one(&pool)
+            .await
+            .expect("rejected attempt count should load"),
+            initial_attempt_count
+        );
+
+        let valid_response = queue_system_evaluation_prerequisite(
+            State(state),
+            valid_headers,
+            Path((system_id, revision)),
+        )
+        .await
+        .into_response();
+        assert_eq!(valid_response.status(), StatusCode::OK);
+        let valid_body: crate::models::evaluation_snapshots::QueueEvaluationResponse =
+            response_json(valid_response).await;
+        assert_eq!(valid_body.lifecycle, SnapshotLifecycle::Queued);
+        assert!(valid_body.queued);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM evaluation_attempts WHERE commit_id = $1",
+            )
+            .bind(commit_id)
+            .fetch_one(&pool)
+            .await
+            .expect("accepted attempt count should load"),
+            initial_attempt_count + 1
+        );
+    }
+
+    #[tokio::test]
+    async fn config_inspection_action_requires_authentication_before_revision_disclosure() {
+        let state = test_cf_state();
+        let response = queue_system_config_inspection(
+            State(state),
+            HeaderMap::new(),
+            Path((Uuid::nil(), "not-a-revision".to_string())),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires an isolated migrated database"]
+    async fn targeted_config_inspection_api_preserves_primary_state_and_nondisclosure() {
+        let pool = test_pool_from_env().await;
+        let suffix = Uuid::new_v4().simple().to_string();
+        let flake_id: i32 = sqlx::query_scalar(
+            "INSERT INTO flakes (name, repo_url, branch) VALUES ($1, $2, 'main') RETURNING id",
+        )
+        .bind(format!("targeted-api-{suffix}"))
+        .bind(format!("https://example.test/targeted-api-{suffix}.git"))
+        .fetch_one(&pool)
+        .await
+        .expect("API flake should persist");
+        let revision = format!("{:0>40}", &suffix[..suffix.len().min(32)]);
+        let commit_id: i32 = sqlx::query_scalar(
+            "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp, evaluation_status, evaluation_attempt_count) VALUES ($1, $2, now(), 'complete', 4) RETURNING id",
+        )
+        .bind(flake_id)
+        .bind(&revision)
+        .fetch_one(&pool)
+        .await
+        .expect("API commit should persist");
+        let configuration_name = format!("config-{suffix}");
+        let system_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO systems (hostname, public_key, flake_id, derivation, system_configuration_name) VALUES ($1, 'test-public-key', $2, '', $3) RETURNING id",
+        )
+        .bind(format!("host-{suffix}"))
+        .bind(flake_id)
+        .bind(&configuration_name)
+        .fetch_one(&pool)
+        .await
+        .expect("API system should persist");
+        let carrier_drv_path = format!("/nix/store/{suffix}-{configuration_name}.drv");
+        let derivation_id: i32 = sqlx::query_scalar(
+            "INSERT INTO derivations (commit_id, derivation_type, derivation_name, derivation_path, status_id, attempt_count, completed_at) VALUES ($1, 'nixos', $2, $3, 5, 0, now()) RETURNING id",
+        )
+        .bind(commit_id)
+        .bind(&configuration_name)
+        .bind(&carrier_drv_path)
+        .fetch_one(&pool)
+        .await
+        .expect("API carrier should persist");
+        let headers = mutation_headers(&pool, AuthRole::Admin, &suffix).await;
+        let notifier = std::sync::Arc::new(crate::queue::QueueNotifier::new());
+        let state = CFState::new(
+            pool.clone(),
+            crate::config::ServerConfig::default(),
+            notifier.clone(),
+            crate::server::jobs::BackgroundJobRegistry::new(),
+        );
+        let primary_before: (String, Option<i32>, i64) = sqlx::query_as(
+            "SELECT evaluation_status, evaluation_attempt_count, (SELECT COUNT(*) FROM evaluation_attempts WHERE commit_id = commits.id) FROM commits WHERE id = $1",
+        )
+        .bind(commit_id)
+        .fetch_one(&pool)
+        .await
+        .expect("initial primary API state should load");
+
+        let response = queue_system_config_inspection(
+            State(state.clone()),
+            headers.clone(),
+            Path((system_id, revision.clone())),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: crate::models::evaluation_snapshots::QueueConfigInspectionResponse =
+            response_json(response).await;
+        assert_eq!(body.revision, revision);
+        assert_eq!(body.configuration_name, configuration_name);
+        assert_eq!(body.lifecycle, SnapshotLifecycle::Queued);
+        assert!(body.queued);
+        let target: (i32, i32, String, String) = sqlx::query_as(
+            "SELECT commit_id, derivation_id, configuration_name, carrier_drv_path FROM config_inspection_jobs WHERE commit_id = $1",
+        )
+        .bind(commit_id)
+        .fetch_one(&pool)
+        .await
+        .expect("exact API job should persist");
+        assert_eq!(
+            target,
+            (
+                commit_id,
+                derivation_id,
+                configuration_name.clone(),
+                carrier_drv_path
+            )
+        );
+        let primary: (String, Option<i32>, i64) = sqlx::query_as(
+            "SELECT evaluation_status, evaluation_attempt_count, (SELECT COUNT(*) FROM evaluation_attempts WHERE commit_id = commits.id) FROM commits WHERE id = $1",
+        )
+        .bind(commit_id)
+        .fetch_one(&pool)
+        .await
+        .expect("primary API state should load");
+        assert_eq!(primary, primary_before);
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(20),
+                notifier.wait_for_eval_work(),
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(20),
+                notifier.wait_for_build_work(),
+            )
+            .await
+            .is_err()
+        );
+
+        let replacement_carrier = format!("/nix/store/{suffix}-{configuration_name}-new.drv");
+        sqlx::query("UPDATE derivations SET derivation_path = $1 WHERE id = $2")
+            .bind(&replacement_carrier)
+            .bind(derivation_id)
+            .execute(&pool)
+            .await
+            .expect("replacement carrier should persist");
+        let conflict = queue_system_config_inspection(
+            State(state.clone()),
+            headers.clone(),
+            Path((system_id, revision.clone())),
+        )
+        .await
+        .into_response();
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        let conflict_body: ApiError = response_json(conflict).await;
+        assert_eq!(conflict_body.error, "config_inspection_target_conflict");
+        assert_eq!(
+            sqlx::query_as::<_, (i32, i32, String, String)>(
+                "SELECT commit_id, derivation_id, configuration_name, carrier_drv_path FROM config_inspection_jobs WHERE commit_id = $1",
+            )
+            .bind(commit_id)
+            .fetch_one(&pool)
+            .await
+            .expect("conflicting API job should remain unchanged"),
+            target
+        );
+
+        let prerequisite_revision = "e".repeat(40);
+        let prerequisite_commit_id: i32 = sqlx::query_scalar(
+            "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp, evaluation_status) VALUES ($1, $2, now(), 'complete') RETURNING id",
+        )
+        .bind(flake_id)
+        .bind(&prerequisite_revision)
+        .fetch_one(&pool)
+        .await
+        .expect("prerequisite commit should persist");
+        let prerequisite = queue_system_config_inspection(
+            State(state.clone()),
+            headers.clone(),
+            Path((system_id, prerequisite_revision)),
+        )
+        .await
+        .into_response();
+        assert_eq!(prerequisite.status(), StatusCode::CONFLICT);
+        let prerequisite_body: ApiError = response_json(prerequisite).await;
+        assert_eq!(prerequisite_body.error, "config_inspection_prerequisite");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM config_inspection_jobs WHERE commit_id = $1",
+            )
+            .bind(prerequisite_commit_id)
+            .fetch_one(&pool)
+            .await
+            .expect("job count should load"),
+            0
+        );
+
+        let foreign_flake_id: i32 = sqlx::query_scalar(
+            "INSERT INTO flakes (name, repo_url, branch) VALUES ($1, $2, 'main') RETURNING id",
+        )
+        .bind(format!("foreign-target-{suffix}"))
+        .bind(format!("https://example.test/foreign-target-{suffix}.git"))
+        .fetch_one(&pool)
+        .await
+        .expect("foreign flake should persist");
+        let foreign_revision = "d".repeat(40);
+        sqlx::query(
+            "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp, evaluation_status) VALUES ($1, $2, now(), 'complete')",
+        )
+        .bind(foreign_flake_id)
+        .bind(&foreign_revision)
+        .execute(&pool)
+        .await
+        .expect("foreign commit should persist");
+        for (target_id, target_revision) in [
+            (system_id, foreign_revision),
+            (Uuid::new_v4(), "c".repeat(40)),
+        ] {
+            let hidden = queue_system_config_inspection(
+                State(state.clone()),
+                headers.clone(),
+                Path((target_id, target_revision)),
+            )
+            .await
+            .into_response();
+            assert_eq!(hidden.status(), StatusCode::NOT_FOUND);
+        }
+
+        let operator_headers =
+            mutation_headers(&pool, AuthRole::Operator, &format!("operator-{suffix}")).await;
+        for target_id in [system_id, Uuid::new_v4()] {
+            let hidden = queue_system_config_inspection(
+                State(state.clone()),
+                operator_headers.clone(),
+                Path((target_id, "not-a-revision".to_string())),
+            )
+            .await
+            .into_response();
+            assert_eq!(hidden.status(), StatusCode::FORBIDDEN);
+        }
     }
 
     #[tokio::test]

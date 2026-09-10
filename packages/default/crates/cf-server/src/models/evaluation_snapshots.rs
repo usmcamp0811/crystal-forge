@@ -14,15 +14,19 @@ use crate::security::snapshot_redaction::{
     REDACTED_VALUE, redact_evaluation_error, redact_option_value, redact_text,
 };
 
-/// Identifies the durable lifecycle of an evaluation or flake-output snapshot.
+/// Identifies the durable lifecycle exposed by a snapshot API.
+///
+/// For schema-V2 Config data, active states describe the exact Config Inspector
+/// job. For primary fallback and flake-output data, they describe the commit
+/// evaluation attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SnapshotLifecycle {
-    /// An authorized request has queued evaluation work.
+    /// The lifecycle-specific worker has queued work.
     Queued,
-    /// The existing evaluation worker is extracting the snapshot.
+    /// The lifecycle-specific worker owns the work.
     Running,
-    /// Evaluation ended with a safe persisted diagnostic.
+    /// The lifecycle-specific work ended with a safe persisted diagnostic.
     Failed,
     /// The complete snapshot is available for database-only reads.
     Available,
@@ -395,6 +399,19 @@ pub struct QueueEvaluationResponse {
     /// Current lifecycle after the idempotent action.
     pub lifecycle: SnapshotLifecycle,
     /// True only when this request changed the commit to queued.
+    pub queued: bool,
+}
+
+/// Reports whether a targeted Config Inspector action queued or reused work.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueueConfigInspectionResponse {
+    /// Full requested revision SHA.
+    pub revision: String,
+    /// Exact effective NixOS configuration name.
+    pub configuration_name: String,
+    /// Current lifecycle after the idempotent action.
+    pub lifecycle: SnapshotLifecycle,
+    /// True only when this request inserted a queued inspection job.
     pub queued: bool,
 }
 
