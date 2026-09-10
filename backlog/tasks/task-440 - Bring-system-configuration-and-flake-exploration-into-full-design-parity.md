@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-09 22:36'
+updated_date: '2026-09-10 00:55'
 labels:
   - design-parity
   - web-ui
@@ -176,6 +176,8 @@ Production remediation assigned on 2026-09-09: (1) add direct runtime parity to 
 Deployed-review remediation from exact branch SHA `24bd1d0e9950c918e698773efa936c2e2326f6c7`: (A) add an Admin-authorized and non-disclosing system Config-inspection POST route that atomically resolves the exact existing NixOS derivation and reuses the established Config Inspector enqueue state machine; return a typed 409 prerequisite without touching the primary evaluation queue; update the commit-mode Web UI action, lifecycle error handling, documentation, and focused DB/API/browser regressions; verify and commit as `TASK-440: Queue targeted Config inspections`. (B) deserialize `require_cve_check` writer input through the authoritative server `CveCheckConfig` defaults, preserve sparse JSON and explicit malformed-value rejection, add focused writer plus real publication/rollback regressions and narrow default documentation, verify and commit as `TASK-440: Preserve CVE policy XCCDF defaults`. Audit from the starting SHA, recheck the unchanged remote branch, push both commits, and leave TASK-440 In Progress with AC #24/#27 unchanged. No migration, evaluator redesign, worker concurrency change, deployment change, generation redesign, broad XCCDF refactor, TASK-441 work, rebase, merge, or deployment.
 
 Commit B from exact parent 997d7d4826db9ca7c6723254c700a122c01a469c: deserialize only the XCCDF writer's require_cve_check implementation view through the authoritative server CveCheckConfig serde defaults; continue writing the original sparse JSON as config-json and do not add a strict XML representation. Add focused unit matrices for complete/defaulted, per-field omission, explicit values, and malformed bool/threshold/when_no_scan input. Add enrolled isolated-PostgreSQL publication regressions proving an accepted/trusted sparse seed-shaped CVE policy publishes and exports after commit, while malformed CVE writer input rolls back bundle publication. Update only the stale require_cve_check default contract. Run focused writer tests, the two isolated database regressions, offline cf-server lib check, rustfmt, diff check, and the XCCDF schema check if its focused command is available. Audit scope, then create exactly one local commit titled TASK-440: Preserve CVE policy XCCDF defaults; do not push.
+
+Commit A final-audit correction from parent 24bd1d0e: acquire the shared snapshot-writer transaction lock before all automatic and targeted Config enqueue resolution/readiness work; reject active queued/running rows whose derivation or carrier differs from the newly resolved target with a typed retryable conflict and no mutation; enforce CSRF on the retained whole-commit prerequisite mutation after authentication/role checks; strengthen focused PostgreSQL/API and live 12l coverage; correct lifecycle and prerequisite documentation without changing primary evaluator semantics; run focused DB/API, syntax, formatting, offline server, Web UI, and 12l checks; audit exactly the 11 Commit A files; create one local commit named TASK-440: Queue targeted Config inspections; do not push or alter the stash.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
