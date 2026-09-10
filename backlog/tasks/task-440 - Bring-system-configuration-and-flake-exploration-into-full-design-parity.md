@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-10 03:08'
+updated_date: '2026-09-10 03:21'
 labels:
   - design-parity
   - web-ui
@@ -40,6 +40,9 @@ references:
   - git commit 24bd1d0e9950c918e698773efa936c2e2326f6c7
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2834497659'
   - git commit df58dbd6b408cfa1d718dd766690f3834201f033
+  - git commit 41a4904943fd43e1c95c5cd40b8be0f7b1cd3141
+  - git commit b0018e497dd4a30ddb334b77bd2d74bf5d056763
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2835583294'
 documentation:
   - docs/design/CrystalForge/app.jsx
   - docs/design/CrystalForge/components/SystemDetail.jsx
@@ -228,6 +231,8 @@ Commit B was created locally as df58dbd6b408cfa1d718dd766690f3834201f033 with ex
 2026-09-10 corrected Commit B from exact corrected Commit A `128b6a30045ea0815fb848f35935079a4a5fd7a7`: retained the four-file sparse/default writer and real publication/rollback implementation, and corrected `cf:execution@strict` for native `require_cve_check` policies to use authoritative `CveCheckConfig.strict`. Omitted `strict` remains default `true`; explicit valid `false` exports `strict="false"`; non-CVE and non-native behavior remains unchanged. Focused writer tests passed 4/4. Against verified disposable PostgreSQL 17 at `127.0.0.1:55441` with repository migrations through 253, sparse publication/export, malformed CVE rollback, and retained custom-check rollback each passed 1/1; the cluster was stopped afterward. Offline cf-server lib check, rustfmt check, scoped diff check, and rebuilt xccdf-schema check passed with existing warnings/advisories. Audited and committed exactly the four B files as `cb8719bf783560bfafedcb9cca2fe672d0c47762` with exact title `TASK-440: Preserve CVE policy XCCDF defaults`; sole parent is corrected Commit A and no push was performed.
 
 2026-09-10 corrected Commit A final P1 lifecycle correction: `missing_config_snapshot_lifecycle_v2` now resolves the current completed NixOS derivation for the system configuration and reports Config Inspector lifecycle only when both `derivation_id` and `carrier_drv_path` match. Obsolete queued and failed jobs no longer override the primary lifecycle fallback. The isolated PostgreSQL regression covers obsolete active/terminal identities, primary failure fallback, and an exact queued identity. Verification passed: focused exact-target lifecycle DB test, targeted enqueue DB lifecycle test, server lifecycle parser unit test, Web UI lifecycle-copy unit test, offline `cf-server --lib` check, server workspace rustfmt, direct rustfmt for all changed Web UI Rust files, Node syntax, coverage JSON parsing, and `git diff --check`. The crate-wide Web UI rustfmt check remains blocked by pre-existing unrelated drift in `flake_timeline.rs`, `coach_panel.rs`, and `dashboard.rs`; those files were not modified. Committed exactly the 12 approved Commit A files locally as `41a4904943fd43e1c95c5cd40b8be0f7b1cd3141` with title `TASK-440: Queue targeted Config inspections`. The corrected Commit B stash was not changed and no push was performed. TASK-440 remains In Progress with AC #24/#27 unchanged.
+
+2026-09-10 deployed-review remediation completed and pushed in two commits from exact starting SHA `24bd1d0e9950c918e698773efa936c2e2326f6c7`. Commit `41a4904943fd43e1c95c5cd40b8be0f7b1cd3141` (`TASK-440: Queue targeted Config inspections`) changes the commit-mode Config action to `POST /api/v1/systems/:id/config-inspections/:revision`, resolves and queues only the exact completed NixOS configuration carrier, preserves Admin/CSRF/non-disclosing authorization, returns typed prerequisite/target-conflict 409s, and never mutates or wakes the primary evaluation/build paths. The shared enqueue path now serializes with artifact publication, rejects stale active carrier identity, preserves active idempotency/terminal retry/ready-V2 suppression, and binds Config lifecycle to the current exact carrier. Focused real PostgreSQL query/API/lifecycle/race tests, notifier assertions, Web UI unit/WASM checks, rustdoc, formatting, JavaScript/JSON syntax, and diff checks passed. The exact-head Web UI VM workflow was deliberately left to CI per maintainer direction. Commit `b0018e497dd4a30ddb334b77bd2d74bf5d056763` (`TASK-440: Preserve CVE policy XCCDF defaults`) makes `require_cve_check` XCCDF serialization use authoritative `CveCheckConfig` defaults while preserving sparse config JSON, explicit valid values including `strict=false`, and malformed-value rejection. Focused writer tests passed (4/4); isolated PostgreSQL publication/export, malformed-CVE rollback, and existing custom-check rollback regressions passed; offline cf-server check, rustfmt, XCCDF schema check, and diff checks passed. No migration, primary evaluator redesign, worker concurrency increase, deployment/generation redesign, TASK-441 change, rebase, merge, or deployment occurred. Local, tracking, and remote heads match at `b0018e497dd4a30ddb334b77bd2d74bf5d056763`; worktree is clean. Exact-head pipeline 2835583294 is running. TASK-440 remains In Progress and AC #24/#27 remain unchecked.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
