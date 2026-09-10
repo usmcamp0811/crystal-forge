@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-10 02:48'
+updated_date: '2026-09-10 02:55'
 labels:
   - design-parity
   - web-ui
@@ -178,6 +178,8 @@ Deployed-review remediation from exact branch SHA `24bd1d0e9950c918e698773efa936
 Commit B from exact parent 997d7d4826db9ca7c6723254c700a122c01a469c: deserialize only the XCCDF writer's require_cve_check implementation view through the authoritative server CveCheckConfig serde defaults; continue writing the original sparse JSON as config-json and do not add a strict XML representation. Add focused unit matrices for complete/defaulted, per-field omission, explicit values, and malformed bool/threshold/when_no_scan input. Add enrolled isolated-PostgreSQL publication regressions proving an accepted/trusted sparse seed-shaped CVE policy publishes and exports after commit, while malformed CVE writer input rolls back bundle publication. Update only the stale require_cve_check default contract. Run focused writer tests, the two isolated database regressions, offline cf-server lib check, rustfmt, diff check, and the XCCDF schema check if its focused command is available. Audit scope, then create exactly one local commit titled TASK-440: Preserve CVE policy XCCDF defaults; do not push.
 
 Commit A final-audit correction from parent 24bd1d0e: acquire the shared snapshot-writer transaction lock before all automatic and targeted Config enqueue resolution/readiness work; reject active queued/running rows whose derivation or carrier differs from the newly resolved target with a typed retryable conflict and no mutation; enforce CSRF on the retained whole-commit prerequisite mutation after authentication/role checks; strengthen focused PostgreSQL/API and live 12l coverage; correct lifecycle and prerequisite documentation without changing primary evaluator semantics; run focused DB/API, syntax, formatting, offline server, Web UI, and 12l checks; audit exactly the 11 Commit A files; create one local commit named TASK-440: Queue targeted Config inspections; do not push or alter the stash.
+
+Final Commit A P1 correction: update `missing_config_snapshot_lifecycle_v2` to resolve the same unique completed NixOS derivation/carrier used by targeted inspection and select only jobs matching both `derivation_id` and `carrier_drv_path`. Preserve the existing primary-evaluation fallback when no exact job matches and retain the read-only system-to-flake non-disclosure join. Add a focused isolated-PostgreSQL regression for obsolete queued/failed identities and exact matching lifecycle, run the requested focused lifecycle tests and structural gates, then audit and commit only A files without popping the corrected B stash or pushing.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
