@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-10 02:55'
+updated_date: '2026-09-10 03:08'
 labels:
   - design-parity
   - web-ui
@@ -226,6 +226,8 @@ Root-cause diagnosis found that the 12l cleanup retained an unrelated `test-agen
 Commit B was created locally as df58dbd6b408cfa1d718dd766690f3834201f033 with exact title `TASK-440: Preserve CVE policy XCCDF defaults`. Its sole parent is required Commit A 997d7d4826db9ca7c6723254c700a122c01a469c, and the range from Commit A contains exactly one commit. The worktree is clean. No push was performed; origin/TASK-440-system-config-flake-parity remains 24bd1d0e9950c918e698773efa936c2e2326f6c7. TASK-440 remains In Progress with AC #24 and #27 unchanged.
 
 2026-09-10 corrected Commit B from exact corrected Commit A `128b6a30045ea0815fb848f35935079a4a5fd7a7`: retained the four-file sparse/default writer and real publication/rollback implementation, and corrected `cf:execution@strict` for native `require_cve_check` policies to use authoritative `CveCheckConfig.strict`. Omitted `strict` remains default `true`; explicit valid `false` exports `strict="false"`; non-CVE and non-native behavior remains unchanged. Focused writer tests passed 4/4. Against verified disposable PostgreSQL 17 at `127.0.0.1:55441` with repository migrations through 253, sparse publication/export, malformed CVE rollback, and retained custom-check rollback each passed 1/1; the cluster was stopped afterward. Offline cf-server lib check, rustfmt check, scoped diff check, and rebuilt xccdf-schema check passed with existing warnings/advisories. Audited and committed exactly the four B files as `cb8719bf783560bfafedcb9cca2fe672d0c47762` with exact title `TASK-440: Preserve CVE policy XCCDF defaults`; sole parent is corrected Commit A and no push was performed.
+
+2026-09-10 corrected Commit A final P1 lifecycle correction: `missing_config_snapshot_lifecycle_v2` now resolves the current completed NixOS derivation for the system configuration and reports Config Inspector lifecycle only when both `derivation_id` and `carrier_drv_path` match. Obsolete queued and failed jobs no longer override the primary lifecycle fallback. The isolated PostgreSQL regression covers obsolete active/terminal identities, primary failure fallback, and an exact queued identity. Verification passed: focused exact-target lifecycle DB test, targeted enqueue DB lifecycle test, server lifecycle parser unit test, Web UI lifecycle-copy unit test, offline `cf-server --lib` check, server workspace rustfmt, direct rustfmt for all changed Web UI Rust files, Node syntax, coverage JSON parsing, and `git diff --check`. The crate-wide Web UI rustfmt check remains blocked by pre-existing unrelated drift in `flake_timeline.rs`, `coach_panel.rs`, and `dashboard.rs`; those files were not modified. Committed exactly the 12 approved Commit A files locally as `41a4904943fd43e1c95c5cd40b8be0f7b1cd3141` with title `TASK-440: Queue targeted Config inspections`. The corrected Commit B stash was not changed and no push was performed. TASK-440 remains In Progress with AC #24/#27 unchanged.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
