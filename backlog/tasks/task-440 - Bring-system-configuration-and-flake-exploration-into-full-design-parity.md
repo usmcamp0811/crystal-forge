@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-10 14:01'
+updated_date: '2026-09-10 14:19'
 labels:
   - design-parity
   - web-ui
@@ -193,6 +193,8 @@ Final bounded policy-draft JSON remediation from exact clean HEAD `b0018e497dd4a
 Diagnostic-only policy-draft follow-up: instrument `20af-policy-catalog-selection-delete-regressions` to snapshot every `deployment_policy_versions` column for the exact accepted source UUID immediately before and after the production Create draft POST, emit complete rows and a per-column `IS DISTINCT` equivalent comparison, and rerun only 20af. If any column changes, stop without server changes. If no column changes, replace the hash assertion with explicit immutable semantic-field and identity/state assertions, then finish only the already-declared client/browser verification.
 
 2026-09-10 final closure research gate: Before code changes, resolve two material contract gaps. XCCDF: choose whether typed custom-check export follows CF-XCCDF v0.1 (`binding=cfg`, expressions projected to `cfg.config.*`) or a revised/versioned `config` binding contract; also decide how the valid no-enforcement shape `{mode: all, rules: []}` is represented because the current XSD requires at least one rule. Config Inspector: guarded traversal can preserve healthy options, but schema V2 cannot truthfully mark partial option enumeration or root/subtree diagnostics. Any implementation that preserves partial results requires an artifact/persistence/API completeness extension and likely a migration; otherwise the inspector must remain globally unavailable. Do not implement until these decisions are approved.
+
+2026-09-10 approved two-commit closure plan from exact clean HEAD `1e986cd2351652e866f9b72bff956a312fc0827a`. Commit A (`TASK-440: Align custom-check XCCDF context`): derive current export metadata as context `nixos-configuration-v2` plus binding `config`; preserve canonical `config.*` expression text; retain V1 `cfg`/`cfg.config.*` import compatibility by normalizing to current canonical JSON; reconcile typed custom-check projection with lossless `cf:config-json`; widen XSD to allow zero rules only for explicit All no-enforcement semantics; prove current single/multi/empty isolated export-import canonical equality, digest behavior, normal evaluator/gating parity, production-shaped publication and post-commit export, and malformed atomic rollback; update maintained profile. Commit B (`TASK-440: Represent partial Config inventories`): add additive migration 0254 and typed bounded inventory-completeness diagnostics; port guarded attrNames/child-WHNF/_type/depth traversal to targeted V2 inspector only; preserve healthy exact options and record unknown children as unreadable prefixes; make partial artifacts available/selectable but never comparison-ready; skip fabricated Stage-2 identities while retaining healthy work; expose minimal API and UI truth; prove old V2 complete backfill, V1 isolation, poison-before/after, root unavailable, certification/selector/count/All/Search/Changed semantics, and retained shared-index complexity. Run only focused XCCDF, real-Nix Config, Rust, isolated PostgreSQL, offline lib, formatting, and diff checks. Run no broad Web UI or flake checks; if browser behavior changes, run only the narrow partial Config scenario. Preserve policy Create-draft production behavior and leave TASK-440 In Progress with AC #24/#27 unchanged.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
