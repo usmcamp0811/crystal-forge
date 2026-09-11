@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-11 18:51'
+updated_date: '2026-09-11 18:52'
 labels:
   - design-parity
   - web-ui
@@ -251,7 +251,7 @@ Commit B was created locally as df58dbd6b408cfa1d718dd766690f3834201f033 with ex
 
 2026-09-11 Configured options research: Pinned nixpkgs exposes post-discharge/post-priority-filter option metadata through isDefined, highestPrio, and definitionsWithLocations. A declaration default is injected as lib.mkOptionDefault at priority 1500. Exact lightweight classification is: configured when isDefined and either no declared default exists, highestPrio is less than the derived mkOptionDefault priority, or highestPrio equals that priority and more than one definition survives. This excludes default-only and a lower-priority losing assignment, includes ordinary/mkDefault/mkForce/module-generated winners and a same-priority configuration tie, and does not request option.value, type merge, apply, provenance replay, value encoding, or definition-value extraction. It remains O(N) over option identities and the module system may inspect raw definition values to WHNF for property discharge; top-level raw poison can therefore become a scoped diagnostic. A throwing apply and nested poison are suitable regressions proving option.value is not evaluated.
 
-2026-09iënt?
+2026-09-11 backend-only lazy Config observation slice is implemented but remains uncommitted. Migration 0255, typed API/query contracts, exact carrier resolution, immutable identity-bound content storage, active-request coalescing, read-only GETs, Admin/CSRF/non-disclosing POST ordering, a nonblocking capacity-aware worker, ten-second heartbeats, fenced stale-execution recovery, bounded process cleanup, trusted JSON-path Nix operations, isolated configured classifiers, and automatic complete-V2 enqueue removal are in place. A freshly recreated disposable PostgreSQL database at 127.0.0.1:55445 applied migrations 1-255 and both ignored scoped database tests passed. Six focused non-database Rust tests, SQLX_OFFLINE cf-server lib/bins check, server rustfmt check, git diff check, and the focused real-Nix config-observer check passed; existing compiler warnings remain. One concurrent real-Nix attempt failed without a retained log while Rust compilation was contending for resources; the immediate isolated rerun of the same exact command succeeded. No Web UI, migration 0254 or earlier, policy evaluator, certified selector, commit, push, merge, or deployment change was made. TASK-440 remains In Progress.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
