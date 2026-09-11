@@ -753,6 +753,206 @@ pub async fn queue_system_config_inspection(
     })
 }
 
+/// Creates or reuses one exact scoped Config Explorer request.
+///
+/// This mutation uses the shared credential and CSRF helper. A successful
+/// response can be active (`202`) or already complete (`200`).
+///
+/// # Errors
+///
+/// Returns [`ApiClientError`] when the request fails or the response cannot be
+/// decoded as [`ConfigObservationRequestResponse`].
+pub async fn create_system_config_observation(
+    id: &uuid::Uuid,
+    revision: &str,
+    request: &CreateConfigObservationRequest,
+) -> Result<ConfigObservationRequestResponse, ApiClientError> {
+    let url = format!(
+        "{}/systems/{}/config-observations/{}",
+        base_url(),
+        id,
+        encode_uri_component(revision)
+    );
+    send_json_with_csrf("POST", &url, Some(request)).await
+}
+
+/// Fetches the read-only lifecycle for one durable observation request.
+///
+/// # Errors
+///
+/// Returns [`ApiClientError`] when the request fails or the response cannot be
+/// decoded as [`ConfigObservationRequestResponse`].
+pub async fn fetch_system_config_observation_request(
+    id: &uuid::Uuid,
+    request_id: &uuid::Uuid,
+) -> Result<ConfigObservationRequestResponse, ApiClientError> {
+    let url = format!(
+        "{}/systems/{}/config-observation-requests/{}",
+        base_url(),
+        id,
+        request_id
+    );
+    fetch_json(&url).await
+}
+
+/// Fetches one immutable scoped Config Explorer observation by identity.
+///
+/// # Errors
+///
+/// Returns [`ApiClientError`] when the request fails or the response cannot be
+/// decoded as [`ConfigObservationResponse`].
+pub async fn fetch_system_config_observation(
+    id: &uuid::Uuid,
+    observation_id: &uuid::Uuid,
+) -> Result<ConfigObservationResponse, ApiClientError> {
+    let url = format!(
+        "{}/systems/{}/config-observations/by-id/{}",
+        base_url(),
+        id,
+        observation_id
+    );
+    fetch_json(&url).await
+}
+
+fn validate_config_observation_request_identity(
+    response: &ConfigObservationRequestResponse,
+    request_id: Option<uuid::Uuid>,
+    revision: &str,
+    request: &CreateConfigObservationRequest,
+) -> Result<(), ApiClientError> {
+    if request_id.is_some_and(|request_id| response.request_id != request_id)
+        || response.revision != revision
+        || response.kind != request.kind
+        || response.path_components != request.path_components
+    {
+        return Err(ApiClientError::Deserialize(
+            "Config observation request identity changed while polling".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn config_observation_payload_identity(
+    payload: &ConfigObservationPayload,
+) -> (ConfigObservationKind, &[String]) {
+    match payload {
+        ConfigObservationPayload::Root {
+            path_components, ..
+        } => (ConfigObservationKind::Root, path_components),
+        ConfigObservationPayload::Prefix {
+            path_components, ..
+        } => (ConfigObservationKind::Prefix, path_components),
+        ConfigObservationPayload::Option {
+            path_components, ..
+        } => (ConfigObservationKind::Option, path_components),
+        ConfigObservationPayload::Provenance {
+            path_components, ..
+        } => (ConfigObservationKind::Provenance, path_components),
+        ConfigObservationPayload::ConfiguredIndex {
+            path_components, ..
+        } => (ConfigObservationKind::ConfiguredIndex, path_components),
+    }
+}
+
+/// Posts once, polls only the durable request, and fetches its immutable result.
+///
+/// `on_lifecycle` receives the initial POST response and each later lifecycle
+/// response. Queued and capacity-waiting requests poll every five seconds.
+/// Running requests poll every 2.5 seconds. The loader does not synthesize a
+/// percentage or re-POST while it waits. `should_continue` stops obsolete
+/// polling without changing or cancelling the durable server request.
+///
+/// # Errors
+///
+/// Returns [`ApiClientError`] for transport, status, decoding, failed-request,
+/// missing-observation, or exact-identity errors.
+pub async fn load_system_config_observation<F, C>(
+    id: &uuid::Uuid,
+    revision: &str,
+    request: CreateConfigObservationRequest,
+    mut on_lifecycle: F,
+    mut should_continue: C,
+) -> Result<Option<ConfigObservationResponse>, ApiClientError>
+where
+    F: FnMut(&ConfigObservationRequestResponse),
+    C: FnMut() -> bool,
+{
+    if !should_continue() {
+        return Ok(None);
+    }
+    let mut lifecycle = create_system_config_observation(id, revision, &request).await?;
+    if !should_continue() {
+        return Ok(None);
+    }
+    validate_config_observation_request_identity(&lifecycle, None, revision, &request)?;
+    let request_id = lifecycle.request_id;
+    on_lifecycle(&lifecycle);
+
+    loop {
+        match lifecycle.lifecycle {
+            ConfigObservationLifecycle::Succeeded => {
+                if !should_continue() {
+                    return Ok(None);
+                }
+                let observation_id = lifecycle.observation_id.ok_or_else(|| {
+                    ApiClientError::Deserialize(
+                        "Succeeded Config observation request omitted observation_id".to_string(),
+                    )
+                })?;
+                let observation = fetch_system_config_observation(id, &observation_id).await?;
+                if !should_continue() {
+                    return Ok(None);
+                }
+                let (payload_kind, payload_path) =
+                    config_observation_payload_identity(&observation.payload);
+                if observation.observation_id != observation_id
+                    || observation.revision != revision
+                    || observation.kind != request.kind
+                    || observation.path_components != request.path_components
+                    || payload_kind != request.kind
+                    || payload_path != request.path_components
+                {
+                    return Err(ApiClientError::Deserialize(
+                        "Immutable Config observation identity did not match its request"
+                            .to_string(),
+                    ));
+                }
+                return Ok(Some(observation));
+            }
+            ConfigObservationLifecycle::Failed => {
+                return Err(ApiClientError::Status {
+                    code: 422,
+                    body: lifecycle
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| "Config observation failed".to_string()),
+                });
+            }
+            ConfigObservationLifecycle::Queued | ConfigObservationLifecycle::WaitingForCapacity => {
+                gloo_timers::future::TimeoutFuture::new(5_000).await;
+            }
+            ConfigObservationLifecycle::Running => {
+                gloo_timers::future::TimeoutFuture::new(2_500).await;
+            }
+        }
+
+        if !should_continue() {
+            return Ok(None);
+        }
+        lifecycle = fetch_system_config_observation_request(id, &request_id).await?;
+        if !should_continue() {
+            return Ok(None);
+        }
+        validate_config_observation_request_identity(
+            &lifecycle,
+            Some(request_id),
+            revision,
+            &request,
+        )?;
+        on_lifecycle(&lifecycle);
+    }
+}
+
 /// Fetch CVE vulnerabilities for a single system.
 pub async fn fetch_system_cves(
     id: &uuid::Uuid,
@@ -2983,4 +3183,87 @@ pub async fn delete_policy_mapping(
         mapping_id
     );
     send_empty_with_csrf("DELETE", &url, None::<&()>).await
+}
+
+#[cfg(test)]
+mod config_observation_tests {
+    use super::*;
+
+    fn request(
+        kind: ConfigObservationKind,
+        path_components: Vec<String>,
+    ) -> CreateConfigObservationRequest {
+        CreateConfigObservationRequest {
+            kind,
+            path_components,
+        }
+    }
+
+    #[test]
+    fn observation_request_identity_rejects_revision_kind_path_and_request_changes() {
+        let expected = request(ConfigObservationKind::Prefix, vec!["services".into()]);
+        let response = ConfigObservationRequestResponse {
+            request_id: uuid::Uuid::from_u128(440),
+            revision: "a".repeat(40),
+            configuration_name: "atlas-01".into(),
+            kind: ConfigObservationKind::Prefix,
+            path_components: vec!["services".into()],
+            lifecycle: ConfigObservationLifecycle::Running,
+            observation_id: None,
+            error: None,
+            attempts: 1,
+            heartbeat_at: None,
+            reused: false,
+        };
+        assert!(
+            validate_config_observation_request_identity(
+                &response,
+                Some(response.request_id),
+                &response.revision,
+                &expected,
+            )
+            .is_ok()
+        );
+
+        for (request_id, revision, request) in [
+            (
+                Some(uuid::Uuid::from_u128(441)),
+                response.revision.as_str(),
+                expected.clone(),
+            ),
+            (Some(response.request_id), "b", expected.clone()),
+            (
+                Some(response.request_id),
+                response.revision.as_str(),
+                request(ConfigObservationKind::Option, vec!["services".into()]),
+            ),
+            (
+                Some(response.request_id),
+                response.revision.as_str(),
+                request(ConfigObservationKind::Prefix, vec!["networking".into()]),
+            ),
+        ] {
+            assert!(
+                validate_config_observation_request_identity(
+                    &response, request_id, revision, &request,
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn observation_payload_identity_uses_structured_components() {
+        let payload = ConfigObservationPayload::Option {
+            path_components: vec!["services".into(), "openssh".into(), "enable".into()],
+            key: "a".repeat(64),
+            declared_type: Some("boolean".into()),
+            is_defined: true,
+            highest_prio: Some(100),
+            value: SafeOptionValue::Scalar(serde_json::Value::Bool(true)),
+        };
+        let (kind, path) = config_observation_payload_identity(&payload);
+        assert_eq!(kind, ConfigObservationKind::Option);
+        assert_eq!(path, ["services", "openssh", "enable"]);
+    }
 }

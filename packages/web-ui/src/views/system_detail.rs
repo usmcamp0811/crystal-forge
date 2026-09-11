@@ -59,6 +59,7 @@ use crate::components::notifications::Toast;
 use crate::components::poam::{
     AssignmentVersionCandidate, FindingPoamEvent, PoamDetailHost, PoamFilter, SystemPoamSection,
 };
+use crate::components::system::config_explorer::ConfigExplorer;
 use crate::components::system::{
     AutoLatestDeployEvent, AutoLatestDeployPrompt, AutoLatestDeployState, EditSystemModal,
     PendingDeployBanner, deployment_request_for_target, deployment_state_label, environment_style,
@@ -5975,9 +5976,20 @@ fn ConfigTab(
 
     rsx! {
         div { class: "sd-grid sd-grid-config",
+            ConfigExplorer {
+                system_id: system.id,
+                revision: selected_revision.clone(),
+                enabled: selected_revision.is_some()
+                    && !matches!(revision, ConfigRevision::Generation(_)),
+                disabled_reason: if matches!(revision, ConfigRevision::Generation(_)) {
+                    "Lazy Explorer observations are commit-scoped. This retained generation remains on certified generation evidence so Crystal Forge does not mislabel a new commit observation as historical generation data.".to_string()
+                } else {
+                    "An exact commit is required before lazy Config observations can start.".to_string()
+                },
+            }
             section { class: "card sd-card cfg-card", id: "{card_id}",
                 div { class: "sd-card-head",
-                    h2 { "Evaluated options" }
+                    h2 { "Certified snapshot search" }
                     span { class: "sd-card-meta mono", "{flake_name}#nixosConfigurations.{config_name}" }
                 }
                 div { class: "cfg-revbar",

@@ -2210,6 +2210,41 @@ select.input {
   grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
 }
 
+.cfg-explorer-card { grid-column: 1 / -1; min-width: 0; }
+.cfg-explorer-subtitle { margin: 2px 0 0; color: var(--cf-text-muted); font-size: 11px; font-weight: 400; }
+.cfg-explorer-grid { display: grid; grid-template-columns: minmax(0, 3fr) minmax(260px, 2fr); gap: 12px; }
+.cfg-explorer-pane { min-width: 0; border: 1px solid var(--cf-card-border); border-radius: 8px; background: var(--cf-subtle-bg); }
+.cfg-explorer-pane-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; padding: 10px 12px; border-bottom: 1px solid var(--cf-card-border); }
+.cfg-explorer-pane-head h3 { margin: 0; font-size: 12.5px; }
+.cfg-explorer-pane-head span, .cfg-explorer-copy { color: var(--cf-text-muted); font-size: 10.5px; }
+.cfg-explorer-copy { margin: 0; padding: 9px 12px; line-height: 1.45; }
+.cfg-explorer-tree, .cfg-explorer-configured { margin: 0; padding: 5px 0; list-style: none; }
+.cfg-explorer-tree .cfg-explorer-tree { padding: 0; }
+.cfg-explorer-tree-row, .cfg-explorer-configured-row { display: flex; align-items: center; gap: 7px; width: 100%; min-width: 0; border: 0; border-radius: 4px; background: none; color: var(--cf-text-primary); padding: 5px 10px; text-align: left; cursor: pointer; }
+.cfg-explorer-tree-row:hover, .cfg-explorer-configured-row:hover { background: var(--cf-hover-bg); }
+.cfg-explorer-option { color: var(--cf-text-secondary); }
+.cfg-explorer-leaf { display: inline-flex; flex: 0 0 12px; color: var(--cf-text-muted); }
+.cfg-explorer-path, .cfg-explorer-configured-row .mono { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; }
+.cfg-explorer-kind { flex-shrink: 0; color: var(--cf-text-muted); font-size: 9px; text-transform: uppercase; letter-spacing: .04em; }
+.cfg-explorer-unavailable { cursor: default; color: var(--cf-text-muted); }
+.cfg-explorer-configured { border-top: 1px solid var(--cf-divider); }
+.cfg-explorer-configured-row { padding-inline: 12px; }
+.cfg-explorer-configured-meta, .cfg-explorer-diagnostics { padding: 7px 12px; color: var(--cf-text-muted); font-size: 10px; }
+.cfg-explorer-diagnostics { border-top: 1px solid var(--cf-divider); color: #fbbf24; }
+.cfg-explorer-status { padding: 18px 12px; color: var(--cf-text-muted); font-size: 11.5px; }
+.cfg-explorer-error, .cfg-explorer-local-error { color: #f87171; }
+.cfg-explorer-local-error, .cfg-explorer-local-note { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 3px 10px 7px; padding: 7px 9px; border-radius: 5px; background: var(--cf-card-bg); font-size: 10.5px; }
+.cfg-explorer-local-note { color: var(--cf-text-muted); }
+.cfg-explorer-detail { margin-top: 12px; min-width: 0; border: 1px solid var(--cf-card-border); border-radius: 8px; background: var(--cf-subtle-bg); padding: 12px; }
+.cfg-explorer-detail-empty { color: var(--cf-text-muted); font-size: 11.5px; }
+.cfg-explorer-detail-head h3 { margin: 3px 0 8px; overflow-wrap: anywhere; font-size: 13px; }
+.cfg-explorer-facts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; margin: 0; overflow: hidden; border: 1px solid var(--cf-card-border); border-radius: 6px; background: var(--cf-card-border); }
+.cfg-explorer-facts > div { min-width: 0; padding: 8px 10px; background: var(--cf-card-bg); }
+.cfg-explorer-facts dt { color: var(--cf-text-muted); font-size: 9px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
+.cfg-explorer-facts dd { margin: 3px 0 0; overflow-wrap: anywhere; color: var(--cf-text-secondary); font-size: 11px; }
+.cfg-explorer-provenance { display: flex; flex-direction: column; gap: 4px; margin-top: 10px; }
+.cfg-explorer-provenance h4 { margin: 0 0 3px; font-size: 11px; }
+
 .cfg-card { padding-bottom: 0; min-width: 0; }
 .cfg-revbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; padding-bottom: 10px; }
 .cfg-revseg { flex-shrink: 0; }
@@ -2375,6 +2410,8 @@ select.input {
 .fx-empty { padding: 24px 18px; text-align: center; color: var(--cf-text-muted); font-size: 12.5px; }
 
 @media (max-width: 900px) {
+  .cfg-explorer-grid { grid-template-columns: 1fr; }
+  .cfg-explorer-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .cfg-revselect { max-width: 100%; flex: 1 1 220px; }
   .cfg-revback { margin-left: 0; }
   .cfg-detail { padding-left: 18px; }

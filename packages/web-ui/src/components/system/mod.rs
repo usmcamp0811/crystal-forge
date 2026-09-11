@@ -5,6 +5,7 @@
 
 pub mod auto_latest_deploy_prompt;
 pub mod cards;
+pub(crate) mod config_explorer;
 pub mod deploy_system_modal;
 pub mod edit_system_modal;
 pub mod helpers;

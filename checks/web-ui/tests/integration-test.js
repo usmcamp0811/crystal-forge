@@ -3308,6 +3308,12 @@ async function routeTask440SystemData(page, overrides = {}) {
     summaryRequests: [],
     evaluationRequests: [],
     inspectionRequests: [],
+    observationPosts: [],
+    observationRequests: new Map(),
+    observationPostWaiters: [],
+    heldObservationResolvers: new Map(),
+    holdObservationKinds: new Set(),
+    prefixFailureCounts: new Map(),
     inspectionPrerequisite: false,
     rollbackRequests: [],
     requestOrdinal: 0,
@@ -3325,6 +3331,8 @@ async function routeTask440SystemData(page, overrides = {}) {
   state.moduleTransportFailureCounts = new Map(overrides.moduleTransportFailureCounts || state.moduleTransportFailureCounts);
   state.moduleReplacementConflictCounts = new Map(overrides.moduleReplacementConflictCounts || state.moduleReplacementConflictCounts);
   state.optionReplacementConflictCounts = new Map(overrides.optionReplacementConflictCounts || state.optionReplacementConflictCounts);
+  state.holdObservationKinds = new Set(overrides.holdObservationKinds || state.holdObservationKinds);
+  state.prefixFailureCounts = new Map(overrides.prefixFailureCounts || state.prefixFailureCounts);
   const canonicalDesign = state.canonicalDesign === true;
   const currentRevision = canonicalDesign ? TASK_440_CONFIG_SHA : TASK_440_CURRENT_SHA;
   const currentGeneration = canonicalDesign ? 160 : 74;
@@ -3349,6 +3357,16 @@ async function routeTask440SystemData(page, overrides = {}) {
     state.holdModuleRevisions.delete(revision);
     for (const resolve of state.heldModuleResolvers.get(revision) || []) resolve();
     state.heldModuleResolvers.delete(revision);
+  };
+  state.waitForObservationPosts = (kinds) => {
+    const ready = () => kinds.every((kind) => state.observationPosts.some((request) => request.kind === kind));
+    if (ready()) return Promise.resolve();
+    return new Promise((resolve) => state.observationPostWaiters.push({ ready, resolve }));
+  };
+  state.releaseHeldObservation = (kind) => {
+    state.holdObservationKinds.delete(kind);
+    for (const resolve of state.heldObservationResolvers.get(kind) || []) resolve();
+    state.heldObservationResolvers.delete(kind);
   };
 
   await page.route(new RegExp(`/api/v1/systems/${TASK_440_SYSTEM_ID}$`), async (route) => {
@@ -3686,6 +3704,99 @@ async function routeTask440SystemData(page, overrides = {}) {
     }
     state.lifecycle = state.queueLifecycle;
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ revision, configuration_name: "atlas-01", lifecycle: state.lifecycle, queued: true }) });
+  });
+
+  const observationPayload = (kind, pathComponents, revision) => {
+    const key = (value) => createHash("sha256").update(`task440-observation:${value}`).digest("hex");
+    if (kind === "root") return {
+      kind, path_components: [], children: [
+        { path_components: [`${revision.slice(0, 7)}-root`], key: key(`${revision}-root`), kind: "prefix" },
+        { path_components: ["networking"], key: key("networking"), kind: "prefix" },
+        { path_components: ["services"], key: key("services"), kind: "prefix" },
+        { path_components: ["poison"], key: key("poison"), kind: "unavailable" },
+      ], children_truncated: false, total_children: 4,
+    };
+    if (kind === "prefix") {
+      const dotted = pathComponents.join(".");
+      const children = dotted === "services"
+        ? [
+            { path_components: ["services", "openssh"], key: key("services.openssh"), kind: "prefix" },
+            { path_components: ["services", "healthy"], key: key("services.healthy"), kind: "prefix" },
+          ]
+        : dotted === "services.openssh"
+          ? [{ path_components: ["services", "openssh", "enable"], key: key("services.openssh.enable"), kind: "option" }]
+          : dotted === "networking"
+            ? [{ path_components: ["networking", "hostName"], key: key("networking.hostName"), kind: "option" }]
+            : [{ path_components: [...pathComponents, "enabled"], key: key(`${dotted}.enabled`), kind: "option" }];
+      return { kind, path_components: pathComponents, children, children_truncated: false, total_children: children.length };
+    }
+    if (kind === "configured_index") return {
+      kind, path_components: [], total_traversed: 16000, diagnostics: [], diagnostics_truncated: false,
+      configured: [
+        { path_components: ["services", "openssh", "enable"], key: key("services.openssh.enable") },
+        { path_components: ["networking", "hostName"], key: key("networking.hostName") },
+      ], total_configured: 2, configured_truncated: false, classifier_diagnostics: [], classifier_diagnostics_truncated: false,
+    };
+    if (kind === "option") return {
+      kind, path_components: pathComponents, key: key(pathComponents.join(".")), declared_type: pathComponents.at(-1) === "enable" ? "boolean" : "string",
+      is_defined: true, highest_prio: 100, value: { kind: "scalar", value: pathComponents.at(-1) === "enable" ? true : "atlas-01" },
+    };
+    return {
+      kind, path_components: pathComponents, key: key(pathComponents.join(".")),
+      definitions: [{ source_path: "nixos/hosts/atlas-01.nix", priority: 100 }], definitions_truncated: false, total_definitions: 1,
+    };
+  };
+
+  await page.route(new RegExp(`/api/v1/systems/${TASK_440_SYSTEM_ID}/config-observations/([^/?]+)$`), async (route) => {
+    const request = route.request();
+    if (request.method() !== "POST") return route.fallback();
+    const headers = await request.allHeaders();
+    const csrfCookie = (headers.cookie || "").split(";").map((cookie) => cookie.trim()).find((cookie) => cookie.startsWith("__Host-cf-csrf="))?.slice("__Host-cf-csrf=".length);
+    if (!csrfCookie || headers["x-csrf-token"] !== csrfCookie) {
+      await route.fulfill({ status: 403, contentType: "application/json", body: JSON.stringify({ error: "csrf_validation_failed", message: "CSRF validation failed" }) });
+      return;
+    }
+    const revision = decodeURIComponent(new URL(request.url()).pathname.split("/").at(-1));
+    const body = request.postDataJSON();
+    state.observationPosts.push({ revision, kind: body.kind, path_components: body.path_components });
+    for (const waiter of state.observationPostWaiters.splice(0)) {
+      if (waiter.ready()) waiter.resolve();
+      else state.observationPostWaiters.push(waiter);
+    }
+    if (state.holdObservationKinds.has(body.kind)) {
+      await new Promise((resolve) => {
+        const resolvers = state.heldObservationResolvers.get(body.kind) || [];
+        resolvers.push(resolve);
+        state.heldObservationResolvers.set(body.kind, resolvers);
+      });
+    }
+    const dotted = body.path_components.join(".");
+    const failures = body.kind === "prefix" ? state.prefixFailureCounts.get(dotted) || 0 : 0;
+    const requestId = `44000000-0000-4000-8000-${String(state.observationPosts.length).padStart(12, "0")}`;
+    const observationId = `44100000-0000-4000-8000-${String(state.observationPosts.length).padStart(12, "0")}`;
+    const response = {
+      request_id: requestId, revision, configuration_name: "atlas-01", kind: body.kind, path_components: body.path_components,
+      lifecycle: failures > 0 ? "failed" : "succeeded", observation_id: failures > 0 ? null : observationId,
+      error: failures > 0 ? `Unable to inspect ${dotted}` : null, attempts: 1, heartbeat_at: null, reused: false,
+    };
+    if (failures > 0) state.prefixFailureCounts.set(dotted, failures - 1);
+    state.observationRequests.set(requestId, response);
+    state.observationRequests.set(observationId, { ...response, payload: observationPayload(body.kind, body.path_components, revision) });
+    await route.fulfill({ status: failures > 0 ? 202 : 200, contentType: "application/json", body: JSON.stringify(response) });
+  });
+
+  await page.route(new RegExp(`/api/v1/systems/${TASK_440_SYSTEM_ID}/config-observation-requests/([^/?]+)$`), async (route) => {
+    const id = new URL(route.request().url()).pathname.split("/").at(-1);
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(state.observationRequests.get(id)) });
+  });
+
+  await page.route(new RegExp(`/api/v1/systems/${TASK_440_SYSTEM_ID}/config-observations/by-id/([^/?]+)$`), async (route) => {
+    const id = new URL(route.request().url()).pathname.split("/").at(-1);
+    const stored = state.observationRequests.get(id);
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+      observation_id: id, revision: stored.revision, configuration_name: stored.configuration_name, schema_version: 1,
+      kind: stored.kind, path_components: stored.path_components, payload: stored.payload, created_at: "2026-09-11T20:00:00Z",
+    }) });
   });
 
   await page.route(new RegExp(`/api/v1/systems/${TASK_440_SYSTEM_ID}/deploy$`), async (route) => {
@@ -16979,7 +17090,7 @@ security.audit.enable = true;</fixtext>
       const state = await routeTask440SystemData(page);
       const configUrl = `${baseUrl}/systems/${TASK_440_SYSTEM_ID}?tab=config&config_mode=commit&revision=${TASK_440_NEVER_DEPLOYED_SHA}`;
       await page.goto(configUrl, { timeout: LOAD_TIMEOUT });
-      await assertVisible(page.getByRole("heading", { name: "Evaluated options" }), `Expected Config explorer; fixture requests: ${state.handledRequests.join(",")}`, 15000);
+      await assertVisible(page.getByRole("heading", { name: "Certified snapshot search" }), `Expected Config explorer; fixture requests: ${state.handledRequests.join(",")}`, 15000);
       await assertVisible(page.locator(".cfg-hist-note").filter({ hasText: "revision never deployed here" }), "Expected never-deployed warning");
       if (!page.url().includes(TASK_440_NEVER_DEPLOYED_SHA)) throw new Error("Expected full revision in Config deep link");
       await page.reload({ timeout: LOAD_TIMEOUT });
@@ -16991,6 +17102,10 @@ security.audit.enable = true;</fixtext>
       await assertVisible(unavailableState, "Expected unavailable snapshot status semantics", 15000);
       for (const text of ["Module sources unavailable", "Evaluation summary unavailable", "Drift unavailable"]) {
         await assertVisible(page.getByText(text, { exact: true }), `Expected distinct unavailable summary state: ${text}`);
+      }
+      await assertVisible(page.getByRole("button", { name: "Inspect configured option services.openssh.enable" }), "Lazy configured data should remain usable without certified V2 evidence");
+      if (!(await page.getByRole("button", { name: /^Changed/ }).isDisabled())) {
+        throw new Error("Lazy observations must not enable Changed without certified V2 evidence");
       }
       state.inspectionPrerequisite = true;
       await page.getByRole("button", { name: "Inspect configuration" }).click();
@@ -17059,8 +17174,13 @@ security.audit.enable = true;</fixtext>
       await modulesCard.getByRole("button", { name: "Retry evaluation module sources" }).click();
       await assertVisible(modulesCard.getByText("Loaded 40 of 86 module sources", { exact: true }), "Expected initial module-source retry to recover");
 
+      const observationsBeforeHistoricalGeneration = state.observationPosts.length;
       await page.goto(`${baseUrl}/systems/${TASK_440_SYSTEM_ID}?tab=config&config_mode=generation&generation=72`, { timeout: LOAD_TIMEOUT });
       await assertVisible(page.getByText(/no tracked commit/i), "Expected unavailable local generation state", 15000);
+      await assertVisible(page.getByText(/Lazy Explorer observations are commit-scoped/i), "Expected truthful historical generation Explorer boundary");
+      if (state.observationPosts.length !== observationsBeforeHistoricalGeneration) {
+        throw new Error("Historical generation mode launched a misleading commit-scoped observation");
+      }
       for (const text of ["Module sources unavailable", "Evaluation summary unavailable", "Drift unavailable"]) {
         await assertVisible(page.getByText(text, { exact: true }), `Expected unavailable summary state without a selectable revision: ${text}`);
       }
@@ -17143,9 +17263,76 @@ security.audit.enable = true;</fixtext>
       const state = await routeTask440SystemData(page, {
         holdModuleRevisions: [TASK_440_CURRENT_SHA],
         summaryReplacementConflictCount: 1,
+        holdObservationKinds: ["root", "configured_index"],
+        prefixFailureCounts: [["services", 1]],
       });
       state.holdSummary = true;
       await page.goto(`${baseUrl}/systems/${TASK_440_SYSTEM_ID}?tab=config&config_mode=commit&revision=${TASK_440_CURRENT_SHA}`, { timeout: LOAD_TIMEOUT });
+      await state.waitForObservationPosts(["root", "configured_index"]);
+      await assertVisible(page.getByRole("status").filter({ hasText: "Root: Queued" }), "Expected independently queued root observation");
+      await assertVisible(page.getByRole("status").filter({ hasText: "Configured options: Queued" }), "Expected independently queued configured index");
+      state.releaseHeldObservation("configured_index");
+      await assertVisible(page.getByRole("button", { name: "Inspect configured option services.openssh.enable" }), "Configured index did not render while root remained held", 15000);
+      await assertVisible(page.getByRole("status").filter({ hasText: "Root: Queued" }), "Configured completion incorrectly completed root");
+      state.releaseHeldObservation("root");
+      let servicesPrefix = page.getByRole("button", { name: "Expand services" });
+      await assertVisible(servicesPrefix, "Root did not render after configured index");
+
+      state.holdObservationKinds.add("root");
+      state.holdObservationKinds.add("configured_index");
+      const nextRootPost = page.waitForRequest((request) => request.method() === "POST" && request.url().includes("/config-observations/") && request.postDataJSON().kind === "root");
+      const nextConfiguredPost = page.waitForRequest((request) => request.method() === "POST" && request.url().includes("/config-observations/") && request.postDataJSON().kind === "configured_index");
+      await page.reload({ timeout: LOAD_TIMEOUT });
+      await Promise.all([nextRootPost, nextConfiguredPost]);
+      state.releaseHeldObservation("root");
+      servicesPrefix = page.getByRole("button", { name: "Expand services" });
+      await assertVisible(servicesPrefix, "Root did not render while configured index remained held", 15000);
+      await assertVisible(page.getByRole("status").filter({ hasText: "Configured options: Queued" }), "Root completion incorrectly completed configured index");
+      state.releaseHeldObservation("configured_index");
+      await assertVisible(page.getByRole("button", { name: "Inspect configured option services.openssh.enable" }), "Configured index did not recover after independent root rendering", 15000);
+
+      await servicesPrefix.click();
+      const servicesFailure = page.getByRole("alert").filter({ hasText: "Unable to inspect services" });
+      await assertVisible(servicesFailure, "Expected prefix failure to remain local", 15000);
+      await assertVisible(page.getByRole("button", { name: "Expand networking" }), "Prefix failure cleared a healthy root sibling");
+      const postsBeforeRetry = state.observationPosts.length;
+      await servicesFailure.getByRole("button", { name: "Retry services" }).click();
+      await assertVisible(page.getByRole("button", { name: "Expand services.openssh" }), "Expected local prefix retry to recover", 15000);
+      const retryPosts = state.observationPosts.slice(postsBeforeRetry);
+      if (retryPosts.length !== 1 || retryPosts[0].kind !== "prefix" || retryPosts[0].path_components.join(".") !== "services") {
+        throw new Error(`Prefix retry requested unrelated observations: ${JSON.stringify(retryPosts)}`);
+      }
+      await page.getByRole("button", { name: "Expand services.openssh" }).click();
+      const treeOption = page.getByRole("button", { name: "Inspect option services.openssh.enable" });
+      await assertVisible(treeOption, "Expected nested lazy option", 15000);
+      await treeOption.click();
+      await assertVisible(page.getByRole("heading", { name: "services.openssh.enable" }), "Tree option did not render lazy detail", 15000);
+      const treeOperation = state.observationPosts.filter((request) => request.kind === "option").at(-1);
+      await page.getByRole("button", { name: "Inspect configured option services.openssh.enable" }).click();
+      await assertVisible(page.getByRole("heading", { name: "services.openssh.enable" }), "Configured option did not render shared lazy detail", 15000);
+      const configuredOperation = state.observationPosts.filter((request) => request.kind === "option").at(-1);
+      if (!treeOperation || !configuredOperation || JSON.stringify(treeOperation.path_components) !== JSON.stringify(configuredOperation.path_components)) {
+        throw new Error(`Tree and configured options used different operations: ${JSON.stringify({ treeOperation, configuredOperation })}`);
+      }
+      const provenanceBefore = state.observationPosts.filter((request) => request.kind === "provenance").length;
+      await page.getByRole("button", { name: "Load provenance for services.openssh.enable" }).click();
+      await assertVisible(page.getByText("nixos/hosts/atlas-01.nix", { exact: true }), "Separate provenance did not render", 15000);
+      if (state.observationPosts.filter((request) => request.kind === "provenance").length !== provenanceBefore + 1) {
+        throw new Error("Option detail did not start exactly one separate provenance request");
+      }
+      state.holdObservationKinds.add("root");
+      const commitSelect = page.locator("select.cfg-revselect");
+      const historicalRootPost = page.waitForRequest((request) => request.method() === "POST" && request.url().includes("/config-observations/") && request.url().includes(TASK_440_HISTORICAL_SHA) && request.postDataJSON().kind === "root");
+      await commitSelect.selectOption(TASK_440_HISTORICAL_SHA);
+      await historicalRootPost;
+      const newestRootPost = page.waitForRequest((request) => request.method() === "POST" && request.url().includes("/config-observations/") && request.url().includes(TASK_440_NEVER_DEPLOYED_SHA) && request.postDataJSON().kind === "root");
+      await commitSelect.selectOption(TASK_440_NEVER_DEPLOYED_SHA);
+      await newestRootPost;
+      state.releaseHeldObservation("root");
+      await assertVisible(page.getByRole("button", { name: "Expand 9999999-root" }), "Newest revision root did not render after releasing held responses", 15000);
+      await assertHidden(page.getByRole("button", { name: "Expand abcdef0-root" }), "Old revision root overwrote the newer exact revision");
+      await commitSelect.selectOption(TASK_440_CURRENT_SHA);
+      await assertVisible(page.getByRole("button", { name: `Expand ${TASK_440_CURRENT_SHA.slice(0, 7)}-root` }), "Current revision did not recover after stale-response scenario", 15000);
       await assertVisible(page.getByText(/^1–\d+ of 38$/), `Expected bounded first page; fixture requests: ${state.handledRequests.join(",")}`, 15000);
       const unresolvedSource = page.getByText("services.openssh.enable", { exact: true }).locator("xpath=ancestor::tr[1]").locator(".cfg-src");
       if (await unresolvedSource.isDisabled()) throw new Error("Direct option provenance incorrectly depends on evaluation summary or module-page loading");
@@ -17448,7 +17635,7 @@ security.audit.enable = true;</fixtext>
       const state = await routeTask440SystemData(page);
       state.moduleFailureCounts.set(40, 1);
       await page.goto(`${baseUrl}/systems/${TASK_440_SYSTEM_ID}?tab=config&config_mode=commit&revision=${TASK_440_CURRENT_SHA}`, { timeout: LOAD_TIMEOUT });
-      await assertVisible(page.getByRole("heading", { name: "Evaluated options" }), "Expected narrow Config explorer", 15000);
+      await assertVisible(page.getByRole("heading", { name: "Certified snapshot search" }), "Expected narrow Config explorer", 15000);
       await assertTask440SelectedConfigRevision(page, "Narrow Config");
       const generationsMode = page.getByRole("button", { name: "Generations" });
       const commitsMode = page.getByRole("button", { name: "Commits" });
@@ -17505,7 +17692,7 @@ security.audit.enable = true;</fixtext>
       const loadCanonicalGeneration = async () => {
         await page.goto(url, { timeout: LOAD_TIMEOUT });
         await dismissOnboardingCoachForCapture(page);
-        await assertVisible(page.getByRole("heading", { name: "Evaluated options" }), "Expected canonical wide Config", 15000);
+        await assertVisible(page.getByRole("heading", { name: "Certified snapshot search" }), "Expected canonical wide Config", 15000);
         await page.getByRole("button", { name: "Generations" }).click();
         await page.locator("select.cfg-revselect").selectOption("160");
       };
@@ -17585,7 +17772,7 @@ security.audit.enable = true;</fixtext>
       await routeTask440SystemData(page, { canonicalDesign: true });
       await page.goto(`${baseUrl}/systems/${TASK_440_SYSTEM_ID}?tab=config&config_mode=commit&revision=${TASK_440_CONFIG_SHA}`, { timeout: LOAD_TIMEOUT });
       await dismissOnboardingCoachForCapture(page);
-      await assertVisible(page.getByRole("heading", { name: "Evaluated options" }), "Expected canonical narrow Config", 15000);
+      await assertVisible(page.getByRole("heading", { name: "Certified snapshot search" }), "Expected canonical narrow Config", 15000);
       await page.getByRole("button", { name: "Generations" }).click();
       await page.locator("select.cfg-revselect").selectOption("160");
       await assertTask440CanonicalConfigState(page, "Canonical narrow Config");

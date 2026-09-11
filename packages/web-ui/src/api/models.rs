@@ -1348,6 +1348,236 @@ pub struct QueueConfigInspectionResponse {
     pub queued: bool,
 }
 
+/// Selects one bounded, non-authoritative Config Explorer observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigObservationKind {
+    /// Lists immediate children at the option-tree root.
+    Root,
+    /// Lists immediate children below an exact structured prefix.
+    Prefix,
+    /// Reads safe value and basic metadata for one exact option.
+    Option,
+    /// Reads bounded definition provenance for one exact option.
+    Provenance,
+    /// Lists bounded identities with surviving non-default assignments.
+    ConfiguredIndex,
+}
+
+/// Requests one exact Config Explorer operation without accepting Nix source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateConfigObservationRequest {
+    /// Closed observation operation.
+    pub kind: ConfigObservationKind,
+    /// Exact option path components. Dotted text is not an identity.
+    pub path_components: Vec<String>,
+}
+
+/// Describes the durable lifecycle of one scoped observation request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigObservationLifecycle {
+    /// The request is queued for a worker pass.
+    Queued,
+    /// The request is waiting for evaluator capacity.
+    WaitingForCapacity,
+    /// The evaluator is inspecting the requested scope.
+    Running,
+    /// An immutable observation is available.
+    Succeeded,
+    /// The bounded observation failed.
+    Failed,
+}
+
+/// Reports one exact scoped request without evaluator internals.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConfigObservationRequestResponse {
+    /// Durable request identity.
+    pub request_id: Uuid,
+    /// Full immutable commit SHA.
+    pub revision: String,
+    /// Effective NixOS configuration name.
+    pub configuration_name: String,
+    /// Exact requested operation.
+    pub kind: ConfigObservationKind,
+    /// Exact requested path components.
+    pub path_components: Vec<String>,
+    /// Current durable lifecycle.
+    pub lifecycle: ConfigObservationLifecycle,
+    /// Immutable observation identity after success.
+    pub observation_id: Option<Uuid>,
+    /// Bounded safe failure message after failure.
+    pub error: Option<String>,
+    /// Number of executions that acquired capacity.
+    pub attempts: i32,
+    /// Last running heartbeat, if the request is running.
+    pub heartbeat_at: Option<DateTime<Utc>>,
+    /// Whether the POST reused an active request or cached observation.
+    #[serde(default)]
+    pub reused: bool,
+}
+
+/// Classifies one immediate Config Explorer child.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigObservationChildKind {
+    /// The child is an exact option.
+    Option,
+    /// The child is an expandable prefix.
+    Prefix,
+    /// The child is unreadable and has no inferred descendants.
+    Unavailable,
+}
+
+/// Identifies one immediate child by its exact structured path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigObservationChild {
+    /// Exact child path components.
+    pub path_components: Vec<String>,
+    /// Stable content key supplied by the server.
+    pub key: String,
+    /// Child behavior observed by the server.
+    pub kind: ConfigObservationChildKind,
+}
+
+/// Identifies one configured option without loading its value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfiguredOptionIdentity {
+    /// Exact option path components.
+    pub path_components: Vec<String>,
+    /// Stable content key supplied by the server.
+    pub key: String,
+}
+
+/// Describes one bounded traversal diagnostic.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigObservationDiagnostic {
+    /// Exact affected path components.
+    pub path_components: Vec<String>,
+    /// Stable diagnostic category.
+    pub code: String,
+    /// Bounded safe diagnostic.
+    pub message: String,
+}
+
+/// Describes one bounded configured-option classifier diagnostic.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigClassifierDiagnostic {
+    /// Stable content key for the affected option.
+    pub key: String,
+    /// Stable diagnostic category.
+    pub code: String,
+    /// Bounded safe diagnostic.
+    pub message: String,
+}
+
+/// Describes one definition without claiming complete provenance.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigObservationDefinition {
+    /// Source path reported by the module system, when available.
+    pub source_path: Option<String>,
+    /// Module-system priority, when available.
+    pub priority: Option<i64>,
+}
+
+/// Contains one typed, bounded Config Explorer payload.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ConfigObservationPayload {
+    /// Contains immediate children at the root.
+    Root {
+        /// Exact empty root path.
+        path_components: Vec<String>,
+        /// Bounded immediate children.
+        children: Vec<ConfigObservationChild>,
+        /// Whether additional children were omitted.
+        children_truncated: bool,
+        /// Total immediate children before bounding.
+        total_children: u64,
+    },
+    /// Contains immediate children below one exact prefix.
+    Prefix {
+        /// Exact requested prefix components.
+        path_components: Vec<String>,
+        /// Bounded immediate children.
+        children: Vec<ConfigObservationChild>,
+        /// Whether additional children were omitted.
+        children_truncated: bool,
+        /// Total immediate children before bounding.
+        total_children: u64,
+    },
+    /// Contains safe basic detail for one exact option.
+    Option {
+        /// Exact option path components.
+        path_components: Vec<String>,
+        /// Stable content key supplied by the server.
+        key: String,
+        /// Declared NixOS option type, when available.
+        declared_type: Option<String>,
+        /// Whether the module system reports the option as defined.
+        is_defined: bool,
+        /// Highest surviving module priority, when available.
+        highest_prio: Option<i64>,
+        /// Existing safe encoded-value contract.
+        value: SafeOptionValue,
+    },
+    /// Contains separately requested bounded provenance.
+    Provenance {
+        /// Exact option path components.
+        path_components: Vec<String>,
+        /// Stable content key supplied by the server.
+        key: String,
+        /// Bounded definitions in server order.
+        definitions: Vec<ConfigObservationDefinition>,
+        /// Whether additional definitions were omitted.
+        definitions_truncated: bool,
+        /// Total definitions before bounding.
+        total_definitions: u64,
+    },
+    /// Contains the independent bounded configured-options index.
+    ConfiguredIndex {
+        /// Exact empty index path.
+        path_components: Vec<String>,
+        /// Total option identities traversed.
+        total_traversed: u64,
+        /// Bounded traversal diagnostics.
+        diagnostics: Vec<ConfigObservationDiagnostic>,
+        /// Whether traversal diagnostics were omitted.
+        diagnostics_truncated: bool,
+        /// Bounded configured identities.
+        configured: Vec<ConfiguredOptionIdentity>,
+        /// Total configured identities before bounding.
+        total_configured: u64,
+        /// Whether configured identities were omitted.
+        configured_truncated: bool,
+        /// Bounded classifier diagnostics.
+        classifier_diagnostics: Vec<ConfigClassifierDiagnostic>,
+        /// Whether classifier diagnostics were omitted.
+        classifier_diagnostics_truncated: bool,
+    },
+}
+
+/// Returns one immutable, typed Config Explorer observation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConfigObservationResponse {
+    /// Immutable observation identity.
+    pub observation_id: Uuid,
+    /// Full immutable commit SHA.
+    pub revision: String,
+    /// Effective NixOS configuration name.
+    pub configuration_name: String,
+    /// Observation schema version.
+    pub schema_version: i32,
+    /// Exact operation that produced the payload.
+    pub kind: ConfigObservationKind,
+    /// Exact structured path components.
+    pub path_components: Vec<String>,
+    /// Typed redacted observation payload.
+    pub payload: ConfigObservationPayload,
+    /// Observation creation time.
+    pub created_at: DateTime<Utc>,
+}
+
 /// Classifies a declared-to-managed flake system relationship.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -5500,8 +5730,9 @@ pub struct UpdatePolicyMappingRequest {
 #[cfg(test)]
 mod tests {
     use super::{
-        ComplianceControlEvidence, CreatePolicyDraftRequest, CreatePolicyDraftResponse,
-        EvaluatedOption, EvaluationModuleSummary, XccdfPreviewResponse,
+        ComplianceControlEvidence, ConfigObservationLifecycle, ConfigObservationPayload,
+        ConfigObservationRequestResponse, ConfigObservationResponse, CreatePolicyDraftRequest,
+        CreatePolicyDraftResponse, EvaluatedOption, EvaluationModuleSummary, XccdfPreviewResponse,
     };
 
     #[test]
@@ -5597,6 +5828,66 @@ mod tests {
         }))
         .expect("nullable V2 module source path should deserialize");
         assert!(module.source_path.is_none());
+    }
+
+    #[test]
+    fn scoped_config_observation_dtos_preserve_typed_payloads_and_lifecycle() {
+        let error = serde_json::from_value::<ConfigObservationRequestResponse>(serde_json::json!({
+            "request_id": "00000000-0000-0000-0000-000000000440",
+            "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "configuration_name": "atlas-01",
+            "kind": "waiting_for_capacity",
+            "path_components": ["services"],
+            "lifecycle": "waiting_for_capacity",
+            "observation_id": null,
+            "error": null,
+            "attempts": 0,
+            "heartbeat_at": null,
+            "reused": true
+        }))
+        .expect_err("an operation kind cannot be replaced by a lifecycle value");
+        assert!(error.to_string().contains("unknown variant"));
+
+        let response: ConfigObservationResponse = serde_json::from_value(serde_json::json!({
+            "observation_id": "00000000-0000-0000-0000-000000000441",
+            "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "configuration_name": "atlas-01",
+            "schema_version": 1,
+            "kind": "configured_index",
+            "path_components": [],
+            "payload": {
+                "kind": "configured_index",
+                "path_components": [],
+                "total_traversed": 16000,
+                "diagnostics": [],
+                "diagnostics_truncated": false,
+                "configured": [{"path_components": ["services", "openssh", "enable"], "key": "a".repeat(64)}],
+                "total_configured": 1,
+                "configured_truncated": false,
+                "classifier_diagnostics": [],
+                "classifier_diagnostics_truncated": false
+            },
+            "created_at": "2026-09-11T20:00:00Z"
+        }))
+        .expect("configured-index observation should deserialize");
+        assert_eq!(response.kind, super::ConfigObservationKind::ConfiguredIndex);
+        let ConfigObservationPayload::ConfiguredIndex {
+            configured,
+            total_traversed,
+            ..
+        } = response.payload
+        else {
+            panic!("expected configured-index payload");
+        };
+        assert_eq!(
+            configured[0].path_components,
+            ["services", "openssh", "enable"]
+        );
+        assert_eq!(total_traversed, 16000);
+        assert_eq!(
+            ConfigObservationLifecycle::WaitingForCapacity,
+            ConfigObservationLifecycle::WaitingForCapacity
+        );
     }
 
     #[test]
