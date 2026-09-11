@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-11 17:19'
+updated_date: '2026-09-11 18:51'
 labels:
   - design-parity
   - web-ui
@@ -250,6 +250,8 @@ Commit B was created locally as df58dbd6b408cfa1d718dd766690f3834201f033 with ex
 2026-09-11 lazy Explorer research: Current production automatically queues one whole-configuration Config inspection after each successful primary evaluation. The serial worker claims the job as running before it blocks on a session execution lock and then a transaction-scoped blocking HEAVY_NIX advisory lock; heartbeats occur only around stages, not periodically during a stage. The current five-minute Stage-1/Stage-2 commands run nix-eval-jobs with two workers, bounded process-group cleanup, but without --no-write-lock-file. Certified V2 artifacts are immutable and config_snapshot_selections is V2-only, so incremental observations require separate cache/request tables rather than selector mutation. The smallest seams are server/mod.rs auto-enqueue removal; additive scoped routes/DTOs; config_inspections request/claim persistence and priority; config_inspector expression builders; and additive Web UI tree/detail state.
 
 2026-09-11 Configured options research: Pinned nixpkgs exposes post-discharge/post-priority-filter option metadata through isDefined, highestPrio, and definitionsWithLocations. A declaration default is injected as lib.mkOptionDefault at priority 1500. Exact lightweight classification is: configured when isDefined and either no declared default exists, highestPrio is less than the derived mkOptionDefault priority, or highestPrio equals that priority and more than one definition survives. This excludes default-only and a lower-priority losing assignment, includes ordinary/mkDefault/mkForce/module-generated winners and a same-priority configuration tie, and does not request option.value, type merge, apply, provenance replay, value encoding, or definition-value extraction. It remains O(N) over option identities and the module system may inspect raw definition values to WHNF for property discharge; top-level raw poison can therefore become a scoped diagnostic. A throwing apply and nested poison are suitable regressions proving option.value is not evaluated.
+
+2026-09iënt?
 <!-- SECTION:NOTES:END -->
 
 ## Comments
