@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-07-31 13:46'
-updated_date: '2026-09-02 02:54'
+updated_date: '2026-09-11 15:33'
 labels:
   - web-ui
   - design-parity
@@ -56,25 +56,25 @@ The view follows `docs/design/CrystalForge/components/ProfileView.jsx` for appli
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Route /profile exists inside AppShell and is reachable through the desktop and mobile sidebar user sections
-- [ ] #2 Profile identity displays only values supplied by AuthContext; missing user name, email, role, or auth source is explicitly unavailable or omitted
-- [ ] #3 Appearance controls update shared application state: theme uses the root UiTheme signal, sidebar uses SidebarContext, and density/default Systems view use PreferencesContext
-- [ ] #4 Appearance changes persist through existing canonical keys and remain synchronized between the profile page and TopBar Tweaks
-- [ ] #5 Successful sign out calls logout(), clears AppState.auth, marks auth fetch state Loaded, and replaces the route with LoginView; failure keeps the user on the page and displays an error
-- [ ] #6 Notification preferences and active-session management are visibly unavailable until backend support exists; no non-functional controls claim to configure behavior
-- [ ] #7 Access scope, organization, groups, MFA, last-login, and session data are omitted unless the API provides actual values
-- [ ] #8 cargo fmt and cargo check --target wasm32-unknown-unknown pass
-- [ ] #9 The Nix web-ui check completes successfully in CI or an equivalent environment; local timeout results are recorded without claiming success
-- [ ] #10 Preferences are stored server-side in a `user_preferences` table keyed only by `users.id` with theme, density, sidebar_collapsed, default_systems_view, and updated_at columns
-- [ ] #11 GET `/api/v1/user/preferences` and PATCH `/api/v1/user/preferences` derive the target user exclusively from `AuthenticatedUser.user_id`; requests cannot specify another user ID
-- [ ] #12 PATCH accepts partial updates and updates only supplied fields so concurrent browser sessions do not overwrite unrelated preferences
+- [x] #1 Route /profile exists inside AppShell and is reachable through the desktop and mobile sidebar user sections
+- [x] #2 Profile identity displays only values supplied by AuthContext; missing user name, email, role, or auth source is explicitly unavailable or omitted
+- [x] #3 Appearance controls update shared application state: theme uses the root UiTheme signal, sidebar uses SidebarContext, and density/default Systems view use PreferencesContext
+- [x] #4 Appearance changes persist through existing canonical keys and remain synchronized between the profile page and TopBar Tweaks
+- [x] #5 Successful sign out calls logout(), clears AppState.auth, marks auth fetch state Loaded, and replaces the route with LoginView; failure keeps the user on the page and displays an error
+- [x] #6 Notification preferences and active-session management are visibly unavailable until backend support exists; no non-functional controls claim to configure behavior
+- [x] #7 Access scope, organization, groups, MFA, last-login, and session data are omitted unless the API provides actual values
+- [x] #8 cargo fmt and cargo check --target wasm32-unknown-unknown pass
+- [x] #9 The Nix web-ui check completes successfully in CI or an equivalent environment; local timeout results are recorded without claiming success
+- [x] #10 Preferences are stored server-side in a `user_preferences` table keyed only by `users.id` with theme, density, sidebar_collapsed, default_systems_view, and updated_at columns
+- [x] #11 GET `/api/v1/user/preferences` and PATCH `/api/v1/user/preferences` derive the target user exclusively from `AuthenticatedUser.user_id`; requests cannot specify another user ID
+- [x] #12 PATCH accepts partial updates and updates only supplied fields so concurrent browser sessions do not overwrite unrelated preferences
 - [ ] #13 Authenticated app startup applies server preferences before rendering the normal shell and populates theme, density, sidebar, and Systems view shared signals
-- [ ] #14 LocalStorage is used only as a startup cache and one-time legacy import source for users without a database preference row; after import, server values are authoritative
-- [ ] #15 Preference changes send PATCH requests and display a visible error when saving fails
-- [ ] #16 Tests prove same-user persistence across sessions, isolation between users, same OIDC issuer/subject reuse, no cross-user modification, server override of stale localStorage, one-time legacy import, failed-save error display, and second-browser survival for theme/density/sidebar/default Systems view
-- [ ] #17 The exact acceptance behavior is covered: given the same OIDC user on two computers, selecting Light theme on computer A causes a new login/application load on computer B to use Light theme
-- [ ] #18 Existing profile route, identity display, sign-out behavior, and unavailable notification/session messaging remain intact
-- [ ] #19 Server checks, web-ui checks, SQLx metadata, and migration verification are run or explicitly reported if an environment limitation prevents them
+- [x] #14 LocalStorage is used only as a startup cache and one-time legacy import source for users without a database preference row; after import, server values are authoritative
+- [x] #15 Preference changes send PATCH requests and display a visible error when saving fails
+- [x] #16 Tests prove same-user persistence across sessions, isolation between users, same OIDC issuer/subject reuse, no cross-user modification, server override of stale localStorage, one-time legacy import, failed-save error display, and second-browser survival for theme/density/sidebar/default Systems view
+- [x] #17 The exact acceptance behavior is covered: given the same OIDC user on two computers, selecting Light theme on computer A causes a new login/application load on computer B to use Light theme
+- [x] #18 Existing profile route, identity display, sign-out behavior, and unavailable notification/session messaging remain intact
+- [x] #19 Server checks, web-ui checks, SQLx metadata, and migration verification are run or explicitly reported if an environment limitation prevents them
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -170,4 +170,12 @@ Addressed remaining P1 save-worker cancellation issue. Added `PreferenceSaveWork
 Addressed P1 persistence review by moving preference save queue ownership out of thread-local state and under `AppShell`. `PreferencesContext` now exposes a `Callback<UpdateUserPreferences>`; Profile, TopBar, Sidebar, and Systems send updates through that AppShell-owned callback. AppShell owns pending updates, in-flight state, and an authenticated-user/generation guard. Navigation between child views no longer cancels persistence because the save worker is spawned from AppShell state, and auth changes clear pending queued values so saves cannot cross accounts. Removed the prior thread-local `PREFERENCE_SAVE_STATE` and cancellation guard. Verification passed: `nix develop -c bash -c 'rustfmt --edition 2024 packages/web-ui/src/components/layout/app_shell.rs packages/web-ui/src/components/layout/sidebar.rs packages/web-ui/src/components/layout/topbar.rs packages/web-ui/src/views/profile.rs packages/web-ui/src/views/systems_list.rs packages/web-ui/src/state/preferences.rs && cd packages/web-ui && cargo check --target wasm32-unknown-unknown'`; `nix develop -c bash -c 'cd packages/web-ui && cargo test --bin crystal-forge-ui preferences::tests'` (4 tests passed); `nix develop -c bash -c 'node --check checks/web-ui/tests/integration-test.js'`. Committed `c2518b10 Move preference saves under AppShell` and pushed to remote branch `TASK-412-profile-preferences` for MR !312. `git ls-remote origin TASK-412-profile-preferences` confirmed remote SHA `c2518b10112f2dfdd1c5f0ea2abdd2116552c31e`; GitLab MR API was still reporting the prior head immediately after push, likely due processing lag.
 
 Fixed collapsed sidebar logo layout separately from preference persistence. Kept `assets/cf.png`, replaced sidebar brand CSS so rail mode uses a column layout with the 28px contained logo above the 26px bordered expand button, and removed the collapsed-only inline `justify-content` style from `sidebar.rs`. Verification passed: `nix develop -c bash -c 'rustfmt --edition 2024 packages/web-ui/src/components/layout/sidebar.rs && cd packages/web-ui && cargo check --target wasm32-unknown-unknown'` (existing warnings). Committed `8b34196e Fix collapsed sidebar logo layout` and pushed to MR !312 source branch `TASK-412-profile-preferences`; `git ls-remote origin TASK-412-profile-preferences` confirmed remote SHA `8b34196ee2cf7d295b99c20215a601bdb6cea5f4`.
+
+### TASK-413 reconciliation against merged dev and MR !312
+
+Audited current `dev` source rather than relying on source-branch notes. MR !312 is recorded as merged at SHA `08b17b9b971e6c8a7e22ee7e87257316ffa64835`; current `dev` contains the profile route/view, shared preference state, `user_preferences` migration/API, notification preference/session integrations, and the related client and browser coverage. The current source also includes the later preference bootstrap and save-worker fixes recorded in the task history.
+
+Satisfied by merged/current dev: AC #1-#12 and AC #14-#19. Evidence includes `/profile` route and desktop/mobile navigation; AuthContext-only identity rendering; shared theme/sidebar/density/Systems-view state and canonical storage; sign-out failure handling; functional notification and active-session APIs; migration `0196_user_preferences.sql`; authenticated-user-scoped GET/PATCH/initialize handlers; partial-update SQL; startup cache/legacy import behavior; visible save errors; focused server/UI tests and the `11a-profile-preferences` browser coverage. The recorded CI pipeline `2722327841` passed at the implementation SHA. The unavailable live-DB checks and later full Nix web-ui rerun are explicitly recorded as environment-limited in the implementation notes, satisfying AC #19's reporting clause.
+
+Remaining gap only: AC #13. Current `AppShell` renders the authenticated shell while server preference bootstrap is still loading, then applies server preferences; it does not apply server preferences before rendering the normal shell as AC #13 requires. Keep the task To Do until that startup ordering contract is resolved and verified.
 <!-- SECTION:NOTES:END -->
