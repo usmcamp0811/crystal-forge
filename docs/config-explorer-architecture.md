@@ -137,6 +137,67 @@ Inspect definitions, source input, revision, path, and related provenance only
 for the selected option or explicitly requested detail. Provenance work MAY be
 more expensive than tree navigation and MUST retain the same target identity.
 
+## Configured options
+
+The Configured options index is a separate asynchronous observation. It is not
+the root observation, and root rendering MUST NOT wait for it. Starting both
+requests independently at Config startup keeps the shallow hierarchy usable
+while the index performs its O(N) option traversal.
+
+An option appears in Configured options if and only if the exact evaluated
+module configuration contains a surviving non-default configuration
+definition. `option.isDefined` alone is not sufficient because a declaration
+default also makes an option defined. The classifier derives `defaultPriority`
+from `(lib.mkOptionDefault null).priority` and applies this exact rule:
+
+```text
+configured = option.isDefined && (
+    !(option ? default)
+    || highestPrio < defaultPriority
+    || (highestPrio == defaultPriority && post-filter survivor count > 1)
+)
+```
+
+The survivor count uses definitions after module priority filtering. Therefore
+a priority-2000 assignment that loses to a declaration default is absent. An
+ordinary assignment, `mkDefault`, `mkForce`, a surviving module-generated
+assignment, a priority-1500 tie with a declaration default, and a defaultless
+option assigned with `mkOptionDefault` are present.
+
+The classifier MUST NOT read `option.value`, execute `apply`, encode a value,
+load complete provenance, or read definition values. Nix 2.34 `tryEval` does
+not contain every type error. Each option classifier is therefore an
+independent `nix-eval-jobs` job. A failing ambiguous priority-1500 survivor
+count becomes one bounded diagnostic. Healthy option identities remain in the
+result.
+
+The configured-index payload contains only exact `path_components`, option keys,
+bounded diagnostics, and traversed/configured identity counts. One request
+stores this bounded index as one content row. It retains at most 512 configured
+identities and reports the untruncated total. Option detail, values, and
+provenance remain separate lazy observations.
+
+### Benchmark record
+
+The pre-implementation configured/highest-priority baseline traversed 16,266
+option identities and returned 226 configured identities. Across the observed
+runs, wall time had a 7.31-second median and a 7.30-7.42-second range. Peak RSS
+had a 667,692-KiB median and a 667,052-667,852-KiB range. The run used one
+evaluator client and no child processes; the external Nix daemon was excluded.
+
+The shallow-root baseline returned 54 entries. Wall time had a 4.97-second
+median and a 4.92-5.06-second range. Peak RSS had a 204,504-KiB median and a
+204,276-204,564-KiB range.
+
+These measurements justify independent startup requests: configured-index
+latency and memory MUST NOT become root latency and memory. The baseline did
+not include the final exact tie classifier. The final implementation isolates
+ambiguous classifier jobs as required above. Its focused real-Nix regression
+proves failure localization and value non-evaluation, but this change does not
+claim a comparable production-scale final-implementation benchmark. Record
+that benchmark when the exact production fixture and measurement harness are
+available.
+
 ## Target identity and cache contract
 
 Every observation is tied to an immutable identity containing, at minimum:
@@ -240,7 +301,13 @@ queued/waiting_for_capacity
 ```
 
 The system MUST NOT hold a long-lived database transaction merely to wait for
-evaluator capacity.
+evaluator capacity. This rule applies to scoped observations and optional
+complete-V2 enrichment. A capacity miss does not increment the durable attempt
+count. A complete-V2 worker holds the acquired capacity across both Nix stages
+and refreshes its execution heartbeat every 10 seconds while either stage runs.
+It releases global and local heavy-Nix capacity before it acquires the snapshot
+writer lock for persistence. Its execution-session lock remains held through
+persistence or terminalization so stale recovery cannot replace the owner.
 
 ## Lifecycle and progress
 
@@ -270,8 +337,10 @@ Config inspection follows these security rules:
 - POST mutations require CSRF protection.
 - Credentials remain server-side.
 - Exact revision inspection is read-only.
-- Config inspection MUST NOT mutate `flake.lock`; use `--no-write-lock-file`
-  or an equivalent read-only mode where appropriate.
+- Config inspection MUST NOT mutate `flake.lock`. `nix-eval-jobs` has no
+  `--no-write-lock-file` option. The worker evaluates an immutable revision
+  reference, and the real-Nix regression uses a read-only store fixture without
+  a lock file and verifies that no lock file appears.
 - Secret values and traces MUST follow the existing redaction rules before
   persistence, indexing, comparison, logging, or API serialization.
 
@@ -394,7 +463,8 @@ The current TASK-440 implementation is distributed across these boundaries:
 - Trusted inspector expressions:
   `packages/default/crates/cf-server/src/models/config_inspector.nix`.
 - Explorer queries and persistence:
-  `packages/default/crates/cf-server/src/queries/config_inspections.rs` and
+  `packages/default/crates/cf-server/src/queries/config_inspections.rs`,
+  `packages/default/crates/cf-server/src/queries/config_observations.rs`, and
   `packages/default/crates/cf-server/src/security/snapshot_redaction.rs`.
 - Evaluation snapshot queries and V2 model:
   `packages/default/crates/cf-server/src/queries/evaluation_snapshots.rs`,
@@ -406,8 +476,9 @@ The current TASK-440 implementation is distributed across these boundaries:
   `0249_snapshot_capture_diagnostics.sql`,
   `0250_config_snapshot_artifact_v2.sql`,
   `0252_config_inspection_jobs.sql`,
-  `0253_config_inspection_execution_ownership.sql`, and
-  `0254_partial_config_option_inventories.sql`.
+  `0253_config_inspection_execution_ownership.sql`,
+  `0254_partial_config_option_inventories.sql`, and
+  `0255_scoped_config_observations.sql`.
 - API handlers and models: the Config inspection handlers and API models under
   `packages/default/crates/cf-server/src/handlers/api/` and
   `packages/default/crates/cf-server/src/api/models.rs`.

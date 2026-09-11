@@ -1,12 +1,13 @@
-//! Executes one already-claimed Config Inspector job.
+//! Runs the serial optional complete Config Inspector queue.
 //!
-//! This module owns the bounded two-stage Nix orchestration for one execution.
-//! It does not claim queued jobs, run a worker loop, expose an API, or alter
-//! primary evaluation and deployment behavior.
+//! This module owns reservation, nonblocking heavy-Nix capacity acquisition,
+//! bounded two-stage Nix orchestration, and fenced finalization. It does not
+//! expose an API or alter primary evaluation and deployment behavior.
 
 use anyhow::{Context, Result, bail};
 use chrono::Duration as ChronoDuration;
 use serde::Serialize;
+use sqlx::pool::PoolConnection;
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
@@ -14,6 +15,7 @@ use std::path::Path;
 use std::time::Duration;
 use std::{future::Future, pin::Pin};
 use tokio::process::Command;
+use tokio::sync::OwnedSemaphorePermit;
 use tokio::time::MissedTickBehavior;
 use tracing::{debug, info, warn};
 
@@ -30,9 +32,10 @@ use crate::models::evaluate_with_policies::{
 };
 use crate::queries::config_inspections::{
     ConfigInspectionExecutionClaim, ConfigInspectionRecoverySummary,
-    claim_next_config_inspection_job, complete_config_inspection_execution_failure,
-    complete_config_inspection_execution_success_tx, load_config_inspection_execution_context,
-    lock_config_inspection_execution_tx, recover_stale_config_inspection_jobs,
+    complete_config_inspection_execution_failure, complete_config_inspection_execution_success_tx,
+    load_config_inspection_execution_context, lock_config_inspection_execution_tx,
+    recover_stale_config_inspection_jobs, reserve_next_config_inspection_job,
+    start_config_inspection_execution,
 };
 use crate::queries::cve_scans::{acquire_execution_lock, release_execution_lock_or_close};
 use crate::queries::evaluation_snapshots::{
@@ -49,6 +52,7 @@ const STAGE1_APPLY: &str = "derivation: if derivation.meta ? crystalForgeInspect
 const STAGE2_APPLY: &str = "derivation: if derivation.meta ? crystalForgeDefinitionValues then derivation.meta.crystalForgeDefinitionValues else derivation.meta";
 const CONFIG_INSPECTION_QUEUE_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const CONFIG_INSPECTION_STALE_THRESHOLD: ChronoDuration = ChronoDuration::minutes(10);
+const CONFIG_INSPECTION_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -59,6 +63,49 @@ struct Stage2AllowedSelection<'a> {
 
 struct Stage2AllowedSelectionFile {
     file: tempfile::NamedTempFile,
+}
+
+struct HeavyNixCapacity {
+    connection: Option<PoolConnection<Postgres>>,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl HeavyNixCapacity {
+    fn new(connection: PoolConnection<Postgres>, permit: OwnedSemaphorePermit) -> Self {
+        Self {
+            connection: Some(connection),
+            _permit: permit,
+        }
+    }
+
+    async fn release(mut self) {
+        let Some(mut connection) = self.connection.take() else {
+            return;
+        };
+        if !matches!(
+            sqlx::query_scalar::<_, bool>("SELECT pg_advisory_unlock($1)")
+                .bind(HEAVY_NIX_ADVISORY_LOCK)
+                .fetch_one(&mut *connection)
+                .await,
+            Ok(true)
+        ) {
+            warn!("Config Inspector heavy-Nix lock release was not confirmed");
+            // CONCURRENCY: Do not return an uncertain session to the pool
+            // because a retained advisory lock would suppress later Nix work.
+            let _ = connection.close().await;
+        }
+    }
+}
+
+impl Drop for HeavyNixCapacity {
+    fn drop(&mut self) {
+        if let Some(connection) = self.connection.take() {
+            // CONCURRENCY: Cancellation cannot perform an asynchronous unlock.
+            // Detach and close the physical connection instead of returning a
+            // possibly locked session to the pool.
+            drop(connection.detach());
+        }
+    }
 }
 
 impl Stage2AllowedSelectionFile {
@@ -119,19 +166,26 @@ pub(crate) enum ConfigInspectionExecutionOutcome {
 ///
 /// The claim is revalidated before any subprocess starts. The execution
 /// advisory lock remains held through both bounded Nix stages, semantic
-/// assembly, V2 persistence, and terminalization. No queued job is claimed by
-/// this function.
+/// assembly, V2 persistence, and terminalization. Heavy-Nix capacity is held
+/// only through semantic assembly and is released before persistence or
+/// terminalization. No queued job is claimed by this function.
 ///
 /// # Errors
 ///
 /// Returns an error when the exact context cannot be loaded, the database
 /// cannot maintain ownership or persistence, or the Nix execution setup fails.
-pub(crate) async fn execute_claimed_config_inspection(
+async fn execute_claimed_config_inspection(
     pool: &PgPool,
     claim: ConfigInspectionExecutionClaim,
+    capacity: HeavyNixCapacity,
 ) -> Result<ConfigInspectionExecutionOutcome> {
-    execute_claimed_config_inspection_with_program(pool, claim, Path::new(NIX_EVAL_JOBS_PROGRAM))
-        .await
+    execute_claimed_config_inspection_with_program_and_capacity(
+        pool,
+        claim,
+        Path::new(NIX_EVAL_JOBS_PROGRAM),
+        Some(capacity),
+    )
+    .await
 }
 
 /// Runs the durable Config Inspector queue serially until the process stops.
@@ -154,12 +208,118 @@ pub async fn run_config_inspection_queue(pool: PgPool) {
 
 async fn run_config_inspection_worker_cycle(pool: &PgPool) {
     recover_config_inspection_jobs(pool).await;
+    if crate::services::config_observations::process_one_config_observation(pool).await {
+        return;
+    }
+    process_one_config_inspection_job_with_capacity(pool).await;
+}
+
+async fn process_one_config_inspection_job_with_capacity(pool: &PgPool) {
+    let target = match reserve_next_config_inspection_job(pool).await {
+        Ok(Some(target)) => target,
+        Ok(None) => return,
+        Err(error) => {
+            warn!(%error, "config_inspection_reserve_failed");
+            return;
+        }
+    };
+    let mut capacity_conn = match pool.acquire().await {
+        Ok(connection) => connection,
+        Err(error) => {
+            warn!(%error, "config_inspection_capacity_session_failed");
+            return;
+        }
+    };
+    // CONCURRENCY: Acquire the cross-process lock before the local permit, as
+    // primary evaluation does. A durable `running` row starts only after both
+    // capacity reservations are held.
+    let global_capacity = sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_lock($1)")
+        .bind(HEAVY_NIX_ADVISORY_LOCK)
+        .fetch_one(&mut *capacity_conn)
+        .await;
+    let global_capacity = match global_capacity {
+        Ok(acquired) => acquired,
+        Err(error) => {
+            warn!(%error, "config_inspection_capacity_check_failed");
+            // CONCURRENCY: A failed lock query leaves the session state
+            // uncertain. Close it instead of returning a possibly locked
+            // session to the pool.
+            let _ = capacity_conn.close().await;
+            if let Err(error) =
+                crate::queries::config_inspections::defer_config_inspection_capacity(
+                    pool,
+                    target.job_id,
+                )
+                .await
+            {
+                warn!(%error, "config_inspection_capacity_defer_failed");
+            }
+            return;
+        }
+    };
+    if !global_capacity {
+        if let Err(error) = crate::queries::config_inspections::defer_config_inspection_capacity(
+            pool,
+            target.job_id,
+        )
+        .await
+        {
+            warn!(%error, "config_inspection_capacity_defer_failed");
+        }
+        return;
+    }
+    let permit = match heavy_nix_limiter().try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            release_heavy_nix_lock(capacity_conn).await;
+            if let Err(error) =
+                crate::queries::config_inspections::defer_config_inspection_capacity(
+                    pool,
+                    target.job_id,
+                )
+                .await
+            {
+                warn!(%error, "config_inspection_capacity_defer_failed");
+            }
+            return;
+        }
+    };
+    let claim = match start_config_inspection_execution(pool, target).await {
+        Ok(Some(claim)) => claim,
+        Ok(None) => {
+            release_heavy_nix_lock(capacity_conn).await;
+            drop(permit);
+            return;
+        }
+        Err(error) => {
+            release_heavy_nix_lock(capacity_conn).await;
+            drop(permit);
+            warn!(%error, "config_inspection_start_failed");
+            return;
+        }
+    };
+    let capacity = HeavyNixCapacity::new(capacity_conn, permit);
     process_one_config_inspection_job(
         pool,
-        |pool| Box::pin(claim_next_config_inspection_job(pool)),
-        |pool, claim| Box::pin(execute_claimed_config_inspection(pool, claim)),
+        |_| Box::pin(async move { Ok(Some(claim)) }),
+        |pool, claim| Box::pin(execute_claimed_config_inspection(pool, claim, capacity)),
     )
     .await;
+}
+
+async fn release_heavy_nix_lock(mut connection: PoolConnection<Postgres>) {
+    if !matches!(
+        sqlx::query_scalar::<_, bool>("SELECT pg_advisory_unlock($1)")
+            .bind(HEAVY_NIX_ADVISORY_LOCK)
+            .fetch_one(&mut *connection)
+            .await,
+        Ok(true)
+    ) {
+        warn!("Config Inspector heavy-Nix lock release was not confirmed");
+        // CONCURRENCY: Do not return an uncertain session to the pool because
+        // a retained session advisory lock would suppress future heavy-Nix work.
+        let _ = connection.close().await;
+    }
 }
 
 async fn recover_config_inspection_jobs(pool: &PgPool) {
@@ -271,11 +431,27 @@ pub(crate) async fn execute_claimed_config_inspection_with_program(
     claim: ConfigInspectionExecutionClaim,
     nix_eval_jobs_program: &Path,
 ) -> Result<ConfigInspectionExecutionOutcome> {
+    execute_claimed_config_inspection_with_program_and_capacity(
+        pool,
+        claim,
+        nix_eval_jobs_program,
+        None,
+    )
+    .await
+}
+
+async fn execute_claimed_config_inspection_with_program_and_capacity(
+    pool: &PgPool,
+    claim: ConfigInspectionExecutionClaim,
+    nix_eval_jobs_program: &Path,
+    capacity: Option<HeavyNixCapacity>,
+) -> Result<ConfigInspectionExecutionOutcome> {
     execute_claimed_config_inspection_with_lock_acquirer(
         pool,
         claim,
         nix_eval_jobs_program,
         acquire_execution_lock_for_executor,
+        capacity,
     )
     .await
 }
@@ -296,9 +472,22 @@ async fn execute_claimed_config_inspection_with_lock_acquirer(
     claim: ConfigInspectionExecutionClaim,
     nix_eval_jobs_program: &Path,
     acquire_lock: ExecutionLockAcquirer,
+    capacity: Option<HeavyNixCapacity>,
 ) -> Result<ConfigInspectionExecutionOutcome> {
-    let Some(context) = load_config_inspection_execution_context(pool, &claim).await? else {
-        return Ok(ConfigInspectionExecutionOutcome::LostOwnership);
+    let context = match load_config_inspection_execution_context(pool, &claim).await {
+        Ok(Some(context)) => context,
+        Ok(None) => {
+            if let Some(capacity) = capacity {
+                capacity.release().await;
+            }
+            return Ok(ConfigInspectionExecutionOutcome::LostOwnership);
+        }
+        Err(error) => {
+            if let Some(capacity) = capacity {
+                capacity.release().await;
+            }
+            return Err(error);
+        }
     };
     let flake_ref = build_flake_reference(&context.repo_url, &context.commit_hash);
     let target = InspectionTarget::new(&flake_ref, &claim.configuration_name);
@@ -311,31 +500,45 @@ async fn execute_claimed_config_inspection_with_lock_acquirer(
         // The session state is uncertain after a failed lock acquisition. Do
         // not return the connection to the pool.
         let _ = lock_conn.close().await;
+        if let Some(capacity) = capacity {
+            capacity.release().await;
+        }
         return Err(error.context("acquire execution advisory lock"));
     }
 
     // CONCURRENCY: The advisory lock alone does not prove that this claim is
     // still current. Confirm the exact token before loading credentials or
     // allowing any owned failure terminalization.
-    let outcome = match crate::queries::config_inspections::heartbeat_config_inspection_execution(
-        pool,
-        claim.job_id,
-        claim.execution_id,
-    )
-    .await
-    {
-        Ok(true) => {
-            execute_with_lock(
-                pool,
-                &claim,
-                &target,
-                context.flake_id,
-                nix_eval_jobs_program,
-            )
-            .await
-        }
-        Ok(false) => Ok(ConfigInspectionExecutionOutcome::LostOwnership),
-        Err(error) => Err(error.context("initial Config Inspector ownership heartbeat")),
+    let preparation =
+        match crate::queries::config_inspections::heartbeat_config_inspection_execution(
+            pool,
+            claim.job_id,
+            claim.execution_id,
+        )
+        .await
+        {
+            Ok(true) => {
+                prepare_with_lock(
+                    pool,
+                    &claim,
+                    &target,
+                    context.flake_id,
+                    nix_eval_jobs_program,
+                )
+                .await
+            }
+            Ok(false) => Ok(ConfigInspectionPreparation::LostOwnership),
+            Err(error) => Err(error.context("initial Config Inspector ownership heartbeat")),
+        };
+    // CONCURRENCY: Release global and local heavy-Nix capacity before any
+    // persistence transaction can acquire the snapshot-writer lock. The
+    // execution advisory lock remains held until finalization completes.
+    if let Some(capacity) = capacity {
+        capacity.release().await;
+    }
+    let outcome = match preparation {
+        Ok(preparation) => finalize_prepared_config_inspection(pool, &claim, preparation).await,
+        Err(error) => Err(error),
     };
     release_execution_lock_or_close(lock_conn, claim.execution_id).await;
     outcome
@@ -359,21 +562,30 @@ pub(crate) async fn execute_claimed_config_inspection_with_lock_failure_for_test
         claim,
         nix_eval_jobs_program,
         fail_lock,
+        None,
     )
     .await
 }
 
-async fn execute_with_lock(
+enum ConfigInspectionPreparation {
+    Artifact(crate::models::config_snapshot_artifact::ConfigInspectionArtifactV2),
+    Failure(anyhow::Error),
+    LostOwnership,
+}
+
+async fn prepare_with_lock(
     pool: &PgPool,
     claim: &ConfigInspectionExecutionClaim,
     target: &InspectionTarget,
     flake_id: i32,
     nix_eval_jobs_program: &Path,
-) -> Result<ConfigInspectionExecutionOutcome> {
+) -> Result<ConfigInspectionPreparation> {
     let credentials = match FlakeCredentialEnv::load(pool, flake_id).await {
         Ok(credentials) => credentials,
         Err(error) => {
-            return terminalize_failure(pool, claim, error.context("load flake credentials")).await;
+            return Ok(ConfigInspectionPreparation::Failure(
+                error.context("load flake credentials"),
+            ));
         }
     };
 
@@ -387,28 +599,45 @@ async fn execute_with_lock(
     .await
     {
         Ok(Some(semantic)) => semantic,
-        Ok(None) => return Ok(ConfigInspectionExecutionOutcome::LostOwnership),
-        Err(error) => return terminalize_failure(pool, claim, error).await,
+        Ok(None) => return Ok(ConfigInspectionPreparation::LostOwnership),
+        Err(error) => return Ok(ConfigInspectionPreparation::Failure(error)),
     };
 
     let artifact = match config_artifact_v2_from_assembled(semantic) {
         Ok(artifact) => artifact,
         Err(error) => {
-            return terminalize_failure(
-                pool,
-                claim,
+            return Ok(ConfigInspectionPreparation::Failure(
                 error.context("convert Config Inspector artifact"),
-            )
-            .await;
+            ));
         }
     };
 
-    match persist_artifact_and_complete(pool, claim, artifact).await {
-        Ok(PersistOutcome::Succeeded { snapshot_id }) => {
-            Ok(ConfigInspectionExecutionOutcome::Succeeded { snapshot_id })
+    Ok(ConfigInspectionPreparation::Artifact(artifact))
+}
+
+async fn finalize_prepared_config_inspection(
+    pool: &PgPool,
+    claim: &ConfigInspectionExecutionClaim,
+    preparation: ConfigInspectionPreparation,
+) -> Result<ConfigInspectionExecutionOutcome> {
+    match preparation {
+        ConfigInspectionPreparation::Artifact(artifact) => {
+            match persist_artifact_and_complete(pool, claim, artifact).await {
+                Ok(PersistOutcome::Succeeded { snapshot_id }) => {
+                    Ok(ConfigInspectionExecutionOutcome::Succeeded { snapshot_id })
+                }
+                Ok(PersistOutcome::LostOwnership) => {
+                    Ok(ConfigInspectionExecutionOutcome::LostOwnership)
+                }
+                Err(error) => terminalize_failure(pool, claim, error).await,
+            }
         }
-        Ok(PersistOutcome::LostOwnership) => Ok(ConfigInspectionExecutionOutcome::LostOwnership),
-        Err(error) => terminalize_failure(pool, claim, error).await,
+        ConfigInspectionPreparation::Failure(error) => {
+            terminalize_failure(pool, claim, error).await
+        }
+        ConfigInspectionPreparation::LostOwnership => {
+            Ok(ConfigInspectionExecutionOutcome::LostOwnership)
+        }
     }
 }
 
@@ -419,21 +648,9 @@ async fn execute_nix_stages(
     credentials: Option<&FlakeCredentialEnv>,
     nix_eval_jobs_program: &Path,
 ) -> Result<Option<crate::models::config_inspector::AssembledConfigInspection>> {
-    // CONCURRENCY: Acquire the cross-process advisory lock before the
-    // in-process semaphore, matching primary evaluation and hardening. Hold
-    // both across Stage 1 and Stage 2, then release them before persistence.
-    let mut heavy_lock = pool.begin().await.context("begin heavy Nix lock")?;
-    sqlx::query("SELECT pg_advisory_xact_lock($1)")
-        .bind(HEAVY_NIX_ADVISORY_LOCK)
-        .execute(&mut *heavy_lock)
-        .await
-        .context("acquire heavy Nix advisory lock")?;
-    let heavy_permit = heavy_nix_limiter()
-        .acquire_owned()
-        .await
-        .context("heavy Nix limiter was closed")?;
-
     let stage1_output = run_stage(
+        pool,
+        claim,
         nix_eval_jobs_program,
         &build_inspector_expression(target),
         STAGE1_APPLY,
@@ -461,8 +678,6 @@ async fn execute_nix_stages(
     .await
     .context("between-stage Config Inspector ownership heartbeat")?
     {
-        drop(heavy_permit);
-        heavy_lock.rollback().await.ok();
         return Ok(None);
     }
 
@@ -471,6 +686,8 @@ async fn execute_nix_stages(
     let stage2_expression =
         build_definition_values_expression(target, stage2_selection.path_for_nix()?);
     let stage2_output = run_stage(
+        pool,
+        claim,
         nix_eval_jobs_program,
         &stage2_expression,
         STAGE2_APPLY,
@@ -493,16 +710,8 @@ async fn execute_nix_stages(
     .await
     .context("final Config Inspector ownership heartbeat")?
     {
-        drop(heavy_permit);
-        heavy_lock.rollback().await.ok();
         return Ok(None);
     }
-
-    drop(heavy_permit);
-    heavy_lock
-        .commit()
-        .await
-        .context("release heavy Nix advisory lock")?;
     Ok(Some(assembled))
 }
 
@@ -520,6 +729,8 @@ fn reconcile_stage1(
 }
 
 async fn run_stage(
+    pool: &PgPool,
+    claim: &ConfigInspectionExecutionClaim,
     program: &Path,
     expression: &str,
     apply: &str,
@@ -527,14 +738,30 @@ async fn run_stage(
     process_name: &str,
 ) -> Result<BoundedProcessOutput> {
     let mut command = build_stage_command(program, expression, apply, credentials);
-    let output = run_nix_command_bounded(
+    let mut run = Box::pin(run_nix_command_bounded(
         &mut command,
         process_name,
         STAGE_DEADLINE,
         STAGE_STDOUT_LIMIT,
         STAGE_STDERR_LIMIT,
-    )
-    .await?;
+    ));
+    let mut heartbeat = tokio::time::interval(CONFIG_INSPECTION_HEARTBEAT_INTERVAL);
+    heartbeat.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    heartbeat.tick().await;
+    let output = loop {
+        tokio::select! {
+            output = &mut run => break output?,
+            _ = heartbeat.tick() => {
+                if !crate::queries::config_inspections::heartbeat_config_inspection_execution(
+                    pool,
+                    claim.job_id,
+                    claim.execution_id,
+                ).await? {
+                    bail!("Config Inspector execution ownership was lost");
+                }
+            }
+        }
+    };
     if output.stdout.is_truncated() {
         bail!("{process_name} stdout exceeded the bounded retention limit");
     }
@@ -641,6 +868,40 @@ mod tests {
     use tokio::sync::{Mutex, Notify};
     use uuid::Uuid;
 
+    async fn claimable_job(pool: &PgPool) -> Uuid {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let flake_id: i32 = sqlx::query_scalar(
+            "INSERT INTO flakes (name, repo_url, branch) VALUES ($1, 'https://example.test/config-capacity.git', 'main') RETURNING id",
+        )
+        .bind(format!("config-capacity-{suffix}"))
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let commit_id: i32 = sqlx::query_scalar(
+            "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp) VALUES ($1, $2, now()) RETURNING id",
+        )
+        .bind(flake_id)
+        .bind(format!("{suffix:0>40}"))
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let derivation_id: i32 = sqlx::query_scalar(
+            "INSERT INTO derivations (commit_id, derivation_type, derivation_name, derivation_path, status_id, attempt_count) VALUES ($1, 'nixos', 'capacity', $2, (SELECT id FROM derivation_statuses ORDER BY id LIMIT 1), 0) RETURNING id",
+        )
+        .bind(commit_id)
+        .bind(format!("/nix/store/{suffix}-capacity.drv"))
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        sqlx::query_scalar(
+            "INSERT INTO config_inspection_jobs (commit_id, derivation_id, configuration_name, carrier_drv_path, status) SELECT commit_id, id, derivation_name, derivation_path, 'queued' FROM derivations WHERE id = $1 RETURNING id",
+        )
+        .bind(derivation_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
     fn test_pool() -> PgPool {
         PgPool::connect_lazy("postgres://worker-test.invalid/config_inspections")
             .expect("test pool should be constructible without connecting")
@@ -673,6 +934,35 @@ mod tests {
         .await;
 
         assert_eq!(executor_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn capacity_lock_miss_waits_without_consuming_an_attempt(pool: PgPool) {
+        let job_id = claimable_job(&pool).await;
+        let mut blocker = pool.acquire().await.unwrap();
+        sqlx::query("SELECT pg_advisory_lock($1)")
+            .bind(HEAVY_NIX_ADVISORY_LOCK)
+            .execute(&mut *blocker)
+            .await
+            .unwrap();
+
+        process_one_config_inspection_job_with_capacity(&pool).await;
+
+        let state: (String, i32, Option<Uuid>, Option<chrono::DateTime<chrono::Utc>>) =
+            sqlx::query_as(
+                "SELECT status, attempts, execution_id, execution_heartbeat_at FROM config_inspection_jobs WHERE id = $1",
+            )
+            .bind(job_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(state, ("waiting_for_capacity".to_string(), 0, None, None));
+        let _: bool = sqlx::query_scalar("SELECT pg_advisory_unlock($1)")
+            .bind(HEAVY_NIX_ADVISORY_LOCK)
+            .fetch_one(&mut *blocker)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -868,6 +1158,10 @@ mod tests {
         assert_eq!(STAGE_STDOUT_LIMIT, 256 * 1024 * 1024);
         assert_eq!(STAGE_STDERR_LIMIT, 256 * 1024);
         assert_eq!(STAGE_DEADLINE, Duration::from_secs(300));
+        assert_eq!(
+            CONFIG_INSPECTION_HEARTBEAT_INTERVAL,
+            Duration::from_secs(10)
+        );
     }
 
     #[test]
@@ -955,5 +1249,28 @@ mod tests {
         assert!(snapshot_lock < execution_lock);
         assert!(persistence.contains("persist_config_artifact_v2_deferred_tx"));
         assert!(!persistence.contains("persist_config_artifact_v2_tx"));
+
+        let execution = source
+            .split_once("async fn execute_claimed_config_inspection_with_lock_acquirer")
+            .and_then(|(_, body)| body.split_once("#[cfg(test)]"))
+            .map(|(body, _)| body)
+            .expect("capacity-aware executor should remain present");
+        let post_nix = execution
+            .split_once("let preparation =")
+            .map(|(_, body)| body)
+            .expect("executor should prepare Nix output before finalization");
+        let capacity_release = post_nix
+            .find("capacity.release().await")
+            .expect("heavy-Nix capacity must be released");
+        let finalization = post_nix
+            .find("finalize_prepared_config_inspection")
+            .expect("persistence must use the post-capacity finalization phase");
+        let execution_release = post_nix
+            .find("release_execution_lock_or_close")
+            .expect("execution lock must be released after finalization");
+        assert!(capacity_release < finalization);
+        assert!(finalization < execution_release);
+        assert!(!post_nix.contains("persist_artifact_and_complete"));
+        assert!(!post_nix.contains("lock_snapshot_writer_tx"));
     }
 }

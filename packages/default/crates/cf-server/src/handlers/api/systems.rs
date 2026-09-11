@@ -29,6 +29,9 @@ use crate::handlers::api::rbac::{
     authenticated_user_roles, extract_request_origin, require_viewer_or_above,
 };
 use crate::models::auth_identity::AuthRole;
+use crate::models::config_observations::{
+    ConfigObservationLifecycle, ConfigObservationRequestResponse, CreateConfigObservationRequest,
+};
 use crate::models::config_snapshot_artifact::{
     ConfigDefinitionArtifactV2, ConfigDefinitionStatusV2, ConfigOptionArtifactV2,
     ConfigOptionMetadataArtifactV2, ConfigOptionProvenanceArtifactV2,
@@ -1161,6 +1164,169 @@ pub async fn queue_system_config_inspection(
         Err(error) => {
             tracing::error!(system_id = %system_id, error = %error, "failed to queue targeted Config Inspector work");
             internal_error("Failed to queue configuration inspection")
+        }
+    }
+}
+
+/// Creates or reuses one scoped Config Explorer observation request.
+///
+/// Authentication, Admin authorization, CSRF, and environment visibility run
+/// before revision or observation validation. The browser supplies only a
+/// closed operation enum and structured path components.
+pub async fn create_system_config_observation(
+    State(state): State<CFState>,
+    headers: HeaderMap,
+    Path((system_id, revision)): Path<(Uuid, String)>,
+    Json(request): Json<CreateConfigObservationRequest>,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&state.pool, &headers).await else {
+        return forbidden();
+    };
+    let Some(caller_role) = highest_role(&roles) else {
+        return forbidden();
+    };
+    if caller_role != Role::Admin {
+        return forbidden_mutation();
+    }
+    if let Err(response) = require_csrf(&headers) {
+        return response;
+    }
+    let memberships = match load_membership_environment_ids(&state.pool, user_id).await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to load environment memberships"),
+    };
+    let access = match find_system_access_row(&state.pool, system_id).await {
+        Ok(Some(value)) => value,
+        Ok(None) => return not_found(),
+        Err(_) => return internal_error("Failed to load system"),
+    };
+    if !caller_role.can_access_system_environment(access.environment_id, &memberships) {
+        return not_found();
+    }
+    if !is_full_commit_sha(&revision) {
+        return bad_request("revision must be a full 40- or 64-character commit SHA");
+    }
+    if crate::models::config_observations::validate_config_observation_path(
+        request.kind,
+        &request.path_components,
+    )
+    .is_err()
+    {
+        return bad_request("path_components exceed the structured Config observation bounds");
+    }
+
+    match crate::queries::config_observations::create_or_reuse_config_observation_request(
+        &state.pool,
+        system_id,
+        &revision,
+        request.kind,
+        &request.path_components,
+    )
+    .await
+    {
+        Ok(crate::queries::config_observations::CreateConfigObservationOutcome::Resolved(
+            response,
+        )) => {
+            let status = config_observation_post_status(&response);
+            (status, Json(response)).into_response()
+        }
+        Ok(crate::queries::config_observations::CreateConfigObservationOutcome::NotFound) => {
+            not_found()
+        }
+        Ok(crate::queries::config_observations::CreateConfigObservationOutcome::PrerequisiteMissing) => {
+            config_inspection_prerequisite()
+        }
+        Err(error) => {
+            tracing::error!(system_id = %system_id, %error, "failed to create scoped Config observation");
+            internal_error("Failed to create configuration observation")
+        }
+    }
+}
+
+fn config_observation_post_status(response: &ConfigObservationRequestResponse) -> StatusCode {
+    if response.lifecycle == ConfigObservationLifecycle::Succeeded
+        && response.observation_id.is_some()
+    {
+        StatusCode::OK
+    } else {
+        StatusCode::ACCEPTED
+    }
+}
+
+/// Returns one scoped request lifecycle without enqueueing work.
+pub async fn get_system_config_observation_request(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path((system_id, request_id)): Path<(Uuid, Uuid)>,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+    let Some(caller_role) = highest_role(&roles) else {
+        return forbidden();
+    };
+    let memberships = match load_membership_environment_ids(&pool, user_id).await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to load environment memberships"),
+    };
+    let access = match find_system_access_row(&pool, system_id).await {
+        Ok(Some(value)) => value,
+        Ok(None) => return not_found(),
+        Err(_) => return internal_error("Failed to load system"),
+    };
+    if !caller_role.can_access_system_environment(access.environment_id, &memberships) {
+        return not_found();
+    }
+    match crate::queries::config_observations::get_config_observation_request(
+        &pool, system_id, request_id,
+    )
+    .await
+    {
+        Ok(Some(response)) => (StatusCode::OK, Json(response)).into_response(),
+        Ok(None) => not_found(),
+        Err(error) => {
+            tracing::error!(system_id = %system_id, request_id = %request_id, %error, "failed to read Config observation request");
+            internal_error("Failed to read configuration observation request")
+        }
+    }
+}
+
+/// Returns one immutable scoped observation without enqueueing work.
+pub async fn get_system_config_observation(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path((system_id, observation_id)): Path<(Uuid, Uuid)>,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+    let Some(caller_role) = highest_role(&roles) else {
+        return forbidden();
+    };
+    let memberships = match load_membership_environment_ids(&pool, user_id).await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to load environment memberships"),
+    };
+    let access = match find_system_access_row(&pool, system_id).await {
+        Ok(Some(value)) => value,
+        Ok(None) => return not_found(),
+        Err(_) => return internal_error("Failed to load system"),
+    };
+    if !caller_role.can_access_system_environment(access.environment_id, &memberships) {
+        return not_found();
+    }
+    match crate::queries::config_observations::get_config_observation(
+        &pool,
+        system_id,
+        observation_id,
+    )
+    .await
+    {
+        Ok(Some(response)) => (StatusCode::OK, Json(response)).into_response(),
+        Ok(None) => not_found(),
+        Err(error) => {
+            tracing::error!(system_id = %system_id, observation_id = %observation_id, %error, "failed to read Config observation");
+            internal_error("Failed to read configuration observation")
         }
     }
 }
@@ -4600,6 +4766,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scoped_config_observation_post_requires_authentication_before_validation() {
+        let state = test_cf_state();
+        let response = create_system_config_observation(
+            State(state),
+            HeaderMap::new(),
+            Path((Uuid::nil(), "not-a-revision".to_string())),
+            Json(CreateConfigObservationRequest {
+                kind: crate::models::config_observations::ConfigObservationKind::Root,
+                path_components: vec!["invalid-for-root".to_string()],
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn scoped_config_observation_gets_require_authentication_before_database_access() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
+            .expect("lazy pool should construct");
+        let request = get_system_config_observation_request(
+            State(pool.clone()),
+            HeaderMap::new(),
+            Path((Uuid::nil(), Uuid::nil())),
+        )
+        .await
+        .into_response();
+        let observation = get_system_config_observation(
+            State(pool),
+            HeaderMap::new(),
+            Path((Uuid::nil(), Uuid::nil())),
+        )
+        .await
+        .into_response();
+        assert_eq!(request.status(), StatusCode::FORBIDDEN);
+        assert_eq!(observation.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn scoped_config_observation_post_status_tracks_terminal_availability() {
+        let mut response = ConfigObservationRequestResponse {
+            request_id: Uuid::new_v4(),
+            revision: "a".repeat(40),
+            configuration_name: "host".to_string(),
+            kind: crate::models::config_observations::ConfigObservationKind::Root,
+            path_components: Vec::new(),
+            lifecycle: ConfigObservationLifecycle::Queued,
+            observation_id: None,
+            error: None,
+            attempts: 0,
+            heartbeat_at: None,
+            reused: true,
+        };
+        for lifecycle in [
+            ConfigObservationLifecycle::Queued,
+            ConfigObservationLifecycle::WaitingForCapacity,
+            ConfigObservationLifecycle::Running,
+            ConfigObservationLifecycle::Failed,
+        ] {
+            response.lifecycle = lifecycle;
+            assert_eq!(
+                config_observation_post_status(&response),
+                StatusCode::ACCEPTED
+            );
+        }
+        response.lifecycle = ConfigObservationLifecycle::Succeeded;
+        response.observation_id = Some(Uuid::new_v4());
+        assert_eq!(config_observation_post_status(&response), StatusCode::OK);
+    }
+
+    #[tokio::test]
     #[ignore = "requires an isolated migrated database"]
     async fn targeted_config_inspection_api_preserves_primary_state_and_nondisclosure() {
         let pool = test_pool_from_env().await;
@@ -4713,12 +4951,20 @@ mod tests {
         );
 
         let replacement_carrier = format!("/nix/store/{suffix}-{configuration_name}-new.drv");
-        sqlx::query("UPDATE derivations SET derivation_path = $1 WHERE id = $2")
-            .bind(&replacement_carrier)
+        sqlx::query("UPDATE derivations SET derivation_type = 'package' WHERE id = $1")
             .bind(derivation_id)
             .execute(&pool)
             .await
-            .expect("replacement carrier should persist");
+            .expect("original carrier should stop being the current NixOS result");
+        sqlx::query(
+            "INSERT INTO derivations (commit_id, derivation_type, derivation_name, derivation_path, status_id, attempt_count, completed_at) VALUES ($1, 'nixos', $2, $3, 5, 0, now())",
+        )
+        .bind(commit_id)
+        .bind(&configuration_name)
+        .bind(&replacement_carrier)
+        .execute(&pool)
+        .await
+        .expect("replacement carrier should persist");
         let conflict = queue_system_config_inspection(
             State(state.clone()),
             headers.clone(),

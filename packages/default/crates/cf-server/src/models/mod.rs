@@ -4,6 +4,7 @@ pub mod builders;
 pub mod cache_destination;
 pub mod commits;
 pub mod config_inspector;
+pub mod config_observations;
 pub(crate) mod config_snapshot_artifact;
 pub mod custom_check;
 pub mod cve_scans;

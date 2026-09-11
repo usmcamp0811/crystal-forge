@@ -24,7 +24,9 @@ const MAX_ATTEMPTS_ERROR: &str = "Config inspection execution expired after maxi
 pub(crate) enum ConfigInspectionJobStatus {
     /// The target is waiting for a future worker.
     Queued,
-    /// A future worker has claimed the target.
+    /// The target is reserved but has not consumed an execution attempt.
+    WaitingForCapacity,
+    /// A worker holds heavy-Nix capacity and owns the execution.
     Running,
     /// The target completed successfully.
     Succeeded,
@@ -36,6 +38,7 @@ impl ConfigInspectionJobStatus {
     fn as_str(self) -> &'static str {
         match self {
             Self::Queued => "queued",
+            Self::WaitingForCapacity => "waiting_for_capacity",
             Self::Running => "running",
             Self::Succeeded => "succeeded",
             Self::Failed => "failed",
@@ -45,6 +48,7 @@ impl ConfigInspectionJobStatus {
     fn parse(value: &str) -> Result<Self> {
         match value {
             "queued" => Ok(Self::Queued),
+            "waiting_for_capacity" => Ok(Self::WaitingForCapacity),
             "running" => Ok(Self::Running),
             "succeeded" => Ok(Self::Succeeded),
             "failed" => Ok(Self::Failed),
@@ -105,6 +109,21 @@ pub(crate) struct ConfigInspectionExecutionClaim {
     pub execution_id: Uuid,
     /// Number of claims made, including this claim.
     pub attempts: i32,
+}
+
+/// Identifies a reserved job that has not consumed an execution attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ConfigInspectionExecutionTarget {
+    /// Durable job identity.
+    pub job_id: Uuid,
+    /// Commit containing the exact configuration target.
+    pub commit_id: i32,
+    /// NixOS carrier derivation targeted by the job.
+    pub derivation_id: i32,
+    /// Exact NixOS configuration name.
+    pub configuration_name: String,
+    /// Exact carrier `.drv` path.
+    pub carrier_drv_path: String,
 }
 
 /// Resolves the immutable flake lineage required by one claimed execution.
@@ -178,11 +197,6 @@ pub(crate) enum TargetedConfigInspectionOutcome {
     ActiveTargetConflict,
     /// The exact target was queued, reused, or already had a ready V2 artifact.
     Resolved(QueueConfigInspectionResponse),
-}
-
-/// Returns whether automatic Config Inspector scheduling is enabled for a mode.
-pub(crate) fn should_schedule_config_inspections(execution_mode_is_mock: bool) -> bool {
-    !execution_mode_is_mock
 }
 
 /// Enqueues exact successful NixOS systems for later Config Inspector work.
@@ -322,7 +336,7 @@ async fn active_config_inspection_target_conflict_tx(
             JOIN config_inspection_jobs job
               ON job.commit_id = $4
              AND job.configuration_name = supplied.configuration_name
-             AND job.status IN ('queued', 'running')
+             AND job.status IN ('queued', 'waiting_for_capacity', 'running')
             WHERE job.derivation_id IS DISTINCT FROM supplied.derivation_id
                OR job.carrier_drv_path IS DISTINCT FROM supplied.carrier_drv_path
         )
@@ -393,7 +407,7 @@ async fn enqueue_resolved_config_inspection_targets_tx(
                   WHERE ready.configuration_name = supplied.configuration_name
               )
         ON CONFLICT (commit_id, configuration_name)
-            WHERE status IN ('queued', 'running')
+            WHERE status IN ('queued', 'waiting_for_capacity', 'running')
         DO NOTHING
         RETURNING id
         "#,
@@ -509,7 +523,7 @@ pub(crate) async fn queue_or_reuse_targeted_config_inspection(
                  FROM config_inspection_jobs job
                  WHERE job.commit_id = $1
                    AND job.configuration_name = $2
-                   AND job.status IN ('queued', 'running')
+                   AND job.status IN ('queued', 'waiting_for_capacity', 'running')
                  ORDER BY job.created_at DESC, job.id DESC
                  LIMIT 1
                ),
@@ -546,7 +560,7 @@ pub(crate) async fn queue_or_reuse_targeted_config_inspection(
         SnapshotLifecycle::Available
     } else {
         match job_status.as_deref() {
-            Some("queued") => SnapshotLifecycle::Queued,
+            Some("queued" | "waiting_for_capacity") => SnapshotLifecycle::Queued,
             Some("running") => SnapshotLifecycle::Running,
             other => bail!("targeted Config Inspector enqueue produced no active job: {other:?}"),
         }
@@ -723,67 +737,104 @@ pub(crate) async fn complete_config_inspection_execution_success_tx(
     Ok(affected == 1)
 }
 
-/// Claims the oldest queued Config Inspector job without globally serializing claims.
+/// Reserves the oldest eligible Config Inspector job without consuming an attempt.
 ///
 /// PostgreSQL locks the selected candidate with `FOR UPDATE SKIP LOCKED` inside
-/// the same statement that changes it to `running`. Concurrent claimers therefore
-/// either skip the locked row or claim a different queued row.
-pub(crate) async fn claim_next_config_inspection_job(
+/// the statement that changes it to `waiting_for_capacity`.
+pub(crate) async fn reserve_next_config_inspection_job(
     pool: &PgPool,
-) -> Result<Option<ConfigInspectionExecutionClaim>> {
-    let claim = sqlx::query_as::<_, (Uuid, i32, i32, String, String, Uuid, i32)>(
+) -> Result<Option<ConfigInspectionExecutionTarget>> {
+    let target = sqlx::query_as::<_, (Uuid, i32, i32, String, String)>(
         r#"
         WITH candidate AS (
             SELECT id
             FROM config_inspection_jobs
-            WHERE status = 'queued'
-            ORDER BY scheduled_at ASC, created_at ASC, id ASC
+            WHERE status IN ('queued', 'waiting_for_capacity')
+            ORDER BY (status = 'waiting_for_capacity') ASC,
+                     scheduled_at ASC, created_at ASC, id ASC
             LIMIT 1
             FOR UPDATE SKIP LOCKED
         )
         UPDATE config_inspection_jobs job
-        SET status = 'running',
-            attempts = job.attempts + 1,
-            started_at = now(),
-            completed_at = NULL,
-            error = NULL,
-            execution_id = gen_random_uuid(),
-            execution_heartbeat_at = now(),
-            updated_at = now()
+        SET status = 'waiting_for_capacity', updated_at = now()
         FROM candidate
         WHERE job.id = candidate.id
         RETURNING job.id, job.commit_id, job.derivation_id,
-                  job.configuration_name, job.carrier_drv_path,
-                  job.execution_id, job.attempts
+                  job.configuration_name, job.carrier_drv_path
         "#,
     )
     .fetch_optional(pool)
     .await
-    .context("claim Config Inspector job")?;
+    .context("reserve Config Inspector job")?;
 
-    claim
+    target
         .map(
-            |(
-                job_id,
-                commit_id,
-                derivation_id,
-                configuration_name,
-                carrier_drv_path,
-                execution_id,
-                attempts,
-            )| {
-                Ok(ConfigInspectionExecutionClaim {
+            |(job_id, commit_id, derivation_id, configuration_name, carrier_drv_path)| {
+                Ok(ConfigInspectionExecutionTarget {
                     job_id,
                     commit_id,
                     derivation_id,
                     configuration_name,
                     carrier_drv_path,
-                    execution_id,
-                    attempts,
                 })
             },
         )
         .transpose()
+}
+
+/// Defers a capacity miss without consuming an execution attempt.
+pub(crate) async fn defer_config_inspection_capacity(pool: &PgPool, job_id: Uuid) -> Result<()> {
+    sqlx::query(
+        "UPDATE config_inspection_jobs SET scheduled_at = now(), updated_at = now() WHERE id = $1 AND status = 'waiting_for_capacity'",
+    )
+    .bind(job_id)
+    .execute(pool)
+    .await
+    .context("defer Config Inspector capacity")?;
+    Ok(())
+}
+
+/// Starts a reserved job after the caller has acquired all heavy-Nix capacity.
+pub(crate) async fn start_config_inspection_execution(
+    pool: &PgPool,
+    target: ConfigInspectionExecutionTarget,
+) -> Result<Option<ConfigInspectionExecutionClaim>> {
+    let execution_id = Uuid::new_v4();
+    let attempts = sqlx::query_scalar::<_, i32>(
+        r#"
+        UPDATE config_inspection_jobs
+        SET status = 'running', attempts = attempts + 1, started_at = now(),
+            completed_at = NULL, error = NULL, execution_id = $2,
+            execution_heartbeat_at = now(), updated_at = now()
+        WHERE id = $1 AND status = 'waiting_for_capacity' AND attempts < $3
+        RETURNING attempts
+        "#,
+    )
+    .bind(target.job_id)
+    .bind(execution_id)
+    .bind(MAX_CONFIG_INSPECTION_ATTEMPTS)
+    .fetch_optional(pool)
+    .await
+    .context("start Config Inspector execution")?;
+    Ok(attempts.map(|attempts| ConfigInspectionExecutionClaim {
+        job_id: target.job_id,
+        commit_id: target.commit_id,
+        derivation_id: target.derivation_id,
+        configuration_name: target.configuration_name,
+        carrier_drv_path: target.carrier_drv_path,
+        execution_id,
+        attempts,
+    }))
+}
+
+#[cfg(test)]
+async fn claim_next_config_inspection_job(
+    pool: &PgPool,
+) -> Result<Option<ConfigInspectionExecutionClaim>> {
+    let Some(target) = reserve_next_config_inspection_job(pool).await? else {
+        return Ok(None);
+    };
+    start_config_inspection_execution(pool, target).await
 }
 
 /// Refreshes a running execution heartbeat only for the exact owner token.
@@ -1233,15 +1284,10 @@ mod tests {
     }
 
     #[test]
-    fn execution_mode_gate_only_allows_real_mode() {
-        assert!(should_schedule_config_inspections(false));
-        assert!(!should_schedule_config_inspections(true));
-    }
-
-    #[test]
     fn status_values_match_migration_contract() {
         for status in [
             ConfigInspectionJobStatus::Queued,
+            ConfigInspectionJobStatus::WaitingForCapacity,
             ConfigInspectionJobStatus::Running,
             ConfigInspectionJobStatus::Succeeded,
             ConfigInspectionJobStatus::Failed,
@@ -1251,6 +1297,12 @@ mod tests {
                 status
             );
         }
+    }
+
+    #[test]
+    fn primary_evaluation_does_not_automatically_enqueue_complete_config_inspection() {
+        let server = include_str!("../server/mod.rs");
+        assert!(!server.contains("enqueue_config_inspection_jobs_for_successful_systems("));
     }
 
     #[sqlx::test]
@@ -1566,9 +1618,10 @@ mod tests {
         .expect("targeted system should persist");
         let obsolete_path = format!("/nix/store/{}-obsolete.drv", Uuid::new_v4().simple());
         let obsolete_derivation_id: i32 = sqlx::query_scalar(
-            "INSERT INTO derivations (commit_id, derivation_type, derivation_name, derivation_path, status_id, attempt_count) VALUES ($1, 'nixos', 'obsolete-target', $2, (SELECT id FROM derivation_statuses ORDER BY id LIMIT 1), 0) RETURNING id",
+            "INSERT INTO derivations (commit_id, derivation_type, derivation_name, derivation_path, status_id, attempt_count) VALUES ($1, 'package', $2, $3, (SELECT id FROM derivation_statuses ORDER BY id LIMIT 1), 0) RETURNING id",
         )
         .bind(commit_id)
+        .bind(&name)
         .bind(&obsolete_path)
         .fetch_one(&pool)
         .await
@@ -1623,6 +1676,46 @@ mod tests {
         assert!(migration.contains("error = NULL"));
         assert!(migration.contains("execution_id uuid"));
         assert!(migration.contains("execution_heartbeat_at timestamptz"));
+    }
+
+    #[test]
+    fn migration_0255_enforces_new_complete_job_identity_without_scanning_history() {
+        let migration = include_str!("../../migrations/0255_scoped_config_observations.sql");
+        let legacy_constraint = migration
+            .split_once("ADD CONSTRAINT config_inspection_jobs_derivation_identity_fk")
+            .and_then(|(_, sql)| {
+                sql.split_once("DROP INDEX config_inspection_jobs_active_target_idx")
+            })
+            .map(|(sql, _)| sql)
+            .expect("legacy complete-inspection identity constraint should remain present");
+        assert!(legacy_constraint.contains("NOT VALID"));
+
+        let scoped_tables = migration
+            .split_once("CREATE TABLE config_observations")
+            .map(|(_, sql)| sql)
+            .expect("scoped observation tables should remain present");
+        assert!(!scoped_tables.contains("NOT VALID"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn reservation_waits_without_consuming_an_attempt(pool: PgPool) {
+        let (_, job_id) = make_claimable_job(&pool, "capacity").await;
+        let target = reserve_next_config_inspection_job(&pool)
+            .await
+            .expect("reservation should succeed")
+            .expect("a target should exist");
+        assert_eq!(target.job_id, job_id);
+
+        let job = get_config_inspection_job(&pool, job_id)
+            .await
+            .expect("reserved job should load")
+            .expect("reserved job should exist");
+        assert_eq!(job.status, ConfigInspectionJobStatus::WaitingForCapacity);
+        assert_eq!(job.attempts, 0);
+        assert!(job.execution_id.is_none());
+        assert!(job.execution_heartbeat_at.is_none());
+        assert!(job.started_at.is_none());
     }
 
     #[sqlx::test]
@@ -2233,6 +2326,14 @@ mod tests {
         enqueue_config_inspection_jobs_for_successful_systems(&pool, commit_id, &[target])
             .await
             .expect("inspection job should enqueue");
+        let mismatched_insert = sqlx::query(
+            "INSERT INTO config_inspection_jobs (commit_id, derivation_id, configuration_name, carrier_drv_path, status, started_at, completed_at, error) VALUES ($1, $2, 'host', '/nix/store/wrong-carrier.drv', 'failed', now(), now(), 'test failure')",
+        )
+        .bind(commit_id)
+        .bind(derivation_id)
+        .execute(&pool)
+        .await;
+        assert!(mismatched_insert.is_err());
         let mutation = sqlx::query(
             "UPDATE config_inspection_jobs SET carrier_drv_path = '/nix/store/other.drv' WHERE commit_id = $1",
         )
@@ -2396,6 +2497,9 @@ mod tests {
                     "targetKey": target.target_key,
                     "sourceOutPath": "/nix/store/config-inspection-source",
                     "options": [],
+                    "optionInventoryComplete": true,
+                    "optionInventoryDiagnostics": [],
+                    "optionInventoryDiagnosticsTruncated": false,
                     "origins": []
                 }
             }),
@@ -2455,7 +2559,15 @@ mod tests {
             crate::services::config_inspections::ConfigInspectionExecutionOutcome::Succeeded {
                 snapshot_id,
             } => snapshot_id,
-            other => panic!("expected successful snapshot execution, got {other:?}"),
+            other => {
+                let error: Option<String> =
+                    sqlx::query_scalar("SELECT error FROM config_inspection_jobs WHERE id = $1")
+                        .bind(job_id)
+                        .fetch_one(&pool)
+                        .await
+                        .expect("executor error should load");
+                panic!("expected successful snapshot execution, got {other:?}: {error:?}");
+            }
         };
         let after_job = get_config_inspection_job(&pool, job_id)
             .await

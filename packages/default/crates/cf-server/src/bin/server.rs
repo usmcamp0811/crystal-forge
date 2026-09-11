@@ -535,6 +535,18 @@ async fn main() -> anyhow::Result<()> {
             post(systems::queue_system_config_inspection),
         )
         .route(
+            "/api/v1/systems/:id/config-observations/:revision",
+            post(systems::create_system_config_observation),
+        )
+        .route(
+            "/api/v1/systems/:id/config-observation-requests/:request_id",
+            get(systems::get_system_config_observation_request),
+        )
+        .route(
+            "/api/v1/systems/:id/config-observations/by-id/:observation_id",
+            get(systems::get_system_config_observation),
+        )
+        .route(
             "/api/v1/systems/:id/verify-generation-closure",
             post(systems::verify_generation_closure),
         )

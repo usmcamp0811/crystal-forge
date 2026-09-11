@@ -13,6 +13,7 @@ pub mod compliance;
 pub mod compliance_interchange;
 pub mod config_health;
 pub mod config_inspections;
+pub mod config_observations;
 pub mod cve_scans;
 pub mod cves;
 pub mod dashboard;
