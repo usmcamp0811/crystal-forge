@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-10 20:02'
+updated_date: '2026-09-11 12:37'
 labels:
   - design-parity
   - web-ui
@@ -45,6 +45,9 @@ references:
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2835583294'
   - git commit 1e986cd2351652e866f9b72bff956a312fc0827a
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2835889586'
+  - git commit 88d3218d4b194f0a6c5253f760327cb5fae144fb
+  - git commit 27f93478837b9b726c5cda807faf6182fb0d3229
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2840805787'
 documentation:
   - docs/design/CrystalForge/app.jsx
   - docs/design/CrystalForge/components/SystemDetail.jsx
@@ -265,6 +268,12 @@ Commit B was created locally as df58dbd6b408cfa1d718dd766690f3834201f033 with ex
 2026-09-10 corrected Commit B verification: bounded Stage-1 diagnostics now retain 128 entries while traversal continues and certifies truncation; Stage 2 projects exact healthy Stage-1 paths, uses one option-key attrset, and balances option-tree merges. Added persistence/API/UI truncation state and corrected the existing API fixture to mark its claimed derivation complete. Passed real-Nix config-inspector and evaluator-snapshot-isolation checks; 42 config_inspector model tests; 13 config_snapshot_artifact model tests; focused partial selector, API mapping, API handler, and migration 0254 tests against isolated PostgreSQL 17; all-target offline cf-server check; Web UI WASM check; SQLx prepare --check against a freshly migrated isolated database; server/Web UI formatting; Node syntax; and git diff checks. SQLx reported only pre-existing potentially unused metadata, with no metadata update required. Commit A files and parent SHA matched acecec5a71ff99fe0c4d1f59e6d5f54d4f616687. The disposable PostgreSQL cluster on port 55441 was stopped and removed. Commit-B amend remains pending.
 
 2026-09-10 corrected Commit B amended successfully: old temporary B `f1b4127bfe239cf2fe4f32e5194e852c855ade41` was replaced by `c8597b73` with exact subject `TASK-440: Represent partial Config inventories`. Commit A remains the exact parent `acecec5a71ff99fe0c4d1f59e6d5f54d4f616687`; the branch has exactly two local commits above `origin/TASK-440-system-config-flake-parity` at `1e986cd2351652e866f9b72bff956a312fc0827a`, and the task worktree is clean. No push, merge, deployment, or task status change was performed.
+
+2026-09-10 corrected XCCDF commit finalized and pushed as `88d3218d4b194f0a6c5253f760327cb5fae144fb` (`TASK-440: Align custom-check XCCDF context`). Current exports derive V2 `nixos-configuration-v2`/`config`, preserve canonical `config.*`, and emit zero rules only for the exact no-expression All-empty state. V1 source representation and digest authenticate before deterministic normalization to current `config.*`; current API and importer share custom-check validation. Lexer regressions cover executable direct/quoted/dynamic access plus absolute/relative/search/URI path literals, strings, comments, interpolation, and escaped indented-string interpolation. The operational PostgreSQL round trip exports and imports single, multi, expression-plus-empty, and no-enforcement policies, preserves configs/membership/order, performs local trust/publication without policy content repair, loads through normal persistence, and proves original/imported `PolicyCheckResult` pass/fail/strict parity. Production-shaped publication and subsequent export pass; malformed publication rolls back state, pointers, timestamps, digests, config, and audit count. Focused XCCDF tests reported 292 passed/1 ignored; custom-check tests 41 passed/4 ignored; XCCDF schema, offline cf-server, formatting, and diff checks passed.
+
+2026-09-10 corrected Config commit finalized and pushed as `27f93478837b9b726c5cda807faf6182fb0d3229` (`TASK-440: Represent partial Config inventories`). Migration `0254_partial_config_option_inventories.sql` adds certified completeness, bounded diagnostics, and truncation state while preserving V1 NULL fields and backfilling prior successful V2 artifacts as complete. Targeted Stage 1 guards attrNames, child WHNF, `_type`, non-option nodes, and depth; diagnostics retain at most 128 redacted deterministic prefixes while traversal continues. Stage 1 uses subquadratic indexed collision handling/accumulation. Stage 2 filters by an indexed exact observed-key set, recomputes partial provenance digest over the same observed set, and transports 16k identities through an owner-only temporary JSON file instead of argv; RAII cleanup covers completion/error/cancellation. Partial artifacts certify available/selectable with observed rows and comparison_ready=false; complete comparison-unready artifacts remain retryable. Focused proof covers 130 poisons plus a healthy later option, root unavailable, partial persistence/selection, All/Search, fail-closed Changed/Drift, and no fabricated jobs. Config Inspector model tests reported 43 passed; service tests 11 passed; focused PostgreSQL enqueue tests 7 passed; focused Config Inspector/evaluator-isolation Nix checks, offline all-targets, migration/SQLx, WASM check, formatting, syntax, and diff checks passed.
+
+2026-09-10 verification policy: no successful broad Web UI, full flake, full integration, or broad server-regressions gate was run for this pass. One broad Web UI command was accidentally started during the initial temporary implementation and timed out; no pass is claimed. The corrected exact-head UI changes were verified with changed-file rustfmt, Node syntax, focused model/API tests, and WASM cargo check; no expensive browser/Nix Web UI command was required after correction. Final independent P0/P1 review found no deployment-smoke blocker. Normal fast-forward push succeeded from remote `1e986cd2351652e866f9b72bff956a312fc0827a`; local, remote-tracking, and ls-remote all equal `27f93478837b9b726c5cda807faf6182fb0d3229`; worktree is clean. Exact-head pipeline 2840805787 is running. Policy Create-draft production files were not changed. TASK-440 remains In Progress; AC #24 and #27 remain unchecked.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
