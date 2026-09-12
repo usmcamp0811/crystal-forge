@@ -458,13 +458,17 @@ architecture decision update before implementation.
 The current TASK-440 implementation is distributed across these boundaries:
 
 - Explorer service and worker: `packages/default/crates/cf-server/src/services/config_inspections.rs`,
+  `packages/default/crates/cf-server/src/services/config_observations.rs`,
   `packages/default/crates/cf-server/src/bin/config-inspector-worker.rs`, and
   `packages/default/crates/cf-server/src/models/config_inspector.rs`.
 - Trusted inspector expressions:
-  `packages/default/crates/cf-server/src/models/config_inspector.nix`.
+  `packages/default/crates/cf-server/src/models/config_inspector.nix`,
+  `packages/default/crates/cf-server/src/models/config_observer.nix`, and
+  `packages/default/crates/cf-server/src/models/config_value_encoding.nix`.
 - Explorer queries and persistence:
   `packages/default/crates/cf-server/src/queries/config_inspections.rs`,
   `packages/default/crates/cf-server/src/queries/config_observations.rs`, and
+  `packages/default/crates/cf-server/src/models/config_observations.rs`, and
   `packages/default/crates/cf-server/src/security/snapshot_redaction.rs`.
 - Evaluation snapshot queries and V2 model:
   `packages/default/crates/cf-server/src/queries/evaluation_snapshots.rs`,
@@ -478,7 +482,8 @@ The current TASK-440 implementation is distributed across these boundaries:
   `0252_config_inspection_jobs.sql`,
   `0253_config_inspection_execution_ownership.sql`,
   `0254_partial_config_option_inventories.sql`, and
-  `0255_scoped_config_observations.sql`.
+  `0255_scoped_config_observations.sql`, and
+  `0256_config_observation_child_pages.sql`.
 - API handlers and models: the Config inspection handlers and API models under
   `packages/default/crates/cf-server/src/handlers/api/` and
   `packages/default/crates/cf-server/src/api/models.rs`.
@@ -491,6 +496,24 @@ The current TASK-440 implementation is distributed across these boundaries:
 
 These paths identify ownership. They do not authorize a future change to make
 Explorer data authoritative for policy or deployment.
+
+The request path first reuses an exact scoped observation. A complete certified
+V2 artifact can then answer root or prefix pages and exact option or provenance
+reads when its commit, configuration, target key, and carrier all match. A
+partial V2 artifact can answer only an individually present exact option or its
+surviving-definition provenance. Partial V2 never establishes missing tree
+children. Configured-index requests continue to use the dedicated classifier
+because V2 does not preserve the required default-versus-configuration proof.
+V2 reuse writes only a normal observational cache entry and does not change a
+snapshot selector.
+
+Root and prefix observations use deterministic server-bounded pages of at most
+512 immediate children. The zero-based child offset is part of the request and
+cache identity. The UI can load subsequent pages within the server's bounded
+offset range without accepting Nix source from the browser. If evaluation of an
+option value or nested encoded value fails, the
+option observation retains readable metadata and returns a bounded
+`value_unavailable` value state without a raw Nix trace.
 
 ## Decision record
 

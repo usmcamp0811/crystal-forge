@@ -824,6 +824,7 @@ fn validate_config_observation_request_identity(
         || response.revision != revision
         || response.kind != request.kind
         || response.path_components != request.path_components
+        || response.child_offset != request.child_offset
     {
         return Err(ApiClientError::Deserialize(
             "Config observation request identity changed while polling".to_string(),
@@ -834,23 +835,31 @@ fn validate_config_observation_request_identity(
 
 fn config_observation_payload_identity(
     payload: &ConfigObservationPayload,
-) -> (ConfigObservationKind, &[String]) {
+) -> (ConfigObservationKind, &[String], u32) {
     match payload {
         ConfigObservationPayload::Root {
-            path_components, ..
-        } => (ConfigObservationKind::Root, path_components),
+            path_components,
+            child_offset,
+            ..
+        } => (ConfigObservationKind::Root, path_components, *child_offset),
         ConfigObservationPayload::Prefix {
-            path_components, ..
-        } => (ConfigObservationKind::Prefix, path_components),
+            path_components,
+            child_offset,
+            ..
+        } => (
+            ConfigObservationKind::Prefix,
+            path_components,
+            *child_offset,
+        ),
         ConfigObservationPayload::Option {
             path_components, ..
-        } => (ConfigObservationKind::Option, path_components),
+        } => (ConfigObservationKind::Option, path_components, 0),
         ConfigObservationPayload::Provenance {
             path_components, ..
-        } => (ConfigObservationKind::Provenance, path_components),
+        } => (ConfigObservationKind::Provenance, path_components, 0),
         ConfigObservationPayload::ConfiguredIndex {
             path_components, ..
-        } => (ConfigObservationKind::ConfiguredIndex, path_components),
+        } => (ConfigObservationKind::ConfiguredIndex, path_components, 0),
     }
 }
 
@@ -903,14 +912,16 @@ where
                 if !should_continue() {
                     return Ok(None);
                 }
-                let (payload_kind, payload_path) =
+                let (payload_kind, payload_path, payload_child_offset) =
                     config_observation_payload_identity(&observation.payload);
                 if observation.observation_id != observation_id
                     || observation.revision != revision
                     || observation.kind != request.kind
                     || observation.path_components != request.path_components
+                    || observation.child_offset != request.child_offset
                     || payload_kind != request.kind
                     || payload_path != request.path_components
+                    || payload_child_offset != request.child_offset
                 {
                     return Err(ApiClientError::Deserialize(
                         "Immutable Config observation identity did not match its request"
@@ -3196,6 +3207,7 @@ mod config_observation_tests {
         CreateConfigObservationRequest {
             kind,
             path_components,
+            child_offset: 0,
         }
     }
 
@@ -3208,6 +3220,7 @@ mod config_observation_tests {
             configuration_name: "atlas-01".into(),
             kind: ConfigObservationKind::Prefix,
             path_components: vec!["services".into()],
+            child_offset: 0,
             lifecycle: ConfigObservationLifecycle::Running,
             observation_id: None,
             error: None,
@@ -3262,8 +3275,9 @@ mod config_observation_tests {
             highest_prio: Some(100),
             value: SafeOptionValue::Scalar(serde_json::Value::Bool(true)),
         };
-        let (kind, path) = config_observation_payload_identity(&payload);
+        let (kind, path, child_offset) = config_observation_payload_identity(&payload);
         assert_eq!(kind, ConfigObservationKind::Option);
         assert_eq!(path, ["services", "openssh", "enable"]);
+        assert_eq!(child_offset, 0);
     }
 }

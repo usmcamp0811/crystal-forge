@@ -1371,6 +1371,9 @@ pub struct CreateConfigObservationRequest {
     pub kind: ConfigObservationKind,
     /// Exact option path components. Dotted text is not an identity.
     pub path_components: Vec<String>,
+    /// Zero-based immediate-child offset. Non-tree operations require zero.
+    #[serde(default)]
+    pub child_offset: u32,
 }
 
 /// Describes the durable lifecycle of one scoped observation request.
@@ -1402,6 +1405,9 @@ pub struct ConfigObservationRequestResponse {
     pub kind: ConfigObservationKind,
     /// Exact requested path components.
     pub path_components: Vec<String>,
+    /// Zero-based immediate-child offset included in the request identity.
+    #[serde(default)]
+    pub child_offset: u32,
     /// Current durable lifecycle.
     pub lifecycle: ConfigObservationLifecycle,
     /// Immutable observation identity after success.
@@ -1488,6 +1494,8 @@ pub enum ConfigObservationPayload {
     Root {
         /// Exact empty root path.
         path_components: Vec<String>,
+        /// Applied zero-based child offset.
+        child_offset: u32,
         /// Bounded immediate children.
         children: Vec<ConfigObservationChild>,
         /// Whether additional children were omitted.
@@ -1499,6 +1507,8 @@ pub enum ConfigObservationPayload {
     Prefix {
         /// Exact requested prefix components.
         path_components: Vec<String>,
+        /// Applied zero-based child offset.
+        child_offset: u32,
         /// Bounded immediate children.
         children: Vec<ConfigObservationChild>,
         /// Whether additional children were omitted.
@@ -1572,6 +1582,9 @@ pub struct ConfigObservationResponse {
     pub kind: ConfigObservationKind,
     /// Exact structured path components.
     pub path_components: Vec<String>,
+    /// Applied immediate-child offset included in the observation identity.
+    #[serde(default)]
+    pub child_offset: u32,
     /// Typed redacted observation payload.
     pub payload: ConfigObservationPayload,
     /// Observation creation time.

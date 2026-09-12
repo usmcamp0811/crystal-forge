@@ -98,13 +98,17 @@ Current system state compared against latest evaluated configuration to detect u
 
 PRIMARY evaluates system derivations and policies. It also emits one
 revision-scoped flake-output projection without per-host exploration. A separate
-durable Config Inspector worker extracts option metadata, safe values, and module
-provenance for an exact commit and configuration after PRIMARY succeeds. Config
-and flake explorer reads use PostgreSQL only and never launch Nix, Git, network,
-or queue work. See
+durable Config Inspector worker can extract complete option metadata, safe
+values, and module provenance for an exact commit and configuration after
+PRIMARY succeeds. Config Explorer first reuses exact certified V2 or scoped
+observations. It queues bounded observational Nix only when persisted evidence
+cannot answer the requested scope. Explorer data never becomes policy or
+deployment input. See
 [Evaluation and Flake Snapshot Architecture](./evaluation-flake-snapshots.md)
 for ownership, lifecycle, comparison, retention, redaction, authorization, and
-compatibility contracts.
+compatibility contracts. See
+[Config Explorer Architecture](./config-explorer-architecture.md) for lazy
+observation, failure containment, cache, and authority boundaries.
 
 ### Event-Driven Queue Architecture
 

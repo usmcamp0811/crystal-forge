@@ -3706,43 +3706,45 @@ async function routeTask440SystemData(page, overrides = {}) {
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ revision, configuration_name: "atlas-01", lifecycle: state.lifecycle, queued: true }) });
   });
 
-  const observationPayload = (kind, pathComponents, revision) => {
-    const key = (value) => createHash("sha256").update(`task440-observation:${value}`).digest("hex");
+  const observationPayload = (kind, pathComponents, revision, childOffset = 0) => {
+    const key = (path) => createHash("sha256").update(JSON.stringify(path)).digest("hex");
+    const child = (path, childKind) => ({ path_components: path, key: key(path), kind: childKind });
     if (kind === "root") return {
-      kind, path_components: [], children: [
-        { path_components: [`${revision.slice(0, 7)}-root`], key: key(`${revision}-root`), kind: "prefix" },
-        { path_components: ["networking"], key: key("networking"), kind: "prefix" },
-        { path_components: ["services"], key: key("services"), kind: "prefix" },
-        { path_components: ["poison"], key: key("poison"), kind: "unavailable" },
-      ], children_truncated: false, total_children: 4,
+      kind, path_components: [], child_offset: childOffset, children: [
+        child([`${revision.slice(0, 7)}-root`], "prefix"),
+        child(["networking"], "prefix"),
+        child(["poison"], "unavailable"),
+        child(["services"], "prefix"),
+      ].slice(childOffset, childOffset + 512), children_truncated: false, total_children: 4,
     };
     if (kind === "prefix") {
       const dotted = pathComponents.join(".");
       const children = dotted === "services"
         ? [
-            { path_components: ["services", "openssh"], key: key("services.openssh"), kind: "prefix" },
-            { path_components: ["services", "healthy"], key: key("services.healthy"), kind: "prefix" },
+            child(["services", "healthy"], "prefix"),
+            child(["services", "openssh"], "prefix"),
           ]
         : dotted === "services.openssh"
-          ? [{ path_components: ["services", "openssh", "enable"], key: key("services.openssh.enable"), kind: "option" }]
+          ? [child(["services", "openssh", "enable"], "option")]
           : dotted === "networking"
-            ? [{ path_components: ["networking", "hostName"], key: key("networking.hostName"), kind: "option" }]
-            : [{ path_components: [...pathComponents, "enabled"], key: key(`${dotted}.enabled`), kind: "option" }];
-      return { kind, path_components: pathComponents, children, children_truncated: false, total_children: children.length };
+            ? [child(["networking", "hostName"], "option")]
+            : [child([...pathComponents, "enabled"], "option")];
+      const page = children.slice(childOffset, childOffset + 512);
+      return { kind, path_components: pathComponents, child_offset: childOffset, children: page, children_truncated: childOffset + page.length < children.length, total_children: children.length };
     }
     if (kind === "configured_index") return {
       kind, path_components: [], total_traversed: 16000, diagnostics: [], diagnostics_truncated: false,
       configured: [
-        { path_components: ["services", "openssh", "enable"], key: key("services.openssh.enable") },
-        { path_components: ["networking", "hostName"], key: key("networking.hostName") },
+        { path_components: ["services", "openssh", "enable"], key: key(["services", "openssh", "enable"]) },
+        { path_components: ["networking", "hostName"], key: key(["networking", "hostName"]) },
       ], total_configured: 2, configured_truncated: false, classifier_diagnostics: [], classifier_diagnostics_truncated: false,
     };
     if (kind === "option") return {
-      kind, path_components: pathComponents, key: key(pathComponents.join(".")), declared_type: pathComponents.at(-1) === "enable" ? "boolean" : "string",
+      kind, path_components: pathComponents, key: key(pathComponents), declared_type: pathComponents.at(-1) === "enable" ? "boolean" : "string",
       is_defined: true, highest_prio: 100, value: { kind: "scalar", value: pathComponents.at(-1) === "enable" ? true : "atlas-01" },
     };
     return {
-      kind, path_components: pathComponents, key: key(pathComponents.join(".")),
+      kind, path_components: pathComponents, key: key(pathComponents),
       definitions: [{ source_path: "nixos/hosts/atlas-01.nix", priority: 100 }], definitions_truncated: false, total_definitions: 1,
     };
   };
@@ -3758,7 +3760,7 @@ async function routeTask440SystemData(page, overrides = {}) {
     }
     const revision = decodeURIComponent(new URL(request.url()).pathname.split("/").at(-1));
     const body = request.postDataJSON();
-    state.observationPosts.push({ revision, kind: body.kind, path_components: body.path_components });
+    state.observationPosts.push({ revision, kind: body.kind, path_components: body.path_components, child_offset: body.child_offset });
     for (const waiter of state.observationPostWaiters.splice(0)) {
       if (waiter.ready()) waiter.resolve();
       else state.observationPostWaiters.push(waiter);
@@ -3775,13 +3777,13 @@ async function routeTask440SystemData(page, overrides = {}) {
     const requestId = `44000000-0000-4000-8000-${String(state.observationPosts.length).padStart(12, "0")}`;
     const observationId = `44100000-0000-4000-8000-${String(state.observationPosts.length).padStart(12, "0")}`;
     const response = {
-      request_id: requestId, revision, configuration_name: "atlas-01", kind: body.kind, path_components: body.path_components,
+      request_id: requestId, revision, configuration_name: "atlas-01", kind: body.kind, path_components: body.path_components, child_offset: body.child_offset,
       lifecycle: failures > 0 ? "failed" : "succeeded", observation_id: failures > 0 ? null : observationId,
       error: failures > 0 ? `Unable to inspect ${dotted}` : null, attempts: 1, heartbeat_at: null, reused: false,
     };
     if (failures > 0) state.prefixFailureCounts.set(dotted, failures - 1);
     state.observationRequests.set(requestId, response);
-    state.observationRequests.set(observationId, { ...response, payload: observationPayload(body.kind, body.path_components, revision) });
+    state.observationRequests.set(observationId, { ...response, payload: observationPayload(body.kind, body.path_components, revision, body.child_offset) });
     await route.fulfill({ status: failures > 0 ? 202 : 200, contentType: "application/json", body: JSON.stringify(response) });
   });
 
@@ -3795,7 +3797,7 @@ async function routeTask440SystemData(page, overrides = {}) {
     const stored = state.observationRequests.get(id);
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
       observation_id: id, revision: stored.revision, configuration_name: stored.configuration_name, schema_version: 1,
-      kind: stored.kind, path_components: stored.path_components, payload: stored.payload, created_at: "2026-09-11T20:00:00Z",
+      kind: stored.kind, path_components: stored.path_components, child_offset: stored.child_offset, payload: stored.payload, created_at: "2026-09-11T20:00:00Z",
     }) });
   });
 

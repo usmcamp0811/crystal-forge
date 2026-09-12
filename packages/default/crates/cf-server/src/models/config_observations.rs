@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
+use crate::models::config_inspector::option_key;
+
 /// Current scoped observation schema version.
 pub const CONFIG_OBSERVATION_SCHEMA_VERSION: i32 = 1;
 /// Maximum structured option path depth.
@@ -18,6 +20,8 @@ pub const MAX_CONFIG_OBSERVATION_COMPONENT_CHARS: usize = 256;
 const MAX_CONFIG_OBSERVATION_PATH_JSON_BYTES: usize = 8192;
 /// Maximum children or definitions returned by one scoped observation.
 pub const MAX_CONFIG_OBSERVATION_ITEMS: usize = 512;
+/// Maximum immediate-child offset accepted for a scoped tree page.
+pub const MAX_CONFIG_OBSERVATION_CHILD_OFFSET: u32 = 1_000_000;
 /// Maximum configured identities retained in one batched index payload.
 pub const MAX_CONFIGURED_OBSERVATION_ITEMS: usize = 512;
 /// Maximum diagnostics retained for each configured-index diagnostic class.
@@ -95,6 +99,33 @@ pub fn validate_config_observation_path(
     );
     if requires_empty != path.is_empty() || !config_observation_path_is_bounded(path)? {
         bail!("invalid structured Config observation path");
+    }
+    Ok(())
+}
+
+/// Validates the structured path and server-bounded child-page offset.
+///
+/// Root and prefix observations can select a nonzero immediate-child offset.
+/// Other operations have no child pages and require offset zero.
+///
+/// # Errors
+///
+/// Returns an error when the path is invalid, the offset exceeds the server
+/// bound, or a non-tree operation requests a nonzero offset.
+pub fn validate_config_observation_identity(
+    kind: ConfigObservationKind,
+    path: &[String],
+    child_offset: u32,
+) -> Result<()> {
+    validate_config_observation_path(kind, path)?;
+    if child_offset > MAX_CONFIG_OBSERVATION_CHILD_OFFSET
+        || (child_offset != 0
+            && !matches!(
+                kind,
+                ConfigObservationKind::Root | ConfigObservationKind::Prefix
+            ))
+    {
+        bail!("invalid Config observation child offset");
     }
     Ok(())
 }
@@ -207,6 +238,17 @@ fn valid_encoded_value(value: &Value, depth: usize) -> bool {
                     .and_then(Value::as_str)
                     .is_some_and(|name| name.len() <= 128)
         }),
+        Some("failed") => encoded.as_object().is_some_and(|error| {
+            exact_fields(error, &["code", "message"])
+                && error
+                    .get("code")
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| value.len() <= 128)
+                && error
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| value.len() <= 512)
+        }),
         _ => false,
     }
 }
@@ -224,9 +266,10 @@ fn valid_encoded_value(value: &Value, depth: usize) -> bool {
 pub(crate) fn validate_config_observation_payload(
     kind: ConfigObservationKind,
     path: &[String],
+    child_offset: u32,
     payload: &Value,
 ) -> Result<()> {
-    validate_config_observation_path(kind, path)?;
+    validate_config_observation_identity(kind, path, child_offset)?;
     let object = payload
         .as_object()
         .ok_or_else(|| anyhow::anyhow!("Config observation payload must be an object"))?;
@@ -241,44 +284,55 @@ pub(crate) fn validate_config_observation_payload(
             let children = object.get("children").and_then(Value::as_array);
             let total = object.get("total_children").and_then(Value::as_u64);
             let truncated = object.get("children_truncated").and_then(Value::as_bool);
+            let mut previous_child_path: Option<Vec<String>> = None;
             exact_fields(
                 object,
                 &[
                     "kind",
                     "path_components",
+                    "child_offset",
                     "children",
                     "children_truncated",
                     "total_children",
                 ],
-            ) && children.is_some_and(|children| {
-                children.len() <= MAX_CONFIG_OBSERVATION_ITEMS
-                    && children.iter().all(|child| {
-                        let Some(child) = child.as_object() else {
-                            return false;
-                        };
-                        let Ok(child_path) = payload_path(child, "path_components") else {
-                            return false;
-                        };
-                        exact_fields(child, &["path_components", "key", "kind"])
-                            && child_path.len() == path.len() + 1
-                            && child_path.starts_with(path)
-                            && config_observation_path_is_bounded(&child_path).unwrap_or(false)
-                            && valid_key(child.get("key"))
-                            && matches!(
-                                child.get("kind").and_then(Value::as_str),
-                                Some("option" | "prefix" | "unavailable")
-                            )
-                    })
-            }) && total.is_some_and(|total| {
-                let count = children.map_or(0, Vec::len) as u64;
-                truncated.is_some_and(|truncated| {
-                    if truncated {
-                        total > count
-                    } else {
-                        total == count
-                    }
+            ) && object.get("child_offset").and_then(Value::as_u64) == Some(u64::from(child_offset))
+                && children.is_some_and(|children| {
+                    children.len() <= MAX_CONFIG_OBSERVATION_ITEMS
+                        && children.iter().all(|child| {
+                            let Some(child) = child.as_object() else {
+                                return false;
+                            };
+                            let Ok(child_path) = payload_path(child, "path_components") else {
+                                return false;
+                            };
+                            exact_fields(child, &["path_components", "key", "kind"])
+                                && child_path.len() == path.len() + 1
+                                && child_path.starts_with(path)
+                                && config_observation_path_is_bounded(&child_path).unwrap_or(false)
+                                && child.get("key").and_then(Value::as_str)
+                                    == Some(option_key(&child_path).as_str())
+                                && previous_child_path
+                                    .as_ref()
+                                    .is_none_or(|previous| previous < &child_path)
+                                && matches!(
+                                    child.get("kind").and_then(Value::as_str),
+                                    Some("option" | "prefix" | "unavailable")
+                                )
+                                && {
+                                    previous_child_path = Some(child_path);
+                                    true
+                                }
+                        })
                 })
-            })
+                && total.is_some_and(|total| {
+                    let offset = u64::from(child_offset);
+                    let count = children.map_or(0, Vec::len) as u64;
+                    let expected_count = total
+                        .saturating_sub(offset)
+                        .min(MAX_CONFIG_OBSERVATION_ITEMS as u64);
+                    count == expected_count
+                        && truncated == Some(total > offset.saturating_add(count))
+                })
         }
         ConfigObservationKind::Option => {
             exact_fields(
@@ -436,6 +490,9 @@ pub struct CreateConfigObservationRequest {
     pub kind: ConfigObservationKind,
     /// Exact option path components. No Nix source is accepted.
     pub path_components: Vec<String>,
+    /// Zero-based immediate-child offset. Only root and prefix use this field.
+    #[serde(default)]
+    pub child_offset: u32,
 }
 
 /// Describes the durable scoped request lifecycle.
@@ -485,6 +542,8 @@ pub struct ConfigObservationRequestResponse {
     pub kind: ConfigObservationKind,
     /// Exact validated path components.
     pub path_components: Vec<String>,
+    /// Applied immediate-child offset for root or prefix observations.
+    pub child_offset: u32,
     /// Current lifecycle.
     pub lifecycle: ConfigObservationLifecycle,
     /// Immutable observation identity after success.
@@ -515,6 +574,8 @@ pub struct ConfigObservationResponse {
     pub kind: ConfigObservationKind,
     /// Exact structured path components.
     pub path_components: Vec<String>,
+    /// Applied immediate-child offset for root or prefix observations.
+    pub child_offset: u32,
     /// Redacted bounded observation payload.
     pub payload: Value,
     /// Observation creation time.
@@ -559,6 +620,33 @@ mod tests {
             )
             .is_err()
         );
+        assert!(
+            validate_config_observation_identity(ConfigObservationKind::Root, &[], 512).is_ok()
+        );
+        assert!(
+            validate_config_observation_identity(
+                ConfigObservationKind::Prefix,
+                &["services".to_string()],
+                MAX_CONFIG_OBSERVATION_CHILD_OFFSET,
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_config_observation_identity(
+                ConfigObservationKind::Option,
+                &["services".to_string()],
+                1,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_config_observation_identity(
+                ConfigObservationKind::Root,
+                &[],
+                MAX_CONFIG_OBSERVATION_CHILD_OFFSET + 1,
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -578,7 +666,9 @@ mod tests {
 
     #[test]
     fn every_operation_accepts_its_exact_bounded_payload_contract() {
-        let key = "a".repeat(64);
+        let root_key = option_key(&["services".to_string()]);
+        let option_path = vec!["services".to_string(), "nginx".to_string()];
+        let option_key = option_key(&option_path);
         let cases = [
             (
                 ConfigObservationKind::Root,
@@ -586,7 +676,8 @@ mod tests {
                 serde_json::json!({
                     "kind": "root",
                     "path_components": [],
-                    "children": [{"path_components": ["services"], "key": key, "kind": "prefix"}],
+                    "child_offset": 0,
+                    "children": [{"path_components": ["services"], "key": root_key, "kind": "prefix"}],
                     "children_truncated": false,
                     "total_children": 1
                 }),
@@ -597,7 +688,8 @@ mod tests {
                 serde_json::json!({
                     "kind": "prefix",
                     "path_components": ["services"],
-                    "children": [{"path_components": ["services", "nginx"], "key": key, "kind": "option"}],
+                    "child_offset": 0,
+                    "children": [{"path_components": ["services", "nginx"], "key": option_key, "kind": "option"}],
                     "children_truncated": false,
                     "total_children": 1
                 }),
@@ -608,7 +700,7 @@ mod tests {
                 serde_json::json!({
                     "kind": "option",
                     "path_components": ["services", "nginx"],
-                    "key": key,
+                    "key": option_key,
                     "declared_type": "boolean",
                     "is_defined": true,
                     "highest_prio": 100,
@@ -621,7 +713,7 @@ mod tests {
                 serde_json::json!({
                     "kind": "provenance",
                     "path_components": ["services", "nginx"],
-                    "key": key,
+                    "key": option_key,
                     "definitions": [{"source_path": "/flake/module.nix", "priority": 100}],
                     "definitions_truncated": false,
                     "total_definitions": 1
@@ -636,7 +728,7 @@ mod tests {
                     "total_traversed": 1,
                     "diagnostics": [],
                     "diagnostics_truncated": false,
-                    "configured": [{"path_components": ["services", "nginx"], "key": key}],
+                    "configured": [{"path_components": ["services", "nginx"], "key": option_key}],
                     "total_configured": 1,
                     "configured_truncated": false,
                     "classifier_diagnostics": [],
@@ -646,8 +738,43 @@ mod tests {
         ];
 
         for (kind, path, payload) in cases {
-            validate_config_observation_payload(kind, &path, &payload)
+            validate_config_observation_payload(kind, &path, 0, &payload)
                 .unwrap_or_else(|error| panic!("{kind:?} payload should validate: {error:#}"));
+        }
+    }
+
+    #[test]
+    fn tree_payload_rejects_wrong_keys_duplicates_and_noncanonical_order() {
+        let child = |name: &str| {
+            let path = vec![name.to_string()];
+            serde_json::json!({
+                "path_components": path,
+                "key": option_key(&path),
+                "kind": "prefix"
+            })
+        };
+        let payload = |children: Vec<Value>| {
+            serde_json::json!({
+                "kind": "root",
+                "path_components": [],
+                "child_offset": 0,
+                "children_truncated": false,
+                "total_children": children.len(),
+                "children": children
+            })
+        };
+
+        let mut wrong_key = child("services");
+        wrong_key["key"] = Value::String("a".repeat(64));
+        for invalid in [
+            payload(vec![wrong_key]),
+            payload(vec![child("services"), child("services")]),
+            payload(vec![child("services"), child("networking")]),
+        ] {
+            assert!(
+                validate_config_observation_payload(ConfigObservationKind::Root, &[], 0, &invalid,)
+                    .is_err()
+            );
         }
     }
 
@@ -665,7 +792,7 @@ mod tests {
             "classifier_diagnostics": [],
             "classifier_diagnostics_truncated": false
         });
-        validate_config_observation_payload(ConfigObservationKind::ConfiguredIndex, &[], &valid)
+        validate_config_observation_payload(ConfigObservationKind::ConfiguredIndex, &[], 0, &valid)
             .unwrap();
 
         for field in ["value", "provenance", "definitions", "configured"] {
@@ -683,6 +810,7 @@ mod tests {
                 validate_config_observation_payload(
                     ConfigObservationKind::ConfiguredIndex,
                     &[],
+                    0,
                     &invalid
                 )
                 .is_err()

@@ -1,4 +1,4 @@
-{ flake, configuration, targetKey, operation, path, encodeValue }:
+{ flake, configuration, targetKey, operation, path, childOffset ? 0, encodeValue }:
 
 let
   lib = configuration.pkgs.lib;
@@ -12,7 +12,8 @@ let
   childrenFor = prefix: node:
     let
       names = builtins.attrNames node;
-      retained = lib.sublist 0 (lib.min maxItems (builtins.length names)) names;
+      remaining = lib.max 0 (builtins.length names - childOffset);
+      retained = lib.sublist childOffset (lib.min maxItems remaining) names;
       childFor = name:
         let
           childPath = prefix ++ [ name ];
@@ -34,20 +35,36 @@ let
     in {
       kind = operation;
       path_components = prefix;
+      child_offset = childOffset;
       children = map childFor retained;
-      children_truncated = builtins.length names > builtins.length retained;
+      children_truncated = builtins.length names > childOffset + builtins.length retained;
       total_children = builtins.length names;
     };
 
   detailFor = option:
-    let typeAttempt = builtins.tryEval (option.type.name or null); in {
+    let
+      typeAttempt = builtins.tryEval (option.type.name or null);
+      declaredType = if typeAttempt.success then typeAttempt.value else null;
+      valueAttempt = builtins.tryEval (
+        let encoded = encodeValue 0
+          (if declaredType != null then declaredType else "unknown")
+          option.value;
+        in builtins.deepSeq encoded encoded
+      );
+    in {
       kind = "option";
       path_components = path;
       key = optionKey path;
-      declared_type = if typeAttempt.success then typeAttempt.value else null;
+      declared_type = declaredType;
       is_defined = option.isDefined or false;
       highest_prio = option.highestPrio or null;
-      value = encodeValue 0 (if typeAttempt.success then typeAttempt.value else "unknown") option.value;
+      value = if valueAttempt.success then valueAttempt.value else {
+        kind = "failed";
+        value = {
+          code = "value_unavailable";
+          message = "Option value is unavailable";
+        };
+      };
     };
 
   provenanceFor = option:

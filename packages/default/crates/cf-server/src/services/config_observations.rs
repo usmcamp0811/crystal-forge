@@ -48,6 +48,7 @@ const STALE_EXECUTION_THRESHOLD: ChronoDuration = ChronoDuration::minutes(10);
 struct ObserverSelection<'a> {
     operation: &'a str,
     path: &'a [String],
+    child_offset: u32,
 }
 
 struct ObserverSelectionFile(NamedTempFile);
@@ -69,6 +70,7 @@ impl ObserverSelectionFile {
             &ObserverSelection {
                 operation: target.kind.as_str(),
                 path: &target.path_components,
+                child_offset: target.child_offset,
             },
         )?;
         file.as_file_mut().flush()?;
@@ -239,7 +241,7 @@ fn build_observer_expression(
     let observer = include_str!("../models/config_observer.nix");
     let encoder = include_str!("../models/config_value_encoding.nix");
     format!(
-        "let\n  selection = builtins.fromJSON (builtins.readFile {selection});\n  flake = builtins.getFlake {flake_ref};\n  configuration = builtins.getAttr {configuration} flake.nixosConfigurations;\n  encodeValue = ({encoder}) configuration.pkgs.lib;\nin ({observer}) {{ inherit flake configuration encodeValue; targetKey = builtins.hashString \"sha256\" (builtins.toJSON [ {flake_ref} {configuration} configuration.config.system.build.toplevel.drvPath ]); operation = selection.operation; path = selection.path; }}",
+        "let\n  selection = builtins.fromJSON (builtins.readFile {selection});\n  flake = builtins.getFlake {flake_ref};\n  configuration = builtins.getAttr {configuration} flake.nixosConfigurations;\n  encodeValue = ({encoder}) configuration.pkgs.lib;\nin ({observer}) {{ inherit flake configuration encodeValue; targetKey = builtins.hashString \"sha256\" (builtins.toJSON [ {flake_ref} {configuration} configuration.config.system.build.toplevel.drvPath ]); operation = selection.operation; path = selection.path; childOffset = selection.child_offset; }}",
         selection = nix_string_pub(selection_path),
         flake_ref = nix_string_pub(flake_ref),
         configuration = nix_string_pub(configuration_name),
@@ -392,6 +394,7 @@ fn reconcile_observer_output(
     validate_config_observation_payload(
         execution.target.kind,
         &execution.target.path_components,
+        execution.target.child_offset,
         &redacted,
     )?;
     Ok(redacted)
@@ -400,6 +403,7 @@ fn reconcile_observer_output(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::config_inspector::option_key;
     use crate::models::evaluate_with_policies::CappedOutput;
     use crate::queries::config_observations::{
         CreateConfigObservationOutcome, create_or_reuse_config_observation_request,
@@ -422,6 +426,7 @@ mod tests {
                 flake_id: 3,
                 kind,
                 path_components,
+                child_offset: 0,
             },
             execution_id: Uuid::new_v4(),
             attempts: 1,
@@ -453,14 +458,14 @@ mod tests {
                 execution(ConfigObservationKind::Root, Vec::new()),
                 serde_json::json!({
                     "kind": "root", "path_components": [], "children": [],
-                    "children_truncated": false, "total_children": 0
+                    "child_offset": 0, "children_truncated": false, "total_children": 0
                 }),
             ),
             (
                 execution(ConfigObservationKind::Prefix, vec!["services".to_string()]),
                 serde_json::json!({
                     "kind": "prefix", "path_components": ["services"], "children": [],
-                    "children_truncated": false, "total_children": 0
+                    "child_offset": 0, "children_truncated": false, "total_children": 0
                 }),
             ),
             (
@@ -502,6 +507,7 @@ mod tests {
             validate_config_observation_payload(
                 execution.target.kind,
                 &execution.target.path_components,
+                execution.target.child_offset,
                 &result,
             )
             .unwrap();
@@ -530,8 +536,13 @@ mod tests {
             &configured,
         )
         .expect("configured index should reconcile");
-        validate_config_observation_payload(ConfigObservationKind::ConfiguredIndex, &[], &result)
-            .expect("configured index should validate");
+        validate_config_observation_payload(
+            ConfigObservationKind::ConfiguredIndex,
+            &[],
+            0,
+            &result,
+        )
+        .expect("configured index should validate");
     }
 
     #[test]
@@ -542,7 +553,38 @@ mod tests {
             "/tmp/selection.json",
         );
         assert!(expression.contains("builtins.fromJSON (builtins.readFile"));
+        assert!(expression.contains("childOffset = selection.child_offset"));
+        assert!(expression.contains("lib.sublist childOffset"));
+        assert!(expression.contains("child_offset = childOffset"));
         assert!(!expression.contains("builtins.abort injection"));
+    }
+
+    #[test]
+    fn reconciliation_binds_tree_payload_to_requested_child_offset() {
+        let mut execution = execution(ConfigObservationKind::Prefix, vec!["services".to_string()]);
+        execution.target.child_offset = 512;
+        let child_path = vec!["services".to_string(), "last".to_string()];
+        let result = reconcile_observer_output(
+            successful_output(vec![serde_json::json!({
+                "attr": "observation",
+                "drvPath": execution.target.carrier_drv_path,
+                "extraValue": {
+                    "kind": "prefix",
+                    "path_components": ["services"],
+                    "child_offset": 512,
+                    "children": [{
+                        "path_components": ["services", "last"],
+                        "key": option_key(&child_path),
+                        "kind": "option"
+                    }],
+                    "children_truncated": false,
+                    "total_children": 513
+                }
+            })]),
+            &execution,
+        )
+        .expect("matching child page should reconcile");
+        assert_eq!(result["child_offset"], 512);
     }
 
     #[test]
@@ -614,6 +656,7 @@ mod tests {
             &revision,
             ConfigObservationKind::Root,
             &[],
+            0,
         )
         .await
         .unwrap();

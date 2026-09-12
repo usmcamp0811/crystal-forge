@@ -1172,7 +1172,7 @@ pub async fn queue_system_config_inspection(
 ///
 /// Authentication, Admin authorization, CSRF, and environment visibility run
 /// before revision or observation validation. The browser supplies only a
-/// closed operation enum and structured path components.
+/// closed operation enum, structured path components, and a bounded child offset.
 pub async fn create_system_config_observation(
     State(state): State<CFState>,
     headers: HeaderMap,
@@ -1206,13 +1206,14 @@ pub async fn create_system_config_observation(
     if !is_full_commit_sha(&revision) {
         return bad_request("revision must be a full 40- or 64-character commit SHA");
     }
-    if crate::models::config_observations::validate_config_observation_path(
+    if crate::models::config_observations::validate_config_observation_identity(
         request.kind,
         &request.path_components,
+        request.child_offset,
     )
     .is_err()
     {
-        return bad_request("path_components exceed the structured Config observation bounds");
+        return bad_request("Config observation path or child offset is invalid");
     }
 
     match crate::queries::config_observations::create_or_reuse_config_observation_request(
@@ -1221,6 +1222,7 @@ pub async fn create_system_config_observation(
         &revision,
         request.kind,
         &request.path_components,
+        request.child_offset,
     )
     .await
     {
@@ -4775,6 +4777,7 @@ mod tests {
             Json(CreateConfigObservationRequest {
                 kind: crate::models::config_observations::ConfigObservationKind::Root,
                 path_components: vec!["invalid-for-root".to_string()],
+                child_offset: 0,
             }),
         )
         .await
@@ -4813,6 +4816,7 @@ mod tests {
             configuration_name: "host".to_string(),
             kind: crate::models::config_observations::ConfigObservationKind::Root,
             path_components: Vec::new(),
+            child_offset: 0,
             lifecycle: ConfigObservationLifecycle::Queued,
             observation_id: None,
             error: None,

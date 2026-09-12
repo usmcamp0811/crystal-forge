@@ -100,6 +100,105 @@ fn observation_task_is_current(
     expected_scope == current_scope && expected_operation == current_operation
 }
 
+fn merge_tree_observation(
+    current: &ConfigObservationResponse,
+    mut page: ConfigObservationResponse,
+) -> Result<ConfigObservationResponse, String> {
+    let (current_children, current_total) = match &current.payload {
+        ConfigObservationPayload::Root {
+            children,
+            total_children,
+            ..
+        }
+        | ConfigObservationPayload::Prefix {
+            children,
+            total_children,
+            ..
+        } => (children, *total_children),
+        _ => return Err("Current observation is not a tree page.".into()),
+    };
+    let expected_offset = u32::try_from(current_children.len())
+        .map_err(|_| "Current observation exceeds the child bound.".to_string())?;
+    if page.child_offset != expected_offset
+        || page.kind != current.kind
+        || page.path_components != current.path_components
+    {
+        return Err("Continuation identity did not match the loaded tree.".into());
+    }
+    let known = current_children
+        .iter()
+        .map(|child| child.path_components.clone())
+        .collect::<HashSet<_>>();
+    let known_keys = current_children
+        .iter()
+        .map(|child| child.key.clone())
+        .collect::<HashSet<_>>();
+    let (page_children, page_total, page_truncated) = match &mut page.payload {
+        ConfigObservationPayload::Root {
+            child_offset,
+            children,
+            total_children,
+            children_truncated,
+            ..
+        }
+        | ConfigObservationPayload::Prefix {
+            child_offset,
+            children,
+            total_children,
+            children_truncated,
+            ..
+        } => {
+            if *child_offset != expected_offset || *total_children != current_total {
+                return Err("Continuation totals changed while loading the tree.".into());
+            }
+            (children, *total_children, *children_truncated)
+        }
+        _ => return Err("Continuation payload is not a tree page.".into()),
+    };
+    let mut page_paths = HashSet::new();
+    let mut page_keys = HashSet::new();
+    let mut previous_path = current_children
+        .last()
+        .map(|child| child.path_components.as_slice());
+    for child in page_children.iter() {
+        if known.contains(&child.path_components)
+            || known_keys.contains(&child.key)
+            || !page_paths.insert(child.path_components.clone())
+            || !page_keys.insert(child.key.clone())
+            || previous_path.is_some_and(|previous| previous >= child.path_components.as_slice())
+        {
+            return Err("Continuation repeated or reordered a child.".into());
+        }
+        previous_path = Some(&child.path_components);
+    }
+    let mut merged = current_children.clone();
+    merged.append(page_children);
+    match &mut page.payload {
+        ConfigObservationPayload::Root {
+            child_offset,
+            children,
+            total_children,
+            children_truncated,
+            ..
+        }
+        | ConfigObservationPayload::Prefix {
+            child_offset,
+            children,
+            total_children,
+            children_truncated,
+            ..
+        } => {
+            *child_offset = 0;
+            *children = merged;
+            *total_children = page_total;
+            *children_truncated = page_truncated;
+        }
+        _ => unreachable!("tree payload was checked above"),
+    }
+    page.child_offset = 0;
+    Ok(page)
+}
+
 fn start_top_level_observation(
     system_id: Uuid,
     revision: String,
@@ -120,6 +219,7 @@ fn start_top_level_observation(
             CreateConfigObservationRequest {
                 kind,
                 path_components: Vec::new(),
+                child_offset: 0,
             },
             |request| {
                 if is_current() {
@@ -162,7 +262,9 @@ fn ExplorerChildren(
     depth: usize,
     expanded: Signal<HashSet<Vec<String>>>,
     branches: Signal<HashMap<Vec<String>, ObservationState>>,
-    on_prefix: EventHandler<Vec<String>>,
+    more_loading: Signal<HashSet<Vec<String>>>,
+    more_errors: Signal<HashMap<Vec<String>, String>>,
+    on_prefix: EventHandler<(Vec<String>, u32)>,
     on_option: EventHandler<Vec<String>>,
 ) -> Element {
     rsx! {
@@ -185,7 +287,7 @@ fn ExplorerChildren(
                                         "aria-expanded": is_expanded,
                                         onclick: {
                                             let path = path.clone();
-                                            move |_| on_prefix.call(path.clone())
+                                            move |_| on_prefix.call((path.clone(), 0))
                                         },
                                         span { class: if is_expanded { "cfg-caret open" } else { "cfg-caret" }, Icon { name: IconName::ChevronRight, size: 12 } }
                                         span { class: "mono cfg-explorer-path", title: "{display}", "{display}" }
@@ -196,14 +298,30 @@ fn ExplorerChildren(
                                             ObservationState::Loaded(observation) => match observation.payload {
                                                 ConfigObservationPayload::Prefix { children, children_truncated, total_children, .. } => rsx! {
                                                     ExplorerChildren {
-                                                        entries: children,
+                                                        entries: children.clone(),
                                                         depth: depth + 1,
                                                         expanded,
                                                         branches,
+                                                        more_loading,
+                                                        more_errors,
                                                         on_prefix,
                                                         on_option,
                                                     }
-                                                    if children_truncated { div { class: "cfg-explorer-local-note", role: "status", "Showing bounded children; {total_children} exist under {display}." } }
+                                                    if children_truncated {
+                                                        button {
+                                                            class: "btn btn-ghost focus-ring xs",
+                                                            disabled: more_loading.read().contains(&path),
+                                                            "aria-label": "Load more children under {display}",
+                                                            onclick: {
+                                                                let path = path.clone();
+                                                                let offset = u32::try_from(children.len()).unwrap_or(u32::MAX);
+                                                                move |event| { event.stop_propagation(); on_prefix.call((path.clone(), offset)); }
+                                                            },
+                                                            if more_loading.read().contains(&path) { "Loading more…" } else { "Load more" }
+                                                        }
+                                                        span { class: "cfg-explorer-local-note", role: "status", "Showing {children.len()} of {total_children} children under {display}." }
+                                                    }
+                                                    if let Some(error) = more_errors.read().get(&path) { div { class: "cfg-explorer-local-error", role: "alert", "{error}" } }
                                                 },
                                                 _ => rsx! { div { class: "cfg-explorer-local-error", role: "alert", "Unexpected observation payload for {display}." } },
                                             },
@@ -215,7 +333,7 @@ fn ExplorerChildren(
                                                         "aria-label": "Retry {display}",
                                                         onclick: {
                                                             let path = path.clone();
-                                                            move |event| { event.stop_propagation(); on_prefix.call(path.clone()); }
+                                                            move |event| { event.stop_propagation(); on_prefix.call((path.clone(), 0)); }
                                                         },
                                                         "Retry"
                                                     }
@@ -278,7 +396,11 @@ pub(crate) fn ConfigExplorer(
     let mut configured = use_signal(|| ObservationState::Idle);
     let mut branches = use_signal(HashMap::<Vec<String>, ObservationState>::new);
     let mut branch_sequences = use_signal(HashMap::<Vec<String>, u64>::new);
+    let mut branch_more_loading = use_signal(HashSet::<Vec<String>>::new);
+    let mut branch_more_errors = use_signal(HashMap::<Vec<String>, String>::new);
     let mut expanded = use_signal(HashSet::<Vec<String>>::new);
+    let mut root_more_loading = use_signal(|| false);
+    let mut root_more_error = use_signal(|| None::<String>);
     let mut detail = use_signal(|| ObservationState::Idle);
     let mut detail_path = use_signal(Vec::<String>::new);
     let mut provenance = use_signal(|| ObservationState::Idle);
@@ -296,7 +418,11 @@ pub(crate) fn ConfigExplorer(
                 scope_sequence.set(sequence);
                 branches.set(HashMap::new());
                 branch_sequences.set(HashMap::new());
+                branch_more_loading.set(HashSet::new());
+                branch_more_errors.set(HashMap::new());
                 expanded.set(HashSet::new());
+                root_more_loading.set(false);
+                root_more_error.set(None);
                 detail.set(ObservationState::Idle);
                 detail_path.set(Vec::new());
                 provenance.set(ObservationState::Idle);
@@ -357,18 +483,18 @@ pub(crate) fn ConfigExplorer(
     let load_prefix = EventHandler::new({
         let revision = revision.clone();
         let component_active = component_active.clone();
-        move |path: Vec<String>| {
+        move |(path, child_offset): (Vec<String>, u32)| {
             let currently_expanded = expanded.peek().contains(&path);
             let loaded = matches!(
                 branches.peek().get(&path),
                 Some(ObservationState::Loaded(_))
             );
-            if currently_expanded && loaded {
+            if child_offset == 0 && currently_expanded && loaded {
                 expanded.write().remove(&path);
                 return;
             }
             expanded.write().insert(path.clone());
-            if loaded {
+            if child_offset == 0 && loaded {
                 return;
             }
             let Some(revision) = revision.clone().filter(|_| enabled) else {
@@ -378,10 +504,15 @@ pub(crate) fn ConfigExplorer(
             branch_sequence.set(sequence);
             let scope = *scope_sequence.peek();
             branch_sequences.write().insert(path.clone(), sequence);
-            branches.write().insert(
-                path.clone(),
-                ObservationState::Lifecycle(ConfigObservationLifecycle::Queued),
-            );
+            if child_offset == 0 {
+                branches.write().insert(
+                    path.clone(),
+                    ObservationState::Lifecycle(ConfigObservationLifecycle::Queued),
+                );
+            } else {
+                branch_more_loading.write().insert(path.clone());
+                branch_more_errors.write().remove(&path);
+            }
             let component_active = component_active.clone();
             spawn(async move {
                 let is_current = || {
@@ -403,9 +534,10 @@ pub(crate) fn ConfigExplorer(
                     CreateConfigObservationRequest {
                         kind: ConfigObservationKind::Prefix,
                         path_components: path.clone(),
+                        child_offset,
                     },
                     |request| {
-                        if is_current() {
+                        if is_current() && child_offset == 0 {
                             branches.write().insert(
                                 path.clone(),
                                 ObservationState::Lifecycle(request.lifecycle),
@@ -417,10 +549,36 @@ pub(crate) fn ConfigExplorer(
                 .await;
                 if is_current() {
                     let next_state = match result {
+                        Ok(Some(observation)) if child_offset > 0 => {
+                            let current = branches.peek().get(&path).cloned();
+                            match current {
+                                Some(ObservationState::Loaded(current)) => {
+                                    match merge_tree_observation(&current, observation) {
+                                        Ok(observation) => ObservationState::Loaded(observation),
+                                        Err(error) => {
+                                            branch_more_errors.write().insert(path.clone(), error);
+                                            ObservationState::Loaded(current)
+                                        }
+                                    }
+                                }
+                                _ => ObservationState::Error(
+                                    "Loaded tree was replaced before continuation completed."
+                                        .into(),
+                                ),
+                            }
+                        }
                         Ok(Some(observation)) => ObservationState::Loaded(observation),
                         Ok(None) => return,
+                        Err(error) if child_offset > 0 => {
+                            branch_more_errors
+                                .write()
+                                .insert(path.clone(), observation_error(&error));
+                            branch_more_loading.write().remove(&path);
+                            return;
+                        }
                         Err(error) => ObservationState::Error(observation_error(&error)),
                     };
+                    branch_more_loading.write().remove(&path);
                     branches.write().insert(path, next_state);
                 }
             });
@@ -460,6 +618,7 @@ pub(crate) fn ConfigExplorer(
                     CreateConfigObservationRequest {
                         kind: ConfigObservationKind::Option,
                         path_components: path.clone(),
+                        child_offset: 0,
                     },
                     |request| {
                         if is_current() {
@@ -512,6 +671,7 @@ pub(crate) fn ConfigExplorer(
                     CreateConfigObservationRequest {
                         kind: ConfigObservationKind::Provenance,
                         path_components: path.clone(),
+                        child_offset: 0,
                     },
                     |request| {
                         if is_current() {
@@ -527,6 +687,69 @@ pub(crate) fn ConfigExplorer(
                         Ok(None) => return,
                         Err(error) => ObservationState::Error(observation_error(&error)),
                     });
+                }
+            });
+        }
+    };
+
+    let load_more_root = {
+        let revision = revision.clone();
+        let component_active = component_active.clone();
+        move |_| {
+            let current = root.peek().clone();
+            let ObservationState::Loaded(current_observation) = current else {
+                return;
+            };
+            let ConfigObservationPayload::Root { children, .. } = &current_observation.payload
+            else {
+                return;
+            };
+            let Ok(child_offset) = u32::try_from(children.len()) else {
+                root_more_error.set(Some("Loaded root exceeds the continuation bound.".into()));
+                return;
+            };
+            let Some(revision) = revision.clone().filter(|_| enabled) else {
+                return;
+            };
+            let sequence = root_sequence.peek().saturating_add(1);
+            root_sequence.set(sequence);
+            let scope = *scope_sequence.peek();
+            root_more_loading.set(true);
+            root_more_error.set(None);
+            let component_active = component_active.clone();
+            spawn(async move {
+                let is_current = || {
+                    component_active.get()
+                        && observation_task_is_current(
+                            scope,
+                            *scope_sequence.peek(),
+                            sequence,
+                            *root_sequence.peek(),
+                        )
+                };
+                let result = load_system_config_observation(
+                    &system_id,
+                    &revision,
+                    CreateConfigObservationRequest {
+                        kind: ConfigObservationKind::Root,
+                        path_components: Vec::new(),
+                        child_offset,
+                    },
+                    |_| {},
+                    is_current,
+                )
+                .await;
+                if !is_current() {
+                    return;
+                }
+                root_more_loading.set(false);
+                match result {
+                    Ok(Some(page)) => match merge_tree_observation(&current_observation, page) {
+                        Ok(observation) => root.set(ObservationState::Loaded(observation)),
+                        Err(error) => root_more_error.set(Some(error)),
+                    },
+                    Ok(None) => {}
+                    Err(error) => root_more_error.set(Some(observation_error(&error))),
                 }
             });
         }
@@ -551,8 +774,12 @@ pub(crate) fn ConfigExplorer(
                         match root_state.clone() {
                             ObservationState::Loaded(observation) => match observation.payload {
                                 ConfigObservationPayload::Root { children, children_truncated, total_children, .. } => rsx! {
-                                        ExplorerChildren { entries: children, depth: 0, expanded, branches, on_prefix: load_prefix, on_option: select_option }
-                                    if children_truncated { div { class: "cfg-explorer-local-note", role: "status", "Showing bounded top-level children; {total_children} exist." } }
+                                        ExplorerChildren { entries: children.clone(), depth: 0, expanded, branches, more_loading: branch_more_loading, more_errors: branch_more_errors, on_prefix: load_prefix, on_option: select_option }
+                                    if children_truncated {
+                                        button { class: "btn btn-ghost focus-ring xs", disabled: *root_more_loading.read(), onclick: load_more_root, if *root_more_loading.read() { "Loading more…" } else { "Load more" } }
+                                        span { class: "cfg-explorer-local-note", role: "status", "Showing {children.len()} of {total_children} top-level children." }
+                                    }
+                                    if let Some(error) = root_more_error.read().as_ref() { div { class: "cfg-explorer-local-error", role: "alert", "{error}" } }
                                 },
                                 _ => rsx! { div { class: "cfg-explorer-local-error", role: "alert", "Unexpected root observation payload." } },
                             },
@@ -694,14 +921,85 @@ fn ConfiguredOptions(
 
 #[cfg(test)]
 mod tests {
-    use super::{observation_error, observation_task_is_current};
+    use super::{merge_tree_observation, observation_error, observation_task_is_current};
     use crate::api::client::ApiClientError;
+    use crate::api::models::{
+        ConfigObservationChild, ConfigObservationChildKind, ConfigObservationKind,
+        ConfigObservationPayload, ConfigObservationResponse,
+    };
+
+    fn tree_page(offset: u32, names: &[&str], truncated: bool) -> ConfigObservationResponse {
+        ConfigObservationResponse {
+            observation_id: uuid::Uuid::new_v4(),
+            revision: "a".repeat(40),
+            configuration_name: "host".into(),
+            schema_version: 1,
+            kind: ConfigObservationKind::Prefix,
+            path_components: vec!["services".into()],
+            child_offset: offset,
+            payload: ConfigObservationPayload::Prefix {
+                path_components: vec!["services".into()],
+                child_offset: offset,
+                children: names
+                    .iter()
+                    .map(|name| ConfigObservationChild {
+                        path_components: vec!["services".into(), (*name).into()],
+                        key: format!("{name:0<64}"),
+                        kind: ConfigObservationChildKind::Option,
+                    })
+                    .collect(),
+                children_truncated: truncated,
+                total_children: 3,
+            },
+            created_at: chrono::Utc::now(),
+        }
+    }
 
     #[test]
     fn observation_task_fence_rejects_scope_and_operation_supersession() {
         assert!(observation_task_is_current(4, 4, 8, 8));
         assert!(!observation_task_is_current(4, 5, 8, 8));
         assert!(!observation_task_is_current(4, 4, 8, 9));
+    }
+
+    #[test]
+    fn tree_continuation_merges_exact_next_page_without_duplicates() {
+        let first = tree_page(0, &["a", "b"], true);
+        let merged = merge_tree_observation(&first, tree_page(2, &["c"], false))
+            .expect("exact continuation should merge");
+        let ConfigObservationPayload::Prefix {
+            children,
+            children_truncated,
+            ..
+        } = merged.payload
+        else {
+            panic!("merged payload should remain a prefix");
+        };
+        assert_eq!(
+            children
+                .iter()
+                .map(|child| child.path_components[1].as_str())
+                .collect::<Vec<_>>(),
+            ["a", "b", "c"]
+        );
+        assert!(!children_truncated);
+        assert!(merge_tree_observation(&first, tree_page(1, &["b", "c"], false)).is_err());
+        assert!(merge_tree_observation(&first, tree_page(2, &["c", "c"], false)).is_err());
+        assert!(merge_tree_observation(&first, tree_page(2, &["d", "c"], false)).is_err());
+
+        let mut duplicate_key = tree_page(2, &["c"], false);
+        let ConfigObservationPayload::Prefix {
+            children: first_children,
+            ..
+        } = &first.payload
+        else {
+            panic!("fixture should be a prefix page");
+        };
+        let ConfigObservationPayload::Prefix { children, .. } = &mut duplicate_key.payload else {
+            panic!("fixture should be a prefix page");
+        };
+        children[0].key = first_children[0].key.clone();
+        assert!(merge_tree_observation(&first, duplicate_key).is_err());
     }
 
     #[test]

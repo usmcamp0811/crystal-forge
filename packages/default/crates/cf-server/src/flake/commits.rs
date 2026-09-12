@@ -2656,26 +2656,7 @@ pub async fn load_commit_nixos_configurations_with_creds(
 ) -> Result<Vec<String>> {
     let flake_ref = build_flake_reference(repo_url, commit_hash);
     let flake_target = format!("{flake_ref}#nixosConfigurations");
-
-    let mut cmd = tokio::process::Command::new("nix");
-    cmd.args([
-        "eval",
-        "--json",
-        "--apply",
-        "builtins.attrNames",
-        flake_target.as_str(),
-    ]);
-
-    // Apply Nix configuration (offline mode, substitute behaviour,
-    // timeouts, sandbox settings, etc.) consistently with the main
-    // and fallback evaluators.
-    if let Some(bc) = build_config {
-        bc.apply_to_command(&mut cmd);
-    }
-
-    if let Some(c) = creds {
-        c.apply_to_nix_command(&mut cmd);
-    }
+    let mut cmd = nixos_configuration_discovery_command(&flake_target, creds, build_config);
 
     let output = run_nix_command_bounded(
         &mut cmd,
@@ -2707,6 +2688,34 @@ pub async fn load_commit_nixos_configurations_with_creds(
     names.sort();
     names.dedup();
     Ok(names)
+}
+
+fn nixos_configuration_discovery_command(
+    flake_target: &str,
+    creds: Option<&FlakeCredentialEnv>,
+    build_config: Option<&crate::config::BuildConfig>,
+) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new("nix");
+    // INVARIANT: Exact-revision discovery is read-only. Nix can otherwise try
+    // to create or update flake.lock before PRIMARY establishes the carrier.
+    command.args([
+        "eval",
+        "--json",
+        "--no-write-lock-file",
+        "--apply",
+        "builtins.attrNames",
+        flake_target,
+    ]);
+    // Apply Nix configuration consistently with the main and fallback
+    // evaluators. The outer bounded runner remains the hard deadline and output
+    // limit even when the Nix configuration supplies its own timeout.
+    if let Some(build_config) = build_config {
+        build_config.apply_to_command(&mut command);
+    }
+    if let Some(credentials) = creds {
+        credentials.apply_to_nix_command(&mut command);
+    }
+    command
 }
 
 async fn load_commit_nixos_configurations(
@@ -2966,10 +2975,11 @@ async fn try_get_diff_for_branch(
 mod tests {
     use super::{
         get_commits_with_full_metadata, is_history_rewrite_error, is_invalid_revision_range_error,
-        is_remote_head_diverged, parse_git_log_line, redact_sensitive_tokens,
+        is_remote_head_diverged, load_commit_nixos_configurations_with_creds,
+        nixos_configuration_discovery_command, parse_git_log_line, redact_sensitive_tokens,
         redact_url_credentials, sanitize_and_truncate_sync_error,
     };
-    use anyhow::Context;
+    use crate::flake::credentials::FlakeCredentialEnv;
 
     #[test]
     fn detects_invalid_revision_range_error() {
@@ -3072,6 +3082,120 @@ mod tests {
             .expect("complete metadata should load");
         assert_eq!(complete.len(), 3);
         assert!(complete.last().unwrap().first_parent_sha.is_none());
+    }
+
+    #[test]
+    fn configuration_discovery_command_is_read_only_and_preserves_credentials() {
+        let credentials = FlakeCredentialEnv::from_inline(
+            1,
+            "https://git.example.test/private/repo.git",
+            "pat".to_string(),
+            Some("oauth2".to_string()),
+            Some("secret-for-command-construction-only".to_string()),
+            None,
+        )
+        .expect("credential fixture should materialize")
+        .expect("PAT credentials should exist");
+        let command = nixos_configuration_discovery_command(
+            "git+https://git.example.test/private/repo.git?rev=abc#nixosConfigurations",
+            Some(&credentials),
+            None,
+        );
+        let args = command
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            args,
+            [
+                "eval",
+                "--json",
+                "--no-write-lock-file",
+                "--apply",
+                "builtins.attrNames",
+                "git+https://git.example.test/private/repo.git?rev=abc#nixosConfigurations",
+            ]
+        );
+        let environment = command
+            .as_std()
+            .get_envs()
+            .map(|(name, value)| {
+                (
+                    name.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(
+            environment.get("GIT_TERMINAL_PROMPT"),
+            Some(&Some("0".to_string()))
+        );
+        assert!(environment.get("NETRC").is_some_and(Option::is_some));
+    }
+
+    #[tokio::test]
+    async fn configuration_discovery_does_not_create_or_modify_flake_lock() {
+        let repository = tempfile::tempdir().expect("temporary repository should exist");
+        let dependency = repository.path().join("dependency");
+        std::fs::create_dir(&dependency).expect("dependency directory should exist");
+        std::fs::write(
+            dependency.join("flake.nix"),
+            "{ outputs = { self }: {}; }\n",
+        )
+        .expect("dependency flake should be written");
+        std::fs::write(
+            repository.path().join("flake.nix"),
+            format!(
+                "{{\n  inputs.dependency.url = \"path:{}\";\n  outputs = {{ self, dependency }}: {{ nixosConfigurations = {{ beta = {{}}; alpha = {{}}; }}; }};\n}}\n",
+                dependency.display()
+            ),
+        )
+        .expect("root flake should be written");
+        let run_git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(repository.path())
+                .output()
+                .expect("git command should start");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            output.stdout
+        };
+        run_git(&["init", "--initial-branch=main"]);
+        run_git(&["config", "user.name", "Test"]);
+        run_git(&["config", "user.email", "test@example.test"]);
+        run_git(&["add", "flake.nix", "dependency/flake.nix"]);
+        run_git(&["commit", "-m", "fixture"]);
+        let revision = String::from_utf8(run_git(&["rev-parse", "HEAD"]))
+            .expect("revision should be UTF-8")
+            .trim()
+            .to_string();
+        let tree_before = run_git(&["rev-parse", "HEAD^{tree}"]);
+        let flake_before = std::fs::read(repository.path().join("flake.nix"))
+            .expect("fixture source should be readable");
+
+        let names = load_commit_nixos_configurations_with_creds(
+            &format!("file://{}", repository.path().display()),
+            &revision,
+            None,
+            None,
+        )
+        .await
+        .expect("lockless exact-revision discovery should succeed");
+
+        assert_eq!(names, ["alpha", "beta"]);
+        assert!(!repository.path().join("flake.lock").exists());
+        assert_eq!(
+            std::fs::read(repository.path().join("flake.nix"))
+                .expect("fixture source should remain readable"),
+            flake_before
+        );
+        assert_eq!(run_git(&["rev-parse", "HEAD^{tree}"]), tree_before);
+        assert!(run_git(&["status", "--porcelain"]).is_empty());
     }
 
     #[test]

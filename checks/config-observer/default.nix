@@ -2,6 +2,7 @@
 
 let
   observerSource = builtins.readFile ../../packages/default/crates/cf-server/src/models/config_observer.nix;
+  encoderSource = builtins.readFile ../../packages/default/crates/cf-server/src/models/config_value_encoding.nix;
   fixture = pkgs.runCommand "crystal-forge-config-observer-fixture" { } ''
     mkdir -p "$out"
     cat > "$out/flake.nix" <<'EOF'
@@ -78,6 +79,7 @@ let
       targetKey = "test";
       operation = ${builtins.toJSON operation};
       path = builtins.fromJSON ${builtins.toJSON (builtins.toJSON path)};
+      childOffset = 0;
       encodeValue = _: _: _: throw "value encoder was forced";
     }
   '';
@@ -96,9 +98,38 @@ let
       targetKey = "test";
       operation = "option";
       path = [ "crystalForgeConfigured" "ordinary" ];
+      childOffset = 0;
       encodeValue = _: _: value: { kind = "scalar"; inherit value; };
     }
   '';
+  poisonOptionFile = pkgs.writeText "config-observer-poison-option.nix" ''
+    let
+      flake = builtins.getFlake "path:${fixture}";
+      configuration = flake.nixosConfigurations.test;
+      encodeValue = (${encoderSource}) configuration.pkgs.lib;
+    in (${observerSource}) {
+      inherit flake configuration encodeValue;
+      targetKey = "test";
+      operation = "option";
+      path = [ "crystalForgeConfigured" "nestedPoison" ];
+      childOffset = 0;
+    }
+  '';
+  servicesPageFile = offset: pkgs.writeText "config-observer-services-${toString offset}.nix" ''
+    let
+      flake = builtins.getFlake "path:${fixture}";
+      configuration = flake.nixosConfigurations.test;
+    in (${observerSource}) {
+      inherit flake configuration;
+      targetKey = "test";
+      operation = "prefix";
+      path = [ "services" ];
+      childOffset = ${toString offset};
+      encodeValue = _: _: _: throw "value encoder was forced";
+    }
+  '';
+  servicesFirstFile = servicesPageFile 0;
+  servicesSecondFile = servicesPageFile 512;
   provenanceFile = pkgs.writeText "config-observer-provenance.nix"
     (expressionFor "provenance" [ "crystalForgeProvenance" "many" ]);
 in
@@ -175,6 +206,42 @@ pkgs.runCommand "crystal-forge-config-observer-check" {
     and .extraValue.path_components == ["crystalForgeConfigured", "ordinary"]
     and .extraValue.value == {"kind":"scalar","value":"ordinary"}
   ' option.jsonl >/dev/null
+
+  nix-eval-jobs --expr "import ${poisonOptionFile}" "''${args[@]}" --workers 1 \
+    > poison-option.jsonl 2> poison-option.stderr
+  jq -e '
+    .attr == "observation" and .error == null
+    and .extraValue.path_components == ["crystalForgeConfigured", "nestedPoison"]
+    and .extraValue.declared_type == "attrs"
+    and .extraValue.is_defined == true
+    and .extraValue.highest_prio == 100
+    and .extraValue.value == {
+      "kind":"failed",
+      "value":{"code":"value_unavailable","message":"Option value is unavailable"}
+    }
+  ' poison-option.jsonl >/dev/null
+  ! grep -F 'nested option.value was forced' poison-option.jsonl poison-option.stderr
+
+  nix-eval-jobs --expr "import ${servicesFirstFile}" "''${args[@]}" --workers 1 \
+    > services-first.jsonl 2> services-first.stderr
+  nix-eval-jobs --expr "import ${servicesSecondFile}" "''${args[@]}" --workers 1 \
+    > services-second.jsonl 2> services-second.stderr
+  jq -e '
+    .attr == "observation" and .error == null
+    and .extraValue.child_offset == 0
+    and .extraValue.total_children > 512
+    and .extraValue.children_truncated == true
+    and (.extraValue.children | length) == 512
+  ' services-first.jsonl >/dev/null
+  jq -e '
+    .attr == "observation" and .error == null
+    and .extraValue.child_offset == 512
+    and .extraValue.total_children > 512
+    and (.extraValue.children | length) > 0
+    and .extraValue.children[0].path_components
+      > (input.extraValue.children[-1].path_components)
+  ' services-second.jsonl services-first.jsonl >/dev/null
+  test ! -e "${fixture}/flake.lock"
 
   nix-eval-jobs --expr "import ${provenanceFile}" "''${args[@]}" --workers 1 \
     > provenance.jsonl 2> provenance.stderr
