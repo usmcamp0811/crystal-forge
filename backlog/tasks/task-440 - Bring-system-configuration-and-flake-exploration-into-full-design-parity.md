@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-12 01:04'
+updated_date: '2026-09-12 01:47'
 labels:
   - design-parity
   - web-ui
@@ -384,6 +384,12 @@ author: OpenCode
 created: 2026-09-12 01:04
 ---
 2026-09-12 follow-up preflight: user reported the hermetic cf-server package check failure caused by configuration discovery relying on ambient Nix experimental features. Dedicated worktree `/home/mcamp/code/crystal-forge/TASK-440-system-config-flake-parity` is clean at the expected remote SHA `dbb04121126ea1b78b2678f7f548165bde8a5daf`; `main` and `dev` integration worktrees are clean (`dev` is locally ahead of origin but has no uncommitted changes). Scope is limited to self-contained discovery argv, its exact unit assertion, and matching command documentation. No Config Explorer architecture, V2, pagination, compliance, CVE, merge, or deployment work is included.
+---
+
+author: OpenCode
+created: 2026-09-12 01:47
+---
+2026-09-12 hermetic feature follow-up is blocked before commit/push. The requested production argv change and exact unit assertion pass both focused Cargo tests, and targeted cf-server rustfmt plus `git diff --check` pass. The required `nix build .#packages.x86_64-linux.server --no-link -L` now gets past the original disabled-feature failure but still fails in the same lockfile regression after 1467 passes and 519 ignores because nested Nix initializes its default local store and cannot create `/nix/var/nix/profiles` in checkPhase (`Permission denied`). Repeating with `--builders ''` reproduces the same failure locally. Adding `--option use-registries false` did not resolve it and was reverted. Resolving the remaining package-only failure appears to require an explicitly writable temporary Nix store for the regression or package check environment, which conflicts with the instruction not to rely on test-only environment mutation and is not part of the specified production argv. No commit or push was performed; the intended two-file feature/doc diff remains uncommitted.
 ---
 <!-- COMMENTS:END -->
 
