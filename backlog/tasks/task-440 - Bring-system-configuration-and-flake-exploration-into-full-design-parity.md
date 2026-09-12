@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-12 19:01'
+updated_date: '2026-09-12 19:28'
 labels:
   - design-parity
   - web-ui
@@ -312,6 +312,8 @@ Commit B was created locally as df58dbd6b408cfa1d718dd766690f3834201f033 with ex
 2026-09-12 report-only evaluator blocking-defect correction completed and reviewed in the dedicated TASK-440 worktree without commit or push. Report-only legacy custom-check throws and non-boolean values now use tagged builtins.tryEval output and persist explicit passed=false, blocking=false evaluation-error evidence while enforce output remains Boolean-compatible. Multi-rule top-level strict fallback is local to each policy. Composite assessment freshness now uses a canonical digest of enforced composite version/config semantics, while the resolver complete digest remains compliance evidence identity; a real PostgreSQL regression proves a report-only non-composite assignment changes the complete digest without invalidating existing composite authorization. Verification passed: focused report_only unit suite (4 passed, 1 intentionally ignored); fully qualified real-Nix ignored regression; focused PostgreSQL authorization regression against disposable PostgreSQL 17; evaluation digest and execution eligibility unit tests; SQLX_OFFLINE cf-server library check; targeted rustfmt check; and git diff --check. Final manual scope/documentation review found no additional defect. Eight intended backend/test/operator-documentation files remain modified and uncommitted; no migration, UI, Config Explorer, broad check, commit, or push was performed.
 
 2026-09-12 exact blocking persistence correction verified. `AssignedPolicyCheckResult.blocking` is now the per-policy source for persisted matrix results; classification prefers effective `blocking`, preserves legacy `strict` fallback when the field is absent, and treats present non-boolean blocking metadata as `infrastructure_error`. Focused `blocking` tests passed (7 passed, 3 ignored), focused `report_only` tests passed (5 passed, 1 ignored), and the previously run real-Nix report-only containment and terminal-outcome regressions passed. Final `SQLX_OFFLINE=true cargo check --offline -p cf-server --lib`, cargo fmt check, and `git diff --check` passed with existing repository warnings. No broad checks, commit, or push were performed.
+
+2026-09-12 report-only evaluator and legacy composite-assessment compatibility slice is implemented but remains uncommitted. New assessment writes use an enforce-only composite authorization digest; report-only assignments retain failed evidence without blocking; deployment authorization and POA&M creation/verification accept only one structurally exact legacy complete-digest group. Focused verification passed: report_only lib filter (5 passed, real-Nix test ignored by default), explicit ignored real-Nix regression (1 passed), evaluation policy digest test (1 passed), legacy compatibility classifier (1 passed), composite PostgreSQL legacy/change tests (2 passed), report-only assignment PostgreSQL authorization test (1 passed), POA&M legacy creation/verification PostgreSQL lifecycle test (1 passed), SQLX_OFFLINE cf-server lib check, cf-server cargo fmt check, and git diff --check. Existing compiler warnings remain. No migration, UI change, commit, push, MR update, merge, or deployment was performed.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
