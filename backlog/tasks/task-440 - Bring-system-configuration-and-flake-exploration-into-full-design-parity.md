@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-12 14:32'
+updated_date: '2026-09-12 14:35'
 labels:
   - design-parity
   - web-ui
@@ -192,6 +192,8 @@ Fix the deployment-smoke zombie compliance assignment defect from exact clean SH
 2026-09-12 accepted Config Explorer UI implementation from exact clean SHA c34670ad744f30589fefc060111aff853fbcd88f: consolidate the Config tab into one .cfgx inspector while retaining the existing deep-linked generation/commit controls as the sole revision authority. Start only shallow root on Explorer open; trigger and cache configured_index only after first Configured activation. Keep structured Vec<String> identities for tree, configured, option, and provenance requests; preserve continuation validation, local retries/errors, cancellation, and revision fences. Reuse existing certified V2 summary/search/module DTOs only for truthful complete or certified-partial inventory, comparison, and Sources presentation; do not widen backend contracts. Update config-explorer-architecture.md for lazy configured start. Add focused pure Rust tests for lazy configured triggering, display-only paths, and continuation. Run targeted rustfmt and focused Web UI unit tests only; do not run broad Nix/browser checks, commit, or push.
 
 2026-09-12 review corrections for the uncommitted Config Explorer UI: remove the superseded dead RSX block; retain only certified request/token-fencing state required by the consolidated inspector; make generation scope restrictions local to Browse/Configured while preserving certified Search/Sources; derive completeness only from `OptionInventoryState::Complete`; add structured option-detail and provenance caches plus local partial search over observed/configured identities without dotted-path parsing or fanout; render dense three-column rows with explicit unavailable cells; make inventory action/lifecycle wording match current API behavior; add ARIA pressed state and focused pure-helper tests. Run targeted rustfmt, Config Explorer tests, and `git diff --check` only. No backend/API widening, browser/design/runner test changes, commit, or push.
+
+2026-09-12 Config Explorer browser/design contract correction: modify only the permitted Web UI design manifest/generator, integration browser contracts, runner expectation, and directly necessary check entries. Replace the two Config design targets and old table/sidebar assertions with semantic `.cfgx` Browse/Configured/Search/Option/Sources coverage. Make 12m the bounded comprehensive mocked Explorer workflow, including lazy configured start, structured path identities, prefix continuation and local retry, persistent detail, explicit provenance, truthful partial/complete inventory semantics, no automatic complete-inspection POST, and revision stale-response fencing. Adjust 12la/12n/12p/12q only for the consolidated Explorer contract and geometry. Verify with `node --check` for modified JavaScript, `bash -n` for the runner shell test, and `git diff --check`; do not run browser or Nix checks, commit, or push.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
