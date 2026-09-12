@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-12 00:29'
+updated_date: '2026-09-12 01:04'
 labels:
   - design-parity
   - web-ui
@@ -180,6 +180,8 @@ The `modifiedFiles` metadata is anticipated and non-exhaustive. The implementati
 2026-09-11 focused lazy Config Explorer UI review correction: add independent root and configured-index retry generations without duplicating startup logic; make the observation loader accept a caller cancellation predicate and return a non-error cancelled outcome so scope/retry/branch/detail/provenance supersession stops durable polling without changing POST Admin/CSRF/API semantics; retain per-operation stale-response fences and non-disclosing UI errors; add focused helper/loader cancellation tests where practical; extend only small mocked browser assertions; verify changed-file rustfmt, focused Web UI Rust tests, WASM cargo check, Node syntax, and git diff check. Do not run browser/Nix checks, commit, or push.
 
 2026-09-11 focused backend remediation from clean dedicated worktree HEAD ad13f4b7: add server-validated child_offset identity for root/prefix pages with server-owned size 512 through additive migration 0256, scoped request/observation DTOs, persistence keys/FKs, owner-only observer selection, and payload validation. In create_or_reuse, after a scoped hit and before queue insertion, read only the exact current selected available certified schema/integrity V2 artifact matching commit, configuration, completed carrier, and recomputed inspection target key. Complete V2 may derive deterministic immediate-child root/prefix pages and must reject option/prefix collisions; partial V2 cannot satisfy tree requests. Complete or partial V2 may satisfy exact option/provenance only when persisted V2 metadata/provenance makes the scoped payload truthful; SafeOptionValue failed values remain explicit. Persist adapted content, immutable observation, and a normal succeeded attempts=0 request atomically without queueing or changing selectors, policies, Config Inspector jobs, or evaluator work. ConfiguredIndex always falls through to the existing queue path. Add focused pure adapter/validation tests and ignored SQLx lifecycle/isolation regressions. Run targeted cf-server tests, focused ignored SQLx tests if an isolated PostgreSQL database is practical, cargo fmt for affected Rust, and git diff --check only; do not run broad Nix, Web UI, browser, VM, or flake checks.
+
+Fix the hermetic cf-server package regression by adding the required `nix-command flakes` global feature option to the existing read-only configuration discovery argv. Update the exact argv assertion and Nix CLI invocation documentation. Run the two focused tests, `cargo fmt --check`, `git diff --check`, and the required `.#packages.x86_64-linux.server` build. Create one commit and push only after confirming the remote branch remains at `dbb04121126ea1b78b2678f7f548165bde8a5daf`.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -376,6 +378,12 @@ author: openai-agent
 created: 2026-09-08 03:07
 ---
 The bounded Config Inspector NixOS service-isolation slice is ready for maintainer review in commit `1ccee7cf6aa59c3dc66f80ba02ed0817d2c0c9ba` on MR https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/323. No deployment was performed.
+---
+
+author: OpenCode
+created: 2026-09-12 01:04
+---
+2026-09-12 follow-up preflight: user reported the hermetic cf-server package check failure caused by configuration discovery relying on ambient Nix experimental features. Dedicated worktree `/home/mcamp/code/crystal-forge/TASK-440-system-config-flake-parity` is clean at the expected remote SHA `dbb04121126ea1b78b2678f7f548165bde8a5daf`; `main` and `dev` integration worktrees are clean (`dev` is locally ahead of origin but has no uncommitted changes). Scope is limited to self-contained discovery argv, its exact unit assertion, and matching command documentation. No Config Explorer architecture, V2, pagination, compliance, CVE, merge, or deployment work is included.
 ---
 <!-- COMMENTS:END -->
 
