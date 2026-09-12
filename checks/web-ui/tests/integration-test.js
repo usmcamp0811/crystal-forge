@@ -15400,12 +15400,13 @@ security.audit.enable = true;</fixtext>
       const assignmentId = "ffffffff-ffff-4fff-8fff-ffffffffffff";
       const assignmentVersionId = "99999999-9999-4999-8999-999999999999";
       const systemId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
-      let reason = null;
-      let versionNumber = 1;
+      let reason = "Reason A";
 
       // The standalone profile has no authenticated server or seeded target.
-      // The server-backed harness runs this same UI flow against the real
-      // assignment endpoints and uses the bundle created by 20ab.
+      // The server-backed harness creates the assignment through the
+      // authenticated API because bundle detail no longer owns assignment
+      // creation. The drawer remains the read-only metadata and assignment
+      // maintenance surface.
       if (process.env.CF_UI_TEST_STANDALONE !== "1") {
         const liveFixture = await page.evaluate(async (base) => {
           const response = await fetch(`${base}/api/v1/compliance/bundles`, { credentials: "include" });
@@ -15414,35 +15415,36 @@ security.audit.enable = true;</fixtext>
           const candidates = bundles.filter((item) => item.name?.startsWith("UI requirement-only baseline "));
           const bundle = candidates.sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))[0];
           if (!bundle) throw new Error("Live assignment step requires the bundle created by 20ab");
-          const environmentsResponse = await fetch(`${base}/api/v1/environments`, { credentials: "include" });
-          const environments = await environmentsResponse.json();
-          if (!environmentsResponse.ok || !environments[0]) {
-            throw new Error(`Live environment list failed: HTTP ${environmentsResponse.status}`);
-          }
-          return { bundle, environment: environments[0] };
+          return { bundle };
         }, apiBaseUrl);
         const liveBundle = liveFixture.bundle;
-        const liveEnvironment = liveFixture.environment;
-        if (!liveBundle.current_draft_version_id && !liveBundle.current_published_version_id) {
+        const bundleVersionId = liveBundle.current_published_version_id || liveBundle.current_draft_version_id;
+        if (!bundleVersionId) {
           throw new Error("Live assignment bundle has no assignable version");
         }
+        const systems = (await phase6Api(page, "/api/v1/systems?page=1&per_page=200")).body?.items || [];
+        const liveSystem = systems[0];
+        if (!liveSystem) throw new Error("Live assignment step requires one managed system");
+        await phase6Api(page, "/api/v1/compliance/assignments", {
+          method: "POST",
+          body: JSON.stringify({
+            bundle_version_id: bundleVersionId,
+            scope_type: "system",
+            scope_id: liveSystem.id,
+            enforcement_mode: "enforce",
+            exclusions: [],
+            additions: [],
+            value_overrides: [],
+            reason: "Reason A",
+          }),
+        });
 
         await page.goto(`${baseUrl}/compliance`, { timeout: LOAD_TIMEOUT });
         await page.getByText(liveBundle.name, { exact: true }).first().click();
-        await page.getByRole("button", { name: /Assign bundle/i }).click();
-        await page.getByPlaceholder(/Enter reason for this assignment/i).fill("Reason A");
-        await page.locator("select").filter({ has: page.locator(`option[value="${liveEnvironment.id}"]`) }).last().selectOption(liveEnvironment.id);
-        await page.getByRole("button", { name: /Preview effective set/i }).click();
-        const createResponse = page.waitForResponse(
-          (response) => response.url().endsWith("/api/v1/compliance/assignments") && response.request().method() === "POST",
-        );
-        // Attach a no-op handler immediately so Node.js 24 does not treat the
-        // rejection as unhandled if the response arrives (or times out) before
-        // the `await` below can catch it.
-        createResponse.catch(() => {});
-        await page.getByRole("button", { name: /Create assignment/i }).click();
-        const created = await createResponse;
-        if (created.status() !== 201) throw new Error(`Live assignment create returned HTTP ${created.status()}: ${await created.text()}`);
+        if (await page.getByRole("button", { name: /Assign bundle/i }).count() !== 0) {
+          throw new Error("Bundle detail must not expose duplicate assignment creation");
+        }
+        await page.getByRole("button", { name: `Manage assignment references for ${liveSystem.hostname}`, exact: true }).click();
 
         await page.getByRole("button", { name: "Edit mode", exact: true }).click();
         await assertValue(page.getByPlaceholder("reason (leave empty to preserve)"), "Reason A", "Live create did not persist reason A");
@@ -15488,8 +15490,8 @@ security.audit.enable = true;</fixtext>
         current_version_id: assignmentVersionId,
         bundle_id: bundleId,
         bundle_version_id: versionId,
-        scope_type: "environment",
-        scope_id: environmentId,
+        scope_type: "system",
+        scope_id: systemId,
         enforcement_mode: "enforce",
         exclusions: [],
         additions: [],
@@ -15563,26 +15565,13 @@ security.audit.enable = true;</fixtext>
       await page.route("**/api/v1/environments*", async (route) => {
         await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([{ id: environmentId, name: "production", description: null, color_hex: "#3b82f6", is_active: true, system_count: 0 }]) });
       });
-      await page.route(`**/api/v1/environments/${environmentId}/compliance-assignments`, async (route) => {
-        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ assignments: reason === null && versionNumber === 1 ? [] : [assignment()] }) });
-      });
-      await page.route("**/api/v1/compliance/assignments/preview", async (route) => {
-        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ policies: [], warnings: [], effective_set_digest: "fixture-digest" }) });
-      });
-      await page.route("**/api/v1/compliance/assignments", async (route) => {
-        if (route.request().method() === "POST") {
-          reason = (await route.request().postDataJSON()).reason || null;
-          versionNumber = 1;
-          await route.fulfill({ status: 201, contentType: "application/json", body: JSON.stringify(assignment()) });
-        } else {
-          await route.continue();
-        }
+      await page.route(`**/api/v1/systems/${systemId}/compliance-assignments`, async (route) => {
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ assignments: [assignment()] }) });
       });
       await page.route(`**/api/v1/compliance/assignments/${assignmentId}`, async (route) => {
         if (route.request().method() === "PUT") {
           const payload = await route.request().postDataJSON();
           if (Object.prototype.hasOwnProperty.call(payload, "reason")) reason = payload.reason;
-          versionNumber += 1;
           await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(assignment()) });
         } else {
           await route.continue();
@@ -15595,12 +15584,10 @@ security.audit.enable = true;</fixtext>
       if (await assignmentChip.getAttribute("title") !== "Change freeze exception") {
         throw new Error("Pinned SystemsMatrix assignment reason should be available as the assignment chip title");
       }
-      await page.getByRole("button", { name: /Assign bundle/i }).click();
-      const createReason = page.getByPlaceholder(/Enter reason for this assignment/i);
-      await createReason.fill("Reason A");
-      await page.locator("select").nth(2).selectOption(environmentId);
-      await page.getByRole("button", { name: /Preview effective set/i }).click();
-      await page.getByRole("button", { name: /Create assignment/i }).click();
+      if (await page.getByRole("button", { name: /Assign bundle/i }).count() !== 0) {
+        throw new Error("Bundle detail must not expose duplicate assignment creation");
+      }
+      await page.getByRole("button", { name: "Manage assignment references for reason-fixture-host", exact: true }).click();
       await page.getByRole("button", { name: "Edit mode", exact: true }).click();
       const editReason = page.getByPlaceholder("reason (leave empty to preserve)");
       await assertValue(editReason, "Reason A", "Created assignment reason should be authoritative on reopen");
