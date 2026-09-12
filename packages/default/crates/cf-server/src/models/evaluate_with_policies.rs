@@ -6455,6 +6455,7 @@ mod tests {
         let assigned = vec![AssignedPolicy {
             policy_id,
             policy_name: "failme".to_string(),
+            enforcement_mode: Default::default(),
             policy: DeploymentPolicy::RequirePackages {
                 packages: vec!["grafana".to_string()],
                 strict: true,
@@ -7581,6 +7582,7 @@ mod tests {
             vec![AssignedPolicy {
                 policy_id: id_grafana,
                 policy_name: "require-grafana".to_string(),
+                enforcement_mode: Default::default(),
                 policy: DeploymentPolicy::RequirePackages {
                     packages: vec!["grafana".to_string()],
                     strict: true,
@@ -7592,6 +7594,7 @@ mod tests {
             vec![AssignedPolicy {
                 policy_id: id_neovim,
                 policy_name: "require-neovim".to_string(),
+                enforcement_mode: Default::default(),
                 policy: DeploymentPolicy::RequirePackages {
                     packages: vec!["neovim".to_string()],
                     strict: true,
@@ -7666,6 +7669,7 @@ mod tests {
             vec![AssignedPolicy {
                 policy_id: id_grafana,
                 policy_name: "require-grafana".to_string(),
+                enforcement_mode: Default::default(),
                 policy: DeploymentPolicy::RequirePackages {
                     packages: vec!["grafana".to_string()],
                     strict: true,

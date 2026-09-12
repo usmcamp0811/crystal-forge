@@ -3280,6 +3280,7 @@ mod tests {
         let describe = |parsed: &Option<DeploymentPolicy>, index: usize| AssignedPolicy {
             policy_id: policies[index].policy_id,
             policy_name: policies[index].name.clone(),
+            enforcement_mode: Default::default(),
             policy: parsed.clone().expect("selected policy must parse"),
         };
         let original_assigned = (0..3)

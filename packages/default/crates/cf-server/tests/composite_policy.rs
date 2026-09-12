@@ -871,6 +871,7 @@ fn parsed_evaluation_results(
     let assigned = AssignedPolicy {
         policy_id: version_id,
         policy_name: "mixed lifecycle".to_string(),
+        enforcement_mode: Default::default(),
         policy: DeploymentPolicy::Composite {
             config: config.clone(),
         },
@@ -936,6 +937,7 @@ async fn ac3_evaluation_matrix_uses_parser_and_normalized_persistence_for_all_si
     let assigned = AssignedPolicy {
         policy_id: context.version_id,
         policy_name: "AC3 evaluation matrix".to_string(),
+        enforcement_mode: Default::default(),
         policy: DeploymentPolicy::Composite {
             config: config.clone(),
         },
@@ -1263,6 +1265,262 @@ async fn add_phase_policy(pool: &PgPool, system_id: Uuid) -> Uuid {
     version_id
 }
 
+async fn persist_legacy_assessment_group(
+    pool: &PgPool,
+    context: &mut AssessmentContext,
+    version_ids: &[Uuid],
+) {
+    context.resolved = match resolve_system_effective_policies(pool, context.system_id)
+        .await
+        .unwrap()
+    {
+        ResolutionOutcome::Resolved(resolved) => resolved,
+        ResolutionOutcome::Conflict(conflicts) => panic!("unexpected conflict: {conflicts:?}"),
+    };
+    let config = phase_config();
+    let values = vec![EnforcementOutcome::Pass; version_ids.len()];
+    let mut tx = pool.begin().await.unwrap();
+    persist_evaluation_assessments_in_tx(
+        &mut tx,
+        context.system_id,
+        context.derivation_id,
+        &context.store_path,
+        &policy_results_for_versions(version_ids, &config, &values),
+        &context.resolved,
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    sqlx::query("UPDATE composite_policy_assessments SET effective_set_digest = $1")
+        .bind(&context.resolved.effective_set_digest)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+async fn assign_existing_policy_through_bundle(
+    pool: &PgPool,
+    system_id: Uuid,
+    policy_version_id: Uuid,
+) -> Uuid {
+    let policy_id: Uuid =
+        sqlx::query_scalar("SELECT policy_id FROM deployment_policy_versions WHERE id = $1")
+            .bind(policy_version_id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    let mut policy_tx = pool.begin().await.unwrap();
+    sqlx::query("UPDATE deployment_policies SET current_draft_version_id = NULL WHERE id = $1")
+        .bind(policy_id)
+        .execute(&mut *policy_tx)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE deployment_policy_versions SET publication_state = 'accepted', trust_state = 'trusted' WHERE id = $1",
+    )
+    .bind(policy_version_id)
+    .execute(&mut *policy_tx)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE deployment_policies SET current_published_version_id = $1 WHERE id = $2")
+        .bind(policy_version_id)
+        .bind(policy_id)
+        .execute(&mut *policy_tx)
+        .await
+        .unwrap();
+    policy_tx.commit().await.unwrap();
+
+    let bundle_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO compliance_bundles (name, framework, version, layer) VALUES ($1, 'test', '1.0', 'fleet') RETURNING id",
+    )
+    .bind(format!("mode-transition-bundle-{}", Uuid::new_v4()))
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    let bundle_version_id: Uuid =
+        sqlx::query_scalar("SELECT current_draft_version_id FROM compliance_bundles WHERE id = $1")
+            .bind(bundle_id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    sqlx::query(
+        "INSERT INTO compliance_bundle_version_policies (bundle_version_id, policy_version_id, policy_order) VALUES ($1, $2, 0)",
+    )
+    .bind(bundle_version_id)
+    .bind(policy_version_id)
+    .execute(pool)
+    .await
+    .unwrap();
+    let mut bundle_tx = pool.begin().await.unwrap();
+    sqlx::query("UPDATE compliance_bundles SET current_draft_version_id = NULL WHERE id = $1")
+        .bind(bundle_id)
+        .execute(&mut *bundle_tx)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE compliance_bundle_versions SET publication_state = 'accepted', trust_state = 'trusted', semantic_digest = $1 WHERE id = $2")
+        .bind(format!("mode-transition-{bundle_version_id}"))
+        .bind(bundle_version_id)
+        .execute(&mut *bundle_tx)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE compliance_bundles SET current_published_version_id = $1 WHERE id = $2")
+        .bind(bundle_version_id)
+        .bind(bundle_id)
+        .execute(&mut *bundle_tx)
+        .await
+        .unwrap();
+    bundle_tx.commit().await.unwrap();
+    let assignment_id: Uuid = sqlx::query_scalar(
+        r#"INSERT INTO compliance_bundle_assignments
+             (bundle_id,bundle_version_id,system_id,scope_type,active,enforcement_mode,assignment_overlay_digest)
+           VALUES ($1,$2,$3,'system',true,'enforce','mode-transition') RETURNING id"#,
+    )
+    .bind(bundle_id)
+    .bind(bundle_version_id)
+    .bind(system_id)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    let assignment_version_id: Uuid = sqlx::query_scalar(
+        r#"INSERT INTO compliance_bundle_assignment_versions
+             (assignment_id,version_number,bundle_version_id,enforcement_mode,assignment_overlay_digest)
+           VALUES ($1,1,$2,'enforce','mode-transition') RETURNING id"#,
+    )
+    .bind(assignment_id)
+    .bind(bundle_version_id)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE compliance_bundle_assignments SET current_version_id = $1 WHERE id = $2")
+        .bind(assignment_version_id)
+        .bind(assignment_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    assignment_id
+}
+
+async fn add_report_only_non_composite_assignment(pool: &PgPool, system_id: Uuid) {
+    let policy = create_deployment_policy(
+        pool,
+        &CreateDeploymentPolicyRequest {
+            name: format!("report-only-assessment-policy-{}", Uuid::new_v4()),
+            policy_type: "custom_check".to_string(),
+            config: serde_json::json!({
+                "expression": "true",
+                "description": "report-only authorization regression",
+                "field_name": "reportOnlyAuthorizationRegression",
+                "strict": true
+            }),
+            enabled: Some(true),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let policy_version_id: Uuid = sqlx::query_scalar(
+        "SELECT current_draft_version_id FROM deployment_policies WHERE id = $1",
+    )
+    .bind(policy.id)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    let mut policy_tx = pool.begin().await.unwrap();
+    sqlx::query("UPDATE deployment_policies SET current_draft_version_id = NULL WHERE id = $1")
+        .bind(policy.id)
+        .execute(&mut *policy_tx)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE deployment_policy_versions SET publication_state = 'accepted', trust_state = 'trusted' WHERE id = $1",
+    )
+    .bind(policy_version_id)
+    .execute(&mut *policy_tx)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE deployment_policies SET current_published_version_id = $1 WHERE id = $2")
+        .bind(policy_version_id)
+        .bind(policy.id)
+        .execute(&mut *policy_tx)
+        .await
+        .unwrap();
+    policy_tx.commit().await.unwrap();
+
+    let bundle_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO compliance_bundles (name, framework, version, layer) VALUES ($1, 'test', '1.0', 'fleet') RETURNING id",
+    )
+    .bind(format!("report-only-assessment-bundle-{}", Uuid::new_v4()))
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    let bundle_version_id: Uuid =
+        sqlx::query_scalar("SELECT current_draft_version_id FROM compliance_bundles WHERE id = $1")
+            .bind(bundle_id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    sqlx::query(
+        "INSERT INTO compliance_bundle_version_policies (bundle_version_id, policy_version_id, policy_order) VALUES ($1, $2, 0)",
+    )
+    .bind(bundle_version_id)
+    .bind(policy_version_id)
+    .execute(pool)
+    .await
+    .unwrap();
+    let mut bundle_tx = pool.begin().await.unwrap();
+    sqlx::query("UPDATE compliance_bundles SET current_draft_version_id = NULL WHERE id = $1")
+        .bind(bundle_id)
+        .execute(&mut *bundle_tx)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE compliance_bundle_versions SET publication_state = 'accepted', trust_state = 'trusted', semantic_digest = 'report-only-regression' WHERE id = $1",
+    )
+    .bind(bundle_version_id)
+    .execute(&mut *bundle_tx)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE compliance_bundles SET current_published_version_id = $1 WHERE id = $2")
+        .bind(bundle_version_id)
+        .bind(bundle_id)
+        .execute(&mut *bundle_tx)
+        .await
+        .unwrap();
+    bundle_tx.commit().await.unwrap();
+
+    let assignment_id: Uuid = sqlx::query_scalar(
+        r#"INSERT INTO compliance_bundle_assignments
+             (bundle_id, bundle_version_id, system_id, scope_type, active,
+              enforcement_mode, assignment_overlay_digest)
+           VALUES ($1, $2, $3, 'system', true, 'report_only', 'report-only-regression')
+           RETURNING id"#,
+    )
+    .bind(bundle_id)
+    .bind(bundle_version_id)
+    .bind(system_id)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    let assignment_version_id: Uuid = sqlx::query_scalar(
+        r#"INSERT INTO compliance_bundle_assignment_versions
+             (assignment_id, version_number, bundle_version_id, enforcement_mode,
+              assignment_overlay_digest)
+           VALUES ($1, 1, $2, 'report_only', 'report-only-regression')
+           RETURNING id"#,
+    )
+    .bind(assignment_id)
+    .bind(bundle_version_id)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE compliance_bundle_assignments SET current_version_id = $1 WHERE id = $2")
+        .bind(assignment_version_id)
+        .bind(assignment_id)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
 #[sqlx::test]
 async fn phase_lifecycle_persists_ordered_placeholders_and_authorizes_only_after_all_pass(
     pool: PgPool,
@@ -1314,6 +1572,193 @@ async fn phase_lifecycle_persists_ordered_placeholders_and_authorizes_only_after
     .await
     .unwrap();
     assert_eq!(authorized.outcome, EnforcementOutcome::Pass);
+}
+
+#[sqlx::test]
+async fn report_only_assignment_change_does_not_stale_composite_authorization(pool: PgPool) {
+    let context = assessment_context(&pool).await;
+    persist_evaluation(&pool, &context, EnforcementOutcome::Pass).await;
+    completed_scan(&pool, &context, 0).await;
+    sqlx::query("UPDATE composite_policy_assessments SET effective_set_digest = $1")
+        .bind(&context.resolved.effective_set_digest)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    add_report_only_non_composite_assignment(&pool, context.system_id).await;
+    let current = match resolve_system_effective_policies(&pool, context.system_id)
+        .await
+        .unwrap()
+    {
+        ResolutionOutcome::Resolved(resolved) => resolved,
+        ResolutionOutcome::Conflict(conflicts) => panic!("unexpected conflict: {conflicts:?}"),
+    };
+    assert_ne!(
+        current.effective_set_digest, context.resolved.effective_set_digest,
+        "the report-only assignment must change complete compliance identity"
+    );
+
+    let authorization = authorize_deployment_at(
+        &pool,
+        context.system_id,
+        context.derivation_id,
+        &context.store_path,
+        Utc.with_ymd_and_hms(2026, 8, 24, 12, 0, 0).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(authorization.outcome, EnforcementOutcome::Pass);
+    assert_eq!(authorization.assessments.len(), 1);
+}
+
+#[sqlx::test]
+async fn unchanged_legacy_complete_digest_assessment_remains_authorized(pool: PgPool) {
+    let context = assessment_context(&pool).await;
+    persist_evaluation(&pool, &context, EnforcementOutcome::Pass).await;
+    completed_scan(&pool, &context, 0).await;
+    sqlx::query("UPDATE composite_policy_assessments SET effective_set_digest = $1")
+        .bind(&context.resolved.effective_set_digest)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let authorization = authorize_deployment_at(
+        &pool,
+        context.system_id,
+        context.derivation_id,
+        &context.store_path,
+        Utc.with_ymd_and_hms(2026, 8, 24, 12, 0, 0).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(authorization.outcome, EnforcementOutcome::Pass);
+    assert_eq!(authorization.assessments.len(), 1);
+}
+
+#[sqlx::test]
+async fn enforce_policy_change_stales_legacy_complete_digest_assessment(pool: PgPool) {
+    let context = assessment_context(&pool).await;
+    persist_evaluation(&pool, &context, EnforcementOutcome::Pass).await;
+    completed_scan(&pool, &context, 0).await;
+    sqlx::query("UPDATE composite_policy_assessments SET effective_set_digest = $1")
+        .bind(&context.resolved.effective_set_digest)
+        .execute(&pool)
+        .await
+        .unwrap();
+    add_phase_policy(&pool, context.system_id).await;
+
+    let stale = authorize_deployment_at(
+        &pool,
+        context.system_id,
+        context.derivation_id,
+        &context.store_path,
+        Utc.with_ymd_and_hms(2026, 8, 24, 12, 0, 0).unwrap(),
+    )
+    .await
+    .unwrap_err();
+    assert!(stale.to_string().contains("incomplete or stale"));
+}
+
+#[sqlx::test]
+async fn removed_enforce_policy_is_rejected_as_extra_legacy_assessment(pool: PgPool) {
+    let mut context = assessment_context(&pool).await;
+    let removed_version_id = add_phase_policy(&pool, context.system_id).await;
+    let original_version_id = context.version_id;
+    persist_legacy_assessment_group(
+        &pool,
+        &mut context,
+        &[original_version_id, removed_version_id],
+    )
+    .await;
+    let removed_policy_id: Uuid =
+        sqlx::query_scalar("SELECT policy_id FROM deployment_policy_versions WHERE id = $1")
+            .bind(removed_version_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    sqlx::query("DELETE FROM system_policies WHERE system_id = $1 AND policy_id = $2")
+        .bind(context.system_id)
+        .bind(removed_policy_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let stale = authorize_deployment_at(
+        &pool,
+        context.system_id,
+        context.derivation_id,
+        &context.store_path,
+        Utc.with_ymd_and_hms(2026, 8, 24, 12, 0, 0).unwrap(),
+    )
+    .await
+    .unwrap_err();
+    assert!(stale.to_string().contains("incomplete or stale"));
+}
+
+#[sqlx::test]
+async fn newly_report_only_policy_is_rejected_as_extra_legacy_assessment(pool: PgPool) {
+    let mut context = assessment_context(&pool).await;
+    let transitioned_version_id = add_phase_policy(&pool, context.system_id).await;
+    let assignment_id =
+        assign_existing_policy_through_bundle(&pool, context.system_id, transitioned_version_id)
+            .await;
+    let transitioned_policy_id: Uuid =
+        sqlx::query_scalar("SELECT policy_id FROM deployment_policy_versions WHERE id = $1")
+            .bind(transitioned_version_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    sqlx::query("DELETE FROM system_policies WHERE system_id = $1 AND policy_id = $2")
+        .bind(context.system_id)
+        .bind(transitioned_policy_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let original_version_id = context.version_id;
+    persist_legacy_assessment_group(
+        &pool,
+        &mut context,
+        &[original_version_id, transitioned_version_id],
+    )
+    .await;
+
+    let (bundle_version_id, current_version_id): (Uuid, Uuid) = sqlx::query_as(
+        "SELECT bundle_version_id,current_version_id FROM compliance_bundle_assignments WHERE id = $1",
+    )
+    .bind(assignment_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let next_version_id: Uuid = sqlx::query_scalar(
+        r#"INSERT INTO compliance_bundle_assignment_versions
+             (assignment_id,version_number,bundle_version_id,enforcement_mode,assignment_overlay_digest)
+           VALUES ($1,2,$2,'report_only','mode-transition') RETURNING id"#,
+    )
+    .bind(assignment_id)
+    .bind(bundle_version_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE compliance_bundle_assignments SET current_version_id=$1,enforcement_mode='report_only' WHERE id=$2 AND current_version_id=$3",
+    )
+    .bind(next_version_id)
+    .bind(assignment_id)
+    .bind(current_version_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let stale = authorize_deployment_at(
+        &pool,
+        context.system_id,
+        context.derivation_id,
+        &context.store_path,
+        Utc.with_ymd_and_hms(2026, 8, 24, 12, 0, 0).unwrap(),
+    )
+    .await
+    .unwrap_err();
+    assert!(stale.to_string().contains("incomplete or stale"));
 }
 
 #[sqlx::test]
@@ -2201,6 +2646,7 @@ async fn passing_eval_attempt(pool: &PgPool) -> EvalPassedAttemptContext {
     let assigned = AssignedPolicy {
         policy_id: context.version_id,
         policy_name: "eval attempt evidence".into(),
+        enforcement_mode: Default::default(),
         policy: DeploymentPolicy::Composite {
             config: config.clone(),
         },
@@ -2367,6 +2813,7 @@ fn pin_required_is_not_checked_while_evaluation_is_pending() {
     let assigned = AssignedPolicy {
         policy_id: Uuid::new_v4(),
         policy_name: "pending pin evidence".into(),
+        enforcement_mode: Default::default(),
         policy: DeploymentPolicy::Composite { config },
     };
     let check = PolicyCheckResult::for_evaluation_terminal(

@@ -23,6 +23,10 @@ use crate::queries::compliance::{
     nix_policy_result,
 };
 use crate::queries::poam::{self, insert_activity_and_audit};
+use crate::services::composite_enforcement::{
+    PersistedAssessmentIdentity, PersistedRuleIdentity, enforce_composite_authorization_digest,
+    policy_contexts, select_compatible_assessment_set,
+};
 
 /// Provides the current time used by POA&M lifecycle decisions.
 pub trait PoamClock: Send + Sync {
@@ -273,9 +277,9 @@ struct AssessmentContext {
     system_id: Uuid,
     policy_lineage_id: Uuid,
     policy_version_id: Uuid,
+    derivation_id: i32,
     overall_outcome: String,
     target_store_path: String,
-    effective_set_digest: String,
     effective_config_digest: String,
     effective_config: Value,
 }
@@ -539,8 +543,9 @@ async fn assessment_context_tx(
     Ok(sqlx::query_as::<_, AssessmentContext>(
         r#"
         SELECT a.id AS assessment_id, f.id AS finding_id, a.system_id,
-               a.policy_lineage_id, a.policy_version_id, a.overall_outcome,
-               a.target_store_path, a.effective_set_digest,
+               a.policy_lineage_id, a.policy_version_id, a.derivation_id,
+               a.overall_outcome,
+               a.target_store_path,
                a.effective_config_digest, a.effective_config
         FROM composite_policy_assessments a
         JOIN poam_findings f ON f.system_id=a.system_id AND f.policy_lineage_id=a.policy_lineage_id
@@ -603,7 +608,6 @@ async fn validate_current_assessment_tx(
         ));
     };
     if policy.policy_version_id != context.policy_version_id
-        || resolved.effective_set_digest != context.effective_set_digest
         || semantic_digest(&policy.effective_config) != context.effective_config_digest
         || policy.effective_config != context.effective_config
     {
@@ -613,23 +617,39 @@ async fn validate_current_assessment_tx(
             None,
         ));
     }
-    let current_assessment_id: Option<Uuid> = sqlx::query_scalar(
-        r#"SELECT id FROM composite_policy_assessments
-           WHERE system_id=$1 AND policy_lineage_id=$2 AND policy_version_id=$3
-             AND target_store_path=$4 AND effective_set_digest=$5
-             AND effective_config_digest=$6 AND effective_config=$7
-           ORDER BY updated_at DESC,id DESC LIMIT 1"#,
+    let policies = policy_contexts(&resolved)?;
+    let assessments = sqlx::query_as::<_, PersistedAssessmentIdentity>(
+        r#"SELECT id,policy_lineage_id,policy_version_id,effective_set_digest,
+                  effective_config_digest,effective_config
+           FROM composite_policy_assessments
+           WHERE system_id=$1 AND derivation_id=$2 AND target_store_path=$3
+           ORDER BY updated_at DESC,id DESC FOR SHARE"#,
     )
     .bind(context.system_id)
-    .bind(context.policy_lineage_id)
-    .bind(context.policy_version_id)
+    .bind(context.derivation_id)
     .bind(&context.target_store_path)
-    .bind(&context.effective_set_digest)
-    .bind(&context.effective_config_digest)
-    .bind(&context.effective_config)
-    .fetch_optional(&mut **tx)
+    .fetch_all(&mut **tx)
     .await?;
-    if current_assessment_id != Some(context.assessment_id) {
+    let assessment_ids = assessments
+        .iter()
+        .map(|assessment| assessment.id)
+        .collect::<Vec<_>>();
+    let rules = sqlx::query_as::<_, PersistedRuleIdentity>(
+        r#"SELECT assessment_id,rule_id,ordinal,kind,phase,outcome,blocking
+           FROM composite_policy_rule_results
+           WHERE assessment_id=ANY($1)
+           ORDER BY assessment_id,ordinal FOR SHARE"#,
+    )
+    .bind(&assessment_ids)
+    .fetch_all(&mut **tx)
+    .await?;
+    let compatible = select_compatible_assessment_set(
+        &policies,
+        &enforce_composite_authorization_digest(&resolved),
+        &assessments,
+        &rules,
+    );
+    if !compatible.is_some_and(|set| set.ids().contains(&context.assessment_id)) {
         return Err(PoamError::Precondition(
             "stale_finding",
             "Assessment was superseded by a newer authoritative observation".into(),
@@ -2719,6 +2739,19 @@ struct AssessmentObservation {
     observation_snapshot: Value,
 }
 
+impl AssessmentObservation {
+    fn identity(&self) -> PersistedAssessmentIdentity {
+        PersistedAssessmentIdentity {
+            id: self.assessment_id,
+            policy_lineage_id: self.policy_lineage_id,
+            policy_version_id: self.policy_version_id,
+            effective_set_digest: self.effective_set_digest.clone(),
+            effective_config_digest: self.effective_config_digest.clone(),
+            effective_config: self.effective_config.clone(),
+        }
+    }
+}
+
 #[derive(Debug, sqlx::FromRow)]
 struct LegacyDeployedEvidence {
     system_id: Uuid,
@@ -3017,8 +3050,8 @@ async fn current_verification_items_tx(
                FROM composite_policy_rule_results result WHERE result.assessment_id=a.id
              ),'[]'::jsonb)) AS observation_snapshot
            FROM composite_policy_assessments a
-           JOIN UNNEST($1::uuid[],$2::uuid[]) key(system_id,policy_lineage_id)
-             ON key.system_id=a.system_id AND key.policy_lineage_id=a.policy_lineage_id
+           JOIN (SELECT DISTINCT unnest($1::uuid[]) AS system_id) requested
+             ON requested.system_id=a.system_id
            JOIN systems s ON s.id=a.system_id
            JOIN LATERAL (
              SELECT ss.store_path FROM system_states ss
@@ -3028,7 +3061,19 @@ async fn current_verification_items_tx(
            ORDER BY a.system_id,a.policy_lineage_id,a.updated_at DESC,a.id DESC"#,
     )
     .bind(&system_ids)
-    .bind(&lineage_ids)
+    .fetch_all(&mut **tx)
+    .await?;
+    let observation_ids = observations
+        .iter()
+        .map(|observation| observation.assessment_id)
+        .collect::<Vec<_>>();
+    let assessment_rules = sqlx::query_as::<_, PersistedRuleIdentity>(
+        r#"SELECT assessment_id,rule_id,ordinal,kind,phase,outcome,blocking
+           FROM composite_policy_rule_results
+           WHERE assessment_id=ANY($1)
+           ORDER BY assessment_id,ordinal"#,
+    )
+    .bind(&observation_ids)
     .fetch_all(&mut **tx)
     .await?;
     let finding_ids = findings.iter().map(|row| row.0).collect::<Vec<_>>();
@@ -3120,10 +3165,49 @@ async fn current_verification_items_tx(
                 && observation.policy_lineage_id == *lineage_id
                 && observation.policy_version_id == policy.policy_version_id
         });
+        let composite_authorization_digest = enforce_composite_authorization_digest(resolved);
+        let compatible_ids = if policy.policy_type == "composite" {
+            let policies = policy_contexts(resolved)?;
+            let mut seen_targets = BTreeSet::new();
+            let mut compatible = None;
+            for candidate in observations
+                .iter()
+                .filter(|observation| observation.system_id == *system_id)
+            {
+                let target = (
+                    candidate.derivation_id,
+                    candidate.target_store_path.as_str(),
+                );
+                if !seen_targets.insert(target) {
+                    continue;
+                }
+                let identities = observations
+                    .iter()
+                    .filter(|observation| {
+                        observation.system_id == *system_id
+                            && observation.derivation_id == candidate.derivation_id
+                            && observation.target_store_path == candidate.target_store_path
+                    })
+                    .map(AssessmentObservation::identity)
+                    .collect::<Vec<_>>();
+                if let Some(selected) = select_compatible_assessment_set(
+                    &policies,
+                    &composite_authorization_digest,
+                    &identities,
+                    &assessment_rules,
+                ) {
+                    compatible = Some(selected.ids().to_vec());
+                    break;
+                }
+            }
+            compatible
+        } else {
+            None
+        };
         let exact_observation = current_observations.clone().find(|observation| {
-            observation.effective_set_digest == resolved.effective_set_digest
-                && observation.effective_config_digest == semantic_digest(&policy.effective_config)
-                && observation.effective_config == policy.effective_config
+            compatible_ids
+                .as_ref()
+                .is_some_and(|ids| ids.contains(&observation.assessment_id))
         });
         let Some(observation) = exact_observation.or_else(|| current_observations.clone().next())
         else {
@@ -3215,9 +3299,9 @@ async fn current_verification_items_tx(
             continue;
         };
         let observation_token = semantic_digest(&observation.observation_snapshot);
-        let exact = observation.effective_set_digest == resolved.effective_set_digest
-            && observation.effective_config_digest == semantic_digest(&policy.effective_config)
-            && observation.effective_config == policy.effective_config;
+        let exact = compatible_ids
+            .as_ref()
+            .is_some_and(|ids| ids.contains(&observation.assessment_id));
         if !exact {
             items.push(VerificationItem {
                 finding_id: *finding_id,

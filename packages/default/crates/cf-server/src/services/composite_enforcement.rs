@@ -10,6 +10,7 @@ use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
+use crate::compliance::canonical::semantic_digest;
 use crate::compliance::resolver::{
     AssignmentMode, EffectivePolicySet, ResolutionOutcome, resolve_system_effective_policies_in_tx,
 };
@@ -67,13 +68,70 @@ struct LatestScan {
     composite_phase_order: i64,
 }
 
+/// Holds one enforced composite policy's current authorization identity.
 #[derive(Debug)]
-struct PolicyContext {
-    lineage_id: Uuid,
-    version_id: Uuid,
+pub(crate) struct PolicyContext {
+    /// Identifies the stable policy lineage.
+    pub(crate) lineage_id: Uuid,
+    /// Identifies the exact effective policy version.
+    pub(crate) version_id: Uuid,
     config: CompositePolicyConfig,
     config_json: serde_json::Value,
     config_digest: String,
+}
+
+/// Identifies one persisted composite assessment without loading its evidence.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub(crate) struct PersistedAssessmentIdentity {
+    /// Identifies the assessment row.
+    pub(crate) id: Uuid,
+    /// Identifies the stable policy lineage assessed by the row.
+    pub(crate) policy_lineage_id: Uuid,
+    /// Identifies the exact policy version assessed by the row.
+    pub(crate) policy_version_id: Uuid,
+    /// Identifies the effective policy set used when the row was written.
+    pub(crate) effective_set_digest: String,
+    /// Identifies the effective composite configuration.
+    pub(crate) effective_config_digest: String,
+    /// Contains the effective composite configuration.
+    pub(crate) effective_config: serde_json::Value,
+}
+
+/// Identifies one persisted constituent rule result for compatibility checks.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub(crate) struct PersistedRuleIdentity {
+    /// Identifies the parent assessment.
+    pub(crate) assessment_id: Uuid,
+    /// Identifies the rule within the policy version.
+    pub(crate) rule_id: Uuid,
+    /// Specifies the rule's position in the immutable composite configuration.
+    pub(crate) ordinal: i32,
+    /// Specifies the persisted rule kind.
+    pub(crate) kind: String,
+    /// Specifies the lifecycle phase that produced the result.
+    pub(crate) phase: String,
+    /// Specifies the normalized rule outcome.
+    pub(crate) outcome: String,
+    /// Indicates whether the persisted outcome blocks deployment.
+    pub(crate) blocking: bool,
+}
+
+/// Classifies a compatible assessment group by its persisted digest scheme.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CompatibleAssessmentSet {
+    /// Contains assessment IDs written with the canonical authorization digest.
+    Canonical(Vec<Uuid>),
+    /// Contains assessment IDs written with one pre-canonical complete digest.
+    Legacy(Vec<Uuid>),
+}
+
+impl CompatibleAssessmentSet {
+    /// Returns the assessment IDs in the compatible group.
+    pub(crate) fn ids(&self) -> &[Uuid] {
+        match self {
+            Self::Canonical(ids) | Self::Legacy(ids) => ids,
+        }
+    }
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -618,7 +676,12 @@ fn expected_phase(rule: &CompositeRuleKind) -> EnforcementPhase {
     }
 }
 
-fn policy_contexts(resolved: &EffectivePolicySet) -> Result<Vec<PolicyContext>> {
+/// Returns the current enforced composite policy contexts.
+///
+/// # Errors
+///
+/// Returns an error when an effective composite configuration is invalid.
+pub(crate) fn policy_contexts(resolved: &EffectivePolicySet) -> Result<Vec<PolicyContext>> {
     resolved
         .policies
         .iter()
@@ -640,6 +703,130 @@ fn policy_contexts(resolved: &EffectivePolicySet) -> Result<Vec<PolicyContext>> 
             })
         })
         .collect()
+}
+
+fn valid_semantic_digest(digest: &str) -> bool {
+    digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn assessment_group_matches(
+    policies: &[PolicyContext],
+    assessments: &[&PersistedAssessmentIdentity],
+    rules: &[PersistedRuleIdentity],
+) -> Option<Vec<Uuid>> {
+    if assessments.len() != policies.len() {
+        return None;
+    }
+    let mut ids = Vec::with_capacity(policies.len());
+    for policy in policies {
+        let matches = assessments
+            .iter()
+            .filter(|assessment| {
+                assessment.policy_lineage_id == policy.lineage_id
+                    && assessment.policy_version_id == policy.version_id
+                    && assessment.effective_config_digest == policy.config_digest
+                    && assessment.effective_config == policy.config_json
+            })
+            .collect::<Vec<_>>();
+        if matches.len() != 1 {
+            return None;
+        }
+        let assessment = matches[0];
+        let assessment_rules = rules
+            .iter()
+            .filter(|rule| rule.assessment_id == assessment.id)
+            .collect::<Vec<_>>();
+        if assessment_rules.len() != policy.config.rules.len() {
+            return None;
+        }
+        for (ordinal, expected) in policy.config.rules.iter().enumerate() {
+            let phase = phase_str(expected_phase(&expected.rule));
+            let matches = assessment_rules.iter().filter(|rule| {
+                rule.rule_id == expected.id
+                    && rule.ordinal == ordinal as i32
+                    && rule.kind == expected.rule.kind()
+                    && rule.phase == phase
+                    && matches!(
+                        rule.outcome.as_str(),
+                        "pass" | "fail" | "error" | "not_checked"
+                    )
+                    && rule.blocking == (rule.outcome != "pass")
+            });
+            if matches.count() != 1 {
+                return None;
+            }
+        }
+        ids.push(assessment.id);
+    }
+    ids.sort_unstable();
+    Some(ids)
+}
+
+/// Selects canonical or structurally exact pre-canonical composite evidence.
+///
+/// Canonical evidence is preferred. A legacy digest is accepted only when one
+/// unambiguous digest group exactly represents every current enforced
+/// composite policy and all required rule rows. The digest value alone never
+/// authorizes legacy evidence.
+pub(crate) fn select_compatible_assessment_set(
+    policies: &[PolicyContext],
+    canonical_digest: &str,
+    assessments: &[PersistedAssessmentIdentity],
+    rules: &[PersistedRuleIdentity],
+) -> Option<CompatibleAssessmentSet> {
+    let mut by_digest = std::collections::BTreeMap::<&str, Vec<_>>::new();
+    for assessment in assessments {
+        by_digest
+            .entry(&assessment.effective_set_digest)
+            .or_default()
+            .push(assessment);
+    }
+    if let Some(group) = by_digest.get(canonical_digest)
+        && let Some(ids) = assessment_group_matches(policies, group, rules)
+    {
+        return Some(CompatibleAssessmentSet::Canonical(ids));
+    }
+
+    let mut compatible_legacy = by_digest
+        .into_iter()
+        .filter(|(digest, _)| *digest != canonical_digest && valid_semantic_digest(digest))
+        .filter_map(|(_, group)| assessment_group_matches(policies, &group, rules))
+        .collect::<Vec<_>>();
+    if compatible_legacy.len() == 1 {
+        Some(CompatibleAssessmentSet::Legacy(compatible_legacy.pop()?))
+    } else {
+        None
+    }
+}
+
+/// Returns the canonical semantics that can affect composite authorization.
+///
+/// The resolver's complete digest remains authoritative for compliance
+/// evidence. Composite deployment authorization uses this narrower digest so
+/// report-only and non-composite assignments cannot stale enforced assessment
+/// evidence.
+pub(crate) fn enforce_composite_authorization_digest(resolved: &EffectivePolicySet) -> String {
+    let mut policies = resolved
+        .policies
+        .iter()
+        .filter(|policy| {
+            policy.policy_type == "composite"
+                && matches!(policy.effective_mode, AssignmentMode::Enforce)
+        })
+        .map(|policy| {
+            serde_json::json!({
+                "policy_version_id": policy.policy_version_id,
+                "effective_config": policy.effective_config,
+                "effective_mode": "enforce",
+            })
+        })
+        .collect::<Vec<_>>();
+    policies.sort_by(|left, right| {
+        left["policy_version_id"]
+            .as_str()
+            .cmp(&right["policy_version_id"].as_str())
+    });
+    semantic_digest(&serde_json::Value::Array(policies))
 }
 
 fn evaluation_outcomes(
@@ -1109,6 +1296,7 @@ pub async fn persist_evaluation_assessments_in_tx(
     resolved: &EffectivePolicySet,
 ) -> Result<()> {
     let policies = policy_contexts(resolved)?;
+    let authorization_digest = enforce_composite_authorization_digest(resolved);
     // CONCURRENCY: Assessment triggers acquire per-finding keys. Acquire the
     // system sentinel first so trigger locks preserve the global lock order.
     lock_poam_system_key_tx(tx, system_id).await?;
@@ -1124,7 +1312,7 @@ pub async fn persist_evaluation_assessments_in_tx(
         system_id,
         derivation_id,
         target_store_path,
-        &resolved.effective_set_digest,
+        &authorization_digest,
         &policies,
     )
     .await?;
@@ -1545,6 +1733,7 @@ async fn authorize_target_at(
         ),
     };
     let policies = policy_contexts(&resolved)?;
+    let authorization_digest = enforce_composite_authorization_digest(&resolved);
     let exact_target = match exact_target {
         Some(exact_target) => exact_target,
         None if policies.is_empty()
@@ -1690,36 +1879,55 @@ async fn authorize_target_at(
     let mut assessment_ids = Vec::new();
     let mut configs_by_assessment = std::collections::HashMap::new();
     if !policies.is_empty() {
-        let version_ids = policies.iter().map(|p| p.version_id).collect::<Vec<_>>();
-        let assessments = sqlx::query_as::<_, (Uuid, Uuid, String, serde_json::Value)>(
+        let assessments = sqlx::query_as::<_, PersistedAssessmentIdentity>(
             r#"
-            SELECT id, policy_version_id, effective_config_digest, effective_config
+            SELECT id, policy_lineage_id, policy_version_id, effective_set_digest,
+                   effective_config_digest, effective_config
             FROM composite_policy_assessments
             WHERE system_id = $1 AND derivation_id = $2 AND target_store_path = $3
-              AND effective_set_digest = $4 AND policy_version_id = ANY($5)
             FOR UPDATE
             "#,
         )
         .bind(system_id)
         .bind(exact_target.0)
         .bind(&exact_target.1)
-        .bind(&resolved.effective_set_digest)
-        .bind(&version_ids)
         .fetch_all(&mut *tx)
         .await?;
-        if assessments.len() != policies.len() {
+        let candidate_ids = assessments
+            .iter()
+            .map(|assessment| assessment.id)
+            .collect::<Vec<_>>();
+        let rule_identities = sqlx::query_as::<_, PersistedRuleIdentity>(
+            r#"
+            SELECT assessment_id, rule_id, ordinal, kind, phase, outcome, blocking
+            FROM composite_policy_rule_results
+            WHERE assessment_id = ANY($1)
+            ORDER BY assessment_id, ordinal
+            FOR UPDATE
+            "#,
+        )
+        .bind(&candidate_ids)
+        .fetch_all(&mut *tx)
+        .await?;
+        let Some(compatible) = select_compatible_assessment_set(
+            &policies,
+            &authorization_digest,
+            &assessments,
+            &rule_identities,
+        ) else {
             bail!("Exact current composite assessments are incomplete or stale");
-        }
-        for (assessment_id, version_id, digest, config_json) in assessments {
+        };
+        assessment_ids.extend_from_slice(compatible.ids());
+        for assessment_id in &assessment_ids {
+            let assessment = assessments
+                .iter()
+                .find(|assessment| assessment.id == *assessment_id)
+                .context("Compatible composite assessment disappeared")?;
             let policy = policies
                 .iter()
-                .find(|policy| policy.version_id == version_id)
+                .find(|policy| policy.version_id == assessment.policy_version_id)
                 .context("Assessment references a non-effective policy version")?;
-            if digest != policy.config_digest || config_json != policy.config_json {
-                bail!("Composite assessment effective config is stale");
-            }
-            assessment_ids.push(assessment_id);
-            configs_by_assessment.insert(assessment_id, &policy.config);
+            configs_by_assessment.insert(*assessment_id, &policy.config);
         }
     }
 
@@ -2124,6 +2332,9 @@ pub async fn authorize_deployment(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compliance::resolver::{
+        AssignmentTarget, EffectivePolicy, EffectivePolicySource, PolicySpecificity,
+    };
     use crate::models::deployment_policies::{CveBlockRuleConfig, TimeWindowRuleConfig};
     use chrono::TimeZone;
 
@@ -2141,6 +2352,257 @@ mod tests {
             completed_at: Some(Utc.timestamp_opt(1_700_000_100, 0).single().unwrap()),
             composite_phase_order: 1,
         }
+    }
+
+    fn resolved_policy_set(policies: Vec<EffectivePolicy>) -> EffectivePolicySet {
+        EffectivePolicySet {
+            bundle_version_id: Uuid::from_u128(100),
+            assignment_id: None,
+            target: AssignmentTarget::System {
+                system_id: Uuid::from_u128(101),
+            },
+            policies,
+            effective_set_digest: "complete-compliance-digest".to_string(),
+            warnings: Vec::new(),
+        }
+    }
+
+    fn effective_policy(
+        version_id: u128,
+        policy_type: &str,
+        mode: AssignmentMode,
+        config: serde_json::Value,
+    ) -> EffectivePolicy {
+        EffectivePolicy {
+            policy_version_id: Uuid::from_u128(version_id),
+            policy_lineage_id: Uuid::from_u128(version_id + 100),
+            policy_type: policy_type.to_string(),
+            source: EffectivePolicySource::LegacyDirect,
+            specificity: PolicySpecificity::System,
+            baseline_order: None,
+            addition_order: None,
+            overrides: Vec::new(),
+            effective_config: config,
+            assignment_mode: mode.clone(),
+            effective_mode: mode,
+            provenance: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn composite_authorization_digest_ignores_report_only_and_non_composite_policies() {
+        let enforce = effective_policy(
+            1,
+            "composite",
+            AssignmentMode::Enforce,
+            serde_json::json!({"schema_version": 1, "rules": [{"kind": "eval_passed"}]}),
+        );
+        let baseline = resolved_policy_set(vec![enforce.clone()]);
+        let mut with_report_only = resolved_policy_set(vec![
+            enforce.clone(),
+            effective_policy(
+                2,
+                "composite",
+                AssignmentMode::ReportOnly,
+                serde_json::json!({"schema_version": 1, "rules": [{"kind": "custom_eval"}]}),
+            ),
+        ]);
+        with_report_only.effective_set_digest = "changed-complete-compliance-digest".to_string();
+        let with_non_composite = resolved_policy_set(vec![
+            enforce.clone(),
+            effective_policy(
+                3,
+                "custom_check",
+                AssignmentMode::Enforce,
+                serde_json::json!({"expression": "false"}),
+            ),
+        ]);
+        let changed_enforce = resolved_policy_set(vec![effective_policy(
+            1,
+            "composite",
+            AssignmentMode::Enforce,
+            serde_json::json!({"schema_version": 1, "rules": [{"kind": "custom_eval"}]}),
+        )]);
+
+        let digest = enforce_composite_authorization_digest(&baseline);
+        assert_eq!(
+            digest,
+            enforce_composite_authorization_digest(&with_report_only)
+        );
+        assert_eq!(
+            digest,
+            enforce_composite_authorization_digest(&with_non_composite)
+        );
+        assert_ne!(
+            digest,
+            enforce_composite_authorization_digest(&changed_enforce)
+        );
+        assert_ne!(
+            baseline.effective_set_digest,
+            with_report_only.effective_set_digest
+        );
+    }
+
+    #[test]
+    fn legacy_assessment_compatibility_requires_one_exact_policy_and_rule_set() {
+        let enforce = effective_policy(
+            1,
+            "composite",
+            AssignmentMode::Enforce,
+            serde_json::json!({
+                "schema_version": 1,
+                "mode": "all",
+                "rules": [{
+                    "id": "41000000-0000-0000-0000-000000000001",
+                    "kind": "eval_passed",
+                    "config": {}
+                }]
+            }),
+        );
+        let baseline = resolved_policy_set(vec![enforce.clone()]);
+        let policies = policy_contexts(&baseline).unwrap();
+        let assessment_id = Uuid::from_u128(200);
+        let legacy_digest = "a".repeat(64);
+        let assessments = vec![PersistedAssessmentIdentity {
+            id: assessment_id,
+            policy_lineage_id: enforce.policy_lineage_id,
+            policy_version_id: enforce.policy_version_id,
+            effective_set_digest: legacy_digest,
+            effective_config_digest: policies[0].config_digest.clone(),
+            effective_config: enforce.effective_config.clone(),
+        }];
+        let rules = vec![PersistedRuleIdentity {
+            assessment_id,
+            rule_id: policies[0].config.rules[0].id,
+            ordinal: 0,
+            kind: "eval_passed".to_string(),
+            phase: "evaluation".to_string(),
+            outcome: "pass".to_string(),
+            blocking: false,
+        }];
+        let canonical = enforce_composite_authorization_digest(&baseline);
+        assert!(matches!(
+            select_compatible_assessment_set(&policies, &canonical, &assessments, &rules),
+            Some(CompatibleAssessmentSet::Legacy(ids)) if ids == vec![assessment_id]
+        ));
+
+        let removed_policy = effective_policy(
+            2,
+            "composite",
+            AssignmentMode::Enforce,
+            serde_json::json!({
+                "schema_version": 1,
+                "mode": "all",
+                "rules": [{
+                    "id": "42000000-0000-0000-0000-000000000001",
+                    "kind": "eval_passed",
+                    "config": {}
+                }]
+            }),
+        );
+        let removed_context = policy_contexts(&resolved_policy_set(vec![removed_policy.clone()]))
+            .unwrap()
+            .pop()
+            .unwrap();
+        let removed_assessment_id = Uuid::from_u128(202);
+        let mut group_with_removed_policy = assessments.clone();
+        group_with_removed_policy.push(PersistedAssessmentIdentity {
+            id: removed_assessment_id,
+            policy_lineage_id: removed_policy.policy_lineage_id,
+            policy_version_id: removed_policy.policy_version_id,
+            effective_set_digest: assessments[0].effective_set_digest.clone(),
+            effective_config_digest: removed_context.config_digest,
+            effective_config: removed_policy.effective_config,
+        });
+        let mut rules_with_removed_policy = rules.clone();
+        rules_with_removed_policy.push(PersistedRuleIdentity {
+            assessment_id: removed_assessment_id,
+            rule_id: removed_context.config.rules[0].id,
+            ordinal: 0,
+            kind: "eval_passed".to_string(),
+            phase: "evaluation".to_string(),
+            outcome: "pass".to_string(),
+            blocking: false,
+        });
+        assert!(
+            select_compatible_assessment_set(
+                &policies,
+                &canonical,
+                &group_with_removed_policy,
+                &rules_with_removed_policy,
+            )
+            .is_none(),
+            "a removed or newly report-only policy must remain visible as an extra legacy row"
+        );
+
+        let with_report_only = resolved_policy_set(vec![
+            enforce.clone(),
+            effective_policy(
+                2,
+                "custom_check",
+                AssignmentMode::ReportOnly,
+                serde_json::json!({"expression": "false"}),
+            ),
+        ]);
+        assert!(matches!(
+            select_compatible_assessment_set(
+                &policy_contexts(&with_report_only).unwrap(),
+                &enforce_composite_authorization_digest(&with_report_only),
+                &assessments,
+                &rules,
+            ),
+            Some(CompatibleAssessmentSet::Legacy(_))
+        ));
+
+        let changed_enforce = resolved_policy_set(vec![effective_policy(
+            1,
+            "composite",
+            AssignmentMode::Enforce,
+            serde_json::json!({
+                "schema_version": 1,
+                "mode": "all",
+                "rules": [{
+                    "id": "41000000-0000-0000-0000-000000000001",
+                    "kind": "custom_eval",
+                    "config": {"expression": "true", "message": "changed"}
+                }]
+            }),
+        )]);
+        assert!(
+            select_compatible_assessment_set(
+                &policy_contexts(&changed_enforce).unwrap(),
+                &enforce_composite_authorization_digest(&changed_enforce),
+                &assessments,
+                &rules,
+            )
+            .is_none()
+        );
+
+        assert!(
+            select_compatible_assessment_set(&policies, &canonical, &assessments, &[]).is_none()
+        );
+
+        let mut ambiguous = assessments.clone();
+        let mut second = assessments[0].clone();
+        second.id = Uuid::from_u128(201);
+        second.effective_set_digest = "b".repeat(64);
+        ambiguous.push(second.clone());
+        let mut ambiguous_rules = rules.clone();
+        ambiguous_rules.push(PersistedRuleIdentity {
+            assessment_id: second.id,
+            ..rules[0].clone()
+        });
+        assert!(
+            select_compatible_assessment_set(&policies, &canonical, &ambiguous, &ambiguous_rules,)
+                .is_none()
+        );
+
+        let mut malformed_digest = assessments.clone();
+        malformed_digest[0].effective_set_digest = "arbitrary".to_string();
+        assert!(
+            select_compatible_assessment_set(&policies, &canonical, &malformed_digest, &rules)
+                .is_none()
+        );
     }
 
     #[test]

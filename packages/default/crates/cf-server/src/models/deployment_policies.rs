@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 use sqlx::types::chrono::{DateTime, Utc};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -1131,6 +1131,38 @@ pub struct AssignedPolicy {
     pub policy_name: String,
     /// The parsed deployment policy.
     pub policy: DeploymentPolicy,
+    /// Controls whether this assignment's failed outcome blocks deployment.
+    pub enforcement_mode: AssignedPolicyEnforcementMode,
+}
+
+/// Runtime enforcement mode for one resolved assigned policy.
+///
+/// This mode is separate from the policy's intrinsic `strict` setting. A
+/// report-only assignment retains the intrinsic setting and failed evidence,
+/// but its outcome does not block deployment.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssignedPolicyEnforcementMode {
+    /// Applies intrinsic strict failures to deployment enforcement.
+    #[default]
+    Enforce,
+    /// Records policy outcomes and evidence without blocking deployment.
+    ReportOnly,
+}
+
+impl AssignedPolicyEnforcementMode {
+    /// Returns the persistence representation of this mode.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Enforce => "enforce",
+            Self::ReportOnly => "report_only",
+        }
+    }
+
+    /// Returns whether an intrinsic strict failure blocks deployment.
+    pub fn blocks(self, strict: bool) -> bool {
+        self == Self::Enforce && strict
+    }
 }
 
 /// Map from NixOS configuration name to the ordered, deduplicated list of
@@ -1251,7 +1283,9 @@ fn resolve_assigned_policy_passed(
 /// Build the persisted policy-result document for a successfully evaluated
 /// NixOS configuration. This is the source of truth for queue counters and the
 /// policy matrix; the legacy `cf_agent_enabled` column remains a fast global
-/// signal and compatibility field.
+/// signal and compatibility field. Assigned results preserve intrinsic
+/// `strict`, effective `enforcement_mode`, and outcome-level `blocking`
+/// separately.
 pub fn policy_results_json(
     check: &PolicyCheckResult,
     assigned: &[AssignedPolicy],
@@ -1262,6 +1296,23 @@ pub fn policy_results_json(
         ap.policy.is_nix_evaluated() || matches!(ap.policy, DeploymentPolicy::Composite { .. })
     }) {
         let passed = resolve_assigned_policy_passed(assigned_policy, check);
+        let evaluation_error = check
+            .assigned_results
+            .get(&assigned_policy.policy_id)
+            .and_then(|result| result.evaluation_error.as_deref());
+        let blocking = check
+            .assigned_results
+            .get(&assigned_policy.policy_id)
+            .map(|result| result.blocking)
+            .unwrap_or_else(|| {
+                passed == Some(false)
+                    && (matches!(
+                        assigned_policy.policy,
+                        DeploymentPolicy::RequireCrystalForgeAgent { .. }
+                    ) || assigned_policy
+                        .enforcement_mode
+                        .blocks(assigned_policy.policy.is_strict()))
+            });
         let mut persisted = serde_json::json!({
             // The real database name (`deployment_policies.name`) is used by
             // matrix navigation and must remain distinct from description.
@@ -1269,9 +1320,22 @@ pub fn policy_results_json(
             "description": assigned_policy.policy.description(),
             "type": policy_kind(&assigned_policy.policy),
             "strict": assigned_policy.policy.is_strict(),
+            "enforcement_mode": assigned_policy.enforcement_mode.as_str(),
             "passed": passed,
-            "details": policy_result_detail(&assigned_policy.policy, passed),
+            "blocking": blocking,
+            "details": evaluation_error
+                .map(str::to_string)
+                .or_else(|| policy_result_detail(&assigned_policy.policy, passed)),
         });
+        if let (Some(error), Some(object)) = (evaluation_error, persisted.as_object_mut()) {
+            // COMPATIBILITY: Successful and ordinary failed results retain the
+            // existing JSON shape. This field is additive only when Nix
+            // contained a report-only evaluator error.
+            object.insert(
+                "evaluation_error".to_string(),
+                serde_json::Value::String(error.to_string()),
+            );
+        }
         if let DeploymentPolicy::Composite { config } = &assigned_policy.policy {
             if let Some(object) = persisted.as_object_mut() {
                 object.insert(
@@ -1299,6 +1363,7 @@ pub fn policy_results_json(
             "cfAgentEnabled": {
                 "passed": check.cf_agent_enabled,
                 "strict": true,
+                "blocking": check.cf_agent_enabled == Some(false),
                 "details": if check.cf_agent_enabled == Some(false) {
                     Some("Crystal Forge agent is disabled")
                 } else {
@@ -1347,6 +1412,15 @@ pub struct CveCheckOutcome {
 #[derive(Debug, Clone)]
 pub struct AssignedPolicyCheckResult {
     pub passed: Option<bool>,
+    /// Indicates whether this exact outcome blocks deployment.
+    ///
+    /// This value includes assignment mode, top-level strictness, and any
+    /// constituent-rule strictness. It is the per-policy source of truth for
+    /// persistence and must match the corresponding `failed_policies` entry.
+    pub blocking: bool,
+    /// Describes a contained evaluator error without changing the existing
+    /// pass/fail representation.
+    pub evaluation_error: Option<String>,
     /// Preserves each constituent result for composite policies.
     pub composite_outcomes: Vec<CompositeRuleOutcome>,
 }
@@ -1368,7 +1442,7 @@ pub struct PolicyCheckResult {
     pub custom_checks: HashMap<String, bool>,
     pub meets_requirements: bool,
     pub warnings: Vec<String>,
-    /// Tracks which policies failed (description, is_strict)
+    /// Tracks failed policies as `(description, blocks_deployment)`.
     pub failed_policies: Vec<(String, bool)>,
     /// CVE gate outcomes (populated after DB evaluation)
     pub cve_checks: Vec<CveCheckOutcome>,
@@ -1440,7 +1514,9 @@ impl PolicyCheckResult {
                         kind: rule.rule.kind().to_string(),
                         phase: EnforcementPhase::Evaluation,
                         outcome,
-                        blocking: outcome != EnforcementOutcome::Pass,
+                        blocking: assigned_policy
+                            .enforcement_mode
+                            .blocks(outcome != EnforcementOutcome::Pass),
                         detail: detail.to_string(),
                         evidence: serde_json::json!({
                             "configuration": system_name,
@@ -1457,13 +1533,16 @@ impl PolicyCheckResult {
                 EvaluationTerminalOutcome::Pending => None,
                 _ => Some(false),
             };
+            let blocking = passed == Some(false) && assigned_policy.enforcement_mode.blocks(true);
             if passed == Some(false) {
-                failed_policies.push((assigned_policy.policy.description(), true));
+                failed_policies.push((assigned_policy.policy.description(), blocking));
             }
             assigned_results.insert(
                 assigned_policy.policy_id,
                 AssignedPolicyCheckResult {
                     passed,
+                    blocking,
+                    evaluation_error: None,
                     composite_outcomes: outcomes,
                 },
             );
@@ -1484,8 +1563,12 @@ impl PolicyCheckResult {
 
     /// Creates a policy result from Nix JSON and stable assigned-policy identities.
     ///
-    /// Uses `policy_result_key(policy_id)` for CF-agent and package checks, and
-    /// `rule.field_name` for multi-rule custom checks (existing convention).
+    /// Uses `policy_result_key(policy_id)` for CF-agent and package checks.
+    /// Enforced custom checks use their configured field names. Report-only
+    /// custom checks use assignment-slice-allocated policy-scoped keys so they
+    /// cannot collide with configured or generated evaluator fields.
+    /// Report-only policies retain their failed outcomes and evidence but do
+    /// not add a blocking failure. The unconditional agent gate remains strict.
     ///
     /// # Errors
     ///
@@ -1497,11 +1580,45 @@ impl PolicyCheckResult {
         policies_json: &serde_json::Value,
         assigned: &[AssignedPolicy],
     ) -> Result<Self, String> {
+        let result_keys = assigned_policy_result_keys(assigned);
         let mut warnings = Vec::new();
         let mut has_required_packages: Option<bool> = None;
         let mut custom_checks = HashMap::new();
         let mut failed_policies = Vec::new();
         let mut assigned_results: BTreeMap<Uuid, AssignedPolicyCheckResult> = BTreeMap::new();
+
+        fn report_only_custom_result(
+            system_name: &str,
+            field_name: &str,
+            value: &serde_json::Value,
+        ) -> Result<(bool, Option<String>), String> {
+            let success = value
+                .get("success")
+                .and_then(serde_json::Value::as_bool)
+                .ok_or_else(|| {
+                    format!(
+                        "Configuration {system_name:?}: report-only custom check {field_name:?} has malformed success metadata"
+                    )
+                })?;
+            let result = value
+                .get("value")
+                .and_then(serde_json::Value::as_bool)
+                .ok_or_else(|| {
+                    format!(
+                        "Configuration {system_name:?}: report-only custom check {field_name:?} has malformed value metadata"
+                    )
+                })?;
+            if success {
+                Ok((result, None))
+            } else {
+                Ok((
+                    false,
+                    Some(format!(
+                        "Report-only custom check {field_name:?} threw or returned a non-boolean value"
+                    )),
+                ))
+            }
+        }
 
         // cfAgentEnabled is emitted unconditionally by the evaluator for every
         // configuration, even when no require_cf_agent policy is assigned. The
@@ -1533,6 +1650,7 @@ impl PolicyCheckResult {
                 continue;
             }
             let is_strict = ap.policy.is_strict();
+            let is_blocking = ap.enforcement_mode.blocks(is_strict);
             let key = policy_result_key(&ap.policy_id);
 
             match &ap.policy {
@@ -1580,6 +1698,8 @@ impl PolicyCheckResult {
                         ap.policy_id,
                         AssignedPolicyCheckResult {
                             passed: Some(value),
+                            blocking: !value,
+                            evaluation_error: None,
                             composite_outcomes: Vec::new(),
                         },
                     );
@@ -1588,7 +1708,9 @@ impl PolicyCheckResult {
                             "Crystal Forge agent not enabled for {}",
                             system_name
                         ));
-                        failed_policies.push((ap.policy.description(), is_strict));
+                        // SECURITY: The agent gate is global and unconditional;
+                        // assignment mode cannot make a disabled agent nonblocking.
+                        failed_policies.push((ap.policy.description(), true));
                     }
                 }
                 DeploymentPolicy::RequirePackages { packages, .. } => {
@@ -1618,6 +1740,8 @@ impl PolicyCheckResult {
                         ap.policy_id,
                         AssignedPolicyCheckResult {
                             passed: Some(value),
+                            blocking: !value && is_blocking,
+                            evaluation_error: None,
                             composite_outcomes: Vec::new(),
                         },
                     );
@@ -1627,7 +1751,7 @@ impl PolicyCheckResult {
                             system_name,
                             packages.join(", ")
                         ));
-                        failed_policies.push((ap.policy.description(), is_strict));
+                        failed_policies.push((ap.policy.description(), is_blocking));
                     }
                 }
                 DeploymentPolicy::CustomCheck {
@@ -1639,27 +1763,48 @@ impl PolicyCheckResult {
                     ..
                 } => {
                     if rules.is_empty() {
-                        // Legacy single-expression: use field_name from config.
-                        match policies_json.get(field_name) {
+                        // Enforce mode retains the legacy configured field name.
+                        // Report-only mode uses a policy-scoped result key.
+                        let result_key =
+                            if ap.enforcement_mode == AssignedPolicyEnforcementMode::ReportOnly {
+                                result_keys.report_only_custom(ap.policy_id, None)
+                            } else {
+                                field_name.clone()
+                            };
+                        match policies_json.get(&result_key) {
                             Some(v) => {
-                                let v = v.as_bool().ok_or_else(|| {
-                                    format!(
-                                        "Configuration {:?}: custom check {:?} must evaluate \
-                                         to boolean, got {}",
-                                        system_name, field_name, v
+                                let (v, evaluation_error) = if ap.enforcement_mode
+                                    == AssignedPolicyEnforcementMode::ReportOnly
+                                {
+                                    report_only_custom_result(&system_name, field_name, v)?
+                                } else {
+                                    (
+                                        v.as_bool().ok_or_else(|| {
+                                            format!(
+                                                "Configuration {:?}: custom check {:?} must evaluate \
+                                                 to boolean, got {}",
+                                                system_name, field_name, v
+                                            )
+                                        })?,
+                                        None,
                                     )
-                                })?;
+                                };
                                 custom_checks.insert(field_name.clone(), v);
                                 assigned_results.insert(
                                     ap.policy_id,
                                     AssignedPolicyCheckResult {
                                         passed: Some(v),
+                                        blocking: !v && ap.enforcement_mode.blocks(*strict),
+                                        evaluation_error,
                                         composite_outcomes: Vec::new(),
                                     },
                                 );
                                 if !v {
                                     warnings.push(format!("{}: {}", system_name, description));
-                                    failed_policies.push((description.clone(), *strict));
+                                    failed_policies.push((
+                                        description.clone(),
+                                        ap.enforcement_mode.blocks(*strict),
+                                    ));
                                 }
                             }
                             None => {
@@ -1675,17 +1820,40 @@ impl PolicyCheckResult {
                             }
                         }
                     } else {
-                        // Multi-rule: use per-rule field_name (existing convention).
-                        let mut rule_results: Vec<(bool, &PolicyRule)> = Vec::new();
-                        for rule in rules {
-                            let passed = match policies_json.get(&rule.field_name) {
-                                Some(v) => v.as_bool().ok_or_else(|| {
-                                    format!(
-                                        "Configuration {:?}: custom-check rule {:?} must \
-                                         evaluate to boolean, got {}",
-                                        system_name, rule.field_name, v
-                                    )
-                                })?,
+                        // Enforce mode retains each configured rule field name.
+                        // Report-only mode uses policy-scoped ordinal keys.
+                        let mut rule_results: Vec<(bool, &PolicyRule, Option<String>)> = Vec::new();
+                        for (ordinal, rule) in rules.iter().enumerate() {
+                            let result_key = if ap.enforcement_mode
+                                == AssignedPolicyEnforcementMode::ReportOnly
+                            {
+                                result_keys.report_only_custom(ap.policy_id, Some(ordinal))
+                            } else {
+                                rule.field_name.clone()
+                            };
+                            let passed = match policies_json.get(&result_key) {
+                                Some(v) => {
+                                    if ap.enforcement_mode
+                                        == AssignedPolicyEnforcementMode::ReportOnly
+                                    {
+                                        report_only_custom_result(
+                                            &system_name,
+                                            &rule.field_name,
+                                            v,
+                                        )?
+                                    } else {
+                                        (
+                                            v.as_bool().ok_or_else(|| {
+                                                format!(
+                                                    "Configuration {:?}: custom-check rule {:?} must \
+                                                     evaluate to boolean, got {}",
+                                                    system_name, rule.field_name, v
+                                                )
+                                            })?,
+                                            None,
+                                        )
+                                    }
+                                }
                                 None => {
                                     return Err(format!(
                                         "Configuration {:?}: custom-check rule {:?} was absent \
@@ -1698,35 +1866,52 @@ impl PolicyCheckResult {
                                     ));
                                 }
                             };
-                            custom_checks.insert(rule.field_name.clone(), passed);
-                            rule_results.push((passed, rule));
+                            custom_checks.insert(rule.field_name.clone(), passed.0);
+                            rule_results.push((passed.0, rule, passed.1));
                         }
                         let overall_passed = match mode {
-                            RuleMode::All => rule_results.iter().all(|(p, _)| *p),
-                            RuleMode::Any => rule_results.iter().any(|(p, _)| *p),
+                            RuleMode::All => rule_results.iter().all(|(p, _, _)| *p),
+                            RuleMode::Any => rule_results.iter().any(|(p, _, _)| *p),
                         };
-                        assigned_results.insert(
-                            ap.policy_id,
-                            AssignedPolicyCheckResult {
-                                passed: Some(overall_passed),
-                                composite_outcomes: Vec::new(),
-                            },
-                        );
-                        for (passed, rule) in &rule_results {
+                        let evaluation_error = rule_results
+                            .iter()
+                            .filter_map(|(_, _, error)| error.as_deref())
+                            .collect::<Vec<_>>()
+                            .join("; ");
+                        let mut has_blocking_constituent = false;
+                        for (passed, rule, _) in &rule_results {
                             if !passed {
                                 warnings.push(format!(
                                     "{}: rule '{}' failed",
                                     system_name, rule.description
                                 ));
                                 if !overall_passed && rule.strict {
-                                    failed_policies.push((rule.description.clone(), true));
+                                    has_blocking_constituent |= ap.enforcement_mode.blocks(true);
+                                    failed_policies.push((
+                                        rule.description.clone(),
+                                        ap.enforcement_mode.blocks(true),
+                                    ));
                                 }
                             }
                         }
-                        if !overall_passed && *strict && failed_policies.is_empty() {
-                            failed_policies
-                                .push((format!("Multi-rule check ({:?} mode) failed", mode), true));
+                        if !overall_passed && *strict && is_blocking && !has_blocking_constituent {
+                            failed_policies.push((
+                                format!("Multi-rule check ({:?} mode) failed", mode),
+                                ap.enforcement_mode.blocks(true),
+                            ));
                         }
+                        let blocking = !overall_passed
+                            && (has_blocking_constituent || (*strict && is_blocking));
+                        assigned_results.insert(
+                            ap.policy_id,
+                            AssignedPolicyCheckResult {
+                                passed: Some(overall_passed),
+                                blocking,
+                                evaluation_error: (!evaluation_error.is_empty())
+                                    .then_some(evaluation_error),
+                                composite_outcomes: Vec::new(),
+                            },
+                        );
                     }
                     let _ = (idx, key); // suppress unused warnings
                 }
@@ -1797,7 +1982,9 @@ impl PolicyCheckResult {
                                 kind: rule.rule.kind().to_string(),
                                 phase: EnforcementPhase::Evaluation,
                                 outcome,
-                                blocking: outcome != EnforcementOutcome::Pass,
+                                blocking: ap
+                                    .enforcement_mode
+                                    .blocks(outcome != EnforcementOutcome::Pass),
                                 detail: detail.to_string(),
                                 evidence: serde_json::json!({
                                     "expected_revision": expected,
@@ -1851,7 +2038,9 @@ impl PolicyCheckResult {
                             kind: rule.rule.kind().to_string(),
                             phase: EnforcementPhase::Evaluation,
                             outcome,
-                            blocking: outcome != EnforcementOutcome::Pass,
+                            blocking: ap
+                                .enforcement_mode
+                                .blocks(outcome != EnforcementOutcome::Pass),
                             detail,
                             evidence: serde_json::json!({ "metadata_key": result_key }),
                         });
@@ -1872,6 +2061,8 @@ impl PolicyCheckResult {
                         ap.policy_id,
                         AssignedPolicyCheckResult {
                             passed: Some(passed),
+                            blocking: !passed && ap.enforcement_mode.blocks(true),
+                            evaluation_error: None,
                             composite_outcomes: outcomes,
                         },
                     );
@@ -1880,7 +2071,8 @@ impl PolicyCheckResult {
                             "Composite policy {} failed during evaluation",
                             ap.policy_name
                         ));
-                        failed_policies.push((ap.policy.description(), true));
+                        failed_policies
+                            .push((ap.policy.description(), ap.enforcement_mode.blocks(true)));
                     }
                 }
             }
@@ -2156,12 +2348,120 @@ fn nix_string(value: &str) -> String {
 /// `PolicyCheckResult::from_json` for an assigned policy with the given UUID.
 pub fn policy_result_key(policy_id: &Uuid) -> String {
     // Use the first 8 hex chars of the UUID to keep keys readable and unique.
-    format!("policy_{}", policy_id.to_string().replace('-', ""))
+    format!("policy_{}", &policy_id.to_string()[..8])
 }
 
 /// Returns the stable evaluator metadata key for one composite rule.
 pub fn composite_rule_result_key(policy_id: &Uuid, rule_id: &Uuid) -> String {
     format!("composite_{}_{}", policy_id.simple(), rule_id.simple())
+}
+
+fn report_only_custom_result_key_base(policy_id: &Uuid) -> String {
+    format!("policy_{}_report_only", policy_id.simple())
+}
+
+fn report_only_custom_rule_result_key_base(policy_id: &Uuid, ordinal: usize) -> String {
+    format!("policy_{}_report_only_rule_{ordinal}", policy_id.simple())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct ReportOnlyCustomResultIdentity {
+    policy_id: Uuid,
+    ordinal: Option<usize>,
+}
+
+#[derive(Debug)]
+struct AssignedPolicyResultKeys {
+    report_only_custom: BTreeMap<ReportOnlyCustomResultIdentity, String>,
+}
+
+impl AssignedPolicyResultKeys {
+    fn report_only_custom(&self, policy_id: Uuid, ordinal: Option<usize>) -> String {
+        let identity = ReportOnlyCustomResultIdentity { policy_id, ordinal };
+        self.report_only_custom
+            .get(&identity)
+            .cloned()
+            .unwrap_or_else(|| match ordinal {
+                Some(ordinal) => report_only_custom_rule_result_key_base(&policy_id, ordinal),
+                None => report_only_custom_result_key_base(&policy_id),
+            })
+    }
+}
+
+/// Allocates evaluator result keys for one complete assignment slice.
+///
+/// Enforce-mode and compatibility keys retain their existing names. The
+/// allocator reserves those names first, then gives each report-only custom
+/// result its UUID-based name or the first available deterministic suffix.
+fn assigned_policy_result_keys(assigned: &[AssignedPolicy]) -> AssignedPolicyResultKeys {
+    let mut used = RESERVED_POLICY_RESULT_FIELDS
+        .iter()
+        .map(|key| (*key).to_string())
+        .collect::<BTreeSet<_>>();
+    let mut report_only_custom = Vec::new();
+
+    for policy in assigned {
+        match &policy.policy {
+            DeploymentPolicy::CustomCheck {
+                field_name, rules, ..
+            } => {
+                if policy.enforcement_mode == AssignedPolicyEnforcementMode::Enforce {
+                    if rules.is_empty() {
+                        used.insert(field_name.clone());
+                    } else {
+                        used.extend(rules.iter().map(|rule| rule.field_name.clone()));
+                    }
+                } else if rules.is_empty() {
+                    report_only_custom.push(ReportOnlyCustomResultIdentity {
+                        policy_id: policy.policy_id,
+                        ordinal: None,
+                    });
+                } else {
+                    report_only_custom.extend(rules.iter().enumerate().map(|(ordinal, _)| {
+                        ReportOnlyCustomResultIdentity {
+                            policy_id: policy.policy_id,
+                            ordinal: Some(ordinal),
+                        }
+                    }));
+                }
+            }
+            DeploymentPolicy::Composite { config } => {
+                used.extend(
+                    config
+                        .rules
+                        .iter()
+                        .map(|rule| composite_rule_result_key(&policy.policy_id, &rule.id)),
+                );
+            }
+            other if other.is_nix_evaluated() => {
+                used.insert(policy_result_key(&policy.policy_id));
+            }
+            _ => {}
+        }
+    }
+
+    report_only_custom.sort_unstable();
+    report_only_custom.dedup();
+    let report_only_custom = report_only_custom
+        .into_iter()
+        .map(|identity| {
+            let base = match identity.ordinal {
+                Some(ordinal) => {
+                    report_only_custom_rule_result_key_base(&identity.policy_id, ordinal)
+                }
+                None => report_only_custom_result_key_base(&identity.policy_id),
+            };
+            let mut key = base.clone();
+            let mut suffix = 1usize;
+            while !used.insert(key.clone()) {
+                key = format!("{base}_{suffix}");
+                suffix += 1;
+            }
+            (identity, key)
+        })
+        .collect();
+
+    AssignedPolicyResultKeys { report_only_custom }
 }
 
 fn semantic_nix_literal(value: &serde_json::Value) -> Result<String, String> {
@@ -2221,10 +2521,16 @@ fn composite_evaluation_expression(rule: &CompositeRuleKind) -> Option<String> {
     ))
 }
 
+fn report_only_custom_expression(expression: &str) -> String {
+    format!(
+        "let attempt = builtins.tryEval ({expression}); isBoolean = attempt.success && builtins.isBool attempt.value; in {{ success = isBoolean; value = if isBoolean then attempt.value else false; }}"
+    )
+}
+
 /// Builds standalone Nix field lines for one configuration's assigned policies.
 ///
-/// Each line uses two-space indentation. Composite rules use stable policy and
-/// rule IDs so results cannot collide across policies.
+/// Each line uses two-space indentation. Bulk and standalone generation use
+/// the same assignment-slice-wide result-key allocation.
 pub fn build_policy_fields_for_config_standalone(assigned: &[AssignedPolicy]) -> Vec<String> {
     build_policy_fields_for_config_indented(assigned, "  ")
 }
@@ -2239,6 +2545,7 @@ fn build_policy_fields_for_config_indented(
     assigned: &[AssignedPolicy],
     indent: &str,
 ) -> Vec<String> {
+    let result_keys = assigned_policy_result_keys(assigned);
     let mut lines = Vec::new();
 
     for (idx, ap) in assigned.iter().enumerate() {
@@ -2265,9 +2572,9 @@ fn build_policy_fields_for_config_indented(
                 rules,
                 ..
             } if rules.is_empty() => {
-                // Legacy single-expression custom check: emit under the configured
-                // field_name so the parser can find it. The expression is inserted
-                // verbatim and must use the `config.*` lexical contract.
+                // Enforce mode preserves the configured field name. Report-only
+                // mode uses a policy-scoped key so unrelated configured names
+                // cannot collide. Expressions use the `config.*` lexical contract.
                 if is_reserved_policy_result_field(field_name) {
                     warn!(
                         policy_id = %ap.policy_id,
@@ -2276,19 +2583,30 @@ fn build_policy_fields_for_config_indented(
                     );
                     continue;
                 }
+                let expression = if ap.enforcement_mode == AssignedPolicyEnforcementMode::ReportOnly
+                {
+                    report_only_custom_expression(expression)
+                } else {
+                    expression.clone()
+                };
+                let result_key = if ap.enforcement_mode == AssignedPolicyEnforcementMode::ReportOnly
+                {
+                    result_keys.report_only_custom(ap.policy_id, None)
+                } else {
+                    field_name.clone()
+                };
                 lines.push(format!(
                     "{}{} = {};",
                     indent,
-                    nix_string(field_name),
+                    nix_string(&result_key),
                     expression
                 ));
             }
             DeploymentPolicy::CustomCheck { rules, .. } => {
-                // Multi-rule: emit one line per rule using the rule's own field_name
-                // (existing convention; rules predate stable-ID keys).
-                // Expressions are expected to use `config.*` per the documented
-                // policy fragment lexical contract.
-                for rule in rules {
+                // Enforce mode preserves configured rule field names. Report-only
+                // mode uses policy-scoped ordinal keys. Expressions use `config.*`
+                // per the documented policy fragment lexical contract.
+                for (ordinal, rule) in rules.iter().enumerate() {
                     if is_reserved_policy_result_field(&rule.field_name) {
                         warn!(
                             policy_id = %ap.policy_id,
@@ -2297,11 +2615,23 @@ fn build_policy_fields_for_config_indented(
                         );
                         continue;
                     }
+                    let expression =
+                        if ap.enforcement_mode == AssignedPolicyEnforcementMode::ReportOnly {
+                            report_only_custom_expression(&rule.expression)
+                        } else {
+                            rule.expression.clone()
+                        };
+                    let result_key =
+                        if ap.enforcement_mode == AssignedPolicyEnforcementMode::ReportOnly {
+                            result_keys.report_only_custom(ap.policy_id, Some(ordinal))
+                        } else {
+                            rule.field_name.clone()
+                        };
                     lines.push(format!(
                         "{}{} = {};",
                         indent,
-                        nix_string(&rule.field_name),
-                        rule.expression
+                        nix_string(&result_key),
+                        expression
                     ));
                 }
             }
@@ -2974,6 +3304,7 @@ mod tests {
         let assigned = AssignedPolicy {
             policy_id,
             policy_name: "quoted paths".to_string(),
+            enforcement_mode: Default::default(),
             policy: DeploymentPolicy::Composite {
                 config: CompositePolicyConfig {
                     schema_version: 1,
@@ -3063,6 +3394,7 @@ in {{ {fields} }}"#
         let assigned = AssignedPolicy {
             policy_id,
             policy_name: "isolated custom expressions".to_string(),
+            enforcement_mode: Default::default(),
             policy: DeploymentPolicy::Composite {
                 config: CompositePolicyConfig {
                     schema_version: 1,
@@ -3318,6 +3650,7 @@ in {{ {fields} }}"#
         let assigned = AssignedPolicy {
             policy_id,
             policy_name: "AC3 actual executor matrix".to_string(),
+            enforcement_mode: Default::default(),
             policy: DeploymentPolicy::Composite {
                 config: CompositePolicyConfig {
                     schema_version: 1,
@@ -3488,6 +3821,7 @@ in {{ {fields} }}"#
         let fields = build_policy_fields_for_config_standalone(&[AssignedPolicy {
             policy_id,
             policy_name: "semantic literals".to_string(),
+            enforcement_mode: Default::default(),
             policy: DeploymentPolicy::Composite { config },
         }]);
         let expression = fields.join("\n");
@@ -3518,6 +3852,7 @@ in {{ {fields} }}"#
         let assigned = AssignedPolicy {
             policy_id: Uuid::from_u128(99),
             policy_name: "composite".into(),
+            enforcement_mode: Default::default(),
             policy: DeploymentPolicy::Composite { config },
         };
         let evaluated = PolicyCheckResult::from_assigned(
@@ -3594,6 +3929,7 @@ in {{ {fields} }}"#
         let assigned = AssignedPolicy {
             policy_id,
             policy_name: "mixed outcomes".to_string(),
+            enforcement_mode: Default::default(),
             policy: DeploymentPolicy::Composite { config },
         };
         let metadata = serde_json::json!({
@@ -3624,6 +3960,7 @@ in {{ {fields} }}"#
         let assigned = AssignedPolicy {
             policy_id,
             policy_name: "pin".to_string(),
+            enforcement_mode: Default::default(),
             policy: DeploymentPolicy::Composite {
                 config: CompositePolicyConfig {
                     schema_version: 1,
@@ -3677,6 +4014,7 @@ in {{ {fields} }}"#
         let assigned = AssignedPolicy {
             policy_id,
             policy_name: "evaluation terminal".to_string(),
+            enforcement_mode: Default::default(),
             policy: DeploymentPolicy::Composite {
                 config: CompositePolicyConfig {
                     schema_version: 1,
@@ -3734,6 +4072,10 @@ in {{ {fields} }}"#
                     .as_str()
                     .is_some()
             );
+            assert_eq!(
+                result.blocking,
+                terminal != EvaluationTerminalOutcome::Pending
+            );
         }
     }
 
@@ -3745,8 +4087,9 @@ in {{ {fields} }}"#
             .into_iter()
             .enumerate()
             .map(|(i, policy)| AssignedPolicy {
-                policy_id: uuid::Uuid::from_u128(i as u128 + 1),
+                policy_id: uuid::Uuid::from_u128(((i as u128) + 1) << 96),
                 policy_name: format!("test-policy-{i}"),
+                enforcement_mode: Default::default(),
                 policy,
             })
             .collect();
@@ -3876,7 +4219,7 @@ in {{ {fields} }}"#
         ];
         let map = policies_map_for(policies);
         let expr = build_nix_eval_expression("github:user/repo", &map);
-        // Stable keys: policy_00000000000000000000000000000001 and _2
+        // Enforce keys retain the legacy first-eight-character UUID format.
         assert!(expr.contains("crystal-forge-agent.enable"));
         assert!(expr.contains("test-config"));
         assert!(expr.contains("policyCheckers"));
@@ -3884,10 +4227,13 @@ in {{ {fields} }}"#
 
     #[test]
     fn require_packages_policies_get_distinct_field_names() {
-        let id1 = uuid::Uuid::from_u128(1);
-        let id2 = uuid::Uuid::from_u128(2);
+        let id1 = uuid::Uuid::parse_str("12345678-0000-0000-0000-000000000001").unwrap();
+        let id2 = uuid::Uuid::parse_str("87654321-0000-0000-0000-000000000002").unwrap();
         let key1 = policy_result_key(&id1);
         let key2 = policy_result_key(&id2);
+
+        assert_eq!(key1, "policy_12345678");
+        assert_eq!(key2, "policy_87654321");
 
         let mut map = PoliciesByConfiguration::new();
         map.insert(
@@ -3896,6 +4242,7 @@ in {{ {fields} }}"#
                 AssignedPolicy {
                     policy_id: id1,
                     policy_name: "require-grafana".to_string(),
+                    enforcement_mode: Default::default(),
                     policy: DeploymentPolicy::RequirePackages {
                         packages: vec!["grafana".to_string()],
                         strict: true,
@@ -3904,6 +4251,7 @@ in {{ {fields} }}"#
                 AssignedPolicy {
                     policy_id: id2,
                     policy_name: "require-neovim".to_string(),
+                    enforcement_mode: Default::default(),
                     policy: DeploymentPolicy::RequirePackages {
                         packages: vec!["neovim".to_string()],
                         strict: true,
@@ -3916,6 +4264,23 @@ in {{ {fields} }}"#
         assert!(expr.contains(&key1), "must contain key for policy id1");
         assert!(expr.contains(&key2), "must contain key for policy id2");
         assert_ne!(key1, key2, "keys must be distinct");
+    }
+
+    #[test]
+    fn enforce_policy_result_key_preserves_legacy_uuid_prefix() {
+        let first = uuid::Uuid::parse_str("12345678-0000-0000-0000-000000000001").unwrap();
+        let same_prefix = uuid::Uuid::parse_str("12345678-ffff-ffff-ffff-ffffffffffff").unwrap();
+
+        assert_eq!(policy_result_key(&first), "policy_12345678");
+        assert_eq!(policy_result_key(&same_prefix), "policy_12345678");
+        assert_eq!(
+            report_only_custom_result_key_base(&first),
+            "policy_12345678000000000000000000000001_report_only"
+        );
+        assert_ne!(
+            report_only_custom_result_key_base(&first),
+            report_only_custom_result_key_base(&same_prefix)
+        );
     }
 
     #[test]
@@ -3957,11 +4322,13 @@ in {{ {fields} }}"#
                 AssignedPolicy {
                     policy_id: id1,
                     policy_name: "require-cf-agent".to_string(),
+                    enforcement_mode: Default::default(),
                     policy: DeploymentPolicy::RequireCrystalForgeAgent { strict: true },
                 },
                 AssignedPolicy {
                     policy_id: id2,
                     policy_name: "require-cve-check".to_string(),
+                    enforcement_mode: Default::default(),
                     policy: DeploymentPolicy::RequireCveCheck {
                         config: CveCheckConfig::default(),
                     },
@@ -4136,6 +4503,7 @@ in {{ {fields} }}"#
             vec![AssignedPolicy {
                 policy_id: uuid::Uuid::from_u128(1),
                 policy_name: "require-grafana".to_string(),
+                enforcement_mode: Default::default(),
                 policy: DeploymentPolicy::RequirePackages {
                     packages: vec!["grafana".to_string()],
                     strict: true,
@@ -4170,6 +4538,7 @@ in {{ {fields} }}"#
         let assigned = vec![AssignedPolicy {
             policy_id: uuid::Uuid::from_u128(1),
             policy_name: "require-cf-agent".to_string(),
+            enforcement_mode: Default::default(),
             policy: DeploymentPolicy::RequireCrystalForgeAgent { strict: true },
         }];
 
@@ -4196,6 +4565,7 @@ in {{ {fields} }}"#
             vec![AssignedPolicy {
                 policy_id: uuid::Uuid::from_u128(1),
                 policy_name: "firewall-enabled".to_string(),
+                enforcement_mode: Default::default(),
                 policy: DeploymentPolicy::CustomCheck {
                     expression: "config.networking.firewall.enable".to_string(),
                     description: "firewall".to_string(),
@@ -4227,6 +4597,7 @@ in {{ {fields} }}"#
             vec![AssignedPolicy {
                 policy_id: uuid::Uuid::from_u128(1),
                 policy_name: "ssh-and-firewall".to_string(),
+                enforcement_mode: Default::default(),
                 policy: DeploymentPolicy::CustomCheck {
                     expression: String::new(),
                     description: "ssh-and-firewall".to_string(),
@@ -4278,21 +4649,24 @@ in {{ {fields} }}"#
     fn generated_policy_fields_evaluate_without_undefined_variables() {
         let assigned = vec![
             AssignedPolicy {
-                policy_id: uuid::Uuid::from_u128(1),
+                policy_id: uuid::Uuid::from_u128(1 << 96),
                 policy_name: "require-cf-agent".to_string(),
+                enforcement_mode: Default::default(),
                 policy: DeploymentPolicy::RequireCrystalForgeAgent { strict: true },
             },
             AssignedPolicy {
-                policy_id: uuid::Uuid::from_u128(2),
+                policy_id: uuid::Uuid::from_u128(2 << 96),
                 policy_name: "require-grafana".to_string(),
+                enforcement_mode: Default::default(),
                 policy: DeploymentPolicy::RequirePackages {
                     packages: vec!["grafana".to_string()],
                     strict: true,
                 },
             },
             AssignedPolicy {
-                policy_id: uuid::Uuid::from_u128(3),
+                policy_id: uuid::Uuid::from_u128(3 << 96),
                 policy_name: "ssh-and-firewall".to_string(),
+                enforcement_mode: Default::default(),
                 policy: DeploymentPolicy::CustomCheck {
                     expression: String::new(),
                     description: "ssh-and-firewall".to_string(),
@@ -4321,8 +4695,8 @@ in {{ {fields} }}"#
         assert!(!field_lines.is_empty());
 
         let fields = field_lines.join("\n");
-        let agent_key = policy_result_key(&uuid::Uuid::from_u128(1));
-        let package_key = policy_result_key(&uuid::Uuid::from_u128(2));
+        let agent_key = policy_result_key(&uuid::Uuid::from_u128(1 << 96));
+        let package_key = policy_result_key(&uuid::Uuid::from_u128(2 << 96));
 
         let expr = format!(
             r#"
@@ -4444,6 +4818,7 @@ in {{
         let assigned = vec![AssignedPolicy {
             policy_id,
             policy_name: "require-grafana".to_string(),
+            enforcement_mode: Default::default(),
             policy: DeploymentPolicy::RequirePackages {
                 packages: vec!["grafana".to_string()],
                 strict: true,
@@ -4475,6 +4850,7 @@ in {{
         let assigned = vec![AssignedPolicy {
             policy_id,
             policy_name: "firewall-enabled".to_string(),
+            enforcement_mode: Default::default(),
             policy: DeploymentPolicy::CustomCheck {
                 expression: "cfg.config.networking.firewall.enable".to_string(),
                 description: "firewall".to_string(),
@@ -4517,6 +4893,7 @@ in {{
         let assigned = vec![AssignedPolicy {
             policy_id: uuid::Uuid::from_u128(1),
             policy_name: "spoof-agent".to_string(),
+            enforcement_mode: Default::default(),
             policy: DeploymentPolicy::CustomCheck {
                 expression: "true".to_string(),
                 description: "spoof agent".to_string(),
@@ -4542,6 +4919,7 @@ in {{
         let assigned = vec![AssignedPolicy {
             policy_id: uuid::Uuid::from_u128(1),
             policy_name: "mixed-rules".to_string(),
+            enforcement_mode: Default::default(),
             policy: DeploymentPolicy::CustomCheck {
                 expression: String::new(),
                 description: "mixed rules".to_string(),
@@ -4587,6 +4965,7 @@ in {{
         let assigned = vec![AssignedPolicy {
             policy_id,
             policy_name: "failme".to_string(),
+            enforcement_mode: Default::default(),
             policy: DeploymentPolicy::RequirePackages {
                 packages: vec!["grafana".to_string()],
                 strict: true,
@@ -4634,6 +5013,510 @@ in {{
         );
     }
 
+    #[test]
+    fn strict_report_only_nix_failure_retains_evidence_without_blocking() {
+        let package_id = uuid::Uuid::from_u128(2);
+        let single_id = uuid::Uuid::from_u128(3);
+        let multi_id = uuid::Uuid::from_u128(4);
+        let composite_id = uuid::Uuid::from_u128(5);
+        let composite_config = validate_policy_type_config(
+            COMPOSITE_POLICY_TYPE,
+            &single_composite_rule(
+                "custom_eval",
+                serde_json::json!({"expression": "false", "message": "composite"}),
+            ),
+        )
+        .unwrap()
+        .unwrap();
+        let composite_rule_id = composite_config.rules[0].id;
+        let assigned = vec![
+            AssignedPolicy {
+                policy_id: package_id,
+                policy_name: "report-only packages".to_string(),
+                enforcement_mode: AssignedPolicyEnforcementMode::ReportOnly,
+                policy: DeploymentPolicy::RequirePackages {
+                    packages: vec!["grafana".to_string()],
+                    strict: true,
+                },
+            },
+            AssignedPolicy {
+                policy_id: single_id,
+                policy_name: "report-only single".to_string(),
+                enforcement_mode: AssignedPolicyEnforcementMode::ReportOnly,
+                policy: DeploymentPolicy::CustomCheck {
+                    expression: "false".to_string(),
+                    description: "single failed".to_string(),
+                    field_name: "singleCheck".to_string(),
+                    strict: true,
+                    rules: Vec::new(),
+                    mode: RuleMode::All,
+                },
+            },
+            AssignedPolicy {
+                policy_id: multi_id,
+                policy_name: "report-only multi".to_string(),
+                enforcement_mode: AssignedPolicyEnforcementMode::ReportOnly,
+                policy: DeploymentPolicy::CustomCheck {
+                    expression: String::new(),
+                    description: "multi failed".to_string(),
+                    field_name: "multiCheck".to_string(),
+                    strict: true,
+                    rules: vec![PolicyRule {
+                        expression: "false".to_string(),
+                        description: "multi rule failed".to_string(),
+                        field_name: "multiRule".to_string(),
+                        strict: true,
+                    }],
+                    mode: RuleMode::All,
+                },
+            },
+            AssignedPolicy {
+                policy_id: composite_id,
+                policy_name: "report-only composite".to_string(),
+                enforcement_mode: AssignedPolicyEnforcementMode::ReportOnly,
+                policy: DeploymentPolicy::Composite {
+                    config: composite_config,
+                },
+            },
+        ];
+        let check = PolicyCheckResult::from_assigned(
+            "gray".to_string(),
+            &serde_json::json!({
+                "cfAgentEnabled": true,
+                policy_result_key(&package_id): false,
+                report_only_custom_result_key_base(&single_id): { "success": true, "value": false },
+                report_only_custom_rule_result_key_base(&multi_id, 0): { "success": true, "value": false },
+                composite_rule_result_key(&composite_id, &composite_rule_id): {
+                    "success": true,
+                    "value": false,
+                },
+            }),
+            &assigned,
+        )
+        .expect("report-only policy metadata should parse");
+
+        for policy_id in [package_id, single_id, multi_id, composite_id] {
+            assert_eq!(check.assigned_results[&policy_id].passed, Some(false));
+            assert!(!check.assigned_results[&policy_id].blocking);
+        }
+        assert!(
+            check.assigned_results[&composite_id]
+                .composite_outcomes
+                .iter()
+                .all(|outcome| !outcome.blocking)
+        );
+        assert!(!check.warnings.is_empty());
+        assert!(!check.failed_policies.is_empty());
+        assert!(check.failed_policies.iter().all(|(_, blocking)| !blocking));
+        assert!(check.meets_requirements);
+        assert!(policy_requirements_met(&check));
+
+        let persisted = policy_results_json(&check, &assigned);
+        for policy_id in [package_id, single_id, multi_id, composite_id] {
+            let result = &persisted["assigned"][policy_id.to_string()];
+            assert_eq!(result["passed"], false);
+            assert_eq!(result["strict"], true);
+            assert_eq!(result["enforcement_mode"], "report_only");
+            assert_eq!(result["blocking"], false);
+        }
+        assert_eq!(
+            persisted["assigned"][package_id.to_string()]["details"],
+            "Missing required packages: grafana"
+        );
+    }
+
+    #[test]
+    fn prior_report_only_failure_cannot_hide_enforced_top_level_strict_failure() {
+        let report_only_id = Uuid::from_u128(1);
+        let enforce_id = Uuid::from_u128(2);
+        let assigned = vec![
+            AssignedPolicy {
+                policy_id: report_only_id,
+                policy_name: "report-only first".to_string(),
+                enforcement_mode: AssignedPolicyEnforcementMode::ReportOnly,
+                policy: DeploymentPolicy::CustomCheck {
+                    expression: "false".to_string(),
+                    description: "report-only failure".to_string(),
+                    field_name: "reportOnly".to_string(),
+                    strict: true,
+                    rules: Vec::new(),
+                    mode: RuleMode::All,
+                },
+            },
+            AssignedPolicy {
+                policy_id: enforce_id,
+                policy_name: "enforced second".to_string(),
+                enforcement_mode: AssignedPolicyEnforcementMode::Enforce,
+                policy: DeploymentPolicy::CustomCheck {
+                    expression: String::new(),
+                    description: "top-level strict".to_string(),
+                    field_name: "enforced".to_string(),
+                    strict: true,
+                    rules: vec![PolicyRule {
+                        expression: "false".to_string(),
+                        description: "non-strict constituent".to_string(),
+                        field_name: "nonStrictRule".to_string(),
+                        strict: false,
+                    }],
+                    mode: RuleMode::All,
+                },
+            },
+        ];
+        let check = PolicyCheckResult::from_assigned(
+            "host".to_string(),
+            &serde_json::json!({
+                "cfAgentEnabled": true,
+                report_only_custom_result_key_base(&report_only_id): {
+                    "success": true,
+                    "value": false
+                },
+                "nonStrictRule": false,
+            }),
+            &assigned,
+        )
+        .expect("mixed mode metadata must parse");
+
+        assert!(!check.meets_requirements);
+        assert!(!policy_requirements_met(&check));
+        assert!(
+            check.failed_policies.iter().any(
+                |(description, blocking)| *blocking && description.contains("Multi-rule check")
+            )
+        );
+    }
+
+    #[test]
+    fn strict_constituent_controls_effective_multi_rule_blocking() {
+        let enforce_id = Uuid::from_u128(1);
+        let report_only_id = Uuid::from_u128(2);
+        let policy = |policy_id, field_name: &str, enforcement_mode| AssignedPolicy {
+            policy_id,
+            policy_name: field_name.to_string(),
+            enforcement_mode,
+            policy: DeploymentPolicy::CustomCheck {
+                expression: String::new(),
+                description: "top-level non-strict".to_string(),
+                field_name: format!("{field_name}Parent"),
+                strict: false,
+                rules: vec![PolicyRule {
+                    expression: "false".to_string(),
+                    description: "strict constituent".to_string(),
+                    field_name: field_name.to_string(),
+                    strict: true,
+                }],
+                mode: RuleMode::All,
+            },
+        };
+        let assigned = vec![
+            policy(
+                enforce_id,
+                "enforcedRule",
+                AssignedPolicyEnforcementMode::Enforce,
+            ),
+            policy(
+                report_only_id,
+                "reportOnlyRule",
+                AssignedPolicyEnforcementMode::ReportOnly,
+            ),
+        ];
+        let check = PolicyCheckResult::from_assigned(
+            "host".to_string(),
+            &serde_json::json!({
+                "cfAgentEnabled": true,
+                "enforcedRule": false,
+                report_only_custom_rule_result_key_base(&report_only_id, 0): {
+                    "success": true,
+                    "value": false
+                },
+            }),
+            &assigned,
+        )
+        .expect("multi-rule metadata must parse");
+
+        assert!(check.assigned_results[&enforce_id].blocking);
+        assert!(!check.assigned_results[&report_only_id].blocking);
+        let persisted = policy_results_json(&check, &assigned);
+        assert_eq!(
+            persisted["assigned"][enforce_id.to_string()]["strict"],
+            false
+        );
+        assert_eq!(
+            persisted["assigned"][enforce_id.to_string()]["blocking"],
+            true
+        );
+        assert_eq!(
+            persisted["assigned"][report_only_id.to_string()]["strict"],
+            false
+        );
+        assert_eq!(
+            persisted["assigned"][report_only_id.to_string()]["blocking"],
+            false
+        );
+    }
+
+    #[test]
+    fn report_only_custom_fields_are_tagged_while_enforce_fields_remain_boolean() {
+        let policy = |mode| AssignedPolicy {
+            policy_id: Uuid::from_u128(1),
+            policy_name: "legacy custom".to_string(),
+            enforcement_mode: mode,
+            policy: DeploymentPolicy::CustomCheck {
+                expression: "throw \"sentinel\"".to_string(),
+                description: "legacy".to_string(),
+                field_name: "legacyCheck".to_string(),
+                strict: true,
+                rules: Vec::new(),
+                mode: RuleMode::All,
+            },
+        };
+        let enforce = build_policy_fields_for_config_standalone(&[policy(
+            AssignedPolicyEnforcementMode::Enforce,
+        )])
+        .join("\n");
+        let report_only = build_policy_fields_for_config_standalone(&[policy(
+            AssignedPolicyEnforcementMode::ReportOnly,
+        )])
+        .join("\n");
+
+        assert!(enforce.contains("= throw \"sentinel\";"));
+        assert!(!enforce.contains("builtins.tryEval"));
+        assert!(report_only.contains("builtins.tryEval"));
+        assert!(report_only.contains("success = isBoolean"));
+        assert!(enforce.contains("\"legacyCheck\" ="));
+        assert!(!report_only.contains("\"legacyCheck\" ="));
+        assert!(report_only.contains(&format!(
+            "\"{}\" =",
+            report_only_custom_result_key_base(&Uuid::from_u128(1))
+        )));
+    }
+
+    #[test]
+    fn report_only_custom_key_allocation_avoids_enforce_field_collision() {
+        let enforce_id = Uuid::from_u128(11);
+        let report_only_id = Uuid::from_u128(12);
+        let report_only_base = report_only_custom_result_key_base(&report_only_id);
+        let assigned = vec![
+            AssignedPolicy {
+                policy_id: report_only_id,
+                policy_name: "report only".to_string(),
+                enforcement_mode: AssignedPolicyEnforcementMode::ReportOnly,
+                policy: DeploymentPolicy::CustomCheck {
+                    expression: "false".to_string(),
+                    description: "report-only failure".to_string(),
+                    field_name: "configuredReportName".to_string(),
+                    strict: true,
+                    rules: Vec::new(),
+                    mode: RuleMode::All,
+                },
+            },
+            AssignedPolicy {
+                policy_id: enforce_id,
+                policy_name: "enforce".to_string(),
+                enforcement_mode: AssignedPolicyEnforcementMode::Enforce,
+                policy: DeploymentPolicy::CustomCheck {
+                    expression: "true".to_string(),
+                    description: "enforced pass".to_string(),
+                    field_name: report_only_base.clone(),
+                    strict: true,
+                    rules: Vec::new(),
+                    mode: RuleMode::All,
+                },
+            },
+        ];
+        let result_keys = assigned_policy_result_keys(&assigned);
+        let allocated = result_keys.report_only_custom(report_only_id, None);
+        assert_eq!(allocated, format!("{report_only_base}_1"));
+        let mut reversed = assigned.clone();
+        reversed.reverse();
+        assert_eq!(
+            assigned_policy_result_keys(&reversed).report_only_custom(report_only_id, None),
+            allocated
+        );
+
+        let fields = build_policy_fields_for_config_standalone(&assigned).join("\n");
+        assert!(fields.contains(&format!("\"{report_only_base}\" = true;")));
+        assert!(fields.contains(&format!("\"{allocated}\" = let attempt")));
+        let bulk = build_nix_eval_expression(
+            "github:user/repo/0123456789abcdef0123456789abcdef01234567",
+            &BTreeMap::from([("host".to_string(), assigned.clone())]),
+        );
+        assert!(bulk.contains(&format!("\"{report_only_base}\" = true;")));
+        assert!(bulk.contains(&format!("\"{allocated}\" = let attempt")));
+        let check = PolicyCheckResult::from_assigned(
+            "host".to_string(),
+            &serde_json::json!({
+                "cfAgentEnabled": true,
+                report_only_base: true,
+                allocated: { "success": true, "value": false },
+            }),
+            &assigned,
+        )
+        .expect("generation and parsing must use the same allocated keys");
+
+        assert_eq!(check.assigned_results[&enforce_id].passed, Some(true));
+        assert_eq!(check.assigned_results[&report_only_id].passed, Some(false));
+        assert!(!check.assigned_results[&report_only_id].blocking);
+        assert!(policy_requirements_met(&check));
+        let persisted = policy_results_json(&check, &assigned);
+        assert_eq!(
+            persisted["assigned"][enforce_id.to_string()]["passed"],
+            true
+        );
+        assert_eq!(
+            persisted["assigned"][report_only_id.to_string()]["passed"],
+            false
+        );
+        assert_eq!(
+            persisted["assigned"][report_only_id.to_string()]["blocking"],
+            false
+        );
+    }
+
+    #[test]
+    #[ignore = "requires Nix evaluator in PATH"]
+    fn enforce_custom_field_matching_report_only_base_is_collision_free_in_real_nix() {
+        let enforce_id = Uuid::from_u128(11);
+        let report_single_id = Uuid::from_u128(12);
+        let report_multi_id = Uuid::from_u128(13);
+        let report_only_base = report_only_custom_result_key_base(&report_single_id);
+        let single =
+            |policy_id, enforcement_mode, expression: &str, field_name: &str| AssignedPolicy {
+                policy_id,
+                policy_name: policy_id.to_string(),
+                enforcement_mode,
+                policy: DeploymentPolicy::CustomCheck {
+                    expression: expression.to_string(),
+                    description: policy_id.to_string(),
+                    field_name: field_name.to_string(),
+                    strict: true,
+                    rules: Vec::new(),
+                    mode: RuleMode::All,
+                },
+            };
+        let assigned = vec![
+            single(
+                enforce_id,
+                AssignedPolicyEnforcementMode::Enforce,
+                "true",
+                &report_only_base,
+            ),
+            single(
+                report_single_id,
+                AssignedPolicyEnforcementMode::ReportOnly,
+                "false",
+                "duplicateField",
+            ),
+            AssignedPolicy {
+                policy_id: report_multi_id,
+                policy_name: "report multi".to_string(),
+                enforcement_mode: AssignedPolicyEnforcementMode::ReportOnly,
+                policy: DeploymentPolicy::CustomCheck {
+                    expression: String::new(),
+                    description: "report multi".to_string(),
+                    field_name: "duplicateField".to_string(),
+                    strict: true,
+                    rules: vec![PolicyRule {
+                        expression: "false".to_string(),
+                        description: "report rule".to_string(),
+                        field_name: "duplicateField".to_string(),
+                        strict: true,
+                    }],
+                    mode: RuleMode::All,
+                },
+            },
+        ];
+        let fields = build_policy_fields_for_config_standalone(&assigned).join("\n");
+        let evaluated = nix_eval_json(&format!(
+            "let config = {{}}; in {{ cfAgentEnabled = true; {fields} }}"
+        ));
+        let check = PolicyCheckResult::from_assigned("host".to_string(), &evaluated, &assigned)
+            .expect("policy-scoped report-only keys must not collide");
+
+        assert_eq!(check.assigned_results[&enforce_id].passed, Some(true));
+        assert_eq!(
+            check.assigned_results[&report_single_id].passed,
+            Some(false)
+        );
+        assert_eq!(check.assigned_results[&report_multi_id].passed, Some(false));
+        assert!(!check.assigned_results[&report_single_id].blocking);
+        assert!(!check.assigned_results[&report_multi_id].blocking);
+        assert!(policy_requirements_met(&check));
+        let persisted = policy_results_json(&check, &assigned);
+        assert_eq!(persisted["assigned"].as_object().unwrap().len(), 3);
+        assert_eq!(
+            persisted["assigned"][enforce_id.to_string()]["passed"],
+            true
+        );
+        assert_eq!(
+            persisted["assigned"][report_single_id.to_string()]["passed"],
+            false
+        );
+        assert_eq!(
+            persisted["assigned"][report_multi_id.to_string()]["passed"],
+            false
+        );
+    }
+
+    #[test]
+    #[ignore = "requires Nix evaluator in PATH"]
+    fn report_only_legacy_custom_errors_are_contained_by_real_nix() {
+        let single_id = Uuid::from_u128(1);
+        let multi_id = Uuid::from_u128(2);
+        let assigned = vec![
+            AssignedPolicy {
+                policy_id: single_id,
+                policy_name: "throwing report-only check".to_string(),
+                enforcement_mode: AssignedPolicyEnforcementMode::ReportOnly,
+                policy: DeploymentPolicy::CustomCheck {
+                    expression: "throw \"sentinel\"".to_string(),
+                    description: "throwing report-only check".to_string(),
+                    field_name: "throwingCheck".to_string(),
+                    strict: true,
+                    rules: Vec::new(),
+                    mode: RuleMode::All,
+                },
+            },
+            AssignedPolicy {
+                policy_id: multi_id,
+                policy_name: "non-boolean report-only check".to_string(),
+                enforcement_mode: AssignedPolicyEnforcementMode::ReportOnly,
+                policy: DeploymentPolicy::CustomCheck {
+                    expression: String::new(),
+                    description: "non-boolean report-only check".to_string(),
+                    field_name: "unusedParent".to_string(),
+                    strict: true,
+                    rules: vec![PolicyRule {
+                        expression: "42".to_string(),
+                        description: "non-boolean constituent".to_string(),
+                        field_name: "nonBooleanRule".to_string(),
+                        strict: true,
+                    }],
+                    mode: RuleMode::All,
+                },
+            },
+        ];
+        let fields = build_policy_fields_for_config_standalone(&assigned).join("\n");
+        let evaluated = nix_eval_json(&format!(
+            "let config = {{}}; in {{ cfAgentEnabled = true; {fields} }}"
+        ));
+        let check = PolicyCheckResult::from_assigned("host".to_string(), &evaluated, &assigned)
+            .expect("contained report-only results must parse");
+
+        assert!(check.meets_requirements);
+        for policy_id in [single_id, multi_id] {
+            let result = &check.assigned_results[&policy_id];
+            assert_eq!(result.passed, Some(false));
+            assert!(result.evaluation_error.is_some());
+        }
+        let persisted = policy_results_json(&check, &assigned);
+        for policy_id in [single_id, multi_id] {
+            let result = &persisted["assigned"][policy_id.to_string()];
+            assert_eq!(result["passed"], false);
+            assert_eq!(result["blocking"], false);
+            assert!(result["evaluation_error"].is_string());
+        }
+    }
+
     // ── Global CF-agent invariant regression ────────────────────────────
     //
     // Scenario from review: a configuration with NO assigned
@@ -4671,6 +5554,7 @@ in {{
         let assigned = vec![AssignedPolicy {
             policy_id,
             policy_name: "require-cf-agent".to_string(),
+            enforcement_mode: Default::default(),
             policy: DeploymentPolicy::RequireCrystalForgeAgent { strict: true },
         }];
         let check = PolicyCheckResult::from_assigned(
@@ -4702,12 +5586,13 @@ in {{
     // depending on iteration order.
     #[test]
     fn two_require_packages_policies_persist_distinct_results() {
-        let policy_a = uuid::Uuid::from_u128(0xA);
-        let policy_b = uuid::Uuid::from_u128(0xB);
+        let policy_a = uuid::Uuid::from_u128(0xA << 96);
+        let policy_b = uuid::Uuid::from_u128(0xB << 96);
         let assigned = vec![
             AssignedPolicy {
                 policy_id: policy_a,
                 policy_name: "require-grafana".to_string(),
+                enforcement_mode: Default::default(),
                 policy: DeploymentPolicy::RequirePackages {
                     packages: vec!["grafana".to_string()],
                     strict: true,
@@ -4716,6 +5601,7 @@ in {{
             AssignedPolicy {
                 policy_id: policy_b,
                 policy_name: "require-neovim".to_string(),
+                enforcement_mode: Default::default(),
                 policy: DeploymentPolicy::RequirePackages {
                     packages: vec!["neovim".to_string()],
                     strict: true,
@@ -4786,6 +5672,7 @@ in {{
         let assigned = vec![AssignedPolicy {
             policy_id,
             policy_name: "require-cf-agent".to_string(),
+            enforcement_mode: Default::default(),
             policy: DeploymentPolicy::RequireCrystalForgeAgent { strict: true },
         }];
         let policies_json = serde_json::json!({
@@ -4814,6 +5701,7 @@ in {{
         let assigned = vec![AssignedPolicy {
             policy_id,
             policy_name: "require-cf-agent".to_string(),
+            enforcement_mode: Default::default(),
             policy: DeploymentPolicy::RequireCrystalForgeAgent { strict: true },
         }];
         let policies_json = serde_json::json!({
@@ -4876,6 +5764,7 @@ in {{
         let assigned = vec![AssignedPolicy {
             policy_id,
             policy_name: "Require Crystal Forge Agent".to_string(),
+            enforcement_mode: Default::default(),
             policy: DeploymentPolicy::RequireCrystalForgeAgent { strict: false },
         }];
 

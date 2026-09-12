@@ -368,18 +368,17 @@ pub async fn get_eval_policy_matrix(
 }
 
 /// Classify a persisted policy-result object (`{"passed": .., "strict": ..,
-/// "details": ..}`, either the global `cfAgentEnabled` entry or an assigned
-/// policy entry) into a matrix cell status and detail text.
+/// "blocking": .., "details": ..}`, either the global `cfAgentEnabled` entry
+/// or an assigned policy entry) into a matrix cell status and detail text.
 ///
-/// A non-strict failure (`passed=false, strict=false`) does not block
-/// deployment — `policy_requirements_met` only gates on strict failures —
-/// so it must render as `warn`, not `fail`, or the matrix would contradict
-/// the actual queue-gating decision. Missing/non-boolean `passed`, or a
-/// `passed=false` result whose strictness is unknown, fails closed as
-/// `fail`/`infrastructure_error` rather than risking a hidden strict
-/// failure being displayed as harmless.
+/// Current documents use `blocking` because assignment mode can make an
+/// intrinsically strict failure report-only. Documents written before the
+/// field existed fall back to intrinsic `strict`. Non-boolean current metadata,
+/// missing/non-boolean `passed`, or a failed legacy result whose strictness is
+/// unknown fails closed rather than displaying an invalid result as harmless.
 fn classify_policy_result(policy_result: &serde_json::Value) -> (&'static str, Option<String>) {
     let passed = policy_result.get("passed").and_then(|v| v.as_bool());
+    let blocking = policy_result.get("blocking").and_then(|v| v.as_bool());
     let strict = policy_result.get("strict").and_then(|v| v.as_bool());
     let detail = || {
         policy_result
@@ -387,11 +386,25 @@ fn classify_policy_result(policy_result: &serde_json::Value) -> (&'static str, O
             .and_then(|v| v.as_str())
             .map(str::to_string)
     };
+    if policy_result.get("blocking").is_some() && blocking.is_none() {
+        return (
+            "infrastructure_error",
+            Some("policy result has invalid blocking metadata".to_string()),
+        );
+    }
+    if passed == Some(true) && blocking == Some(true) {
+        return (
+            "infrastructure_error",
+            Some("policy result has contradictory blocking metadata".to_string()),
+        );
+    }
 
-    match (passed, strict) {
-        (Some(true), _) => ("pass", None),
-        (Some(false), Some(false)) => ("warn", detail()),
-        (Some(false), Some(true) | None) => ("fail", detail()),
+    match (passed, blocking, strict) {
+        (Some(true), _, _) => ("pass", None),
+        (Some(false), Some(false), _) => ("warn", detail()),
+        (Some(false), Some(true), _) => ("fail", detail()),
+        (Some(false), None, Some(false)) => ("warn", detail()),
+        (Some(false), None, Some(true) | None) => ("fail", detail()),
         _ => (
             "infrastructure_error",
             Some("policy result missing or invalid".to_string()),
@@ -1095,6 +1108,76 @@ mod tests {
             matrix.systems[0].details,
             vec![None, Some("Missing optional package: htop".to_string())]
         );
+    }
+
+    #[test]
+    fn report_only_strict_failure_renders_as_warn_from_effective_blocking() {
+        let result = serde_json::json!({
+            "passed": false,
+            "strict": true,
+            "enforcement_mode": "report_only",
+            "blocking": false,
+            "details": "Report-only evidence failed"
+        });
+
+        assert_eq!(
+            classify_policy_result(&result),
+            ("warn", Some("Report-only evidence failed".to_string()))
+        );
+    }
+
+    #[test]
+    fn legacy_failure_without_blocking_falls_back_to_intrinsic_strict() {
+        let strict = serde_json::json!({ "passed": false, "strict": true });
+        let non_strict = serde_json::json!({ "passed": false, "strict": false });
+
+        assert_eq!(classify_policy_result(&strict), ("fail", None));
+        assert_eq!(classify_policy_result(&non_strict), ("warn", None));
+    }
+
+    #[test]
+    fn malformed_blocking_metadata_is_an_infrastructure_error() {
+        let result = serde_json::json!({
+            "passed": true,
+            "strict": true,
+            "blocking": "false"
+        });
+
+        assert_eq!(
+            classify_policy_result(&result),
+            (
+                "infrastructure_error",
+                Some("policy result has invalid blocking metadata".to_string())
+            )
+        );
+    }
+
+    #[test]
+    fn passed_policy_rejects_contradictory_blocking_evidence() {
+        let contradictory = serde_json::json!({
+            "passed": true,
+            "strict": true,
+            "blocking": true
+        });
+        let nonblocking = serde_json::json!({
+            "passed": true,
+            "strict": true,
+            "blocking": false
+        });
+        let legacy = serde_json::json!({
+            "passed": true,
+            "strict": true
+        });
+
+        assert_eq!(
+            classify_policy_result(&contradictory),
+            (
+                "infrastructure_error",
+                Some("policy result has contradictory blocking metadata".to_string())
+            )
+        );
+        assert_eq!(classify_policy_result(&nonblocking), ("pass", None));
+        assert_eq!(classify_policy_result(&legacy), ("pass", None));
     }
 
     /// A strict failed policy must still render as `fail`.
