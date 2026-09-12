@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-12 14:45'
+updated_date: '2026-09-12 17:39'
 labels:
   - design-parity
   - web-ui
@@ -194,6 +194,8 @@ Fix the deployment-smoke zombie compliance assignment defect from exact clean SH
 2026-09-12 review corrections for the uncommitted Config Explorer UI: remove the superseded dead RSX block; retain only certified request/token-fencing state required by the consolidated inspector; make generation scope restrictions local to Browse/Configured while preserving certified Search/Sources; derive completeness only from `OptionInventoryState::Complete`; add structured option-detail and provenance caches plus local partial search over observed/configured identities without dotted-path parsing or fanout; render dense three-column rows with explicit unavailable cells; make inventory action/lifecycle wording match current API behavior; add ARIA pressed state and focused pure-helper tests. Run targeted rustfmt, Config Explorer tests, and `git diff --check` only. No backend/API widening, browser/design/runner test changes, commit, or push.
 
 2026-09-12 Config Explorer browser/design contract correction: modify only the permitted Web UI design manifest/generator, integration browser contracts, runner expectation, and directly necessary check entries. Replace the two Config design targets and old table/sidebar assertions with semantic `.cfgx` Browse/Configured/Search/Option/Sources coverage. Make 12m the bounded comprehensive mocked Explorer workflow, including lazy configured start, structured path identities, prefix continuation and local retry, persistent detail, explicit provenance, truthful partial/complete inventory semantics, no automatic complete-inspection POST, and revision stale-response fencing. Adjust 12la/12n/12p/12q only for the consolidated Explorer contract and geometry. Verify with `node --check` for modified JavaScript, `bash -n` for the runner shell test, and `git diff --check`; do not run browser or Nix checks, commit, or push.
+
+2026-09-12 focused report-only Nix policy evaluation change from clean dedicated worktree HEAD 3708ef3a: modify only cf-server runtime policy loading/result models and docs/operator/compliance-interchange.md. Add a documented AssignedPolicy enforcement-mode model that defaults legacy/test construction to enforce; map authoritative EffectivePolicy.effective_mode in the production per-configuration loader; batch-read deployment_policy_versions implementation_state/execution_phase and admit only native nix-evaluation or multi-phase records whose parsed policy remains Nix-evaluated, while retaining the unconditional cfAgentEnabled gate. Include mode in evaluation_policy_digest. Preserve intrinsic DeploymentPolicy/PolicyRule strict values and failed evidence, but make report-only assigned outcomes nonblocking across require_packages, custom single/multi-rule, and composite parsing; persist enforcement_mode and effective outcome blocking in policy_results JSON. Add focused pure tests for report-only failed evidence/gating, digest mode sensitivity, and execution eligibility. Run rustfmt on touched Rust files, focused pure tests, SQLX_OFFLINE cf-server lib check, and git diff --check only. Do not modify migrations, Config Explorer, or Web UI; do not commit or push.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
