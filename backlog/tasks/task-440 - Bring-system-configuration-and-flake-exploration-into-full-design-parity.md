@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-12 06:45'
+updated_date: '2026-09-12 13:56'
 labels:
   - design-parity
   - web-ui
@@ -188,6 +188,8 @@ The `modifiedFiles` metadata is anticipated and non-exhaustive. The implementati
 Fix the hermetic cf-server package regression by adding the required `nix-command flakes` global feature option to the existing read-only configuration discovery argv. Update the exact argv assertion and Nix CLI invocation documentation. Run the two focused tests, `cargo fmt --check`, `git diff --check`, and the required `.#packages.x86_64-linux.server` build. Create one commit and push only after confirming the remote branch remains at `dbb04121126ea1b78b2678f7f548165bde8a5daf`.
 
 Fix the deployment-smoke zombie compliance assignment defect from exact clean SHA `32654ebd419fbde207ddc010a401249e16a92ea7`. First prove the current legacy trigger and Rust versioned-assignment authority path. Add migration 0257 to stop zombie production and deterministically repair only incomplete active lineages according to confirmed legacy semantics. Harden create with a typed incomplete-lineage conflict and safe structured PostgreSQL diagnostics. Add focused real-PostgreSQL regressions for legacy inserts, healthy create, zombie conflict, concurrency, healthy updates, and resolver/list visibility. Run focused assignment/server tests, offline cf-server check, rustfmt, and diff checks only. Create one commit and push normally only if the remote still descends from the required starting SHA.
+
+2026-09-12 accepted Config Explorer UI implementation from exact clean SHA c34670ad744f30589fefc060111aff853fbcd88f: consolidate the Config tab into one .cfgx inspector while retaining the existing deep-linked generation/commit controls as the sole revision authority. Start only shallow root on Explorer open; trigger and cache configured_index only after first Configured activation. Keep structured Vec<String> identities for tree, configured, option, and provenance requests; preserve continuation validation, local retries/errors, cancellation, and revision fences. Reuse existing certified V2 summary/search/module DTOs only for truthful complete or certified-partial inventory, comparison, and Sources presentation; do not widen backend contracts. Update config-explorer-architecture.md for lazy configured start. Add focused pure Rust tests for lazy configured triggering, display-only paths, and continuation. Run targeted rustfmt and focused Web UI unit tests only; do not run broad Nix/browser checks, commit, or push.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
