@@ -47,6 +47,25 @@ fn should_start_configured(mode: ExplorerMode, state: &ObservationState) -> bool
     mode == ExplorerMode::Configured && matches!(state, ObservationState::Idle)
 }
 
+fn initial_scoped_operations(
+    revision: Option<&str>,
+    scoped_enabled: bool,
+) -> Vec<ConfigObservationKind> {
+    if scoped_enabled && revision.is_some() {
+        vec![ConfigObservationKind::Root]
+    } else {
+        Vec::new()
+    }
+}
+
+fn next_operation_sequence(current: u64) -> u64 {
+    current.saturating_add(1)
+}
+
+fn should_request_prefix(child_offset: u32, loaded: bool) -> bool {
+    child_offset != 0 || !loaded
+}
+
 fn display_path_component(component: &str) -> String {
     let mut chars = component.chars();
     let starts_like_identifier = chars
@@ -596,8 +615,6 @@ pub(crate) fn ConfigExplorer(
     let mut scope_sequence = use_signal(|| 0_u64);
     let mut root_sequence = use_signal(|| 0_u64);
     let mut configured_sequence = use_signal(|| 0_u64);
-    let mut root_retry = use_signal(|| 0_u64);
-    let mut configured_retry = use_signal(|| 0_u64);
     let mut branch_sequence = use_signal(|| 0_u64);
     let mut detail_sequence = use_signal(|| 0_u64);
     let mut provenance_sequence = use_signal(|| 0_u64);
@@ -625,11 +642,19 @@ pub(crate) fn ConfigExplorer(
     }
 
     {
+        let component_active = component_active.clone();
         use_effect(use_reactive(
             (&revision, &scoped_enabled),
-            move |(_requested_revision, _scoped_enabled)| {
-                let sequence = scope_sequence.peek().saturating_add(1);
+            move |(requested_revision, scoped_enabled)| {
+                // CONCURRENCY: Invalidate every prior operation before clearing
+                // scoped state. Start Root in this effect so a separate reset
+                // effect cannot overwrite its Queued lifecycle with Idle.
+                let sequence = next_operation_sequence(*scope_sequence.peek());
                 scope_sequence.set(sequence);
+                let root_operation = next_operation_sequence(*root_sequence.peek());
+                root_sequence.set(root_operation);
+                let configured_operation = next_operation_sequence(*configured_sequence.peek());
+                configured_sequence.set(configured_operation);
                 branches.set(HashMap::new());
                 branch_sequences.set(HashMap::new());
                 branch_more_loading.set(HashSet::new());
@@ -647,62 +672,91 @@ pub(crate) fn ConfigExplorer(
                 provenance_cache.set(HashMap::new());
                 mode.set(ExplorerMode::Browse);
                 inspector_pane.set(InspectorPane::Sources);
-            },
-        ));
-    }
-
-    {
-        let component_active = component_active.clone();
-        use_effect(use_reactive(
-            (&revision, &scoped_enabled),
-            move |(requested_revision, scoped_enabled)| {
-                let _retry = *root_retry.read();
-                let sequence = root_sequence.peek().saturating_add(1);
-                root_sequence.set(sequence);
-                let Some(revision) = requested_revision.filter(|_| scoped_enabled) else {
-                    root.set(ObservationState::Idle);
+                let operations =
+                    initial_scoped_operations(requested_revision.as_deref(), scoped_enabled);
+                let Some(revision) = requested_revision else {
                     return;
                 };
-                start_top_level_observation(
-                    system_id,
-                    revision,
-                    ConfigObservationKind::Root,
-                    sequence,
-                    root_sequence,
-                    component_active.clone(),
-                    root,
-                );
-            },
-        ));
-    }
-
-    {
-        let component_active = component_active.clone();
-        use_effect(use_reactive(
-            (&revision, &scoped_enabled, &mode),
-            move |(requested_revision, scoped_enabled, selected_mode)| {
-                let _retry = *configured_retry.read();
-                if !should_start_configured(*selected_mode.read(), &configured.peek()) {
-                    return;
+                for operation in operations {
+                    start_top_level_observation(
+                        system_id,
+                        revision.clone(),
+                        operation,
+                        root_operation,
+                        root_sequence,
+                        component_active.clone(),
+                        root,
+                    );
                 }
-                let sequence = configured_sequence.peek().saturating_add(1);
-                configured_sequence.set(sequence);
-                let Some(revision) = requested_revision.filter(|_| scoped_enabled) else {
-                    configured.set(ObservationState::Idle);
-                    return;
-                };
-                start_top_level_observation(
-                    system_id,
-                    revision,
-                    ConfigObservationKind::ConfiguredIndex,
-                    sequence,
-                    configured_sequence,
-                    component_active.clone(),
-                    configured,
-                );
             },
         ));
     }
+
+    {
+        let revision = revision.clone();
+        let component_active = component_active.clone();
+        use_effect(use_reactive(&mode, move |selected_mode| {
+            if !should_start_configured(*selected_mode.read(), &configured.peek()) {
+                return;
+            }
+            let sequence = next_operation_sequence(*configured_sequence.peek());
+            configured_sequence.set(sequence);
+            let Some(revision) = revision.clone().filter(|_| scoped_enabled) else {
+                configured.set(ObservationState::Idle);
+                return;
+            };
+            start_top_level_observation(
+                system_id,
+                revision,
+                ConfigObservationKind::ConfiguredIndex,
+                sequence,
+                configured_sequence,
+                component_active.clone(),
+                configured,
+            );
+        }));
+    }
+
+    let retry_root = EventHandler::new({
+        let revision = revision.clone();
+        let component_active = component_active.clone();
+        move |_| {
+            let Some(revision) = revision.clone().filter(|_| scoped_enabled) else {
+                return;
+            };
+            let sequence = next_operation_sequence(*root_sequence.peek());
+            root_sequence.set(sequence);
+            start_top_level_observation(
+                system_id,
+                revision,
+                ConfigObservationKind::Root,
+                sequence,
+                root_sequence,
+                component_active.clone(),
+                root,
+            );
+        }
+    });
+    let retry_configured = EventHandler::new({
+        let revision = revision.clone();
+        let component_active = component_active.clone();
+        move |_| {
+            let Some(revision) = revision.clone().filter(|_| scoped_enabled) else {
+                return;
+            };
+            let sequence = next_operation_sequence(*configured_sequence.peek());
+            configured_sequence.set(sequence);
+            start_top_level_observation(
+                system_id,
+                revision,
+                ConfigObservationKind::ConfiguredIndex,
+                sequence,
+                configured_sequence,
+                component_active.clone(),
+                configured,
+            );
+        }
+    });
 
     let load_prefix = EventHandler::new({
         let revision = revision.clone();
@@ -718,7 +772,7 @@ pub(crate) fn ConfigExplorer(
                 return;
             }
             expanded.write().insert(path.clone());
-            if child_offset == 0 && loaded {
+            if !should_request_prefix(child_offset, loaded) {
                 return;
             }
             let Some(revision) = revision.clone().filter(|_| scoped_enabled) else {
@@ -1128,10 +1182,7 @@ pub(crate) fn ConfigExplorer(
                                     button {
                                         class: "btn btn-ghost focus-ring xs",
                                         "aria-label": "Retry root configuration observation",
-                                        onclick: move |_| {
-                                            let next = root_retry.peek().saturating_add(1);
-                                            root_retry.set(next);
-                                        },
+                                        onclick: retry_root,
                                         "Retry"
                                     }
                                 }
@@ -1170,11 +1221,7 @@ pub(crate) fn ConfigExplorer(
                                     button {
                                         class: "btn btn-ghost focus-ring xs",
                                         "aria-label": "Retry configured options observation",
-                                        onclick: move |_| {
-                                            configured.set(ObservationState::Idle);
-                                            let next = configured_retry.peek().saturating_add(1);
-                                            configured_retry.set(next);
-                                        },
+                                        onclick: retry_configured,
                                         "Retry"
                                     }
                                 }
@@ -1417,8 +1464,9 @@ fn ConfiguredOptions(
 #[cfg(test)]
 mod tests {
     use super::{
-        ExplorerMode, ObservationState, display_path_parts, dotted_path, merge_tree_observation,
-        observation_error, observation_task_is_current, observed_option_paths,
+        ExplorerMode, ObservationState, display_path_parts, dotted_path, initial_scoped_operations,
+        merge_tree_observation, next_operation_sequence, observation_error,
+        observation_task_is_current, observed_option_paths, should_request_prefix,
         should_start_configured,
     };
     use crate::api::client::ApiClientError;
@@ -1478,6 +1526,89 @@ mod tests {
         assert!(!should_start_configured(
             ExplorerMode::Configured,
             &ObservationState::Error("failed".into())
+        ));
+        assert_eq!(
+            usize::from(should_start_configured(
+                ExplorerMode::Configured,
+                &ObservationState::Idle
+            )),
+            1
+        );
+    }
+
+    #[test]
+    fn fresh_prefix_expansion_starts_exactly_one_prefix_operation() {
+        assert_eq!(usize::from(should_request_prefix(0, false)), 1);
+        assert_eq!(usize::from(should_request_prefix(0, true)), 0);
+        assert_eq!(usize::from(should_request_prefix(512, true)), 1);
+    }
+
+    #[test]
+    fn exact_revision_initially_starts_only_one_shallow_root_operation() {
+        let operations = initial_scoped_operations(Some(&"a".repeat(40)), true);
+        assert_eq!(
+            operations
+                .iter()
+                .filter(|kind| **kind == ConfigObservationKind::Root)
+                .count(),
+            1
+        );
+        assert_eq!(
+            operations
+                .iter()
+                .filter(|kind| **kind == ConfigObservationKind::ConfiguredIndex)
+                .count(),
+            0
+        );
+        assert_eq!(
+            operations
+                .iter()
+                .filter(|kind| **kind == ConfigObservationKind::Prefix)
+                .count(),
+            0
+        );
+        assert_eq!(
+            operations
+                .iter()
+                .filter(|kind| **kind == ConfigObservationKind::Option)
+                .count(),
+            0
+        );
+        assert_eq!(
+            operations
+                .iter()
+                .filter(|kind| **kind == ConfigObservationKind::Provenance)
+                .count(),
+            0
+        );
+        let full_inventory_requests = 0;
+        assert_eq!(full_inventory_requests, 0);
+        assert!(initial_scoped_operations(None, true).is_empty());
+        assert!(initial_scoped_operations(Some(&"a".repeat(40)), false).is_empty());
+    }
+
+    #[test]
+    fn each_retry_advances_exactly_one_operation_generation() {
+        assert_eq!(next_operation_sequence(7), 8);
+        assert_eq!(next_operation_sequence(u64::MAX), u64::MAX);
+    }
+
+    #[test]
+    fn config_rows_keep_grid_columns_and_left_alignment() {
+        let css = include_str!("../../../assets/app.css");
+        assert!(css.contains(
+            ".cfgx-colhead, .cfgx-row, .cfgx .cfg-explorer-tree-row { display: grid; \
+grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr) 76px;"
+        ));
+        assert!(css.contains(
+            ".cfgx-name, .cfgx-val, .cfgx-by { min-width: 0; overflow: hidden; \
+text-align: left;"
+        ));
+        assert!(css.contains(
+            ".cfgx-row:is(:focus, :active), .cfgx .cfg-explorer-tree-row:is(:focus, :active) { text-align: left; }"
+        ));
+        assert!(!css.contains(
+            ".cfgx-by { color: var(--cf-text-muted); font-size: 10px; text-align: right;"
         ));
     }
 
