@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-12 19:34'
+updated_date: '2026-09-12 20:04'
 labels:
   - design-parity
   - web-ui
@@ -202,6 +202,8 @@ Fix the deployment-smoke zombie compliance assignment defect from exact clean SH
 2026-09-12 upgrade-compatibility correction for the uncommitted report-only evaluator diff: keep canonical enforce-only digests for new assessment writes. Add a shared assessment-selection helper that accepts canonical rows directly and accepts pre-change complete-resolver-digest rows only when their persisted policy-version/config-digest set exactly equals the current enforced composite contexts and all required rule rows are structurally complete and valid. Reuse the same compatibility classification in deployment authorization, current POA&M assessment validation, and POA&M verification selection. Add pure digest/set classification tests plus PostgreSQL regressions for unchanged legacy evidence, report-only/non-composite-only changes, and enforced composite version/config changes. Update operator documentation for the bounded legacy path. Run targeted rustfmt/tests, SQLX_OFFLINE cf-server lib check, and git diff --check only; no migration, UI, commit, or push.
 
 2026-09-12 final review corrections for the uncommitted report-only/composite compatibility slice: remove current-version filtering from exact-target composite assessment loads so structural group validation observes and rejects removed or newly report-only policies; add deployment and POA&M regressions for enforce removal and enforce-to-report-only transitions. Keep enforce custom-check field names unchanged, but generate and parse UUID-scoped report-only result keys with deterministic rule ordinals in bulk and standalone evaluators; add duplicate-field pure and real-Nix persistence regressions. Split executable-policy parsing by effective mode so malformed enforce records remain deterministic failures while malformed report-only records are skipped with structured identifiers and a digest placeholder that preserves shared-configuration conflict detection; add focused helper tests and operator documentation. Run touched rustfmt, focused pure/real-Nix/PostgreSQL tests, SQLX_OFFLINE cf-server lib check, and git diff --check only. Do not add migrations or change UI/Config Explorer; do not commit or push.
+
+2026-09-12 result-key collision correction for the current uncommitted report-only evaluator slice: add one deterministic assignment-slice-wide key allocator in deployment_policies.rs. Reserve built-in metadata keys plus every enforce custom field name and every stable built-in/composite result key before allocating UUID/ordinal-based report-only custom keys with deterministic suffixes. Use the same allocation map in bulk and standalone Nix field generation and PolicyCheckResult::from_assigned parsing, preserving all enforce keys and legacy behavior. Add pure and real-Nix regressions where an enforce custom field equals a report-only base key and prove independent parse/persistence with a nonblocking report-only failure. Update operator/source documentation. Verify touched Rust formatting, focused tests, SQLX_OFFLINE cf-server lib check, and git diff --check only. Do not commit or push.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
