@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-12 20:04'
+updated_date: '2026-09-12 20:20'
 labels:
   - design-parity
   - web-ui
@@ -318,6 +318,8 @@ Commit B was created locally as df58dbd6b408cfa1d718dd766690f3834201f033 with ex
 2026-09-12 exact blocking persistence correction verified. `AssignedPolicyCheckResult.blocking` is now the per-policy source for persisted matrix results; classification prefers effective `blocking`, preserves legacy `strict` fallback when the field is absent, and treats present non-boolean blocking metadata as `infrastructure_error`. Focused `blocking` tests passed (7 passed, 3 ignored), focused `report_only` tests passed (5 passed, 1 ignored), and the previously run real-Nix report-only containment and terminal-outcome regressions passed. Final `SQLX_OFFLINE=true cargo check --offline -p cf-server --lib`, cargo fmt check, and `git diff --check` passed with existing repository warnings. No broad checks, commit, or push were performed.
 
 2026-09-12 report-only evaluator and legacy composite-assessment compatibility slice is implemented but remains uncommitted. New assessment writes use an enforce-only composite authorization digest; report-only assignments retain failed evidence without blocking; deployment authorization and POA&M creation/verification accept only one structurally exact legacy complete-digest group. Focused verification passed: report_only lib filter (5 passed, real-Nix test ignored by default), explicit ignored real-Nix regression (1 passed), evaluation policy digest test (1 passed), legacy compatibility classifier (1 passed), composite PostgreSQL legacy/change tests (2 passed), report-only assignment PostgreSQL authorization test (1 passed), POA&M legacy creation/verification PostgreSQL lifecycle test (1 passed), SQLX_OFFLINE cf-server lib check, cf-server cargo fmt check, and git diff --check. Existing compiler warnings remain. No migration, UI change, commit, push, MR update, merge, or deployment was performed.
+
+2026-09-12 result-key collision correction final review: inspected the shared assignment-slice allocator, parser and bulk/standalone generator call sites, focused regressions, and operator documentation. No semantic gap was found. Verified `nix develop -c cargo fmt --manifest-path packages/default/Cargo.toml --package cf-server -- --check`; the pure collision regression (1 passed); the ignored real-Nix collision regression (1 passed); `nix develop -c env SQLX_OFFLINE=true cargo check --offline --manifest-path packages/default/Cargo.toml -p cf-server --lib`; and `git diff --check`. Existing compiler warnings and one ignored Nix eval-cache busy message remain non-blocking. The first test reruns used an unqualified name with `--exact` and selected zero tests; corrected reruns without `--exact` executed and passed the intended tests. Slice is ready for the requested next review step. No commit or push was performed.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
