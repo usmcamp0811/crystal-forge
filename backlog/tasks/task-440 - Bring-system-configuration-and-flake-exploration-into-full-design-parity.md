@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-12 21:37'
+updated_date: '2026-09-12 21:46'
 labels:
   - design-parity
   - web-ui
@@ -61,6 +61,8 @@ references:
   - git commit 3708ef3abe94c52778d2dfe1f1fc86a4596e08cb
   - git commit 54278885f2212d0cb15045fab1708da7ad89ce4b
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2843619053'
+  - git commit 606b3a90178a76251f2dae839023ce49890ec083
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2843645262'
 documentation:
   - docs/design/CrystalForge/app.jsx
   - docs/design/CrystalForge/components/SystemDetail.jsx
@@ -339,6 +341,8 @@ Commit B was created locally as df58dbd6b408cfa1d718dd766690f3834201f033 with ex
 Correction: the exact full SHA for `TASK-440: Fix compliance bundle systems view` is `3708ef3abe94c52778d2dfe1f1fc86a4596e08cb`.
 
 2026-09-12 residual compliance assignment cleanup committed and pushed as `54278885f2212d0cb15045fab1708da7ad89ce4b` (`TASK-440: Remove duplicate bundle assignment action`). Removed the bundle-detail `Assign bundle` button, `show_assignment` state, and the sole `AssignmentCreatePanel` implementation with now-unused imports. Preserved Environment-editor assignment reconciliation, backend assignment APIs, Systems assignment metadata, and existing-assignment maintenance. Browser step 29f now creates the live system-scoped assignment through the authenticated API, uses a pre-seeded standalone fixture, asserts the drawer has no `Assign bundle` button, and continues to verify reason preservation/change/clear through existing-assignment maintenance. Updated doc-22 through Backlog MCP with a supersession note. Verification passed: touched Rust `rustfmt --check`; 8 Compliance Web UI Rust tests; 13 Environment adapter tests; wasm32 Web UI `cargo check`; Node syntax check; and `git diff --check`. Browser execution was deferred to CI because the available supported runner requires the full `run-ui-dev` stack and is not a lightweight active runner. The worktree is clean; local HEAD, tracking ref, and remote branch all equal the commit. Exact-head GitLab pipeline 2843619053 is pending: https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2843619053. TASK-440 remains In Progress; AC #24 and #27 remain unchecked.
+
+2026-09-12 Config Explorer lifecycle regression fix: consolidated exact-scope reset and initial Root start into one effect so reset cannot overwrite Queued with Idle; invalidated prior root/configured generations before scoped state reset; made Configured activation mode-driven; replaced non-reactive retry counters with direct one-request Root and ConfiguredIndex retry handlers. The CSS conflict was `.cfg-explorer-tree-row { display: flex; ... }`, which kept Browse rows outside the `.cfgx` three-column grid, plus `.cfgx-by { text-align: right; }`; Config-scoped tree rows now share the grid and all three cells remain left-aligned under focus/active states. Added focused operation-count, retry-generation, prefix-start, and static CSS regressions. Passed `nix develop -c rustfmt --edition 2024 packages/web-ui/src/components/system/config_explorer.rs`; `nix develop -c cargo test --manifest-path packages/web-ui/Cargo.toml config_explorer::tests` (10 passed); `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown`; and `git diff --check`, with existing repository warnings. Committed and pushed as 606b3a90178a76251f2dae839023ce49890ec083. Local HEAD, upstream, and remote branch match. Exact-head pipeline 2843645262 is pending. No merge or deployment was performed; TASK-440 remains In Progress.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
