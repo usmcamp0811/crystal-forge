@@ -19,6 +19,10 @@ function _scanSeed(i) { let s = i*7919+13; return () => { s=(s*9301+49297)%23328
 const SCAN_STATUS_META = {
   scanning:  { label:"Scanning",  color:"#60a5fa", cls:"chip-info" },
   queued:    { label:"Queued",    color:"#a78bfa", cls:"chip-info" },
+  // Scanning runs async from building. A config can be known and wanted but have no
+  // realised closure yet (build still running, or built on a remote builder and not
+  // pushed to a cache we can substitute from). That is a waiting state, not a failure.
+  awaiting:  { label:"Awaiting closure", color:"#94a3b8", cls:"chip-unknown" },
   complete:  { label:"Complete",  color:"#34d399", cls:"chip-healthy" },
   failed:    { label:"Failed",    color:"#f87171", cls:"chip-critical" },
   stale:     { label:"Stale",     color:"#fbbf24", cls:"chip-warning" },
@@ -28,11 +32,13 @@ const SCAN_STATUS_META = {
 
 const SCAN_CONFIGS = (typeof __fx === "function" && __fx("scanning.configs")) || [
   // freshness: deployed | recent | archived
-  { id:"sc-1",  name:"gaia-web-01",  flake:"web-services",   commit:"c7e1902", freshness:"deployed", status:"scanning", progress:0.62, found:{crit:0,high:2,med:5}, lastScan:"scanning…", trigger:"post-build" },
+  { id:"sc-1",  name:"gaia-web-01",  flake:"web-services",   commit:"c7e1902", freshness:"deployed", status:"scanning", startedAgo:"48s", found:{crit:0,high:2,med:5}, lastScan:"scanning…", trigger:"post-build" },
   { id:"sc-2",  name:"atlas-01",     flake:"infrastructure", commit:"a3f8c12", freshness:"deployed", status:"complete", found:{crit:1,high:3,med:8}, lastScan:"4m ago", trigger:"scheduled" },
   { id:"sc-3",  name:"orion-db-01",  flake:"infrastructure", commit:"a3f8c12", freshness:"deployed", status:"complete", found:{crit:0,high:1,med:4}, lastScan:"12m ago", trigger:"scheduled" },
   { id:"sc-4",  name:"edge-pdx-01",  flake:"edge-gateway",   commit:"4d2a801", freshness:"deployed", status:"stale",    found:{crit:2,high:4,med:9}, lastScan:"9h ago", trigger:"scheduled" },
   { id:"sc-5",  name:"hydra-03",     flake:"build-farm",     commit:"9f0c344", freshness:"recent",   status:"queued",   found:null, lastScan:"pending", trigger:"post-build" },
+  { id:"sc-11", name:"gaia-web-02",  flake:"web-services",   commit:"c7e1902", freshness:"deployed", status:"awaiting", found:null, lastScan:"waiting 6m", trigger:"post-build", awaiting:"building", awaitingDetail:"build in progress on hydra-03" },
+  { id:"sc-12", name:"edge-sfo-01",  flake:"edge-gateway",   commit:"4d2a801", freshness:"recent",   status:"awaiting", found:null, lastScan:"waiting 41m", trigger:"post-build", awaiting:"not-cached", awaitingDetail:"built on remote builder · not yet pushed to a reachable cache" },
   { id:"sc-6",  name:"stg-web-02",   flake:"web-services",   commit:"2fa8031", freshness:"recent",   status:"complete", found:{crit:0,high:0,med:2}, lastScan:"2h ago", trigger:"scheduled" },
   { id:"sc-7",  name:"gaia-web-03",  flake:"web-services",   commit:"d90c411", freshness:"deployed", status:"failed",   found:null, lastScan:"failed 18m ago", trigger:"scheduled", error:"vulnix: derivation not in store" },
   { id:"sc-8",  name:"lab-vm-01",    flake:"lab-nodes",      commit:"1b7e5f0", freshness:"archived", status:"unscanned",found:null, lastScan:"never", trigger:null },
@@ -43,6 +49,7 @@ const SCAN_CONFIGS = (typeof __fx === "function" && __fx("scanning.configs")) ||
 const SCAN_STATS = {
   scanning: SCAN_CONFIGS.filter(s=>s.status==="scanning").length,
   queued:   SCAN_CONFIGS.filter(s=>s.status==="queued").length,
+  awaiting: SCAN_CONFIGS.filter(s=>s.status==="awaiting").length,
   stale:    SCAN_CONFIGS.filter(s=>s.status==="stale").length,
   unscanned:SCAN_CONFIGS.filter(s=>s.status==="unscanned").length,
   failed:   SCAN_CONFIGS.filter(s=>s.status==="failed").length,
@@ -59,7 +66,81 @@ const SCAN_ACTIVITY = (typeof __fx === "function" && __fx("scanning.activity")) 
   { at:"2h ago",   name:"stg-web-02", event:"Scan complete", detail:"2 medium found", color:"#34d399", icon:"check" },
 ];
 
-Object.assign(window, { SCAN_POLICY, SCAN_INTERVALS, SCAN_CONFIGS, SCAN_STATS, SCAN_STATUS_META, SCAN_ACTIVITY });
+Object.assign(window, { SCAN_POLICY, SCAN_INTERVALS, SCAN_CONFIGS, SCAN_STATS, SCAN_STATUS_META, SCAN_ACTIVITY, scanLogLines });
+
+// Scan log lines (mock) — vulnix output for a config. Failed scans get the real reason
+// plus a stack-ish tail, since "why did this fail" is the whole point of opening the log.
+function scanLogLines(cfg) {
+  const pkgs = ["glibc-2.40","openssl-3.3.2","zlib-1.3.1","systemd-256.7","linux-6.12.4",
+    "python3-3.12.7","curl-8.11.0","nginx-1.27.4","openssh-9.9p1","sqlite-3.47.0",
+    "libxml2-2.13.4","pcre2-10.44","gnutls-3.8.8","expat-2.6.4"];
+  const t0 = 0;
+  const L = [];
+  let sec = t0;
+  const stamp = () => {
+    const m = String(Math.floor(sec / 60)).padStart(2,"0");
+    const s = String(sec % 60).padStart(2,"0");
+    return `00:${m}:${s}`;
+  };
+  const push = (lvl, m, adv = 1) => { L.push({ t: stamp(), lvl, m }); sec += adv; };
+
+  push("info", `vulnix ${SCAN_POLICY.vulnixVersion} · scan requested for ${cfg.name}`);
+  push("info", `trigger: ${cfg.trigger || "manual"} · flake ${cfg.flake} @ ${cfg.commit}`);
+  push("info", `resolving nixosConfigurations.${cfg.name}.config.system.build.toplevel`, 2);
+
+  if (cfg.status === "failed") {
+    push("info", "querying local store for derivation closure");
+    push("warn", `path /nix/store/…-nixos-system-${cfg.name} not present in store`);
+    push("warn", "no substituter provided the closure (tried 2 caches)", 2);
+    push("error", cfg.error || "vulnix: derivation not available");
+    push("error", "  ↳ closure must be built or fetched before scanning", 0);
+    push("error", "  ↳ hint: build this config, or run with --no-closure to scan metadata only", 0);
+    push("error", `scan aborted after ${sec}s · exit code 1`, 0);
+    return L;
+  }
+
+  if (cfg.status === "awaiting") {
+    push("info", "querying local store for derivation closure");
+    if (cfg.awaiting === "building") {
+      push("warn", "closure not realised — a build for this derivation is still running");
+      push("info", "scan deferred · will start automatically when the build completes", 0);
+    } else {
+      push("warn", "closure not present in local store");
+      push("warn", "no configured substituter has this path yet (tried 2 caches)");
+      push("info", `scan deferred · retrying every ${SCAN_INTERVALS?.retry || "5m"} until the closure is available`, 0);
+    }
+    return L;
+  }
+
+  if (cfg.status === "unscanned") {
+    push("info", "no scan has been run for this config");
+    return L;
+  }
+
+  push("info", "derivation closure resolved · 1,284 store paths", 2);
+  push("info", `loading vulnerability database (updated ${SCAN_POLICY.dbAge})`, 2);
+  push("info", "matching store paths against CVE feed", 1);
+
+  const found = cfg.found || { crit:0, high:0, med:0 };
+  const hits = [];
+  for (let i = 0; i < found.crit; i++) hits.push(["error", "CRITICAL"]);
+  for (let i = 0; i < found.high; i++) hits.push(["warn", "HIGH"]);
+  for (let i = 0; i < found.med; i++) hits.push(["warn", "MEDIUM"]);
+  hits.forEach(([lvl, sev], i) => {
+    const pkg = pkgs[i % pkgs.length];
+    const cve = `CVE-2026-${String(1000 + ((i * 137) % 8999)).padStart(4,"0")}`;
+    push(lvl, `${sev.padEnd(8)} ${cve}  ${pkg}`, i % 3 === 2 ? 1 : 0);
+  });
+
+  if (cfg.status === "scanning") {
+    push("info", "matching remaining paths…", 0);
+    return L;
+  }
+
+  push("info", `scan complete · ${found.crit} critical, ${found.high} high, ${found.med} medium`, 1);
+  push("info", `results written · exit code 0`, 0);
+  return L;
+}
 
 // Per-system scan history — every system, each with its commit scan records.
 // "All configs" view groups by system; expanding shows each commit's scan.

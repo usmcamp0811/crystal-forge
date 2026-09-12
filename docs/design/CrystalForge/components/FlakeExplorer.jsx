@@ -35,6 +35,234 @@ function FxRevBar({ commit, out, onPickCommit }) {
   );
 }
 
+/* ── Pipeline pane: artifact state per config, at one revision ──────────
+   The flake tray already owns the revision axis, so this is where "what
+   happened to this commit" belongs. Stages read left to right in order of
+   operations: eval → build → cache → scan. Cache is the only observed (rather
+   than recorded) column, so it always states when it was last verified. */
+const PL_EVAL = {
+  pass:    { l:"pass",    c:"#34d399" },
+  fail:    { l:"failed",  c:"#f87171" },
+  queued:  { l:"queued",  c:"#a78bfa" },
+};
+const PL_BUILD = {
+  built:    { l:"built",    c:"#34d399" },
+  building: { l:"building", c:"#60a5fa" },
+  queued:   { l:"queued",   c:"#a78bfa" },
+  waiting:  { l:"waiting",  c:"#94a3b8" },
+  failed:   { l:"failed",   c:"#f87171" },
+  blocked:  { l:"blocked",  c:"#64748b" },
+};
+const PL_CACHE = {
+  present: { l:"cached",      c:"#34d399" },
+  partial: { l:"partial",     c:"#fbbf24" },
+  evicted: { l:"evicted",     c:"#f87171" },
+  unknown: { l:"unverified",  c:"#94a3b8" },
+  pending: { l:"not pushed",  c:"#64748b" },
+  none:    { l:"—",           c:"#64748b" },
+};
+const PL_SCAN = {
+  clean:    { l:"clean",    c:"#34d399" },
+  findings: { l:"findings", c:"#fbbf24" },
+  scanning: { l:"scanning", c:"#60a5fa" },
+  queued:   { l:"queued",   c:"#a78bfa" },
+  awaiting: { l:"blocked",  c:"#f87171" },
+  none:     { l:"—",        c:"#64748b" },
+};
+
+function PlCell({ meta, sub, title }) {
+  return (
+    <div className="fx-pl-cell" title={title}>
+      <span className="fx-pl-dot" style={{ background: meta.c }}/>
+      <span className="fx-pl-l">{meta.l}</span>
+      {sub && <span className="fx-pl-sub">{sub}</span>}
+    </div>
+  );
+}
+
+function ageDaysOf(at) {
+  if (!at) return 0;
+  const n = parseFloat(at) || 1;
+  if (/mo/.test(at)) return n * 30;
+  if (/w/.test(at)) return n * 7;
+  if (/d/.test(at)) return n;
+  if (/h/.test(at)) return n / 24;
+  return 0;
+}
+
+function FlakePipelinePane({ flake, out, commit, onPickCommit, onOpenSystem, onNavigate }) {
+  const ageDays = ageDaysOf(commit && commit.at);
+  const pl = React.useMemo(() => getFlakePipeline(flake, out.sha, ageDays), [flake.id, out.sha, ageDays]);
+  const [scope, setScope] = React.useState("all");
+  const [open, setOpen] = React.useState(null);
+  React.useEffect(() => { setScope("all"); setOpen(null); }, [out.sha]);
+
+  const c = pl.counts;
+  const rows = pl.rows.filter(x =>
+    scope === "blocked"  ? (x.scan === "awaiting" || x.build === "failed" || x.eval === "fail")
+  : scope === "inflight" ? (x.build === "building" || x.build === "queued" || x.build === "waiting" || x.scan === "scanning" || x.scan === "queued")
+  : scope === "deployed" ? x.deployed
+  : true);
+
+  const tierNote = pl.tier === "hot"
+    ? "This revision is deployed or has a scan waiting, so cache presence re-verifies every 15m."
+    : pl.tier === "warm"
+      ? "Built in the last 7 days and still deployable, so cache presence re-verifies every 6h."
+      : "Older than 30 days. Forge stops re-verifying cold revisions on a timer — check on demand if you need to deploy or scan it.";
+
+  return (
+    <div className="fx-pane">
+      <FxRevBar commit={commit} out={out} onPickCommit={onPickCommit}/>
+
+      {c.blocked > 0 && (
+        <div className="sd-callout sd-callout-danger fx-callout">
+          <Icon name="warn" size={13}/>
+          <div>
+            <strong>{c.blocked} config{c.blocked===1?"":"s"} cannot be scanned at this revision.</strong> The closure is no longer
+            fetchable — {c.evicted > 0 && <>{c.evicted} evicted from every configured cache{c.unknown > 0 && ", "}</>}
+            {c.unknown > 0 && <>{c.unknown} never re-verified</>}. vulnix needs the realised closure, so these scans will keep
+            deferring until the config is rebuilt and pushed.
+            <div style={{ display:"flex", gap:6, marginTop:8, flexWrap:"wrap" }}>
+              <button className="btn btn-ghost focus-ring xs" onClick={()=>setScope("blocked")}>Show only these</button>
+              <button className="btn btn-ghost focus-ring xs" onClick={()=>onNavigate && onNavigate("builds", { sha: out.sha })}><Icon name="build" size={11}/> Rebuild &amp; push</button>
+              <button className="btn btn-ghost focus-ring xs" onClick={()=>onNavigate && onNavigate("scanning")}><Icon name="shield" size={11}/> Open scanning</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Funnel: the four stages as counts, so a revision's health reads in one glance. */}
+      <div className="fx-pl-funnel">
+        {[
+          { l:"Evaluated", ok:c.total - c.evalFail, n:c.total, bad:c.evalFail, badL:"failed" },
+          { l:"Built",     ok:c.built, n:c.total, bad:c.buildFail, badL:"failed", warn:c.inFlight, warnL:"in flight" },
+          { l:"Cached",    ok:c.built - c.evicted - c.unknown, n:c.built, bad:c.evicted, badL:"evicted", warn:c.unknown, warnL:"unverified" },
+          { l:"Scanned",   ok:c.total - c.unscanned, n:c.total, bad:c.blocked, badL:"blocked", warn:c.findings, warnL:"with findings" },
+        ].map((s, i) => (
+          <React.Fragment key={s.l}>
+            {i > 0 && <Icon name="chevron-right" size={13} className="fx-pl-arrow"/>}
+            <div className="fx-pl-stage">
+              <div className="fx-pl-stage-n">{s.ok}<span className="fx-pl-stage-of">/{s.n}</span></div>
+              <div className="fx-pl-stage-l">{s.l}</div>
+              <div className="fx-pl-stage-sub">
+                {s.bad > 0 && <span className="crit">{s.bad} {s.badL}</span>}
+                {s.warn > 0 && <span className="warn">{s.warn} {s.warnL}</span>}
+                {!s.bad && !s.warn && <span className="ok">all clear</span>}
+              </div>
+            </div>
+          </React.Fragment>
+        ))}
+      </div>
+
+      {/* Observation policy, stated rather than implied — presence is never polled live. */}
+      <div className="fx-pl-obs">
+        <Icon name="clock" size={12}/>
+        <div>
+          <span className="fx-pl-obs-head">
+            Cache presence last verified <strong>{pl.checkedAt}</strong>
+            <span className={`fx-pl-tier ${pl.tier}`}>{pl.tier}</span>
+          </span>
+          <span className="fx-pl-obs-body">
+            {tierNote} Push receipts are recorded at build time; re-verification is one batched narinfo query per cache, never one per store path.
+          </span>
+        </div>
+        <button className="btn btn-ghost focus-ring xs" style={{ marginLeft:"auto", flexShrink:0 }}>
+          <Icon name="sync" size={11}/> Verify now
+        </button>
+      </div>
+
+      <div className="fx-toolbar">
+        <div className="seg">
+          <button className={scope==="all"?"active":""} onClick={()=>setScope("all")}>All <span className="seg-n">{c.total}</span></button>
+          <button className={scope==="blocked"?"active":""} onClick={()=>setScope("blocked")}>Blocked <span className="seg-n">{pl.rows.filter(x=>x.scan==="awaiting"||x.build==="failed"||x.eval==="fail").length}</span></button>
+          <button className={scope==="inflight"?"active":""} onClick={()=>setScope("inflight")}>In flight <span className="seg-n">{pl.rows.filter(x=>x.build==="building"||x.build==="queued"||x.build==="waiting"||x.scan==="scanning"||x.scan==="queued").length}</span></button>
+          <button className={scope==="deployed"?"active":""} onClick={()=>setScope("deployed")}>Deployed <span className="seg-n">{pl.rows.filter(x=>x.deployed).length}</span></button>
+        </div>
+      </div>
+
+      <table className="sys-table compact fx-table fx-pl-table">
+        <colgroup><col style={{width:"26%"}}/><col style={{width:"15%"}}/><col style={{width:"17%"}}/><col style={{width:"21%"}}/><col style={{width:"21%"}}/></colgroup>
+        <thead><tr><th>nixosConfiguration</th><th>Eval</th><th>Build</th><th>Cache</th><th>Scan</th></tr></thead>
+        <tbody>
+          {rows.map(x => {
+            const isOpen = open === x.hostname;
+            const cacheMeta = PL_CACHE[x.cache];
+            const hits = x.caches.filter(k => k.has).length;
+            return (
+              <React.Fragment key={x.hostname}>
+                <tr className={`fx-pl-row${isOpen ? " open" : ""}`} onClick={()=>setOpen(isOpen ? null : x.hostname)}>
+                  <td>
+                    <div className="fx-pl-host">
+                      <Icon name="chevron-right" size={11} className={`fx-pl-caret${isOpen?" open":""}`}/>
+                      <span className="mono fx-host" title={x.hostname}>{x.hostname}</span>
+                      {x.deployed && <span className="chip chip-healthy fx-chip" style={{ fontSize:9 }}>deployed</span>}
+                    </div>
+                  </td>
+                  <td><PlCell meta={PL_EVAL[x.eval]}/></td>
+                  <td><PlCell meta={PL_BUILD[x.build]}/></td>
+                  <td>
+                    <PlCell meta={cacheMeta}
+                      sub={x.caches.length ? `${hits}/${x.caches.length}` : null}
+                      title={x.caches.length ? x.caches.map(k=>`${k.has?"✓":"✗"} ${k.name} (checked ${k.checked})`).join("\n") : undefined}/>
+                  </td>
+                  <td>
+                    <PlCell meta={PL_SCAN[x.scan]} title={x.scanReason || undefined}/>
+                    {x.scanReason && <span className="fx-pl-reason">{x.scanReason}</span>}
+                    {x.found && (x.found.crit||x.found.high) > 0 && (
+                      <span className="fx-pl-reason">{x.found.crit} crit · {x.found.high} high</span>
+                    )}
+                  </td>
+                </tr>
+                {isOpen && (
+                  <tr className="fx-pl-detail-row">
+                    <td colSpan={5}>
+                      <div className="fx-pl-detail">
+                        <div className="fx-pl-detail-caches">
+                          <div className="fx-pl-detail-h">Closure by cache</div>
+                          {x.build !== "built"
+                            ? <div className="fx-dim" style={{ fontSize:11.5 }}>Nothing was pushed for this revision — {x.build === "failed" ? "the build failed." : x.build === "blocked" ? "evaluation failed, so it never built." : "the build has not completed."}</div>
+                            : x.caches.length === 0
+                            ? <div className="fx-dim" style={{ fontSize:11.5 }}>No cache destinations are configured, so closure presence cannot be verified.</div>
+                            : x.caches.map(k => (
+                              <div key={k.name} className="fx-pl-cachek">
+                                <Icon name={k.has ? "check" : "x"} size={11} style={{ color: k.has ? "#34d399" : "#f87171", flexShrink:0 }}/>
+                                <span className="mono fx-pl-cachek-n">{k.name}</span>
+                                <span className="fx-pl-cachek-t">{k.has ? "present" : "not found"} · checked {k.checked}</span>
+                              </div>
+                            ))}
+                        </div>
+                        <div className="fx-pl-detail-acts">
+                          {x.managedSystem && (
+                            <button className="btn btn-ghost focus-ring xs" onClick={(e)=>{ e.stopPropagation(); onOpenSystem && onOpenSystem(x.managedSystem, out.sha); }}>
+                              <Icon name="server" size={11}/> Open config
+                            </button>
+                          )}
+                          <button className="btn btn-ghost focus-ring xs" onClick={(e)=>{ e.stopPropagation(); onNavigate && onNavigate("builds"); }}>
+                            <Icon name="build" size={11}/> Build log
+                          </button>
+                          <button className="btn btn-ghost focus-ring xs" onClick={(e)=>{ e.stopPropagation(); onNavigate && onNavigate("scanning"); }}>
+                            <Icon name="shield" size={11}/> Scan log
+                          </button>
+                          {(x.cache === "evicted" || x.cache === "unknown") && (
+                            <button className="btn btn-ghost focus-ring xs" onClick={(e)=>e.stopPropagation()}>
+                              <Icon name="sync" size={11}/> Rebuild &amp; push
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    </td>
+                  </tr>
+                )}
+              </React.Fragment>
+            );
+          })}
+          {rows.length === 0 && <tr><td colSpan={5}><div className="fx-empty">Nothing in this category.</div></td></tr>}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function FlakeSystemsPane({ flake, out, commit, onPickCommit, onOpenSystem }) {
   const [scope, setScope] = React.useState("all");
   // Registering a declared-but-unmanaged host: the flake already knows its
@@ -224,4 +452,4 @@ function FlakeInputsPane({ flake, out, commit, onPickCommit }) {
   );
 }
 
-Object.assign(window, { FxRevBar, FlakeSystemsPane, FlakeModulesPane, FlakeInputsPane });
+Object.assign(window, { FxRevBar, FlakePipelinePane, PlCell, ageDaysOf, FlakeSystemsPane, FlakeModulesPane, FlakeInputsPane });

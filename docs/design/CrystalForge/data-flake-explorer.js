@@ -144,6 +144,126 @@
 
   const _cache = {};
 
+  /* ── Pipeline status per config, at one revision ──────────────────────
+     Answers "what happened to each nixosConfiguration on this commit": did it
+     evaluate, did it build, is its closure still fetchable, has it been scanned.
+
+     Cache presence is the only field Forge cannot know for free, and polling it
+     per config per revision would hammer both the server and the cache. Model:
+
+       1. AUTHORITATIVE AT PUSH. The build records a push receipt per cache
+          (paths + timestamp). That is a fact, not a poll.
+       2. LAZY RE-VERIFICATION, TIERED BY RELEVANCE. Presence only matters for
+          deployment and scanning, so revisions are bucketed:
+            hot  — deployed somewhere, or a scan is waiting on it → 15m
+            warm — built in the last 7d, deployable → 6h
+            cold — older than that → on demand only, never on a timer
+          One batched narinfo query per cache per tier, not one per path.
+       3. OPPORTUNISTIC. Any deploy, scan, or push updates the observation for
+          free, since those operations already talk to the cache.
+
+     So every cache verdict carries WHEN it was observed. A stale observation is
+     shown as stale rather than silently presented as current. */
+  // Resolved lazily: data-caches.js loads after this file, so reading it at
+  // module scope would capture an empty list.
+  function plCaches() { return (window.CACHE_DESTINATIONS || []).slice(0, 3).map(c => c.name); }
+
+  function pipelineAt(flake, sha, ageDays) {
+    const r = rngFor(`${flake.id}|${sha}|pipeline`);
+    const PL_CACHES = plCaches();
+    const out = outputsAt(flake, sha);
+    const declared = out.systems.filter(s => s.declared);
+    // Age drives everything: fresh revisions are mid-flight, old ones have been
+    // garbage-collected out of the caches that once held them.
+    const cold = ageDays > 7, ancient = ageDays > 30;
+    const tier = ancient ? "cold" : cold ? "warm" : "hot";
+    const checkedAt = ancient ? `${Math.min(90, Math.round(ageDays))}d ago`
+      : cold ? `${2 + Math.floor(r() * 5)}h ago`
+      : `${2 + Math.floor(r() * 13)}m ago`;
+
+    const rows = declared.map((s) => {
+      const q = rngFor(`${flake.id}|${sha}|${s.hostname}`);
+      // Eval — nix-eval-jobs, per attribute.
+      const evalState = q() < 0.06 ? "fail" : (!cold && q() < 0.08) ? "queued" : "pass";
+      // Build — blocked by a failed eval; still in flight only on fresh revs.
+      const build = evalState === "fail" ? "blocked"
+        : evalState === "queued" ? "waiting"
+        : q() < 0.07 ? "failed"
+        : (!cold && q() < 0.12) ? "building"
+        : (!cold && q() < 0.16) ? "queued"
+        : "built";
+
+      // Cache — only meaningful once something was built and pushed.
+      let cacheState, caches = [];
+      if (build !== "built") {
+        cacheState = build === "failed" || build === "blocked" ? "none" : "pending";
+      } else {
+        const evicted = PL_CACHES.length > 0 && (ancient ? q() < 0.62 : cold ? q() < 0.18 : q() < 0.04);
+        caches = PL_CACHES.map((n, i) => ({
+          name: n,
+          has: evicted ? (i === 0 ? false : q() < 0.25) : q() > 0.18,
+          checked: checkedAt,
+        }));
+        if (caches.length === 0) cacheState = "unknown";
+        else if (!caches.some(c => c.has)) cacheState = "evicted";
+        else if (caches.every(c => c.has)) cacheState = "present";
+        else cacheState = "partial";
+        // A cold revision nobody re-verified: the receipt is all we have.
+        if (ancient && q() < 0.3) cacheState = "unknown";
+      }
+
+      // Scan — vulnix; needs the closure. This is where a cache eviction bites.
+      let scan, scanReason = null, found = null;
+      if (build === "failed" || build === "blocked") { scan = "none"; }
+      else if (build !== "built") { scan = "awaiting"; scanReason = "build in progress"; }
+      else if (cacheState === "evicted") { scan = "awaiting"; scanReason = "closure evicted from all caches"; }
+      else if (cacheState === "unknown") { scan = "awaiting"; scanReason = "closure presence unverified"; }
+      else if (!cold && q() < 0.18) { scan = q() < 0.5 ? "scanning" : "queued"; }
+      else {
+        const crit = q() < 0.14 ? 1 + Math.floor(q() * 2) : 0;
+        const high = q() < 0.45 ? Math.floor(q() * 4) : 0;
+        found = { crit, high, med: Math.floor(q() * 7) };
+        scan = crit || high ? "findings" : "clean";
+      }
+
+      return {
+        hostname: s.hostname,
+        environment: s.environment,
+        managedSystem: s.managedSystem,
+        deployed: !!(s.managedSystem && s.managedSystem.commit === sha),
+        eval: evalState, build, cache: cacheState, caches, scan, scanReason, found,
+      };
+    });
+
+    const blocked = rows.filter(x => x.scan === "awaiting" && (x.cache === "evicted" || x.cache === "unknown"));
+    return {
+      sha, tier, checkedAt, ageDays,
+      cacheNames: plCaches(),
+      rows,
+      counts: {
+        total: rows.length,
+        built: rows.filter(x => x.build === "built").length,
+        evalFail: rows.filter(x => x.eval === "fail").length,
+        buildFail: rows.filter(x => x.build === "failed").length,
+        // Anything not yet resolved to built/failed: includes rows still waiting on eval.
+        inFlight: rows.filter(x => x.build === "building" || x.build === "queued" || x.build === "waiting").length,
+        evicted: rows.filter(x => x.cache === "evicted").length,
+        unknown: rows.filter(x => x.cache === "unknown").length,
+        unscanned: rows.filter(x => x.scan === "awaiting" || x.scan === "queued" || x.scan === "scanning").length,
+        findings: rows.filter(x => x.scan === "findings").length,
+        blocked: blocked.length,
+      },
+      blocked,
+    };
+  }
+
+  const _plCache = {};
+  window.getFlakePipeline = function (flake, sha, ageDays) {
+    const key = `${flake.id}|${sha}|${ageDays}`;
+    if (!_plCache[key]) _plCache[key] = pipelineAt(flake, sha || flake.latestCommit, ageDays || 0);
+    return _plCache[key];
+  };
+
   /* prevSha lets the pane report the delta. Server-side this is two cached
      output blobs compared in the backend — never two full sets shipped to the
      browser. */

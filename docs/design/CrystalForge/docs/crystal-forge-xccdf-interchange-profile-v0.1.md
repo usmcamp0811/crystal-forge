@@ -79,7 +79,7 @@ A generic scanner is not expected to execute a Crystal Forge Nix or deployment p
 - Imported source preservation
 - Optional XCCDF `TestResult` export
 - Current Crystal Forge policy types
-- NixOS configuration checks using the Crystal Forge `config` evaluation context
+- NixOS configuration checks using the Crystal Forge `cfg` evaluation context
 - Operational policies, including approval, time-window, rollout, and vulnerability controls
 
 ### 4.2 Out of scope for version 0.1
@@ -394,11 +394,11 @@ Package order is not semantically significant. The importer SHOULD preserve sour
 ### 12.3 Custom Nix check
 
 ```xml
-<cf:custom-check mode="all" context="nixos-configuration-v2" binding="config">
+<cf:custom-check mode="all" context="nixos-configuration-v1" binding="cfg">
   <cf:rule field-name="firewallEnabled" strict="true">
     <cf:description>The NixOS firewall must be enabled.</cf:description>
     <cf:expression language="nix"><![CDATA[
-config.networking.firewall.enable
+cfg.config.networking.firewall.enable
     ]]></cf:expression>
   </cf:rule>
 </cf:custom-check>
@@ -408,16 +408,9 @@ Requirements:
 
 - `mode` MUST be `all` or `any`.
 - A legacy single-expression Crystal Forge policy MUST normalize to one nested `cf:rule` on export.
-- A non-empty `config.rules` array takes precedence over `config.expression`. A non-empty `config.expression` takes precedence when `config.rules` is absent or empty. An absent expression with `mode="all"` and an empty rules array exports zero rules. An absent expression without a rules array is invalid.
-- Current exports MUST use the `nixos-configuration-v2` and `config` pair. The binding identifies the evaluated NixOS module configuration.
-- Current expressions MUST use the canonical `config.*` lexical contract. The exporter MUST preserve canonical expression text exactly.
-- Importers MUST also accept the historical `nixos-configuration-v1` and `cfg` pair and normalize executable `cfg.config.*` references to `config.*`. Importers MUST reject all other pairs and references that contradict the declared pair.
-- `context` and `binding` are XML projection metadata. They MUST NOT be added to `config-json` or the semantic digest input.
-- `mode="all"` with zero rules means no enforcement and is valid. `mode="any"` with zero rules is invalid.
-- The XSD permits zero rules for both modes because XSD 1.0 cannot express the conditional count. The semantic importer MUST reject `mode="any"` with zero effective rules.
-- A V1 importer MUST validate the source `config-json` shape and binding, then verify the embedded policy digest against that unchanged source representation. Only after source verification can the importer normalize executable `cfg.config.*` references, reconcile the V1 typed projection, validate the current representation, and persist its current semantic digest. A V2 source digest is also the current digest.
-- Existing `context` or `binding` fields in historical `config-json` remain ordinary persisted fields and remain part of that source digest. Current exporters MUST NOT add these fields. Import normalization MUST NOT remove unrelated persisted fields.
-- Other than the required V1 binding normalization, expression text MUST be preserved exactly. An importer MAY also normalize XML line endings to LF.
+- `binding="cfg"` identifies the full `nixosConfigurations.<name>` object supplied by Crystal Forge.
+- Expressions using the version 1 context MUST use the `cfg.config.*` lexical contract for NixOS module configuration access.
+- Expression text MUST be preserved exactly, except that an importer MAY normalize XML line endings to LF.
 - The exporter MUST safely encode expression text. It MUST handle a literal `]]>` sequence instead of emitting invalid CDATA.
 - The field name and per-rule strictness MUST be preserved.
 - Rule order MUST be preserved because it can affect presentation and evidence ordering, even when it does not change boolean evaluation.
@@ -648,7 +641,7 @@ A round trip MUST preserve:
 
 - bundle lineage identity;
 - bundle version identity;
-- source publication state as provenance, without bypassing local trust review;
+- publication state;
 - bundle version string;
 - bundle title, description, framework, layer, and owner;
 - baseline policy membership;
@@ -705,18 +698,6 @@ The importer MUST:
 ### 18.2 CF-native import
 
 For a supported CF-native document, Crystal Forge MUST reconstruct the exact supported policy definitions.
-
-When a portable version does not already exist locally, the reconstructed local
-version MUST start in a mutable draft state and MUST remain untrusted and
-ineligible for evaluation. A new policy lineage MUST initialize its local
-`enabled` preference from the authenticated portable `enabled-by-default` value.
-This preference does not bypass the version trust, publication, assignment, or
-other execution gates. Reuse of an existing lineage MUST preserve its local
-`enabled` preference. The importer MUST preserve the source publication state in
-the source artifact and import audit metadata. Explicit local trust review and
-publication MAY then activate the reconstructed version through the normal
-lifecycle. Administrative activation does not refine policy content, paths, or
-bindings and does not change its portable content digest.
 
 Object reconciliation order:
 
@@ -832,7 +813,7 @@ A Nix expression or deployment policy imported from XML is executable content.
 
 Importing a document MUST NOT automatically:
 
-- make its policy versions eligible for evaluation;
+- enable its policies;
 - assign its bundle;
 - evaluate its expressions;
 - add flake inputs;
@@ -1039,13 +1020,13 @@ A source-artifact table should preserve bytes, hashes, media type, parser inform
         <cf:implementation>
           <cf:custom-check
               mode="all"
-              context="nixos-configuration-v2"
-              binding="config">
+              context="nixos-configuration-v1"
+              binding="cfg">
             <cf:rule field-name="firewallEnabled" strict="true">
               <cf:description>
                 The evaluated firewall option is true.
               </cf:description>
-              <cf:expression language="nix">config.networking.firewall.enable</cf:expression>
+              <cf:expression language="nix">cfg.config.networking.firewall.enable</cf:expression>
             </cf:rule>
           </cf:custom-check>
         </cf:implementation>

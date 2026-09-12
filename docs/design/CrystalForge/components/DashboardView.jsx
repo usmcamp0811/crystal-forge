@@ -1,34 +1,148 @@
 // Dashboard view — customizable widget grid with drag-and-drop
 
-function DashboardView({ onNavigate }) {
-  // Layout persists in localStorage for now (in real app -> server-side per-user prefs)
-  const [layout, setLayout] = React.useState(() => {
-    try {
-      const saved = localStorage.getItem("cf-dashboard-layout");
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (!parsed.find(w => w.id === "attestationTrust")) parsed.splice(1, 0, { id:"attestationTrust", cols:1 }, { id:"deployApprovals", cols:1 });
-        if (!parsed.find(w => w.id === "poamSummary")) parsed.splice(1, 0, { id:"poamSummary", cols:1 });
-        if (!parsed.find(w => w.id === "poamWatchlist")) parsed.push({ id:"poamWatchlist", cols:2 });
-        // Fleet-ops widgets, added later — append once so existing dashboards get them.
-        [{ id:"fleetDrift", cols:2, rows:2 }, { id:"rebootRequired", cols:1 },
-         { id:"closurePressure", cols:2, rows:2 }, { id:"rollbackReadiness", cols:1 },
-         { id:"deployHeatmap", cols:3 }].forEach(w => { if (!parsed.find(x => x.id === w.id)) parsed.push(w); });
-        if (!parsed.find(w => w.id === "fleetCalendar")) parsed.push({ id:"fleetCalendar", cols:3 });
-        // Retired widgets stay out of dashboards that already saved them.
-        return parsed.filter(w => w.id !== "cacheHitRate" && w.id !== "secretExpiry");
-      }
-    } catch {}
-    return DEFAULT_DASHBOARD_LAYOUT;
+// ── Dashboard persistence + portable export format ─────────────────────────────
+// A dashboard is just {id, name, widgets[]}. The export wrapper is deliberately a
+// plain, self-describing JSON document so it round-trips between Crystal Forge
+// instances (and stores as a single jsonb value server-side) — the only thing an
+// importing instance needs to reconcile is widget ids it doesn't know about.
+const DASHBOARD_SCHEMA = "crystal-forge.dashboard/v1";
+const DASHBOARD_BOOK_KEY = "cf-dashboards";
+const LEGACY_LAYOUT_KEY = "cf-dashboard-layout";
+
+// Widget fields that are part of the portable contract. Anything else (runtime ui
+// state, instance keys) is regenerated on import rather than trusted from the file.
+function widgetToExport(w) {
+  const out = { id: w.id, cols: w.cols };
+  if (w.rows && w.rows !== 1) out.rows = w.rows;
+  if (w.scope) out.scope = w.scope;
+  if (w.metric) out.metric = w.metric;
+  return out;
+}
+function dashboardToExport(d) {
+  return { schema: DASHBOARD_SCHEMA, name: d.name, widgets: d.widgets.map(widgetToExport) };
+}
+
+// Accepts either a single-dashboard document or an {dashboards:[…]} bundle. Unknown
+// widget ids are dropped (and counted) instead of failing the whole import, so a
+// dashboard from an instance with extra widgets still lands usefully.
+function parseDashboardFile(text) {
+  let doc;
+  try { doc = JSON.parse(text); } catch { throw new Error("not valid JSON"); }
+  const raw = Array.isArray(doc?.dashboards) ? doc.dashboards : [doc];
+  let dropped = 0;
+  const dashboards = raw.map((d, i) => {
+    if (!d || !Array.isArray(d.widgets)) throw new Error("no widgets array found");
+    const widgets = d.widgets.filter(w => {
+      const known = w && DASHBOARD_WIDGETS[w.id];
+      if (!known) dropped++;
+      return known;
+    }).map(w => ({
+      key: `${w.id}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2,6)}`,
+      id: w.id,
+      cols: w.cols || DASHBOARD_WIDGETS[w.id].defaultCols,
+      rows: w.rows || DASHBOARD_WIDGETS[w.id].defaultRows || 1,
+      ...(w.scope ? { scope: w.scope } : {}),
+      ...(w.metric ? { metric: w.metric } : {}),
+    }));
+    return { name: (d.name || `Imported dashboard ${i + 1}`).slice(0, 60), widgets };
   });
+  if (!dashboards.length) throw new Error("no dashboards in file");
+  return { dashboards, dropped };
+}
+
+// Brings forward the widgets added since a saved layout was written, so an existing
+// dashboard doesn't silently miss new capability. Only applied to the legacy key.
+function migrateLegacyLayout(parsed) {
+  if (!parsed.find(w => w.id === "attestationTrust")) parsed.splice(1, 0, { id:"attestationTrust", cols:1 }, { id:"deployApprovals", cols:1 });
+  if (!parsed.find(w => w.id === "poamSummary")) parsed.splice(1, 0, { id:"poamSummary", cols:1 });
+  if (!parsed.find(w => w.id === "poamWatchlist")) parsed.push({ id:"poamWatchlist", cols:2 });
+  [{ id:"fleetDrift", cols:2, rows:2 }, { id:"rebootRequired", cols:1 },
+   { id:"closurePressure", cols:2, rows:2 }, { id:"rollbackReadiness", cols:1 },
+   { id:"deployHeatmap", cols:3 }].forEach(w => { if (!parsed.find(x => x.id === w.id)) parsed.push(w); });
+  if (!parsed.find(w => w.id === "fleetCalendar")) parsed.push({ id:"fleetCalendar", cols:3 });
+  return parsed.filter(w => w.id !== "cacheHitRate" && w.id !== "secretExpiry");
+}
+
+function loadDashboardBook() {
+  try {
+    const saved = localStorage.getItem(DASHBOARD_BOOK_KEY);
+    if (saved) {
+      const book = JSON.parse(saved);
+      if (Array.isArray(book?.dashboards) && book.dashboards.length) return book;
+    }
+  } catch {}
+  // First run after the multi-dashboard change: fold the single saved layout into
+  // the new shape so nobody loses the dashboard they had arranged.
+  try {
+    const legacy = localStorage.getItem(LEGACY_LAYOUT_KEY);
+    if (legacy) {
+      const widgets = migrateLegacyLayout(JSON.parse(legacy));
+      return { activeId: "dash-default", dashboards: [{ id: "dash-default", name: "Overview", widgets }] };
+    }
+  } catch {}
+  return { activeId: "dash-default", dashboards: [{ id: "dash-default", name: "Overview", widgets: DEFAULT_DASHBOARD_LAYOUT }] };
+}
+
+function DashboardView({ onNavigate }) {
+  // Dashboards live as a named set so a user can keep focused views ("Compliance",
+  // "Fleet health") instead of one catch-all. Persisted client-side here; server-side
+  // this is one jsonb column per dashboard row, which is also exactly what Export writes.
+  const [book, setBook] = React.useState(() => loadDashboardBook());
   const [editMode, setEditMode] = React.useState(false);
   const [pickerOpen, setPickerOpen] = React.useState(false);
   const [dragIdx, setDragIdx] = React.useState(null);
   const [overIdx, setOverIdx] = React.useState(null);
+  const [renaming, setRenaming] = React.useState(false);
+  const [importReport, setImportReport] = React.useState(null);
+  const fileRef = React.useRef(null);
 
-  const persist = (next) => {
-    setLayout(next);
-    try { localStorage.setItem("cf-dashboard-layout", JSON.stringify(next)); } catch {}
+  const active = book.dashboards.find(d => d.id === book.activeId) || book.dashboards[0];
+  const layout = active.widgets;
+
+  const persistBook = (next) => {
+    setBook(next);
+    try { localStorage.setItem(DASHBOARD_BOOK_KEY, JSON.stringify(next)); } catch {}
+  };
+  const persist = (nextWidgets) => {
+    persistBook({ ...book, dashboards: book.dashboards.map(d => d.id === active.id ? { ...d, widgets: nextWidgets } : d) });
+  };
+  const switchTo = (id) => persistBook({ ...book, activeId: id });
+  const renameActive = (name) => persistBook({ ...book, dashboards: book.dashboards.map(d => d.id === active.id ? { ...d, name } : d) });
+  const newDashboard = () => {
+    const d = { id: `dash-${Date.now().toString(36)}`, name: `Dashboard ${book.dashboards.length + 1}`, widgets: [] };
+    persistBook({ ...book, dashboards: [...book.dashboards, d], activeId: d.id });
+    setEditMode(true);
+    setRenaming(true);
+  };
+  const duplicateActive = () => {
+    const d = { id: `dash-${Date.now().toString(36)}`, name: `${active.name} copy`, widgets: active.widgets.map(w => ({ ...w })) };
+    persistBook({ ...book, dashboards: [...book.dashboards, d], activeId: d.id });
+  };
+  const deleteActive = () => {
+    if (book.dashboards.length === 1) return;
+    const rest = book.dashboards.filter(d => d.id !== active.id);
+    persistBook({ ...book, dashboards: rest, activeId: rest[0].id });
+  };
+
+  const exportActive = () => {
+    downloadFile(`${slugify(active.name) || "dashboard"}.cf-dashboard.json`,
+      JSON.stringify(dashboardToExport(active), null, 2), "application/json");
+  };
+  const exportAll = () => {
+    downloadFile("all.cf-dashboards.json",
+      JSON.stringify({ schema: DASHBOARD_SCHEMA, exportedAt: new Date().toISOString(), dashboards: book.dashboards.map(dashboardToExport) }, null, 2),
+      "application/json");
+  };
+  const onImportFile = async (file) => {
+    if (!file) return;
+    try {
+      const parsed = parseDashboardFile(await file.text());
+      const added = parsed.dashboards.map(d => ({ ...d, id: `dash-${Date.now().toString(36)}-${Math.random().toString(36).slice(2,6)}` }));
+      persistBook({ ...book, dashboards: [...book.dashboards, ...added], activeId: added[0].id });
+      setImportReport({ ok:true, count: added.length, dropped: parsed.dropped });
+    } catch (err) {
+      setImportReport({ ok:false, message: err.message });
+    }
   };
 
   // Scopeable widgets can be added more than once (one per environment), so each
@@ -52,24 +166,39 @@ function DashboardView({ onNavigate }) {
     next.splice(to, 0, moved);
     persist(next);
   };
-  const resetLayout = () => {
-    localStorage.removeItem("cf-dashboard-layout");
-    setLayout(DEFAULT_DASHBOARD_LAYOUT);
-  };
+  const resetLayout = () => persist(DEFAULT_DASHBOARD_LAYOUT);
 
   const available = Object.values(DASHBOARD_WIDGETS).filter(w => SCOPEABLE.has(w.id) || !layout.find(l => l.id === w.id));
 
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
-      <div className="page-head">
-        <div>
-          <h1 className="page-title">Dashboard</h1>
-          <p className="page-subtitle">{layout.length} widgets · drag to rearrange in edit mode</p>
+      <div className="page-head" style={{ marginBottom:0 }}>
+        <div style={{ display:"flex", alignItems:"center", gap:10, minWidth:0 }}>
+          {renaming ? (
+            <input className="input focus-ring" autoFocus value={active.name}
+              onChange={e=>renameActive(e.target.value)}
+              onBlur={()=>setRenaming(false)}
+              onKeyDown={e=>{ if (e.key==="Enter"||e.key==="Escape") setRenaming(false); }}
+              style={{ fontSize:22, fontWeight:700, width:320, height:40 }}/>
+          ) : (
+            <h1 className="page-title" style={{ marginBottom:0 }}>{active.name}</h1>
+          )}
+          {editMode && !renaming && (
+            <button className="btn-icon focus-ring" title="Rename dashboard" onClick={()=>setRenaming(true)}>
+              <Icon name="gear" size={13}/>
+            </button>
+          )}
         </div>
         <div style={{ display:"flex", gap:8 }}>
+          <IOMenu items={[
+            { label:"Export this dashboard…", icon:"download", onClick: exportActive },
+            { label:`Export all ${book.dashboards.length} dashboards…`, icon:"download", onClick: exportAll },
+            "divider",
+            { label:"Import dashboard…", icon:"upload", onClick:() => fileRef.current?.click() },
+          ]}/>
           {editMode && (
             <>
-              <button className="btn btn-ghost focus-ring" onClick={resetLayout} title="Reset to default layout">
+              <button className="btn btn-ghost focus-ring" onClick={resetLayout} title="Reset to default widget set">
                 <Icon name="sync" size={14}/> Reset
               </button>
               <button className="btn btn-ghost focus-ring" onClick={() => setPickerOpen(true)}>
@@ -82,6 +211,47 @@ function DashboardView({ onNavigate }) {
           </button>
         </div>
       </div>
+      <input ref={fileRef} type="file" accept=".json" style={{ display:"none" }}
+        onChange={e=>{ onImportFile(e.target.files?.[0]); e.target.value = ""; }}/>
+
+      {/* Dashboard switcher — tabs, since a handful of named views is the intent here
+          (focused sub-dashboards), not an unbounded Grafana-style library. */}
+      <div className="dash-tabs" role="tablist">
+        {book.dashboards.map(d => (
+          <button key={d.id} role="tab" aria-selected={d.id===active.id}
+            className={`dash-tab${d.id===active.id?" active":""}`} onClick={()=>switchTo(d.id)}>
+            {d.name}
+            <span className="dash-tab-count">{d.widgets.length}</span>
+          </button>
+        ))}
+        <button className="dash-tab dash-tab-add focus-ring" onClick={newDashboard} title="New dashboard">
+          <Icon name="plus" size={12}/>
+        </button>
+        {editMode && book.dashboards.length > 1 && (
+          <button className="btn btn-ghost focus-ring xs" style={{ marginLeft:"auto", alignSelf:"center", color:"#f87171" }}
+            onClick={deleteActive}>
+            <Icon name="x" size={11}/> Delete "{active.name}"
+          </button>
+        )}
+        {editMode && (
+          <button className="btn btn-ghost focus-ring xs" style={{ marginLeft: book.dashboards.length > 1 ? 0 : "auto", alignSelf:"center" }}
+            onClick={duplicateActive}>
+            <Icon name="file" size={11}/> Duplicate
+          </button>
+        )}
+      </div>
+
+      {importReport && (
+        <div className={`sd-callout ${importReport.ok ? "sd-callout-healthy" : "sd-callout-critical"}`}>
+          <Icon name={importReport.ok ? "check" : "warn"} size={13}/>
+          <div style={{ fontSize:12, flex:1 }}>
+            {importReport.ok
+              ? <>Imported {importReport.count} dashboard{importReport.count===1?"":"s"}.{importReport.dropped > 0 && <> {importReport.dropped} widget{importReport.dropped===1?"":"s"} skipped — not available in this Crystal Forge instance.</>}</>
+              : <>Import failed: {importReport.message}</>}
+          </div>
+          <button className="btn-icon focus-ring" onClick={()=>setImportReport(null)}><Icon name="x" size={12}/></button>
+        </div>
+      )}
 
       {editMode && (
         <div className="sd-callout sd-callout-info">
@@ -960,7 +1130,11 @@ function WidgetPicker({ addedIds, countsById = {}, onAdd, onClose }) {
                     </span>
                     {added
                       ? <span className="chip chip-healthy" style={{ fontSize: 10, flexShrink: 0 }}><Icon name="check" size={9} /> Added</span>
-                      : <span className="widget-lib-add"><Icon name="plus" size={13} /></span>}
+                      : <span className="widget-lib-add focus-ring" role="button" tabIndex={0} title="Add to dashboard"
+                          onClick={e => { e.stopPropagation(); setSelId(w.id); onAdd(w.id); }}
+                          onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); setSelId(w.id); onAdd(w.id); } }}>
+                          <Icon name="plus" size={13} />
+                        </span>}
                   </button>
                 );
               })}
