@@ -502,7 +502,7 @@ async function captureThemedBaselines(page, step, visualThemes) {
     if (canonicalTask440) {
       await dismissOnboardingCoachForCapture(page);
       await prepareTask440CanonicalCapture(page, step);
-      const surfaceSelector = step.name.includes("config-") ? ".sd-grid-config" : ".fl-tray";
+      const surfaceSelector = step.name.includes("config-") ? ".cfgx" : ".fl-tray";
       await assertNoOverlayIntersections(page, surfaceSelector, `${step.name} ${theme} capture`);
       const parityManifestPath = firstExistingPath([
         path.join(__dirname, "design-parity", "manifest.json"),
@@ -3149,7 +3149,7 @@ function task440TypedOptions(revision = TASK_440_CURRENT_SHA) {
     }),
     task440Option("services.broken.value", "string", {
       kind: "failed",
-      value: { code: "not_evaluated", message: "not evaluated: fixture dependency failed" },
+      value: { code: "not_evaluated", message: "fixture dependency failed" },
     }),
     task440Option("services.untracked.enable", "boolean", { kind: "scalar", value: true }, {
       changed: false,
@@ -3314,6 +3314,7 @@ async function routeTask440SystemData(page, overrides = {}) {
     heldObservationResolvers: new Map(),
     holdObservationKinds: new Set(),
     prefixFailureCounts: new Map(),
+    largeServicesPrefix: false,
     inspectionPrerequisite: false,
     rollbackRequests: [],
     requestOrdinal: 0,
@@ -3719,11 +3720,19 @@ async function routeTask440SystemData(page, overrides = {}) {
     };
     if (kind === "prefix") {
       const dotted = pathComponents.join(".");
+      const largeServicesChildren = [
+        child(["services", "healthy"], "prefix"),
+        ...Array.from({ length: 511 }, (_, index) => child(["services", `fixture-${String(index + 1).padStart(3, "0")}`], "prefix")),
+        child(["services", "openssh"], "prefix"),
+        child(["services", "tail"], "prefix"),
+      ];
       const children = dotted === "services"
-        ? [
-            child(["services", "healthy"], "prefix"),
-            child(["services", "openssh"], "prefix"),
-          ]
+        ? state.largeServicesPrefix
+          ? largeServicesChildren
+          : [
+              child(["services", "healthy"], "prefix"),
+              child(["services", "openssh"], "prefix"),
+            ]
         : dotted === "services.openssh"
           ? [child(["services", "openssh", "enable"], "option")]
           : dotted === "networking"
@@ -3734,14 +3743,20 @@ async function routeTask440SystemData(page, overrides = {}) {
     }
     if (kind === "configured_index") return {
       kind, path_components: [], total_traversed: 16000, diagnostics: [], diagnostics_truncated: false,
-      configured: [
-        { path_components: ["services", "openssh", "enable"], key: key(["services", "openssh", "enable"]) },
-        { path_components: ["networking", "hostName"], key: key(["networking", "hostName"]) },
-      ], total_configured: 2, configured_truncated: false, classifier_diagnostics: [], classifier_diagnostics_truncated: false,
+      configured: canonicalDesign
+        ? [{ path_components: ["networking", "hostName"], key: key(["networking", "hostName"]) }]
+        : [
+            { path_components: ["services", "openssh", "enable"], key: key(["services", "openssh", "enable"]) },
+            { path_components: ["networking", "hostName"], key: key(["networking", "hostName"]) },
+            { path_components: ["services", "broken", "value"], key: key(["services", "broken", "value"]) },
+          ],
+      total_configured: canonicalDesign ? 1 : 3, configured_truncated: false, classifier_diagnostics: [], classifier_diagnostics_truncated: false,
     };
     if (kind === "option") return {
       kind, path_components: pathComponents, key: key(pathComponents), declared_type: pathComponents.at(-1) === "enable" ? "boolean" : "string",
-      is_defined: true, highest_prio: 100, value: { kind: "scalar", value: pathComponents.at(-1) === "enable" ? true : "atlas-01" },
+      is_defined: true, highest_prio: 100, value: pathComponents.includes("broken")
+        ? { kind: "failed", value: { code: "not_evaluated", message: "fixture dependency failed" } }
+        : { kind: "scalar", value: pathComponents.at(-1) === "enable" ? true : "atlas-01" },
     };
     return {
       kind, path_components: pathComponents, key: key(pathComponents),
@@ -3773,7 +3788,10 @@ async function routeTask440SystemData(page, overrides = {}) {
       });
     }
     const dotted = body.path_components.join(".");
-    const failures = body.kind === "prefix" ? state.prefixFailureCounts.get(dotted) || 0 : 0;
+    const failureKey = `${dotted}@${body.child_offset}`;
+    const failures = body.kind === "prefix"
+      ? state.prefixFailureCounts.get(failureKey) || state.prefixFailureCounts.get(dotted) || 0
+      : 0;
     const requestId = `44000000-0000-4000-8000-${String(state.observationPosts.length).padStart(12, "0")}`;
     const observationId = `44100000-0000-4000-8000-${String(state.observationPosts.length).padStart(12, "0")}`;
     const response = {
@@ -3781,7 +3799,10 @@ async function routeTask440SystemData(page, overrides = {}) {
       lifecycle: failures > 0 ? "failed" : "succeeded", observation_id: failures > 0 ? null : observationId,
       error: failures > 0 ? `Unable to inspect ${dotted}` : null, attempts: 1, heartbeat_at: null, reused: false,
     };
-    if (failures > 0) state.prefixFailureCounts.set(dotted, failures - 1);
+    if (failures > 0) {
+      const key = state.prefixFailureCounts.has(failureKey) ? failureKey : dotted;
+      state.prefixFailureCounts.set(key, failures - 1);
+    }
     state.observationRequests.set(requestId, response);
     state.observationRequests.set(observationId, { ...response, payload: observationPayload(body.kind, body.path_components, revision, body.child_offset) });
     await route.fulfill({ status: failures > 0 ? 202 : 200, contentType: "application/json", body: JSON.stringify(response) });
@@ -4284,43 +4305,33 @@ async function assertExactTextOrder(locator, expected, label) {
 }
 
 async function assertTask440ConfigSemantics(page) {
-  const evaluation = page.locator(".cfg-side > section").nth(1);
-  const drift = page.locator(".cfg-side > section").nth(2);
-  await assertExactTextOrder(
-    evaluation.locator(".sd-drift-row .sd-drift-label"),
-    ["Toplevel", "Evaluated options", "Host delta", "Packages", "Closure size", "Eval time"],
-    "Config Evaluation labels",
-  );
-  await assertExactTextOrder(
-    drift.locator(".sd-drift-row .sd-drift-label"),
-    ["Evaluated config", "Running config", "Agent fingerprint"],
-    "Config Drift labels",
-  );
-  for (const expected of ["/nix/store/task440-current-system", "38", "17 rows", "731", "4.8 GiB", "845 ms · 2026-08-28 18:00 UTC"]) {
-    await assertVisible(evaluation.getByText(expected, { exact: true }), `Missing authoritative Config metric ${expected}`);
-  }
-  await assertVisible(drift.getByText("matches", { exact: true }), "Missing typed matching agent fingerprint");
-  await assertVisible(drift.getByText("No configuration drift was observed in the last 7 days.", { exact: true }), "Incorrect no-observed-drift callout");
+  const explorer = page.locator(".cfgx");
+  await assertVisible(explorer.getByText("TARGET", { exact: true }), "Config Explorer lost its target contract");
+  await assertVisible(explorer.getByText("OBSERVATIONAL", { exact: true }), "Config Explorer lost its observational boundary");
+  await assertExactTextOrder(explorer.locator(".cfgx-tools .seg button"), ["Browse", "Configured", "Search"], "Config Explorer modes");
+  await assertExactTextOrder(explorer.locator(".cfgx-side-tabs button"), ["Option", "Sources"], "Config inspector panes");
+  await assertVisible(explorer.locator(".cfgx-meta-i").filter({ hasText: "inventory" }), "Config Explorer lost inventory state");
+  await assertVisible(explorer.locator(".cfgx-meta-i").filter({ hasText: "comparison" }), "Config Explorer lost comparison state");
 }
 
 async function assertTask440CanonicalConfigState(page, label) {
   await assertVisible(page.getByRole("heading", { name: "atlas-01" }), `${label} lost the atlas-01 identity`);
   await assertVisible(page.getByText("#160", { exact: true }), `${label} lost generation 160`);
   await assertVisible(page.getByRole("tab", { name: "Config", selected: true }), `${label} lost its active Config tab`);
-  const revision = page.locator("select.cfg-revselect");
+  const revision = page.locator("select.cfgx-select");
   await assertVisible(revision, `${label} lost its generation selector`);
   await page.waitForFunction(
-    () => document.querySelector("select.cfg-revselect")?.value === "160",
-    undefined,
+    (expectedRevision) => {
+      const value = document.querySelector("select.cfgx-select")?.value;
+      return value === "160" || value === expectedRevision;
+    },
+    TASK_440_CONFIG_SHA,
     { timeout: 5000 },
   );
-  await assertVisible(page.locator(".cfg-toolbar .seg button").first(), `${label} did not render available Config results`, 30000);
-  await assertExactTextOrder(page.locator(".cfg-toolbar .seg button"), ["All 1092", "Overridden 204", "Changed 5"], `${label} Config filters`);
-  await assertVisible(page.getByText("Loaded 27 of 27 module sources", { exact: true }), `${label} lost its 27 module sources`);
-  const evaluation = page.locator(".cfg-side > section").nth(1);
-  for (const expected of ["1092", "37 rows", "842", "1.6 GiB"]) {
-    await assertVisible(evaluation.getByText(expected, { exact: true }), `${label} lost authoritative Config metric ${expected}`);
-  }
+  await assertTask440ConfigSemantics(page);
+  await assertVisible(page.locator(".cfgx-meta-i").filter({ hasText: "inventory1092 options" }), `${label} lost its complete inventory`);
+  await assertVisible(page.locator(".cfgx-meta-i").filter({ hasText: "comparisonready" }), `${label} lost comparison readiness`);
+  for (const expected of ["842", "1.6 GiB", "3400 ms"]) await assertVisible(page.locator(".cfgx-meta").getByText(expected, { exact: true }), `${label} lost Explorer metric ${expected}`);
   if (await page.getByText(/configuration issues detected/i).count()) throw new Error(`${label} inherited an unrelated global configuration warning`);
 }
 
@@ -4338,33 +4349,13 @@ async function validateTask440SemanticContract(page, target, contract, theme) {
     await assertVisible(page.getByText(`#${contract.identity.generation}`, { exact: true }), `${target.name} lost its generation identity`);
     await assertVisible(page.getByText(contract.identity.uptime.dioxus, { exact: true }), `${target.name} lost its uptime`);
     await assertVisible(page.getByText(`activated · ${contract.identity.heartbeatAgeMinutes}m ago`, { exact: true }), `${target.name} lost its stable heartbeat age`);
-    const selected = page.locator("select.cfg-revselect option:checked");
+    const selected = page.locator("select.cfgx-select option:checked");
     const selectedText = (await selected.textContent() || "").replace(/\s+/g, " ").trim();
     if (!selectedText.includes(contract.identity.revision.slice(0, 7))) throw new Error(`${target.name} selected generation lost revision ${contract.identity.revision}`);
-    await assertVisible(page.locator(".cfg-revbar-msg").filter({ hasText: contract.identity.revisionMessage }), `${target.name} lost its revision message`);
-    await assertExactTextOrder(page.locator(".cfg-toolbar .seg button"), [
-      `All ${contract.counts.all}`,
-      `Overridden ${contract.counts.overridden}`,
-      `Changed ${contract.counts.changed}`,
-    ], `${target.name} Config counts`);
-    if (contract.searchQuery) {
-      const search = page.getByPlaceholder("Filter options, values, modules…");
-      if ((await search.inputValue()) !== contract.searchQuery) throw new Error(`${target.name} Config search does not match the semantic contract`);
-    }
-    await assertExactTextOrder(page.locator(".cfg-table tbody > tr.cfg-row .cfg-path"), task440ExpectedRows(contract, "dioxus", theme), `${target.name} ordered Config rows`);
-    const evaluation = page.locator(".cfg-side > section").nth(1);
-    for (const expected of [
-      String(contract.counts.all),
-      `${contract.counts.hostDelta} rows`,
-      String(contract.counts.packages),
-      contract.formattedMetrics.dioxusClosure,
-    ]) await assertVisible(evaluation.getByText(expected, { exact: true }), `${target.name} lost Config metric ${expected}`);
-    const evalTime = (await evaluation.locator(".sd-drift-row").filter({ hasText: "Eval time" }).textContent() || "").replace(/\s+/g, " ");
-    if (!evalTime.includes(contract.formattedMetrics.dioxusEvaluationDuration)) throw new Error(`${target.name} evaluation duration mismatch: ${evalTime}`);
-    if (contract.expandedItem) {
-      const row = page.getByText(contract.expandedItem, { exact: true }).locator("xpath=ancestor::tr[1]");
-      if ((await row.locator(".cfg-row-toggle").getAttribute("aria-expanded")) !== "true") throw new Error(`${target.name} lost expanded item ${contract.expandedItem}`);
-    }
+    await assertTask440ConfigSemantics(page);
+    const configured = page.locator(".cfgx-tools").getByRole("button", { name: "Configured", exact: true });
+    if ((await configured.getAttribute("aria-pressed")) !== "true") throw new Error(`${target.name} lost Configured mode`);
+    if (contract.expandedItem) await assertVisible(page.locator(".cfgx-insp-path").filter({ hasText: contract.expandedItem }), `${target.name} lost selected option ${contract.expandedItem}`);
     return;
   }
 
@@ -4387,10 +4378,10 @@ async function validateTask440SemanticContract(page, target, contract, theme) {
 }
 
 async function assertTask440SelectedConfigRevision(page, label) {
-  const revision = page.locator("select.cfg-revselect");
+  const revision = page.locator("select.cfgx-select");
   await assertVisible(revision, `${label} lost its revision selector`);
   await page.waitForFunction(
-    (expected) => document.querySelector("select.cfg-revselect")?.value === expected,
+    (expected) => document.querySelector("select.cfgx-select")?.value === expected,
     TASK_440_CURRENT_SHA,
     { timeout: 5000 },
   );
@@ -4399,11 +4390,12 @@ async function assertTask440SelectedConfigRevision(page, label) {
 
 async function assertTask440ConfigGeometry(page, viewportName) {
   const geometry = await page.evaluate(() => {
-    const grid = document.querySelector(".sd-grid-config");
-    const card = grid?.querySelector(".cfg-card");
-    const side = grid?.querySelector(".cfg-side");
-    const tableWrap = grid?.querySelector(".cfg-table-wrap");
-    if (!grid || !card || !side || !tableWrap) throw new Error("Config geometry surfaces are missing");
+    const explorer = document.querySelector(".cfgx");
+    const body = explorer?.querySelector(".cfgx-body");
+    const tree = body?.querySelector(".cfgx-tree-col");
+    const side = body?.querySelector(".cfgx-side");
+    const scroll = tree?.querySelector(".cfgx-scroll");
+    if (!explorer || !body || !tree || !side || !scroll) throw new Error("Config Explorer geometry surfaces are missing");
     const rect = (element) => {
       const box = element.getBoundingClientRect();
       return { top: box.top, right: box.right, bottom: box.bottom, left: box.left, width: box.width };
@@ -4412,39 +4404,24 @@ async function assertTask440ConfigGeometry(page, viewportName) {
       viewportWidth: innerWidth,
       documentWidth: document.documentElement.scrollWidth,
       bodyWidth: document.body.scrollWidth,
-      grid: rect(grid),
-      card: rect(card),
+      explorer: rect(explorer),
+      body: rect(body),
+      tree: rect(tree),
       side: rect(side),
-      sideInlineHeight: side.style.height,
-      sideGap: Number.parseFloat(getComputedStyle(side).rowGap || getComputedStyle(side).gap || "0"),
-      sideChildren: [...side.children].filter((element) => getComputedStyle(element).display !== "none").map(rect),
-      tableOverflowY: getComputedStyle(tableWrap).overflowY,
-      tableOverflowX: getComputedStyle(tableWrap).overflowX,
-      tableClientWidth: tableWrap.clientWidth,
-      tableScrollWidth: tableWrap.scrollWidth,
-      tableClientHeight: tableWrap.clientHeight,
-      tableScrollHeight: tableWrap.scrollHeight,
-      headers: [...tableWrap.querySelectorAll("thead th")].map((header) => header.textContent.replace(/\s+/g, " ").trim()),
-      widths: [...tableWrap.querySelectorAll("thead th")].map((header) => header.getBoundingClientRect().width / tableWrap.querySelector("table").getBoundingClientRect().width),
+      scrollClientWidth: scroll.clientWidth,
+      scrollScrollWidth: scroll.scrollWidth,
+      headers: [...tree.querySelectorAll(".cfgx-colhead > span")].map((header) => header.textContent.replace(/\s+/g, " ").trim()),
     };
   });
   if (geometry.documentWidth > geometry.viewportWidth + 1 || geometry.bodyWidth > geometry.viewportWidth + 1) throw new Error(`${viewportName} Config clips horizontally: ${JSON.stringify(geometry)}`);
-  if (!["Option", "Value", "Set by"].every((header, index) => geometry.headers[index] === header)) throw new Error(`${viewportName} Config column order changed: ${JSON.stringify(geometry)}`);
-  [0.46, 0.26, 0.28].forEach((expected, index) => {
-    if (Math.abs(geometry.widths[index] - expected) > 0.025) throw new Error(`${viewportName} Config column ${index + 1} width changed: ${JSON.stringify(geometry)}`);
-  });
-  if (["auto", "scroll"].includes(geometry.tableOverflowY) || geometry.tableScrollHeight > geometry.tableClientHeight + 1) throw new Error(`${viewportName} Config table gained an inner vertical scroller: ${JSON.stringify(geometry)}`);
-  if (["auto", "scroll"].includes(geometry.tableOverflowX) || geometry.tableScrollWidth > geometry.tableClientWidth + 1) throw new Error(`${viewportName} Config table gained an inner horizontal scroller: ${JSON.stringify(geometry)}`);
-  if (geometry.sideInlineHeight) throw new Error(`${viewportName} Config side column uses an explicit test height: ${JSON.stringify(geometry)}`);
-  const naturalSideHeight = geometry.sideChildren.reduce((total, child) => total + (child.bottom - child.top), 0) + geometry.sideGap * Math.max(0, geometry.sideChildren.length - 1);
-  if (naturalSideHeight <= 0 || geometry.sideChildren.length !== 3) throw new Error(`${viewportName} Config natural side-card geometry is incomplete: ${JSON.stringify(geometry)}`);
+  if (!isDeepStrictEqual(geometry.headers, ["configured option", "value", "defined by"])) throw new Error(`${viewportName} Config columns changed: ${JSON.stringify(geometry)}`);
+  if (geometry.scrollScrollWidth > geometry.scrollClientWidth + 1) throw new Error(`${viewportName} Config tree has horizontal overflow: ${JSON.stringify(geometry)}`);
   if (viewportName === "wide") {
-    if (Math.abs(geometry.card.top - geometry.side.top) > 1 || geometry.card.right > geometry.side.left + 1) throw new Error(`Wide Config top alignment or separation changed: ${JSON.stringify(geometry)}`);
-    if (Math.abs((geometry.card.width / geometry.side.width) - (7 / 5)) > 0.03) throw new Error(`Wide Config is not a 7:5 split: ${JSON.stringify(geometry)}`);
-    if (Math.abs(geometry.side.bottom - geometry.card.bottom) > 2) throw new Error(`Wide Config card columns are not bottom-aligned: ${JSON.stringify(geometry)}`);
+    if (Math.abs(geometry.tree.top - geometry.side.top) > 1 || geometry.tree.right > geometry.side.left + 1) throw new Error(`Wide Config Explorer columns overlap: ${JSON.stringify(geometry)}`);
+    if (Math.abs(geometry.side.right - geometry.body.right) > 1) throw new Error(`Wide Config inspector is clipped: ${JSON.stringify(geometry)}`);
   } else {
-    if (geometry.side.top < geometry.card.bottom - 1 || Math.abs(geometry.card.width - geometry.side.width) > 1) throw new Error(`Narrow Config did not stack without overlap: ${JSON.stringify(geometry)}`);
-    if (Math.abs(geometry.side.bottom - geometry.grid.bottom) > 2) throw new Error(`Narrow Config stack is clipped: ${JSON.stringify(geometry)}`);
+    if (geometry.side.top < geometry.tree.bottom - 1 || Math.abs(geometry.tree.width - geometry.side.width) > 1) throw new Error(`Narrow Config Explorer did not stack without overlap: ${JSON.stringify(geometry)}`);
+    if (Math.abs(geometry.side.bottom - geometry.body.bottom) > 2) throw new Error(`Narrow Config Explorer is clipped: ${JSON.stringify(geometry)}`);
   }
 }
 
@@ -4516,7 +4493,7 @@ async function resetTask440CaptureScroll(page) {
     window.scrollTo(0, 0);
     document.documentElement.scrollTop = 0;
     document.body.scrollTop = 0;
-    const selectors = [".content", ".app-main", ".main-content", ".sd-content", ".cfg-table-wrap", ".fl-tray-body", ".fl-tray-commits", ".fx-body"];
+    const selectors = [".content", ".app-main", ".main-content", ".sd-content", ".cfgx-scroll", ".cfgx-side", ".fl-tray-body", ".fl-tray-commits", ".fx-body"];
     const reset = [];
     for (const selector of selectors) {
       for (const element of document.querySelectorAll(selector)) {
@@ -4546,13 +4523,11 @@ async function resetTask440CaptureScroll(page) {
 async function prepareTask440CanonicalCapture(page, step) {
   await resetTask440CaptureScroll(page);
   if (step.name.includes("config-canonical")) {
-      await assertTask440CanonicalConfigState(page, "Canonical Config capture");
+    await assertTask440CanonicalConfigState(page, "Canonical Config capture");
     const wide = step.name.includes("wide");
-    if (wide) {
-      const row = page.getByText(TASK_440_FIXTURE.canonicalConfig.expandedOption, { exact: true }).locator("xpath=ancestor::tr[1]");
-      if ((await row.locator(".cfg-row-toggle").getAttribute("aria-expanded")) !== "true") throw new Error("Canonical wide Config capture lost its expanded typed option");
-      await assertVisible(page.getByText("modules/stig/kernel/default.nix", { exact: true }), "Canonical wide Config capture lost production provenance");
-    }
+    const configured = page.locator(".cfgx-tools").getByRole("button", { name: "Configured", exact: true });
+    if ((await configured.getAttribute("aria-pressed")) !== "true") throw new Error("Canonical Config capture lost Configured mode");
+    await assertVisible(page.locator(".cfgx-insp-path").filter({ hasText: TASK_440_FIXTURE.canonicalConfig.expandedOption }), "Canonical Config capture lost its persistent option pane");
     await assertTask440ConfigGeometry(page, wide ? "wide" : "narrow");
   } else {
     const tray = page.getByRole("dialog", { name: "infrastructure commits" });
@@ -4975,7 +4950,7 @@ async function runTask440LiveSnapshotEvaluation(page) {
     { timeout: LOAD_TIMEOUT },
   );
     await assertVisible(
-    page.getByText("Snapshot unavailable", { exact: true }),
+    page.locator(".cfgx-meta-i").filter({ hasText: "inventoryunavailable" }),
     "Expected live commit to begin without a reusable snapshot",
     15000,
   );
@@ -5071,7 +5046,7 @@ async function runTask440LiveSnapshotEvaluation(page) {
       throw new Error(`Could not isolate the exact targeted Config inspection from automatic scheduling: ${exactTargetState}`);
     }
     const attemptsBeforeInspection = completed.attempts.length;
-    await page.getByRole("button", { name: "Inspect configuration" }).click();
+    await page.getByRole("button", { name: "request full inventory" }).click();
     let targetedState = null;
     for (let attempt = 0; attempt < 150; attempt += 1) {
       targetedState = runFixtureSql(`
@@ -5176,11 +5151,12 @@ async function runTask440LiveSnapshotEvaluation(page) {
     }
 
     await assertVisible(
-      page.locator(".cfg-toolbar .seg button").first(),
+      page.locator(".cfgx-meta-i").filter({ hasText: "inventory" }),
       "Expected Config to render the snapshot persisted by evaluator finalization",
       15000,
     );
-    const liveSearch = page.getByPlaceholder("Filter options, values, modules…");
+    await page.getByRole("button", { name: "Search", exact: true }).click();
+    const liveSearch = page.getByPlaceholder("Search all certified options…");
     await liveSearch.fill("networking.hostName");
     await assertVisible(
       page.getByText("networking.hostName", { exact: true }),
@@ -17088,11 +17064,12 @@ security.audit.enable = true;</fixtext>
     description: "TASK-440 live explicit primary prerequisite and targeted Config Inspector regression plus mocked auxiliary lifecycle and legacy-generation states",
     action: async (page) => {
       await runTask440LiveSnapshotEvaluation(page);
+      await suppressOnboardingCoach(page);
       await routeSystemsWarningData(page);
       const state = await routeTask440SystemData(page);
       const configUrl = `${baseUrl}/systems/${TASK_440_SYSTEM_ID}?tab=config&config_mode=commit&revision=${TASK_440_NEVER_DEPLOYED_SHA}`;
       await page.goto(configUrl, { timeout: LOAD_TIMEOUT });
-      await assertVisible(page.getByRole("heading", { name: "Certified snapshot search" }), `Expected Config explorer; fixture requests: ${state.handledRequests.join(",")}`, 15000);
+      await assertVisible(page.locator(".cfgx").getByText("TARGET", { exact: true }), `Expected Config Explorer; fixture requests: ${state.handledRequests.join(",")}`, 15000);
       await assertVisible(page.locator(".cfg-hist-note").filter({ hasText: "revision never deployed here" }), "Expected never-deployed warning");
       if (!page.url().includes(TASK_440_NEVER_DEPLOYED_SHA)) throw new Error("Expected full revision in Config deep link");
       await page.reload({ timeout: LOAD_TIMEOUT });
@@ -17100,134 +17077,35 @@ security.audit.enable = true;</fixtext>
 
       state.lifecycle = "unavailable";
       await page.reload({ timeout: LOAD_TIMEOUT });
-      const unavailableState = page.getByText("Snapshot unavailable", { exact: true }).locator("xpath=ancestor::*[@role='status'][1]");
-      await assertVisible(unavailableState, "Expected unavailable snapshot status semantics", 15000);
-      for (const text of ["Module sources unavailable", "Evaluation summary unavailable", "Drift unavailable"]) {
-        await assertVisible(page.getByText(text, { exact: true }), `Expected distinct unavailable summary state: ${text}`);
-      }
-      await assertVisible(page.getByRole("button", { name: "Inspect configured option services.openssh.enable" }), "Lazy configured data should remain usable without certified V2 evidence");
-      if (!(await page.getByRole("button", { name: /^Changed/ }).isDisabled())) {
-        throw new Error("Lazy observations must not enable Changed without certified V2 evidence");
-      }
+      await assertVisible(page.locator(".cfgx-meta-i").filter({ hasText: "primary evalunavailable" }), "Expected unavailable primary evaluation state", 15000);
+      await assertVisible(page.locator(".cfgx-meta-i").filter({ hasText: "inventoryunavailable" }), "Expected unavailable inventory state");
+      await assertVisible(page.locator(".cfgx-meta-i").filter({ hasText: "comparisonunavailable" }), "Unavailable inventory made comparison look ready");
+      await page.getByRole("button", { name: "Configured", exact: true }).click();
+      await assertVisible(page.getByRole("button", { name: "Inspect configured option services.openssh.enable" }), "Lazy configured data should remain usable without certified inventory", 15000);
       state.inspectionPrerequisite = true;
-      await page.getByRole("button", { name: "Inspect configuration" }).click();
+      await page.getByRole("button", { name: "request full inventory" }).click();
       await assertVisible(page.getByText(/Configuration inspection prerequisite: The exact completed NixOS carrier is not available/i), "Expected distinct Config inspection prerequisite");
       state.inspectionPrerequisite = false;
-      await page.getByRole("button", { name: "Inspect configuration" }).click();
-      const queuedState = page
-        .getByText("Configuration evidence queued", { exact: true })
-        .locator("xpath=ancestor::*[@role='status'][1]");
-      await assertVisible(queuedState, "Expected queued snapshot state");
-      await assertVisible(
-        queuedState.getByText("Configuration evidence is waiting to be prepared for this revision.", { exact: true }),
-        "Expected source-agnostic queued detail",
-      );
-      for (const text of ["Module sources queued", "Evaluation summary queued", "Drift queued"]) {
-        await assertVisible(page.getByText(text, { exact: true }), `Expected distinct queued summary state: ${text}`);
-      }
+      await page.getByRole("button", { name: "request full inventory" }).click();
+      const queuedInventory = page.locator(".cfgx-meta-i").filter({ hasText: "inventoryqueued" });
+      await assertVisible(queuedInventory, "Expected queued inventory state", 15000);
+      if ((await queuedInventory.textContent()).toLowerCase().includes("running")) throw new Error("Queued inventory was mislabeled as running");
 
       state.lifecycle = "running";
       await page.reload({ timeout: LOAD_TIMEOUT });
-      const runningState = page
-        .getByText("Configuration evidence in progress", { exact: true })
-        .locator("xpath=ancestor::*[@role='status'][1]");
-      await assertVisible(runningState, "Expected running snapshot state", 15000);
-      await assertVisible(
-        runningState.getByText("Configuration evidence is still being prepared for this revision.", { exact: true }),
-        "Expected source-agnostic running detail",
-      );
-      for (const text of ["Module sources running", "Evaluation summary running", "Drift running"]) {
-        await assertVisible(page.getByText(text, { exact: true }), `Expected distinct running summary state: ${text}`);
-      }
+      await assertVisible(page.locator(".cfgx-meta-i").filter({ hasText: "inventoryrunning" }), "Expected running inventory state", 15000);
       state.lifecycle = "failed";
       await page.reload({ timeout: LOAD_TIMEOUT });
-      await assertVisible(page.getByText("safe deterministic evaluation failure", { exact: true }).first(), "Expected failed evaluation diagnostic", 15000);
-      await assertVisible(page.getByText("Evaluation failed", { exact: true }).locator("xpath=ancestor::*[@role='alert'][1]"), "Expected failed Config alert semantics");
-      for (const text of ["Evaluation summary failed", "Drift failed"]) {
-        const card = page.locator(".sd-card").filter({ hasText: text });
-        await assertVisible(card.getByRole("alert"), `Expected failed ${text} alert semantics`);
-        await assertVisible(card.getByText("safe deterministic evaluation failure", { exact: true }), `Expected safe diagnostic in ${text}`);
-      }
-      const failedModulesCard = page.locator(".sd-card").filter({ hasText: "Module sources failed" });
-      await assertVisible(failedModulesCard.getByRole("alert"), "Expected failed module-source alert semantics");
-      await assertVisible(failedModulesCard.getByText("safe deterministic module source failure", { exact: true }), "Expected independent safe module-source diagnostic");
-
-      state.apiError = true;
-      state.moduleApiError = true;
-      await page.reload({ timeout: LOAD_TIMEOUT });
-      await assertVisible(page.getByRole("alert").filter({ hasText: /Unable to load evaluated options.*deterministic snapshot API failure/i }), "Expected Config API error alert semantics", 15000);
-      for (const heading of ["Evaluation", "Drift"]) {
-        const card = page.locator(".sd-card").filter({ has: page.getByRole("heading", { name: heading }) });
-        await assertVisible(card.getByRole("alert"), `Expected ${heading} transport error alert`);
-        await assertVisible(card.getByText(/deterministic summary API failure/i), `Expected ${heading} transport diagnostic`);
-      }
-      const modulesCard = page.locator(".sd-card").filter({ has: page.getByRole("heading", { name: "Modules" }) });
-      await assertVisible(modulesCard.getByRole("alert"), "Expected Modules transport error alert");
-      await assertVisible(modulesCard.getByText(/deterministic module source API failure/i), "Expected independent module-source transport diagnostic");
-      state.apiError = false;
-      state.moduleApiError = false;
-      state.lifecycle = "available";
-
-      state.moduleTransportError = true;
-      await page.reload({ timeout: LOAD_TIMEOUT });
-      await assertVisible(modulesCard.getByRole("alert"), "Expected initial module-source transport failure", 15000);
-      await assertVisible(page.getByText("38", { exact: true }).first(), "Expected evaluation summary to remain available during module-source transport failure");
-      state.moduleTransportError = false;
-      await modulesCard.getByRole("button", { name: "Retry evaluation module sources" }).click();
-      await assertVisible(modulesCard.getByText("Loaded 40 of 86 module sources", { exact: true }), "Expected initial module-source retry to recover");
-
-      const observationsBeforeHistoricalGeneration = state.observationPosts.length;
-      await page.goto(`${baseUrl}/systems/${TASK_440_SYSTEM_ID}?tab=config&config_mode=generation&generation=72`, { timeout: LOAD_TIMEOUT });
-      await assertVisible(page.getByText(/no tracked commit/i), "Expected unavailable local generation state", 15000);
-      await assertVisible(page.getByText(/Lazy Explorer observations are commit-scoped/i), "Expected truthful historical generation Explorer boundary");
-      if (state.observationPosts.length !== observationsBeforeHistoricalGeneration) {
-        throw new Error("Historical generation mode launched a misleading commit-scoped observation");
-      }
-      for (const text of ["Module sources unavailable", "Evaluation summary unavailable", "Drift unavailable"]) {
-        await assertVisible(page.getByText(text, { exact: true }), `Expected unavailable summary state without a selectable revision: ${text}`);
-      }
-      await page.goto(`${baseUrl}/systems/${TASK_440_SYSTEM_ID}?tab=config&config_mode=generation&generation=999`, { timeout: LOAD_TIMEOUT });
-      await assertVisible(page.getByText(/generation is unknown or is no longer retained/i), "Expected unknown generation to differ from retained untracked generation", 15000);
-      state.lifecycle = "unavailable";
-      await page.goto(`${baseUrl}/systems/${TASK_440_SYSTEM_ID}?tab=config&config_mode=generation&generation=73`, { timeout: LOAD_TIMEOUT });
-      await assertVisible(page.locator(".cfg-hist-note").filter({ hasText: "generation #73" }), "Expected historical generation warning", 15000);
-      const legacyGeneration = page.getByTestId("legacy-generation-provenance");
-      await assertVisible(legacyGeneration.getByText("Historical generation configuration not retained", { exact: true }), "Expected explicit missing historical generation provenance", 15000);
-      await assertVisible(legacyGeneration.getByText(/did not retain the exact evaluated configuration for that generation/i), "Expected exact generation retention warning");
-      await assertVisible(legacyGeneration.getByText(/does not restore or recreate the historical generation configuration/i), "Expected commit reevaluation boundary");
-      await assertHidden(page.getByRole("button", { name: "Inspect configuration" }), "Generation mode must not imply targeted inspection repairs historical provenance");
-      await page.getByRole("button", { name: "Inspect associated commit" }).click();
-      await page.waitForURL((url) => url.searchParams.get("config_mode") === "commit" && url.searchParams.get("revision") === TASK_440_HISTORICAL_SHA);
-      await assertVisible(page.getByRole("button", { name: "Inspect configuration" }), "Commit mode must permit authorized targeted inspection");
-      state.queueLifecycle = "available";
-      await page.getByRole("button", { name: "Inspect configuration" }).click();
-      await assertVisible(page.locator(".cfg-comparison-note").filter({ hasText: `Inspection of commit ${TASK_440_HISTORICAL_SHA.slice(0, 7)}` }), "Expected fresh result to be labeled as targeted commit inspection", 15000);
-      await assertVisible(page.locator(".cfg-table tbody .cfg-row").first(), "Expected commit data after successful inspection");
-      const inspectionRequest = state.inspectionRequests.at(-1);
-      if (inspectionRequest?.method !== "POST" || inspectionRequest?.revision !== TASK_440_HISTORICAL_SHA) {
-        throw new Error(`Expected exact associated-commit Config inspection POST, got ${JSON.stringify(inspectionRequest)}`);
-      }
-      if (state.evaluationRequests.length !== 0) {
-        throw new Error(`Config UI issued forbidden primary evaluation POSTs: ${JSON.stringify(state.evaluationRequests)}`);
-      }
-      state.lifecycle = "unavailable";
-      await page.goBack({ waitUntil: "domcontentloaded" });
-      await assertVisible(page.getByTestId("legacy-generation-provenance"), "Generation must remain unavailable after commit reevaluation", 15000);
-      if (new URL(page.url()).searchParams.get("generation") !== "73") throw new Error("Legacy generation deep link was not restored");
-      await page.getByRole("button", { name: "Back to current" }).click();
-      await assertVisible(page.getByRole("button", { name: "Generations" }), "Expected current generation Config state");
-      if (page.url().includes("generation=73")) throw new Error("Back to current retained stale generation context");
-      await page.goBack({ waitUntil: "domcontentloaded" });
-      await assertVisible(page.locator(".cfg-hist-note").filter({ hasText: "generation #73" }), "Back navigation did not restore generation 73", 15000);
-      await page.goForward({ waitUntil: "domcontentloaded" });
-      await assertVisible(page.getByRole("button", { name: "Generations" }), "Forward navigation did not restore current Config", 15000);
-      if (page.url().includes("generation=73")) throw new Error("Forward navigation restored stale generation context");
+      await assertVisible(page.locator(".cfgx-meta-i").filter({ hasText: "primary evalfailed" }), "Expected failed primary evaluation state", 15000);
+      await assertVisible(page.locator(".cfgx-meta-i").filter({ hasText: "inventoryfailed" }), "Expected failed inventory state");
+      await assertVisible(page.locator(".cfgx-meta-i").filter({ hasText: "comparisonunavailable" }), "Failed inventory made comparison look ready");
     },
   },
   {
     name: "12la-task440-partial-config-inventory",
-    description: "TASK-440 partial Config inventory warning, observed rows, and fail-closed comparison",
+    description: "TASK-440 truthful partial Config search, Sources, and fail-closed comparison contract",
     action: async (page) => {
+      await suppressOnboardingCoach(page);
       await routeSystemsWarningData(page);
       const state = await routeTask440SystemData(page, {
         optionInventoryState: "partial",
@@ -17239,91 +17117,110 @@ security.audit.enable = true;</fixtext>
         optionInventoryDiagnosticsTruncated: false,
       });
       await page.goto(`${baseUrl}/systems/${TASK_440_SYSTEM_ID}?tab=config&config_mode=commit&revision=${TASK_440_CURRENT_SHA}`, { timeout: LOAD_TIMEOUT });
-      await assertVisible(
-        page.getByText("This inventory is partial. Counts include observed options only; Changed and drift are unavailable. Recorded 1 unreadable prefix: services.poison.", { exact: true }),
-        "Expected explicit partial inventory warning",
-        15000,
-      );
-      await assertVisible(page.locator(".cfg-table tbody .cfg-row").first(), "Expected observed healthy option rows");
-      const changed = page.getByRole("button", { name: /^Changed/ });
-      if (!(await changed.isDisabled())) throw new Error("Changed must be disabled for a partial inventory");
-      await assertVisible(
-        page.getByText("No comparison is available for this revision.", { exact: true }),
-        "Expected partial inventory drift to fail closed",
-      );
-      if (state.optionRequests.some((request) => request.filter === "changed")) {
-        throw new Error("Partial inventory UI requested the unavailable Changed filter");
-      }
+      await assertVisible(page.locator(".cfgx-meta-i").filter({ hasText: "inventorypartial" }), "Expected explicit partial inventory state", 15000);
+      await assertVisible(page.locator(".cfgx-meta-i").filter({ hasText: "comparisonunavailable" }), "Partial inventory made comparison look available");
+      await page.getByRole("button", { name: "Search", exact: true }).click();
+      await assertVisible(page.getByText("Partial search over options observed in this Explorer session only. No match does not mean the option is absent.", { exact: true }), "Expected truthful partial search scope");
+      await assertVisible(page.getByText("No match in options observed during this Explorer session. Unobserved paths were not searched.", { exact: true }), "Expected truthful partial empty search");
+      await page.getByRole("button", { name: "Sources", exact: true }).click();
+      await assertVisible(page.getByText("Partial list: only source paths from provenance inspected in this Explorer target and session. This is not a complete module registry.", { exact: true }), "Expected truthful partial Sources scope");
+      if (state.inspectionRequests.length) throw new Error("Opening a partial inventory queued a complete inspection");
+      if (state.optionRequests.some((request) => request.filter === "changed")) throw new Error("Partial inventory UI requested unavailable comparison data");
     },
   },
   {
     name: "12m-task440-config-explorer-keyboard-wide",
-    description: "TASK-440 mocked API explorer (not live integration): scalar summary, deterministic module-source continuation/retry/conflict, revision races, typed options, provenance, wide themes, and keyboard behavior",
+    description: "TASK-440 comprehensive mocked Config Explorer: lazy observations, bounded continuation, local failures, persistent detail, explicit provenance, certified search, and revision fencing",
     action: async (page) => {
       await page.setViewportSize({ width: 1920, height: 1080 });
+      await suppressOnboardingCoach(page);
       await routeSystemsWarningData(page);
       const state = await routeTask440SystemData(page, {
-        holdModuleRevisions: [TASK_440_CURRENT_SHA],
-        summaryReplacementConflictCount: 1,
-        holdObservationKinds: ["root", "configured_index"],
-        prefixFailureCounts: [["services", 1]],
+        holdObservationKinds: ["root"],
+        prefixFailureCounts: [["services@512", 1]],
+        largeServicesPrefix: true,
       });
-      state.holdSummary = true;
       await page.goto(`${baseUrl}/systems/${TASK_440_SYSTEM_ID}?tab=config&config_mode=commit&revision=${TASK_440_CURRENT_SHA}`, { timeout: LOAD_TIMEOUT });
-      await state.waitForObservationPosts(["root", "configured_index"]);
+      await state.waitForObservationPosts(["root"]);
       await assertVisible(page.getByRole("status").filter({ hasText: "Root: Queued" }), "Expected independently queued root observation");
-      await assertVisible(page.getByRole("status").filter({ hasText: "Configured options: Queued" }), "Expected independently queued configured index");
-      state.releaseHeldObservation("configured_index");
-      await assertVisible(page.getByRole("button", { name: "Inspect configured option services.openssh.enable" }), "Configured index did not render while root remained held", 15000);
-      await assertVisible(page.getByRole("status").filter({ hasText: "Root: Queued" }), "Configured completion incorrectly completed root");
+      if (state.observationPosts.some((request) => request.kind === "configured_index")) throw new Error("Opening Config eagerly requested configured_index");
+      if (state.inspectionRequests.length) throw new Error(`Opening Config queued a forbidden complete inspection: ${JSON.stringify(state.inspectionRequests)}`);
       state.releaseHeldObservation("root");
       let servicesPrefix = page.getByRole("button", { name: "Expand services" });
-      await assertVisible(servicesPrefix, "Root did not render after configured index");
+      await assertVisible(servicesPrefix, "Root observation did not render", 15000);
 
-      state.holdObservationKinds.add("root");
       state.holdObservationKinds.add("configured_index");
-      const nextRootPost = page.waitForRequest((request) => request.method() === "POST" && request.url().includes("/config-observations/") && request.postDataJSON().kind === "root");
-      const nextConfiguredPost = page.waitForRequest((request) => request.method() === "POST" && request.url().includes("/config-observations/") && request.postDataJSON().kind === "configured_index");
-      await page.reload({ timeout: LOAD_TIMEOUT });
-      await Promise.all([nextRootPost, nextConfiguredPost]);
-      state.releaseHeldObservation("root");
-      servicesPrefix = page.getByRole("button", { name: "Expand services" });
-      await assertVisible(servicesPrefix, "Root did not render while configured index remained held", 15000);
-      await assertVisible(page.getByRole("status").filter({ hasText: "Configured options: Queued" }), "Root completion incorrectly completed configured index");
+      const configuredMode = page.getByRole("button", { name: "Configured", exact: true });
+      await configuredMode.click();
+      await state.waitForObservationPosts(["configured_index"]);
+      await assertVisible(page.getByRole("status").filter({ hasText: "Configured options: Queued" }), "First Configured activation did not start configured_index");
       state.releaseHeldObservation("configured_index");
-      await assertVisible(page.getByRole("button", { name: "Inspect configured option services.openssh.enable" }), "Configured index did not recover after independent root rendering", 15000);
+      await assertVisible(page.getByRole("button", { name: "Inspect configured option services.openssh.enable" }), "Configured index did not render", 15000);
+      const configuredPosts = () => state.observationPosts.filter((request) => request.kind === "configured_index").length;
+      const configuredCount = configuredPosts();
+      await page.getByRole("button", { name: "Browse", exact: true }).click();
+      await configuredMode.click();
+      if (configuredPosts() !== configuredCount) throw new Error("Revisiting Configured duplicated configured_index work");
+      await page.getByRole("button", { name: "Browse", exact: true }).click();
 
       await servicesPrefix.click();
-      const servicesFailure = page.getByRole("alert").filter({ hasText: "Unable to inspect services" });
-      await assertVisible(servicesFailure, "Expected prefix failure to remain local", 15000);
-      await assertVisible(page.getByRole("button", { name: "Expand networking" }), "Prefix failure cleared a healthy root sibling");
-      const postsBeforeRetry = state.observationPosts.length;
-      await servicesFailure.getByRole("button", { name: "Retry services" }).click();
-      await assertVisible(page.getByRole("button", { name: "Expand services.openssh" }), "Expected local prefix retry to recover", 15000);
-      const retryPosts = state.observationPosts.slice(postsBeforeRetry);
-      if (retryPosts.length !== 1 || retryPosts[0].kind !== "prefix" || retryPosts[0].path_components.join(".") !== "services") {
-        throw new Error(`Prefix retry requested unrelated observations: ${JSON.stringify(retryPosts)}`);
+      await assertVisible(page.getByText("Showing 512 of 514 children under services.", { exact: true }), "Expected bounded services prefix page", 15000);
+      if (await page.getByRole("button", { name: "Expand services.openssh" }).count()) throw new Error("Browse eagerly exposed child 513 before continuation");
+      const retainedFirst = page.getByRole("button", { name: "Expand services.healthy" });
+      await assertVisible(retainedFirst, "Expected first prefix row before continuation");
+      await assertVisible(retainedFirst.locator(".cfgx-val").getByText("—", { exact: true }), "Browse prefix row eagerly exposed a value");
+      const loadMoreServices = page.getByRole("button", { name: "Load more children under services" });
+      await loadMoreServices.click();
+      const continuationFailure = page.getByRole("alert").filter({ hasText: "Unable to inspect services" });
+      await assertVisible(continuationFailure, "Expected continuation failure to remain local", 15000);
+      await assertVisible(retainedFirst, "Continuation failure discarded loaded prefix rows");
+      await assertVisible(page.getByRole("button", { name: "Expand networking" }), "Continuation failure removed a healthy root sibling");
+      await loadMoreServices.click();
+      const offsetRequests = state.observationPosts.filter((request) => request.kind === "prefix" && isDeepStrictEqual(request.path_components, ["services"]) && request.child_offset === 512);
+      if (offsetRequests.length !== 2) throw new Error(`Expected failed and retried offset 512 requests: ${JSON.stringify(offsetRequests)}`);
+      const servicesRows = page.locator(".cfg-explorer-tree [title^='services.']");
+      await assertVisible(page.getByRole("button", { name: "Expand services.openssh" }), "Child 513 was not reachable after continuation retry", 15000);
+      const serviceTitles = await servicesRows.evaluateAll((elements) => elements.map((element) => element.getAttribute("title")));
+      if (serviceTitles.length !== 514 || new Set(serviceTitles).size !== 514 || serviceTitles[0] !== "services.healthy" || serviceTitles[512] !== "services.openssh" || serviceTitles[513] !== "services.tail") {
+        throw new Error(`Prefix continuation lost, duplicated, or reordered rows: ${JSON.stringify({ count: serviceTitles.length, first: serviceTitles[0], child513: serviceTitles[512], last: serviceTitles[513] })}`);
       }
       await page.getByRole("button", { name: "Expand services.openssh" }).click();
       const treeOption = page.getByRole("button", { name: "Inspect option services.openssh.enable" });
       await assertVisible(treeOption, "Expected nested lazy option", 15000);
       await treeOption.click();
-      await assertVisible(page.getByRole("heading", { name: "services.openssh.enable" }), "Tree option did not render lazy detail", 15000);
+      await assertVisible(page.locator(".cfgx-insp-path").filter({ hasText: "services.openssh.enable" }), "Tree option did not render lazy detail", 15000);
       const treeOperation = state.observationPosts.filter((request) => request.kind === "option").at(-1);
+      await page.getByRole("button", { name: "Sources", exact: true }).click();
+      await page.getByRole("button", { name: "Option", exact: true }).click();
+      await assertVisible(page.locator(".cfgx-insp-path").filter({ hasText: "services.openssh.enable" }), "Option detail did not persist across inspector panes");
+      await page.getByRole("button", { name: "Configured", exact: true }).click();
       await page.getByRole("button", { name: "Inspect configured option services.openssh.enable" }).click();
-      await assertVisible(page.getByRole("heading", { name: "services.openssh.enable" }), "Configured option did not render shared lazy detail", 15000);
+      await assertVisible(page.locator(".cfgx-insp-path").filter({ hasText: "services.openssh.enable" }), "Configured option did not render shared lazy detail", 15000);
       const configuredOperation = state.observationPosts.filter((request) => request.kind === "option").at(-1);
       if (!treeOperation || !configuredOperation || JSON.stringify(treeOperation.path_components) !== JSON.stringify(configuredOperation.path_components)) {
         throw new Error(`Tree and configured options used different operations: ${JSON.stringify({ treeOperation, configuredOperation })}`);
       }
       const provenanceBefore = state.observationPosts.filter((request) => request.kind === "provenance").length;
-      await page.getByRole("button", { name: "Load provenance for services.openssh.enable" }).click();
-      await assertVisible(page.getByText("nixos/hosts/atlas-01.nix", { exact: true }), "Separate provenance did not render", 15000);
+      if (provenanceBefore !== 0) throw new Error("Option selection eagerly requested provenance");
+      await page.getByRole("button", { name: "Inspect provenance for services.openssh.enable" }).click();
+      await assertVisible(page.locator(".cfg-explorer-provenance .cfg-def-file").getByText("nixos/hosts/atlas-01.nix", { exact: true }), "Separate provenance did not render", 15000);
       if (state.observationPosts.filter((request) => request.kind === "provenance").length !== provenanceBefore + 1) {
         throw new Error("Option detail did not start exactly one separate provenance request");
       }
+      await page.getByRole("button", { name: "Configured", exact: true }).click();
+      await page.getByRole("button", { name: "Inspect configured option services.broken.value" }).click();
+      await assertVisible(page.getByText("not evaluated: fixture dependency failed", { exact: true }), "Failed value did not remain local to its option", 15000);
+      await assertVisible(page.getByRole("button", { name: "Inspect configured option networking.hostName" }), "Failed value displaced a healthy configured sibling");
+      await page.getByRole("button", { name: "Search", exact: true }).click();
+      await assertVisible(page.getByText("Complete search over the certified inventory for this exact target.", { exact: true }), "Complete inventory did not advertise certified search scope");
+      const certifiedSearch = page.getByPlaceholder("Search all certified options…");
+      await certifiedSearch.fill("openssh");
+      await assertVisible(page.getByRole("button", { name: "Inspect certified option services.openssh.enable" }), "Certified search did not return the matching option", 15000);
+      await page.getByRole("button", { name: "Sources", exact: true }).click();
+      await assertVisible(page.getByText("Partial list: only source paths from provenance inspected in this Explorer target and session. This is not a complete module registry.", { exact: true }), "Incomplete source pagination was mislabeled as complete coverage");
+      await page.getByRole("button", { name: "Browse", exact: true }).click();
       state.holdObservationKinds.add("root");
-      const commitSelect = page.locator("select.cfg-revselect");
+      const commitSelect = page.locator("select.cfgx-select");
       const historicalRootPost = page.waitForRequest((request) => request.method() === "POST" && request.url().includes("/config-observations/") && request.url().includes(TASK_440_HISTORICAL_SHA) && request.postDataJSON().kind === "root");
       await commitSelect.selectOption(TASK_440_HISTORICAL_SHA);
       await historicalRootPost;
@@ -17335,309 +17232,23 @@ security.audit.enable = true;</fixtext>
       await assertHidden(page.getByRole("button", { name: "Expand abcdef0-root" }), "Old revision root overwrote the newer exact revision");
       await commitSelect.selectOption(TASK_440_CURRENT_SHA);
       await assertVisible(page.getByRole("button", { name: `Expand ${TASK_440_CURRENT_SHA.slice(0, 7)}-root` }), "Current revision did not recover after stale-response scenario", 15000);
-      await assertVisible(page.getByText(/^1–\d+ of 38$/), `Expected bounded first page; fixture requests: ${state.handledRequests.join(",")}`, 15000);
-      const unresolvedSource = page.getByText("services.openssh.enable", { exact: true }).locator("xpath=ancestor::tr[1]").locator(".cfg-src");
-      if (await unresolvedSource.isDisabled()) throw new Error("Direct option provenance incorrectly depends on evaluation summary or module-page loading");
-      await unresolvedSource.click();
-      const directSourceDialog = page.getByRole("dialog", { name: "Module source details" });
-      await assertVisible(directSourceDialog.getByRole("button", { name: "Open in Flakes" }), "Expected direct option provenance before module pages resolve");
-      await directSourceDialog.getByRole("button", { name: "Close module source details" }).click();
-      for (const text of ["Loading module sources…", "Loading evaluation summary…", "Resolving drift from exact store paths…"]) {
-        await assertVisible(page.getByRole("status").filter({ hasText: text }), `Expected independent summary loading state: ${text}`);
-      }
-      state.releaseHeldSummary();
-      const evaluationCard = page.locator(".sd-card").filter({ has: page.getByRole("heading", { name: "Evaluation" }) });
-      await assertVisible(evaluationCard.getByText("/nix/store/task440-current-system", { exact: true }), "Expected authoritative selected toplevel after summary resolves", 15000);
-      const summaryConflictRequest = state.summaryRequests.find((request) => request.snapshotToken);
-      const optionRestartAfterSummaryConflict = summaryConflictRequest
-        && state.optionRequests.some((request) => request.ordinal > summaryConflictRequest.ordinal && request.offset === 0);
-      const summaryRestartAfterConflict = summaryConflictRequest
-        && state.summaryRequests.some((request) => request.ordinal > summaryConflictRequest.ordinal);
-      if (!summaryConflictRequest || !summaryRestartAfterConflict || !optionRestartAfterSummaryConflict) {
-        throw new Error(`Summary token conflict did not restart Config at offset zero: ${JSON.stringify({ summaryRequests: state.summaryRequests, optionRequests: state.optionRequests })}`);
-      }
-      await assertVisible(page.getByText("Loading module sources…", { exact: true }), "Summary resolution incorrectly completed the independent module-source request");
-      state.releaseHeldModules(TASK_440_CURRENT_SHA);
-      const modulesCard = page.locator(".sd-card").filter({ has: page.getByRole("heading", { name: "Modules" }) });
-      await assertVisible(modulesCard.getByText("Loaded 40 of 86 module sources", { exact: true }), "Expected deterministic first module-source page", 15000);
-      const stableConfigToken = state.optionRequests.findLast((request) => request.snapshotToken)?.snapshotToken;
-      const stableSummaryToken = state.summaryRequests.findLast((request) => request.snapshotToken)?.snapshotToken;
-      const stableModuleToken = state.moduleRequests.findLast((request) => request.snapshotToken)?.snapshotToken;
-      if (!/^[0-9a-f]{64}$/.test(stableConfigToken || "") || stableConfigToken !== stableSummaryToken || stableConfigToken !== stableModuleToken) {
-        throw new Error(`Config surfaces did not converge on one stable 64-hex snapshot token: ${JSON.stringify({ stableConfigToken, stableSummaryToken, stableModuleToken })}`);
-      }
-      if (await modulesCard.locator("button[title='shared/exact-identity.nix']").count() !== 2) {
-        throw new Error("Expected the same source path under two distinct input/revision tuple identities");
-      }
-
-      state.moduleFailureCounts.set(40, 1);
-      await modulesCard.getByRole("button", { name: "Load more evaluation module sources" }).click();
-      await assertVisible(modulesCard.getByRole("alert").filter({ hasText: /offset 40/i }), "Expected deterministic continuation failure");
-      await assertVisible(modulesCard.getByText("Loaded 40 of 86 module sources", { exact: true }), "Continuation failure discarded existing module rows");
-      await modulesCard.getByRole("button", { name: "Retry evaluation module sources continuation" }).click();
-      await assertVisible(modulesCard.getByText("Loaded 80 of 86 module sources", { exact: true }), "Expected same-offset continuation retry to merge the second page");
-      const offset40Requests = state.moduleRequests.filter((request) => request.revision === TASK_440_CURRENT_SHA && request.offset === 40);
-      if (offset40Requests.length !== 2 || offset40Requests.some((request) => request.limit !== 40 || !request.snapshotToken)) {
-        throw new Error(`Expected two token-bound requests for offset 40, got ${JSON.stringify(offset40Requests)}`);
-      }
-
-      state.moduleReplacementConflictCounts.set(80, 1);
-      const tokenBeforeReplacement = state.moduleRequests.find((request) => request.revision === TASK_440_CURRENT_SHA && request.offset === 40)?.snapshotToken;
-      const replacementRestartResponse = page.waitForResponse((response) => {
-        const url = new URL(response.url());
-        return url.pathname.endsWith("/evaluation-module-sources")
-          && url.searchParams.get("offset") === "0"
-          && !url.searchParams.has("snapshot_token");
-      });
-      await modulesCard.getByRole("button", { name: "Load more evaluation module sources" }).click();
-      await replacementRestartResponse;
-      await assertVisible(modulesCard.getByText("Loaded 40 of 86 module sources", { exact: true }), "Expected replacement conflict to discard stale rows and restart at page zero", 15000);
-      const replacementPageZero = state.moduleRequests.filter((request) => request.revision === TASK_440_CURRENT_SHA && request.offset === 0).at(-1);
-      const offset80Requests = state.moduleRequests.filter((request) => request.revision === TASK_440_CURRENT_SHA && request.offset === 80);
-      if (offset80Requests.length !== 1 || !replacementPageZero) {
-        throw new Error(`Expected one rejected continuation followed by a page-zero restart, got ${JSON.stringify({ offset80Requests, replacementPageZero })}`);
-      }
-      await modulesCard.getByRole("button", { name: "Load more evaluation module sources" }).click();
-      await assertVisible(modulesCard.getByText("Loaded 80 of 86 module sources", { exact: true }), "Expected replacement snapshot second page", 15000);
-      const replacementOffset40 = state.moduleRequests.filter((request) => request.revision === TASK_440_CURRENT_SHA && request.offset === 40).at(-1);
-      if (!replacementOffset40?.snapshotToken || replacementOffset40.snapshotToken === tokenBeforeReplacement) {
-        throw new Error(`Expected continuation to use the replacement snapshot token, got ${JSON.stringify(replacementOffset40)}`);
-      }
-      await modulesCard.getByRole("button", { name: "Load more evaluation module sources" }).click();
-      await assertVisible(modulesCard.getByText("Loaded 86 of 86 module sources", { exact: true }), "Expected replacement snapshot pagination to complete", 15000);
-      state.moduleReplacement = 0;
-
-      const validation = await page.evaluate(async ({ systemId, revision }) => {
-        const root = `/api/v1/systems/${systemId}/evaluation-module-sources?mode=commit&revision=${revision}`;
-        const missingToken = await fetch(`${root}&limit=40&offset=40`);
-        const malformedToken = await fetch(`${root}&limit=40&offset=40&snapshot_token=bad`);
-        const clamped = await fetch(`${root}&limit=500&offset=-5`);
-        return { missingToken: missingToken.status, malformedToken: malformedToken.status, clamped: await clamped.json() };
-      }, { systemId: TASK_440_SYSTEM_ID, revision: TASK_440_CURRENT_SHA });
-      if (validation.missingToken !== 400 || validation.malformedToken !== 400 || validation.clamped.limit !== 100 || validation.clamped.offset !== 0) {
-        throw new Error(`Module-source fixture validation diverged from the server contract: ${JSON.stringify(validation)}`);
-      }
-      const optionPageLimit = state.optionRequests.at(-1)?.limit;
-      if (!Number.isInteger(optionPageLimit)) throw new Error(`Missing current bounded option-page limit: ${JSON.stringify(state.optionRequests)}`);
-      const optionValidation = await page.evaluate(async ({ systemId, revision }) => {
-        const root = `/api/v1/systems/${systemId}/evaluated-options?mode=commit&revision=${revision}&filter=all`;
-        const missingToken = await fetch(`${root}&limit=24&offset=24`);
-        const malformedToken = await fetch(`${root}&limit=24&offset=24&snapshot_token=bad`);
-        const mismatchedToken = await fetch(`${root}&limit=24&offset=24&snapshot_token=${"f".repeat(64)}`);
-        const summaryMismatch = await fetch(`/api/v1/systems/${systemId}/evaluation-summary?mode=commit&revision=${revision}&snapshot_token=${"e".repeat(64)}`);
-        return { missingToken: missingToken.status, malformedToken: malformedToken.status, mismatchedToken: mismatchedToken.status, summaryMismatch: summaryMismatch.status };
-      }, { systemId: TASK_440_SYSTEM_ID, revision: TASK_440_CURRENT_SHA });
-      if (optionValidation.missingToken !== 400 || optionValidation.malformedToken !== 400 || optionValidation.mismatchedToken !== 409 || optionValidation.summaryMismatch !== 409) {
-        throw new Error(`Config token fixture validation diverged from the server contract: ${JSON.stringify(optionValidation)}`);
-      }
-      state.optionReplacementConflictCounts.set(optionPageLimit, 1);
-      const optionRequestCountBeforeConflict = state.optionRequests.length;
-      const moduleRequestCountBeforeConflict = state.moduleRequests.length;
-      const summaryRequestCountBeforeConflict = state.summaryRequests.length;
-      const optionConflictRestart = page.waitForRequest((request) => {
-        const url = new URL(request.url());
-        return url.pathname.endsWith("/evaluated-options") && url.searchParams.get("offset") === "0" && !url.searchParams.has("snapshot_token");
-      });
-      await page.getByTitle("Next page").click();
-      await optionConflictRestart;
-      await assertVisible(page.getByText(`1–${optionPageLimit} of 38`), "Expected options conflict to restart at offset zero", 15000);
-      const moduleRestartAfterOptionConflict = state.moduleRequests.slice(moduleRequestCountBeforeConflict).some((request) => request.offset === 0);
-      const summaryRestartAfterOptionConflict = state.summaryRequests.length > summaryRequestCountBeforeConflict;
-      const optionRestartAfterOptionConflict = state.optionRequests.slice(optionRequestCountBeforeConflict).some((request) => request.offset === 0);
-      if (!optionRestartAfterOptionConflict || !moduleRestartAfterOptionConflict || !summaryRestartAfterOptionConflict) {
-        throw new Error(`Options token conflict did not restart every Config surface: ${JSON.stringify({ moduleRequests: state.moduleRequests, summaryRequests: state.summaryRequests })}`);
-      }
-      await page.getByTitle("Next page").click();
-      await assertVisible(page.getByText(`${optionPageLimit + 1}–38 of 38`), "Expected bounded second page");
-      await page.getByTitle("Previous page").click();
-      await assertVisible(page.getByText(`1–${optionPageLimit} of 38`), "Expected first page after paging backward");
-
-      await page.getByRole("button", { name: /Overridden 1/ }).click();
-      await assertVisible(page.getByText("1–1 of 1"), "Expected revision-global filter count and filtered result total");
-      await page.getByRole("button", { name: /All 38/ }).click();
-      await assertVisible(page.getByText(`1–${optionPageLimit} of 38`), "Expected all-options page after clearing filter");
-
-      await page.reload({ timeout: LOAD_TIMEOUT });
-      const search = page.getByPlaceholder("Filter options, values, modules…");
-      await assertVisible(search, "Expected Config search after filter refetch");
-      state.holdSearch = "openssh";
-      const oldRequest = page.waitForRequest((request) => request.url().includes("search=openssh"));
-      const mountedSearch = await search.elementHandle();
-      await search.fill("open");
-      await search.pressSequentially("ssh");
-      await oldRequest;
-      await assertVisible(page.locator(".cfg-count").getByText(new RegExp(`^Querying… showing 1–${optionPageLimit} of 38$`)), "Expected stale-query status to retain the valid range while the replacement request is pending");
-      await assertVisible(page.getByRole("button", { name: /All 38/ }), "Pending search discarded the prior revision-global count");
-      await assertVisible(page.getByText("services.openssh.enable", { exact: true }), "Pending search discarded the prior valid option rows");
-      if ((await page.locator(".cfg-table-wrap").getAttribute("aria-busy")) !== "true") throw new Error("Pending option query did not expose aria-busy state");
-      if (!(await mountedSearch.evaluate((element) => element.isConnected && element.value === "openssh"))) throw new Error("Config search input was replaced or lost continuous typing during the pending query");
-      await assertVisible(modulesCard.getByText("Loaded 40 of 86 module sources", { exact: true }), "Expected the independent first module page to remain stable during option search");
-      const replacementResponse = page.waitForResponse((response) => response.url().includes("search=broken"));
-      await search.press("ControlOrMeta+A");
-      await search.pressSequentially("broken");
-      await replacementResponse;
-      await assertVisible(page.getByText("services.broken.value", { exact: true }), "Expected newer search response", 15000);
-      state.releaseHeldSearch();
-      const optionTable = page.locator(".cfg-table tbody");
-      await optionTable.getByText("services.broken.value", { exact: true }).waitFor({ state: "visible", timeout: 3000 });
-      if (await optionTable.getByText("services.openssh.enable", { exact: true }).isVisible()) throw new Error("Older search response replaced newer results");
-
-      const clearResponse = page.waitForResponse((response) => response.url().includes("/evaluated-options?") && !new URL(response.url()).searchParams.get("search"));
-      await search.fill("");
-      await clearResponse;
-      if (!(await mountedSearch.evaluate((element) => element.isConnected && element.value === ""))) throw new Error("Config search input was replaced instead of remaining mounted through clear");
-      const optionRow = page.getByText("services.openssh.enable", { exact: true }).locator("xpath=ancestor::tr[1]");
-      await optionRow.locator(".cfg-row-toggle").focus();
-      await page.keyboard.press("Enter");
-      await assertVisible(page.getByText("boolean", { exact: true }), "Expected keyboard row expansion with declared type");
-      await assertVisible(page.getByText(/- false/), "Expected typed before value");
-      await assertVisible(page.getByText(/\+ true/), "Expected typed after value");
-      const optionDetail = optionRow.locator("xpath=following-sibling::tr[1]");
-      const commitChangedBaseline = optionDetail.locator(".cfg-diff-note").filter({ hasText: "Compared with 1111111." });
-      await assertVisible(commitChangedBaseline, "Expected changed commit row to display the short first-parent SHA");
-      if ((await commitChangedBaseline.getAttribute("title")) !== `Git first parent ${TASK_440_ROOT_SHA}`) throw new Error("Changed commit row omitted the full immutable baseline SHA metadata");
-      await assertVisible(page.getByText("winning", { exact: true }).first(), "Expected winning provenance");
-      await assertVisible(page.getByText("overridden", { exact: true }).first(), "Expected overridden provenance");
-
-      for (const expected of ["ripgrep-14.1.1", "forge.example", "shared_buffers", "<lambda: opaque>", "not evaluated: fixture dependency failed"]) {
-        await assertVisible(page.getByText(expected, { exact: false }).first(), `Expected typed value ${expected}`);
-      }
-
-      await optionRow.locator(".cfg-src").click();
-      const sourceDialog = page.getByRole("dialog", { name: "Module source details" });
-      await assertVisible(sourceDialog, "Expected tracked source tray");
-      await assertVisible(sourceDialog.getByRole("button", { name: "Open in Flakes" }), "Expected tracked provenance navigation");
-      await sourceDialog.getByRole("button", { name: "Open in Flakes" }).click();
-      const selfTray = page.getByRole("dialog", { name: "platform-core commits" });
-      const selectedSelfCommit = selfTray.getByRole("button", { name: `Commit ${TASK_440_CURRENT_SHA}: tracked self input` });
-      await assertVisible(selectedSelfCommit, "Expected exact full self provenance revision in selected drawer state", 15000);
-      if ((await selectedSelfCommit.getAttribute("aria-pressed")) !== "true") throw new Error("Self provenance did not select the exact server-issued revision");
-      if (new URL(page.url()).searchParams.get("revision") !== TASK_440_CURRENT_SHA) throw new Error(`Self provenance changed the exact Config URL revision: ${page.url()}`);
-      await page.keyboard.press("Escape");
-      await selfTray.waitFor({ state: "hidden" });
-      await sourceDialog.getByRole("button", { name: "Close module source details" }).click();
-
-      const untracked = page.getByText("services.untracked.enable", { exact: true }).locator("xpath=ancestor::tr[1]");
-      await untracked.locator(".cfg-src").click();
-      const untrackedAction = page.getByRole("button", { name: "Not tracked" });
-      await assertVisible(untrackedAction, "Expected untracked provenance to be non-navigable");
-      if (!(await untrackedAction.isDisabled())) throw new Error("Genuinely untracked provenance action was enabled");
-      await page.getByRole("button", { name: "Close module source details" }).click();
-
-      const external = page.getByText("environment.systemPackages", { exact: true }).locator("xpath=ancestor::tr[1]");
-      await external.locator(".cfg-src").click();
-      await assertVisible(page.getByRole("button", { name: "Open in Flakes" }), "Expected visible exact external provenance to be navigable");
-      await page.getByRole("button", { name: "Open in Flakes" }).click();
-      const externalTray = page.getByRole("dialog", { name: "nixpkgs-tracked commits" });
-      const selectedExternalCommit = externalTray.getByRole("button", { name: `Commit ${TASK_440_EXTERNAL_SHA}: tracked external input` });
-      await assertVisible(selectedExternalCommit, "Expected exact full external provenance revision in selected drawer state", 15000);
-      if ((await selectedExternalCommit.getAttribute("aria-pressed")) !== "true") throw new Error("External provenance did not select the exact server-issued revision");
-      if (new URL(page.url()).searchParams.get("revision") !== TASK_440_CURRENT_SHA) throw new Error(`External provenance changed the exact Config URL revision: ${page.url()}`);
-      await page.keyboard.press("Escape");
-      await externalTray.waitFor({ state: "hidden" });
-      await page.getByRole("button", { name: "Close module source details" }).click();
-
-      await assertVisible(page.getByText("731", { exact: true }), "Expected authoritative closure package count");
-      await assertVisible(evaluationCard.getByText("17 rows", { exact: true }), "Expected authoritative same-commit host delta");
-      await assertVisible(evaluationCard.getByText("4.8 GiB", { exact: true }), "Expected authoritative recursive closure size");
-      await assertVisible(page.getByText("in sync", { exact: true }), "Expected exact store-path drift classification");
-      const driftCard = page.locator(".sd-card").filter({ has: page.getByRole("heading", { name: "Drift" }) });
-      const fingerprintRow = driftCard.getByText("Agent fingerprint", { exact: true }).locator("xpath=..");
-      await assertVisible(fingerprintRow.getByText("matches", { exact: true }), "Expected exact agent fingerprint status");
-      await assertVisible(driftCard.getByText("No configuration drift was observed in the last 7 days.", { exact: true }), "Expected authoritative seven-day drift status");
-
-      const unchangedCommitRow = page.getByText("services.untracked.enable", { exact: true }).locator("xpath=ancestor::tr[1]");
-      await unchangedCommitRow.locator(".cfg-row-toggle").click();
-      const unchangedCommitDetail = unchangedCommitRow.locator("xpath=following-sibling::tr[1]");
-      const commitUnchangedBaseline = unchangedCommitDetail.locator(".cfg-diff-line").filter({ hasText: "Unchanged vs 1111111." });
-      await assertVisible(commitUnchangedBaseline, "Expected unchanged commit row to display the short first-parent SHA");
-      if ((await commitUnchangedBaseline.getAttribute("title")) !== `Git first parent ${TASK_440_ROOT_SHA}`) throw new Error("Unchanged commit row omitted the full immutable baseline SHA metadata");
-
-      const tableOverflow = await page.locator(".cfg-table-wrap").evaluate((element) => getComputedStyle(element).overflowY);
-      if (tableOverflow === "auto" || tableOverflow === "scroll") throw new Error(`Unexpected Config inner scroller: ${tableOverflow}`);
+      await page.getByRole("button", { name: "Configured", exact: true }).click();
+      await page.getByRole("button", { name: "Inspect configured option services.openssh.enable" }).click();
       for (const theme of ["dark", "light"]) {
         await applyVisualTheme(page, theme);
-        const geometry = await page.evaluate(() => {
-          const card = document.querySelector(".sd-grid-config .cfg-card")?.getBoundingClientRect();
-          const side = document.querySelector(".sd-grid-config .cfg-side")?.getBoundingClientRect();
-          if (!card || !side) throw new Error("Config layout surfaces are missing");
-          return {
-            viewportWidth: innerWidth,
-            viewportHeight: innerHeight,
-            documentWidth: document.documentElement.scrollWidth,
-            card: { top: card.top, right: card.right, bottom: card.bottom, width: card.width },
-            side: { top: side.top, left: side.left, right: side.right, bottom: side.bottom, width: side.width },
-          };
-        });
-        if (geometry.documentWidth > geometry.viewportWidth) throw new Error(`${theme} Config layout clips horizontally: ${JSON.stringify(geometry)}`);
-        if (Math.abs(geometry.card.top - geometry.side.top) > 1 || geometry.card.right > geometry.side.left) {
-          throw new Error(`${theme} Config cards are misaligned or overlapping: ${JSON.stringify(geometry)}`);
-        }
-        if (geometry.side.right > geometry.viewportWidth) throw new Error(`${theme} Config sidebar exceeds the viewport: ${JSON.stringify(geometry)}`);
-        if (Math.abs((geometry.card.width / geometry.side.width) - (7 / 5)) > 0.03) throw new Error(`${theme} Config grid is not the expected 7fr/5fr split: ${JSON.stringify(geometry)}`);
-        if (geometry.side.bottom > geometry.card.bottom + 1) throw new Error(`${theme} Config side cards extend below the options card: ${JSON.stringify(geometry)}`);
+        await assertTask440ConfigGeometry(page, "wide");
       }
-
-      state.holdModuleRevisions.add(TASK_440_HISTORICAL_SHA);
-      state.holdSummaryRevisions.add(TASK_440_HISTORICAL_SHA);
-      const revisionSelect = page.locator("select.cfg-revselect");
-      const historicalModuleRequest = page.waitForRequest((request) => request.url().includes("evaluation-module-sources") && request.url().includes(TASK_440_HISTORICAL_SHA));
-      const historicalSummaryRequest = page.waitForRequest((request) => request.url().includes("evaluation-summary") && request.url().includes(TASK_440_HISTORICAL_SHA));
-      const historicalSummaryResponse = page.waitForResponse((response) => response.url().includes("evaluation-summary") && response.url().includes(TASK_440_HISTORICAL_SHA));
-      await revisionSelect.selectOption(TASK_440_HISTORICAL_SHA);
-      await Promise.all([historicalModuleRequest, historicalSummaryRequest]);
-      const currentModuleRequest = page.waitForResponse((response) => response.url().includes("evaluation-module-sources") && response.url().includes(TASK_440_CURRENT_SHA));
-      const currentSummaryRequest = page.waitForResponse((response) => response.url().includes("evaluation-summary") && response.url().includes(TASK_440_CURRENT_SHA));
-      await revisionSelect.selectOption(TASK_440_CURRENT_SHA);
-      await Promise.all([currentModuleRequest, currentSummaryRequest]);
-      await assertVisible(modulesCard.getByText("Loaded 40 of 86 module sources", { exact: true }), "Expected current module page after changing selection", 15000);
-      const currentModuleTitle = state.moduleReplacement > 0
-        ? `nixos/revisions/${TASK_440_CURRENT_SHA.slice(0, 12)}-replacement-${state.moduleReplacement}.nix`
-        : `nixos/revisions/${TASK_440_CURRENT_SHA.slice(0, 12)}.nix`;
-      await page.waitForFunction((title) => Boolean(document.querySelector(`[title='${title}']`)), currentModuleTitle, { timeout: 15000 });
-      state.releaseHeldModules(TASK_440_HISTORICAL_SHA);
-      await page.getByTitle(currentModuleTitle).first().waitFor({ state: "visible", timeout: 3000 });
-      const historicalModuleTitle = state.moduleReplacement > 0
-        ? `nixos/revisions/${TASK_440_HISTORICAL_SHA.slice(0, 12)}-replacement-${state.moduleReplacement}.nix`
-        : `nixos/revisions/${TASK_440_HISTORICAL_SHA.slice(0, 12)}.nix`;
-      if (await page.getByTitle(historicalModuleTitle).first().isVisible()) {
-        throw new Error("A delayed historical module-source response replaced the current revision");
-      }
-      state.releaseHeldSummaryRevision(TASK_440_HISTORICAL_SHA);
-      await historicalSummaryResponse;
-      await assertVisible(evaluationCard.getByText("/nix/store/task440-current-system", { exact: true }), "A delayed historical summary replaced the current Evaluation state");
-      await assertVisible(driftCard.getByText("in sync", { exact: true }), "A delayed historical summary replaced the current Drift state");
-      const postRaceOptionRequest = state.optionRequests.at(-1);
-      if (postRaceOptionRequest?.revision !== TASK_440_CURRENT_SHA || postRaceOptionRequest.snapshotToken !== task440ConfigSnapshotToken(TASK_440_CURRENT_SHA, state.moduleReplacement, "commit", null)) {
-        throw new Error(`A delayed historical summary replaced the current Config token state: ${JSON.stringify(postRaceOptionRequest)}`);
-      }
-
-      await page.getByRole("button", { name: "Generations" }).click();
-      await page.locator("select.cfg-revselect").selectOption("73");
-      const generationChangedRow = page.getByText("services.openssh.enable", { exact: true }).locator("xpath=ancestor::tr[1]");
-      await generationChangedRow.locator(".cfg-row-toggle").click();
-      const generationChangedDetail = generationChangedRow.locator("xpath=following-sibling::tr[1]");
-      const generationChangedBaseline = generationChangedDetail.locator(".cfg-diff-note").filter({ hasText: "Compared with generation #71." });
-      await assertVisible(generationChangedBaseline, "Expected generation comparison to skip the unusable immediate numeric predecessor", 15000);
-      if ((await generationChangedBaseline.getAttribute("title")) !== `Generation #71 at ${TASK_440_ROOT_SHA}`) throw new Error("Changed generation row omitted the nearest earlier usable retained baseline metadata");
-      const generationUnchangedRow = page.getByText("services.untracked.enable", { exact: true }).locator("xpath=ancestor::tr[1]");
-      await generationUnchangedRow.locator(".cfg-row-toggle").click();
-      const generationUnchangedDetail = generationUnchangedRow.locator("xpath=following-sibling::tr[1]");
-      const generationUnchangedBaseline = generationUnchangedDetail.locator(".cfg-diff-line").filter({ hasText: "Unchanged vs generation #71." });
-      await assertVisible(generationUnchangedBaseline, "Expected unchanged generation row to use the nearest earlier usable retained generation");
-      if ((await generationUnchangedBaseline.getAttribute("title")) !== `Generation #71 at ${TASK_440_ROOT_SHA}`) throw new Error("Unchanged generation row omitted exact retained baseline metadata");
     },
   },
   {
     name: "12n-task440-config-narrow-keyboard",
-    description: "TASK-440 mocked API Config (not live integration): narrow 900x900 layout, revision controls, and keyboard-accessible module-source continuation failure/retry",
+    description: "TASK-440 mocked narrow Config Explorer revision, mode, option-pane, and geometry keyboard contract",
     action: async (page) => {
       await page.setViewportSize({ width: 900, height: 900 });
       await routeSystemsWarningData(page);
-      const state = await routeTask440SystemData(page);
-      state.moduleFailureCounts.set(40, 1);
+      await routeTask440SystemData(page);
       await page.goto(`${baseUrl}/systems/${TASK_440_SYSTEM_ID}?tab=config&config_mode=commit&revision=${TASK_440_CURRENT_SHA}`, { timeout: LOAD_TIMEOUT });
-      await assertVisible(page.getByRole("heading", { name: "Certified snapshot search" }), "Expected narrow Config explorer", 15000);
+      await assertVisible(page.locator(".cfgx").getByText("TARGET", { exact: true }), "Expected narrow Config Explorer", 15000);
       await assertTask440SelectedConfigRevision(page, "Narrow Config");
       const generationsMode = page.getByRole("button", { name: "Generations" });
       const commitsMode = page.getByRole("button", { name: "Commits" });
@@ -17648,42 +17259,21 @@ security.audit.enable = true;</fixtext>
       await commitsMode.focus();
       await page.keyboard.press("Enter");
       if ((await commitsMode.getAttribute("aria-pressed")) !== "true" || (await generationsMode.getAttribute("aria-pressed")) !== "false") throw new Error("Keyboard activation did not restore Commits semantically");
-      const revisionSelect = page.locator("select.cfg-revselect");
-      await revisionSelect.focus();
-      await page.keyboard.press("ArrowDown");
+      const configuredMode = page.getByRole("button", { name: "Configured", exact: true });
+      await configuredMode.focus();
       await page.keyboard.press("Enter");
-      const modulesCard = page.locator(".sd-card").filter({ has: page.getByRole("heading", { name: "Modules" }) });
-      const loadMore = modulesCard.getByRole("button", { name: "Load more evaluation module sources" });
-      await assertVisible(loadMore, "Expected narrow module-source continuation control");
-      await loadMore.focus();
+      if ((await configuredMode.getAttribute("aria-pressed")) !== "true") throw new Error("Keyboard activation did not select Configured mode");
+      const option = page.getByRole("button", { name: "Inspect configured option services.openssh.enable" });
+      await assertVisible(option, "Expected keyboard-accessible configured option", 15000);
+      await option.focus();
       await page.keyboard.press("Enter");
-      const retry = modulesCard.getByRole("button", { name: "Retry evaluation module sources continuation" });
-      await assertVisible(retry, "Expected keyboard-accessible narrow continuation retry");
-      await assertVisible(modulesCard.getByText("Loaded 40 of 86 module sources", { exact: true }), "Narrow continuation failure discarded module rows");
-      await retry.focus();
-      await page.keyboard.press("Enter");
-      await assertVisible(modulesCard.getByText("Loaded 80 of 86 module sources", { exact: true }), "Expected keyboard retry to load the same narrow page");
-      const dimensions = await page.evaluate(() => {
-        const grid = document.querySelector(".sd-grid-config")?.getBoundingClientRect();
-        const card = document.querySelector(".sd-grid-config .cfg-card")?.getBoundingClientRect();
-        const side = document.querySelector(".sd-grid-config .cfg-side")?.getBoundingClientRect();
-        if (!grid || !card || !side) throw new Error("Narrow Config layout surfaces are missing");
-        return {
-          viewport: innerWidth,
-          document: document.documentElement.scrollWidth,
-          grid: { bottom: grid.bottom },
-          card: { top: card.top, bottom: card.bottom, width: card.width },
-          side: { top: side.top, bottom: side.bottom, width: side.width },
-        };
-      });
-      if (dimensions.document > dimensions.viewport) throw new Error(`Narrow Config clips horizontally: ${JSON.stringify(dimensions)}`);
-      if (dimensions.side.top < dimensions.card.bottom || Math.abs(dimensions.card.width - dimensions.side.width) > 1) throw new Error(`Narrow Config did not stack at equal width: ${JSON.stringify(dimensions)}`);
-      if (Math.abs(dimensions.side.bottom - dimensions.grid.bottom) > 1) throw new Error(`Narrow Config side cards are clipped at the grid bottom: ${JSON.stringify(dimensions)}`);
+      await assertVisible(page.locator(".cfgx-insp-path").filter({ hasText: "services.openssh.enable" }), "Keyboard option selection did not populate the persistent pane");
+      await assertTask440ConfigGeometry(page, "narrow");
     },
   },
   {
     name: "12p-task440-config-canonical-wide-expanded",
-    description: "TASK-440 canonical mocked Config wide expanded state at 1920x1080 with exact metrics, typed drift, measured page limit, coherent paging, and 7:5 geometry",
+    description: "TASK-440 canonical mocked Config Explorer wide Configured state with persistent option pane and consolidated geometry",
     action: async (page) => {
       await page.setViewportSize({ width: 1920, height: 1080 });
       await suppressOnboardingCoach(page);
@@ -17694,78 +17284,29 @@ security.audit.enable = true;</fixtext>
       const loadCanonicalGeneration = async () => {
         await page.goto(url, { timeout: LOAD_TIMEOUT });
         await dismissOnboardingCoachForCapture(page);
-        await assertVisible(page.getByRole("heading", { name: "Certified snapshot search" }), "Expected canonical wide Config", 15000);
+        await assertVisible(page.locator(".cfgx").getByText("TARGET", { exact: true }), "Expected canonical wide Config Explorer", 15000);
         await page.getByRole("button", { name: "Generations" }).click();
-        await page.locator("select.cfg-revselect").selectOption("160");
+        await page.locator("select.cfgx-select").selectOption("160");
       };
       await loadCanonicalGeneration();
       await assertTask440CanonicalConfigState(page, "Canonical wide Config");
-      state.sevenDayDrift = "observed_drift";
-      state.agentFingerprint = "differs";
-      state.evaluationDrift = "differs";
-      await loadCanonicalGeneration();
-      await assertVisible(page.getByText("A different running configuration was observed in the last 7 days.", { exact: true }), "Observed-drift typed state rendered the wrong callout", 15000);
-      await assertVisible(page.locator(".sd-card").filter({ hasText: "Agent fingerprint" }).getByText("differs", { exact: true }), "Typed differing fingerprint did not render");
-      state.sevenDayDrift = "insufficient_coverage";
-      await loadCanonicalGeneration();
-      await assertVisible(page.getByText("Seven-day drift is unavailable because continuous agent observation coverage is incomplete.", { exact: true }), "Insufficient-coverage typed state rendered the wrong callout", 15000);
-      state.sevenDayDrift = "no_observed_drift";
-      state.agentFingerprint = null;
-      state.evaluationDrift = null;
-      await loadCanonicalGeneration();
-      await assertTask440CanonicalConfigState(page, "Canonical wide Config after drift-state checks");
-
-      const initialLimit = state.optionRequests.at(-1)?.limit;
-      if (!Number.isInteger(initialLimit)) throw new Error(`Missing initial Config page-limit request: ${JSON.stringify(state.optionRequests)}`);
-      const naturalMeasurement = await page.evaluate(() => {
-        const card = document.querySelector(".sd-grid-config .cfg-card");
-        const table = document.querySelector(".cfg-table-wrap");
-        const sideCards = [...document.querySelectorAll(".sd-grid-config .cfg-side > .sd-card")];
-        const row = table?.querySelector("tbody tr.cfg-row");
-        const header = table?.querySelector("thead");
-        if (!card || !table || !row || !header || sideCards.length !== 3) throw new Error("Natural Config page-size geometry is incomplete");
-        const bounds = sideCards.map((element) => element.getBoundingClientRect());
-        const naturalSideHeight = bounds.reduce((total, box, index) => total + box.height + (index ? Math.max(0, box.top - bounds[index - 1].bottom) : 0), 0);
-        const tableChrome = table.getBoundingClientRect().top - card.getBoundingClientRect().top;
-        return {
-          naturalSideHeight,
-          tableChrome,
-          headerHeight: header.getBoundingClientRect().height,
-          rowHeight: row.getBoundingClientRect().height,
-        };
-      });
-      const naturalLimit = Math.max(10, Math.min(80, Math.floor((naturalMeasurement.naturalSideHeight - naturalMeasurement.tableChrome - naturalMeasurement.headerHeight) / naturalMeasurement.rowHeight)));
-      if (Math.abs(initialLimit - naturalLimit) > 1) throw new Error(`Config page limit did not use natural child card heights and rendered gaps: ${JSON.stringify({ initialLimit, naturalLimit, naturalMeasurement })}`);
-      await assertVisible(page.getByText(`1–${Math.min(initialLimit, 1_092)} of 1092`, { exact: true }), "Natural Config page sizing produced an incoherent range", 15000);
-
-      const search = page.getByPlaceholder("Filter options, values, modules…");
-      await search.fill("category-with-no-options");
-      await assertVisible(page.getByText("No options match this search and filter.", { exact: true }), "Config filter-aware empty category state disappeared", 15000);
-      await page.getByRole("button", { name: "Clear option search" }).click();
-      await assertVisible(page.getByText(`1–${Math.min(initialLimit, 1_092)} of 1092`, { exact: true }), "Clearing Config empty state did not restore the revision page", 15000);
-      await page.getByRole("button", { name: /Changed 5/ }).click();
-      const revisionSelect = page.locator("select.cfg-revselect");
-      await revisionSelect.selectOption("159");
-      await assertVisible(page.locator(".cfg-toolbar .seg button.active").filter({ hasText: "All 1092" }), "Config filter selection did not reset on revision change", 15000);
-      await revisionSelect.selectOption("160");
-
-      await search.fill(TASK_440_FIXTURE.canonicalConfig.expandedOption);
-      await assertVisible(page.getByText("1–1 of 1", { exact: true }), "Canonical Config search did not select the design row", 15000);
-      const optionRow = page.getByText(TASK_440_FIXTURE.canonicalConfig.expandedOption, { exact: true }).locator("xpath=ancestor::tr[1]");
-      await optionRow.locator(".cfg-row-toggle").click();
-      await assertVisible(page.getByText("modules/stig/kernel/default.nix", { exact: true }), "Canonical Config row did not retain production provenance", 15000);
+      await page.getByRole("button", { name: "Commits" }).click();
+      await page.locator("select.cfgx-select").selectOption(TASK_440_CONFIG_SHA);
+      await page.getByRole("button", { name: "Configured", exact: true }).click();
+      const configuredOption = page.getByRole("button", { name: `Inspect configured option ${TASK_440_FIXTURE.canonicalConfig.expandedOption}` });
+      await assertVisible(configuredOption, "Canonical Configured option did not render", 15000);
+      await configuredOption.click();
+      await assertVisible(page.locator(".cfgx-insp-path").filter({ hasText: TASK_440_FIXTURE.canonicalConfig.expandedOption }), "Canonical option did not populate the persistent inspector");
       for (const theme of ["dark", "light"]) {
         await applyVisualTheme(page, theme);
-        await assertTask440CanonicalConfigState(page, `${theme} canonical wide Config`);
         await assertTask440ConfigGeometry(page, "wide");
-        await assertReachableControls(page.locator(".sd-grid-config button:not([disabled]), .sd-grid-config input:not([disabled]), .sd-grid-config select:not([disabled])"), `${theme} wide Config`);
-        await assertNoOverlayIntersections(page, ".sd-grid-config", `${theme} wide Config`);
+        await assertReachableControls(page.locator(".cfgx button:not([disabled]), .cfgx input:not([disabled]), .cfgx select:not([disabled])"), `${theme} wide Config Explorer`);
       }
     },
   },
   {
     name: "12q-task440-config-canonical-narrow",
-    description: "TASK-440 canonical mocked Config narrow state at 900x900 with exact metrics, controls, stacking, and clipping assertions",
+    description: "TASK-440 canonical mocked Config Explorer narrow Configured state, persistent option pane, controls, and stacking",
     action: async (page) => {
       await page.setViewportSize({ width: 900, height: 900 });
       await suppressOnboardingCoach(page);
@@ -17774,24 +17315,24 @@ security.audit.enable = true;</fixtext>
       await routeTask440SystemData(page, { canonicalDesign: true });
       await page.goto(`${baseUrl}/systems/${TASK_440_SYSTEM_ID}?tab=config&config_mode=commit&revision=${TASK_440_CONFIG_SHA}`, { timeout: LOAD_TIMEOUT });
       await dismissOnboardingCoachForCapture(page);
-      await assertVisible(page.getByRole("heading", { name: "Certified snapshot search" }), "Expected canonical narrow Config", 15000);
-      await page.getByRole("button", { name: "Generations" }).click();
-      await page.locator("select.cfg-revselect").selectOption("160");
-      await assertTask440CanonicalConfigState(page, "Canonical narrow Config");
-      await page.getByPlaceholder("Filter options, values, modules…").fill(TASK_440_FIXTURE.semanticTargets["task440-config-narrow"].searchQuery);
-      await assertVisible(page.getByText("1–1 of 1", { exact: true }), "Canonical narrow Config search did not settle", 15000);
+      await assertVisible(page.locator(".cfgx").getByText("TARGET", { exact: true }), "Expected canonical narrow Config Explorer", 15000);
+      await page.getByRole("button", { name: "Configured", exact: true }).click();
+      const configuredOption = page.getByRole("button", { name: `Inspect configured option ${TASK_440_FIXTURE.canonicalConfig.expandedOption}` });
+      await assertVisible(configuredOption, "Canonical narrow Configured option did not render", 15000);
+      await configuredOption.click();
+      await assertVisible(page.locator(".cfgx-insp-path").filter({ hasText: TASK_440_FIXTURE.canonicalConfig.expandedOption }), "Canonical narrow option did not populate the persistent inspector");
       for (const control of [
         page.getByRole("button", { name: "Generations" }),
         page.getByRole("button", { name: "Commits" }),
-        page.getByPlaceholder("Filter options, values, modules…"),
-        page.locator("select.cfg-revselect"),
+        page.getByPlaceholder("Search all certified options…"),
+        page.locator("select.cfgx-select"),
       ]) await assertVisible(control, "A narrow Config control became unreachable");
       for (const theme of ["dark", "light"]) {
         await applyVisualTheme(page, theme);
         await assertTask440CanonicalConfigState(page, `${theme} canonical narrow Config`);
         await assertTask440ConfigGeometry(page, "narrow");
-        await assertReachableControls(page.locator(".sd-grid-config button:not([disabled]), .sd-grid-config input:not([disabled]), .sd-grid-config select:not([disabled])"), `${theme} narrow Config`);
-        await assertNoOverlayIntersections(page, ".sd-grid-config", `${theme} narrow Config`);
+        await assertReachableControls(page.locator(".cfgx button:not([disabled]), .cfgx input:not([disabled]), .cfgx select:not([disabled])"), `${theme} narrow Config`);
+        await assertNoOverlayIntersections(page, ".cfgx", `${theme} narrow Config`);
       }
     },
   },

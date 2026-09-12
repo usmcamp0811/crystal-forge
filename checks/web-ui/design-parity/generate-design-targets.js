@@ -47,33 +47,16 @@ async function validateSemanticContract(page, capture, contract, theme) {
   if (contract.kind !== capture.designState.kind) throw new Error(`${capture.name}: semantic contract kind does not match the manifest`);
 
   if (contract.kind === "system-config") {
-    await page.locator(".cfg-count:not(:text-is('Querying…'))").waitFor({ state: "visible" });
-    assertEqual(await exactTexts(page.locator(".cfg-table tbody > tr.cfg-row .cfg-path")), expectedRows(contract, "react", theme), `${capture.name} ordered Config rows`);
-    assertEqual(await exactTexts(page.locator(".cfg-toolbar .seg button")), [
-      `All ${contract.counts.all.toLocaleString("en-US")}`,
-      `Overridden ${contract.counts.overridden}`,
-      `Changed ${contract.counts.changed}`,
-    ], `${capture.name} Config counts`);
-    if (contract.searchQuery) assertEqual(await page.getByPlaceholder("Filter options, values, modules…").inputValue(), contract.searchQuery, `${capture.name} Config search`);
-    const selected = page.locator("select.cfg-revselect option:checked");
-    assertEqual(await selected.getAttribute("value"), String(contract.identity.generation), `${capture.name} selected generation`);
-    const selectedText = normalizedTexts([await selected.textContent()]);
-    if (!selectedText[0].includes(contract.identity.revision)) throw new Error(`${capture.name}: selected generation lost revision ${contract.identity.revision}`);
-    assertEqual(normalizedTexts([await page.locator(".cfg-revbar-msg").textContent()])[0], contract.identity.revisionMessage, `${capture.name} revision message`);
-    await page.getByText(contract.identity.uptime.react, { exact: true }).waitFor({ state: "visible" });
-    await page.locator(".sd-metric-sub").filter({ hasText: `activated · ${contract.identity.heartbeatAgeMinutes}m ago` }).waitFor({ state: "visible" });
-    const evaluation = page.locator(".cfg-side > section").nth(1);
-    for (const expected of [
-      contract.counts.all.toLocaleString("en-US"),
-      `${contract.counts.hostDelta} rows`,
-      String(contract.counts.packages),
-      contract.formattedMetrics.reactClosure,
-    ]) await evaluation.getByText(expected, { exact: true }).waitFor({ state: "visible" });
-    const evalTime = normalizedTexts([await evaluation.locator(".sd-drift-row").filter({ hasText: "Eval time" }).textContent()])[0];
-    if (!evalTime.includes(contract.formattedMetrics.reactEvaluationDuration)) throw new Error(`${capture.name}: evaluation duration mismatch: ${evalTime}`);
-    if (contract.expandedItem) {
-      const row = page.getByText(contract.expandedItem, { exact: true }).locator("xpath=ancestor::tr[1]");
-      if ((await row.getAttribute("class") || "").split(/\s+/).includes("open") === false) throw new Error(`${capture.name}: ${contract.expandedItem} is not expanded`);
+    const explorer = page.locator(".cfgx");
+    await explorer.getByText("TARGET", { exact: true }).waitFor({ state: "visible" });
+    await explorer.getByText("observational", { exact: true }).waitFor({ state: "visible" });
+    assertEqual(await exactTexts(explorer.locator(".cfgx-tools .seg button")), ["Browse", "Configured", "Search"], `${capture.name} Explorer modes`);
+    assertEqual(await exactTexts(explorer.locator(".cfgx-side-tabs button")), ["Option", "Sources"], `${capture.name} inspector panes`);
+    if ((await explorer.getByRole("button", { name: "Configured" }).getAttribute("class") || "").split(/\s+/).includes("active") === false) {
+      throw new Error(`${capture.name}: Configured mode is not selected`);
+    }
+    if (capture.designState.selectOption) {
+      await explorer.locator(".cfgx-insp-path").filter({ hasText: capture.designState.selectOption }).waitFor({ state: "visible" });
     }
   } else {
     const tray = page.getByRole("dialog", { name: `${contract.identity.flake} commits` });
@@ -162,17 +145,19 @@ async function driveSystemConfig(page, state) {
   }, state);
   await page.locator('[data-screen-label="SystemDetail"]').waitFor({ state: "visible" });
   await page.getByRole("tab", { name: "Config", selected: true }).waitFor({ state: "visible" });
-  await page.getByRole("heading", { name: "Evaluated options" }).waitFor({ state: "visible" });
-  if (state.search) {
-    await page.getByPlaceholder("Filter options, values, modules…").fill(state.search);
-    await page.locator(".cfg-count").getByText("1–1 of 1", { exact: true }).waitFor({ state: "visible" });
+  const explorer = page.locator(".cfgx");
+  await explorer.getByText("TARGET", { exact: true }).waitFor({ state: "visible" });
+  if (state.mode) {
+    await explorer.getByRole("button", { name: state.mode, exact: true }).click();
   }
-  if (state.expandOption) {
-    const option = page.getByText(state.expandOption, { exact: true });
+  if (state.selectOption) {
+    const option = explorer.locator(".cfgx-row").filter({ hasText: state.selectOption }).first();
     await option.waitFor({ state: "visible" });
-    const row = page.getByRole("row").filter({ has: page.getByText(state.expandOption, { exact: true }) });
-    await row.click();
-    await row.locator("xpath=following-sibling::tr[1]").getByText("Definitions", { exact: true }).waitFor({ state: "visible" });
+    await option.click();
+    await explorer.locator(".cfgx-insp-path").filter({ hasText: state.selectOption }).waitFor({ state: "visible" });
+    if (state.mode) {
+      await explorer.getByRole("button", { name: state.mode, exact: true }).click();
+    }
   }
 }
 
@@ -216,7 +201,7 @@ async function validateState(page, state) {
     await expectScreen(page, state.screen, state.heading);
   } else if (state.kind === "system-config") {
     await page.getByRole("tab", { name: "Config", selected: true }).waitFor({ state: "visible" });
-    await page.getByRole("heading", { name: "Evaluated options" }).waitFor({ state: "visible" });
+    await page.locator(".cfgx").getByText("TARGET", { exact: true }).waitFor({ state: "visible" });
   } else if (state.kind === "flake-pane") {
     await page.waitForFunction(
       ({ flake, pane }) => {

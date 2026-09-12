@@ -5328,6 +5328,9 @@ fn ConfigTab(
             }
             active_selection.set(next_selection.clone());
             bump_refresh_generation(refresh_generation);
+            search.set(String::new());
+            debounced_search.set(String::new());
+            filter.set(EvaluatedOptionFilter::All);
             offset.set(0);
             expanded.set(None);
             source.set(None);
@@ -5365,6 +5368,26 @@ fn ConfigTab(
         let system_id = system.id;
         use_effect(move || {
             let search_text = debounced_search.read().clone();
+            let Some(scope) = request_scope.clone() else {
+                loading_options.set(false);
+                options.set(None);
+                return;
+            };
+            let certified_inventory_complete = options
+                .peek()
+                .as_ref()
+                .and_then(|result| result.as_ref().ok())
+                .is_some_and(|page| {
+                    page.revision == scope.revision
+                        && page.generation == scope.generation
+                        && page.option_inventory_state == OptionInventoryState::Complete
+                });
+            if !certified_inventory_complete && !search_text.is_empty() {
+                // Partial and unavailable search are local to identities already
+                // observed by the Explorer. They do not issue a certified-data query.
+                loading_options.set(false);
+                return;
+            }
             let active_filter = *filter.read();
             let request_offset = *offset.read();
             let request_limit = *page_size.read();
@@ -5372,11 +5395,6 @@ fn ConfigTab(
             let request_snapshot_token = config_snapshot_token.read().clone();
             let sequence = *request_sequence.peek() + 1;
             request_sequence.set(sequence);
-            let Some(scope) = request_scope.clone() else {
-                loading_options.set(false);
-                options.set(None);
-                return;
-            };
             loading_options.set(true);
             let request_search = search_text.clone();
             spawn(async move {
@@ -5613,7 +5631,11 @@ fn ConfigTab(
         .as_ref()
         .and_then(|result| result.as_ref().ok())
         .cloned();
-    let response = visible_config_response(loaded_response.clone());
+    let response = visible_config_response(
+        loaded_response.clone(),
+        selected_revision.as_deref(),
+        selected_generation,
+    );
     let load_error = (!loading_options())
         .then(|| {
             options
@@ -5627,7 +5649,11 @@ fn ConfigTab(
         .read()
         .as_ref()
         .and_then(|result| result.as_ref().ok())
-        .cloned();
+        .cloned()
+        .filter(|value| {
+            Some(value.revision.as_str()) == selected_revision.as_deref()
+                && value.generation == selected_generation
+        });
     let summary_error = (!loading_summary())
         .then(|| {
             summary
@@ -5649,7 +5675,7 @@ fn ConfigTab(
     let range_start = if total == 0 { 0 } else { page_offset + 1 };
     let active_page_size = *page_size.read();
     let range_end = (page_offset + active_page_size).min(total);
-    let lifecycle = loaded_response.as_ref().map(|value| value.lifecycle);
+    let lifecycle = response.as_ref().map(|value| value.lifecycle);
     let module_lifecycle_hint = module_sources
         .read()
         .as_ref()
@@ -5663,12 +5689,19 @@ fn ConfigTab(
     let show_commit_inspection = selected_mode == SnapshotRevisionMode::Commit
         && lifecycle == Some(SnapshotLifecycle::Available)
         && inspected_commit.read().as_deref() == selected_revision.as_deref();
-    let comparison_available = loaded_response
+    let comparison_available = response
         .as_ref()
         .is_some_and(|value| value.comparison_available);
-    let option_inventory_partial = response
+    let option_inventory_state = response
         .as_ref()
-        .is_some_and(|value| value.option_inventory_state == OptionInventoryState::Partial);
+        .map(|value| value.option_inventory_state)
+        .or_else(|| {
+            summary_response
+                .as_ref()
+                .map(|value| value.option_inventory_state)
+        })
+        .unwrap_or(OptionInventoryState::Unavailable);
+    let option_inventory_partial = option_inventory_state == OptionInventoryState::Partial;
     let option_inventory_notice = response.as_ref().and_then(|value| {
         (value.option_inventory_state == OptionInventoryState::Partial).then(|| {
             let paths = value
@@ -5705,6 +5738,24 @@ fn ConfigTab(
     let baseline_generation = response
         .as_ref()
         .and_then(|value| value.baseline_generation);
+    let comparison_baseline = match selected_mode {
+        SnapshotRevisionMode::Generation => {
+            baseline_generation.map(|value| format!("generation #{value}"))
+        }
+        SnapshotRevisionMode::Commit => baseline.as_deref().map(short_revision),
+    };
+    let explorer_scope_key = format!(
+        "{}:{}:{}",
+        if selected_mode == SnapshotRevisionMode::Commit {
+            "commit"
+        } else {
+            "generation"
+        },
+        selected_revision.as_deref().unwrap_or("none"),
+        selected_generation
+            .map(|value| value.to_string())
+            .unwrap_or_default()
+    );
     let flake_name = system
         .flake
         .as_ref()
@@ -5781,7 +5832,10 @@ fn ConfigTab(
         .as_ref()
         .map(|value| value.seven_day_drift)
         .unwrap_or(SevenDayDriftStatus::InsufficientCoverage);
-    let module_collection = module_sources.read().clone();
+    let module_collection = module_sources
+        .read()
+        .clone()
+        .filter(|collection| selected_module_scope.as_ref() == Some(&collection.scope));
     let module_loaded = module_collection
         .as_ref()
         .map(|collection| collection.sources.len())
@@ -5973,539 +6027,131 @@ fn ConfigTab(
             });
         }
     };
+    let commits_for_mode_switch = commits.clone();
+    let selected_revision_for_inventory = selected_revision.clone();
+    let inventory_selection = selected_module_scope.clone();
 
     rsx! {
-        div { class: "sd-grid sd-grid-config",
+        section { class: "card cfgx",
+            div { class: "cfgx-top",
+                div { class: "cfgx-target", span { class: "cfgx-target-label", "TARGET" } span { class: "mono cfgx-target-path", "{flake_name}#nixosConfigurations.{config_name}.config" } }
+                div { class: "cfgx-top-r",
+                    div { class: "cfgx-rev",
+                        div { class: "seg xs",
+                            button { class: if selected_mode == SnapshotRevisionMode::Generation { "active focus-ring" } else { "focus-ring" }, "aria-pressed": selected_mode == SnapshotRevisionMode::Generation, onclick: move |_| on_revision_change.call(ConfigRevision::Current), "Generations" }
+                            button { class: if selected_mode == SnapshotRevisionMode::Commit { "active focus-ring" } else { "focus-ring" }, "aria-pressed": selected_mode == SnapshotRevisionMode::Commit, onclick: move |_| { if let Some(commit) = commits_for_mode_switch.first() { on_revision_change.call(ConfigRevision::Commit(commit.hash.clone())); } }, "Commits" }
+                        }
+                        if selected_mode == SnapshotRevisionMode::Generation {
+                            select { class: "cfgx-select focus-ring", value: selected_generation.map(|value| value.to_string()).unwrap_or_default(), onchange: move |event| { if let Ok(generation) = event.value().parse::<i32>() { on_revision_change.call(ConfigRevision::Generation(generation)); } },
+                                for generation in &generations {
+                                    {
+                                        let current = if generation.is_current { " (current)" } else { "" };
+                                        let commit = generation.commit_hash.as_deref().map(short_revision).unwrap_or_else(|| "no commit".into());
+                                        rsx! { option { value: "{generation.generation}", disabled: generation.commit_hash.is_none(), "gen #{generation.generation}{current} · {commit}" } }
+                                    }
+                                }
+                            }
+                        } else {
+                            select { class: "cfgx-select focus-ring", value: selected_revision.clone().unwrap_or_default(), onchange: move |event| on_revision_change.call(ConfigRevision::Commit(event.value())),
+                                if let ConfigRevision::Commit(sha) = &revision { if !revision_known { option { value: "{sha}", "{short_revision(sha)} · linked revision" } } }
+                                for commit in &commits {
+                                    {
+                                        let deployed = if commit.is_current { " (deployed)" } else { "" };
+                                        let short = short_revision(&commit.hash);
+                                        rsx! { option { value: "{commit.hash}", "{short}{deployed} · {commit.message}" } }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    span { class: "cfgx-obs", title: "Observational only. Deployment gating uses the policy evaluator, which evaluates this configuration independently — an Explorer cache hit never substitutes for an authoritative policy evaluation.", "OBSERVATIONAL" }
+                }
+            }
+            if is_historical {
+                div { class: "cfgx-hist", Icon { name: IconName::Clock, size: 12 }
+                    div { "Inspecting historical configuration " span { class: "mono", title: selected_revision.clone().unwrap_or_default(), "{selected_revision_label}" } if selected_mode == SnapshotRevisionMode::Commit && revision_known && !deployed_here { " (never deployed here)" } ". This is not the running state." }
+                    button { class: "cfgx-link focus-ring", onclick: move |_| on_revision_change.call(ConfigRevision::Current), "back to current" }
+                }
+            }
             ConfigExplorer {
+                key: "{explorer_scope_key}",
                 system_id: system.id,
                 revision: selected_revision.clone(),
-                enabled: selected_revision.is_some()
-                    && !matches!(revision, ConfigRevision::Generation(_)),
-                disabled_reason: if matches!(revision, ConfigRevision::Generation(_)) {
-                    "Lazy Explorer observations are commit-scoped. This retained generation remains on certified generation evidence so Crystal Forge does not mislabel a new commit observation as historical generation data.".to_string()
-                } else {
-                    "An exact commit is required before lazy Config observations can start.".to_string()
+                scoped_enabled: selected_revision.is_some() && !matches!(revision, ConfigRevision::Generation(_)),
+                disabled_reason: if matches!(revision, ConfigRevision::Generation(_)) { "Lazy observations are commit-scoped. Certified retained-generation evidence remains selected so a new commit observation is not mislabeled as historical generation data.".to_string() } else { "An exact commit is required before lazy Config observations can start.".to_string() },
+                target: format!("{}#nixosConfigurations.{}.config @ {}", flake_name, config_name, selected_revision.as_deref().unwrap_or("no commit")),
+                primary_lifecycle: lifecycle.unwrap_or(SnapshotLifecycle::Unavailable),
+                evaluation_time: evaluation_duration_label.clone(),
+                package_count: closure_package_label.clone(),
+                closure_size: closure_size_label.clone(),
+                carrier: selected_store_path.as_deref().map(short_source_path).unwrap_or_else(|| "unavailable".to_string()),
+                inventory_label: match option_inventory_state { OptionInventoryState::Complete => format!("{} options", counts.all), OptionInventoryState::Partial => "partial".to_string(), OptionInventoryState::Unavailable => summary_lifecycle_short(lifecycle.unwrap_or(SnapshotLifecycle::Unavailable)).to_string() },
+                inventory_state: option_inventory_state,
+                inventory_request_allowed: selected_mode == SnapshotRevisionMode::Commit && allow_mutations && queueing_scope.read().is_none() && !loading_options() && matches!(lifecycle, Some(SnapshotLifecycle::Available | SnapshotLifecycle::Unavailable | SnapshotLifecycle::Failed)) && option_inventory_state != OptionInventoryState::Complete,
+                inventory_request_error: inspection_prerequisite.read().clone(),
+                comparison_ready: lifecycle == Some(SnapshotLifecycle::Available) && option_inventory_state == OptionInventoryState::Complete && comparison_available,
+                search,
+                search_rows: response.as_ref().map(|value| value.options.clone()).unwrap_or_default(),
+                search_total: total,
+                search_offset: *offset.read(),
+                search_limit: *page_size.read(),
+                search_filter: *filter.read(),
+                search_counts: counts.clone(),
+                search_loading: loading_options(),
+                search_error: load_error.clone(),
+                comparison_baseline,
+                certified_sources: module_collection.as_ref().map(|collection| collection.sources.clone()).unwrap_or_default(),
+                certified_sources_complete: module_collection.as_ref().is_some_and(|collection| collection.lifecycle == SnapshotLifecycle::Available && collection.option_inventory_state == OptionInventoryState::Complete && collection.next_offset >= collection.total),
+                certified_sources_has_more: module_has_more,
+                certified_sources_loading_more: module_loading() || *module_loading_more.read(),
+                certified_sources_error: module_initial_error.read().clone().or_else(|| module_continuation_error.read().clone()),
+                on_search_offset: move |next: i64| offset.set(next.max(0)),
+                on_search_filter: move |next| { filter.set(next); offset.set(0); },
+                on_load_more_sources: load_more_module_sources,
+                on_open_definition: move |definition| source.set(Some(source_target_from_definition(definition))),
+                on_open_source: move |module| source.set(Some(source_target_from_module(module))),
+                on_request_inventory: move |_| {
+                    let Some(revision) = selected_revision_for_inventory.clone() else { return; };
+                    let Some(selection) = inventory_selection.clone() else { return; };
+                    if !allow_mutations || queueing_scope.peek().is_some() { return; }
+                    let request_scope = ConfigRefreshScope {
+                        selection,
+                        generation: *refresh_generation.peek(),
+                    };
+                    queueing_scope.set(Some(request_scope.clone()));
+                    inspection_prerequisite.set(None);
+                    spawn(async move {
+                        let result = queue_system_config_inspection(&system.id, &revision).await;
+                        if !refresh_scope_is_current(
+                            active_selection.peek().as_ref(),
+                            *refresh_generation.peek(),
+                            &request_scope,
+                        ) || queueing_scope.peek().as_ref() != Some(&request_scope) {
+                            return;
+                        }
+                        queueing_scope.set(None);
+                        match result {
+                            Ok(_) => { inspected_commit.set(Some(revision)); bump_refresh_generation(refresh_generation); }
+                            Err(crate::api::client::QueueConfigInspectionError::Prerequisite(message)) => inspection_prerequisite.set(Some(message)),
+                            Err(crate::api::client::QueueConfigInspectionError::Request(error)) => options.set(Some(Err(error))),
+                        }
+                    });
                 },
             }
-            section { class: "card sd-card cfg-card", id: "{card_id}",
-                div { class: "sd-card-head",
-                    h2 { "Certified snapshot search" }
-                    span { class: "sd-card-meta mono", "{flake_name}#nixosConfigurations.{config_name}" }
-                }
-                div { class: "cfg-revbar",
-                    div { class: "seg cfg-revseg",
-                        button {
-                            class: if selected_mode == SnapshotRevisionMode::Generation { "active focus-ring" } else { "focus-ring" },
-                            "aria-pressed": selected_mode == SnapshotRevisionMode::Generation,
-                            onclick: move |_| on_revision_change.call(ConfigRevision::Current),
-                            "Generations"
-                        }
-                        button {
-                            class: if selected_mode == SnapshotRevisionMode::Commit { "active focus-ring" } else { "focus-ring" },
-                            "aria-pressed": selected_mode == SnapshotRevisionMode::Commit,
-                            onclick: move |_| {
-                                if let Some(commit) = commits.first() {
-                                    on_revision_change.call(ConfigRevision::Commit(commit.hash.clone()));
-                                }
-                            },
-                            "Commits"
-                        }
-                    }
-                    if selected_mode == SnapshotRevisionMode::Generation {
-                        select {
-                            class: "cfg-revselect focus-ring",
-                            value: selected_generation.map(|value| value.to_string()).unwrap_or_default(),
-                            onchange: move |event| {
-                                if let Ok(generation) = event.value().parse::<i32>() {
-                                    on_revision_change.call(ConfigRevision::Generation(generation));
-                                }
-                            },
-                            for generation in &generations {
-                                {
-                                    let current_label = if generation.is_current { " (current)" } else { "" };
-                                    let commit_label = generation.commit_hash.as_deref().map(short_revision).unwrap_or_else(|| "no commit".into());
-                                    rsx! { option {
-                                        value: "{generation.generation}",
-                                        "gen #{generation.generation}{current_label} - {commit_label}"
-                                    } }
-                                }
-                            }
-                        }
-                    } else {
-                        select {
-                            class: "cfg-revselect focus-ring",
-                            value: selected_revision.clone().unwrap_or_default(),
-                            onchange: move |event| on_revision_change.call(ConfigRevision::Commit(event.value())),
-                            if let ConfigRevision::Commit(sha) = &revision {
-                                if !revision_known {
-                                    option { value: "{sha}", "{short_revision(sha)} · linked revision" }
-                                }
-                            }
-                            for commit in &commits {
-                                {
-                                    let current_label = if commit.is_current { " (deployed)" } else { "" };
-                                    let revision_label = short_revision(&commit.hash);
-                                    rsx! { option { value: "{commit.hash}", "{revision_label}{current_label} - {commit.message}" } }
-                                }
-                            }
-                        }
-                    }
-                    if let Some(message) = selected_commit_message {
-                        span { class: "cfg-revbar-msg", title: "{message}", "{message}" }
-                    }
-                    if is_historical {
-                        button {
-                            class: "btn btn-ghost focus-ring xs cfg-revback",
-                            onclick: move |_| on_revision_change.call(ConfigRevision::Current),
-                            "Back to current"
-                        }
-                    }
-                }
-                if is_historical {
-                    div { class: "sd-callout sd-callout-warn cfg-hist-note",
-                        Icon { name: IconName::Clock, size: 13 }
-                        if selected_mode == SnapshotRevisionMode::Commit {
-                            div {
-                                "Showing the configuration this host would evaluate to at " span { class: "mono", title: selected_revision.clone().unwrap_or_default(), "{selected_revision_label}" }
-                                if revision_known && !deployed_here { ", a revision never deployed here, not what is running now." } else { ", not what is running now." }
-                            }
-                        } else {
-                            div { "Showing the configuration as evaluated for generation #{selected_generation.unwrap_or_default()}, not what is running now." }
-                        }
-                    }
-                }
-                if show_commit_inspection {
-                    div {
-                        class: "cfg-comparison-note",
-                        "Inspection of commit "
-                        span {
-                            class: "mono",
-                            title: selected_revision.clone().unwrap_or_default(),
-                            "{selected_revision_label}"
-                        }
-                        ". This commit-scoped result is not a retained historical generation configuration."
-                    }
-                }
-                if selected_revision.is_none() {
-                    if revision_known {
-                        ConfigState { kind: "unavailable", message: "This retained generation is known, but it has no tracked commit. No evaluation snapshot can be selected." }
-                    } else {
-                        ConfigState { kind: "unavailable", message: "This generation is unknown or is no longer retained." }
-                    }
-                } else if let Some(commit) = unavailable_generation_commit.clone() {
-                    div { class: "cfg-state cfg-state-unavailable", role: "status",
-                        div {
-                            "data-testid": "legacy-generation-provenance",
-                            strong { "Historical generation configuration not retained" }
-                            p {
-                                "Crystal Forge retained the association between generation #"
-                                "{selected_generation.unwrap_or_default()}"
-                                " and commit "
-                                span { class: "mono", title: "{commit}", "{short_revision(&commit)}" }
-                                ", but it did not retain the exact evaluated configuration for that generation."
-                            }
-                            p { "Inspecting or reevaluating the associated commit creates commit-scoped data. It does not restore or recreate the historical generation configuration." }
-                        }
-                        button {
-                            class: "btn btn-primary focus-ring xs",
-                            onclick: move |_| on_revision_change.call(ConfigRevision::Commit(commit.clone())),
-                            "Inspect associated commit"
-                        }
-                    }
-                } else if let Some(error) = load_error {
-                    div { class: "cfg-state cfg-state-failed", role: "alert",
-                        p { "Unable to load evaluated options: {error}" }
-                        button {
-                            class: "btn btn-ghost focus-ring xs",
-                            "aria-label": "Retry evaluated options",
-                            onclick: move |_| bump_refresh_generation(refresh_generation),
-                            "Retry"
-                        }
-                    }
-                } else if options.read().is_none()
-                    || (loading_options() && lifecycle != Some(SnapshotLifecycle::Available))
-                {
-                    ConfigState { kind: "loading", message: "Loading evaluated options…" }
-                } else if lifecycle != Some(SnapshotLifecycle::Available) {
-                    {
-                        let state = lifecycle.unwrap_or(SnapshotLifecycle::Unavailable);
-                        let message = snapshot_lifecycle_message(state, response.as_ref().and_then(|value| value.error.as_deref()));
-                        let role = if state == SnapshotLifecycle::Failed { "alert" } else { "status" };
-                        let revision_for_queue = selected_revision.clone().unwrap_or_default();
-                        let queue_scope = ConfigRefreshScope {
-                            selection: ModuleSourcesScope {
-                                revision: revision_for_queue.clone(),
-                                mode: selected_mode,
-                                generation: selected_generation,
-                            },
-                            generation: *refresh_generation.read(),
-                        };
-                        let queueing = queueing_scope.read().as_ref() == Some(&queue_scope);
-                        rsx! {
-                            div { class: "cfg-state cfg-state-{snapshot_lifecycle_class(state)}", role,
-                                div {
-                                    strong { "{snapshot_lifecycle_label(state)}" }
-                                    p { "{message}" }
-                                    if let Some(prerequisite) = inspection_prerequisite.read().as_deref() {
-                                        p { class: "cfg-error", role: "alert", "Configuration inspection prerequisite: {prerequisite}" }
-                                    }
-                                }
-                                if allow_mutations
-                                    && (state == SnapshotLifecycle::Unavailable || state == SnapshotLifecycle::Failed)
-                                {
-                                    button {
-                                        class: "btn btn-primary focus-ring xs",
-                                        disabled: queueing,
-                                        onclick: move |_| {
-                                            queueing_scope.set(Some(queue_scope.clone()));
-                                            inspection_prerequisite.set(None);
-                                            let revision_for_queue = revision_for_queue.clone();
-                                            let request_scope = queue_scope.clone();
-                                            spawn(async move {
-                                                let result = queue_system_config_inspection(&system.id, &revision_for_queue).await;
-                                                if queueing_scope.peek().as_ref() != Some(&request_scope)
-                                                    || !refresh_scope_is_current(
-                                                        active_selection.peek().as_ref(),
-                                                        *refresh_generation.peek(),
-                                                        &request_scope,
-                                                    )
-                                                {
-                                                    return;
-                                                }
-                                                queueing_scope.set(None);
-                                                match result {
-                                                    Ok(_) => {
-                                                        inspected_commit.set(Some(revision_for_queue));
-                                                        refresh_generation.set(request_scope.generation.saturating_add(1));
-                                                    }
-                                                    Err(crate::api::client::QueueConfigInspectionError::Prerequisite(message)) => {
-                                                        inspection_prerequisite.set(Some(message));
-                                                    }
-                                                    Err(crate::api::client::QueueConfigInspectionError::Request(error)) => {
-                                                        options.set(Some(Err(error)));
-                                                    }
-                                                }
-                                            });
-                                        },
-                                        if queueing { "Requesting inspection…" } else { "Inspect configuration" }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    div { class: "cfg-toolbar",
-                        div { class: "seg",
-                            for (value, label, count) in [
-                                (EvaluatedOptionFilter::All, if option_inventory_partial { "All observed" } else { "All" }, Some(counts.all)),
-                                (EvaluatedOptionFilter::Overridden, "Overridden", Some(counts.overridden)),
-                                (EvaluatedOptionFilter::Changed, "Changed", counts.changed),
-                            ] {
-                                button {
-                                    class: if *filter.read() == value { "active focus-ring" } else { "focus-ring" },
-                                    disabled: loading_options() || (value == EvaluatedOptionFilter::Changed && !comparison_available),
-                                    title: if value == EvaluatedOptionFilter::Changed && !comparison_available { "No comparison snapshot is available" } else { "" },
-                                    onclick: move |_| { loading_options.set(true); filter.set(value); offset.set(0); expanded.set(None); },
-                                    "{label} " span { class: "seg-n", "{optional_count_label(count)}" }
-                                }
-                            }
-                        }
-                        div { class: "q-search cfg-q",
-                            Icon { name: IconName::Search, size: 13 }
-                            input {
-                                class: "q-search-input focus-ring",
-                                value: "{search}",
-                                placeholder: "Filter options, values, modules…",
-                                oninput: move |event| { loading_options.set(true); search.set(event.value()); },
-                            }
-                            if !search.read().is_empty() {
-                                button {
-                                    class: "btn-icon xs focus-ring",
-                                    title: "Clear",
-                                    "aria-label": "Clear option search",
-                                    onclick: move |_| { loading_options.set(true); search.set(String::new()); },
-                                    Icon { name: IconName::X, size: 13 }
-                                }
-                            }
-                        }
-                        span {
-                            class: "cfg-count",
-                            role: "status",
-                            "aria-live": "polite",
-                            if loading_options() { "Querying… showing {range_start}–{range_end} of {total} inspected" } else { "{range_start}–{range_end} of {total} inspected" }
-                        }
-                        if total > active_page_size {
-                        div { class: "cfg-pager",
-                            button {
-                                class: "btn-icon xs focus-ring",
-                                disabled: loading_options() || page_offset == 0,
-                                title: "Previous page",
-                                onclick: move |_| { loading_options.set(true); offset.set((page_offset - active_page_size).max(0)); expanded.set(None); },
-                                Icon { name: IconName::ArrowLeft, size: 13 }
-                            }
-                            button {
-                                class: "btn-icon xs focus-ring",
-                                disabled: loading_options() || range_end >= total,
-                                title: "Next page",
-                                onclick: move |_| { loading_options.set(true); offset.set(page_offset + active_page_size); expanded.set(None); },
-                                Icon { name: IconName::ChevronRight, size: 13 }
-                            }
-                        }
-                        }
-                    }
-                    if !comparison_available {
-                        div { class: "cfg-comparison-note", "No comparison is available for this revision." }
-                    }
-                    if let Some(notice) = option_inventory_notice {
-                        div {
-                            class: "cfg-comparison-note",
-                            role: "status",
-                            "{notice}"
-                        }
-                    }
-                    div {
-                        class: if loading_options() { "cfg-table-wrap loading" } else { "cfg-table-wrap" },
-                        id: "{table_id}",
-                        "aria-busy": loading_options(),
-                        table { class: "sys-table compact cfg-table",
-                            colgroup { col { style: "width:46%" } col { style: "width:26%" } col { style: "width:28%" } }
-                            thead { tr { th { "Option" } th { "Value" } th { "Set by" } } }
-                            tbody {
-                                for row in response.as_ref().map(|value| value.options.as_slice()).unwrap_or_default() {
-                                    {
-                                        let row_path = option_row_path(row).to_string();
-                                        rsx! { ConfigOptionRows {
-                                            key: "{row_path}",
-                                            row: row.clone(),
-                                            open: expanded.read().as_deref() == Some(row_path.as_str()),
-                                            baseline: baseline.clone(),
-                                            baseline_generation,
-                                            comparison_mode: selected_mode,
-                                            on_toggle: move |path: String| {
-                                                if expanded.read().as_deref() == Some(path.as_str()) { expanded.set(None); } else { expanded.set(Some(path)); }
-                                            },
-                                            on_source: move |definition| source.set(Some(source_target_from_definition(definition))),
-                                        } }
-                                    }
-                                }
-                                if loading_options() && response.as_ref().is_none_or(|value| value.options.is_empty()) {
-                                    tr { td { colspan: "3", div { class: "cfg-empty", "Loading evaluated options…" } } }
-                                } else if response.as_ref().is_none_or(|value| value.options.is_empty()) {
-                                    tr { td { colspan: "3", div { class: "cfg-empty", "No options match this search and filter." } } }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            div { class: "cfg-side", id: "{side_id}",
-                section { class: "card sd-card",
-                    div { class: "sd-card-head",
-                        h2 { "Modules" }
-                        span { class: "sd-card-meta",
-                            if module_loading() { "loading" }
-                            else if module_initial_error.read().is_some() || module_total_mismatch { "error" }
-                            else if module_lifecycle == Some(SnapshotLifecycle::Available) && module_inventory_partial { "{module_total} observed modules · won / defined" }
-                            else if module_lifecycle == Some(SnapshotLifecycle::Available) { "{module_total} modules · won / defined" }
-                            else { "{summary_lifecycle_short(module_lifecycle.unwrap_or(SnapshotLifecycle::Unavailable))}" }
-                        }
-                    }
-                    div { class: "cfg-modules",
-                        if module_loading() {
-                            div { class: "cfg-empty", role: "status", "Loading module sources…" }
-                        } else if let Some(error) = module_initial_error.read().as_ref() {
-                            div { class: "cfg-summary-state cfg-summary-error", role: "alert",
-                                strong { "Unable to load module sources" }
-                                p { "{error}" }
-                                button {
-                                    class: "btn btn-ghost focus-ring xs",
-                                    "aria-label": "Retry evaluation module sources",
-                                    onclick: move |_| {
-                                        bump_refresh_generation(refresh_generation);
-                                    },
-                                    "Retry module sources"
-                                }
-                            }
-                        } else if module_total_mismatch {
-                            div { class: "cfg-summary-state cfg-summary-error", role: "alert",
-                                strong { "Module source data is inconsistent" }
-                                p { "The summary and module page report different authoritative totals. Reload Config before using module provenance." }
-                                button {
-                                    class: "btn btn-ghost focus-ring xs",
-                                    "aria-label": "Reload inconsistent Config snapshot",
-                                    onclick: move |_| {
-                                        config_snapshot_token.set(None);
-                                        offset.set(0);
-                                        bump_refresh_generation(refresh_generation);
-                                    },
-                                    "Reload Config"
-                                }
-                            }
-                        } else if module_lifecycle == Some(SnapshotLifecycle::Available) && module_loaded == 0 {
-                            div { class: "cfg-empty", "No module provenance was emitted for this snapshot." }
-                        } else if module_lifecycle == Some(SnapshotLifecycle::Available) {
-                            for module in module_collection.as_ref().map(|collection| collection.sources.as_slice()).unwrap_or_default() {
-                                {
-                                    let module_for_open = module.clone();
-                                    let input = module.source_input.as_deref().unwrap_or("untracked");
-                                    let source_path_label = module
-                                        .source_path
-                                        .as_deref()
-                                        .unwrap_or(SOURCE_PATH_UNAVAILABLE_LABEL);
-                                    let source_path_display = module
-                                        .source_path
-                                        .as_deref()
-                                        .map(short_source_path)
-                                        .unwrap_or_else(|| SOURCE_PATH_UNAVAILABLE_LABEL.to_string());
-                                    let source_available = module.source_path.is_some()
-                                        || module.tracked_flake.is_some();
-                                    let input_class = if input == "self" {
-                                        "cfg-module-kind cfg-module-self"
-                                    } else if input == "nixpkgs" {
-                                        "cfg-module-kind cfg-module-nixpkgs"
-                                    } else {
-                                        "cfg-module-kind cfg-module-input"
-                                    };
-                                    rsx! { button {
-                                        class: "cfg-module focus-ring",
-                                        title: "{source_path_label}",
-                                        disabled: !source_available,
-                                        onclick: move |_| source.set(Some(source_target_from_module(module_for_open.clone()))),
-                                        span { class: "{input_class}", title: module.source_revision.clone().unwrap_or_default(), "{input}" }
-                                        span { class: "mono cfg-module-path", title: "{source_path_label}", "{source_path_display}" }
-                                        span { class: "cfg-module-count mono", "{module.won_count}/{module.defined_count}" }
-                                    } }
-                                }
-                            }
-                        } else {
-                            ConfigSummaryLifecycleState {
-                                surface: "Module sources",
-                                lifecycle: module_lifecycle.unwrap_or(SnapshotLifecycle::Unavailable),
-                                error: module_collection.as_ref().and_then(|value| value.error.clone()),
-                            }
-                        }
-                    }
-                    if module_lifecycle == Some(SnapshotLifecycle::Available) && module_loaded > 0 && !module_total_mismatch {
-                        div {
-                            class: "cfg-module-footer",
-                            span {
-                                class: "cfg-module-status mono",
-                                role: "status",
-                                "aria-live": "polite",
-                                if module_inventory_partial { "Loaded {module_loaded} of {module_total} observed module sources" }
-                                else { "Loaded {module_loaded} of {module_total} module sources" }
-                            }
-                            if module_has_more && module_continuation_error.read().is_none() {
-                                button {
-                                    class: "btn btn-ghost focus-ring xs",
-                                    "aria-label": "Load more evaluation module sources",
-                                    disabled: module_loading_more(),
-                                    onclick: load_more_module_sources,
-                                    if module_loading_more() { "Loading more…" } else { "Load more" }
-                                }
-                            }
-                        }
-                        if let Some(error) = module_continuation_error.read().as_ref() {
-                            div { class: "cfg-continuation-error", role: "alert",
-                                span { "Unable to continue loading module sources: {error}" }
-                                button {
-                                    class: "btn btn-ghost focus-ring xs",
-                                    "aria-label": "Retry evaluation module sources continuation",
-                                    disabled: module_loading_more(),
-                                    onclick: load_more_module_sources,
-                                    "Retry same page"
-                                }
-                            }
-                        }
-                    }
-                }
-                section { class: "card sd-card",
-                    div { class: "sd-card-head",
-                        h2 { "Evaluation" }
-                        if summary_pending { span { class: "chip chip-info", "resolving" } }
-                        else if summary_error.is_some() { span { class: "chip chip-critical", "error" } }
-                        else if summary_available { span { class: "chip chip-healthy", "cached" } }
-                        else { span { class: "chip chip-{snapshot_lifecycle_chip(summary_lifecycle.unwrap_or(SnapshotLifecycle::Unavailable))}", "{summary_lifecycle_short(summary_lifecycle.unwrap_or(SnapshotLifecycle::Unavailable))}" } }
-                    }
-                    if summary_pending {
-                        div { class: "cfg-summary-state", role: "status", "Loading evaluation summary…" }
-                    } else if let Some(error) = &summary_error {
-                        div { class: "cfg-summary-state cfg-summary-error", role: "alert",
-                            strong { "Unable to load evaluation summary" }
-                            p { "{error}" }
-                            button {
-                                class: "btn btn-ghost focus-ring xs",
-                                "aria-label": "Retry evaluation summary",
-                                onclick: move |_| bump_refresh_generation(refresh_generation),
-                                "Retry"
-                            }
-                        }
-                    } else if !summary_available {
-                        ConfigSummaryLifecycleState {
-                            surface: "Evaluation summary",
-                            lifecycle: summary_lifecycle.unwrap_or(SnapshotLifecycle::Unavailable),
-                            error: summary_response.as_ref().and_then(|value| value.error.clone()),
-                        }
-                    } else {
-                        div { class: "sd-drift-row", span { class: "sd-drift-label", "Toplevel" } span { class: "mono sd-drift-val cfg-drv", title: selected_store_path.clone().unwrap_or_default(), "{selected_store_label}" } }
-                        div { class: "sd-drift-row", span { class: "sd-drift-label", if summary_inventory_partial { "Observed options" } else { "Evaluated options" } } span { class: "mono sd-drift-val", "{option_total_label}" } }
-                        div { class: "sd-drift-row", span { class: "sd-drift-label", "Host delta" } span { class: "mono sd-drift-val", title: "Selected option states that differ from the same-commit modal configuration", "{host_delta_label}" } }
-                        div { class: "sd-drift-row", span { class: "sd-drift-label", "Packages" } span { class: "mono sd-drift-val", "{closure_package_label}" } }
-                        div { class: "sd-drift-row", span { class: "sd-drift-label", "Closure size" } span { class: "mono sd-drift-val", "{closure_size_label}" } }
-                        div { class: "sd-drift-row", span { class: "sd-drift-label", "Eval time" } span { class: "mono sd-drift-val", "{evaluation_duration_label} · {completed_label}" } }
-                    }
-                }
-                section { class: "card sd-card",
-                    div { class: "sd-card-head",
-                        h2 { "Drift" }
-                        if summary_pending { span { class: "chip chip-info", "resolving" } }
-                        else if summary_error.is_some() { span { class: "chip chip-critical", "error" } }
-                        else if !summary_available { span { class: "chip chip-{snapshot_lifecycle_chip(summary_lifecycle.unwrap_or(SnapshotLifecycle::Unavailable))}", "{summary_lifecycle_short(summary_lifecycle.unwrap_or(SnapshotLifecycle::Unavailable))}" } }
-                        else if drift == EvaluationDrift::Matches { span { class: "chip chip-healthy", "in sync" } }
-                        else if drift == EvaluationDrift::Differs { span { class: "chip chip-warning", "drift" } }
-                        else { span { class: "chip chip-unknown", "unavailable" } }
-                    }
-                    if summary_pending {
-                        div { class: "cfg-summary-state", role: "status", "Resolving drift from exact store paths…" }
-                    } else if let Some(error) = &summary_error {
-                        div { class: "cfg-summary-state cfg-summary-error", role: "alert", "Unable to resolve drift: {error}" }
-                    } else if !summary_available {
-                        ConfigSummaryLifecycleState {
-                            surface: "Drift",
-                            lifecycle: summary_lifecycle.unwrap_or(SnapshotLifecycle::Unavailable),
-                            error: summary_response.as_ref().and_then(|value| value.error.clone()),
-                        }
-                    } else {
-                        div { class: "sd-drift-row", span { class: "sd-drift-label", "Evaluated config" } span { class: "mono sd-drift-val cfg-drv", title: selected_store_path.clone().unwrap_or_default(), "{selected_store_label}" } }
-                        div { class: "sd-drift-row", span { class: "sd-drift-label", "Running config" } span { class: "mono sd-drift-val cfg-drv", title: running_store_path.clone().unwrap_or_default(), "{running_store_label}" } }
-                        div { class: "sd-drift-row", span { class: "sd-drift-label", "Agent fingerprint" } span { class: "mono sd-drift-val", "{agent_fingerprint_label}" } }
-                        if drift == EvaluationDrift::Matches { div { class: "cfg-drift-explainer", "The selected and running store paths are exactly equal." } }
-                        else if drift == EvaluationDrift::Differs { div { class: "cfg-drift-explainer cfg-drift-warning", "The selected and running store paths are different." } }
-                        else if summary_inventory_partial { div { class: "cfg-drift-explainer", "Drift is unavailable because the evaluated option inventory is incomplete." } }
-                        else { div { class: "cfg-drift-explainer", "Drift is unavailable until both exact store paths are known." } }
-                        if summary_inventory_partial {
-                            div { class: "cfg-limit-note", "Seven-day drift is unavailable because the evaluated option inventory is incomplete." }
-                        } else { match seven_day_drift {
-                            SevenDayDriftStatus::NoObservedDrift => rsx! { div { class: "sd-callout sd-callout-info cfg-drift-history", Icon { name: IconName::Check, size: 13 } div { "No configuration drift was observed in the last 7 days." } } },
-                            SevenDayDriftStatus::ObservedDrift => rsx! { div { class: "sd-callout sd-callout-warn cfg-drift-history", Icon { name: IconName::Warn, size: 13 } div { "A different running configuration was observed in the last 7 days." } } },
-                            SevenDayDriftStatus::InsufficientCoverage => rsx! { div { class: "cfg-limit-note", "Seven-day drift is unavailable because continuous agent observation coverage is incomplete." } },
-                        } }
-                    }
-                }
-            }
-            if let Some(target) = source.read().clone() {
-                ConfigSourceTray {
-                    target,
-                    on_open_flake_commit,
-                    on_close: move |_| source.set(None),
-                }
-            }
+        }
+        if let Some(target) = source.read().clone() {
+            ConfigSourceTray { target, on_open_flake_commit, on_close: move |_| source.set(None) }
         }
     }
 }
 
-fn visible_config_response(response: Option<EvaluatedOptionsPage>) -> Option<EvaluatedOptionsPage> {
+fn visible_config_response(
+    response: Option<EvaluatedOptionsPage>,
+    revision: Option<&str>,
+    generation: Option<i32>,
+) -> Option<EvaluatedOptionsPage> {
     response
+        .filter(|page| Some(page.revision.as_str()) == revision && page.generation == generation)
 }
 
 #[component]
@@ -11234,7 +10880,7 @@ mod tests {
     }
 
     #[test]
-    fn config_loading_preserves_the_previous_response() {
+    fn config_response_is_visible_only_for_the_selected_scope() {
         let page: EvaluatedOptionsPage = serde_json::from_value(serde_json::json!({
             "lifecycle": "available",
             "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -11254,10 +10900,21 @@ mod tests {
         .expect("evaluated options page");
 
         assert_eq!(
-            visible_config_response(Some(page.clone())),
+            visible_config_response(
+                Some(page.clone()),
+                Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+                None,
+            ),
             Some(page.clone())
         );
-        assert_eq!(visible_config_response(Some(page.clone())), Some(page));
-        assert_eq!(visible_config_response(None), None);
+        assert_eq!(
+            visible_config_response(
+                Some(page),
+                Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+                None,
+            ),
+            None
+        );
+        assert_eq!(visible_config_response(None, None, None), None);
     }
 }

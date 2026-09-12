@@ -140,9 +140,12 @@ more expensive than tree navigation and MUST retain the same target identity.
 ## Configured options
 
 The Configured options index is a separate asynchronous observation. It is not
-the root observation, and root rendering MUST NOT wait for it. Starting both
-requests independently at Config startup keeps the shallow hierarchy usable
-while the index performs its O(N) option traversal.
+the root observation, and root rendering MUST NOT wait for it. Opening Config
+starts only the shallow root observation. The first activation of the
+Configured mode starts the index. The Explorer caches and reuses that result for
+the exact target until the revision changes or the user explicitly retries a
+failed request. This lazy trigger prevents an O(N) traversal for users who only
+browse scoped paths.
 
 An option appears in Configured options if and only if the exact evaluated
 module configuration contains a surviving non-default configuration
@@ -189,8 +192,8 @@ The shallow-root baseline returned 54 entries. Wall time had a 4.97-second
 median and a 4.92-5.06-second range. Peak RSS had a 204,504-KiB median and a
 204,276-204,564-KiB range.
 
-These measurements justify independent startup requests: configured-index
-latency and memory MUST NOT become root latency and memory. The baseline did
+These measurements justify a lazy configured-index request: configured-index
+latency and memory MUST NOT become Config-open or root latency and memory. The baseline did
 not include the final exact tie classifier. The final implementation isolates
 ambiguous classifier jobs as required above. Its focused real-Nix regression
 proves failure localization and value non-evaluation, but this change does not
@@ -261,6 +264,17 @@ Search over a complete V2 snapshot MAY provide complete search semantics. Search
 over only a lazy Explorer cache MUST identify that it is limited to inspected
 and cached paths, or report that complete search is unavailable. It MUST NOT
 silently present a partial search as a complete corpus search.
+
+The Web UI uses certified server search only when `OptionInventoryState` is
+`Complete`. For a partial or unavailable inventory, search filters only the
+structured option identities, values, and provenance already observed in the
+current Explorer session. It does not start prefix, option, or provenance
+requests to expand the result set.
+
+Scoped observations use an exact commit identity. A retained-generation
+selection therefore shows Browse and Configured as locally unavailable. This
+restriction does not disable certified Search or Sources data for that retained
+generation.
 
 ## Failure containment
 

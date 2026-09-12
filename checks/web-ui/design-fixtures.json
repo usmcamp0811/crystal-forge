@@ -77,7 +77,7 @@
       "packageTotal": 842,
       "closureSizeBytes": 1760936591,
       "evaluationDurationMs": 3400,
-      "expandedOption": "boot.kernel.sysctl.\"fs.protected_hardlinks\"",
+      "expandedOption": "networking.hostName",
       "volatileExclusions": {
         "heartbeatCountdown": "The design spinner advances continuously and is not a persisted production value. The contract checks the stable four-minute heartbeat age instead.",
         "evaluationAge": "The design presents a relative mock age while production presents the persisted completion timestamp. The contract checks evaluation duration and excludes only the age presentation."
@@ -114,18 +114,18 @@
         "identity": { "system": "atlas-01", "flake": "infrastructure", "generation": 160, "revision": "84274a8a", "revisionMessage": "bump nixpkgs to 24.11", "uptime": { "react": "32d 22h", "dioxus": "32d 22h 0m" }, "heartbeatAgeMinutes": 4 },
         "counts": { "all": 1092, "overridden": 204, "changed": 5, "moduleSources": 27, "hostDelta": 37, "packages": 842 },
         "formattedMetrics": { "reactClosure": "1.64 GiB", "dioxusClosure": "1.6 GiB", "reactEvaluationDuration": "3.4s", "dioxusEvaluationDuration": "3400 ms" },
-        "orderedVisibleRows": ["boot.kernel.sysctl.\"fs.protected_hardlinks\""],
+        "orderedVisibleRows": ["networking.hostName"],
         "selectedPane": "Config",
         "selectedFilter": "All",
-        "expandedItem": "boot.kernel.sysctl.\"fs.protected_hardlinks\""
+        "expandedItem": "networking.hostName"
       },
       "task440-config-narrow": {
         "kind": "system-config",
         "identity": { "system": "atlas-01", "flake": "infrastructure", "generation": 160, "revision": "84274a8a", "revisionMessage": "bump nixpkgs to 24.11", "uptime": { "react": "32d 22h", "dioxus": "32d 22h 0m" }, "heartbeatAgeMinutes": 4 },
         "counts": { "all": 1092, "overridden": 204, "changed": 5, "moduleSources": 27, "hostDelta": 37, "packages": 842 },
         "formattedMetrics": { "reactClosure": "1.64 GiB", "dioxusClosure": "1.6 GiB", "reactEvaluationDuration": "3.4s", "dioxusEvaluationDuration": "3400 ms" },
-        "orderedVisibleRows": ["boot.kernel.sysctl.\"fs.protected_hardlinks\""],
-        "searchQuery": "boot.kernel.sysctl.\"fs.protected_hardlinks\"",
+        "orderedVisibleRows": ["networking.hostName"],
+        "searchQuery": "networking.hostName",
         "selectedPane": "Config",
         "selectedFilter": "All",
         "expandedItem": null
