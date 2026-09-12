@@ -2120,6 +2120,8 @@ async fn list_explicit_bundle_version_system_rows(
     bundle_id: Uuid,
     bundle_version_id: Uuid,
 ) -> Result<Vec<SystemRow>> {
+    // INVARIANT: The immutable current version must belong to the same
+    // assignment lineage. Do not trust a cross-lineage current-version pointer.
     Ok(sqlx::query_as::<_, SystemRow>(
         r#"
         SELECT DISTINCT v.id, v.hostname, v.environment, v.health_status,
@@ -2130,6 +2132,7 @@ async fn list_explicit_bundle_version_system_rows(
           ON a.bundle_id = $1 AND a.active
         JOIN compliance_bundle_assignment_versions av
           ON av.id = a.current_version_id
+         AND av.assignment_id = a.id
          AND av.bundle_version_id = $2
          AND (
              (a.scope_type = 'system' AND a.system_id = v.id)
@@ -3117,9 +3120,10 @@ pub async fn load_assignment_metadata_for_systems(
         return Ok(std::collections::HashMap::new());
     }
 
-    // Single query to load effective assignments with metadata
     // System-scoped assignments take precedence over environment-scoped
-    // Uses DISTINCT ON to ensure each system gets only one assignment
+    // assignments. DISTINCT ON returns at most one assignment per system.
+    // INVARIANT: Each immutable current version must belong to the assignment
+    // lineage that references it.
     #[derive(sqlx::FromRow)]
     struct AssignmentRow {
         system_id: Uuid,
@@ -3144,7 +3148,9 @@ pub async fn load_assignment_metadata_for_systems(
             JOIN systems sys ON sys.id = rs.system_id
             JOIN compliance_bundle_assignments cba ON cba.system_id = sys.id 
                 AND cba.bundle_id = $1 AND cba.active = true AND cba.scope_type = 'system'
-            JOIN compliance_bundle_assignment_versions av ON av.id = cba.current_version_id
+            JOIN compliance_bundle_assignment_versions av
+              ON av.id = cba.current_version_id
+             AND av.assignment_id = cba.id
             
             UNION ALL
             
@@ -3159,7 +3165,9 @@ pub async fn load_assignment_metadata_for_systems(
             JOIN compliance_bundle_assignments cba ON cba.bundle_id = $1 
                 AND cba.active = true AND cba.scope_type = 'environment'
                 AND cba.environment_id = sys.environment_id
-            JOIN compliance_bundle_assignment_versions av ON av.id = cba.current_version_id
+            JOIN compliance_bundle_assignment_versions av
+              ON av.id = cba.current_version_id
+             AND av.assignment_id = cba.id
             WHERE NOT EXISTS (
                 -- Exclude if system already has a system-scoped assignment
                 SELECT 1 FROM compliance_bundle_assignments cba_sys
@@ -3178,10 +3186,12 @@ pub async fn load_assignment_metadata_for_systems(
     // Collect user IDs for batched lookup
     let user_ids: Vec<Uuid> = assignments.iter().filter_map(|a| a.created_by).collect();
 
-    // Batch load user names (email or name field)
+    // Resolve the actor label in one query. Usernames are the established
+    // human-readable identity, with email as the fallback.
     let users: std::collections::HashMap<Uuid, String> = if !user_ids.is_empty() {
         let user_rows: Vec<(Uuid, Option<String>)> = sqlx::query_as(
-            "SELECT id, COALESCE(name, email) AS display_name FROM users WHERE id = ANY($1)",
+            "SELECT id, COALESCE(NULLIF(BTRIM(username), ''), email) AS display_name \
+             FROM users WHERE id = ANY($1)",
         )
         .bind(&user_ids)
         .fetch_all(pool)

@@ -1895,11 +1895,8 @@ fn AssignmentCreatePanel(props: AssignmentCreatePanelProps) -> Element {
 
     rsx! {
         div { class: "card", style: "padding:14px 16px;display:flex;flex-direction:column;gap:12px;",
-                 div { style: "font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:var(--cf-text-muted);",
-                "Assign bundle revision {revision_label}"
-            }
             div { style: "font-size:10px;color:var(--cf-text-muted);",
-                "Exact revision: " span { class: "mono", "{props.bundle_version_id}" }
+                "Revision {revision_label}: " span { class: "mono", "{props.bundle_version_id}" }
                 " · {revision_state}"
             }
             if !revision_is_current {
