@@ -432,6 +432,7 @@ SQL
     echo "=== Critical cf-server integration targets ==="
     cargo test --offline --package cf-server \
       --test assignment_semantics \
+      --test compliance_assignment_zombie_repair \
       --test composite_policy \
       --test evidence_for_ato \
       --test framework_version_id_lifecycle \
@@ -455,6 +456,15 @@ SQL
       -- --ignored --test-threads=1
     cargo test --offline --package cf-server --lib \
       handlers::api::compliance::tests::publish_bundle_with_malformed_cve_config_rolls_back \
+      -- --ignored --test-threads=1
+    cargo test --offline --package cf-server --lib \
+      handlers::api::compliance::tests::assignment_create_rejects_incomplete_active_lineage \
+      -- --ignored --test-threads=1
+    cargo test --offline --package cf-server --lib \
+      handlers::api::compliance::tests::assignment_create_failure_points_roll_back_all_rows \
+      -- --ignored --test-threads=1
+    cargo test --offline --package cf-server --lib \
+      handlers::api::compliance::tests::assignment_list_contract_and_deactivation_safety \
       -- --ignored --test-threads=1
     cargo test --offline --package cf-server --lib \
       handlers::api::compliance::tests::bundle_publication_rolls_back_when_custom_check_xccdf_is_invalid \

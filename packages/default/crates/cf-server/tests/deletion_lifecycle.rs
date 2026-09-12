@@ -180,7 +180,7 @@ async fn assigned_bundle(pool: &PgPool) -> Uuid {
             .fetch_one(pool)
             .await
             .expect("insert environment");
-    let (bundle_id, _) = draft_bundle(pool).await;
+    let (bundle_id, bundle_version_id) = draft_bundle(pool).await;
     sqlx::query(
         "INSERT INTO compliance_bundle_environments (bundle_id, environment_id) VALUES ($1, $2)",
     )
@@ -190,32 +190,46 @@ async fn assigned_bundle(pool: &PgPool) -> Uuid {
     .await
     .expect("create bundle assignment");
 
-    // The env trigger created the assignment lineage row; create the initial
-    // immutable version row to reflect the state the assignment API always
-    // produces. Without a version row, immutable_assignment_history = 0 and
-    // the eligibility check would not block deletion.
-    let assignment_version_id: Uuid = sqlx::query_scalar(
+    // Environment membership is eligibility metadata. Create the explicit
+    // lineage and immutable version in one transaction, as the assignment API
+    // does. Without a version row, immutable_assignment_history = 0 and the
+    // eligibility check would not block deletion.
+    let mut tx = pool.begin().await.expect("begin assignment transaction");
+    let assignment_id: Uuid = sqlx::query_scalar(
         r#"
-        INSERT INTO compliance_bundle_assignment_versions
-            (assignment_id, version_number, bundle_version_id, enforcement_mode, assignment_overlay_digest)
-        SELECT id, 1, bundle_version_id, enforcement_mode, 'test'
-        FROM compliance_bundle_assignments
-        WHERE bundle_id = $1
+        INSERT INTO compliance_bundle_assignments
+            (bundle_id, bundle_version_id, scope_type, environment_id,
+             enforcement_mode, assignment_overlay_digest)
+        VALUES ($1, $2, 'environment', $3, 'enforce', 'test')
         RETURNING id
         "#,
     )
     .bind(bundle_id)
-    .fetch_one(pool)
+    .bind(bundle_version_id)
+    .bind(environment_id)
+    .fetch_one(&mut *tx)
+    .await
+    .expect("insert assignment lineage");
+    let assignment_version_id: Uuid = sqlx::query_scalar(
+        r#"
+        INSERT INTO compliance_bundle_assignment_versions
+            (assignment_id, version_number, bundle_version_id, enforcement_mode, assignment_overlay_digest)
+        VALUES ($1, 1, $2, 'enforce', 'test')
+        RETURNING id
+        "#,
+    )
+    .bind(assignment_id)
+    .bind(bundle_version_id)
+    .fetch_one(&mut *tx)
     .await
     .expect("insert assignment version");
-    sqlx::query(
-        "UPDATE compliance_bundle_assignments SET current_version_id = $1 WHERE bundle_id = $2",
-    )
-    .bind(assignment_version_id)
-    .bind(bundle_id)
-    .execute(pool)
-    .await
-    .expect("set current assignment version");
+    sqlx::query("UPDATE compliance_bundle_assignments SET current_version_id = $1 WHERE id = $2")
+        .bind(assignment_version_id)
+        .bind(assignment_id)
+        .execute(&mut *tx)
+        .await
+        .expect("set current assignment version");
+    tx.commit().await.expect("commit assignment transaction");
 
     bundle_id
 }
@@ -405,18 +419,18 @@ async fn deletion_lifecycle_database_matrix() {
         BundleDeleteOutcome::NotFound
     );
 
-    // ── Versionless draft assignment: deletable with its bundle ───────────────
+    // ── Incomplete draft assignment: deletable with its bundle ────────────────
     //
-    // The legacy environment-membership trigger creates an assignment lineage
-    // without an immutable version. This compatibility row is disposable and
-    // must not prevent deletion of an otherwise-unused draft bundle.
+    // Reproduce an imported or otherwise malformed lineage that has no
+    // immutable version. Migration 0257 repairs existing rows of this shape,
+    // but deletion must remain safe if an external writer creates another one.
     let environment_id: Uuid =
         sqlx::query_scalar("INSERT INTO environments (name) VALUES ($1) RETURNING id")
             .bind(format!("delete-env-{}", Uuid::new_v4()))
             .fetch_one(&pool)
             .await
             .unwrap();
-    let (versionless_bundle_id, _) = draft_bundle(&pool).await;
+    let (versionless_bundle_id, versionless_bundle_version_id) = draft_bundle(&pool).await;
     sqlx::query(
         "INSERT INTO compliance_bundle_environments (bundle_id, environment_id) VALUES ($1, $2)",
     )
@@ -425,6 +439,31 @@ async fn deletion_lifecycle_database_matrix() {
     .execute(&pool)
     .await
     .unwrap();
+    let versionless_assignment_id: Uuid = sqlx::query_scalar(
+        r#"
+        INSERT INTO compliance_bundle_assignments
+            (bundle_id, bundle_version_id, scope_type, environment_id,
+             enforcement_mode, assignment_overlay_digest)
+        VALUES ($1, $2, 'environment', $3, 'enforce', 'pending')
+        RETURNING id
+        "#,
+    )
+    .bind(versionless_bundle_id)
+    .bind(versionless_bundle_version_id)
+    .bind(environment_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM compliance_bundle_assignments WHERE id = $1 AND active AND current_version_id IS NULL",
+        )
+        .bind(versionless_assignment_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        1
+    );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM compliance_bundle_assignment_versions av JOIN compliance_bundle_assignments a ON a.id = av.assignment_id WHERE a.bundle_id = $1",

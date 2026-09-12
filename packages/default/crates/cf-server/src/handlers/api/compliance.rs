@@ -2383,20 +2383,21 @@ async fn persist_assignment_inner(
     // Assignment uniqueness is defined by bundle lineage + target, not by a
     // mutable/draft bundle-version row. Lock the target identity while checking
     // it so concurrent creates cannot silently create ambiguous assignments.
-    let duplicate_assignment: Option<Uuid> = sqlx::query_scalar(
-        r#"SELECT a.id
+    let duplicate_assignment: Option<(Uuid, Option<Uuid>, Option<Uuid>)> = sqlx::query_as(
+        r#"SELECT a.id, a.current_version_id, av.id
            FROM compliance_bundle_assignments a
-           JOIN compliance_bundle_assignment_versions av ON av.id = a.current_version_id
-           JOIN compliance_bundle_versions bv ON bv.id = av.bundle_version_id
+           LEFT JOIN compliance_bundle_assignment_versions av
+             ON av.id = a.current_version_id
+            AND av.assignment_id = a.id
            WHERE a.active
-             AND bv.bundle_id = (
+             AND a.bundle_id = (
                SELECT bundle_id FROM compliance_bundle_versions WHERE id = $1
-           )
+            )
              AND a.scope_type = $2
              AND (($2 = 'environment' AND a.environment_id = $3)
                OR ($2 = 'system' AND a.system_id = $3))
               AND ($4::uuid IS NULL OR a.id <> $4)
-           FOR UPDATE"#,
+           FOR UPDATE OF a"#,
     )
     .bind(authoritative_bundle_version_id)
     .bind(scope_type)
@@ -2406,8 +2407,27 @@ async fn persist_assignment_inner(
     .await
     .map_err(|_| internal_error("Failed to validate assignment uniqueness"))?;
 
-    if duplicate_assignment.is_some() {
+    if let Some((lineage_id, current_version_id, authoritative_version_id)) = duplicate_assignment {
         let _ = tx.rollback().await;
+        if current_version_id.is_none() || authoritative_version_id.is_none() {
+            tracing::error!(
+                assignment_id = %lineage_id,
+                current_version_id = ?current_version_id,
+                bundle_id = %bundle_lineage_id,
+                scope_type,
+                scope_id = %payload.scope_id,
+                "active assignment lineage has no authoritative current version"
+            );
+            return Err((
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "Assignment lineage incomplete",
+                    "message": "The existing assignment lineage has no authoritative current version",
+                    "code": "ASSIGNMENT_LINEAGE_INCOMPLETE"
+                })),
+            )
+                .into_response());
+        }
         return Err((
             StatusCode::CONFLICT,
             Json(serde_json::json!({
@@ -2498,7 +2518,18 @@ async fn persist_assignment_inner(
         .await;
         if let Err(error) = inserted {
             let _ = tx.rollback().await;
-            tracing::error!("Failed to create assignment lineage: {error}");
+            if let Some(database_error) = error.as_database_error() {
+                let message: String = database_error.message().chars().take(512).collect();
+                tracing::error!(
+                    code = ?database_error.code(),
+                    message,
+                    constraint = ?database_error.constraint(),
+                    table = ?database_error.table(),
+                    "failed to create assignment lineage"
+                );
+            } else {
+                tracing::error!(error = %error, "failed to create assignment lineage");
+            }
             return Err(internal_error("Failed to create assignment"));
         }
         if failure_point == Some("after_lineage_insert") {
@@ -8991,6 +9022,42 @@ mod tests {
         tx.commit().await.expect("commit db_publish_policy_version");
     }
 
+    /// Publishes a bundle version directly for assignment fixture setup.
+    async fn db_publish_bundle_version(pool: &PgPool, version_id: Uuid) {
+        let mut tx = pool.begin().await.expect("begin bundle publication");
+        sqlx::query(
+            "UPDATE compliance_bundles
+             SET current_draft_version_id = NULL
+             WHERE current_draft_version_id = $1",
+        )
+        .bind(version_id)
+        .execute(&mut *tx)
+        .await
+        .expect("clear bundle draft pointer");
+        sqlx::query(
+            "UPDATE compliance_bundle_versions
+             SET publication_state = 'accepted', published_at = now(),
+                 trust_state = 'trusted', trusted_at = now()
+             WHERE id = $1",
+        )
+        .bind(version_id)
+        .execute(&mut *tx)
+        .await
+        .expect("publish bundle version");
+        sqlx::query(
+            "UPDATE compliance_bundles
+             SET current_published_version_id = $1
+             WHERE id = (
+                 SELECT bundle_id FROM compliance_bundle_versions WHERE id = $1
+             )",
+        )
+        .bind(version_id)
+        .execute(&mut *tx)
+        .await
+        .expect("set bundle published pointer");
+        tx.commit().await.expect("commit bundle publication");
+    }
+
     /// Create a draft bundle with the given set of already-published policy version IDs.
     /// Returns (bundle_id, bundle_version_id, current_semantic_digest).
     ///
@@ -12722,33 +12789,26 @@ If "networking.firewall.enable" is not set to "true", is commented out, or is mi
     #[ignore = "requires live database connection"]
     async fn assignment_create_failure_points_roll_back_all_rows() {
         let pool = test_pool_from_env().await;
-        let (admin_id, token) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let (admin_id, _token) = session_token_for_role(&pool, AuthRole::Admin).await;
         let (baseline_a, baseline_a_version) =
             make_draft_cve_policy(&pool, &format!("rollback-a-{}", Uuid::new_v4().simple())).await;
         let (baseline_b, baseline_b_version) =
             make_draft_cve_policy(&pool, &format!("rollback-b-{}", Uuid::new_v4().simple())).await;
         let (addition, addition_version, _) =
             make_draft_policy(&pool, &format!("rollback-add-{}", Uuid::new_v4().simple())).await;
+        db_trust_policy_version(&pool, baseline_a_version, admin_id).await;
+        db_trust_policy_version(&pool, baseline_b_version, admin_id).await;
+        db_trust_policy_version(&pool, addition_version, admin_id).await;
         db_publish_policy_version(&pool, baseline_a, baseline_a_version).await;
         db_publish_policy_version(&pool, baseline_b, baseline_b_version).await;
         db_publish_policy_version(&pool, addition, addition_version).await;
-        let (_, bundle_version_id, bundle_digest) = make_draft_bundle(
+        let (_, bundle_version_id, _) = make_draft_bundle(
             &pool,
             &format!("rollback-bundle-{}", Uuid::new_v4().simple()),
             &[baseline_a_version, baseline_b_version],
         )
         .await;
-        let base = spawn_phase1_server(pool.clone()).await;
-        let publish = reqwest::Client::new()
-            .post(format!(
-                "{base}/api/v1/compliance/bundle-versions/{bundle_version_id}/publish"
-            ))
-            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
-            .json(&serde_json::json!({"expected_semantic_digest": bundle_digest}))
-            .send()
-            .await
-            .expect("publish bundle");
-        assert_eq!(publish.status(), 200);
+        db_publish_bundle_version(&pool, bundle_version_id).await;
         let environment_id = Uuid::new_v4();
         sqlx::query("INSERT INTO environments (id, name) VALUES ($1, $2)")
             .bind(environment_id)
@@ -12813,8 +12873,7 @@ If "networking.firewall.enable" is not set to "true", is commented out, or is mi
 
         // ── Barrier-synchronized concurrent create ────────────────────────────
         // Two creates for the same target + bundle lineage. The barrier ensures
-        // both reach the critical section (after advisory locks, before the
-        // FOR UPDATE uniqueness check) simultaneously.
+        // both start the transaction and advisory-lock path simultaneously.
         let concurrent_environment_id = Uuid::new_v4();
         sqlx::query("INSERT INTO environments (id, name) VALUES ($1, $2)")
             .bind(concurrent_environment_id)
@@ -12858,6 +12917,7 @@ If "networking.firewall.enable" is not set to "true", is commented out, or is mi
         } else {
             first.unwrap_err()
         };
+        assert_eq!(conflict_resp.status(), StatusCode::CONFLICT);
         // The failure must be a typed ASSIGNMENT_ALREADY_EXISTS, not an
         // unclassified 500 or raw SQL unique-constraint violation.
         let body = axum::body::to_bytes(conflict_resp.into_body(), usize::MAX)
@@ -12908,6 +12968,118 @@ If "networking.firewall.enable" is not set to "true", is commented out, or is mi
             create_audit_count, 1,
             "exactly one create audit event after concurrent create"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn assignment_create_rejects_incomplete_active_lineage() {
+        let pool = test_pool_from_env().await;
+        let (admin_id, _token) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let (_, bundle_version_id, _) = make_draft_bundle(
+            &pool,
+            &format!("zombie-bundle-{}", Uuid::new_v4().simple()),
+            &[],
+        )
+        .await;
+        let mut publish_tx = pool.begin().await.expect("begin bundle publication");
+        sqlx::query(
+            "UPDATE compliance_bundle_versions
+             SET publication_state='accepted', published_at=now(),
+                 trust_state='trusted', trusted_at=now()
+             WHERE id=$1",
+        )
+        .bind(bundle_version_id)
+        .execute(&mut *publish_tx)
+        .await
+        .expect("publish bundle version");
+        sqlx::query(
+            "UPDATE compliance_bundles
+             SET current_published_version_id=$1, current_draft_version_id=NULL
+             WHERE id=(SELECT bundle_id FROM compliance_bundle_versions WHERE id=$1)",
+        )
+        .bind(bundle_version_id)
+        .execute(&mut *publish_tx)
+        .await
+        .expect("select published bundle version");
+        publish_tx
+            .commit()
+            .await
+            .expect("commit bundle publication");
+        let environment_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO environments (id, name) VALUES ($1, $2)")
+            .bind(environment_id)
+            .bind(format!("zombie-{}", environment_id.simple()))
+            .execute(&pool)
+            .await
+            .expect("insert zombie environment");
+        let zombie_id: Uuid = sqlx::query_scalar(
+            r#"INSERT INTO compliance_bundle_assignments
+               (bundle_id, bundle_version_id, scope_type, environment_id,
+                enforcement_mode, assignment_overlay_digest)
+               VALUES ((SELECT bundle_id FROM compliance_bundle_versions WHERE id = $1),
+                       $1, 'environment', $2, 'enforce', 'pending')
+               RETURNING id"#,
+        )
+        .bind(bundle_version_id)
+        .bind(environment_id)
+        .fetch_one(&pool)
+        .await
+        .expect("insert incomplete lineage");
+        let payload = crate::api::models::CreateAssignmentRequest {
+            bundle_version_id,
+            scope_type: "environment".to_string(),
+            scope_id: environment_id,
+            enforcement_mode: None,
+            exclusions: None,
+            additions: None,
+            value_overrides: None,
+            reason: None,
+        };
+
+        let conflict = persist_assignment(&pool, admin_id, &payload, None, None)
+            .await
+            .expect_err("incomplete lineage must conflict");
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(conflict.into_body(), usize::MAX)
+            .await
+            .expect("read incomplete-lineage response");
+        let body_json: serde_json::Value =
+            serde_json::from_slice(&body).expect("parse incomplete-lineage response");
+        assert_eq!(body_json["code"], "ASSIGNMENT_LINEAGE_INCOMPLETE");
+
+        sqlx::query("UPDATE compliance_bundle_assignments SET active=false WHERE id=$1")
+            .bind(zombie_id)
+            .execute(&pool)
+            .await
+            .expect("deactivate incomplete lineage");
+        let replacement = persist_assignment(&pool, admin_id, &payload, None, None)
+            .await
+            .expect("create healthy replacement");
+        assert_ne!(replacement.id, zombie_id);
+        assert_ne!(replacement.current_version_id, Uuid::nil());
+
+        let update_payload = crate::api::models::CreateAssignmentRequest {
+            enforcement_mode: Some("report_only".to_string()),
+            ..payload
+        };
+        let updated = persist_assignment(
+            &pool,
+            admin_id,
+            &update_payload,
+            Some(replacement.id),
+            Some(replacement.current_version_id),
+        )
+        .await
+        .expect("update healthy replacement");
+        assert_ne!(updated.current_version_id, replacement.current_version_id);
+        let version_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM compliance_bundle_assignment_versions WHERE assignment_id=$1",
+        )
+        .bind(replacement.id)
+        .fetch_one(&pool)
+        .await
+        .expect("count immutable assignment versions");
+        assert_eq!(version_count, 2);
     }
 
     // ── Environment and system combined resolution tests ───────────────────────
@@ -14318,7 +14490,7 @@ packages = ["git"]
     #[ignore = "requires live database connection"]
     async fn assignment_list_contract_and_deactivation_safety() {
         let pool = test_pool_from_env().await;
-        let (_, token) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let (admin_id, token) = session_token_for_role(&pool, AuthRole::Admin).await;
 
         // Create two separate bundle+policy fixtures.
         let (p1, pv1, _) = make_draft_policy(
@@ -14326,6 +14498,7 @@ packages = ["git"]
             &format!("list-contract-p1-{}", Uuid::new_v4().simple()),
         )
         .await;
+        db_trust_policy_version(&pool, pv1, admin_id).await;
         db_publish_policy_version(&pool, p1, pv1).await;
         let (_, bv1, _) = make_draft_bundle(
             &pool,
@@ -14338,6 +14511,7 @@ packages = ["git"]
             &format!("list-contract-p2-{}", Uuid::new_v4().simple()),
         )
         .await;
+        db_trust_policy_version(&pool, pv2, admin_id).await;
         db_publish_policy_version(&pool, p2, pv2).await;
         let (_, bv2, _) = make_draft_bundle(
             &pool,
@@ -14372,12 +14546,17 @@ packages = ["git"]
         }
 
         let base = spawn_assignment_test_server(pool.clone()).await;
+        let csrf = format!("assignment-list-csrf-{}", Uuid::new_v4().simple());
+        let cookie = format!("{SESSION_COOKIE_NAME}={token}; {CSRF_COOKIE_NAME}={csrf}");
 
         // Create a unique system UUID for this test.
         let system_id = Uuid::new_v4();
         sqlx::query(
-            "INSERT INTO systems (id, hostname, environment_id, is_active, flake_id, deployment_policy)
-             VALUES ($1, $2, NULL, TRUE, NULL, 'manual')",
+            "INSERT INTO systems
+                 (id, hostname, environment_id, is_active, flake_id,
+                  deployment_policy, public_key, derivation)
+             VALUES ($1, $2, NULL, TRUE, NULL, 'manual', 'test-key',
+                     '/nix/store/test')",
         )
         .bind(system_id)
         .bind(format!("list-contract-sys-{}", Uuid::new_v4().simple()))
@@ -14394,7 +14573,8 @@ packages = ["git"]
         });
         let resp1 = reqwest::Client::new()
             .post(format!("{base}/api/v1/compliance/assignments"))
-            .header("cookie", format!("cf_session={token}"))
+            .header("cookie", &cookie)
+            .header(CSRF_HEADER_NAME.as_str(), &csrf)
             .json(&body1)
             .send()
             .await
@@ -14415,7 +14595,8 @@ packages = ["git"]
         });
         let resp2 = reqwest::Client::new()
             .post(format!("{base}/api/v1/compliance/assignments"))
-            .header("cookie", format!("cf_session={token}"))
+            .header("cookie", &cookie)
+            .header(CSRF_HEADER_NAME.as_str(), &csrf)
             .json(&body2)
             .send()
             .await
@@ -14429,7 +14610,7 @@ packages = ["git"]
             .get(format!(
                 "{base}/api/v1/systems/{system_id}/compliance-assignments"
             ))
-            .header("cookie", format!("cf_session={token}"))
+            .header("cookie", &cookie)
             .send()
             .await
             .expect("list assignments");
@@ -14456,7 +14637,8 @@ packages = ["git"]
         // Deactivate assignment 1.
         let deact_resp = reqwest::Client::new()
             .delete(format!("{base}/api/v1/compliance/assignments/{a1_id}"))
-            .header("cookie", format!("cf_session={token}"))
+            .header("cookie", &cookie)
+            .header(CSRF_HEADER_NAME.as_str(), &csrf)
             .query(&[("expected_version_id", a1_version_id.to_string())])
             .send()
             .await
@@ -14472,7 +14654,7 @@ packages = ["git"]
             .get(format!(
                 "{base}/api/v1/systems/{system_id}/compliance-assignments"
             ))
-            .header("cookie", format!("cf_session={token}"))
+            .header("cookie", &cookie)
             .send()
             .await
             .expect("list after deactivation");
@@ -14498,7 +14680,7 @@ packages = ["git"]
         // GET the deactivated assignment — must return 410, not 500.
         let deact_get = reqwest::Client::new()
             .get(format!("{base}/api/v1/compliance/assignments/{a1_id}"))
-            .header("cookie", format!("cf_session={token}"))
+            .header("cookie", &cookie)
             .send()
             .await
             .expect("get deactivated assignment");

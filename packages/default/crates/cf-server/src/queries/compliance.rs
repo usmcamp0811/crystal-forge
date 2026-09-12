@@ -1507,8 +1507,8 @@ pub async fn create_bundle(
     write_bundle_version_digest(&mut tx, bundle_id, &canonical).await?;
     refresh_bundle_requirement_digest(&mut tx, draft_version_id).await?;
 
-    // Write assignment overlay digests for all new environment assignments
-    // (created by trigger; still have assignment_overlay_digest = 'pending').
+    // Refresh any explicit assignment overlays that already target this draft.
+    // Environment membership does not create authoritative assignments.
     let assignment_ids: Vec<Uuid> = sqlx::query_scalar(
         r#"
         SELECT id FROM compliance_bundle_assignments
@@ -1896,8 +1896,7 @@ pub async fn update_bundle(
     write_bundle_version_digest(&mut tx, bundle_id, &canonical).await?;
     refresh_bundle_requirement_digest(&mut tx, draft_version_id).await?;
 
-    // Write assignment effective-set digests for ALL assignments on this draft
-    // version (both pre-existing and newly created by the trigger). (P1 #1)
+    // Write effective-set digests for all explicit assignments on this draft.
     let assignment_ids: Vec<Uuid> = sqlx::query_scalar(
         r#"
         SELECT id FROM compliance_bundle_assignments
