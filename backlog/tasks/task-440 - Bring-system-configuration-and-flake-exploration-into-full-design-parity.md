@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-12 02:04'
+updated_date: '2026-09-12 02:19'
 labels:
   - design-parity
   - web-ui
@@ -52,6 +52,8 @@ references:
   - git commit ad13f4b7
   - git commit dbb04121126ea1b78b2678f7f548165bde8a5daf
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2842357571'
+  - git commit e6f0ceb57342941214a28f748aa3e42e7b5efdf0
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2842484224'
 documentation:
   - docs/design/CrystalForge/app.jsx
   - docs/design/CrystalForge/components/SystemDetail.jsx
@@ -396,6 +398,12 @@ author: OpenCode
 created: 2026-09-12 02:04
 ---
 2026-09-12 approved isolated-store follow-up stopped at the mandated sandbox restriction. Production continues to pass no store override; only `configuration_discovery_does_not_create_or_modify_flake_lock` creates a TempDir and supplies it as `--store <temporary-root>` before `eval`. Both focused tests pass in `nix develop`. The required `nix build .#packages.x86_64-linux.server --no-link -L` now initializes the disposable chroot store but fails after 1467 passes and 519 ignores because Nix attempts to create `/homeless-shelter/.cache/nix` while fetching the local git flake: `Permission denied`. Per the explicit instruction to stop if the temporary chroot store exposed another sandbox-specific restriction, no additional environment changes, commit, or push were made. The branch remains at `dbb04121126ea1b78b2678f7f548165bde8a5daf` with two intended files modified.
+---
+
+author: OpenCode
+created: 2026-09-12 02:19
+---
+2026-09-12 hermetic Config discovery correction completed as `e6f0ceb57342941214a28f748aa3e42e7b5efdf0` (`TASK-440: Harden config discovery regression`) with sole parent `dbb04121126ea1b78b2678f7f548165bde8a5daf`. Production now explicitly enables `nix-command flakes` while retaining `--no-write-lock-file`, BuildConfig, credential environment, bounded timeout, and bounded output; production receives no store or HOME override. The real-Nix lockfile regression alone uses a disposable chroot store and command-local writable HOME/XDG cache, then executes through the same bounded runner/parser. Focused command-construction and lockfile tests each passed 1/1. Required `nix build .#packages.x86_64-linux.server --no-link -L` passed with 1468 tests passed and 519 ignored in cf-server checkPhase. Targeted cf-server rustfmt and `git diff --check` passed. Before push, fetch confirmed the remote branch and commit parent both equaled required SHA `dbb04121126ea1b78b2678f7f548165bde8a5daf`; normal non-force push succeeded. Local, tracking, and remote heads match and the worktree is clean. Exact-head pipeline 2842484224 is running for MR !323. No broad Web UI, full flake check, merge, or deployment occurred.
 ---
 <!-- COMMENTS:END -->
 
