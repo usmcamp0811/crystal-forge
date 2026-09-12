@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-12 00:28'
+updated_date: '2026-09-12 00:29'
 labels:
   - design-parity
   - web-ui
@@ -50,6 +50,8 @@ references:
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2840805787'
   - git commit fa204eb8
   - git commit ad13f4b7
+  - git commit dbb04121126ea1b78b2678f7f548165bde8a5daf
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2842357571'
 documentation:
   - docs/design/CrystalForge/app.jsx
   - docs/design/CrystalForge/components/SystemDetail.jsx
@@ -272,6 +274,8 @@ Commit B was created locally as df58dbd6b408cfa1d718dd766690f3834201f033 with ex
 2026-09-11 focused backend remediation implemented and locally verified in `/home/mcamp/code/crystal-forge/TASK-440-system-config-flake-parity` from HEAD `ad13f4b7`. Added additive migration 0256 and server-owned `child_offset` paging identity across scoped DTOs, validation, cache/request/observation/FK identities, execution, persistence, and owner-only observer selection. Added read-only adaptation from the exact selected available schema/integrity V2 artifact after scoped cache lookup and before queue insertion, fenced by exact commit, configuration, completed carrier, recomputed target key, transaction selector locks, and a per-identity advisory lock. Complete V2 serves deterministic root/prefix pages; partial V2 refuses trees; complete or partial V2 serves truthful exact option/provenance payloads, including failed safe values; ConfiguredIndex and all mismatches retain the queue path. Adapted evidence persists atomically as immutable content plus a normal succeeded request with attempts=0 and does not enqueue Config Inspector work or modify selectors. Verification passed: focused pure tests (12 passed, 3 ignored), certified V2 isolated SQLx test (1 passed), existing scoped request SQLx test (1 passed), cf-server offline library check, cf-server rustdoc build, package rustfmt check, and `git diff --check`. Rustdoc emitted existing unrelated warnings. Disposable PostgreSQL on port 55449 was stopped and no longer responds. No Web UI, browser, VM, broad Nix/flake check, commit, push, merge, or deployment was performed. The five intended files remain uncommitted; TASK-440 remains In Progress and AC #24/#27 remain unchanged.
 
 2026-09-12 focused Config Explorer review remediation is implemented but not yet committed or pushed. Exact-revision configuration discovery now uses `nix eval --no-write-lock-file` while preserving private credential command setup. Additive migration 0256 and the API/cache/worker/UI contract add server-validated `child_offset` identity and 512-item deterministic root/prefix continuation. Exact matching certified V2 artifacts can populate observational scoped cache entries with attempts=0: complete V2 supports tree and exact reads; partial V2 supports only individually sufficient exact option/provenance; configured_index still queues. Existing migration-0255 tree payloads are projected as offset zero without mutating content-addressed storage. Poisoned nested option values retain metadata and return bounded `value_unavailable`. UI continuation rejects changed identity/totals, overlap, duplicate paths or keys, and reordering; localized loading/error state is preserved. Architecture and Nix invocation documentation were updated. Focused verification passed: 14 Config observation tests with 3 DB-only ignores; both ignored PostgreSQL V2/scoped lifecycle tests individually against isolated PostgreSQL 17; 2 exact-revision discovery tests; SQLX_OFFLINE cf-server lib check; focused Web UI continuation test; WASM cargo check; targeted Rust formatting; Node syntax; git diff check; and the focused real-Nix config-observer check including services continuation and nested poison. Initial config-observer attempts were blocked by a slow configured Attic cache and then exposed an incorrect fixture expectation (`attrs` was expected as `attribute set`); retry with cache.nixos.org and local building passed after correcting only the assertion. Representative direct-child measurements remain services=1469, programs=238, hardware=94, networking=69, system=46. Independent falsification review found and then confirmed fixes for legacy 0255 payload reuse, canonical child-key/order validation, duplicate continuation rejection, bounded-offset wording, and production-shaped browser mocks; final review found no concrete defect. No broad Web UI, VM, or full flake check was run. AC #24 and #27 remain unchecked; no merge or deployment occurred.
+
+2026-09-12 remediation committed and pushed as `dbb04121126ea1b78b2678f7f548165bde8a5daf` with exact title `TASK-440: Close Config Explorer review gaps`. Before push, `git fetch origin` confirmed both the remote branch and the new commit's sole parent were the required `ad13f4b73da6bfad286332ea4b460ece22a43017`; a normal non-force push succeeded. Local HEAD, remote-tracking HEAD, and `git ls-remote` all match the exact new SHA, and the implementation worktree is clean. Exact-head GitLab pipeline 2842357571 is running for MR !323. TASK-440 remains In Progress; AC #24 and #27 remain unchecked. No merge or deployment occurred.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
