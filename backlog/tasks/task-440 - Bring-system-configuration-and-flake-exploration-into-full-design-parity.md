@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-12 20:30'
+updated_date: '2026-09-12 20:35'
 labels:
   - design-parity
   - web-ui
@@ -56,6 +56,9 @@ references:
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2842484224'
   - git commit c34670ad744f30589fefc060111aff853fbcd88f
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2842732664'
+  - git commit 37d1ed38ce39a86635c9ae7280315d5db27d95de
+  - git commit 3708ef3a2f9480f51fe676314d56d0345e731261
+  - git commit fa4f16826fb9b4481b27b36598eb0a4083a4260a
 documentation:
   - docs/design/CrystalForge/app.jsx
   - docs/design/CrystalForge/components/SystemDetail.jsx
@@ -324,6 +327,8 @@ Commit B was created locally as df58dbd6b408cfa1d718dd766690f3834201f033 with ex
 2026-09-12 result-key collision correction final review: inspected the shared assignment-slice allocator, parser and bulk/standalone generator call sites, focused regressions, and operator documentation. No semantic gap was found. Verified `nix develop -c cargo fmt --manifest-path packages/default/Cargo.toml --package cf-server -- --check`; the pure collision regression (1 passed); the ignored real-Nix collision regression (1 passed); `nix develop -c env SQLX_OFFLINE=true cargo check --offline --manifest-path packages/default/Cargo.toml -p cf-server --lib`; and `git diff --check`. Existing compiler warnings and one ignored Nix eval-cache busy message remain non-blocking. The first test reruns used an unqualified name with `--exact` and selected zero tests; corrected reruns without `--exact` executed and passed the intended tests. Slice is ready for the requested next review step. No commit or push was performed.
 
 2026-09-12 final blocking-review correction implemented without commit or push. Restored enforce `policy_result_key` to `policy_<first 8 UUID characters>` and its prior documentation semantics. Report-only custom bases now use the independent full simple UUID and still use the assignment-slice allocator for deterministic collision suffixes against reserved and emitted keys. Updated synthetic multi-policy fixtures to use distinct legacy prefixes and added explicit legacy-prefix/full-report-only identity assertions. Policy matrix now classifies `passed=true, blocking=true` as infrastructure error while accepting passing evidence with false or absent blocking. Verification passed: touched-file rustfmt and rustfmt check; 58 focused deployment-policy pure tests; 17 focused commit-handler pure tests; real-Nix `enforce_custom_field_matching_report_only_base_is_collision_free_in_real_nix`, `report_only_legacy_custom_errors_are_contained_by_real_nix`, and `generated_policy_fields_evaluate_without_undefined_variables`; `SQLX_OFFLINE=true cargo check --offline -p cf-server --lib`; and `git diff --check`. The generated-fields real-Nix test initially exposed one stale fixture-key assertion after UUID fixture correction; the assertion was corrected and its rerun passed. Existing repository warnings remain. No broad checks ran.
+
+2026-09-12 final focused sequence completed and pushed. `37d1ed38` matches the lazy Config Explorer design and passed focused Config Rust tests, wasm32 Web UI check, runner unit check, Node/shell syntax checks, touched rustfmt, and diff checks. Browser 12l remained deferred because `run-ui-dev` was inactive; 12m remained deferred because its repository path boots the prohibited heavyweight VM. `3708ef3a` repairs the compliance bundle Systems actor lookup and assignment-lineage joins, removes the duplicate inner assignment presentation, and passed a focused isolated-PostgreSQL regression, offline server check, wasm32 check, rustfmt, and diff checks. `fa4f1682` evaluates native report-only Nix policies while preserving intrinsic strictness and nonblocking evidence, excludes non-native/non-Nix phases, contains report-only custom expression errors, preserves evaluator key compatibility, and adds exact enforce-only composite/POA&M authorization with safe legacy evidence compatibility. Focused pure, real-Nix, isolated-PostgreSQL, offline server, formatting, and diff checks passed. Local HEAD, tracking ref, and remote branch all equal `fa4f16826fb9b4481b27b36598eb0a4083a4260a`; the worktree is clean. TASK-440 remains In Progress because AC #24 and #27 are still unproven. No merge or deployment was performed.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
