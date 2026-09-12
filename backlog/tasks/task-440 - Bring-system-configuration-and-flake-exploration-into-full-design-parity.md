@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-12 18:56'
+updated_date: '2026-09-12 19:01'
 labels:
   - design-parity
   - web-ui
@@ -198,6 +198,8 @@ Fix the deployment-smoke zombie compliance assignment defect from exact clean SH
 2026-09-12 focused report-only Nix policy evaluation change from clean dedicated worktree HEAD 3708ef3a: modify only cf-server runtime policy loading/result models and docs/operator/compliance-interchange.md. Add a documented AssignedPolicy enforcement-mode model that defaults legacy/test construction to enforce; map authoritative EffectivePolicy.effective_mode in the production per-configuration loader; batch-read deployment_policy_versions implementation_state/execution_phase and admit only native nix-evaluation or multi-phase records whose parsed policy remains Nix-evaluated, while retaining the unconditional cfAgentEnabled gate. Include mode in evaluation_policy_digest. Preserve intrinsic DeploymentPolicy/PolicyRule strict values and failed evidence, but make report-only assigned outcomes nonblocking across require_packages, custom single/multi-rule, and composite parsing; persist enforcement_mode and effective outcome blocking in policy_results JSON. Add focused pure tests for report-only failed evidence/gating, digest mode sensitivity, and execution eligibility. Run rustfmt on touched Rust files, focused pure tests, SQLX_OFFLINE cf-server lib check, and git diff --check only. Do not modify migrations, Config Explorer, or Web UI; do not commit or push.
 
 2026-09-12 blocking-defect correction for the uncommitted report-only evaluator slice: preserve enforce-mode legacy custom-check output compatibility, but encode report-only single/multi custom expressions as tryEval-contained tagged results and parse thrown/non-boolean values into explicit nonblocking failed/error evidence in bulk and standalone paths. Make multi-rule top-level strict fallback local to the current policy. Derive a canonical enforce-only composite authorization digest from exact enforced composite version/config/mode semantics and use it in the existing assessment digest field while retaining the resolver's complete digest elsewhere. Add focused pure, real-Nix, and practical PostgreSQL regressions. Run targeted rustfmt, focused tests, SQLX_OFFLINE cf-server lib check, and git diff --check only; no migration, UI, Config Explorer, broad checks, commit, or push.
+
+2026-09-12 upgrade-compatibility correction for the uncommitted report-only evaluator diff: keep canonical enforce-only digests for new assessment writes. Add a shared assessment-selection helper that accepts canonical rows directly and accepts pre-change complete-resolver-digest rows only when their persisted policy-version/config-digest set exactly equals the current enforced composite contexts and all required rule rows are structurally complete and valid. Reuse the same compatibility classification in deployment authorization, current POA&M assessment validation, and POA&M verification selection. Add pure digest/set classification tests plus PostgreSQL regressions for unchanged legacy evidence, report-only/non-composite-only changes, and enforced composite version/config changes. Update operator documentation for the bounded legacy path. Run targeted rustfmt/tests, SQLX_OFFLINE cf-server lib check, and git diff --check only; no migration, UI, commit, or push.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
