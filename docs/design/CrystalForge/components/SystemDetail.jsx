@@ -1504,6 +1504,7 @@ function CvesTab({ sys }) {
 
   const [expanded, setExpanded] = React.useState(null);
   React.useEffect(() => { if (groups.length && expanded == null) setExpanded(groups[0].pkg); }, [groups]);
+  const [poamCve, setPoamCve] = React.useState(null);
 
   return (
     <section className="card" style={{ overflow: "hidden" }}>
@@ -1566,6 +1567,7 @@ function CvesTab({ sys }) {
                           </td>
                           <td>
                             <div className="row-actions">
+                              {window.CvePoamCreateModal && <button className="btn-icon focus-ring" title="Create POA&M" onClick={() => setPoamCve(c)}><Icon name="plus" size={14} /></button>}
                               <button className="btn-icon focus-ring" title="Open advisory" onClick={() => window.open(`https://nvd.nist.gov/vuln/detail/${c.id}`, '_blank')}><Icon name="link" size={14} /></button>
                             </div>
                           </td>
@@ -1579,6 +1581,7 @@ function CvesTab({ sys }) {
           })}
         </div>
       )}
+      {poamCve && window.CvePoamCreateModal && <window.CvePoamCreateModal sys={sys} cve={poamCve} onClose={() => setPoamCve(null)} onCreated={(p) => { setPoamCve(null); window.openPoamDetail?.(p.id); }}/>}
     </section>
   );
 }

@@ -89,7 +89,18 @@ function FindingPoamBar({ sysId, policyId, bundleId, evalStatus }) {
 }
 
 /* ── Create ───────────────────────────────────────────────────────────────── */
-const POAM_OWNERS = ["Platform Team","Security Team","Endpoint Team","Network Team","Database Team"];
+const POAM_OWNER_PEOPLE = ADMIN_USERS.filter(u => u.status === "active").map(u => u.name);
+const POAM_OWNER_GROUPS = OIDC_MAPPINGS.map(m => m.group);
+const POAM_OWNERS = [...POAM_OWNER_PEOPLE, ...POAM_OWNER_GROUPS];
+function PoamOwnerOptions({ extra }) {
+  return (
+    <React.Fragment>
+      {extra && !POAM_OWNERS.includes(extra) && <option value={extra}>{extra}</option>}
+      <optgroup label="People">{POAM_OWNER_PEOPLE.map(o => <option key={o} value={o}>{o}</option>)}</optgroup>
+      <optgroup label="Groups">{POAM_OWNER_GROUPS.map(o => <option key={o} value={o}>{o}</option>)}</optgroup>
+    </React.Fragment>
+  );
+}
 const POAM_STD_MILESTONES = [
   { text:"Update NixOS module", offset:14 },
   { text:"Deploy to staging", offset:28 },
@@ -112,7 +123,7 @@ function PoamCreateModal({ finding, onClose, onCreated }) {
 
   const [form, setForm] = React.useState({
     title: `${policy?.name || finding.policyId} remediation on ${sys?.hostname || finding.sysId}`,
-    owner: POAM_OWNERS[0],
+    owner: POAM_OWNER_PEOPLE[0],
     due: poamDatePlus(56),
     severity: policy?.severity || ev?.severity || "medium",
     status: "open",
@@ -169,17 +180,17 @@ function PoamCreateModal({ finding, onClose, onCreated }) {
           </div>
 
           <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:12 }}>
-            <div className="field">
+            <div className="field" style={{ marginTop:0 }}>
               <label>Owner</label>
               <select className="input focus-ring" value={form.owner} onChange={e=>set("owner", e.target.value)}>
-                {POAM_OWNERS.map(o => <option key={o} value={o}>{o}</option>)}
+                <PoamOwnerOptions/>
               </select>
             </div>
-            <div className="field">
+            <div className="field" style={{ marginTop:0 }}>
               <label>Target completion</label>
               <input type="date" className="input focus-ring" value={form.due} onChange={e=>set("due", e.target.value)}/>
             </div>
-            <div className="field">
+            <div className="field" style={{ marginTop:0 }}>
               <label>Risk</label>
               <select className="input focus-ring" value={form.severity} onChange={e=>set("severity", e.target.value)}>
                 <option value="high">CAT I — High</option>
@@ -204,6 +215,114 @@ function PoamCreateModal({ finding, onClose, onCreated }) {
             <Icon name="info" size={13}/>
             <div style={{ fontSize:11.5 }}>This records a plan to fix the deficiency. To formally accept the risk instead, use the waiver flow on the control — the two are not interchangeable.</div>
           </div>
+        </div>
+        <div className="modal-foot">
+          <button className="btn btn-ghost focus-ring" onClick={onClose}>Cancel</button>
+          <button className="btn btn-primary focus-ring" disabled={!form.title.trim()} onClick={submit}>
+            <Icon name="plus" size={13}/> Create POA&M
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Same modal, keyed off a CVE/package rather than a compliance finding — no policy/bundle context,
+// just enough to give the remediation a home before it gets tied to anything.
+function CvePoamCreateModal({ sys, cve, onClose, onCreated }) {
+  const [form, setForm] = React.useState({
+    title: `${cve.id} — patch ${cve.pkg} on ${sys.hostname}`,
+    owner: POAM_OWNER_PEOPLE[0],
+    due: poamDatePlus(cve.level === "critical" ? 14 : cve.level === "high" ? 30 : 56),
+    severity: cve.level === "critical" || cve.level === "high" ? "high" : cve.level === "medium" ? "medium" : "low",
+    status: "open",
+    plan: "",
+    withMilestones: true,
+  });
+  const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+
+  const submit = () => {
+    if (!form.title.trim()) return;
+    const item = poamCreate({
+      title: form.title.trim(),
+      owner: form.owner,
+      due: form.due,
+      severity: form.severity,
+      status: form.status,
+      plan: form.plan,
+      cveRefs: [{ id: cve.id, pkg: cve.pkg, sysId: sys.id, hostname: sys.hostname }],
+      milestones: form.withMilestones ? [
+        { text: `Identify patched ${cve.pkg} version`, due: poamDatePlus(3), done:false },
+        { text: "Deploy to staging", due: poamDatePlus(10), done:false },
+        { text: `Deploy to ${sys.hostname}`, due: poamDatePlus(18), done:false },
+        { text: "Verify scan clears the CVE", due: form.due, done:false },
+      ] : [],
+    });
+    onCreated?.(item);
+  };
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal" onClick={e=>e.stopPropagation()} style={{ width:"min(680px, 94vw)", maxHeight:"92vh" }}>
+        <div className="modal-head" style={{ display:"flex", alignItems:"flex-start", justifyContent:"space-between", gap:12 }}>
+          <div>
+            <div style={{ fontSize:15, fontWeight:700 }}>Create POA&M</div>
+            <div style={{ fontSize:11.5, color:"var(--cf-text-muted)", marginTop:2 }}>A remediation plan for a known vulnerability. It stays open until a scan clears the CVE.</div>
+          </div>
+          <button className="btn-icon focus-ring" onClick={onClose}><Icon name="x" size={16}/></button>
+        </div>
+        <div className="modal-body" style={{ display:"flex", flexDirection:"column", gap:14 }}>
+          <div className="poam-ctx">
+            <div className="poam-ctx-head">
+              <Icon name="shield" size={12}/> Vulnerability context
+              <span style={{ marginLeft:"auto", fontSize:10.5, color:"var(--cf-text-muted)" }}>carried over automatically</span>
+            </div>
+            <div className="poam-ctx-grid">
+              <div><span>System</span><b className="mono">{sys.hostname}</b></div>
+              <div><span>CVE</span><b className="mono">{cve.id}</b></div>
+              <div><span>Package</span><b className="mono">{cve.pkg}@{cve.version}</b></div>
+              <div><span>CVSS</span><b>{cve.score}</b></div>
+              <div><span>Severity</span><b style={{ color:"#f87171", textTransform:"uppercase" }}>{cve.level}</b></div>
+              <div><span>Fix</span><b>{cve.fix === "available" ? "patch available" : "patch pending"}</b></div>
+            </div>
+          </div>
+
+          <div className="field">
+            <label>Title</label>
+            <input className="input focus-ring" value={form.title} onChange={e=>set("title", e.target.value)}/>
+          </div>
+
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:12 }}>
+            <div className="field" style={{ marginTop:0 }}>
+              <label>Owner</label>
+              <select className="input focus-ring" value={form.owner} onChange={e=>set("owner", e.target.value)}>
+                <PoamOwnerOptions/>
+              </select>
+            </div>
+            <div className="field" style={{ marginTop:0 }}>
+              <label>Target completion</label>
+              <input type="date" className="input focus-ring" value={form.due} onChange={e=>set("due", e.target.value)}/>
+            </div>
+            <div className="field" style={{ marginTop:0 }}>
+              <label>Risk</label>
+              <select className="input focus-ring" value={form.severity} onChange={e=>set("severity", e.target.value)}>
+                <option value="high">CAT I — High</option>
+                <option value="medium">CAT II — Medium</option>
+                <option value="low">CAT III — Low</option>
+              </select>
+            </div>
+          </div>
+
+          <div className="field">
+            <label>Remediation plan <span style={{ color:"var(--cf-text-muted)", fontWeight:400 }}>· optional now, expected before review</span></label>
+            <textarea className="input focus-ring" rows={3} value={form.plan} onChange={e=>set("plan", e.target.value)}
+              placeholder="What will be changed, where, and how it gets verified" style={{ resize:"vertical" }}/>
+          </div>
+
+          <label className="poam-check">
+            <input type="checkbox" checked={form.withMilestones} onChange={e=>set("withMilestones", e.target.checked)}/>
+            <span>Start from standard patch milestones <span style={{ color:"var(--cf-text-muted)" }}>— identify version, staging, production, verify scan. Editable after creation.</span></span>
+          </label>
         </div>
         <div className="modal-foot">
           <button className="btn btn-ghost focus-ring" onClick={onClose}>Cancel</button>
@@ -320,7 +439,7 @@ function PoamDetailTray({ poam, onClose, onOpenFinding }) {
           <div className="poam-meta">
             <div><span>Owner</span>
               <select className="poam-inline-input mono" value={poam.owner} onChange={e=>poamSetField(poam.id, "owner", e.target.value)}>
-                {[...new Set([poam.owner, ...POAM_OWNERS])].map(o => <option key={o} value={o}>{o}</option>)}
+                <PoamOwnerOptions extra={poam.owner}/>
               </select>
             </div>
             <div><span>Target completion</span>
@@ -352,6 +471,7 @@ function PoamDetailTray({ poam, onClose, onOpenFinding }) {
             <div className="seg" style={{ width:"fit-content", marginBottom:10 }}>
               {POAM_STATUS_ORDER.filter(s => s !== "completed").map(s => (
                 <button key={s} className={poam.status === s ? "active" : ""} onClick={()=>poamSetStatus(poam.id, s)}
+                  title={POAM_STATUS[s].blurb}
                   style={poam.status === s ? { color:POAM_STATUS[s].color } : undefined}>{POAM_STATUS[s].label}</button>
               ))}
             </div>
@@ -688,6 +808,6 @@ function PoamDetailHost({ onOpenFinding }) {
 
 Object.assign(window, {
   usePoamStore, openPoamDetail, PoamStatusChip, PoamSevChip, FindingPoamBar,
-  PoamCreateModal, PoamLinkModal, PoamDetailTray, PoamFindingPicker, PoamCountStrip,
+  PoamCreateModal, CvePoamCreateModal, PoamLinkModal, PoamDetailTray, PoamFindingPicker, PoamCountStrip,
   PoamTable, SystemPoamSection, BundlePoamRollup, BundlePoamBody, PoamDetailHost,
 });
