@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-12 19:28'
+updated_date: '2026-09-12 19:34'
 labels:
   - design-parity
   - web-ui
@@ -200,6 +200,8 @@ Fix the deployment-smoke zombie compliance assignment defect from exact clean SH
 2026-09-12 blocking-defect correction for the uncommitted report-only evaluator slice: preserve enforce-mode legacy custom-check output compatibility, but encode report-only single/multi custom expressions as tryEval-contained tagged results and parse thrown/non-boolean values into explicit nonblocking failed/error evidence in bulk and standalone paths. Make multi-rule top-level strict fallback local to the current policy. Derive a canonical enforce-only composite authorization digest from exact enforced composite version/config/mode semantics and use it in the existing assessment digest field while retaining the resolver's complete digest elsewhere. Add focused pure, real-Nix, and practical PostgreSQL regressions. Run targeted rustfmt, focused tests, SQLX_OFFLINE cf-server lib check, and git diff --check only; no migration, UI, Config Explorer, broad checks, commit, or push.
 
 2026-09-12 upgrade-compatibility correction for the uncommitted report-only evaluator diff: keep canonical enforce-only digests for new assessment writes. Add a shared assessment-selection helper that accepts canonical rows directly and accepts pre-change complete-resolver-digest rows only when their persisted policy-version/config-digest set exactly equals the current enforced composite contexts and all required rule rows are structurally complete and valid. Reuse the same compatibility classification in deployment authorization, current POA&M assessment validation, and POA&M verification selection. Add pure digest/set classification tests plus PostgreSQL regressions for unchanged legacy evidence, report-only/non-composite-only changes, and enforced composite version/config changes. Update operator documentation for the bounded legacy path. Run targeted rustfmt/tests, SQLX_OFFLINE cf-server lib check, and git diff --check only; no migration, UI, commit, or push.
+
+2026-09-12 final review corrections for the uncommitted report-only/composite compatibility slice: remove current-version filtering from exact-target composite assessment loads so structural group validation observes and rejects removed or newly report-only policies; add deployment and POA&M regressions for enforce removal and enforce-to-report-only transitions. Keep enforce custom-check field names unchanged, but generate and parse UUID-scoped report-only result keys with deterministic rule ordinals in bulk and standalone evaluators; add duplicate-field pure and real-Nix persistence regressions. Split executable-policy parsing by effective mode so malformed enforce records remain deterministic failures while malformed report-only records are skipped with structured identifiers and a digest placeholder that preserves shared-configuration conflict detection; add focused helper tests and operator documentation. Run touched rustfmt, focused pure/real-Nix/PostgreSQL tests, SQLX_OFFLINE cf-server lib check, and git diff --check only. Do not add migrations or change UI/Config Explorer; do not commit or push.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
