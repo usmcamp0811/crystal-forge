@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-12 02:19'
+updated_date: '2026-09-12 02:56'
 labels:
   - design-parity
   - web-ui
@@ -184,6 +184,8 @@ The `modifiedFiles` metadata is anticipated and non-exhaustive. The implementati
 2026-09-11 focused backend remediation from clean dedicated worktree HEAD ad13f4b7: add server-validated child_offset identity for root/prefix pages with server-owned size 512 through additive migration 0256, scoped request/observation DTOs, persistence keys/FKs, owner-only observer selection, and payload validation. In create_or_reuse, after a scoped hit and before queue insertion, read only the exact current selected available certified schema/integrity V2 artifact matching commit, configuration, completed carrier, and recomputed inspection target key. Complete V2 may derive deterministic immediate-child root/prefix pages and must reject option/prefix collisions; partial V2 cannot satisfy tree requests. Complete or partial V2 may satisfy exact option/provenance only when persisted V2 metadata/provenance makes the scoped payload truthful; SafeOptionValue failed values remain explicit. Persist adapted content, immutable observation, and a normal succeeded attempts=0 request atomically without queueing or changing selectors, policies, Config Inspector jobs, or evaluator work. ConfiguredIndex always falls through to the existing queue path. Add focused pure adapter/validation tests and ignored SQLx lifecycle/isolation regressions. Run targeted cf-server tests, focused ignored SQLx tests if an isolated PostgreSQL database is practical, cargo fmt for affected Rust, and git diff --check only; do not run broad Nix, Web UI, browser, VM, or flake checks.
 
 Fix the hermetic cf-server package regression by adding the required `nix-command flakes` global feature option to the existing read-only configuration discovery argv. Update the exact argv assertion and Nix CLI invocation documentation. Run the two focused tests, `cargo fmt --check`, `git diff --check`, and the required `.#packages.x86_64-linux.server` build. Create one commit and push only after confirming the remote branch remains at `dbb04121126ea1b78b2678f7f548165bde8a5daf`.
+
+Fix the deployment-smoke zombie compliance assignment defect from exact clean SHA `32654ebd419fbde207ddc010a401249e16a92ea7`. First prove the current legacy trigger and Rust versioned-assignment authority path. Add migration 0257 to stop zombie production and deterministically repair only incomplete active lineages according to confirmed legacy semantics. Harden create with a typed incomplete-lineage conflict and safe structured PostgreSQL diagnostics. Add focused real-PostgreSQL regressions for legacy inserts, healthy create, zombie conflict, concurrency, healthy updates, and resolver/list visibility. Run focused assignment/server tests, offline cf-server check, rustfmt, and diff checks only. Create one commit and push normally only if the remote still descends from the required starting SHA.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -404,6 +406,12 @@ author: OpenCode
 created: 2026-09-12 02:19
 ---
 2026-09-12 hermetic Config discovery correction completed as `e6f0ceb57342941214a28f748aa3e42e7b5efdf0` (`TASK-440: Harden config discovery regression`) with sole parent `dbb04121126ea1b78b2678f7f548165bde8a5daf`. Production now explicitly enables `nix-command flakes` while retaining `--no-write-lock-file`, BuildConfig, credential environment, bounded timeout, and bounded output; production receives no store or HOME override. The real-Nix lockfile regression alone uses a disposable chroot store and command-local writable HOME/XDG cache, then executes through the same bounded runner/parser. Focused command-construction and lockfile tests each passed 1/1. Required `nix build .#packages.x86_64-linux.server --no-link -L` passed with 1468 tests passed and 519 ignored in cf-server checkPhase. Targeted cf-server rustfmt and `git diff --check` passed. Before push, fetch confirmed the remote branch and commit parent both equaled required SHA `dbb04121126ea1b78b2678f7f548165bde8a5daf`; normal non-force push succeeded. Local, tracking, and remote heads match and the worktree is clean. Exact-head pipeline 2842484224 is running for MR !323. No broad Web UI, full flake check, merge, or deployment occurred.
+---
+
+author: OpenCode
+created: 2026-09-12 02:56
+---
+2026-09-12 zombie-assignment preflight: dedicated TASK-440 worktree is clean and both local and remote branch heads equal required SHA `32654ebd419fbde207ddc010a401249e16a92ea7`. This SHA is the user-authored Config design update above the prior backend fix and will be preserved. `main` and `dev` have no uncommitted changes (`dev` is locally ahead of origin). Scope is server/database assignment corruption only; no Config UI, Web UI checks, broad flake check, merge, or deployment.
 ---
 <!-- COMMENTS:END -->
 
