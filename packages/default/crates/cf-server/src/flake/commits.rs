@@ -2654,12 +2654,34 @@ pub async fn load_commit_nixos_configurations_with_creds(
     creds: Option<&FlakeCredentialEnv>,
     build_config: Option<&crate::config::BuildConfig>,
 ) -> Result<Vec<String>> {
+    let mut command = nixos_configuration_discovery_command_for_commit(
+        repo_url,
+        commit_hash,
+        creds,
+        build_config,
+        None,
+    );
+    run_nixos_configuration_discovery_command(&mut command, commit_hash).await
+}
+
+fn nixos_configuration_discovery_command_for_commit(
+    repo_url: &str,
+    commit_hash: &str,
+    creds: Option<&FlakeCredentialEnv>,
+    build_config: Option<&crate::config::BuildConfig>,
+    store_override: Option<&std::path::Path>,
+) -> tokio::process::Command {
     let flake_ref = build_flake_reference(repo_url, commit_hash);
     let flake_target = format!("{flake_ref}#nixosConfigurations");
-    let mut cmd = nixos_configuration_discovery_command(&flake_target, creds, build_config);
+    nixos_configuration_discovery_command(&flake_target, creds, build_config, store_override)
+}
 
+async fn run_nixos_configuration_discovery_command(
+    command: &mut tokio::process::Command,
+    commit_hash: &str,
+) -> Result<Vec<String>> {
     let output = run_nix_command_bounded(
-        &mut cmd,
+        command,
         "nixosConfigurations discovery",
         NIX_CONFIG_EVAL_TIMEOUT,
         NIX_CONFIG_STDOUT_MAX_BYTES,
@@ -2694,10 +2716,17 @@ fn nixos_configuration_discovery_command(
     flake_target: &str,
     creds: Option<&FlakeCredentialEnv>,
     build_config: Option<&crate::config::BuildConfig>,
+    store_override: Option<&std::path::Path>,
 ) -> tokio::process::Command {
     let mut command = tokio::process::Command::new("nix");
+    // INVARIANT: Discovery enables its required CLI features because package
+    // tests and deployments cannot depend on ambient Nix configuration.
     // INVARIANT: Exact-revision discovery is read-only. Nix can otherwise try
     // to create or update flake.lock before PRIMARY establishes the carrier.
+    command.args(["--extra-experimental-features", "nix-command flakes"]);
+    if let Some(store) = store_override {
+        command.arg("--store").arg(store);
+    }
     command.args([
         "eval",
         "--json",
@@ -2975,9 +3004,10 @@ async fn try_get_diff_for_branch(
 mod tests {
     use super::{
         get_commits_with_full_metadata, is_history_rewrite_error, is_invalid_revision_range_error,
-        is_remote_head_diverged, load_commit_nixos_configurations_with_creds,
-        nixos_configuration_discovery_command, parse_git_log_line, redact_sensitive_tokens,
-        redact_url_credentials, sanitize_and_truncate_sync_error,
+        is_remote_head_diverged, nixos_configuration_discovery_command,
+        nixos_configuration_discovery_command_for_commit, parse_git_log_line,
+        redact_sensitive_tokens, redact_url_credentials, run_nixos_configuration_discovery_command,
+        sanitize_and_truncate_sync_error,
     };
     use crate::flake::credentials::FlakeCredentialEnv;
 
@@ -3100,6 +3130,7 @@ mod tests {
             "git+https://git.example.test/private/repo.git?rev=abc#nixosConfigurations",
             Some(&credentials),
             None,
+            None,
         );
         let args = command
             .as_std()
@@ -3109,6 +3140,8 @@ mod tests {
         assert_eq!(
             args,
             [
+                "--extra-experimental-features",
+                "nix-command flakes",
                 "eval",
                 "--json",
                 "--no-write-lock-file",
@@ -3132,6 +3165,7 @@ mod tests {
             Some(&Some("0".to_string()))
         );
         assert!(environment.get("NETRC").is_some_and(Option::is_some));
+        assert!(!args.iter().any(|arg| arg == "--store"));
     }
 
     #[tokio::test]
@@ -3177,15 +3211,24 @@ mod tests {
         let tree_before = run_git(&["rev-parse", "HEAD^{tree}"]);
         let flake_before = std::fs::read(repository.path().join("flake.nix"))
             .expect("fixture source should be readable");
+        let store = tempfile::tempdir().expect("temporary Nix store should exist");
+        let home = tempfile::tempdir().expect("temporary Nix home should exist");
+        let cache = home.path().join("cache");
+        std::fs::create_dir(&cache).expect("temporary Nix cache should exist");
 
-        let names = load_commit_nixos_configurations_with_creds(
+        let mut command = nixos_configuration_discovery_command_for_commit(
             &format!("file://{}", repository.path().display()),
             &revision,
             None,
             None,
-        )
-        .await
-        .expect("lockless exact-revision discovery should succeed");
+            Some(store.path()),
+        );
+        command
+            .env("HOME", home.path())
+            .env("XDG_CACHE_HOME", &cache);
+        let names = run_nixos_configuration_discovery_command(&mut command, &revision)
+            .await
+            .expect("lockless exact-revision discovery should succeed");
 
         assert_eq!(names, ["alpha", "beta"]);
         assert!(!repository.path().join("flake.lock").exists());

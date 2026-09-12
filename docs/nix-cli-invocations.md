@@ -32,7 +32,7 @@ Crystal Forge binary, grouped by service. Calls listed in execution order.
 
 | # | Purpose | Command | Source |
 |---|---------|---------|--------|
-| 12 | Discover all `nixosConfigurations` attr names for a commit without changing its lock file | `nix eval --json --no-write-lock-file --apply builtins.attrNames <target>` | `load_commit_nixos_configurations_with_creds` |
+| 12 | Discover all `nixosConfigurations` attr names for a commit without changing its lock file | `nix --extra-experimental-features "nix-command flakes" eval --json --no-write-lock-file --apply builtins.attrNames <target>` | `load_commit_nixos_configurations_with_creds` |
 
 ### `models/evaluate_with_policies.rs`
 
