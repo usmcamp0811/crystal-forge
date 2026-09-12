@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-12 21:00'
+updated_date: '2026-09-12 21:15'
 labels:
   - design-parity
   - web-ui
@@ -59,6 +59,8 @@ references:
   - git commit 37d1ed38ce39a86635c9ae7280315d5db27d95de
   - git commit fa4f16826fb9b4481b27b36598eb0a4083a4260a
   - git commit 3708ef3abe94c52778d2dfe1f1fc86a4596e08cb
+  - git commit 54278885f2212d0cb15045fab1708da7ad89ce4b
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2843619053'
 documentation:
   - docs/design/CrystalForge/app.jsx
   - docs/design/CrystalForge/components/SystemDetail.jsx
@@ -333,6 +335,8 @@ Commit B was created locally as df58dbd6b408cfa1d718dd766690f3834201f033 with ex
 2026-09-12 final focused sequence completed and pushed. `37d1ed38` matches the lazy Config Explorer design and passed focused Config Rust tests, wasm32 Web UI check, runner unit check, Node/shell syntax checks, touched rustfmt, and diff checks. Browser 12l remained deferred because `run-ui-dev` was inactive; 12m remained deferred because its repository path boots the prohibited heavyweight VM. `3708ef3a` repairs the compliance bundle Systems actor lookup and assignment-lineage joins, removes the duplicate inner assignment presentation, and passed a focused isolated-PostgreSQL regression, offline server check, wasm32 check, rustfmt, and diff checks. `fa4f1682` evaluates native report-only Nix policies while preserving intrinsic strictness and nonblocking evidence, excludes non-native/non-Nix phases, contains report-only custom expression errors, preserves evaluator key compatibility, and adds exact enforce-only composite/POA&M authorization with safe legacy evidence compatibility. Focused pure, real-Nix, isolated-PostgreSQL, offline server, formatting, and diff checks passed. Local HEAD, tracking ref, and remote branch all equal `fa4f16826fb9b4481b27b36598eb0a4083a4260a`; the worktree is clean. TASK-440 remains In Progress because AC #24 and #27 are still unproven. No merge or deployment was performed.
 
 Correction: the exact full SHA for `TASK-440: Fix compliance bundle systems view` is `3708ef3abe94c52778d2dfe1f1fc86a4596e08cb`.
+
+2026-09-12 residual compliance assignment cleanup committed and pushed as `54278885f2212d0cb15045fab1708da7ad89ce4b` (`TASK-440: Remove duplicate bundle assignment action`). Removed the bundle-detail `Assign bundle` button, `show_assignment` state, and the sole `AssignmentCreatePanel` implementation with now-unused imports. Preserved Environment-editor assignment reconciliation, backend assignment APIs, Systems assignment metadata, and existing-assignment maintenance. Browser step 29f now creates the live system-scoped assignment through the authenticated API, uses a pre-seeded standalone fixture, asserts the drawer has no `Assign bundle` button, and continues to verify reason preservation/change/clear through existing-assignment maintenance. Updated doc-22 through Backlog MCP with a supersession note. Verification passed: touched Rust `rustfmt --check`; 8 Compliance Web UI Rust tests; 13 Environment adapter tests; wasm32 Web UI `cargo check`; Node syntax check; and `git diff --check`. Browser execution was deferred to CI because the available supported runner requires the full `run-ui-dev` stack and is not a lightweight active runner. The worktree is clean; local HEAD, tracking ref, and remote branch all equal the commit. Exact-head GitLab pipeline 2843619053 is pending: https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2843619053. TASK-440 remains In Progress; AC #24 and #27 remain unchecked.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
