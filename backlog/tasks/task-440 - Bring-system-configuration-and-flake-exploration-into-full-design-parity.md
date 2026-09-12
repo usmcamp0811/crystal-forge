@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-12 01:47'
+updated_date: '2026-09-12 02:04'
 labels:
   - design-parity
   - web-ui
@@ -390,6 +390,12 @@ author: OpenCode
 created: 2026-09-12 01:47
 ---
 2026-09-12 hermetic feature follow-up is blocked before commit/push. The requested production argv change and exact unit assertion pass both focused Cargo tests, and targeted cf-server rustfmt plus `git diff --check` pass. The required `nix build .#packages.x86_64-linux.server --no-link -L` now gets past the original disabled-feature failure but still fails in the same lockfile regression after 1467 passes and 519 ignores because nested Nix initializes its default local store and cannot create `/nix/var/nix/profiles` in checkPhase (`Permission denied`). Repeating with `--builders ''` reproduces the same failure locally. Adding `--option use-registries false` did not resolve it and was reverted. Resolving the remaining package-only failure appears to require an explicitly writable temporary Nix store for the regression or package check environment, which conflicts with the instruction not to rely on test-only environment mutation and is not part of the specified production argv. No commit or push was performed; the intended two-file feature/doc diff remains uncommitted.
+---
+
+author: OpenCode
+created: 2026-09-12 02:04
+---
+2026-09-12 approved isolated-store follow-up stopped at the mandated sandbox restriction. Production continues to pass no store override; only `configuration_discovery_does_not_create_or_modify_flake_lock` creates a TempDir and supplies it as `--store <temporary-root>` before `eval`. Both focused tests pass in `nix develop`. The required `nix build .#packages.x86_64-linux.server --no-link -L` now initializes the disposable chroot store but fails after 1467 passes and 519 ignores because Nix attempts to create `/homeless-shelter/.cache/nix` while fetching the local git flake: `Permission denied`. Per the explicit instruction to stop if the temporary chroot store exposed another sandbox-specific restriction, no additional environment changes, commit, or push were made. The branch remains at `dbb04121126ea1b78b2678f7f548165bde8a5daf` with two intended files modified.
 ---
 <!-- COMMENTS:END -->
 
