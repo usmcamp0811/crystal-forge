@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-12 20:36'
+updated_date: '2026-09-12 21:00'
 labels:
   - design-parity
   - web-ui
@@ -209,6 +209,8 @@ Fix the deployment-smoke zombie compliance assignment defect from exact clean SH
 2026-09-12 result-key collision correction for the current uncommitted report-only evaluator slice: add one deterministic assignment-slice-wide key allocator in deployment_policies.rs. Reserve built-in metadata keys plus every enforce custom field name and every stable built-in/composite result key before allocating UUID/ordinal-based report-only custom keys with deterministic suffixes. Use the same allocation map in bulk and standalone Nix field generation and PolicyCheckResult::from_assigned parsing, preserving all enforce keys and legacy behavior. Add pure and real-Nix regressions where an enforce custom field equals a report-only base key and prove independent parse/persistence with a nonblocking report-only failure. Update operator/source documentation. Verify touched Rust formatting, focused tests, SQLX_OFFLINE cf-server lib check, and git diff --check only. Do not commit or push.
 
 2026-09-12 final blocking-review correction: restore `policy_result_key` to the legacy first-eight-UUID-character enforce format and use independent full-UUID bases only for report-only custom keys, retaining deterministic assignment-slice collision suffixes against every reserved/emitted key. Add focused regressions proving enforce keys remain unchanged and report-only allocation remains collision-free. Make policy-matrix classification reject contradictory `passed=true, blocking=true` current evidence as infrastructure error while retaining pass for false or absent blocking. Run touched Rust formatting, focused pure and real-Nix tests, SQLX_OFFLINE cf-server lib check, and git diff check only. Do not commit, push, or run broad checks.
+
+2026-09-12 residual compliance assignment cleanup from exact clean SHA fa4f16826fb9b4481b27b36598eb0a4083a4260a: remove only the bundle-detail drawer `Assign bundle` action, its local state, and the now-unreferenced `AssignmentCreatePanel` implementation/imports. Preserve Environment-editor assignment create/update/removal, backend assignment APIs, and read-only Systems assignment metadata. Rewrite stale browser setup to use the Environment editor or authenticated API fixtures and assert that bundle detail has no visible `Assign bundle` button. Supersede the historical doc-22 instruction through Backlog MCP. Run touched Rust formatting, focused Web UI Rust tests, wasm32 Web UI cargo check, Node syntax, and git diff checks only; defer browser execution if no lightweight runner is available. Commit as `TASK-440: Remove duplicate bundle assignment action` and push normally only after reconfirming the remote branch remains at the required starting SHA. Do not modify report-only evaluator files, Config Explorer, migrations, backend APIs, or AC #24/#27.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
