@@ -809,5 +809,6 @@ function PoamDetailHost({ onOpenFinding }) {
 Object.assign(window, {
   usePoamStore, openPoamDetail, PoamStatusChip, PoamSevChip, FindingPoamBar,
   PoamCreateModal, CvePoamCreateModal, PoamLinkModal, PoamDetailTray, PoamFindingPicker, PoamCountStrip,
+  PoamOwnerOptions, POAM_OWNER_PEOPLE, POAM_OWNER_GROUPS,
   PoamTable, SystemPoamSection, BundlePoamRollup, BundlePoamBody, PoamDetailHost,
 });

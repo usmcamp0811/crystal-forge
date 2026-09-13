@@ -24,6 +24,7 @@ function ComplianceView({ onOpenSystem, onOpenPolicy, selectedBundleId, selected
   }, [selectedFinding]);
   const [activeFw, setActiveFw] = React.useState("all");
   const [exportOpen, setExportOpen] = React.useState(false);
+  const [atoOpen, setAtoOpen] = React.useState(false);
   const [newBundleOpen, setNewBundleOpen] = React.useState(false);
   const [importOpen, setImportOpen] = React.useState(false);
   const [importBundleOpen, setImportBundleOpen] = React.useState(false);
@@ -90,6 +91,10 @@ function ComplianceView({ onOpenSystem, onOpenPolicy, selectedBundleId, selected
             { label:"Export this bundle (XCCDF .xml)", icon:"download", onClick:() => bundle && exportBundle(bundle) },
             { label:"Export evidence report…", icon:"download", onClick:() => setExportOpen(true) },
           ]}/>
+          <button className="btn btn-ghost focus-ring" onClick={() => setAtoOpen(true)}
+            title="Everything an auditor or authorizing official needs for one environment or a set of hosts — OSCAL, XCCDF, CSV, report">
+            <Icon name="download" size={14}/> Export evidence package
+          </button>
           <button className="btn btn-primary focus-ring" data-coach-target="bundle" onClick={() => setNewBundleOpen(true)}>
             <Icon name="plus" size={14}/> New bundle
           </button>
@@ -150,6 +155,9 @@ function ComplianceView({ onOpenSystem, onOpenPolicy, selectedBundleId, selected
       ); })()}
       {exportOpen && bundle && (
         <ExportEvidenceModal bundle={bundle} stats={stats} onClose={() => setExportOpen(false)}/>
+      )}
+      {atoOpen && window.AtoPackageModal && (
+        <window.AtoPackageModal onClose={() => setAtoOpen(false)}/>
       )}
       {newBundleOpen && (
         <BundleEditor onClose={() => setNewBundleOpen(false)}/>

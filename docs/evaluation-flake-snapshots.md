@@ -249,6 +249,35 @@ commit, store path, and snapshot identity. Restrictive foreign keys keep that
 snapshot, derivation, and commit while the generation reference exists. Nix
 store garbage collection does not affect the database snapshot.
 
+Exact-CVE POA&M verification uses only a retained generation whose system,
+generation number, source store path, derivation, commit, configuration, and
+available integrity-certified evaluation artifact match the latest agent state.
+The retained row must have verified lineage, and the agent state must assert that
+its generation matches its current store path. A path-only derivation match does
+not authorize exact-CVE creation or verification. Missing or inconsistent
+generation lineage fails closed.
+
+A schema-1 CVE scan is an immutable terminal evidence seal with a non-null
+completion time. Each occurrence stores its observed derivation path, package
+name, package version, canonical package name, and canonical CVE directly. It
+does not rely on a mutable package-derivation row for identity. Unreferenced
+sealed scans and their occurrences remain reclaimable. A verification item uses
+restrictive foreign keys to retain its cited scan and occurrence for as long as
+the POA&M evidence exists.
+
+`GET /systems/:id/cves` uses the same retained deployed-generation authority and
+latest schema-1 scan. It does not select vulnerability rows by hostname. Missing
+exact evidence returns an empty row set instead of inferred mutable rows. The
+response is limited to 1,000 stable CVE and canonical-package identities. A
+deterministic occurrence supplies each row's observed name and complete version
+text. Package version is evidence and is not part of relationship identity.
+
+Exact-CVE POA&M, justification, and deployment-state writers acquire locks in
+this order: canonical CVE, system sentinel, policy finding keys, and exact-CVE
+finding keys. Keys at each level use deterministic lexical order. Scan
+publication uses the shared system and finding keys, so verification cannot read
+a partially published scan.
+
 Generation rollback accepts a retained generation UUID or system-local
 generation number and resolves the exact derivation and store path on the
 server. Composite authorization remains constrained to that derivation even if

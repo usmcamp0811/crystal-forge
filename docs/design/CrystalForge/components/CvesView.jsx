@@ -495,13 +495,21 @@ function CveDrawer({ cve, onClose, onOpenSystem }) {
   const sevColor = { critical: "#f87171", high: "#fbbf24", medium: "#60a5fa", low: "#9ca3af" }[cve.severity];
   const affectedSystems = SYSTEMS.filter((s) => cve.affected.includes(s.id));
 
-  // Local acceptance state (mock — in real app persists to backend)
-  const [acceptance, setAcceptance] = React.useState({
-    state: cve.acceptance,
-    justification: cve.justification,
-    by: cve.justifiedBy,
-    at: cve.justifiedAt,
-    scopeEnvs: cve.scopeEnvs || null, // null = all affected envs
+  // Per-environment dispositions (mock — in real app persists to backend).
+  // Legacy mock CVEs carry a single acceptance + scopeEnvs; seed those onto the envs they covered.
+  const [dispositions, setDispositions] = React.useState(() => {
+    if (cve.dispositions) return cve.dispositions;
+    if (!cve.acceptance || cve.acceptance === "outstanding") return {};
+    const envs = (cve.scopeEnvs && cve.scopeEnvs.length)
+      ? cve.scopeEnvs
+      : [...new Set(SYSTEMS.filter(s => cve.affected.includes(s.id)).map(s => s.environment))];
+    const seed = {};
+    envs.forEach(e => {
+      seed[e] = cve.acceptance === "scheduled"
+        ? { state:"scheduled", poamId: cve.poamId || null, owner: cve.remediationOwner || "ops-team", due: cve.reviewDate || null, plan: cve.justification, by: cve.justifiedBy, at: cve.justifiedAt }
+        : { state:"accepted", justification: cve.justification, reviewDate: cve.reviewDate || null, by: cve.justifiedBy, at: cve.justifiedAt };
+    });
+    return seed;
   });
   const [showAccept, setShowAccept] = React.useState(false);
 
@@ -513,28 +521,35 @@ function CveDrawer({ cve, onClose, onOpenSystem }) {
 
   const allAffectedEnvs = [...new Set(affectedSystems.map(s => s.environment))];
 
-  const applyAcceptance = (payload) => {
-    const isPartial = payload.scopeEnvs && payload.scopeEnvs.length < allAffectedEnvs.length;
-    cve.acceptance = isPartial ? "partial" : payload.state;
-    cve.justification = payload.justification;
-    cve.justifiedBy = payload.by;
-    cve.justifiedAt = payload.at;
-    cve.scopeEnvs = payload.scopeEnvs;
-    setAcceptance({ ...payload, state: payload.state });
+  // Rollup the list view and the evidence export read off of.
+  const dispEnvs = allAffectedEnvs.filter(e => dispositions[e]);
+  const states = [...new Set(dispEnvs.map(e => dispositions[e].state))];
+  const rollup = dispEnvs.length === 0 ? "outstanding"
+    : (dispEnvs.length < allAffectedEnvs.length || states.length > 1) ? "partial"
+    : states[0];
+  const openEnvs = allAffectedEnvs.filter(e => !dispositions[e]);
+  const coveredCount = affectedSystems.filter(s => dispositions[s.environment]).length;
+
+  const applyTriage = (next) => {
+    cve.dispositions = next;
+    const de = allAffectedEnvs.filter(e => next[e]);
+    const st = [...new Set(de.map(e => next[e].state))];
+    cve.acceptance = de.length === 0 ? "outstanding"
+      : (de.length < allAffectedEnvs.length || st.length > 1) ? "partial" : st[0];
+    const first = de.length ? next[de[0]] : null;
+    cve.justification = first ? (first.justification || first.plan || null) : null;
+    cve.justifiedBy = first ? first.by : null;
+    cve.justifiedAt = first ? first.at : null;
+    cve.scopeEnvs = de.length ? de : null;
+    cve.poamId = de.map(e => next[e].poamId).find(Boolean) || null;
+    setDispositions(next);
     setShowAccept(false);
   };
-  const revoke = () => {
-    cve.acceptance = "outstanding";
-    cve.justification = null;
-    cve.justifiedBy = null;
-    cve.justifiedAt = null;
-    cve.scopeEnvs = null;
-    setAcceptance({ state: "outstanding", justification: null, by: null, at: null, scopeEnvs: null });
+  const revokeEnv = (env) => {
+    const next = { ...dispositions };
+    delete next[env];
+    applyTriage(next);
   };
-
-  const coveredEnvs = acceptance.scopeEnvs && acceptance.scopeEnvs.length ? acceptance.scopeEnvs : allAffectedEnvs;
-  const coveredCount = affectedSystems.filter(s => coveredEnvs.includes(s.environment)).length;
-  const isPartialScope = coveredEnvs.length < allAffectedEnvs.length;
 
   // Group affected by environment
   const byEnv = {};
@@ -570,13 +585,13 @@ function CveDrawer({ cve, onClose, onOpenSystem }) {
               
               <Icon name="link" size={11} /> Advisory
             </button>
-            {acceptance.state === "outstanding" ? (
+            {rollup === "outstanding" ? (
               <button className="btn btn-primary focus-ring xs" onClick={() => setShowAccept(true)}>
-                <Icon name="check" size={11} /> Accept risk
+                <Icon name="shield" size={11} /> Triage
               </button>
             ) : (
               <button className="btn btn-ghost focus-ring xs" onClick={() => setShowAccept(true)}>
-                <Icon name="file" size={11} /> Edit justification
+                <Icon name="file" size={11} /> Edit triage
               </button>
             )}
             <button className="btn-icon focus-ring" title={maximized?"Restore":"Expand"} onClick={()=>setMaximized(m=>!m)}><Icon name={maximized?"minimize":"maximize"} size={15}/></button>
@@ -625,59 +640,83 @@ function CveDrawer({ cve, onClose, onOpenSystem }) {
             </code>
           </section>
 
-          {/* Triage / acceptance */}
+          {/* Triage / acceptance — per environment */}
           <section>
-            <h3 style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--cf-text-muted)", margin: "0 0 10px", fontWeight: 600 }}>Triage status</h3>
-            {showAccept ? (
-              <CveAcceptForm
-                cve={cve}
-                affectedSystems={affectedSystems}
-                initial={acceptance}
-                onCancel={() => setShowAccept(false)}
-                onSubmit={applyAcceptance} />
-            ) : acceptance.state === "outstanding" ? (
+            <div style={{ display:"flex", alignItems:"center", gap:8, margin:"0 0 10px" }}>
+              <h3 style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--cf-text-muted)", margin: 0, fontWeight: 600 }}>Triage status</h3>
+              {rollup !== "outstanding" && (
+                <span style={{ fontSize:11, color:"var(--cf-text-muted)" }}>
+                  {coveredCount} of {affectedSystems.length} host{affectedSystems.length === 1 ? "" : "s"} dispositioned
+                </span>
+              )}
+              <button className="btn btn-ghost focus-ring xs" style={{ marginLeft:"auto" }} onClick={() => setShowAccept(true)}>
+                <Icon name="file" size={10}/> {rollup === "outstanding" ? "Triage" : "Edit"}
+              </button>
+            </div>
+
+            {rollup === "outstanding" ? (
               <div className="sd-callout sd-callout-warn">
                 <Icon name="warn" size={13} />
                 <div style={{ fontSize: 12 }}>
-                  <strong>Outstanding — needs triage.</strong> Patch the affected systems, or accept the risk with a justification. You can scope it to all environments or only specific ones (e.g. accept in dev, keep open in prod).
+                  <strong>Outstanding — needs triage.</strong> Decide per environment: schedule a patch to open a POA&M with an owner and a due date, or accept the risk with a justification. You can do both at once — accept in dev, schedule for prod.
                 </div>
               </div>
             ) : (
-              <div style={{ padding: 14, borderRadius: 10, border: "1px solid", borderColor: acceptance.state === "accepted" ? "rgba(167,139,250,0.3)" : "rgba(96,165,250,0.3)", background: acceptance.state === "accepted" ? "rgba(167,139,250,0.07)" : "rgba(96,165,250,0.07)" }}>
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 8 }}>
-                  <span className="chip chip-info" style={{ background: acceptance.state === "accepted" ? "rgba(167,139,250,0.18)" : undefined, color: acceptance.state === "accepted" ? "#a78bfa" : undefined }}>
-                    {acceptance.state === "accepted" ? "Risk accepted" : "Patch scheduled"}
-                  </span>
-                  <span style={{ fontSize: 11, color: "var(--cf-text-muted)" }}>
-                    covers {coveredCount} of {affectedSystems.length} system{affectedSystems.length === 1 ? "" : "s"}
-                  </span>
-                </div>
-
-                {/* Scope chips */}
-                <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
-                  {allAffectedEnvs.map(env => {
-                    const covered = coveredEnvs.includes(env);
-                    return covered
-                      ? <EnvBadge key={env} env={env} />
-                      : <span key={env} className="chip chip-critical" style={{ fontSize: 10 }} title="Still outstanding in this environment">{env} · open</span>;
-                  })}
-                </div>
-
-                <div style={{ fontSize: 13, color: "var(--cf-text-primary)", lineHeight: 1.5 }}>{acceptance.justification}</div>
-                <div style={{ fontSize: 11, color: "var(--cf-text-muted)", marginTop: 8, display: "flex", gap: 8, alignItems: "center" }}>
-                  <Icon name="user" size={11} />
-                  <span>by <span className="mono">{acceptance.by || "—"}</span></span>
-                  {acceptance.at && <span>· {acceptance.at}</span>}
-                  <button className="btn btn-ghost focus-ring xs" style={{ marginLeft: "auto" }} onClick={() => setShowAccept(true)}>
-                    <Icon name="file" size={10} /> Edit
-                  </button>
-                  <button className="btn btn-ghost focus-ring xs" onClick={revoke}>
-                    <Icon name="x" size={10} /> Revoke
-                  </button>
-                </div>
-                {isPartialScope && (
-                  <div className="help" style={{ marginTop: 8, color: "#fbbf24" }}>
-                    <Icon name="warn" size={10} style={{ verticalAlign: "middle" }} /> {affectedSystems.length - coveredCount} system{affectedSystems.length - coveredCount === 1 ? "" : "s"} in other environments remain outstanding.
+              <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+                {allAffectedEnvs.map(env => {
+                  const d = dispositions[env];
+                  const hosts = affectedSystems.filter(s => s.environment === env).length;
+                  if (!d) return (
+                    <div key={env} style={{ display:"flex", alignItems:"center", gap:10, padding:"10px 12px", borderRadius:9, border:"1px solid rgba(248,113,113,0.3)", background:"rgba(248,113,113,0.06)" }}>
+                      <EnvBadge env={env}/>
+                      <span className="chip chip-critical" style={{ fontSize:10 }}>outstanding</span>
+                      <span style={{ fontSize:11, color:"var(--cf-text-muted)" }}>{hosts} host{hosts === 1 ? "" : "s"} · no disposition</span>
+                      <button className="btn btn-ghost focus-ring xs" style={{ marginLeft:"auto" }} onClick={() => setShowAccept(true)}>Triage</button>
+                    </div>
+                  );
+                  const accepted = d.state === "accepted";
+                  const color = accepted ? "167,139,250" : "96,165,250";
+                  return (
+                    <div key={env} style={{ padding:"11px 12px", borderRadius:9, border:`1px solid rgba(${color},0.3)`, background:`rgba(${color},0.06)` }}>
+                      <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:8 }}>
+                        <EnvBadge env={env}/>
+                        <span className="chip chip-info" style={{ fontSize:10, background:`rgba(${color},0.18)`, color: accepted ? "#a78bfa" : "#60a5fa" }}>
+                          {accepted ? "risk accepted" : "patch scheduled"}
+                        </span>
+                        <span style={{ fontSize:11, color:"var(--cf-text-muted)" }}>{hosts} host{hosts === 1 ? "" : "s"}</span>
+                        <button className="btn-icon focus-ring" style={{ marginLeft:"auto" }} title={`Revoke disposition for ${env}`} onClick={() => revokeEnv(env)}>
+                          <Icon name="x" size={13}/>
+                        </button>
+                      </div>
+                      {(d.justification || d.plan) && (
+                        <div style={{ fontSize:12.5, color:"var(--cf-text-primary)", lineHeight:1.5 }}>{d.justification || d.plan}</div>
+                      )}
+                      {!accepted && d.poamId && (
+                        <button className="focus-ring" onClick={() => window.openPoamDetail?.(d.poamId)} style={{
+                          all:"unset", cursor:"pointer", display:"flex", alignItems:"center", gap:8, marginTop:9, padding:"7px 10px", borderRadius:7,
+                          border:"1px solid var(--cf-divider)", background:"var(--cf-subtle-bg)", width:"100%", boxSizing:"border-box",
+                        }}>
+                          <Icon name="file" size={12} style={{ color:"var(--cf-text-muted)" }}/>
+                          <span style={{ fontSize:12 }}>Tracked by <span className="mono" style={{ fontWeight:600 }}>{d.poamId}</span></span>
+                          {d.owner && <span style={{ fontSize:11, color:"var(--cf-text-muted)" }}>· {d.owner}</span>}
+                          {d.due && <span style={{ fontSize:11, color:"var(--cf-text-muted)" }}>· due {d.due}</span>}
+                          <Icon name="arrow-right" size={12} style={{ marginLeft:"auto", color:"var(--cf-text-muted)" }}/>
+                        </button>
+                      )}
+                      <div style={{ fontSize:11, color:"var(--cf-text-muted)", marginTop:8, display:"flex", gap:8, alignItems:"center" }}>
+                        <Icon name="user" size={11}/>
+                        <span>by <span className="mono">{d.by || "—"}</span></span>
+                        {d.at && <span>· {d.at}</span>}
+                        {accepted && (d.reviewDate
+                          ? <span>· review {d.reviewDate}</span>
+                          : <span style={{ color:"#fbbf24" }}>· no review date</span>)}
+                      </div>
+                    </div>
+                  );
+                })}
+                {openEnvs.length > 0 && (
+                  <div className="help" style={{ color:"#fbbf24" }}>
+                    <Icon name="warn" size={10} style={{ verticalAlign:"middle" }}/> {affectedSystems.length - coveredCount} host{affectedSystems.length - coveredCount === 1 ? "" : "s"} in {openEnvs.join(", ")} remain outstanding.
                   </div>
                 )}
               </div>
@@ -756,16 +795,28 @@ function CveDrawer({ cve, onClose, onOpenSystem }) {
           </section>
         </div>
       </aside>
+      {showAccept && (
+        <CveTriageModal
+          cve={cve}
+          affectedSystems={affectedSystems}
+          initial={dispositions}
+          onClose={() => setShowAccept(false)}
+          onSubmit={applyTriage} />
+      )}
     </>);
 
 }
 
-function CveAcceptForm({ cve, affectedSystems, initial, onCancel, onSubmit }) {
-  const [state, setState] = React.useState(initial.state === "outstanding" ? "accepted" : initial.state);
-  const [justification, setJustification] = React.useState(initial.justification || "");
-  const [expiry, setExpiry] = React.useState("");
+// Triage modal. Disposition is per environment, because scope and disposition are the same
+// question: you can accept the risk in dev and schedule the patch in prod in one pass. Accepted
+// environments produce a waiver; scheduled ones produce a single POA&M covering their hosts.
+const CVE_CHOICES = [
+  { v:"open",      label:"Leave open" },
+  { v:"accepted",  label:"Accept risk" },
+  { v:"scheduled", label:"Schedule patch" },
+];
 
-  // Environments present among affected systems
+function CveTriageModal({ cve, affectedSystems, initial, onClose, onSubmit }) {
   const envCounts = React.useMemo(() => {
     const m = {};
     affectedSystems.forEach(s => { m[s.environment] = (m[s.environment] || 0) + 1; });
@@ -773,100 +824,227 @@ function CveAcceptForm({ cve, affectedSystems, initial, onCancel, onSubmit }) {
   }, [affectedSystems]);
   const allEnvs = Object.keys(envCounts);
 
-  const [scopeMode, setScopeMode] = React.useState(initial.scopeEnvs && initial.scopeEnvs.length && initial.scopeEnvs.length < allEnvs.length ? "some" : "all");
-  const [scopeEnvs, setScopeEnvs] = React.useState(initial.scopeEnvs && initial.scopeEnvs.length ? initial.scopeEnvs : allEnvs);
+  const [choice, setChoice] = React.useState(() => {
+    const o = {};
+    allEnvs.forEach(e => { o[e] = (initial && initial[e] && initial[e].state) || "open"; });
+    return o;
+  });
+  const seeded = allEnvs.map(e => initial && initial[e]).filter(Boolean);
+  const seedAccepted = seeded.find(d => d.state === "accepted");
+  const seedScheduled = seeded.find(d => d.state === "scheduled");
 
-  const presets = [
-    "Mitigated by network segmentation; service is internal-only.",
-    "Compensating control via WAF rule.",
-    "Vulnerable code path not reachable in this deployment.",
-    "Acceptable in non-production; tracked for prod patch.",
-    "False positive — upstream backport already applied.",
-  ];
-  const effectiveEnvs = scopeMode === "all" ? allEnvs : scopeEnvs;
-  const coveredCount = affectedSystems.filter(s => effectiveEnvs.includes(s.environment)).length;
-  const canSubmit = justification.trim().length >= 10 && effectiveEnvs.length > 0;
+  const [justification, setJustification] = React.useState(seedAccepted ? seedAccepted.justification || "" : "");
+  const [reviewDate, setReviewDate] = React.useState(seedAccepted ? seedAccepted.reviewDate || "" : "");
+  const people = window.POAM_OWNER_PEOPLE || [];
+  const [owner, setOwner] = React.useState(seedScheduled ? seedScheduled.owner || people[0] || "" : people[0] || "");
+  const dueDefault = typeof poamDatePlus === "function"
+    ? poamDatePlus(cve.severity === "critical" ? 14 : cve.severity === "high" ? 30 : 56) : "";
+  const [due, setDue] = React.useState(seedScheduled ? seedScheduled.due || dueDefault : dueDefault);
+  const [plan, setPlan] = React.useState(seedScheduled ? seedScheduled.plan || "" : "");
+  const [withMilestones, setWithMilestones] = React.useState(!seedScheduled);
 
-  const toggleEnv = (env) => setScopeEnvs(prev => prev.includes(env) ? prev.filter(e => e !== env) : [...prev, env]);
+  const acceptedEnvs = allEnvs.filter(e => choice[e] === "accepted");
+  const scheduledEnvs = allEnvs.filter(e => choice[e] === "scheduled");
+  const openEnvs = allEnvs.filter(e => choice[e] === "open");
+  const scheduledHosts = affectedSystems.filter(s => scheduledEnvs.includes(s.environment));
+  const acceptedHosts = affectedSystems.filter(s => acceptedEnvs.includes(s.environment));
+
+  const acceptNeedsText = acceptedEnvs.length > 0 && justification.trim().length < 10;
+  const scheduleNeedsFields = scheduledEnvs.length > 0 && (!owner || !due);
+  const touched = acceptedEnvs.length + scheduledEnvs.length > 0;
+  const canSubmit = touched && !acceptNeedsText && !scheduleNeedsFields;
+
+  React.useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") { e.stopPropagation(); onClose(); } };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [onClose]);
+
+  const submit = () => {
+    if (!canSubmit) return;
+    const next = { ...(initial || {}) };
+    openEnvs.forEach(e => { delete next[e]; });
+
+    if (acceptedEnvs.length) {
+      acceptedEnvs.forEach(e => {
+        next[e] = { state:"accepted", justification: justification.trim(), reviewDate: reviewDate || null, by:"mreyes", at:"just now" };
+      });
+    }
+    if (scheduledEnvs.length) {
+      let poamId = seedScheduled && seedScheduled.poamId;
+      if (!poamId && typeof poamCreate === "function") {
+        const item = poamCreate({
+          title: `${cve.id} — patch ${cve.pkg} in ${scheduledEnvs.join(", ")}`,
+          owner, due,
+          severity: cve.severity === "critical" || cve.severity === "high" ? "high" : cve.severity === "medium" ? "medium" : "low",
+          status: "open",
+          plan: plan.trim() || `Upgrade ${cve.pkg} to ${cve.fix === "available" ? cve.fixedIn : "a patched release once available"} across ${scheduledEnvs.join(", ")}.`,
+          cveRefs: scheduledHosts.map(s => ({ id: cve.id, pkg: cve.pkg, sysId: s.id, hostname: s.hostname })),
+          milestones: withMilestones ? [
+            { text: `Identify patched ${cve.pkg} version`, due: poamDatePlus(3), done: cve.fix === "available" },
+            { text: "Deploy to staging", due: poamDatePlus(10), done: false },
+            { text: `Roll out to ${scheduledHosts.length} host${scheduledHosts.length === 1 ? "" : "s"} in ${scheduledEnvs.join(", ")}`, due: poamDatePlus(18), done: false },
+            { text: "Verify scan clears the CVE", due, done: false },
+          ] : [],
+        });
+        poamId = item.id;
+      }
+      scheduledEnvs.forEach(e => {
+        next[e] = { state:"scheduled", poamId, owner, due, plan: plan.trim() || null, by:"mreyes", at:"just now" };
+      });
+    }
+    onSubmit(next);
+  };
 
   return (
-    <div style={{ padding: 14, borderRadius: 10, border: "1px solid var(--cf-card-border)", background: "var(--cf-card-bg)", display: "flex", flexDirection: "column", gap: 12 }}>
-
-      {/* Scope */}
-      <div className="field">
-        <label>Apply to</label>
-        <div className="seg" style={{ width: "fit-content" }}>
-          <button className={scopeMode === "all" ? "active" : ""} onClick={() => setScopeMode("all")}>All environments</button>
-          <button className={scopeMode === "some" ? "active" : ""} onClick={() => setScopeMode("some")}>Specific environments</button>
-        </div>
-        {scopeMode === "some" && (
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 10 }}>
-            {allEnvs.map(env => {
-              const on = scopeEnvs.includes(env);
-              const envColor = (ENV_STYLE[env] && ENV_STYLE[env].fg) || "#9ca3af";
-              return (
-                <button key={env} className="focus-ring" onClick={() => toggleEnv(env)}
-                  style={{
-                    padding: "4px 10px", borderRadius: 99, fontSize: 11, cursor: "pointer", fontFamily: "inherit",
-                    border: `1px solid ${on ? envColor : "var(--cf-card-border)"}`,
-                    background: on ? `color-mix(in oklab, ${envColor} 16%, var(--cf-card-bg))` : "transparent",
-                    color: on ? envColor : "var(--cf-text-secondary)",
-                    display: "inline-flex", alignItems: "center", gap: 6,
-                  }}>
-                  <span style={{ width: 6, height: 6, borderRadius: "50%", background: envColor }} />
-                  {env}
-                  <span className="mono" style={{ fontSize: 10, opacity: 0.7 }}>{envCounts[env]}</span>
-                </button>
-              );
-            })}
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal" onClick={e=>e.stopPropagation()} style={{ width:"min(720px,95vw)", maxHeight:"92vh" }}>
+        <div className="modal-head" style={{ display:"flex", alignItems:"flex-start", justifyContent:"space-between", gap:12 }}>
+          <div>
+            <h2>Triage {cve.id}</h2>
+            <p>Decide per environment. Hosts left open stay outstanding until someone dispositions them.</p>
           </div>
-        )}
-        <div className="help" style={{ marginTop: 6 }}>
-          Covers <strong style={{ color: "var(--cf-text-primary)" }}>{coveredCount}</strong> of {affectedSystems.length} affected system{affectedSystems.length === 1 ? "" : "s"}
-          {scopeMode === "some" && coveredCount < affectedSystems.length && <> · {affectedSystems.length - coveredCount} remain outstanding</>}.
+          <button className="btn-icon focus-ring" onClick={onClose}><Icon name="x" size={16}/></button>
         </div>
-      </div>
 
-      <div className="field">
-        <label>Disposition</label>
-        <div className="seg" style={{ width: "fit-content" }}>
-          <button className={state === "accepted" ? "active" : ""} onClick={() => setState("accepted")}>Accept risk</button>
-          <button className={state === "scheduled" ? "active" : ""} onClick={() => setState("scheduled")}>Schedule patch</button>
+        <div className="modal-body" style={{ overflowY:"auto", display:"flex", flexDirection:"column", gap:14 }}>
+          <div className="poam-ctx">
+            <div className="poam-ctx-head">
+              <Icon name="shield" size={12}/> Vulnerability
+              <span style={{ marginLeft:"auto", fontSize:10.5, color:"var(--cf-text-muted)" }}>carried over automatically</span>
+            </div>
+            <div className="poam-ctx-grid">
+              <div><span>CVE</span><b className="mono">{cve.id}</b></div>
+              <div><span>Package</span><b className="mono">{cve.pkg}</b></div>
+              <div><span>CVSS</span><b>{cve.cvss.toFixed(1)} <span style={{ fontWeight:400, color:"var(--cf-text-muted)" }}>{cve.severity}</span></b></div>
+              <div><span>Affected hosts</span><b>{affectedSystems.length}</b></div>
+              <div><span>Fix</span><b className="mono">{cve.fix === "available" ? cve.fixedIn : "pending"}</b></div>
+              <div><span>Exploited</span><b>{cve.exploited ? "yes — in the wild" : "not observed"}</b></div>
+            </div>
+          </div>
+
+          <div className="field" style={{ marginTop:0 }}>
+            <label>Disposition by environment</label>
+            <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+              {allEnvs.map(env => {
+                const envColor = (ENV_STYLE[env] && ENV_STYLE[env].fg) || "#9ca3af";
+                const c = choice[env];
+                return (
+                  <div key={env} style={{
+                    display:"flex", alignItems:"center", gap:12, padding:"9px 11px", borderRadius:8,
+                    border:`1px solid ${c === "open" ? "var(--cf-divider)" : envColor}`,
+                    background: c === "open" ? "var(--cf-card-bg)" : `color-mix(in oklab, ${envColor} 7%, var(--cf-card-bg))`,
+                  }}>
+                    <span style={{ display:"flex", alignItems:"center", gap:8, minWidth:0, flex:1 }}>
+                      <span style={{ width:8, height:8, borderRadius:99, background:envColor, flexShrink:0 }}/>
+                      <span style={{ fontSize:12.5, fontWeight:600 }}>{env}</span>
+                      <span className="mono" style={{ fontSize:11, color:"var(--cf-text-muted)" }}>{envCounts[env]} host{envCounts[env] === 1 ? "" : "s"}</span>
+                    </span>
+                    <div className="seg" style={{ flexShrink:0 }}>
+                      {CVE_CHOICES.map(o => (
+                        <button key={o.v} className={c === o.v ? "active" : ""}
+                          onClick={() => setChoice(p => ({ ...p, [env]: o.v }))}>{o.label}</button>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            {openEnvs.length > 0 && touched && (
+              <div className="help" style={{ marginTop:6, color:"#fbbf24" }}>
+                <Icon name="warn" size={10} style={{ verticalAlign:"middle" }}/> {openEnvs.join(", ")} stay{openEnvs.length === 1 ? "s" : ""} outstanding.
+              </div>
+            )}
+          </div>
+
+          {scheduledEnvs.length > 0 && (
+            <div style={{ padding:"12px 13px", borderRadius:9, border:"1px solid rgba(96,165,250,0.3)", background:"rgba(96,165,250,0.06)", display:"flex", flexDirection:"column", gap:12 }}>
+              <div style={{ display:"flex", alignItems:"center", gap:7, fontSize:11.5, fontWeight:600, textTransform:"uppercase", letterSpacing:".06em", color:"#60a5fa" }}>
+                <Icon name="plus" size={12}/> POA&M — {scheduledEnvs.join(", ")} · {scheduledHosts.length} host{scheduledHosts.length === 1 ? "" : "s"}
+              </div>
+              <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
+                <div className="field" style={{ marginTop:0 }}>
+                  <label>Owner</label>
+                  {window.PoamOwnerOptions ? (
+                    <select className="input focus-ring" value={owner} onChange={e=>setOwner(e.target.value)}>
+                      <window.PoamOwnerOptions/>
+                    </select>
+                  ) : (
+                    <input className="input focus-ring" value={owner} onChange={e=>setOwner(e.target.value)}/>
+                  )}
+                </div>
+                <div className="field" style={{ marginTop:0 }}>
+                  <label>Target completion</label>
+                  <input type="date" className="input focus-ring" value={due} onChange={e=>setDue(e.target.value)}/>
+                </div>
+              </div>
+              <div className="field" style={{ marginTop:0 }}>
+                <label>Remediation plan <span style={{ color:"var(--cf-text-muted)", fontWeight:400 }}>· optional now, expected before review</span></label>
+                <textarea className="input focus-ring" rows={2} value={plan} onChange={e=>setPlan(e.target.value)}
+                  placeholder={`Upgrade ${cve.pkg} to ${cve.fix === "available" ? cve.fixedIn : "a patched release"}, roll out, and verify the scan clears`}
+                  style={{ resize:"vertical" }}/>
+              </div>
+              {!seedScheduled && (
+                <label className="poam-check">
+                  <input type="checkbox" checked={withMilestones} onChange={e=>setWithMilestones(e.target.checked)}/>
+                  <span>Start from standard patch milestones <span style={{ color:"var(--cf-text-muted)" }}>— identify version, staging, rollout, verify scan.</span></span>
+                </label>
+              )}
+              {cve.fix !== "available" && (
+                <div className="help" style={{ color:"#fbbf24" }}>
+                  <Icon name="warn" size={10} style={{ verticalAlign:"middle" }}/> No upstream patch yet — the first milestone tracks waiting on the advisory.
+                </div>
+              )}
+            </div>
+          )}
+
+          {acceptedEnvs.length > 0 && (
+            <div style={{ padding:"12px 13px", borderRadius:9, border:"1px solid rgba(167,139,250,0.3)", background:"rgba(167,139,250,0.06)", display:"flex", flexDirection:"column", gap:12 }}>
+              <div style={{ display:"flex", alignItems:"center", gap:7, fontSize:11.5, fontWeight:600, textTransform:"uppercase", letterSpacing:".06em", color:"#a78bfa" }}>
+                <Icon name="check" size={12}/> Waiver — {acceptedEnvs.join(", ")} · {acceptedHosts.length} host{acceptedHosts.length === 1 ? "" : "s"}
+              </div>
+              <div className="field" style={{ marginTop:0 }}>
+                <label>Justification <span style={{ color:"var(--cf-text-muted)", fontWeight:400 }}>· required</span></label>
+                <textarea className="input focus-ring" rows={2} value={justification} onChange={e=>setJustification(e.target.value)}
+                  placeholder="Why is this acceptable / what is the compensating control?" style={{ resize:"vertical" }}/>
+                <div style={{ display:"flex", gap:6, flexWrap:"wrap", marginTop:6 }}>
+                  {[
+                    "Mitigated by network segmentation; service is internal-only.",
+                    "Compensating control via WAF rule.",
+                    "Vulnerable code path not reachable in this deployment.",
+                    "False positive — upstream backport already applied.",
+                  ].map(p => (
+                    <button key={p} className="focus-ring" onClick={() => setJustification(p)}
+                      style={{ all:"unset", cursor:"pointer", fontSize:10, padding:"3px 8px", borderRadius:99, background:"var(--cf-subtle-bg)", color:"var(--cf-text-secondary)", border:"1px solid var(--cf-divider)" }}>
+                      {p.length > 42 ? p.slice(0, 40) + "…" : p}
+                    </button>
+                  ))}
+                </div>
+                {acceptNeedsText && justification.length > 0 && <div className="help" style={{ color:"#fbbf24" }}>Add a bit more detail (min 10 chars).</div>}
+              </div>
+              <div className="field" style={{ marginTop:0, maxWidth:240 }}>
+                <label>Review date <span style={{ color:"var(--cf-text-muted)", fontWeight:400 }}>· optional</span></label>
+                <input type="date" className="input focus-ring" value={reviewDate} onChange={e=>setReviewDate(e.target.value)}/>
+                <div className="help">An acceptance with no review date is what assessors flag most often.</div>
+              </div>
+            </div>
+          )}
         </div>
-      </div>
 
-      <div className="field">
-        <label>Justification</label>
-        <textarea className="input focus-ring" rows={3} value={justification} onChange={(e) => setJustification(e.target.value)}
-          placeholder="Why is this acceptable / what is the compensating control?" style={{ resize: "vertical" }} />
-        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 6 }}>
-          {presets.map((p) => (
-            <button key={p} className="focus-ring" onClick={() => setJustification(p)}
-              style={{ all: "unset", cursor: "pointer", fontSize: 10, padding: "3px 8px", borderRadius: 99, background: "var(--cf-subtle-bg)", color: "var(--cf-text-secondary)", border: "1px solid var(--cf-divider)" }}>
-              {p.length > 42 ? p.slice(0, 40) + "…" : p}
-            </button>
-          ))}
+        <div className="modal-foot">
+          <div style={{ marginRight:"auto", fontSize:11.5, color:"var(--cf-text-muted)" }}>
+            {!touched ? "Nothing dispositioned yet"
+              : [scheduledEnvs.length ? (seedScheduled ? "updates 1 POA&M" : "creates 1 POA&M") : null,
+                 acceptedEnvs.length ? `1 waiver · ${acceptedHosts.length} host${acceptedHosts.length === 1 ? "" : "s"}` : null,
+                 openEnvs.length ? `${openEnvs.length} env${openEnvs.length === 1 ? "" : "s"} left open` : null,
+                ].filter(Boolean).join(" · ")}
+          </div>
+          <button className="btn btn-ghost focus-ring" onClick={onClose}>Cancel</button>
+          <button className="btn btn-primary focus-ring" disabled={!canSubmit}
+            style={!canSubmit ? { opacity:0.5, cursor:"not-allowed" } : null} onClick={submit}>
+            <Icon name="check" size={13}/> Apply triage
+          </button>
         </div>
-        {!canSubmit && justification.length > 0 && justification.trim().length < 10 && <div className="help" style={{ color: "#fbbf24" }}>Add a bit more detail (min 10 chars).</div>}
-      </div>
-
-      <div className="field" style={{ maxWidth: 220 }}>
-        <label>{state === "scheduled" ? "Target patch date" : "Review / expiry date (optional)"}</label>
-        <input type="date" className="input focus-ring" value={expiry} onChange={(e) => setExpiry(e.target.value)} />
-      </div>
-
-      <div className="sd-callout sd-callout-info" style={{ fontSize: 11 }}>
-        <Icon name="check" size={12} />
-        <div>Recorded against your account and attached to each covered system's compliance evidence trail.</div>
-      </div>
-
-      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
-        <button className="btn btn-ghost focus-ring" onClick={onCancel}>Cancel</button>
-        <button className="btn btn-primary focus-ring" disabled={!canSubmit}
-          style={!canSubmit ? { opacity: 0.5, cursor: "not-allowed" } : null}
-          onClick={() => onSubmit({ state, justification: justification.trim(), by: "mreyes", at: "just now", expiry, scopeEnvs: effectiveEnvs, scopeMode })}>
-          <Icon name="check" size={13} /> {state === "accepted" ? `Accept for ${coveredCount} system${coveredCount === 1 ? "" : "s"}` : `Schedule for ${coveredCount}`}
-        </button>
       </div>
     </div>
   );
