@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-13 02:02'
+updated_date: '2026-09-13 02:10'
 labels:
   - design-parity
   - web-ui
@@ -65,6 +65,7 @@ references:
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2843645262'
   - git commit d4230ddf318112cff6626f76f5084b252389180a
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2843864208'
+  - git commit 1204efdc8cf7e25ed01a634832456df0262c08af
 documentation:
   - docs/design/CrystalForge/app.jsx
   - docs/design/CrystalForge/components/SystemDetail.jsx
@@ -233,6 +234,8 @@ Fix the Config Explorer lifecycle regression by using one scope-reset effect tha
 2026-09-12 server/database-only typed POA&M assignee slice implemented without commit or push. Added migration 0258, typed request/view/catalog DTOs, server-authoritative active-human and normalized configured-group resolution, legacy owner compatibility, optimistic typed updates, typed activity snapshots, bounded Operator/Admin catalog route, and focused authorization/compatibility regressions. Verification passed in the repository Nix environment: cf-server rustfmt; all 34 poam_workflows PostgreSQL tests against an isolated PostgreSQL 17 cluster; SQLX_OFFLINE=true cargo check --offline -p cf-server --tests; and git diff --check. Existing compiler warnings remain. The disposable PostgreSQL instance on port 55439 was stopped and confirmed unavailable. Worktree contains only the seven intended server/migration/test files and remains uncommitted.
 
 2026-09-13 typed POA&M assignee pass completed and pushed as d4230ddf318112cff6626f76f5084b252389180a. Migration 0258 preserves legacy owner snapshots and adds mutually exclusive user/group identity fields plus current-availability response metadata. The server resolves active human users and configured normalized OIDC groups, exposes a bounded minimal Operator/Admin catalog, preserves owner search compatibility, and does not use assignment as authorization. The Web UI uses one People/Groups selector, eligible-current-user or Unassigned defaults, historical unavailable values, lifecycle tooltips, and existing aligned POA&M form geometry. Verification passed: populated upgrade migration regression 1/1; isolated PostgreSQL poam_workflows 35/35; SQLX_OFFLINE=true cargo check --offline -p cf-server --tests; server-regressions Nix check; focused POA&M component tests 8/8; POA&M API tests 14/14; wasm32 Web UI cargo check; touched-file rustfmt; and git diff checks. Heavy Web UI/VM/flake checks were deliberately skipped. Exact-head pipeline 2843864208 was running when recorded. TASK-440 remains In Progress and AC #24/#27 remain unchecked.
+
+2026-09-13 POA&M milestone/activity detail parity completed and pushed as 1204efdc8cf7e25ed01a634832456df0262c08af. The detail tray now uses compact checkbox milestones with due/done labels, optional title/date editing, response-safe focus restoration, concise activity date/actor/message columns, collapsed diagnostics, and responsive geometry. Browser contracts cover editor disclosure, Save/Cancel focus restoration, server-shaped complete/reopen payloads, reconciled dates, specific removal controls, and updated compact selectors. Verification passed: focused POA&M Rust tests 11/11; touched Rust formatting; wasm32 Web UI cargo check; Node syntax; git diff check; final hostile review found no P0/P1. Heavy browser/VM/flake checks were skipped as directed. Worktree is clean and HEAD, tracking, and remote all equal 1204efdc8cf7e25ed01a634832456df0262c08af.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
