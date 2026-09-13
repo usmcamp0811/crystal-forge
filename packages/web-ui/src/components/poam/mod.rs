@@ -14,12 +14,14 @@ use crate::components::dialog_focus::{
     DialogFocusBoundary, DialogFocusRestore, DialogFocusSentinel,
 };
 use crate::components::icon::{Icon, IconName};
+use crate::state::app_state::AppState;
 use crate::views::poam_api::{
     self, ActivityView, AddFindingRequest, AddMilestoneRequest, AddNoteRequest, AssessmentOutcome,
     AssignmentReferenceRequest, ClosePreconditionDetails, FindingObservationReference,
     FindingRelationshipEntry, FindingRequirementView, FindingView, MilestoneView, PoamApiError,
-    PoamDetail, PoamDetailQuery, PoamRisk, PoamStatus, PoamSummary, RevisionRequest, Rollup,
-    TransitionPoamRequest, UpdateMilestoneRequest, UpdatePoamRequest, VerificationResult,
+    PoamAssigneeCatalog, PoamAssigneeRequest, PoamAssigneeView, PoamDetail, PoamDetailQuery,
+    PoamRisk, PoamStatus, PoamSummary, RevisionRequest, Rollup, TransitionPoamRequest,
+    UpdateMilestoneRequest, UpdatePoamRequest, VerificationResult,
 };
 
 /// Describes an immutable assignment version that a POA&M can reference.
@@ -98,6 +100,250 @@ pub enum FindingPoamEvent {
     InvalidateAssessment(Uuid),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PoamAssigneeDraft {
+    Unassigned,
+    User {
+        user_id: Uuid,
+        display: String,
+        available: bool,
+    },
+    OidcGroup {
+        group_name: String,
+        display: String,
+        available: bool,
+    },
+    Historical {
+        display: String,
+    },
+}
+
+impl PoamAssigneeDraft {
+    fn from_summary(poam: &PoamSummary) -> Self {
+        match poam.assignee.as_ref() {
+            Some(PoamAssigneeView::User {
+                user_id,
+                display,
+                available,
+            }) => Self::User {
+                user_id: *user_id,
+                display: display.clone(),
+                available: *available,
+            },
+            Some(PoamAssigneeView::OidcGroup {
+                group_name,
+                display,
+                available,
+            }) => Self::OidcGroup {
+                group_name: group_name.clone(),
+                display: display.clone(),
+                available: *available,
+            },
+            Some(PoamAssigneeView::Unassigned) => Self::Unassigned,
+            Some(PoamAssigneeView::Legacy { display }) => Self::Historical {
+                display: display.clone(),
+            },
+            None if poam.owner.is_empty() => Self::Unassigned,
+            None => Self::Historical {
+                display: poam.owner.clone(),
+            },
+        }
+    }
+
+    fn option_value(&self) -> String {
+        match self {
+            Self::Unassigned => "unassigned".to_string(),
+            Self::User { user_id, .. } => format!("user:{user_id}"),
+            Self::OidcGroup { group_name, .. } => format!("group:{group_name}"),
+            Self::Historical { .. } => "historical".to_string(),
+        }
+    }
+
+    fn display(&self) -> &str {
+        match self {
+            Self::Unassigned => "Unassigned",
+            Self::User { display, .. }
+            | Self::OidcGroup { display, .. }
+            | Self::Historical { display } => display,
+        }
+    }
+
+    fn request(&self) -> Option<PoamAssigneeRequest> {
+        match self {
+            Self::Unassigned => Some(PoamAssigneeRequest::Unassigned),
+            Self::User { user_id, .. } => Some(PoamAssigneeRequest::User { user_id: *user_id }),
+            Self::OidcGroup { group_name, .. } => Some(PoamAssigneeRequest::OidcGroup {
+                group_name: group_name.clone(),
+            }),
+            Self::Historical { .. } => None,
+        }
+    }
+
+    fn unavailable_label(&self) -> String {
+        match self {
+            Self::User {
+                display,
+                available: false,
+                ..
+            } => format!("Former assignee — {display}"),
+            Self::OidcGroup {
+                display,
+                available: false,
+                ..
+            } => format!("Former group — {display}"),
+            Self::Historical { display } => format!("Former / legacy assignee — {display}"),
+            _ => self.display().to_string(),
+        }
+    }
+
+    fn is_catalogued_in(&self, catalog: &PoamAssigneeCatalog) -> bool {
+        match self {
+            Self::Unassigned => true,
+            Self::User { user_id, .. } => {
+                catalog.people.iter().any(|item| item.user_id == *user_id)
+            }
+            Self::OidcGroup { group_name, .. } => catalog
+                .groups
+                .iter()
+                .any(|item| item.group_name == *group_name),
+            Self::Historical { .. } => false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AssigneeCatalogState {
+    Loading,
+    Loaded(PoamAssigneeCatalog),
+    Failed(String),
+}
+
+fn assignee_from_option(value: &str, catalog: &PoamAssigneeCatalog) -> Option<PoamAssigneeDraft> {
+    if value == "unassigned" {
+        return Some(PoamAssigneeDraft::Unassigned);
+    }
+    if let Some(raw_id) = value.strip_prefix("user:") {
+        let user_id = Uuid::parse_str(raw_id).ok()?;
+        let person = catalog.people.iter().find(|item| item.user_id == user_id)?;
+        return Some(PoamAssigneeDraft::User {
+            user_id,
+            display: person.label.clone(),
+            available: true,
+        });
+    }
+    let group_name = value.strip_prefix("group:")?;
+    let group = catalog
+        .groups
+        .iter()
+        .find(|item| item.group_name == group_name)?;
+    Some(PoamAssigneeDraft::OidcGroup {
+        group_name: group.group_name.clone(),
+        display: group.group_name.clone(),
+        available: true,
+    })
+}
+
+fn default_assignee(
+    current_user_id: Option<Uuid>,
+    catalog: &PoamAssigneeCatalog,
+) -> PoamAssigneeDraft {
+    current_user_id
+        .and_then(|user_id| {
+            catalog
+                .people
+                .iter()
+                .find(|person| person.user_id == user_id)
+        })
+        .map(|person| PoamAssigneeDraft::User {
+            user_id: person.user_id,
+            display: person.label.clone(),
+            available: true,
+        })
+        .unwrap_or(PoamAssigneeDraft::Unassigned)
+}
+
+fn assignee_display(poam: &PoamSummary) -> String {
+    match poam.assignee.as_ref() {
+        Some(PoamAssigneeView::User {
+            display,
+            available: false,
+            ..
+        }) => format!("Former assignee — {display}"),
+        Some(PoamAssigneeView::OidcGroup {
+            display,
+            available: false,
+            ..
+        }) => format!("Former group — {display}"),
+        Some(PoamAssigneeView::Legacy { display }) => {
+            format!("Former / legacy assignee — {display}")
+        }
+        Some(PoamAssigneeView::Unassigned) => "Unassigned".to_string(),
+        Some(PoamAssigneeView::User { display, .. })
+        | Some(PoamAssigneeView::OidcGroup { display, .. }) => display.clone(),
+        None if poam.owner.is_empty() => "Unassigned".to_string(),
+        None => format!("Former / legacy assignee — {}", poam.owner),
+    }
+}
+
+#[derive(Props, Clone, PartialEq)]
+struct PoamAssigneeSelectProps {
+    selection: Signal<PoamAssigneeDraft>,
+    catalog: AssigneeCatalogState,
+    disabled: bool,
+}
+
+#[component]
+fn PoamAssigneeSelect(props: PoamAssigneeSelectProps) -> Element {
+    let mut selection = props.selection;
+    let empty_catalog = PoamAssigneeCatalog::default();
+    let catalog = match &props.catalog {
+        AssigneeCatalogState::Loaded(catalog) => catalog,
+        _ => &empty_catalog,
+    };
+    let selected = props.selection.read().clone();
+    // COMPATIBILITY: The bounded catalog can omit the current assignee. Keep
+    // that server-provided value selected without making it a new choice.
+    let include_current =
+        !selected.is_catalogued_in(catalog) && !matches!(selected, PoamAssigneeDraft::Unassigned);
+    let catalog_for_change = catalog.clone();
+    rsx! {
+        select {
+            class: "input focus-ring",
+            "data-testid": "poam-assignee-select",
+            value: "{selected.option_value()}",
+            disabled: props.disabled || matches!(props.catalog, AssigneeCatalogState::Loading),
+            onchange: move |event| {
+                if let Some(next) = assignee_from_option(&event.value(), &catalog_for_change) {
+                    selection.set(next);
+                }
+            },
+            option { value: "unassigned", "Unassigned" }
+            if include_current {
+                option { value: "{selected.option_value()}", "{selected.unavailable_label()}" }
+            }
+            if !catalog.people.is_empty() {
+                optgroup { label: "People",
+                    for person in &catalog.people {
+                        option { value: "user:{person.user_id}", "{person.label}" }
+                    }
+                }
+            }
+            if !catalog.groups.is_empty() {
+                optgroup { label: "Groups",
+                    for group in &catalog.groups {
+                        option { value: "group:{group.group_name}", "{group.group_name}" }
+                    }
+                }
+            }
+        }
+        match &props.catalog {
+            AssigneeCatalogState::Loading => rsx! { small { "Loading assignees…" } },
+            AssigneeCatalogState::Failed(error) => rsx! { small { role: "alert", "Current assignees unavailable: {error}" } },
+            AssigneeCatalogState::Loaded(_) => rsx! {},
+        }
+    }
+}
+
 /// Selects the lifecycle subset displayed in a POA&M list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PoamFilter {
@@ -141,6 +387,28 @@ impl PoamFilter {
 /// Returns the product label for a server POA&M status.
 pub const fn status_label(status: PoamStatus) -> &'static str {
     status.label()
+}
+
+fn available_status_transitions(status: PoamStatus) -> &'static [PoamStatus] {
+    match status {
+        PoamStatus::Open => &[
+            PoamStatus::InProgress,
+            PoamStatus::Blocked,
+            PoamStatus::AwaitingVerification,
+        ],
+        PoamStatus::InProgress => &[
+            PoamStatus::Open,
+            PoamStatus::Blocked,
+            PoamStatus::AwaitingVerification,
+        ],
+        PoamStatus::Blocked => &[
+            PoamStatus::Open,
+            PoamStatus::InProgress,
+            PoamStatus::AwaitingVerification,
+        ],
+        PoamStatus::AwaitingVerification => &[PoamStatus::InProgress, PoamStatus::Blocked],
+        PoamStatus::Completed => &[],
+    }
 }
 
 /// Returns the semantic CSS class for a server POA&M status.
@@ -413,13 +681,21 @@ struct PoamCreateModalProps {
 
 #[component]
 fn PoamCreateModal(props: PoamCreateModalProps) -> Element {
+    let app_state = use_context::<Signal<AppState>>();
+    let current_user_id = app_state
+        .read()
+        .auth
+        .as_ref()
+        .and_then(|auth| auth.user.as_ref())
+        .and_then(|user| Uuid::parse_str(&user.id).ok());
     let mut title = use_signal(|| {
         format!(
             "{} remediation on {}",
             props.context.policy_name, props.context.hostname
         )
     });
-    let mut owner = use_signal(String::new);
+    let mut assignee = use_signal(|| PoamAssigneeDraft::Unassigned);
+    let mut assignee_catalog = use_signal(|| AssigneeCatalogState::Loading);
     let mut target = use_signal(String::new);
     let mut risk = use_signal(|| PoamRisk::Medium);
     let mut plan = use_signal(String::new);
@@ -428,6 +704,21 @@ fn PoamCreateModal(props: PoamCreateModalProps) -> Element {
     let mut pending = use_signal(|| false);
     let mut error = use_signal(|| None::<String>);
     let close = props.on_close;
+
+    use_effect(move || {
+        spawn(async move {
+            match poam_api::fetch_assignee_catalog().await {
+                Ok(catalog) => {
+                    assignee.set(default_assignee(current_user_id, &catalog));
+                    assignee_catalog.set(AssigneeCatalogState::Loaded(catalog));
+                }
+                Err(fetch_error) => {
+                    assignee_catalog.set(AssigneeCatalogState::Failed(api_message(&fetch_error)))
+                }
+            }
+        });
+    });
+    let catalog_loading = matches!(&*assignee_catalog.read(), AssigneeCatalogState::Loading);
 
     rsx! {
         div { class: "modal-backdrop", onclick: move |_| if !pending() { close.call(()) },
@@ -447,7 +738,7 @@ fn PoamCreateModal(props: PoamCreateModalProps) -> Element {
                     FindingContextPanel { context: props.context.clone() }
                     div { class: "poam-form-grid",
                         label { class: "field poam-span-all", span { "Title" } input { class: "input focus-ring", autofocus: true, value: "{title}", disabled: pending(), oninput: move |event| title.set(event.value()) } }
-                        label { class: "field", span { "Owner" } input { class: "input focus-ring", value: "{owner}", placeholder: "Responsible team or person", disabled: pending(), oninput: move |event| owner.set(event.value()) } }
+                        label { class: "field", span { "Assignee" } PoamAssigneeSelect { selection: assignee, catalog: assignee_catalog.read().clone(), disabled: pending() } }
                         label { class: "field", span { "Target completion" } input { class: "input focus-ring mono", r#type: "date", value: "{target}", disabled: pending(), oninput: move |event| target.set(event.value()) } }
                         label { class: "field", span { "Risk" } select { class: "input focus-ring", value: "{risk:?}", disabled: pending(), onchange: move |event| risk.set(match event.value().as_str() { "High" => PoamRisk::High, "Low" => PoamRisk::Low, _ => PoamRisk::Medium }), option { value: "High", "CAT I - High" } option { value: "Medium", "CAT II - Medium" } option { value: "Low", "CAT III - Low" } } }
                         label { class: "field poam-span-all", span { "Remediation plan" } textarea { class: "input focus-ring", rows: "4", value: "{plan}", placeholder: "What will change, where, and how it will be verified", disabled: pending(), oninput: move |event| plan.set(event.value()) } }
@@ -470,10 +761,10 @@ fn PoamCreateModal(props: PoamCreateModalProps) -> Element {
                 }
                 div { class: "modal-foot",
                     button { class: "btn btn-ghost focus-ring", disabled: pending(), onclick: move |_| close.call(()), "Cancel" }
-                    button { class: "btn btn-primary focus-ring", disabled: pending() || title.read().trim().is_empty() || owner.read().trim().is_empty(), onclick: move |_| {
+                    button { class: "btn btn-primary focus-ring", disabled: pending() || catalog_loading || title.read().trim().is_empty(), onclick: move |_| {
                         let parsed_target = if target.read().trim().is_empty() { Ok(None) } else { NaiveDate::parse_from_str(target.read().trim(), "%Y-%m-%d").map(Some).map_err(|_| "Enter a valid target date.".to_string()) };
                         let Ok(target_date) = parsed_target else { error.set(parsed_target.err()); return; };
-                        let request = poam_api::CreatePoamRequest { assessment_id: props.context.assessment_id, finding_id: props.context.assessment_id.is_none().then_some(props.context.finding_id), observation: props.context.observation.clone(), title: title.read().trim().to_string(), plan: plan.read().trim().to_string(), owner: owner.read().trim().to_string(), target_date, risk: risk(), default_milestones: milestones(), assignment_version_ids: assignments.read().iter().copied().collect() };
+                        let request = poam_api::CreatePoamRequest { assessment_id: props.context.assessment_id, finding_id: props.context.assessment_id.is_none().then_some(props.context.finding_id), observation: props.context.observation.clone(), title: title.read().trim().to_string(), plan: plan.read().trim().to_string(), owner: String::new(), assignee: assignee.read().request(), target_date, risk: risk(), default_milestones: milestones(), assignment_version_ids: assignments.read().iter().copied().collect() };
                         let mut pending = pending; let mut error = error; let on_created = props.on_created;
                         spawn(async move { pending.set(true); match poam_api::create_poam(&request).await { Ok(detail) => on_created.call(detail), Err(err) => { error.set(Some(if err.is_active_remediation() { "This finding already has an active remediation plan. Refresh the finding before retrying.".to_string() } else { api_message(&err) })); pending.set(false); } } });
                     }, if pending() { "Creating..." } else { "Create POA&M" } }
@@ -601,7 +892,7 @@ fn PoamLinkExistingModal(props: PoamLinkExistingModalProps) -> Element {
                     button { class: "btn-icon focus-ring", aria_label: "Close", disabled: pending().is_some(), onclick: move |_| close.call(()), Icon { name: IconName::X, size: 16 } }
                 }
                 div { class: "modal-body poam-modal-body",
-                    div { class: "filter-search poam-search", Icon { name: IconName::Search, size: 12 } input { class: "input focus-ring", autofocus: true, value: "{query}", placeholder: "Search by POA&M ID, title, or owner", disabled: pending().is_some(), oninput: move |event| query.set(event.value()) } }
+                    div { class: "filter-search poam-search", Icon { name: IconName::Search, size: 12 } input { class: "input focus-ring", autofocus: true, value: "{query}", placeholder: "Search by POA&M ID, title, or assignee", disabled: pending().is_some(), oninput: move |event| query.set(event.value()) } }
                     p { class: "poam-muted", "Compatibility and the one-active-remediation rule are enforced by the server. Linking does not change the FAIL result." }
                     if loading() { div { role: "status", aria_live: "polite", class: "poam-empty", "Searching compatible POA&M items..." } }
                     if let Some(message) = error() { div { role: "alert", class: "sd-callout sd-callout-danger", "{message}" } }
@@ -618,7 +909,7 @@ fn PoamLinkExistingModal(props: PoamLinkExistingModalProps) -> Element {
                             },
                                 div { class: "poam-pick-head", span { class: "mono poam-human-id", "{item.human_id}" } StatusChip { poam: item.clone() } RiskChip { risk: item.risk } }
                                 strong { "{item.title}" }
-                                small { "{item.owner} · due {format_date(item.target_date)} · {item.finding_count} linked findings · revision {item.revision}" }
+                                small { "{assignee_display(&item)} · due {format_date(item.target_date)} · {item.finding_count} linked findings · revision {item.revision}" }
                                 if pending() == Some(item.id) { span { role: "status", aria_live: "polite", class: "poam-pending", "Linking..." } }
                             } }
                             }
@@ -760,7 +1051,8 @@ pub fn PoamDetailTray(props: PoamDetailTrayProps) -> Element {
     let mut message = use_signal(|| None::<String>);
     let mut close_details = use_signal(|| None::<ClosePreconditionDetails>);
     let mut title = use_signal(String::new);
-    let mut owner = use_signal(String::new);
+    let mut assignee = use_signal(|| PoamAssigneeDraft::Unassigned);
+    let mut assignee_catalog = use_signal(|| AssigneeCatalogState::Loading);
     let mut target = use_signal(String::new);
     let mut risk = use_signal(|| PoamRisk::Medium);
     let mut plan = use_signal(String::new);
@@ -789,7 +1081,7 @@ pub fn PoamDetailTray(props: PoamDetailTrayProps) -> Element {
                 Ok(detail) if generation() == requested => {
                     if reset_drafts {
                         title.set(detail.poam.title.clone());
-                        owner.set(detail.poam.owner.clone());
+                        assignee.set(PoamAssigneeDraft::from_summary(&detail.poam));
                         target.set(
                             detail
                                 .poam
@@ -838,6 +1130,21 @@ pub fn PoamDetailTray(props: PoamDetailTrayProps) -> Element {
         }
         loaded_poam_id.set(Some(props.poam_id));
         load(true);
+    });
+
+    use_effect(move || {
+        if props.viewer {
+            assignee_catalog.set(AssigneeCatalogState::Loaded(PoamAssigneeCatalog::default()));
+            return;
+        }
+        spawn(async move {
+            match poam_api::fetch_assignee_catalog().await {
+                Ok(catalog) => assignee_catalog.set(AssigneeCatalogState::Loaded(catalog)),
+                Err(error) => {
+                    assignee_catalog.set(AssigneeCatalogState::Failed(api_message(&error)))
+                }
+            }
+        });
     });
 
     let mut load_more = move |kind: HistoryPageKind, query: PoamDetailQuery| {
@@ -1052,7 +1359,7 @@ pub fn PoamDetailTray(props: PoamDetailTrayProps) -> Element {
                 if let Some(intent) = busy() { div { role: "status", aria_live: "polite", class: "poam-tray-alert sd-callout sd-callout-info", "{intent}..." } }
                 if let Some(text) = message() { div { role: "alert", class: "poam-tray-alert sd-callout sd-callout-warn", Icon { name: IconName::Warn, size: 13 } div { "{text}" } } }
                 section { class: "poam-meta-grid", aria_label: "Remediation metadata", "data-testid": "poam-metadata-summary",
-                    div { span { "Owner" } strong { "{detail.poam.owner}" } }
+                    div { span { "Assignee" } strong { "{assignee_display(&detail.poam)}" } }
                     div { span { "Target completion" } strong { class: if detail.poam.overdue { "poam-overdue" } else { "" }, "{format_date(detail.poam.target_date)}" } if let Some(timing) = target_timing.as_deref() { em { class: if detail.poam.overdue { "poam-target-timing poam-overdue" } else { "poam-target-timing" }, "{timing}" } } }
                     div { span { "Opened" } strong { class: "mono", "{detail.poam.created_at.date_naive()}" } }
                     div { span { "Milestones" } strong { class: "mono", "{completed_milestones} of {detail.milestones.len()} complete" } div { class: "poam-progress", aria_label: "Milestone progress: {progress}%", span { style: "width:{progress}%" } } }
@@ -1062,12 +1369,14 @@ pub fn PoamDetailTray(props: PoamDetailTrayProps) -> Element {
                     header { h3 { "Plan details" } button { class: "btn btn-ghost xs focus-ring", disabled: readonly, onclick: move |_| {
                         let target_date = if target.read().trim().is_empty() { Ok(None) } else { NaiveDate::parse_from_str(target.read().trim(), "%Y-%m-%d").map(Some).map_err(|_| ()) };
                         let Ok(target_date) = target_date else { message.set(Some("Enter a valid target date.".to_string())); return; };
-                        let request = UpdatePoamRequest { revision, title: Some(title.read().trim().to_string()), plan: None, owner: Some(owner.read().trim().to_string()), target_date: Some(target_date), risk: Some(risk()) };
+                        let current_assignee = PoamAssigneeDraft::from_summary(&detail.poam);
+                        let selected_assignee = assignee.read().clone();
+                        let request = UpdatePoamRequest { revision, title: Some(title.read().trim().to_string()), plan: None, owner: None, assignee: (selected_assignee != current_assignee).then(|| selected_assignee.request()).flatten(), target_date: Some(target_date), risk: Some(risk()) };
                         busy.set(Some("Saving metadata".to_string())); spawn(async move { match poam_api::update_poam(props.poam_id, &request).await { Ok(next) => reconcile(next), Err(err) => handle_error("saving metadata", err) } });
                     }, if busy().is_some() { "Working..." } else { "Save metadata" } } }
                     div { class: "poam-form-grid",
                         label { class: "field poam-span-all", span { "Title" } input { class: "input focus-ring", value: "{title}", disabled: readonly, oninput: move |event| title.set(event.value()) } }
-                        label { class: "field", span { "Owner" } input { class: "input focus-ring", value: "{owner}", disabled: readonly, oninput: move |event| owner.set(event.value()) } }
+                        label { class: "field", span { "Assignee" } PoamAssigneeSelect { selection: assignee, catalog: assignee_catalog.read().clone(), disabled: readonly } }
                         label { class: "field", span { "Target completion" } input { class: "input focus-ring mono", r#type: "date", value: "{target}", disabled: readonly, oninput: move |event| target.set(event.value()) } }
                         label { class: "field", span { "Risk" } select { class: "input focus-ring", value: "{risk:?}", disabled: readonly, onchange: move |event| risk.set(match event.value().as_str() { "High" => PoamRisk::High, "Low" => PoamRisk::Low, _ => PoamRisk::Medium }), option { value: "High", "CAT I - High" } option { value: "Medium", "CAT II - Medium" } option { value: "Low", "CAT III - Low" } } }
                     }
@@ -1125,7 +1434,7 @@ pub fn PoamDetailTray(props: PoamDetailTrayProps) -> Element {
                     header {
                         h3 { "Remediation plan" }
                         button { class: "btn btn-ghost xs focus-ring", disabled: readonly, onclick: move |_| {
-                            let request = UpdatePoamRequest { revision, title: None, plan: Some(plan.read().to_string()), owner: None, target_date: None, risk: None };
+                            let request = UpdatePoamRequest { revision, title: None, plan: Some(plan.read().to_string()), owner: None, assignee: None, target_date: None, risk: None };
                             busy.set(Some("Saving remediation plan".to_string()));
                             spawn(async move {
                                 match poam_api::update_poam(props.poam_id, &request).await {
@@ -1168,7 +1477,7 @@ fn LifecycleSection(props: LifecycleSectionProps) -> Element {
     rsx! {
         section { class: "poam-tray-section",
             header { h3 { "Remediation status" } div { class: "poam-lifecycle-actions", if status == PoamStatus::Completed { button { class: "btn btn-ghost xs focus-ring", disabled: props.readonly, onclick: move |_| props.on_reopen.call(()), Icon { name: IconName::Rollback, size: 11 } "Reopen" } } else { button { class: "btn btn-ghost xs focus-ring", disabled: props.readonly, onclick: move |_| props.on_verify.call(()), "Verify now" } if status == PoamStatus::AwaitingVerification { button { class: "btn btn-primary xs focus-ring", disabled: props.readonly, onclick: move |_| props.on_close.call(()), Icon { name: IconName::Check, size: 11 } "Authoritative close" } } } } }
-            if status != PoamStatus::Completed { div { class: "seg poam-status-seg", for choice in [PoamStatus::Open, PoamStatus::InProgress, PoamStatus::Blocked, PoamStatus::AwaitingVerification] { button { class: if status == choice { "active" } else { "" }, disabled: props.readonly || status == choice, onclick: move |_| props.on_transition.call(choice), "{status_label(choice)}" } } } }
+            if status != PoamStatus::Completed { div { class: "seg poam-status-seg", for choice in available_status_transitions(status).iter().copied() { button { class: "focus-ring", title: choice.description(), disabled: props.readonly, onclick: move |_| props.on_transition.call(choice), "{status_label(choice)}" } } } }
             if status == PoamStatus::AwaitingVerification { div { role: "status", class: "sd-callout sd-callout-warn", Icon { name: IconName::Warn, size: 13 } div { strong { "Awaiting verification." } " Remediation is reported complete, but the finding result remains independent. Verify against current assessments, then use authoritative close." } } }
             for (index, attempt) in props.detail.verification_attempts.clone().into_iter().enumerate() {
                 div { class: "poam-verification", "data-testid": "poam-verification-result",
@@ -1341,7 +1650,7 @@ pub fn PoamTable(props: PoamTableProps) -> Element {
     if props.items.is_empty() {
         return rsx! { div { role: "status", class: "poam-empty", "{props.empty_note}" } };
     }
-    rsx! { div { class: "poam-table-wrap", table { class: "sys-table compact sys-table-dense poam-table", thead { tr { th { "POA&M" } th { "Title" } th { "Risk" } th { "Status" } th { "Owner" } th { "Due" } } } tbody { for item in props.items { tr { key: "{item.id}", role: "button", tabindex: "0", aria_label: "Open {item.human_id}: {item.title}", "data-testid": "poam-row", "data-poam-id": "{item.id}", "data-poam-human-id": "{item.human_id}", onclick: move |_| props.on_open.call(item.id), onkeydown: move |event| { let key = event.key(); if key == Key::Enter || matches!(key, Key::Character(ref value) if value == " ") { event.prevent_default(); props.on_open.call(item.id); } }, td { class: "mono poam-human-id", "{item.human_id}" } td { strong { "{item.title}" } small { "{item.finding_count} linked findings" } } td { RiskChip { risk: item.risk } } td { StatusChip { poam: item.clone() } } td { "{item.owner}" } td { class: if item.overdue { "mono poam-overdue" } else { "mono" }, "{format_date(item.target_date)}" } } } } } } }
+    rsx! { div { class: "poam-table-wrap", table { class: "sys-table compact sys-table-dense poam-table", thead { tr { th { "POA&M" } th { "Title" } th { "Risk" } th { "Status" } th { "Assignee" } th { "Due" } } } tbody { for item in props.items { tr { key: "{item.id}", role: "button", tabindex: "0", aria_label: "Open {item.human_id}: {item.title}", "data-testid": "poam-row", "data-poam-id": "{item.id}", "data-poam-human-id": "{item.human_id}", onclick: move |_| props.on_open.call(item.id), onkeydown: move |event| { let key = event.key(); if key == Key::Enter || matches!(key, Key::Character(ref value) if value == " ") { event.prevent_default(); props.on_open.call(item.id); } }, td { class: "mono poam-human-id", "{item.human_id}" } td { strong { "{item.title}" } small { "{item.finding_count} linked findings" } } td { RiskChip { risk: item.risk } } td { StatusChip { poam: item.clone() } } td { "{assignee_display(&item)}" } td { class: if item.overdue { "mono poam-overdue" } else { "mono" }, "{format_date(item.target_date)}" } } } } } } }
 }
 
 /// Configures the POA&M section for one system detail view.
@@ -1413,6 +1722,7 @@ mod tests {
             title: "Test".into(),
             plan: String::new(),
             owner: "Security".into(),
+            assignee: None,
             target_date: None,
             risk: PoamRisk::High,
             status,
@@ -1444,6 +1754,92 @@ mod tests {
             result_class(VerificationResult::Waiver),
             result_class(VerificationResult::Pass)
         );
+        assert!(PoamStatus::Blocked.description().contains("dependency"));
+        assert_eq!(
+            available_status_transitions(PoamStatus::AwaitingVerification),
+            &[PoamStatus::InProgress, PoamStatus::Blocked]
+        );
+        assert!(available_status_transitions(PoamStatus::Completed).is_empty());
+    }
+
+    #[test]
+    fn assignee_defaults_to_current_eligible_user_or_unassigned() {
+        let current_user_id = Uuid::from_u128(7);
+        let catalog = PoamAssigneeCatalog {
+            people: vec![poam_api::PoamAssigneePerson {
+                user_id: current_user_id,
+                label: "Jane Operator".into(),
+            }],
+            groups: vec![],
+        };
+        assert_eq!(
+            default_assignee(Some(current_user_id), &catalog),
+            PoamAssigneeDraft::User {
+                user_id: current_user_id,
+                display: "Jane Operator".into(),
+                available: true,
+            }
+        );
+        assert_eq!(
+            default_assignee(Some(Uuid::from_u128(8)), &catalog),
+            PoamAssigneeDraft::Unassigned
+        );
+        assert_eq!(
+            default_assignee(None, &catalog),
+            PoamAssigneeDraft::Unassigned
+        );
+    }
+
+    #[test]
+    fn assignee_catalog_supports_people_groups_and_historical_values() {
+        let user_id = Uuid::from_u128(9);
+        let catalog = PoamAssigneeCatalog {
+            people: vec![poam_api::PoamAssigneePerson {
+                user_id,
+                label: "Matt Camp".into(),
+            }],
+            groups: vec![poam_api::PoamAssigneeGroup {
+                group_name: "team:compliance".into(),
+            }],
+        };
+        assert!(matches!(
+            assignee_from_option(&format!("user:{user_id}"), &catalog),
+            Some(PoamAssigneeDraft::User { user_id: id, .. }) if id == user_id
+        ));
+        assert!(matches!(
+            assignee_from_option("group:team:compliance", &catalog),
+            Some(PoamAssigneeDraft::OidcGroup { group_name, .. })
+                if group_name == "team:compliance"
+        ));
+        let historical = PoamAssigneeDraft::Historical {
+            display: "Platform Security".into(),
+        };
+        assert_eq!(
+            historical.unavailable_label(),
+            "Former / legacy assignee — Platform Security"
+        );
+        assert!(!historical.is_catalogued_in(&catalog));
+
+        let current_but_not_catalogued = PoamAssigneeDraft::User {
+            user_id: Uuid::from_u128(10),
+            display: "Current Person Beyond Catalog Limit".into(),
+            available: true,
+        };
+        assert!(!current_but_not_catalogued.is_catalogued_in(&catalog));
+        assert_eq!(
+            current_but_not_catalogued.unavailable_label(),
+            "Current Person Beyond Catalog Limit"
+        );
+
+        let catalog_without_groups = PoamAssigneeCatalog {
+            people: catalog.people.clone(),
+            groups: vec![],
+        };
+        assert!(assignee_from_option("group:team:compliance", &catalog_without_groups).is_none());
+
+        let source = include_str!("mod.rs");
+        assert!(source.contains("optgroup { label: \"People\""));
+        assert!(source.contains("optgroup { label: \"Groups\""));
     }
 
     #[test]

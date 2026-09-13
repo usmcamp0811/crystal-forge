@@ -16,9 +16,9 @@ use crystal_forge::models::deployment_policies::{
 };
 use crystal_forge::models::poam::{
     AddFindingRequest, AssignmentReferenceRequest, CreatePoamRequest, CreateWaiverRequest,
-    FindingObservationReference, FindingObservationSource, PoamDetailQuery, PoamListQuery,
-    PoamRisk, PoamStatus, TransitionPoamRequest, UpdatePoamRequest, WaiverDecision,
-    WaiverDecisionRequest,
+    FindingObservationReference, FindingObservationSource, PoamAssigneeRequest, PoamAssigneeView,
+    PoamDetailQuery, PoamListQuery, PoamRisk, PoamStatus, TransitionPoamRequest, UpdatePoamRequest,
+    WaiverDecision, WaiverDecisionRequest,
 };
 use crystal_forge::models::system_states::SystemState;
 use crystal_forge::queries::compliance::nix_policy_observation_reference;
@@ -36,9 +36,40 @@ use crystal_forge::queue::QueueNotifier;
 use crystal_forge::server::jobs::BackgroundJobRegistry;
 use crystal_forge::services::composite_enforcement::persist_evaluation_assessments_in_tx;
 use crystal_forge::services::poam::{self as poam_service, PoamActor, PoamClock, PoamError};
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{PgPool, Postgres, Transaction, migrate::Migrate};
 use std::{sync::Arc, time::Duration};
 use uuid::Uuid;
+
+static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+
+async fn apply_migrations_through(pool: &PgPool, version: i64) {
+    let mut connection = pool.acquire().await.expect("acquire migration connection");
+    connection
+        .ensure_migrations_table()
+        .await
+        .expect("create migrations table");
+    for migration in MIGRATOR
+        .iter()
+        .filter(|migration| migration.version <= version)
+    {
+        connection
+            .apply(migration)
+            .await
+            .unwrap_or_else(|error| panic!("apply migration {}: {error}", migration.version));
+    }
+}
+
+async fn apply_migration(pool: &PgPool, version: i64) {
+    let migration = MIGRATOR
+        .iter()
+        .find(|migration| migration.version == version)
+        .unwrap_or_else(|| panic!("migration {version} is not embedded"));
+    let mut connection = pool.acquire().await.expect("acquire migration connection");
+    connection
+        .apply(migration)
+        .await
+        .unwrap_or_else(|error| panic!("apply migration {version}: {error}"));
+}
 
 #[derive(Clone)]
 struct FixedClock(DateTime<Utc>);
@@ -47,6 +78,512 @@ impl PoamClock for FixedClock {
     fn now(&self) -> DateTime<Utc> {
         self.0
     }
+}
+
+#[sqlx::test(migrations = false)]
+async fn migration_0258_preserves_populated_legacy_poams_and_adds_typed_shape(pool: PgPool) {
+    apply_migrations_through(&pool, 257).await;
+    let fixture = failing_assessment_fixture(&pool).await;
+    let finding_id: Uuid = sqlx::query_scalar(
+        r#"SELECT finding.id
+           FROM composite_policy_assessments assessment
+           JOIN poam_findings finding
+             ON finding.system_id=assessment.system_id
+            AND finding.policy_lineage_id=assessment.policy_lineage_id
+           WHERE assessment.system_id=$1
+           ORDER BY assessment.created_at DESC
+           LIMIT 1"#,
+    )
+    .bind(fixture.system_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    let poam_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO poams(title,owner,risk,created_by) VALUES('Legacy before 0258','Legacy Security Team','high',$1) RETURNING id",
+    )
+    .bind(fixture.user_id)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO poam_finding_links(poam_id,finding_id,linked_by) VALUES($1,$2,$3)")
+        .bind(poam_id)
+        .bind(finding_id)
+        .bind(fixture.user_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    apply_migration(&pool, 258).await;
+
+    let columns: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*) FROM information_schema.columns
+           WHERE table_schema='public' AND table_name='poams'
+             AND column_name=ANY($1)"#,
+    )
+    .bind(vec!["owner_kind", "owner_user_id", "owner_group_name"])
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(columns, 3);
+    let function_exists: bool =
+        sqlx::query_scalar("SELECT to_regprocedure('poam_assignee_view(poams)') IS NOT NULL")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(function_exists);
+    let preserved: (String, Option<String>, Option<Uuid>, Option<String>) = sqlx::query_as(
+        "SELECT owner,owner_kind,owner_user_id,owner_group_name FROM poams WHERE id=$1",
+    )
+    .bind(poam_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(preserved, ("Legacy Security Team".into(), None, None, None));
+    let view: serde_json::Value =
+        sqlx::query_scalar("SELECT poam_assignee_view(poams) FROM poams WHERE id=$1")
+            .bind(poam_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(view["kind"], "legacy");
+    assert_eq!(view["display"], "Legacy Security Team");
+
+    let invalid_shape = sqlx::query(
+        "UPDATE poams SET owner_kind='user',owner_user_id=$2,owner_group_name='group' WHERE id=$1",
+    )
+    .bind(poam_id)
+    .bind(fixture.user_id)
+    .execute(&pool)
+    .await;
+    assert!(invalid_shape.is_err());
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn typed_assignee_create_update_and_legacy_search_matrix(pool: PgPool) {
+    let clock = FixedClock(Utc.with_ymd_and_hms(2026, 9, 12, 12, 0, 0).unwrap());
+    let candidate_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO users(username,first_name,last_name,email) VALUES('typed-owner','  Ada  ','  Lovelace  ','ada@example.invalid') RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO oidc_group_mappings(group_name) VALUES('team:platform/admin')")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let user_fixture = failing_assessment_fixture(&pool).await;
+    let hidden_environment: Uuid = sqlx::query_scalar(
+        "INSERT INTO environments(name,description) VALUES($1,'typed assignee visibility') RETURNING id",
+    )
+    .bind(format!("typed-hidden-{}", Uuid::new_v4().simple()))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE systems SET environment_id=$1 WHERE id=$2")
+        .bind(hidden_environment)
+        .bind(user_fixture.system_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let actor = admin_actor(user_fixture.user_id);
+    let user = poam_service::create(
+        &pool,
+        &actor,
+        assessment_create_request(
+            &pool,
+            &user_fixture,
+            "Typed user owner",
+            "",
+            Some(PoamAssigneeRequest::User {
+                user_id: candidate_id,
+            }),
+        )
+        .await,
+        &clock,
+    )
+    .await
+    .unwrap();
+    assert_eq!(user.poam.owner, "Ada Lovelace");
+    assert_eq!(
+        user.poam.assignee,
+        PoamAssigneeView::User {
+            user_id: candidate_id,
+            display: "Ada Lovelace".into(),
+            available: true,
+        }
+    );
+    let delete_assigned_user = sqlx::query("DELETE FROM users WHERE id=$1")
+        .bind(candidate_id)
+        .execute(&pool)
+        .await;
+    assert!(delete_assigned_user.is_err());
+    let unscoped_assignee = PoamActor {
+        user_id: candidate_id,
+        identifier: "typed-owner".into(),
+        is_admin: false,
+        can_mutate: true,
+        environment_ids: Vec::new(),
+        request_origin: None,
+    };
+    assert!(matches!(
+        poam_service::detail(&pool, &unscoped_assignee, user.poam.id, &clock).await,
+        Err(PoamError::NotFound)
+    ));
+
+    let group_fixture = failing_assessment_fixture(&pool).await;
+    sqlx::query("UPDATE systems SET environment_id=$1 WHERE id=$2")
+        .bind(hidden_environment)
+        .bind(group_fixture.system_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let group_actor = admin_actor(group_fixture.user_id);
+    let group = poam_service::create(
+        &pool,
+        &group_actor,
+        assessment_create_request(
+            &pool,
+            &group_fixture,
+            "Typed group owner",
+            "",
+            Some(PoamAssigneeRequest::OidcGroup {
+                group_name: "  TEAM:Platform/Admin  ".into(),
+            }),
+        )
+        .await,
+        &clock,
+    )
+    .await
+    .unwrap();
+    assert_eq!(group.poam.owner, "team:platform/admin");
+    assert_eq!(
+        group.poam.assignee,
+        PoamAssigneeView::OidcGroup {
+            group_name: "team:platform/admin".into(),
+            display: "team:platform/admin".into(),
+            available: true,
+        }
+    );
+    assert!(matches!(
+        poam_service::detail(&pool, &unscoped_assignee, group.poam.id, &clock).await,
+        Err(PoamError::NotFound)
+    ));
+
+    sqlx::query("DELETE FROM oidc_group_mappings WHERE group_name='team:platform/admin'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let preserved = poam_service::detail(&pool, &group_actor, group.poam.id, &clock)
+        .await
+        .unwrap();
+    assert!(matches!(
+        preserved.poam.assignee,
+        PoamAssigneeView::OidcGroup {
+            available: false,
+            ..
+        }
+    ));
+
+    let unassigned_fixture = failing_assessment_fixture(&pool).await;
+    let unassigned_actor = admin_actor(unassigned_fixture.user_id);
+    let unassigned = poam_service::create(
+        &pool,
+        &unassigned_actor,
+        assessment_create_request(
+            &pool,
+            &unassigned_fixture,
+            "Explicitly unassigned",
+            "",
+            Some(PoamAssigneeRequest::Unassigned),
+        )
+        .await,
+        &clock,
+    )
+    .await
+    .unwrap();
+    assert_eq!(unassigned.poam.owner, "");
+    assert_eq!(unassigned.poam.assignee, PoamAssigneeView::Unassigned);
+
+    let legacy_fixture = failing_assessment_fixture(&pool).await;
+    let legacy_actor = admin_actor(legacy_fixture.user_id);
+    let legacy = poam_service::create(
+        &pool,
+        &legacy_actor,
+        assessment_create_request(
+            &pool,
+            &legacy_fixture,
+            "Legacy owner",
+            "Legacy Security Team",
+            None,
+        )
+        .await,
+        &clock,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        legacy.poam.assignee,
+        PoamAssigneeView::Legacy {
+            display: "Legacy Security Team".into()
+        }
+    );
+    for query in [
+        PoamListQuery {
+            owner: Some("Legacy Security".into()),
+            ..Default::default()
+        },
+        PoamListQuery {
+            q: Some("Legacy Security".into()),
+            ..Default::default()
+        },
+    ] {
+        let page = poam_service::list(&pool, &legacy_actor, &query, &clock)
+            .await
+            .unwrap();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].id, legacy.poam.id);
+    }
+
+    sqlx::query("INSERT INTO oidc_group_mappings(group_name) VALUES('team:platform/admin')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let updated = poam_service::update(
+        &pool,
+        &group_actor,
+        group.poam.id,
+        UpdatePoamRequest {
+            revision: group.poam.revision,
+            assignee: Some(PoamAssigneeRequest::User {
+                user_id: candidate_id,
+            }),
+            ..Default::default()
+        },
+        &clock,
+    )
+    .await
+    .unwrap();
+    assert_eq!(updated.poam.revision, group.poam.revision + 1);
+    assert!(matches!(
+        updated.poam.assignee,
+        PoamAssigneeView::User { user_id, .. } if user_id == candidate_id
+    ));
+    let activity = updated
+        .activity
+        .iter()
+        .find(|event| event.kind == "updated")
+        .unwrap();
+    assert_eq!(activity.payload["old"]["assignee"]["kind"], "oidc_group");
+    assert_eq!(activity.payload["new"]["assignee"]["kind"], "user");
+
+    let legacy_cleared = poam_service::update(
+        &pool,
+        &group_actor,
+        updated.poam.id,
+        UpdatePoamRequest {
+            revision: updated.poam.revision,
+            owner: Some("Compatibility Owner".into()),
+            ..Default::default()
+        },
+        &clock,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        legacy_cleared.poam.assignee,
+        PoamAssigneeView::Legacy { .. }
+    ));
+    let stored: (Option<String>, Option<Uuid>, Option<String>) =
+        sqlx::query_as("SELECT owner_kind,owner_user_id,owner_group_name FROM poams WHERE id=$1")
+            .bind(updated.poam.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(stored, (None, None, None));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn typed_assignee_rejects_invalid_identity_ambiguity_and_shape(pool: PgPool) {
+    let fixture = failing_assessment_fixture(&pool).await;
+    let actor = admin_actor(fixture.user_id);
+    let clock = FixedClock(Utc.with_ymd_and_hms(2026, 9, 12, 12, 0, 0).unwrap());
+    let disabled_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO users(username,first_name,last_name,email,is_active) VALUES('disabled-owner','Disabled','Owner','disabled@example.invalid',false) RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    for assignee in [
+        PoamAssigneeRequest::User {
+            user_id: Uuid::new_v4(),
+        },
+        PoamAssigneeRequest::User {
+            user_id: disabled_id,
+        },
+    ] {
+        let error = poam_service::create(
+            &pool,
+            &actor,
+            assessment_create_request(&pool, &fixture, "Invalid user", "", Some(assignee)).await,
+            &clock,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            PoamError::Validation("invalid_assignee_user", _)
+        ));
+    }
+    for group_name in [
+        "missing-group".to_string(),
+        "invalid group".to_string(),
+        "x".repeat(129),
+    ] {
+        let error = poam_service::create(
+            &pool,
+            &actor,
+            assessment_create_request(
+                &pool,
+                &fixture,
+                "Invalid group",
+                "",
+                Some(PoamAssigneeRequest::OidcGroup { group_name }),
+            )
+            .await,
+            &clock,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            PoamError::Validation("invalid_assignee_group", _)
+        ));
+    }
+    let ambiguous = poam_service::create(
+        &pool,
+        &actor,
+        assessment_create_request(
+            &pool,
+            &fixture,
+            "Ambiguous owner",
+            "Client label",
+            Some(PoamAssigneeRequest::Unassigned),
+        )
+        .await,
+        &clock,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(
+        ambiguous,
+        PoamError::Validation("ambiguous_assignee", _)
+    ));
+
+    let invalid_shape = sqlx::query(
+        r#"INSERT INTO poams(title,owner,owner_kind,owner_user_id,owner_group_name,risk,created_by)
+           VALUES('Invalid shape','label','user',$1,'group','high',$2)"#,
+    )
+    .bind(disabled_id)
+    .bind(fixture.user_id)
+    .execute(&pool)
+    .await;
+    assert!(invalid_shape.is_err());
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn assignee_catalog_is_mutator_only_bounded_minimal_and_non_authorizing(pool: PgPool) {
+    let hidden_environment: Uuid = sqlx::query_scalar(
+        "INSERT INTO environments(name,description) VALUES($1,'hidden') RETURNING id",
+    )
+    .bind(format!("typed-hidden-{}", Uuid::new_v4()))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let assigned_user = insert_user(
+        &pool,
+        "catalog-person@example.invalid",
+        Some("Catalog Person"),
+    )
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO oidc_group_mappings(group_name,role,environments) VALUES('catalog:group','operator',$1)",
+    )
+    .bind(vec!["sensitive-environment-name"])
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (_, viewer) = role_session(&pool, AuthRole::Viewer).await;
+    let (_, operator) = role_session(&pool, AuthRole::Operator).await;
+    let (_, admin) = role_session(&pool, AuthRole::Admin).await;
+    let base = poam_http_server(pool.clone()).await;
+    let client = reqwest::Client::new();
+
+    let viewer_response = http_request(
+        &client,
+        reqwest::Method::GET,
+        format!("{base}/api/v1/poams/assignees"),
+        &viewer,
+        None,
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(viewer_response.status(), reqwest::StatusCode::FORBIDDEN);
+    for token in [&operator, &admin] {
+        let response = http_request(
+            &client,
+            reqwest::Method::GET,
+            format!("{base}/api/v1/poams/assignees"),
+            token,
+            None,
+        )
+        .send()
+        .await
+        .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert!(body["people"].as_array().unwrap().windows(2).all(|rows| {
+            let left = rows[0]["label"].as_str().unwrap().to_ascii_lowercase();
+            let right = rows[1]["label"].as_str().unwrap().to_ascii_lowercase();
+            left <= right
+        }));
+        assert!(body["groups"].as_array().unwrap().windows(2).all(|rows| {
+            rows[0]["group_name"].as_str().unwrap() <= rows[1]["group_name"].as_str().unwrap()
+        }));
+        let person = body["people"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|person| person["user_id"] == assigned_user.id.to_string())
+            .unwrap();
+        assert_eq!(person.as_object().unwrap().len(), 2);
+        let group = body["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|group| group["group_name"] == "catalog:group")
+            .unwrap();
+        assert_eq!(group.as_object().unwrap().len(), 1);
+        assert!(!body.to_string().contains("sensitive-environment-name"));
+        assert!(!body.to_string().contains("operator"));
+    }
+
+    // SECURITY: Assignment metadata must not create environment membership or
+    // otherwise become an environment-visibility grant.
+    let membership_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM user_environment_memberships WHERE user_id=$1 AND environment_id=$2",
+    )
+    .bind(assigned_user.id)
+    .bind(hidden_environment)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(membership_count, 0);
 }
 
 struct Fixture {
@@ -464,6 +1001,7 @@ async fn create_service_poam(
             title: title.into(),
             plan: "Matrix remediation".into(),
             owner: "Security Matrix".into(),
+            assignee: None,
             target_date: Some(clock.today() + chrono::Duration::days(30)),
             risk: PoamRisk::High,
             default_milestones: false,
@@ -622,6 +1160,29 @@ fn legacy_create_request(
         title: "Legacy policy remediation".into(),
         plan: "Correct the custom check".into(),
         owner: "Security".into(),
+        assignee: None,
+        target_date: None,
+        risk: PoamRisk::High,
+        default_milestones: false,
+        assignment_version_ids: Vec::new(),
+    }
+}
+
+async fn assessment_create_request(
+    pool: &PgPool,
+    fixture: &AssessmentFixture,
+    title: &str,
+    owner: &str,
+    assignee: Option<PoamAssigneeRequest>,
+) -> CreatePoamRequest {
+    CreatePoamRequest {
+        assessment_id: Some(current_assessment_id(pool, fixture).await),
+        finding_id: None,
+        observation: None,
+        title: title.into(),
+        plan: "Resolve the finding".into(),
+        owner: owner.into(),
+        assignee,
         target_date: None,
         risk: PoamRisk::High,
         default_milestones: false,
@@ -1447,6 +2008,7 @@ async fn removed_enforce_policy_invalidates_legacy_poam_assessment(pool: PgPool)
             title: "Removed policy evidence".into(),
             plan: "Replace stale evidence".into(),
             owner: "Security Matrix".into(),
+            assignee: None,
             target_date: Some(clock.today() + chrono::Duration::days(30)),
             risk: PoamRisk::High,
             default_milestones: false,
@@ -1524,6 +2086,7 @@ async fn report_only_transition_invalidates_legacy_poam_assessment(pool: PgPool)
             title: "Report-only policy evidence".into(),
             plan: "Replace stale evidence".into(),
             owner: "Security Matrix".into(),
+            assignee: None,
             target_date: Some(clock.today() + chrono::Duration::days(30)),
             risk: PoamRisk::High,
             default_milestones: false,
@@ -1762,6 +2325,14 @@ async fn assignment_snapshot(pool: &PgPool, assignment_version_id: Uuid) -> serd
 
 async fn assessment_fixture(pool: &PgPool) -> AssessmentFixture {
     assessment_fixture_with_policy(pool, None).await
+}
+
+async fn failing_assessment_fixture(pool: &PgPool) -> AssessmentFixture {
+    let fixture = assessment_fixture(pool).await;
+    let mut tx = pool.begin().await.unwrap();
+    persist_assessment(&mut tx, &fixture, EnforcementOutcome::Fail).await;
+    tx.commit().await.unwrap();
+    fixture
 }
 
 async fn assessment_fixture_for_policy(
@@ -2072,6 +2643,10 @@ async fn poam_http_server(pool: PgPool) -> String {
         .route(
             "/api/v1/poams/compatible",
             get(poam_handlers::compatible_poams),
+        )
+        .route(
+            "/api/v1/poams/assignees",
+            get(poam_handlers::assignee_catalog),
         )
         .route(
             "/api/v1/poams/:id",
@@ -2946,6 +3521,7 @@ async fn close_waits_for_and_rejects_a_superseding_failed_assessment(pool: PgPoo
             title: "Race-safe remediation".into(),
             plan: "Deploy and verify".into(),
             owner: "Security".into(),
+            assignee: None,
             target_date: None,
             risk: PoamRisk::High,
             default_milestones: true,
@@ -3616,6 +4192,7 @@ async fn close_waits_for_an_uncommitted_waiver_revocation(pool: PgPool) {
             title: "Waiver race remediation".into(),
             plan: "Validate waiver serialization".into(),
             owner: "Security".into(),
+            assignee: None,
             target_date: None,
             risk: PoamRisk::Medium,
             default_milestones: false,

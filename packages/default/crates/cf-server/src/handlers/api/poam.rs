@@ -167,6 +167,25 @@ pub async fn list(
     }
 }
 
+/// Returns the bounded safe assignee catalog to a POA&M mutator.
+///
+/// Returns a structured error response when authentication, actor lookup,
+/// Operator/Admin authorization, or catalog loading fails.
+pub async fn assignee_catalog(
+    State(pool): State<PgPool>,
+    RequireAuth(user): RequireAuth,
+    headers: HeaderMap,
+) -> Response {
+    let actor = match actor(&pool, user, &headers).await {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    match poam::assignee_catalog(&pool, &actor).await {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => error_response(error),
+    }
+}
+
 /// Selects finding relationships and optional bounded history pages.
 ///
 /// Omitting both history fields selects the bounded compatibility page for

@@ -296,6 +296,7 @@ async fn main() -> anyhow::Result<()> {
             get(poam::assignment_relationships),
         )
         .route("/api/v1/poams/compatible", get(poam::compatible_poams))
+        .route("/api/v1/poams/assignees", get(poam::assignee_catalog))
         .route("/api/v1/poams/:id", get(poam::get).patch(poam::update))
         .route("/api/v1/poams/:id/transition", post(poam::transition))
         .route("/api/v1/poams/:id/notes", post(poam::note))

@@ -7,6 +7,89 @@ use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// Selects a server-validated POA&M assignee.
+///
+/// User and group labels are not accepted from clients. The server resolves a
+/// display snapshot from the stable identity. `Unassigned` clears both the
+/// typed identity and the compatibility `owner` snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PoamAssigneeRequest {
+    /// Assigns an active human user by stable UUID.
+    User {
+        /// Identifies the user to assign.
+        user_id: Uuid,
+    },
+    /// Assigns a currently configured OIDC group by normalized name.
+    OidcGroup {
+        /// Gives the group name that the server must normalize and resolve.
+        group_name: String,
+    },
+    /// Removes the current assignment.
+    Unassigned,
+}
+
+/// Reports the typed or compatibility assignee represented by a POA&M.
+///
+/// `available` reports current catalog eligibility. The persisted stable
+/// identity and display snapshot remain available when a user is disabled or
+/// an OIDC mapping is removed. `Legacy` represents pre-typed owner text that
+/// the server did not infer into an identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PoamAssigneeView {
+    /// Reports a user assignment and its server-resolved display snapshot.
+    User {
+        /// Identifies the assigned user.
+        user_id: Uuid,
+        /// Contains the display label captured when the assignment changed.
+        display: String,
+        /// Indicates whether the user is currently active and human.
+        available: bool,
+    },
+    /// Reports an OIDC group assignment and its normalized display snapshot.
+    OidcGroup {
+        /// Contains the normalized stable group name.
+        group_name: String,
+        /// Contains the display label captured when the assignment changed.
+        display: String,
+        /// Indicates whether the group mapping is currently configured.
+        available: bool,
+    },
+    /// Reports an explicit or legacy unassigned POA&M.
+    Unassigned,
+    /// Reports compatibility owner text with no inferred stable identity.
+    Legacy {
+        /// Contains the preserved compatibility owner text.
+        display: String,
+    },
+}
+
+/// Identifies one active human user available for POA&M assignment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct PoamAssigneePerson {
+    /// Identifies the user without exposing account or authorization metadata.
+    pub user_id: Uuid,
+    /// Gives the server-resolved safe display label.
+    pub label: String,
+}
+
+/// Identifies one configured OIDC group available for POA&M assignment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct PoamAssigneeGroup {
+    /// Gives the normalized group name and no mapping authorization metadata.
+    pub group_name: String,
+}
+
+/// Provides the bounded POA&M assignee catalog.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PoamAssigneeCatalog {
+    /// Lists active human users in deterministic display order.
+    pub people: Vec<PoamAssigneePerson>,
+    /// Lists configured normalized OIDC groups in deterministic name order.
+    pub groups: Vec<PoamAssigneeGroup>,
+}
+
 /// Represents the persisted lifecycle state of a POA&M.
 ///
 /// `Open`, `InProgress`, and `Blocked` can transition among each other or to
@@ -85,9 +168,14 @@ pub struct CreatePoamRequest {
     /// Gives the remediation plan; an empty value records no plan yet.
     #[serde(default)]
     pub plan: String,
-    /// Identifies the responsible person or team; an empty value is unassigned.
+    /// Preserves the free-form compatibility owner for legacy clients.
+    ///
+    /// New clients use `assignee` and send this field as an empty string.
     #[serde(default)]
     pub owner: String,
+    /// Selects a typed assignee when present.
+    #[serde(default)]
+    pub assignee: Option<PoamAssigneeRequest>,
     /// Gives the planned completion date when one has been selected.
     pub target_date: Option<NaiveDate>,
     /// Classifies the remediation risk.
@@ -113,8 +201,12 @@ pub struct UpdatePoamRequest {
     pub title: Option<String>,
     /// Replaces the remediation plan when present.
     pub plan: Option<String>,
-    /// Replaces the responsible owner when present.
+    /// Replaces the free-form compatibility owner when present.
+    ///
+    /// This field cannot be combined with `assignee`.
     pub owner: Option<String>,
+    /// Replaces the typed assignee when present.
+    pub assignee: Option<PoamAssigneeRequest>,
     /// Replaces, clears, or preserves the target date.
     pub target_date: Option<Option<NaiveDate>>,
     /// Replaces the risk classification when present.
@@ -404,8 +496,11 @@ pub struct PoamSummary {
     pub title: String,
     /// Gives the current remediation plan.
     pub plan: String,
-    /// Identifies the responsible person or team.
+    /// Contains the compatibility display snapshot used by legacy clients.
     pub owner: String,
+    /// Reports typed identity, display snapshot, and current availability.
+    #[sqlx(json)]
+    pub assignee: PoamAssigneeView,
     /// Gives the planned completion date.
     pub target_date: Option<NaiveDate>,
     /// Gives the normalized risk classification.

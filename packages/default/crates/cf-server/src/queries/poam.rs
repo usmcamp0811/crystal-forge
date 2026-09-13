@@ -11,14 +11,14 @@ use uuid::Uuid;
 
 use crate::models::poam::{
     ActivityView, AssignmentReferenceView, CompatibleFinding, DashboardSummary,
-    FindingRequirementView, FindingView, HistoryCursor, MilestoneView, Page, PoamDetail,
-    PoamListQuery, PoamSummary, Rollup, VerificationAttemptView, VerificationItemView,
-    WaiverListQuery, WaiverView,
+    FindingRequirementView, FindingView, HistoryCursor, MilestoneView, Page, PoamAssigneeCatalog,
+    PoamAssigneeGroup, PoamAssigneePerson, PoamDetail, PoamListQuery, PoamSummary, Rollup,
+    VerificationAttemptView, VerificationItemView, WaiverListQuery, WaiverView,
 };
 
 const SUMMARY_COLUMNS: &str = r#"
     p.id, 'POAM-' || lpad(p.human_number::text, 4, '0') AS human_id,
-    p.title, p.plan, p.owner, p.target_date, p.risk, p.status, p.revision,
+    p.title, p.plan, p.owner, poam_assignee_view(p) AS assignee, p.target_date, p.risk, p.status, p.revision,
     COALESCE(p.status <> 'completed' AND p.target_date < $1, FALSE) AS overdue,
     (SELECT COUNT(DISTINCT l.finding_id) FROM poam_finding_links l
       WHERE l.poam_id = p.id AND ((p.status <> 'completed' AND l.retired_at IS NULL)
@@ -28,7 +28,7 @@ const SUMMARY_COLUMNS: &str = r#"
 
 const SUMMARY_COLUMNS_BEFORE_TODAY: &str = r#"
     p.id, 'POAM-' || lpad(p.human_number::text, 4, '0') AS human_id,
-    p.title, p.plan, p.owner, p.target_date, p.risk, p.status, p.revision,
+    p.title, p.plan, p.owner, poam_assignee_view(p) AS assignee, p.target_date, p.risk, p.status, p.revision,
     COALESCE(p.status <> 'completed' AND p.target_date <
 "#;
 
@@ -48,6 +48,7 @@ struct RelatedPoamSummary {
     title: String,
     plan: String,
     owner: String,
+    assignee: sqlx::types::Json<crate::models::poam::PoamAssigneeView>,
     target_date: Option<NaiveDate>,
     risk: String,
     status: String,
@@ -71,6 +72,7 @@ impl RelatedPoamSummary {
                 title: self.title,
                 plan: self.plan,
                 owner: self.owner,
+                assignee: self.assignee.0,
                 target_date: self.target_date,
                 risk: self.risk,
                 status: self.status,
@@ -84,6 +86,41 @@ impl RelatedPoamSummary {
             },
         )
     }
+}
+
+/// Loads a bounded, deterministic catalog of eligible POA&M assignees.
+///
+/// The query intentionally excludes roles, environment memberships, claims,
+/// and all other authorization data.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot execute or decode either query.
+pub async fn assignee_catalog(pool: &PgPool, limit: i64) -> Result<PoamAssigneeCatalog> {
+    let people = sqlx::query_as::<_, PoamAssigneePerson>(
+        r#"SELECT id AS user_id,
+                  COALESCE(NULLIF(btrim(concat_ws(' ',NULLIF(btrim(first_name),''),NULLIF(btrim(last_name),''))),''),
+                           NULLIF(btrim(username),''),email) AS label
+           FROM users
+           WHERE is_active AND user_type='human'
+           ORDER BY lower(COALESCE(NULLIF(btrim(concat_ws(' ',NULLIF(btrim(first_name),''),NULLIF(btrim(last_name),''))),''),
+                                   NULLIF(btrim(username),''),email)),id
+           LIMIT $1"#,
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    let groups = sqlx::query_as::<_, PoamAssigneeGroup>(
+        r#"SELECT group_name FROM oidc_group_mappings
+           WHERE group_name=lower(btrim(group_name))
+             AND octet_length(group_name)<=128
+             AND group_name~'^[a-z0-9_.:/-]+$'
+           ORDER BY group_name,id LIMIT $1"#,
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(PoamAssigneeCatalog { people, groups })
 }
 
 /// Loads visible assessment-to-finding identities in request order.

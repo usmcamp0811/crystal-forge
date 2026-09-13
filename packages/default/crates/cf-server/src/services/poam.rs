@@ -49,6 +49,7 @@ const MAX_PLAN_BYTES: usize = 16_384;
 const MAX_CANDIDATES_SCANNED: i64 = 1_000;
 const MAX_RESOLVER_FINDINGS: usize = 1_000;
 const MAX_ROLLUP_POAMS: i64 = 1_000;
+const MAX_ASSIGNEE_CATALOG_ITEMS: i64 = 1_000;
 impl PoamClock for SystemClock {
     fn now(&self) -> DateTime<Utc> {
         Utc::now()
@@ -248,6 +249,126 @@ fn normalized_search(value: &mut Option<String>) {
         .take()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty());
+}
+
+#[derive(Debug)]
+struct ResolvedAssignee {
+    owner: String,
+    kind: Option<&'static str>,
+    user_id: Option<Uuid>,
+    group_name: Option<String>,
+}
+
+fn normalize_oidc_group_name(value: &str) -> Result<String, PoamError> {
+    // COMPATIBILITY: This is the same normalization and accepted character set
+    // as the administrative OIDC group-mapping API.
+    let normalized = value.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return Err(PoamError::Validation(
+            "invalid_assignee_group",
+            "Group name is required".into(),
+        ));
+    }
+    if normalized.len() > 128 {
+        return Err(PoamError::Validation(
+            "invalid_assignee_group",
+            "Group name must be 128 characters or fewer".into(),
+        ));
+    }
+    if !normalized
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | ':' | '/'))
+    {
+        return Err(PoamError::Validation(
+            "invalid_assignee_group",
+            "Group name may only contain letters, numbers, '-', '_', '.', ':', '/'".into(),
+        ));
+    }
+    Ok(normalized)
+}
+
+async fn resolve_assignee_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    request: &PoamAssigneeRequest,
+) -> Result<ResolvedAssignee, PoamError> {
+    match request {
+        PoamAssigneeRequest::User { user_id } => {
+            let user = sqlx::query_as::<_, (Option<String>, Option<String>, String, String)>(
+                r#"SELECT first_name,last_name,username,email FROM users
+                   WHERE id=$1 AND is_active AND user_type='human'"#,
+            )
+            .bind(user_id)
+            .fetch_optional(&mut **tx)
+            .await?
+            .ok_or_else(|| {
+                PoamError::Validation(
+                    "invalid_assignee_user",
+                    "Assignee user must exist and be an active human user".into(),
+                )
+            })?;
+            let full_name = format!(
+                "{} {}",
+                user.0.as_deref().unwrap_or_default().trim(),
+                user.1.as_deref().unwrap_or_default().trim()
+            )
+            .trim()
+            .to_owned();
+            let owner = if !full_name.is_empty() {
+                full_name
+            } else if !user.2.trim().is_empty() {
+                user.2.trim().to_owned()
+            } else {
+                user.3.trim().to_owned()
+            };
+            Ok(ResolvedAssignee {
+                owner,
+                kind: Some("user"),
+                user_id: Some(*user_id),
+                group_name: None,
+            })
+        }
+        PoamAssigneeRequest::OidcGroup { group_name } => {
+            let group_name = normalize_oidc_group_name(group_name)?;
+            let exists: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM oidc_group_mappings WHERE group_name=$1)",
+            )
+            .bind(&group_name)
+            .fetch_one(&mut **tx)
+            .await?;
+            if !exists {
+                return Err(PoamError::Validation(
+                    "invalid_assignee_group",
+                    "Assignee group must have a current OIDC group mapping".into(),
+                ));
+            }
+            Ok(ResolvedAssignee {
+                owner: group_name.clone(),
+                kind: Some("oidc_group"),
+                user_id: None,
+                group_name: Some(group_name),
+            })
+        }
+        PoamAssigneeRequest::Unassigned => Ok(ResolvedAssignee {
+            owner: String::new(),
+            kind: None,
+            user_id: None,
+            group_name: None,
+        }),
+    }
+}
+
+/// Returns the bounded assignee catalog available to POA&M mutators.
+///
+/// # Errors
+///
+/// Returns [`PoamError::Forbidden`] when the actor cannot mutate POA&Ms. It
+/// returns a database error when the catalog cannot be loaded.
+pub async fn assignee_catalog(
+    pool: &PgPool,
+    actor: &PoamActor,
+) -> Result<PoamAssigneeCatalog, PoamError> {
+    require_mutator(actor)?;
+    Ok(poam::assignee_catalog(pool, MAX_ASSIGNEE_CATALOG_ITEMS).await?)
 }
 
 async fn require_poam_contexts_tx(
@@ -798,6 +919,12 @@ pub async fn create(
     clock: &dyn PoamClock,
 ) -> Result<PoamDetail, PoamError> {
     require_mutator(actor)?;
+    if request.assignee.is_some() && !request.owner.trim().is_empty() {
+        return Err(PoamError::Validation(
+            "ambiguous_assignee",
+            "Provide either a non-empty owner or a typed assignee, not both".into(),
+        ));
+    }
     let title = request.title.trim();
     if title.is_empty() {
         return Err(PoamError::Validation(
@@ -823,6 +950,10 @@ pub async fn create(
     assignment_version_ids.sort_unstable();
     assignment_version_ids.dedup();
     let mut tx = pool.begin().await?;
+    let resolved_assignee = match request.assignee.as_ref() {
+        Some(assignee) => Some(resolve_assignee_tx(&mut tx, assignee).await?),
+        None => None,
+    };
     // CONCURRENCY: Assessment, derivation-result, and CVE-scan writers acquire
     // this stable key before commit. Acquire it before resolving evidence so a
     // writer that wins the lock is visible to the following READ COMMITTED
@@ -863,12 +994,23 @@ pub async fn create(
     .await?;
     let poam_id: Uuid = sqlx::query_scalar(
         r#"
-        INSERT INTO poams(title,plan,owner,target_date,risk,created_by)
-        VALUES($1,$2,$3,$4,$5,$6) RETURNING id"#,
+        INSERT INTO poams(title,plan,owner,owner_kind,owner_user_id,owner_group_name,target_date,risk,created_by)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id"#,
     )
     .bind(title)
     .bind(request.plan.trim())
-    .bind(request.owner.trim())
+    .bind(
+        resolved_assignee
+            .as_ref()
+            .map_or_else(|| request.owner.trim(), |assignee| assignee.owner.as_str()),
+    )
+    .bind(resolved_assignee.as_ref().and_then(|assignee| assignee.kind))
+    .bind(resolved_assignee.as_ref().and_then(|assignee| assignee.user_id))
+    .bind(
+        resolved_assignee
+            .as_ref()
+            .and_then(|assignee| assignee.group_name.as_deref()),
+    )
     .bind(request.target_date.or_else(|| {
         request
             .default_milestones
@@ -909,7 +1051,7 @@ pub async fn create(
     }
     let mut payload:Value=sqlx::query_scalar(r#"SELECT jsonb_build_object(
       'poam',jsonb_build_object('id',id,'human_number',human_number,'title',title,'plan',plan,
-        'owner',owner,'target_date',target_date,'risk',risk,'status',status,'revision',revision,
+        'owner',owner,'assignee',poam_assignee_view(poams),'target_date',target_date,'risk',risk,'status',status,'revision',revision,
         'created_by',created_by,'created_at',created_at),
        'finding',jsonb_build_object('finding_id',$2::uuid,'assessment_id',$3::uuid,'observation',$4::jsonb),
       'assignments',COALESCE((SELECT jsonb_agg(jsonb_build_object('assignment_id',assignment_id,
@@ -1382,6 +1524,12 @@ pub async fn update(
 ) -> Result<PoamDetail, PoamError> {
     require_mutator(actor)?;
     require_visible(pool, actor, id).await?;
+    if request.owner.is_some() && request.assignee.is_some() {
+        return Err(PoamError::Validation(
+            "ambiguous_assignee",
+            "Provide either owner or assignee in an update, not both".into(),
+        ));
+    }
     if request
         .title
         .as_deref()
@@ -1403,14 +1551,30 @@ pub async fn update(
     }
     let mut tx = pool.begin().await?;
     lock_mutable_poam(&mut tx, actor, id, request.revision).await?;
-    let old:Value=sqlx::query_scalar("SELECT jsonb_build_object('title',title,'plan',plan,'owner',owner,'target_date',target_date,'risk',risk) FROM poams WHERE id=$1")
+    let resolved_assignee = match request.assignee.as_ref() {
+        Some(assignee) => Some(resolve_assignee_tx(&mut tx, assignee).await?),
+        None => None,
+    };
+    let old:Value=sqlx::query_scalar("SELECT jsonb_build_object('title',title,'plan',plan,'owner',owner,'assignee',poam_assignee_view(poams),'target_date',target_date,'risk',risk) FROM poams WHERE id=$1")
       .bind(id).fetch_one(&mut *tx).await?;
+    let owner = resolved_assignee
+        .as_ref()
+        .map(|assignee| assignee.owner.as_str())
+        .or_else(|| request.owner.as_deref().map(str::trim));
+    let assignee_changed = resolved_assignee.is_some() || request.owner.is_some();
     sqlx::query(r#"UPDATE poams SET title=COALESCE($2,title),plan=COALESCE($3,plan),owner=COALESCE($4,owner),
-        target_date=CASE WHEN $5 THEN $6 ELSE target_date END,risk=COALESCE($7,risk) WHERE id=$1"#)
+        owner_kind=CASE WHEN $5 THEN $6 ELSE owner_kind END,
+        owner_user_id=CASE WHEN $5 THEN $7 ELSE owner_user_id END,
+        owner_group_name=CASE WHEN $5 THEN $8 ELSE owner_group_name END,
+        target_date=CASE WHEN $9 THEN $10 ELSE target_date END,risk=COALESCE($11,risk) WHERE id=$1"#)
         .bind(id).bind(request.title.as_deref().map(str::trim)).bind(request.plan.as_deref().map(str::trim))
-        .bind(request.owner.as_deref().map(str::trim)).bind(request.target_date.is_some())
-        .bind(request.target_date.flatten()).bind(request.risk.map(PoamRisk::as_str)).execute(&mut *tx).await?;
-    let new:Value=sqlx::query_scalar("SELECT jsonb_build_object('title',title,'plan',plan,'owner',owner,'target_date',target_date,'risk',risk) FROM poams WHERE id=$1")
+        .bind(owner).bind(assignee_changed)
+        .bind(resolved_assignee.as_ref().and_then(|assignee| assignee.kind))
+        .bind(resolved_assignee.as_ref().and_then(|assignee| assignee.user_id))
+        .bind(resolved_assignee.as_ref().and_then(|assignee| assignee.group_name.as_deref()))
+        .bind(request.target_date.is_some()).bind(request.target_date.flatten())
+        .bind(request.risk.map(PoamRisk::as_str)).execute(&mut *tx).await?;
+    let new:Value=sqlx::query_scalar("SELECT jsonb_build_object('title',title,'plan',plan,'owner',owner,'assignee',poam_assignee_view(poams),'target_date',target_date,'risk',risk) FROM poams WHERE id=$1")
       .bind(id).fetch_one(&mut *tx).await?;
     if old == new {
         tx.commit().await?;

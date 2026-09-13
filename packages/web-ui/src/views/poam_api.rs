@@ -52,10 +52,99 @@ impl PoamStatus {
         }
     }
 
+    /// Returns the stable lifecycle description for status controls.
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::Open => "Deficiency acknowledged; remediation not started.",
+            Self::InProgress => "Remediation work underway.",
+            Self::Blocked => {
+                "Remediation cannot proceed because a dependency or decision is pending."
+            }
+            Self::AwaitingVerification => {
+                "Work reported complete; waiting on a passing Crystal Forge evaluation."
+            }
+            Self::Completed => "Remediation verified by a passing evaluation and closed.",
+        }
+    }
+
     /// Returns whether this state permits an active remediation relationship.
     pub const fn is_active(self) -> bool {
         !matches!(self, Self::Completed)
     }
+}
+
+/// Selects a server-validated POA&M assignee.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PoamAssigneeRequest {
+    /// Assigns an active Crystal Forge user by stable UUID.
+    User {
+        /// Identifies the user.
+        user_id: Uuid,
+    },
+    /// Assigns a currently configured normalized OIDC group.
+    OidcGroup {
+        /// Gives the group name for server normalization and validation.
+        group_name: String,
+    },
+    /// Clears the assignment.
+    Unassigned,
+}
+
+/// Reports the typed or historical assignee for one POA&M.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PoamAssigneeView {
+    /// Reports a user identity and its server-resolved display snapshot.
+    User {
+        /// Identifies the assigned user.
+        user_id: Uuid,
+        /// Contains the display label captured at assignment time.
+        display: String,
+        /// Indicates whether the user remains eligible for new assignments.
+        available: bool,
+    },
+    /// Reports an OIDC group and its normalized display snapshot.
+    OidcGroup {
+        /// Contains the normalized configured group name.
+        group_name: String,
+        /// Contains the display label captured at assignment time.
+        display: String,
+        /// Indicates whether the group remains configured.
+        available: bool,
+    },
+    /// Reports an unassigned POA&M.
+    Unassigned,
+    /// Reports preserved compatibility owner text with no inferred identity.
+    Legacy {
+        /// Contains the historical owner snapshot.
+        display: String,
+    },
+}
+
+/// Identifies one active user available for POA&M assignment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PoamAssigneePerson {
+    /// Identifies the user.
+    pub user_id: Uuid,
+    /// Contains the server-resolved safe display label.
+    pub label: String,
+}
+
+/// Identifies one configured OIDC group available for POA&M assignment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PoamAssigneeGroup {
+    /// Contains the normalized configured group name.
+    pub group_name: String,
+}
+
+/// Contains the bounded catalog available to POA&M mutators.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PoamAssigneeCatalog {
+    /// Lists active Crystal Forge users in deterministic display order.
+    pub people: Vec<PoamAssigneePerson>,
+    /// Lists configured normalized OIDC groups in deterministic name order.
+    pub groups: Vec<PoamAssigneeGroup>,
 }
 
 /// Represents the persisted POA&M risk category.
@@ -202,8 +291,13 @@ pub struct PoamSummary {
     pub title: String,
     /// Contains the remediation plan text.
     pub plan: String,
-    /// Contains the responsible owner label.
+    /// Contains the free-form compatibility owner for legacy clients.
+    ///
+    /// The production UI sends an empty string and uses `assignee`.
     pub owner: String,
+    /// Contains typed assignee metadata when the server supports it.
+    #[serde(default)]
+    pub assignee: Option<PoamAssigneeView>,
     /// Contains the planned completion date when one is set.
     pub target_date: Option<NaiveDate>,
     /// Contains the persisted risk category.
@@ -694,6 +788,9 @@ pub struct CreatePoamRequest {
     pub plan: String,
     /// Contains the responsible owner label.
     pub owner: String,
+    /// Selects a typed assignee for the production UI.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<PoamAssigneeRequest>,
     /// Sets the planned completion date when provided.
     pub target_date: Option<NaiveDate>,
     /// Sets the persisted remediation risk.
@@ -713,8 +810,13 @@ pub struct UpdatePoamRequest {
     pub title: Option<String>,
     /// Replaces the remediation plan when present.
     pub plan: Option<String>,
-    /// Replaces the owner label when present.
+    /// Replaces the free-form compatibility owner when present.
+    ///
+    /// This field cannot be combined with `assignee`.
     pub owner: Option<String>,
+    /// Replaces or clears the typed assignee when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<PoamAssigneeRequest>,
     /// Preserves, clears, or sets the target date through nested option semantics.
     pub target_date: Option<Option<NaiveDate>>,
     /// Replaces the risk category when present.
@@ -1072,6 +1174,21 @@ pub async fn fetch_poam(id: Uuid, query: &PoamDetailQuery) -> Result<PoamDetail,
     request(
         "GET",
         &with_query(&format!("/poams/{id}"), query)?,
+        None::<&()>,
+    )
+    .await
+}
+
+/// Fetches the bounded People and Groups catalog for POA&M assignment.
+///
+/// # Errors
+///
+/// Returns [`PoamApiError`] when transport fails, the caller cannot mutate
+/// POA&Ms, or the response cannot be decoded.
+pub async fn fetch_assignee_catalog() -> Result<PoamAssigneeCatalog, PoamApiError> {
+    request(
+        "GET",
+        &format!("{}/poams/assignees", base_url()),
         None::<&()>,
     )
     .await
@@ -1557,6 +1674,7 @@ mod tests {
             title: format!("POA&M {id}"),
             plan: "Plan".to_string(),
             owner: "Owner".to_string(),
+            assignee: None,
             target_date: None,
             risk: PoamRisk::Medium,
             status: PoamStatus::Completed,
@@ -1580,6 +1698,10 @@ mod tests {
         assert!(!PoamStatus::Completed.is_active());
         assert_eq!(PoamRisk::High.label(), "High");
         assert_eq!(PoamRisk::High.category_label(), "CAT I");
+        assert_eq!(
+            PoamStatus::AwaitingVerification.description(),
+            "Work reported complete; waiting on a passing Crystal Forge evaluation."
+        );
         assert_eq!(PoamRisk::Medium.category_label(), "CAT II");
         assert_eq!(PoamRisk::Low.category_label(), "CAT III");
     }
@@ -1937,5 +2059,39 @@ mod tests {
         let value = serde_json::to_value(request).unwrap();
         assert_eq!(value["revision"], 7);
         assert!(value["target_date"].is_null());
+    }
+
+    #[test]
+    fn typed_assignee_requests_do_not_accept_display_labels() {
+        let user_id = Uuid::from_u128(44);
+        let value = serde_json::to_value(PoamAssigneeRequest::User { user_id }).unwrap();
+        assert_eq!(value["kind"], "user");
+        assert_eq!(value["user_id"], user_id.to_string());
+        assert!(value.get("display").is_none());
+
+        let group = serde_json::to_value(PoamAssigneeRequest::OidcGroup {
+            group_name: "Team:Compliance".into(),
+        })
+        .unwrap();
+        assert_eq!(group["kind"], "oidc_group");
+        assert!(group.get("label").is_none());
+
+        let create = serde_json::to_value(CreatePoamRequest {
+            assessment_id: Some(Uuid::from_u128(45)),
+            finding_id: None,
+            observation: None,
+            title: "Remediate finding".into(),
+            plan: String::new(),
+            owner: String::new(),
+            assignee: Some(PoamAssigneeRequest::User { user_id }),
+            target_date: None,
+            risk: PoamRisk::Medium,
+            default_milestones: true,
+            assignment_version_ids: vec![],
+        })
+        .unwrap();
+        assert_eq!(create["owner"], "");
+        assert_eq!(create["assignee"]["user_id"], user_id.to_string());
+        assert!(create["assignee"].get("display").is_none());
     }
 }
