@@ -15774,7 +15774,7 @@ security.audit.enable = true;</fixtext>
       if ((await activityPagePromise).status() !== 200) throw new Error("Activity continuation request failed");
       await assertVisible(detail.getByText("Added note: History note 100", { exact: true }), "Activity continuation must append older events");
       const historyActivity = detail.locator(`[data-activity-kind="note"]`).filter({ hasText: "History note 100" });
-      await assertVisible(historyActivity.getByText(`Actor: ${historyActorDisplay}`, { exact: true }), "Activity must identify its actor");
+      await assertVisible(historyActivity.locator(".poam-activity-actor").getByText(historyActorDisplay, { exact: true }), "Activity must identify its actor in a compact column");
       await assertVisible(historyActivity.locator("time"), "Activity must render its timestamp");
       if (await historyActivity.getByText("Diagnostics", { exact: true }).locator("..").evaluate((node) => node.open)) {
         throw new Error("Raw activity diagnostics must remain collapsed by default");
@@ -15819,7 +15819,7 @@ security.audit.enable = true;</fixtext>
       const progressResponse = await progressResponsePromise;
       if (progressResponse.status() !== 200) throw new Error(`In-progress transition returned ${progressResponse.status()}: ${await progressResponse.text()}`);
       await assertVisible(detail.getByText("In Progress", { exact: true }).first(), "Status transition must reconcile");
-      await detail.getByPlaceholder("Add a durable note").fill("Browser persisted durable note");
+      await detail.getByPlaceholder("Add a note...").fill("Browser persisted durable note");
       const noteResponsePromise = page.waitForResponse(
         (response) => response.url().endsWith(`/api/v1/poams/${poam.id}/notes`) && response.request().method() === "POST",
       );
@@ -15832,23 +15832,66 @@ security.audit.enable = true;</fixtext>
       }
       await assertVisible(detail.getByText("Added note: Browser persisted durable note", { exact: true }), "Durable note must appear in activity");
 
-      await detail.getByPlaceholder("Add milestone").fill("Browser release gate");
+      await detail.getByPlaceholder("Add a milestone...").fill("Browser release gate");
       await detail.locator('.poam-milestone-add input[type="date"]').fill("2026-10-31");
       const addMilestoneResponsePromise = page.waitForResponse(
         (response) => response.url().endsWith(`/api/v1/poams/${poam.id}/milestones`) && response.request().method() === "POST",
       );
-      await detail.locator(".poam-milestone-add").getByRole("button", { name: "Add", exact: true }).click();
+      await detail.locator(".poam-milestone-add").getByRole("button", { name: "Add milestone", exact: true }).click();
       const addMilestoneResponse = await addMilestoneResponsePromise;
       const addedDetail = await addMilestoneResponse.json();
       const addedMilestone = addedDetail.milestones.find((item) => item.title === "Browser release gate");
       if (!addedMilestone) throw new Error(`Milestone response omitted added row: ${JSON.stringify(addedDetail.milestones)}`);
       const milestone = detail.locator(`[data-testid="poam-milestone"][data-milestone-id="${addedMilestone.id}"]`);
       await assertVisible(milestone, "Added milestone must reconcile from server response");
-      await milestone.getByRole("button", { name: "Complete", exact: true }).click();
-      await assertVisible(milestone.getByRole("button", { name: "Reopen", exact: true }), "Completed milestone must expose reopen");
-      await milestone.getByRole("button", { name: "Reopen", exact: true }).click();
-      await assertVisible(milestone.getByRole("button", { name: "Complete", exact: true }), "Reopened milestone must persist");
-      await milestone.getByTitle("Remove milestone").click();
+      await assertVisible(milestone.getByText("due Oct 31", { exact: true }), "Open milestone must show its compact due date");
+      const milestoneTitleEditor = milestone.getByLabel("Milestone title for Browser release gate", { exact: true });
+      await assertHidden(milestoneTitleEditor, "Milestone editing controls must not be permanent row content");
+      await milestone.getByRole("button", { name: "Edit milestone Browser release gate", exact: true }).click();
+      await assertVisible(milestoneTitleEditor, "Compact title interaction must expose optional milestone editing");
+      if (!(await milestoneTitleEditor.evaluate((node) => node === document.activeElement))) {
+        throw new Error("Opening optional milestone editing must focus its title field");
+      }
+      await milestone.getByLabel("Milestone target date for Browser release gate", { exact: true }).fill("2026-11-01");
+      const updateMilestoneResponsePromise = page.waitForResponse(
+        (response) => response.url().endsWith(`/api/v1/poams/${poam.id}/milestones/${addedMilestone.id}`) && response.request().method() === "PATCH",
+      );
+      await milestone.getByRole("button", { name: "Save", exact: true }).click();
+      if ((await updateMilestoneResponsePromise).status() !== 200) throw new Error("Milestone update failed");
+      await assertHidden(milestoneTitleEditor, "Saving milestone editing must restore compact checklist geometry");
+      await assertVisible(milestone.getByText("due Nov 1", { exact: true }), "Saved milestone must reconcile its updated date");
+      if (!(await milestone.getByRole("button", { name: "Edit milestone Browser release gate", exact: true }).evaluate((node) => node === document.activeElement))) {
+        throw new Error("Saving optional milestone editing must restore focus to its trigger after reconciliation");
+      }
+      await milestone.getByRole("button", { name: "Edit milestone Browser release gate", exact: true }).click();
+      await milestone.getByRole("button", { name: "Cancel", exact: true }).click();
+      await assertHidden(milestoneTitleEditor, "Cancelling milestone editing must restore compact checklist geometry");
+      if (!(await milestone.getByRole("button", { name: "Edit milestone Browser release gate", exact: true }).evaluate((node) => node === document.activeElement))) {
+        throw new Error("Closing optional milestone editing must restore focus to its trigger");
+      }
+      const completeResponsePromise = page.waitForResponse(
+        (response) => response.url().endsWith(`/api/v1/poams/${poam.id}/milestones/${addedMilestone.id}`) && response.request().method() === "PATCH",
+      );
+      await milestone.getByRole("checkbox", { name: "Mark Browser release gate complete", exact: true }).click();
+      const completeResponse = await completeResponsePromise;
+      if (completeResponse.status() !== 200 || completeResponse.request().postDataJSON().completed !== true) {
+        throw new Error(`Milestone checkbox must send completed=true: ${completeResponse.request().postData()}`);
+      }
+      await assertVisible(milestone.getByRole("checkbox", { name: "Reopen Browser release gate", exact: true }), "Completed milestone must expose reopen through its checkbox");
+      await assertVisible(milestone.getByText(/^done /), "Completed milestone must show its compact completion date");
+      if (!(await milestone.locator(".poam-milestone-title").evaluate((node) => getComputedStyle(node).textDecorationLine.includes("line-through")))) {
+        throw new Error("Completed milestone title must be struck through");
+      }
+      const reopenResponsePromise = page.waitForResponse(
+        (response) => response.url().endsWith(`/api/v1/poams/${poam.id}/milestones/${addedMilestone.id}`) && response.request().method() === "PATCH",
+      );
+      await milestone.getByRole("checkbox", { name: "Reopen Browser release gate", exact: true }).click();
+      const reopenResponse = await reopenResponsePromise;
+      if (reopenResponse.status() !== 200 || reopenResponse.request().postDataJSON().completed !== false) {
+        throw new Error(`Milestone checkbox must send completed=false: ${reopenResponse.request().postData()}`);
+      }
+      await assertVisible(milestone.getByRole("checkbox", { name: "Mark Browser release gate complete", exact: true }), "Reopened milestone must persist");
+      await milestone.getByRole("button", { name: "Remove milestone Browser release gate", exact: true }).click();
       await assertHidden(detail.getByTestId("poam-milestone").filter({ hasText: "Browser release gate" }), "Removed milestone must disappear");
 
       await page.reload({ timeout: LOAD_TIMEOUT });
@@ -16103,12 +16146,12 @@ security.audit.enable = true;</fixtext>
       if (planResponse.status() !== 200 || planRequest.plan !== "Deploy the correction, rerun evaluation, and retain the exact PASS evidence.") {
         throw new Error(`Canonical labeled plan save did not persist the exact draft: ${JSON.stringify(planRequest)}`);
       }
-      await detail.getByPlaceholder("Add milestone").fill("Authoritative reevaluation");
+      await detail.getByPlaceholder("Add a milestone...").fill("Authoritative reevaluation");
       await detail.locator('.poam-milestone-add input[type="date"]').fill("2026-10-01");
       const addMilestoneResponsePromise = page.waitForResponse(
         (response) => response.url().endsWith(`/api/v1/poams/${poam.id}/milestones`) && response.request().method() === "POST",
       );
-      await detail.locator(".poam-milestone-add").getByRole("button", { name: "Add", exact: true }).click();
+      await detail.locator(".poam-milestone-add").getByRole("button", { name: "Add milestone", exact: true }).click();
       const addMilestoneResponse = await addMilestoneResponsePromise;
       if (addMilestoneResponse.status() !== 201) throw new Error(`Canonical milestone returned ${addMilestoneResponse.status()}`);
       const addedMilestone = (await addMilestoneResponse.json()).milestones.find((item) => item.title === "Authoritative reevaluation");

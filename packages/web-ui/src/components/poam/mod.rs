@@ -1446,8 +1446,8 @@ pub fn PoamDetailTray(props: PoamDetailTrayProps) -> Element {
                     }
                     textarea { class: "input focus-ring poam-plan", rows: "5", value: "{plan}", disabled: readonly, placeholder: "What will change, where, and how it will be verified", oninput: move |event| plan.set(event.value()) }
                 }
-                MilestonesSection { milestones: detail.milestones.clone(), drafts: milestone_drafts, new_title: milestone_title, new_target: milestone_target, readonly, on_add: move |values: (String, String)| { let (new_title, new_target) = values; let Ok(target_date) = NaiveDate::parse_from_str(&new_target, "%Y-%m-%d") else { message.set(Some("Enter a valid milestone target date.".to_string())); return; }; let request = AddMilestoneRequest { revision, title: new_title, target_date }; busy.set(Some("Adding milestone".to_string())); spawn(async move { match poam_api::add_poam_milestone(props.poam_id, &request).await { Ok(next) => { milestone_title.set(String::new()); milestone_target.set(String::new()); reconcile(next); }, Err(err) => handle_error("adding milestone", err) } }); }, on_update: move |values: (Uuid, MilestoneDraft, Option<bool>)| { let (id, draft, completed) = values; let Ok(target_date) = NaiveDate::parse_from_str(&draft.target, "%Y-%m-%d") else { message.set(Some("Enter a valid milestone target date.".to_string())); return; }; let request = UpdateMilestoneRequest { revision, title: Some(draft.title), target_date: Some(target_date), completed }; busy.set(Some("Updating milestone".to_string())); spawn(async move { match poam_api::update_poam_milestone(props.poam_id, id, &request).await { Ok(next) => reconcile(next), Err(err) => handle_error("updating milestone", err) } }); }, on_remove: move |id| { busy.set(Some("Removing milestone".to_string())); spawn(async move { match poam_api::remove_poam_milestone(props.poam_id, id, revision).await { Ok(next) => reconcile(next), Err(err) => handle_error("removing milestone", err) } }); } }
-                section { class: "poam-tray-section", header { h3 { "Activity" } } ActivityList { activity: detail.activity.clone() } if detail.activity_has_more { button { class: "btn btn-ghost focus-ring", "data-testid": "poam-load-more-activity", disabled: history_loading().is_some(), onclick: move |_| if let Some(query) = activity_page_query.clone() { load_more(HistoryPageKind::Activity, query); }, if history_loading() == Some(HistoryPageKind::Activity) { "Loading…" } else { "Load more activity" } } } div { class: "poam-note-form", input { class: "input focus-ring", value: "{note}", placeholder: "Add a durable note", disabled: readonly, oninput: move |event| note.set(event.value()) } button { class: "btn btn-ghost focus-ring", disabled: readonly || note.read().trim().is_empty(), onclick: move |_| { let request = AddNoteRequest { revision, text: note.read().trim().to_string() }; busy.set(Some("Adding note".to_string())); spawn(async move { match poam_api::add_poam_note(props.poam_id, &request).await { Ok(next) => { note.set(String::new()); reconcile(next); }, Err(err) => handle_error("adding note", err) } }); }, "Add note" } } }
+                MilestonesSection { milestones: detail.milestones.clone(), drafts: milestone_drafts, new_title: milestone_title, new_target: milestone_target, readonly, on_add: move |values: (String, String)| { let (new_title, new_target) = values; let Ok(target_date) = NaiveDate::parse_from_str(&new_target, "%Y-%m-%d") else { message.set(Some("Enter a valid milestone target date.".to_string())); return; }; let request = AddMilestoneRequest { revision, title: new_title, target_date }; busy.set(Some("Adding milestone".to_string())); spawn(async move { match poam_api::add_poam_milestone(props.poam_id, &request).await { Ok(next) => { milestone_title.set(String::new()); milestone_target.set(String::new()); reconcile(next); }, Err(err) => handle_error("adding milestone", err) } }); }, on_update: move |values: (Uuid, Option<MilestoneDraft>, Option<bool>)| { let (id, draft, completed) = values; let target_date = match draft.as_ref() { Some(draft) => { let Ok(target_date) = NaiveDate::parse_from_str(&draft.target, "%Y-%m-%d") else { message.set(Some("Enter a valid milestone target date.".to_string())); return; }; Some(target_date) }, None => None }; let request = UpdateMilestoneRequest { revision, title: draft.map(|value| value.title), target_date, completed }; busy.set(Some("Updating milestone".to_string())); spawn(async move { match poam_api::update_poam_milestone(props.poam_id, id, &request).await { Ok(next) => reconcile(next), Err(err) => handle_error("updating milestone", err) } }); }, on_remove: move |id| { busy.set(Some("Removing milestone".to_string())); spawn(async move { match poam_api::remove_poam_milestone(props.poam_id, id, revision).await { Ok(next) => reconcile(next), Err(err) => handle_error("removing milestone", err) } }); } }
+                section { class: "poam-tray-section", header { h3 { "Activity" } } ActivityList { activity: detail.activity.clone() } if detail.activity_has_more { button { class: "btn btn-ghost focus-ring", "data-testid": "poam-load-more-activity", disabled: history_loading().is_some(), onclick: move |_| if let Some(query) = activity_page_query.clone() { load_more(HistoryPageKind::Activity, query); }, if history_loading() == Some(HistoryPageKind::Activity) { "Loading…" } else { "Load more activity" } } } div { class: "poam-note-form", input { class: "input focus-ring", aria_label: "Add a note", value: "{note}", placeholder: "Add a note...", disabled: readonly, oninput: move |event| note.set(event.value()), onkeydown: move |event| if event.key() == Key::Enter && !readonly && !note.read().trim().is_empty() { let request = AddNoteRequest { revision, text: note.read().trim().to_string() }; busy.set(Some("Adding note".to_string())); spawn(async move { match poam_api::add_poam_note(props.poam_id, &request).await { Ok(next) => { note.set(String::new()); reconcile(next); }, Err(err) => handle_error("adding note", err) } }); } } button { class: "btn btn-ghost focus-ring", disabled: readonly || note.read().trim().is_empty(), onclick: move |_| { let request = AddNoteRequest { revision, text: note.read().trim().to_string() }; busy.set(Some("Adding note".to_string())); spawn(async move { match poam_api::add_poam_note(props.poam_id, &request).await { Ok(next) => { note.set(String::new()); reconcile(next); }, Err(err) => handle_error("adding note", err) } }); }, "Add note" } } }
             }
             DialogFocusSentinel { dialog_id: "poam-detail-dialog".to_string(), boundary: DialogFocusBoundary::First }
         }
@@ -1547,7 +1547,7 @@ struct MilestonesSectionProps {
     new_target: Signal<String>,
     readonly: bool,
     on_add: EventHandler<(String, String)>,
-    on_update: EventHandler<(Uuid, MilestoneDraft, Option<bool>)>,
+    on_update: EventHandler<(Uuid, Option<MilestoneDraft>, Option<bool>)>,
     on_remove: EventHandler<Uuid>,
 }
 
@@ -1556,15 +1556,96 @@ fn MilestonesSection(props: MilestonesSectionProps) -> Element {
     let mut drafts = props.drafts;
     let mut new_title = props.new_title;
     let mut new_target = props.new_target;
-    rsx! { section { class: "poam-tray-section", header { h3 { "Milestones · {props.milestones.iter().filter(|item| item.completed_at.is_some()).count()} of {props.milestones.len()} complete" } }
-        div { class: "poam-milestones", for milestone in props.milestones.clone() { if let Some(draft) = drafts.read().get(&milestone.id).cloned() { div { class: "poam-milestone", "data-testid": "poam-milestone", "data-milestone-id": "{milestone.id}", input { class: "input focus-ring", value: "{draft.title}", disabled: props.readonly, oninput: move |event| { let mut next = drafts.read().clone(); if let Some(value) = next.get_mut(&milestone.id) { value.title = event.value(); } drafts.set(next); } } input { class: "input focus-ring mono", r#type: "date", value: "{draft.target}", disabled: props.readonly, oninput: move |event| { let mut next = drafts.read().clone(); if let Some(value) = next.get_mut(&milestone.id) { value.target = event.value(); } drafts.set(next); } } button { class: "btn btn-ghost xs focus-ring", disabled: props.readonly, onclick: move |_| if let Some(value) = drafts.read().get(&milestone.id).cloned() { props.on_update.call((milestone.id, value, None)); }, "Save" } button { class: "btn btn-ghost xs focus-ring", disabled: props.readonly, onclick: move |_| if let Some(value) = drafts.read().get(&milestone.id).cloned() { props.on_update.call((milestone.id, value, Some(milestone.completed_at.is_none()))); }, if milestone.completed_at.is_some() { "Reopen" } else { "Complete" } } button { class: "btn-icon focus-ring", title: "Remove milestone", disabled: props.readonly, onclick: move |_| props.on_remove.call(milestone.id), Icon { name: IconName::Trash, size: 12 } } } } } }
-        div { class: "poam-milestone-add", input { class: "input focus-ring", value: "{new_title}", placeholder: "Add milestone", disabled: props.readonly, oninput: move |event| new_title.set(event.value()) } input { class: "input focus-ring mono", r#type: "date", value: "{new_target}", disabled: props.readonly, oninput: move |event| new_target.set(event.value()) } button { class: "btn btn-ghost focus-ring", disabled: props.readonly || new_title.read().trim().is_empty() || new_target.read().is_empty(), onclick: move |_| props.on_add.call((new_title.read().trim().to_string(), new_target.read().clone())), Icon { name: IconName::Plus, size: 12 } "Add" } }
-    } }
+    let mut editing = use_signal(|| None::<Uuid>);
+    rsx! {
+        section { class: "poam-tray-section",
+            header { h3 { "Milestones · {props.milestones.iter().filter(|item| item.completed_at.is_some()).count()} of {props.milestones.len()} complete" } }
+            div { class: "poam-milestones",
+                for milestone in props.milestones.clone() {
+                    {
+                        let completed = milestone.completed_at.is_some();
+                        let action_label = if completed {
+                            format!("Reopen {}", milestone.title)
+                        } else {
+                            format!("Mark {} complete", milestone.title)
+                        };
+                        let date_label = milestone
+                            .completed_at
+                            .map(|at| format!("done {}", short_display_date(at.date_naive())))
+                            .unwrap_or_else(|| format!("due {}", short_display_date(milestone.target_date)));
+                        let is_editing = editing() == Some(milestone.id);
+                        let editor_id = format!("poam-milestone-editor-{}", milestone.id);
+                        let edit_button_id = format!("poam-milestone-edit-{}", milestone.id);
+                        let save_focus_id = edit_button_id.clone();
+                        let cancel_focus_id = edit_button_id.clone();
+                        let reset_title = milestone.title.clone();
+                        let reset_target = milestone.target_date.to_string();
+                        rsx! {
+                            div { class: "poam-milestone", "data-testid": "poam-milestone", "data-milestone-id": "{milestone.id}",
+                                input { class: "focus-ring poam-milestone-check", r#type: "checkbox", checked: completed, disabled: props.readonly, aria_label: "{action_label}", onchange: move |_| props.on_update.call((milestone.id, None, Some(!completed))) }
+                                button { id: "{edit_button_id}", class: if completed { "poam-milestone-title poam-milestone-completed focus-ring" } else { "poam-milestone-title focus-ring" }, aria_disabled: props.readonly, tabindex: if props.readonly { "-1" } else { "0" }, title: "Edit milestone", aria_label: "Edit milestone {milestone.title}", aria_expanded: is_editing, aria_controls: "{editor_id}", onclick: move |_| if !props.readonly { editing.set(Some(milestone.id)); }, "{milestone.title}" }
+                                span { class: "mono poam-milestone-date", "{date_label}" }
+                                button { class: "btn-icon focus-ring", title: "Remove milestone", aria_label: "Remove milestone {milestone.title}", disabled: props.readonly, onclick: move |_| props.on_remove.call(milestone.id), Icon { name: IconName::Trash, size: 12 } }
+                                if is_editing {
+                                    if let Some(draft) = drafts.read().get(&milestone.id).cloned() {
+                                        div { id: "{editor_id}", class: "poam-milestone-editor", role: "group", aria_label: "Edit milestone {milestone.title}",
+                                            input { class: "input focus-ring", aria_label: "Milestone title for {milestone.title}", autofocus: true, value: "{draft.title}", disabled: props.readonly, oninput: move |event| { let mut next = drafts.read().clone(); if let Some(value) = next.get_mut(&milestone.id) { value.title = event.value(); } drafts.set(next); } }
+                                            input { class: "input focus-ring mono", aria_label: "Milestone target date for {milestone.title}", r#type: "date", value: "{draft.target}", disabled: props.readonly, oninput: move |event| { let mut next = drafts.read().clone(); if let Some(value) = next.get_mut(&milestone.id) { value.target = event.value(); } drafts.set(next); } }
+                                            button { class: "btn btn-ghost xs focus-ring", disabled: props.readonly || draft.title.trim().is_empty() || draft.target.is_empty(), onclick: move |_| { props.on_update.call((milestone.id, Some(draft.clone()), None)); editing.set(None); focus_element_by_id(&save_focus_id); }, "Save" }
+                                            button { class: "btn btn-ghost xs focus-ring", disabled: props.readonly, onclick: move |_| { let mut next = drafts.read().clone(); next.insert(milestone.id, MilestoneDraft { title: reset_title.clone(), target: reset_target.clone() }); drafts.set(next); editing.set(None); focus_element_by_id(&cancel_focus_id); }, "Cancel" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            div { class: "poam-milestone-add",
+                input { class: "input focus-ring", aria_label: "Milestone title", value: "{new_title}", placeholder: "Add a milestone...", disabled: props.readonly, oninput: move |event| new_title.set(event.value()), onkeydown: move |event| if event.key() == Key::Enter && !props.readonly && !new_title.read().trim().is_empty() && !new_target.read().is_empty() { props.on_add.call((new_title.read().trim().to_string(), new_target.read().clone())); } }
+                input { class: "input focus-ring mono", aria_label: "Milestone target date", r#type: "date", value: "{new_target}", disabled: props.readonly, oninput: move |event| new_target.set(event.value()) }
+                button { class: "btn btn-ghost focus-ring poam-milestone-add-action", title: "Add milestone", aria_label: "Add milestone", disabled: props.readonly || new_title.read().trim().is_empty() || new_target.read().is_empty(), onclick: move |_| props.on_add.call((new_title.read().trim().to_string(), new_target.read().clone())), Icon { name: IconName::Plus, size: 12 } }
+            }
+        }
+    }
 }
 
 #[component]
 fn ActivityList(activity: Vec<ActivityView>) -> Element {
-    rsx! { div { class: "poam-activity", if activity.is_empty() { div { class: "poam-empty", "No durable activity has been recorded." } } for item in activity { { let payload = serde_json::to_string_pretty(&item.payload).unwrap_or_else(|_| "null".to_string()); let description = activity_description(&item); let actor = item.actor_display.clone().unwrap_or_else(|| if item.actor_user_id.is_some() { "Deleted or unavailable user".to_string() } else { "System".to_string() }); rsx! { div { class: "poam-activity-row", "data-activity-kind": "{item.kind}", div { time { class: "mono", "{item.created_at}" } span { "Actor: {actor}" } } strong { "{description}" } details { summary { "Diagnostics" } pre { "{payload}" } } } } } } } }
+    rsx! { div { class: "poam-activity", if activity.is_empty() { div { class: "poam-empty", "No durable activity has been recorded." } } for item in activity { { let payload = serde_json::to_string_pretty(&item.payload).unwrap_or_else(|_| "null".to_string()); let description = activity_description(&item); let actor = activity_actor(&item); let timestamp = item.created_at.to_rfc3339(); rsx! { div { class: "poam-activity-row", "data-activity-kind": "{item.kind}", time { class: "mono poam-activity-date", datetime: "{timestamp}", title: "{timestamp}", "{item.created_at.date_naive()}" } span { class: "mono poam-activity-actor", "{actor}" } span { class: "poam-activity-message", "{description}" } details { class: "poam-activity-diagnostics", summary { "Diagnostics" } pre { "{payload}" } } } } } } } }
+}
+
+fn short_display_date(date: NaiveDate) -> String {
+    date.format("%b %-d").to_string()
+}
+
+fn focus_element_by_id(id: &str) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        use wasm_bindgen::JsCast;
+
+        if let Some(element) = web_sys::window()
+            .and_then(|window| window.document())
+            .and_then(|document| document.get_element_by_id(id))
+            .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok())
+        {
+            let _ = element.focus();
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = id;
+    }
+}
+
+fn activity_actor(activity: &ActivityView) -> String {
+    activity.actor_display.clone().unwrap_or_else(|| {
+        if activity.actor_user_id.is_some() {
+            "Deleted or unavailable user".to_string()
+        } else {
+            "System".to_string()
+        }
+    })
 }
 
 fn payload_text<'a>(activity: &'a ActivityView, key: &str) -> Option<&'a str> {
@@ -1576,8 +1657,8 @@ fn payload_text<'a>(activity: &'a ActivityView, key: &str) -> Option<&'a str> {
 
 fn activity_description(activity: &ActivityView) -> String {
     match activity.kind.as_str() {
-        "created" => "Created the POA&M and linked its initial finding".to_string(),
-        "updated" => "Updated POA&M metadata or remediation plan".to_string(),
+        "created" => "POA&M created".to_string(),
+        "updated" => updated_activity_description(activity),
         "status_changed" => match (payload_text(activity, "from"), payload_text(activity, "to")) {
             (Some(from), Some(to)) => format!("Changed status from {from} to {to}"),
             _ => "Changed POA&M status".to_string(),
@@ -1585,8 +1666,14 @@ fn activity_description(activity: &ActivityView) -> String {
         "milestone_added" => payload_text(activity, "title")
             .map(|title| format!("Added milestone “{title}”"))
             .unwrap_or_else(|| "Added a remediation milestone".to_string()),
-        "milestone_updated" => "Updated a remediation milestone".to_string(),
-        "milestone_removed" => "Removed a remediation milestone".to_string(),
+        "milestone_updated" => milestone_activity_description(activity),
+        "milestone_removed" => activity
+            .payload
+            .get("old")
+            .and_then(|value| value.get("title"))
+            .and_then(serde_json::Value::as_str)
+            .map(|title| format!("Removed milestone “{title}”"))
+            .unwrap_or_else(|| "Removed a remediation milestone".to_string()),
         "note" => payload_text(activity, "text")
             .map(|text| format!("Added note: {text}"))
             .unwrap_or_else(|| "Added a durable note".to_string()),
@@ -1595,12 +1682,99 @@ fn activity_description(activity: &ActivityView) -> String {
         "assignment_linked" => "Linked an immutable assignment version reference".to_string(),
         "assignment_unlinked" => "Unlinked an immutable assignment version reference".to_string(),
         "verification_attempted" => payload_text(activity, "outcome")
-            .map(|outcome| format!("Recorded {outcome} verification attempt"))
-            .unwrap_or_else(|| "Recorded an authoritative verification attempt".to_string()),
-        "closed" => "Closed the POA&M after authoritative verification".to_string(),
-        "reopened" => "Reopened the POA&M".to_string(),
+            .map(|outcome| format!("Verification {outcome}"))
+            .unwrap_or_else(|| "Verification recorded".to_string()),
+        "closed" => "POA&M closed after authoritative verification".to_string(),
+        "reopened" => "POA&M reopened".to_string(),
         other => format!("Recorded {} activity", other.replace('_', " ")),
     }
+}
+
+fn updated_activity_description(activity: &ActivityView) -> String {
+    let Some(old) = activity.payload.get("old") else {
+        return "Updated POA&M metadata or remediation plan".to_string();
+    };
+    let Some(new) = activity.payload.get("new") else {
+        return "Updated POA&M metadata or remediation plan".to_string();
+    };
+    let mut changes = Vec::new();
+    if old.get("plan") != new.get("plan") {
+        changes.push("Updated remediation plan".to_string());
+    }
+    if old.get("assignee") != new.get("assignee") || old.get("owner") != new.get("owner") {
+        let from = assignee_payload_label(old).unwrap_or_else(|| "Unassigned".to_string());
+        let to = assignee_payload_label(new).unwrap_or_else(|| "Unassigned".to_string());
+        changes.push(format!("Changed assignee from {from} to {to}"));
+    }
+    if old.get("target_date") != new.get("target_date") {
+        if let Some(target) = new.get("target_date").and_then(serde_json::Value::as_str) {
+            changes.push(format!(
+                "Changed target date to {}",
+                payload_date_label(target)
+            ));
+        } else {
+            changes.push("Cleared target date".to_string());
+        }
+    }
+    if old.get("risk") != new.get("risk") {
+        let from = old.get("risk").and_then(serde_json::Value::as_str);
+        let to = new.get("risk").and_then(serde_json::Value::as_str);
+        if let (Some(from), Some(to)) = (from, to) {
+            changes.push(format!("Changed risk from {from} to {to}"));
+        }
+    }
+    if old.get("title") != new.get("title") {
+        changes.push("Changed POA&M title".to_string());
+    }
+    if changes.is_empty() {
+        "Updated POA&M metadata or remediation plan".to_string()
+    } else {
+        changes.join("; ")
+    }
+}
+
+fn assignee_payload_label(value: &serde_json::Value) -> Option<String> {
+    value
+        .get("assignee")
+        .and_then(|assignee| assignee.get("display"))
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| value.get("owner").and_then(serde_json::Value::as_str))
+        .filter(|label| !label.is_empty())
+        .map(str::to_string)
+}
+
+fn payload_date_label(value: &str) -> String {
+    NaiveDate::parse_from_str(value, "%Y-%m-%d")
+        .map(short_display_date)
+        .unwrap_or_else(|_| value.to_string())
+}
+
+fn milestone_activity_description(activity: &ActivityView) -> String {
+    let old = activity.payload.get("old");
+    let new = activity.payload.get("new");
+    let title = new
+        .and_then(|value| value.get("title"))
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            old.and_then(|value| value.get("title"))
+                .and_then(serde_json::Value::as_str)
+        });
+    let completion_changed = old.and_then(|value| value.get("completed_at"))
+        != new.and_then(|value| value.get("completed_at"));
+    if completion_changed {
+        let completed = new
+            .and_then(|value| value.get("completed_at"))
+            .is_some_and(|value| !value.is_null());
+        return match (completed, title) {
+            (true, Some(title)) => format!("Completed milestone “{title}”"),
+            (false, Some(title)) => format!("Reopened milestone “{title}”"),
+            (true, None) => "Completed a remediation milestone".to_string(),
+            (false, None) => "Reopened a remediation milestone".to_string(),
+        };
+    }
+    title
+        .map(|title| format!("Updated milestone “{title}”"))
+        .unwrap_or_else(|| "Updated a remediation milestone".to_string())
 }
 
 /// Configures the aggregate finding and POA&M count strip.
@@ -1910,6 +2084,93 @@ mod tests {
         assert!(message.contains("drafts are preserved"));
     }
 
+    fn activity(kind: &str, payload: serde_json::Value) -> ActivityView {
+        ActivityView {
+            id: Uuid::from_u128(20),
+            actor_user_id: Some(Uuid::from_u128(21)),
+            actor_display: Some("j.okafor".into()),
+            kind: kind.into(),
+            payload,
+            created_at: chrono::DateTime::parse_from_rfc3339("2026-08-21T14:15:16.123456Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        }
+    }
+
+    #[test]
+    fn activity_descriptions_report_typed_assignee_and_milestone_changes() {
+        let assignment = activity(
+            "updated",
+            serde_json::json!({
+                "old": {"owner":"Security", "assignee":{"kind":"oidc_group", "display":"Security"}},
+                "new": {"owner":"Jane Operator", "assignee":{"kind":"user", "display":"Jane Operator"}}
+            }),
+        );
+        assert_eq!(
+            activity_description(&assignment),
+            "Changed assignee from Security to Jane Operator"
+        );
+
+        let completed = activity(
+            "milestone_updated",
+            serde_json::json!({
+                "old": {"title":"Deploy to staging", "completed_at":null},
+                "new": {"title":"Deploy to staging", "completed_at":"2026-08-21T14:15:16Z"}
+            }),
+        );
+        assert_eq!(
+            activity_description(&completed),
+            "Completed milestone “Deploy to staging”"
+        );
+    }
+
+    #[test]
+    fn activity_uses_concise_dates_and_keeps_full_timestamp_as_metadata() {
+        let item = activity(
+            "note",
+            serde_json::json!({"text":"Staging validation clean"}),
+        );
+        assert_eq!(item.created_at.date_naive().to_string(), "2026-08-21");
+        assert_eq!(activity_actor(&item), "j.okafor");
+        assert_eq!(
+            activity_description(&item),
+            "Added note: Staging validation clean"
+        );
+        assert_eq!(short_display_date(item.created_at.date_naive()), "Aug 21");
+
+        let source = include_str!("mod.rs");
+        assert!(source.contains("class: \"mono poam-activity-date\""));
+        assert!(source.contains("class: \"mono poam-activity-actor\""));
+        assert!(source.contains("class: \"poam-activity-message\""));
+        assert!(source.contains("class: \"poam-activity-diagnostics\""));
+        let activity_component = source
+            .split("fn ActivityList")
+            .nth(1)
+            .unwrap()
+            .split("fn short_display_date")
+            .next()
+            .unwrap();
+        assert!(!activity_component.contains("Actor: {actor}"));
+    }
+
+    #[test]
+    fn milestone_default_surface_is_a_compact_accessible_checklist() {
+        let source = include_str!("mod.rs");
+        assert!(source.contains("class: \"focus-ring poam-milestone-check\""));
+        assert!(source.contains("format!(\"Mark {} complete\", milestone.title)"));
+        assert!(source.contains("format!(\"Reopen {}\", milestone.title)"));
+        assert!(source.contains("props.on_update.call((milestone.id, None, Some(!completed)))"));
+        assert!(source.contains("poam-milestone-completed"));
+        assert!(source.contains(
+            "title: \"Remove milestone\", aria_label: \"Remove milestone {milestone.title}\""
+        ));
+        assert!(source.contains("aria_disabled: props.readonly"));
+        assert!(source.contains("title: \"Add milestone\", aria_label: \"Add milestone\""));
+        assert!(source.contains("if is_editing"));
+        assert!(source.contains("placeholder: \"Add a milestone...\""));
+        assert!(source.contains("placeholder: \"Add a note...\""));
+    }
+
     #[test]
     fn responsive_verification_and_disabled_controls_have_scoped_styles() {
         let css = include_str!("../../../assets/app.css");
@@ -1918,5 +2179,8 @@ mod tests {
         assert!(css.contains("--cf-disabled-control-text: #9ca3af"));
         assert!(css.contains("--cf-disabled-control-text: #4b5563"));
         assert!(css.contains(".poam-tray :is(button, input, select, textarea):disabled"));
+        assert!(css.contains(".poam-milestone-title.poam-milestone-completed"));
+        assert!(css.contains(".poam-activity-diagnostics { grid-column: 3"));
+        assert!(css.contains(".poam-activity-message, .poam-activity-diagnostics"));
     }
 }
