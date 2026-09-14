@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-14 08:57'
+updated_date: '2026-09-14 09:03'
 labels:
   - design-parity
   - web-ui
@@ -68,6 +68,9 @@ references:
   - git commit 1204efdc8cf7e25ed01a634832456df0262c08af
   - git commit def63adf405e52ceb249459688c0cae6ff564a54
   - git commit 0867808d1aa54dd4ead8b6b403c84285ce15420b
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2845881618'
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2846236338'
+  - da7473a18a5f4f907350a402da413b75975bcb57
 documentation:
   - docs/design/CrystalForge/app.jsx
   - docs/design/CrystalForge/components/SystemDetail.jsx
@@ -258,6 +261,8 @@ Fix the Config Explorer lifecycle regression by using one scope-reset effect tha
 2026-09-13 backend P1 continuation: confirmed first-ever canonical CVE publication lock regression and corrected exact verification lock regression to materialize the unrelated policy finding key it asserts. Audited fleet triage and exact verify/close/reopen ordering as global CVE, system sentinel, policy keys, then exact keys before lifecycle row locks. Made identical ACCEPTED disposition retries semantic across authorized actors, preserving original provenance without disposition-history churn. Added handler-level fleet triage CSRF/viewer-denial and hidden-fleet non-disclosure coverage. Verification passed in the repository Nix environment against isolated PostgreSQL at port 55447: full poam_workflows (45 tests), cve_scans_tests (8 tests), focused HTTP test after its additions, SQLX_OFFLINE=true cargo check --offline -p cf-server --tests, cargo doc --offline -p cf-server --no-deps, cargo fmt --check, and staged/unstaged git diff --check. Existing repository warnings remain. Changes remain uncommitted and unstaged; pre-existing staged Web UI/index state was preserved.
 
 2026-09-14 integration-test diff cleanup: restored HEAD indentation/content for whitespace-only changes in checks/web-ui/tests/integration-test.js while preserving the full semantic CI-fix patch. Final standard diff is 528 changed lines (429 additions, 99 deletions); whitespace-insensitive diff is 526 lines (428 additions, 98 deletions), down from 2,502 lines. Retained focused context/listener/policy cleanup without reindenting unchanged bodies. Verified `node --check checks/web-ui/tests/integration-test.js`, `CF_UI_STATIC_CONTRACTS=1 node checks/web-ui/tests/integration-test.js` (`web-ui harness static contracts OK`), and `git diff --check HEAD -- checks/web-ui/tests/integration-test.js`. No behavior was deliberately dropped. Did not run VM/browser/Nix checks, commit, or push.
+
+Exact-head pipeline 2845881618 at merge commit 6de5666c failed only after running the authoritative Web UI VM suite. The failure exposed stale Dioxus/typed-assignee/config-explorer locators, incomplete standalone CVE routes, onboarding overlay leakage after browser recovery, and persistent canonical workflow fixture contamination. Commit da7473a18a5f4f907350a402da413b75975bcb57 applies focused harness corrections without changing production behavior or committed strict visual baselines. `node --check checks/web-ui/tests/integration-test.js`, `CF_UI_STATIC_CONTRACTS=1 nix develop -c node checks/web-ui/tests/integration-test.js`, and `git diff --check` passed. Exact-head pipeline 2846236338 is the runtime authority and is currently running.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
