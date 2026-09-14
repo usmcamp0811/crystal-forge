@@ -363,10 +363,17 @@ Config inspection follows these security rules:
 ## Process and timeout model
 
 Every evaluator subprocess MUST be bounded by a timeout and an output limit.
+Each complete Config Inspector stage has a 300-second default deadline. An
+operator MAY set
+`CRYSTAL_FORGE_CONFIG_INSPECTION_STAGE_DEADLINE_SECONDS` to an integer from 1
+through 3600. An invalid, non-Unicode, zero, or larger value fails the
+inspection; the server does not silently use the default. The override does not
+change heartbeat, cancellation, or process-tree cleanup behavior, and each
+stage remains bounded independently.
 Timeout and cancellation handling MUST clean up the complete process tree,
 reap child processes, and prevent escaped `nix-eval-jobs` workers. A timeout
-affects only the scoped Explorer request or prefix. Previously cached,
-unrelated observations remain valid.
+affects only the current scoped Explorer request or optional complete-inventory
+job. Previously cached, unrelated observations remain valid.
 
 ## Optional complete inventory
 

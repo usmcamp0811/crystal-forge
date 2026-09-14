@@ -24,7 +24,7 @@
 , testSteps ? builtins.getEnv "CF_UI_TEST_STEPS"
 , runExportValidation ? true
 , updateVisualBaselines ? builtins.getEnv "CF_UI_UPDATE_BASELINES" == "1"
-, playwrightResultTimeout ? 1800
+, playwrightResultTimeout ? 2700
 , ...
 }:
 let
@@ -352,10 +352,11 @@ in pkgs.testers.runNixOSTest {
 
       # Start with local auth
       systemd.services.crystal-forge-server.environment.AUTH_MODE = "local";
+      systemd.services.crystal-forge-config-inspector.environment.CRYSTAL_FORGE_CONFIG_INSPECTION_STAGE_DEADLINE_SECONDS = "600";
     };
   };
 
-  globalTimeout = 2400; # 40 minutes for comprehensive testing
+  globalTimeout = 3000; # Includes two bounded 600-second Config Inspector stages.
 
   extraPythonPackages = p: [
     p.pytest
@@ -666,6 +667,7 @@ in pkgs.testers.runNixOSTest {
         f" CF_TEST_REAL_REPO_URL={task440_live_repo_url}"
         f" CF_TEST_REAL_COMMIT_HASH={task440_live_commit_hash}"
         f" CF_TEST_REAL_CONFIGURATION_NAME={os.environ['CF_TEST_REAL_CONFIGURATION_NAME']}"
+        " CF_TEST_CONFIG_INSPECTION_WAIT_SECONDS=1260"
     )
     result_timeout = ${toString playwrightResultTimeout}
 

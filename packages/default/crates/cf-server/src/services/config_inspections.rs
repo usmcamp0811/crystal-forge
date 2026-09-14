@@ -9,6 +9,7 @@ use chrono::Duration as ChronoDuration;
 use serde::Serialize;
 use sqlx::pool::PoolConnection;
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};
+use std::ffi::OsStr;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -43,7 +44,9 @@ use crate::queries::evaluation_snapshots::{
 };
 use crate::security::snapshot_redaction::redact_text;
 
-const STAGE_DEADLINE: Duration = Duration::from_secs(5 * 60);
+const DEFAULT_STAGE_DEADLINE: Duration = Duration::from_secs(5 * 60);
+const MAX_STAGE_DEADLINE_SECONDS: u64 = 60 * 60;
+const STAGE_DEADLINE_ENV: &str = "CRYSTAL_FORGE_CONFIG_INSPECTION_STAGE_DEADLINE_SECONDS";
 const STAGE_STDOUT_LIMIT: usize = 256 * 1024 * 1024;
 const STAGE_STDERR_LIMIT: usize = 256 * 1024;
 const NIX_EVAL_JOBS_PROGRAM: &str = "nix-eval-jobs";
@@ -53,6 +56,27 @@ const STAGE2_APPLY: &str = "derivation: if derivation.meta ? crystalForgeDefinit
 const CONFIG_INSPECTION_QUEUE_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const CONFIG_INSPECTION_STALE_THRESHOLD: ChronoDuration = ChronoDuration::minutes(10);
 const CONFIG_INSPECTION_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Resolves the bounded deadline for each complete Config Inspector stage.
+///
+/// The deployed default is 300 seconds. An explicit override must be a Unicode
+/// integer from 1 through 3600 seconds; invalid values fail the inspection
+/// instead of silently selecting another deadline.
+fn parse_stage_deadline(value: Option<&OsStr>) -> Result<Duration> {
+    let Some(value) = value else {
+        return Ok(DEFAULT_STAGE_DEADLINE);
+    };
+    let value = value
+        .to_str()
+        .with_context(|| format!("{STAGE_DEADLINE_ENV} must be valid Unicode"))?;
+    let seconds = value
+        .parse::<u64>()
+        .with_context(|| format!("{STAGE_DEADLINE_ENV} must be an integer number of seconds"))?;
+    if !(1..=MAX_STAGE_DEADLINE_SECONDS).contains(&seconds) {
+        bail!("{STAGE_DEADLINE_ENV} must be between 1 and {MAX_STAGE_DEADLINE_SECONDS} seconds");
+    }
+    Ok(Duration::from_secs(seconds))
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -580,6 +604,11 @@ async fn prepare_with_lock(
     flake_id: i32,
     nix_eval_jobs_program: &Path,
 ) -> Result<ConfigInspectionPreparation> {
+    let stage_deadline = match parse_stage_deadline(std::env::var_os(STAGE_DEADLINE_ENV).as_deref())
+    {
+        Ok(deadline) => deadline,
+        Err(error) => return Ok(ConfigInspectionPreparation::Failure(error)),
+    };
     let credentials = match FlakeCredentialEnv::load(pool, flake_id).await {
         Ok(credentials) => credentials,
         Err(error) => {
@@ -595,6 +624,7 @@ async fn prepare_with_lock(
         target,
         credentials.as_ref(),
         nix_eval_jobs_program,
+        stage_deadline,
     )
     .await
     {
@@ -647,6 +677,7 @@ async fn execute_nix_stages(
     target: &InspectionTarget,
     credentials: Option<&FlakeCredentialEnv>,
     nix_eval_jobs_program: &Path,
+    stage_deadline: Duration,
 ) -> Result<Option<crate::models::config_inspector::AssembledConfigInspection>> {
     let stage1_output = run_stage(
         pool,
@@ -656,6 +687,7 @@ async fn execute_nix_stages(
         STAGE1_APPLY,
         credentials,
         "Config Inspector Stage 1",
+        stage_deadline,
     )
     .await?;
     let stage1 = reconcile_stage1(stage1_output, target, claim)?;
@@ -693,6 +725,7 @@ async fn execute_nix_stages(
         STAGE2_APPLY,
         credentials,
         "Config Inspector Stage 2",
+        stage_deadline,
     )
     .await;
     drop(stage2_selection);
@@ -736,12 +769,13 @@ async fn run_stage(
     apply: &str,
     credentials: Option<&FlakeCredentialEnv>,
     process_name: &str,
+    stage_deadline: Duration,
 ) -> Result<BoundedProcessOutput> {
     let mut command = build_stage_command(program, expression, apply, credentials);
     let mut run = Box::pin(run_nix_command_bounded(
         &mut command,
         process_name,
-        STAGE_DEADLINE,
+        stage_deadline,
         STAGE_STDOUT_LIMIT,
         STAGE_STDERR_LIMIT,
     ));
@@ -863,6 +897,7 @@ async fn terminalize_failure(
 mod tests {
     use super::*;
     use std::collections::VecDeque;
+    use std::os::unix::ffi::OsStringExt;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex as StdMutex};
     use tokio::sync::{Mutex, Notify};
@@ -1157,11 +1192,52 @@ mod tests {
         assert_eq!(NIX_WORKERS, "2");
         assert_eq!(STAGE_STDOUT_LIMIT, 256 * 1024 * 1024);
         assert_eq!(STAGE_STDERR_LIMIT, 256 * 1024);
-        assert_eq!(STAGE_DEADLINE, Duration::from_secs(300));
+        assert_eq!(DEFAULT_STAGE_DEADLINE, Duration::from_secs(300));
         assert_eq!(
             CONFIG_INSPECTION_HEARTBEAT_INTERVAL,
             Duration::from_secs(10)
         );
+    }
+
+    #[test]
+    fn stage_deadline_parser_defaults_to_300_seconds() {
+        assert_eq!(
+            parse_stage_deadline(None).unwrap(),
+            Duration::from_secs(300)
+        );
+    }
+
+    #[test]
+    fn stage_deadline_parser_accepts_600_seconds() {
+        assert_eq!(
+            parse_stage_deadline(Some(OsStr::new("600"))).unwrap(),
+            Duration::from_secs(600)
+        );
+    }
+
+    #[test]
+    fn stage_deadline_parser_rejects_zero() {
+        let error = parse_stage_deadline(Some(OsStr::new("0"))).unwrap_err();
+        assert!(error.to_string().contains(STAGE_DEADLINE_ENV));
+    }
+
+    #[test]
+    fn stage_deadline_parser_rejects_malformed_values() {
+        let error = parse_stage_deadline(Some(OsStr::new("five"))).unwrap_err();
+        assert!(error.to_string().contains(STAGE_DEADLINE_ENV));
+    }
+
+    #[test]
+    fn stage_deadline_parser_rejects_non_unicode_values() {
+        let value = std::ffi::OsString::from_vec(vec![0xff]);
+        let error = parse_stage_deadline(Some(value.as_os_str())).unwrap_err();
+        assert!(error.to_string().contains("valid Unicode"));
+    }
+
+    #[test]
+    fn stage_deadline_parser_rejects_values_above_one_hour() {
+        let error = parse_stage_deadline(Some(OsStr::new("3601"))).unwrap_err();
+        assert!(error.to_string().contains(STAGE_DEADLINE_ENV));
     }
 
     #[test]

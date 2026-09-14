@@ -32,6 +32,22 @@ const outputDir = process.argv[3] || "/tmp/screenshots";
 const apiBaseUrl = process.env.CF_UI_API_BASE_URL || baseUrl;
 const baselinesDir = process.env.CF_UI_BASELINES_DIR || "";
 
+function parseBoundedSeconds(value, defaultSeconds, name) {
+  if (value == null) return defaultSeconds;
+  if (!/^\d+$/.test(value)) throw new Error(`${name} must be an integer number of seconds`);
+  const seconds = Number(value);
+  if (!Number.isSafeInteger(seconds) || seconds < 1 || seconds > 3600) {
+    throw new Error(`${name} must be between 1 and 3600 seconds`);
+  }
+  return seconds;
+}
+
+const CONFIG_INSPECTION_WAIT_SECONDS = parseBoundedSeconds(
+  process.env.CF_TEST_CONFIG_INSPECTION_WAIT_SECONDS,
+  300,
+  "CF_TEST_CONFIG_INSPECTION_WAIT_SECONDS",
+);
+
 // SQL-backed fixture steps execute against whichever PostgreSQL instance is
 // running the target Crystal Forge database. Two deployments are supported:
 //
@@ -3520,6 +3536,7 @@ async function routeTask440SystemData(page, overrides = {}) {
     evaluationRequests: [],
     inspectionRequests: [],
     observationPosts: [],
+    observationOrdinal: 0,
     observationRequests: new Map(),
     observationPostWaiters: [],
     heldObservationResolvers: new Map(),
@@ -3986,7 +4003,10 @@ async function routeTask440SystemData(page, overrides = {}) {
     }
     const revision = decodeURIComponent(new URL(request.url()).pathname.split("/").at(-1));
     const body = request.postDataJSON();
-    state.observationPosts.push({ revision, kind: body.kind, path_components: body.path_components, child_offset: body.child_offset });
+    const observationOrdinal = ++state.observationOrdinal;
+    const requestId = `44000000-0000-4000-8000-${String(observationOrdinal).padStart(12, "0")}`;
+    const observationId = `44100000-0000-4000-8000-${String(observationOrdinal).padStart(12, "0")}`;
+    state.observationPosts.push({ revision, kind: body.kind, path_components: body.path_components, child_offset: body.child_offset, request_id: requestId, observation_id: observationId });
     for (const waiter of state.observationPostWaiters.splice(0)) {
       if (waiter.ready()) waiter.resolve();
       else state.observationPostWaiters.push(waiter);
@@ -4003,8 +4023,6 @@ async function routeTask440SystemData(page, overrides = {}) {
     const failures = body.kind === "prefix"
       ? state.prefixFailureCounts.get(failureKey) || state.prefixFailureCounts.get(dotted) || 0
       : 0;
-    const requestId = `44000000-0000-4000-8000-${String(state.observationPosts.length).padStart(12, "0")}`;
-    const observationId = `44100000-0000-4000-8000-${String(state.observationPosts.length).padStart(12, "0")}`;
     const response = {
       request_id: requestId, revision, configuration_name: "atlas-01", kind: body.kind, path_components: body.path_components, child_offset: body.child_offset,
       lifecycle: failures > 0 ? "failed" : "succeeded", observation_id: failures > 0 ? null : observationId,
@@ -5305,7 +5323,7 @@ async function runTask440LiveSnapshotEvaluation(page) {
     }
 
     let snapshotAvailable = false;
-    for (let attempt = 0; !snapshotAvailable && attempt < 300; attempt += 1) {
+    for (let attempt = 0; !snapshotAvailable && attempt < CONFIG_INSPECTION_WAIT_SECONDS; attempt += 1) {
       const inspectionState = runFixtureSql(`
         SELECT json_build_object(
           'jobStatus', job.status,
@@ -11027,7 +11045,17 @@ const steps = [
         await viewerPage.route(/\/api\/v1\/cves(?:\?.*)?$/, async (route) => {
           await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([cveRowFixture]) });
         });
-      await viewerPage.route(/\/api\/v1\/cves\/CVE-2024-1234\/fleet\?package=openssl$/, async (route) => {
+      let viewerFleetRequests = 0;
+      await viewerPage.route(/\/api\/v1\/cves\/CVE-2024-1234\/fleet(?:\?.*)?$/, async (route) => {
+        const url = new URL(route.request().url());
+        if (url.pathname !== "/api/v1/cves/CVE-2024-1234/fleet" ||
+            url.searchParams.get("package") !== "openssl" ||
+            [...url.searchParams.keys()].length !== 1 ||
+            route.request().method() !== "GET") {
+          await route.fallback();
+          return;
+        }
+        viewerFleetRequests += 1;
         await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(fleetDetail) });
       });
       await viewerPage.route(/\/api\/v1\/cves\/CVE-FAST\/fleet\?package=openssl$/, async (route) => {
@@ -11055,30 +11083,20 @@ const steps = [
         await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(fleetDetail) });
         markLoadingFleetFinished();
       });
-        const [viewerFleetResponse] = await Promise.all([
-          viewerPage.waitForResponse((response) => {
-            const url = new URL(response.url());
-            return url.pathname === "/api/v1/cves/CVE-2024-1234/fleet" &&
-              url.searchParams.get("package") === "openssl" &&
-              [...url.searchParams.keys()].length === 1 &&
-              response.request().method() === "GET";
-          }),
-          viewerPage.goto(
-        `${baseUrl}/cves?cve=CVE-2024-1234&cve_package=openssl`,
-        { timeout: LOAD_TIMEOUT },
-          ),
-        ]);
-        if (viewerFleetResponse.status() !== 200) {
-          throw new Error(`Viewer exact fleet detail returned ${viewerFleetResponse.status()}`);
+        await viewerPage.goto(`${baseUrl}/cves?cve=CVE-2024-1234&cve_package=openssl`, {
+          timeout: LOAD_TIMEOUT,
+        });
+        const viewerDrawer = viewerPage.getByRole("dialog", { name: "CVE-2024-1234 openssl fleet triage" });
+        await assertVisible(viewerDrawer, "Viewer should read exact fleet detail from a deep link");
+        if (viewerFleetRequests !== 1) {
+          throw new Error(`Viewer exact fleet detail made ${viewerFleetRequests} exact requests`);
         }
         const viewerUrl = new URL(viewerPage.url());
         if (viewerUrl.searchParams.get("cve") !== "CVE-2024-1234" ||
             viewerUrl.searchParams.get("cve_package") !== "openssl") {
           throw new Error(`Viewer deep link lost exact CVE query parameters: ${viewerPage.url()}`);
         }
-      const viewerDrawer = viewerPage.getByRole("dialog", { name: "CVE-2024-1234 openssl fleet triage" });
       await assertVisible(viewerPage.getByRole("link", { name: "CVEs" }).first(), "Viewer should see CVE navigation");
-      await assertVisible(viewerDrawer, "Viewer should read exact fleet detail from a deep link");
       await assertHidden(
         viewerDrawer.getByTestId("cve-triage-open"),
         "Viewer must not receive fleet triage mutation controls",
@@ -11748,6 +11766,11 @@ const steps = [
       await page.keyboard.press("Enter");
       const policyDrawer = page.locator("#policy-detail-dialog");
       await assertVisible(policyDrawer, "Keyboard Enter on a policy card must open its detail drawer");
+      await page.waitForFunction(
+        () => document.activeElement?.getAttribute("aria-label") === "Close policy detail",
+        null,
+        { timeout: 15000 },
+      );
       await page.keyboard.press("Escape");
       await assertHidden(policyDrawer, "Policy drawer Escape must close the dialog");
       if (!(await firstCard.evaluate((element) => element === document.activeElement))) {
@@ -13587,6 +13610,7 @@ By using this IS (which includes any device attached to this IS), you consent to
       const systemId = "43300000-0000-4000-8000-000000000010";
       const hostname = "task433-mixed-evidence-target";
       let systemInserted = false;
+      let sourceConfigurationHeld = false;
       let primaryError = null;
       try {
         const reservedCount = Number(runFixtureSql(`
@@ -13596,6 +13620,18 @@ By using this IS (which includes any device attached to this IS), you consent to
         if (reservedCount !== 0) {
           throw new Error(`Canonical mixed-evidence reserved system already exists: ${systemId} / ${hostname}`);
         }
+        const heldSourceCount = Number(runFixtureSql(`
+          WITH held AS (
+            UPDATE systems
+            SET system_configuration_name='task433-held-mixed-source'
+            WHERE id='${sourceSystemId}'::uuid
+              AND system_configuration_name='test-agent'
+            RETURNING id
+          )
+          SELECT COUNT(*) FROM held;
+        `));
+        if (heldSourceCount !== 1) throw new Error("Canonical mixed-evidence source configuration could not be reserved");
+        sourceConfigurationHeld = true;
         const insertedCount = Number(runFixtureSql(`
           WITH inserted AS (
             INSERT INTO systems (
@@ -13612,6 +13648,19 @@ By using this IS (which includes any device attached to this IS), you consent to
         `));
         if (insertedCount !== 1) throw new Error("Canonical mixed-evidence system insertion did not create one row");
         systemInserted = true;
+
+        const configurationCount = Number(runFixtureSql(`
+          SELECT COUNT(*)
+          FROM systems candidate
+          JOIN systems source ON source.id='${sourceSystemId}'::uuid
+          WHERE candidate.flake_id=source.flake_id
+            AND candidate.system_configuration_name='test-agent';
+        `));
+        // Persistence lookup does not filter inactive systems, so identity must
+        // be unique across all rows for this flake before evaluation starts.
+        if (configurationCount !== 1) {
+          throw new Error(`Canonical mixed-evidence configuration identity is ambiguous: ${configurationCount}`);
+        }
 
       await page.goto(`${baseUrl}/deployment-policies`, { timeout: LOAD_TIMEOUT });
       await collapseOnboardingCoach(page);
@@ -13744,13 +13793,26 @@ By using this IS (which includes any device attached to this IS), you consent to
         primaryError = error;
         throw error;
       } finally {
-        if (systemInserted) {
+        if (systemInserted || sourceConfigurationHeld) {
           try {
             runFixtureSql(`
+              BEGIN;
               UPDATE compliance_bundle_assignments
               SET active=false
-              WHERE system_id='${systemId}'::uuid AND active;
-              UPDATE systems SET is_active=false WHERE id='${systemId}'::uuid;
+              WHERE system_id='${systemId}'::uuid
+                AND active
+                AND ${systemInserted ? "true" : "false"};
+              UPDATE systems
+              SET is_active=false,
+                  system_configuration_name='task433-retired-mixed-target'
+              WHERE id='${systemId}'::uuid
+                AND ${systemInserted ? "true" : "false"};
+              UPDATE systems
+              SET system_configuration_name='test-agent'
+              WHERE id='${sourceSystemId}'::uuid
+                AND system_configuration_name='task433-held-mixed-source'
+                AND ${sourceConfigurationHeld ? "true" : "false"};
+              COMMIT;
             `);
           } catch (cleanupError) {
             if (primaryError) {
@@ -16894,6 +16956,11 @@ security.audit.enable = true;</fixtext>
       await assertHidden(milestoneTitleEditor, "Milestone editing controls must not be permanent row content");
       await milestone.getByRole("button", { name: "Edit milestone Browser release gate", exact: true }).click();
       await assertVisible(milestoneTitleEditor, "Compact title interaction must expose optional milestone editing");
+      await page.waitForFunction(
+        (label) => document.activeElement?.getAttribute("aria-label") === label,
+        "Milestone title for Browser release gate",
+        { timeout: 15000 },
+      );
       if (!(await milestoneTitleEditor.evaluate((node) => node === document.activeElement))) {
         throw new Error("Opening optional milestone editing must focus its title field");
       }
@@ -16995,6 +17062,7 @@ security.audit.enable = true;</fixtext>
       const linkedHostname = "task433-linked-canonical";
       let primarySystemInserted = false;
       let linkedSystemInserted = false;
+      let sourceConfigurationHeld = false;
       let primaryError = null;
       try {
         const reservedCount = Number(runFixtureSql(`
@@ -17005,6 +17073,18 @@ security.audit.enable = true;</fixtext>
         if (reservedCount !== 0) {
           throw new Error("Canonical POA&M reserved system IDs or hostnames already exist");
         }
+        const heldSourceCount = Number(runFixtureSql(`
+          WITH held AS (
+            UPDATE systems
+            SET system_configuration_name='task433-held-poam-source'
+            WHERE id='${sourceSystemId}'::uuid
+              AND system_configuration_name='test-agent'
+            RETURNING id
+          )
+          SELECT COUNT(*) FROM held;
+        `));
+        if (heldSourceCount !== 1) throw new Error("Canonical POA&M source configuration could not be reserved");
+        sourceConfigurationHeld = true;
         const insertedCount = Number(runFixtureSql(`
           WITH inserted AS (
             INSERT INTO systems (
@@ -17114,6 +17194,21 @@ security.audit.enable = true;</fixtext>
         `));
         if (linkedInsertedCount !== 1) throw new Error("Canonical POA&M linked system insertion did not create one row");
         linkedSystemInserted = true;
+
+        const configurationCounts = JSON.parse(runFixtureSql(`
+          SELECT json_build_object(
+            'testAgent', COUNT(*) FILTER (WHERE candidate.system_configuration_name='test-agent'),
+            'cfTestSys', COUNT(*) FILTER (WHERE candidate.system_configuration_name='cf-test-sys')
+          )::text
+          FROM systems candidate
+          JOIN systems source ON source.id='${sourceSystemId}'::uuid
+          WHERE candidate.flake_id=source.flake_id;
+        `));
+        // Persistence lookup does not filter inactive systems. Both canonical
+        // configuration identities must be unique before evaluation starts.
+        if (Number(configurationCounts.testAgent) !== 1 || Number(configurationCounts.cfTestSys) !== 1) {
+          throw new Error(`Canonical POA&M configuration identities are ambiguous: ${JSON.stringify(configurationCounts)}`);
+        }
       await phase6Api(page, "/api/v1/compliance/assignments", {
         method: "POST",
         body: JSON.stringify({
@@ -17392,16 +17487,29 @@ security.audit.enable = true;</fixtext>
         throw error;
       } finally {
         try {
-          if (primarySystemInserted || linkedSystemInserted) {
+          if (primarySystemInserted || linkedSystemInserted || sourceConfigurationHeld) {
             const insertedIds = [
               ...(primarySystemInserted ? [`'${systemId}'::uuid`] : []),
               ...(linkedSystemInserted ? [`'${linkedSystemId}'::uuid`] : []),
             ].join(", ");
             runFixtureSql(`
+              BEGIN;
               UPDATE compliance_bundle_assignments
               SET active=false
-              WHERE system_id IN (${insertedIds}) AND active;
-              UPDATE systems SET is_active=false WHERE id IN (${insertedIds});
+              WHERE system_id IN (${insertedIds || "NULL"}) AND active;
+              UPDATE systems
+              SET is_active=false,
+                  system_configuration_name=CASE id
+                    WHEN '${systemId}'::uuid THEN 'task433-retired-poam-primary'
+                    WHEN '${linkedSystemId}'::uuid THEN 'task433-retired-poam-linked'
+                  END
+              WHERE id IN (${insertedIds || "NULL"});
+              UPDATE systems
+              SET system_configuration_name='test-agent'
+              WHERE id='${sourceSystemId}'::uuid
+                AND system_configuration_name='task433-held-poam-source'
+                AND ${sourceConfigurationHeld ? "true" : "false"};
+              COMMIT;
             `);
           }
         } catch (cleanupError) {
@@ -18387,6 +18495,11 @@ security.audit.enable = true;</fixtext>
       state.releaseHeldObservation("root");
       await assertVisible(page.getByRole("button", { name: "Expand 9999999-root" }), "Newest revision root did not render after releasing held responses", 15000);
       await assertHidden(page.getByRole("button", { name: "Expand abcdef0-root" }), "Old revision root overwrote the newer exact revision");
+      const requestIds = state.observationPosts.map((request) => request.request_id);
+      const observationIds = state.observationPosts.map((request) => request.observation_id);
+      if (new Set(requestIds).size !== requestIds.length || new Set(observationIds).size !== observationIds.length) {
+        throw new Error(`Config observation route reused an identity: ${JSON.stringify({ requestIds, observationIds })}`);
+      }
       await commitSelect.selectOption(TASK_440_CURRENT_SHA);
       await assertVisible(page.getByRole("button", { name: `Expand ${TASK_440_CURRENT_SHA.slice(0, 7)}-root` }), "Current revision did not recover after stale-response scenario", 15000);
       await page.getByRole("button", { name: "Configured", exact: true }).click();
