@@ -5029,19 +5029,87 @@ function arrangeTask433CompletedScan(derivationId, criticalCount) {
   return scanId;
 }
 
-function arrangeTask433DeployedAssessment(hostname, targetStorePath) {
+function arrangeTask433DeployedAssessment(systemId, hostname, assessment) {
   // The agent is not connected in this browser check. Arrange its deployment
-  // observation. The production evaluator can persist valid policy evidence
-  // without producing a certified Config snapshot, so this fixture must not
-  // fabricate an available retained-generation artifact.
-  runFixtureSql(`
-    INSERT INTO system_states(
-      hostname, change_reason, store_path, generation,
-      generation_matches_current_store_path, timestamp
+  // observation and exact retained lineage. The evaluator can persist policy
+  // evidence without a Config artifact, so create a valid empty V1 artifact
+  // only to carry the deployment's commit, configuration, and derivation
+  // identity. The current snapshot selector remains unchanged.
+  const snapshotId = runFixtureSql(`
+    INSERT INTO evaluation_snapshots (
+      commit_id, configuration_name, schema_version, lifecycle,
+      first_parent_sha, option_count, module_count, evaluation_duration_ms,
+      content_bytes, completed_at
     )
-    VALUES ($hostname$${hostname}$hostname$, 'cf_deployment',
-            $path$${targetStorePath}$path$, 1, true, CURRENT_TIMESTAMP);
+    SELECT derivation.commit_id, derivation.derivation_name, 1, 'available',
+           commit_row.first_parent_sha, 0, 0, 0, 0, CURRENT_TIMESTAMP
+    FROM composite_policy_assessments persisted
+    JOIN derivations derivation ON derivation.id=persisted.derivation_id
+    JOIN commits commit_row ON commit_row.id=derivation.commit_id
+    WHERE persisted.id='${assessment.assessment_id}'::uuid
+      AND persisted.system_id='${systemId}'::uuid
+      AND derivation.id=${Number(assessment.derivation_id)}
+      AND COALESCE(derivation.store_path, derivation.expected_store_path)=
+          $path$${assessment.target_store_path}$path$
+      AND derivation.derivation_type='nixos'
+    RETURNING id;
   `);
+  if (!/^[0-9a-f-]{36}$/.test(snapshotId)) {
+    throw new Error(`Could not create deployed assessment fixture for ${hostname}: ${JSON.stringify(assessment)}`);
+  }
+  const certified = Number(runFixtureSql(`
+    WITH updated AS (
+      UPDATE evaluation_snapshots
+      SET integrity_version=1
+      WHERE id='${snapshotId}'::uuid
+        AND evaluation_snapshot_payloads_valid(id)
+      RETURNING id
+    )
+    SELECT COUNT(*) FROM updated;
+  `));
+  if (certified !== 1) {
+    throw new Error(`Could not certify deployed assessment fixture for ${hostname}: ${JSON.stringify(assessment)}`);
+  }
+  const arranged = JSON.parse(runFixtureSql(`
+    WITH target AS (
+      SELECT derivation.id, derivation.commit_id, derivation.derivation_name
+      FROM composite_policy_assessments persisted
+      JOIN derivations derivation ON derivation.id=persisted.derivation_id
+      WHERE persisted.id='${assessment.assessment_id}'::uuid
+        AND persisted.system_id='${systemId}'::uuid
+        AND derivation.id=${Number(assessment.derivation_id)}
+        AND COALESCE(derivation.store_path, derivation.expected_store_path)=
+            $path$${assessment.target_store_path}$path$
+        AND derivation.derivation_type='nixos'
+    ), retained AS (
+      INSERT INTO evaluation_generation_snapshots (
+        system_id, generation, snapshot_id, derivation_id, commit_id,
+        source_store_path, configuration_name, lineage_verified
+      )
+      SELECT '${systemId}'::uuid, 1, '${snapshotId}'::uuid, target.id,
+             target.commit_id, $path$${assessment.target_store_path}$path$,
+             target.derivation_name, true
+      FROM target
+      RETURNING id
+    ), observed AS (
+      INSERT INTO system_states(
+        hostname, change_reason, store_path, generation,
+        generation_matches_current_store_path, timestamp
+      )
+      SELECT $hostname$${hostname}$hostname$, 'cf_deployment',
+             $path$${assessment.target_store_path}$path$, 1, true,
+             CURRENT_TIMESTAMP
+      FROM retained
+      RETURNING id
+    )
+    SELECT json_build_object(
+      'retained', (SELECT COUNT(*) FROM retained),
+      'observed', (SELECT COUNT(*) FROM observed)
+    )::text;
+  `));
+  if (Number(arranged.retained) !== 1 || Number(arranged.observed) !== 1) {
+    throw new Error(`Could not bind exact deployed assessment for ${hostname}: ${JSON.stringify({ assessment, arranged })}`);
+  }
 }
 
 async function runTask433ProductionEvaluation(page, { commitId, systemId, policyId }) {
@@ -11270,14 +11338,18 @@ const steps = [
       const drawerCveId = drawer.locator(".mono:has-text('CVE-2024-1234')").first();
       await assertVisible(drawerCveId, "Expected CVE id in drawer header");
 
-      await assertVisible(drawer.getByText("MIXED", { exact: true }), "Expected authoritative mixed fleet rollup");
-      await assertVisible(drawer.getByText("ACCEPTED", { exact: true }), "Expected accepted environment state");
-      await assertVisible(drawer.getByText("SCHEDULED", { exact: true }), "Expected scheduled environment state");
-      await assertVisible(drawer.getByText("OPEN", { exact: true }), "Expected open environment state");
-      await assertVisible(drawer.getByText("Morgan Reyes"), "Expected disposition actor");
-      await assertVisible(drawer.getByText("POAM-0042: Existing OpenSSL fleet remediation"), "Expected useful scheduled POA&M link label");
-      await assertVisible(drawer.getByText("review 2026-10-01"), "Expected accepted review date");
       const environmentCards = drawer.getByTestId("cve-fleet-environment");
+      const developmentCard = environmentCards.filter({ has: page.getByText("Development", { exact: true }) });
+      const productionCard = environmentCards.filter({ has: page.getByText("Production", { exact: true }) });
+      const labCard = environmentCards.filter({ has: page.getByText("Lab", { exact: true }) });
+      await assertVisible(drawer.getByText("MIXED", { exact: true }), "Expected authoritative mixed fleet rollup");
+      await assertVisible(developmentCard.getByText("ACCEPTED", { exact: true }), "Expected accepted environment state");
+      await assertVisible(developmentCard.getByText(/Accepted by Morgan Reyes/), "Expected accepted-risk disposition actor");
+      await assertVisible(developmentCard.getByText("review 2026-10-01"), "Expected accepted review date");
+      await assertVisible(productionCard.getByText("SCHEDULED", { exact: true }), "Expected scheduled environment state");
+      await assertVisible(productionCard.getByText(/Scheduled by Morgan Reyes/), "Expected scheduled-remediation actor");
+      await assertVisible(productionCard.getByText("POAM-0042: Existing OpenSSL fleet remediation"), "Expected useful scheduled POA&M link label");
+      await assertVisible(labCard.getByText("OPEN", { exact: true }), "Expected open environment state");
       for (let index = 0; index < await environmentCards.count(); index += 1) {
         const card = environmentCards.nth(index);
         const declared = Number((await card.locator("header .mono").textContent()).match(/(\d+) host/)?.[1]);
@@ -13792,7 +13864,7 @@ By using this IS (which includes any device attached to this IS), you consent to
       if (cveResult.evidence.count !== 2 || cveResult.evidence.max_allowed !== 0 || outcome.overall !== "fail") {
         throw new Error(`Server produced incorrect all-mode aggregate evidence: ${JSON.stringify(outcome)}`);
       }
-      arrangeTask433DeployedAssessment(hostname, outcome.target_store_path);
+      arrangeTask433DeployedAssessment(systemId, hostname, outcome);
       const findingId = outcome.finding_id;
       if (!findingId) throw new Error("Production assessment did not establish the canonical finding identity");
 
@@ -17294,8 +17366,8 @@ security.audit.enable = true;</fixtext>
       let assessmentId = assessmentFixture.assessment_id;
       let derivationId = assessmentFixture.derivation_id;
       const findingId = assessmentFixture.finding_id;
-      arrangeTask433DeployedAssessment(hostname, assessmentFixture.target_store_path);
-      arrangeTask433DeployedAssessment(linkedHostname, linkedAssessment.target_store_path);
+      arrangeTask433DeployedAssessment(systemId, hostname, assessmentFixture);
+      arrangeTask433DeployedAssessment(linkedSystemId, linkedHostname, linkedAssessment);
       const fixture = {
         policy,
         policyVersionId,
