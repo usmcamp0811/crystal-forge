@@ -1,89 +1,76 @@
 ---
-
 id: TASK-415
-title: Implement deployment approvals, signed running-state attestations, and attention UX
-status: In Progress
+title: >-
+  Implement deployment approvals, signed running-state attestations, and
+  attention UX
+status: To Do
 assignee: []
 created_date: '2026-08-01 10:07'
-updated_date: '2026-08-01 10:07'
-
+updated_date: '2026-09-07 01:27'
 labels:
-
-- design
-- backend
-- frontend
-- web-ui
-- api
-- database
-- deployment
-- approvals
-- attestation
-- agent
-- security
-- attention
-- notifications
-- testing
-
+  - design
+  - backend
+  - frontend
+  - web-ui
+  - api
+  - database
+  - deployment
+  - approvals
+  - attestation
+  - agent
+  - security
+  - attention
+  - notifications
+  - testing
 dependencies:
-
-- TASK-412
-- TASK-414
-
+  - TASK-412
+  - TASK-414
 references:
-
-- 'design commit: 17d8ffe18e954824831543dc5b5684c5de4d30b9'
-- docs/design/CrystalForge/app.jsx
-- docs/design/CrystalForge/components/DashboardView.jsx
-- docs/design/CrystalForge/components/EnvironmentsView.jsx
-- docs/design/CrystalForge/components/Shell.jsx
-- docs/design/CrystalForge/components/SystemDetail.jsx
-- docs/design/CrystalForge/components/Systems.jsx
-- docs/design/CrystalForge/data-attestations.js
-- docs/design/CrystalForge/data-dashboard.js
-- docs/design/CrystalForge/docs/alerts-and-notifications.md
-- docs/design/CrystalForge/styles.css
-- packages/default/crates/cf-server/src/models/deployment_policies.rs
-- packages/default/crates/cf-server/src/queries/attention.rs
-- packages/default/crates/cf-protocol/src/agent.rs
-- packages/default/crates/cf-agent/src/system_state.rs
-- packages/web-ui/src/views/dashboard.rs
-- packages/web-ui/src/views/environments.rs
-- packages/web-ui/src/views/environments_list.rs
-- packages/web-ui/src/views/system_detail.rs
-- packages/web-ui/src/views/systems.rs
-- packages/web-ui/src/views/systems_list.rs
-- packages/web-ui/src/components/layout/
-- packages/web-ui/src/components/notifications/
-
+  - 'design commit: 17d8ffe18e954824831543dc5b5684c5de4d30b9'
+  - docs/design/CrystalForge/app.jsx
+  - docs/design/CrystalForge/components/DashboardView.jsx
+  - docs/design/CrystalForge/components/EnvironmentsView.jsx
+  - docs/design/CrystalForge/components/Shell.jsx
+  - docs/design/CrystalForge/components/SystemDetail.jsx
+  - docs/design/CrystalForge/components/Systems.jsx
+  - docs/design/CrystalForge/data-attestations.js
+  - docs/design/CrystalForge/data-dashboard.js
+  - docs/design/CrystalForge/docs/alerts-and-notifications.md
+  - docs/design/CrystalForge/styles.css
+  - packages/default/crates/cf-server/src/models/deployment_policies.rs
+  - packages/default/crates/cf-server/src/queries/attention.rs
+  - packages/default/crates/cf-protocol/src/agent.rs
+  - packages/default/crates/cf-agent/src/system_state.rs
+  - packages/web-ui/src/views/dashboard.rs
+  - packages/web-ui/src/views/environments.rs
+  - packages/web-ui/src/views/environments_list.rs
+  - packages/web-ui/src/views/system_detail.rs
+  - packages/web-ui/src/views/systems.rs
+  - packages/web-ui/src/views/systems_list.rs
+  - packages/web-ui/src/components/layout/
+  - packages/web-ui/src/components/notifications/
 modified_files:
-
-- migrations/
-- packages/default/crates/cf-protocol/src/
-- packages/default/crates/cf-agent/src/
-- packages/default/crates/cf-server/src/api/
-- packages/default/crates/cf-server/src/models/
-- packages/default/crates/cf-server/src/queries/
-- packages/default/crates/cf-server/src/tasks/
-- packages/web-ui/src/components/dashboard/
-- packages/web-ui/src/components/layout/
-- packages/web-ui/src/components/notifications/
-- packages/web-ui/src/components/system/
-- packages/web-ui/src/views/
-- docs/
-
+  - migrations/
+  - packages/default/crates/cf-protocol/src/
+  - packages/default/crates/cf-agent/src/
+  - packages/default/crates/cf-server/src/api/
+  - packages/default/crates/cf-server/src/models/
+  - packages/default/crates/cf-server/src/queries/
+  - packages/default/crates/cf-server/src/tasks/
+  - packages/web-ui/src/components/dashboard/
+  - packages/web-ui/src/components/layout/
+  - packages/web-ui/src/components/notifications/
+  - packages/web-ui/src/components/system/
+  - packages/web-ui/src/views/
+  - docs/
 priority: high
 type: feature
 ordinal: 415000
-
 ---
-
-
----
-
-<!-- SECTION:DESCRIPTION:BEGIN -->
 
 ## Description
 
+<!-- SECTION:DESCRIPTION:BEGIN -->
 Implement the deployment-approval and running-state attestation changes shown in design commit `17d8ffe18e954824831543dc5b5684c5de4d30b9`.
 
 The design commit is a UI prototype. It uses local JavaScript arrays and client-side state for approval requests, approval decisions, attestation records, trust classifications, and notification events. Do not copy those implementation details into production code.
@@ -2686,6 +2673,11 @@ docs/design/CrystalForge/docs/alerts-and-notifications.md
 into the production documentation area.
 
 Do not make the design directory the permanent product documentation.
+<!-- SECTION:DESCRIPTION:END -->
+
+---
+
+<!-- SECTION:DESCRIPTION:BEGIN -->
 
 ## Acceptance criteria
 
@@ -2850,3 +2842,9 @@ This task is done only when:
 <!--
 SECTION:DESCRIPTION:END
 -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Backlog grooming (2026-09-06): Found In Progress with no active lock and no worktree. A remote branch origin/TASK-415-deployment-approvals-attestations exists but was never opened as an MR. Returned to To Do; the orphaned branch was left untouched in case its content is still wanted for the next attempt.
+<!-- SECTION:NOTES:END -->

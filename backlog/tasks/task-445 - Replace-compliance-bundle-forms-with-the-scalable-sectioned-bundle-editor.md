@@ -4,6 +4,7 @@ title: Replace compliance bundle forms with the scalable sectioned bundle editor
 status: To Do
 assignee: []
 created_date: '2026-08-31 02:21'
+updated_date: '2026-09-11 15:29'
 labels:
   - web-ui
   - compliance
@@ -12,6 +13,7 @@ labels:
   - design-parity
 dependencies:
   - TASK-433
+  - TASK-440
 references:
   - git commit ac582592e8ffd787f103578c272d9f30162a9480
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/318'
@@ -50,3 +52,9 @@ After TASK-433 merges, replace the flat compliance bundle create/edit forms with
 - [ ] #9 Keyboard navigation focus trap nested policy-editor layering Escape order focus restoration and desktop/narrow light/dark layouts are accessible and match the design
 - [ ] #10 Focused Rust tests and the authoritative web-ui check pass with assertion coverage and screenshots for large-catalog grouping bulk membership nested policy creation save error deletion and keyboard states
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+TASK-445 modifies the same compliance/bundle surface currently being stabilized by TASK-440. TASK-440 still has deployed-review work involving XCCDF bundle export and environment bundle assignment. TASK-445 must begin only after those TASK-440 compliance workflows have passed deployment smoke testing.
+<!-- SECTION:NOTES:END -->

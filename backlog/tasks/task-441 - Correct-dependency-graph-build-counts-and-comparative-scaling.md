@@ -1,11 +1,11 @@
 ---
 id: TASK-441
 title: Correct dependency graph build counts and comparative scaling
-status: Review
+status: In Progress
 assignee:
   - '@openai-gpt-5.6-sol'
 created_date: '2026-08-29 16:26'
-updated_date: '2026-09-02 02:46'
+updated_date: '2026-09-07 03:31'
 labels:
   - backend
   - frontend
@@ -96,6 +96,8 @@ The evaluation dependency graph currently conflates closure paths, locally absen
 9. Commit and push implementation and task-record updates, wait for exact-head GitLab CI, verify the remote task file and MR conflict state, then return TASK-441 to Review without merging.
 
 Research decision: migration 0235 will place the durable barrier on immutable `evaluation_attempts` and tag each graph-relevant derivation with the attempt UUID. New attempts enter `planning`; finalization verifies the exact current-attempt derivation set and terminal `complete|failed` states, records expected/terminal counts, releases the barrier, inserts/reconciles rooted eligible jobs, marks the attempt and commit complete, and commits atomically. Claim/reservation paths require the current completed commit, matching derivation attempt UUID, and a released barrier; database triggers provide defense in depth. Existing queued jobs are held while re-evaluation is pending/in progress. Manual re-evaluation must reject active building/cancelling jobs or reservations so an in-flight build cannot mutate the snapshot. Streaming, graph-only, and fallback systems use one structured planning set; no detached planner or per-system activation remains. Recovery may activate only released attempts and can release a legacy completed attempt only after all tagged graph rows are terminal.
+
+Current remediation slice: remove all durable derivation or synthetic-failure writes from policy metadata protocol-error handling during streaming discovery; route the error through the existing attempt failure/retry authority; add focused drvPath and no-drvPath regressions plus mixed-attempt and confirmed-Nix-error coverage; correct the heavy-Nix lock comment without changing lock duration; inspect and report whether a permanent real-Nix planner smoke exists. Do not alter migrations, schemas, claims, reservations, frontend, API contract, design docs, or acceptance checkboxes.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -134,4 +136,6 @@ The user selected a two-release zero-downtime transition for the legacy global d
 Local branch rebased onto origin/dev at 701151f4. Conflicts preserved both TASK-433 and TASK-441 behavior. TASK-441 migrations were renumbered after rebase to the next available sequence: 0245 dependency counts, 0246 explicit plan state, and 0247 evaluation-wide barrier. Post-rebase formatting, SQLX_OFFLINE cf-server test check, wasm Web UI check, Node syntax check, server-regressions, and diff checks passed; existing warnings remain. Local rebased head is f2f472bc. Remote update requires an explicitly authorized force-with-lease push because rebase rewrote branch history.
 
 User authorized a force-with-lease update after the verified rebase. Remote branch and MR !322 now point to f2f472bcf7b34a7bd2af6c8af3287dfebda9d5c6. The worktree is clean and origin/dev is an ancestor of the branch. Exact-head CI is pending.
+
+FINAL TEST/EVIDENCE REMEDIATION started. Preflight fetch/HEAD/origin-dev/divergence/worktree checks passed against expected SHAs. Acceptance criteria remain unchecked. Plan: probe real Nix fixture first; add ignored production-function smoke; add/enroll PostgreSQL metadata-protocol lifecycle coverage; add confirmed Nix-error regression if absent; run authoritative server/UI/SQLx/static checks; synchronize modified_files and append superseding final-verification evidence while preserving historical notes.
 <!-- SECTION:NOTES:END -->

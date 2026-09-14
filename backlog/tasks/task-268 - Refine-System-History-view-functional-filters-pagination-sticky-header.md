@@ -4,7 +4,7 @@ title: 'Refine System History view: functional filters, pagination, sticky heade
 status: To Do
 assignee: []
 created_date: '2026-04-14 01:16'
-updated_date: '2026-08-09 15:37'
+updated_date: '2026-09-11 15:29'
 labels:
   - ui
   - systems
@@ -86,6 +86,14 @@ Medium (user-facing UX + possible data-query pagination changes).
 - [ ] #6 #6 Revert events are visually identifiable in timeline entries
 - [ ] #7 #7 web-ui verification includes checks for filter functionality and sticky navigation
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+### TASK-440 parallel-work boundary
+
+TASK-268 may eventually be stacked on TASK-440, but only for History-specific work. It must not modify Config Explorer semantics or Config inspection state, and it must not repurpose TASK-440 Config APIs, models, or schema. Prefer isolating History in a history-specific component instead of making broad edits to the monolithic `system_detail` view. If implementation requires conflicting changes to the same system-detail sections actively changed by TASK-440's lazy Config Explorer, stop and rebase or defer until that Config UI boundary has landed. Do not introduce a database migration merely for this UI refinement without maintainer review. Rebase onto the latest TASK-440 branch before deployment or merge.
+<!-- SECTION:NOTES:END -->
 
 ## Comments
 

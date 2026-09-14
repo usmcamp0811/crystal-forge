@@ -4080,7 +4080,6 @@ tr.attention-flash { animation-name: attention-flash-row; }
 .sys-table th .th-sort{all:unset;display:inline-flex;align-items:center;gap:4px;cursor:pointer;color:inherit;font:inherit;letter-spacing:inherit;text-transform:inherit;border-radius:4px;transition:color 120ms}
 .sys-table th .th-sort:hover{color:var(--cf-text-primary)}
 .sys-table th .th-sort.on{color:var(--cf-text-primary)}
-
 /* ── Config Explorer ─────────────────────────────────────────────────────
    Inspector layout: dense attribute tree + persistent detail pane, one meta
    strip. Monospace-forward, hairline separators, no card-in-card nesting. */

@@ -1,22 +1,29 @@
 ---
 id: TASK-246
-title: Add cache presence verification and UI indicator for built configurations
+title: Record tiered cache-presence observations for built configuration closures
 status: Backlog
 assignee: []
 created_date: '2026-04-05 22:14'
+updated_date: '2026-09-09 03:32'
 labels:
   - cache
-  - monitoring
-  - frontend
   - backend
+  - api
+  - database
   - observability
-  - ux
+  - scanning
 dependencies: []
 references:
-  - packages/web-ui/src/views/flake_detail.rs
-  - packages/default/src/queries/builds.rs
-  - packages/default/src/handlers/api/caches.rs
-priority: medium
+  - git commit e1b7434899e23f43770632e59d80a76a8fc8459e
+  - TASK-440.1
+documentation:
+  - docs/design/CrystalForge/components/FlakeExplorer.jsx
+  - docs/design/CrystalForge/data-flake-explorer.js
+modified_files:
+  - packages/default/crates/cf-server/src/
+  - packages/default/migrations
+  - packages/web-ui/src/api/models.rs
+priority: high
 ---
 
 ## Description
@@ -24,54 +31,31 @@ priority: medium
 <!-- SECTION:DESCRIPTION:BEGIN -->
 ## Problem
 
-Users and operators have no visibility into whether a previously built configuration is still available in the configured cache. This creates uncertainty during deployment planning and troubleshooting:
+A successful build and push receipt prove that a configuration closure was available at one point, but they do not prove that the closure remains fetchable from a configured cache. Design commit `e1b74348` makes that distinction explicit because deployment and scanning readiness depend on current or honestly stale cache observations.
 
-- A build may have completed successfully weeks ago, but the cache entry could have been evicted, deleted, or expired
-- Users viewing the Flake detail view cannot tell if a configuration is immediately deployable or needs to be rebuilt
-- No automated verification runs to detect cache drift or validate cache retention policies
-- Operators cannot distinguish between "never built" vs "built but cache entry lost" vs "built and cached"
+## Desired outcome
 
-This information is critical for:
-- Deployment readiness assessment
-- Cache health monitoring
-- Troubleshooting deployment failures
-- Understanding infrastructure state
+Record authoritative per-cache push receipts and timestamped closure-presence observations for exact built configuration revisions. Re-verify relevant revisions with a tiered policy: hot revisions are deployed or block a scan, warm revisions are recent and deployable, and cold revisions are checked only on demand. Expose bounded status that distinguishes present, partial, evicted, unverified, pending, and not-applicable states without polling one store path per request or presenting stale observations as current.
 
-## Goal
+## Non-goals
 
-Implement periodic cache presence verification for built configurations and surface this information in the Flake detail UI, so users and operators can see at-a-glance whether a configuration is cached and immediately deployable.
-
-## Non-Goals
-
-- This task does NOT implement automatic cache repopulation or rebuilding
-- This task does NOT change cache eviction policies
-- This task does NOT add cache warming or preemptive builds
-- This task does NOT modify the build queue or builder behavior
-- This task does NOT implement cache health scoring or analytics beyond presence/absence
-
-## Scope
-
-1. Add a periodic background job that checks cache presence for recent/active built configurations
-2. Store cache presence status and last-verified timestamp in the database
-3. Add UI indicator in Flake detail view showing cache status per system configuration
-4. Provide clear visual distinction between: cached (green), not cached (yellow/warning), never built (gray), and unknown/stale verification (gray with timestamp)
-
-## Architectural Constraints
-
-- Cache presence checks MUST NOT block user requests or UI rendering
-- Verification job MUST be rate-limited to avoid overwhelming cache infrastructure
-- Database schema MUST support timestamp-based staleness detection
-- UI indicator MUST gracefully handle missing/stale verification data
-- Backend verification logic MUST be decoupled from specific cache backend types where possible
-- Avoid N+1 query patterns when loading cache status for multiple configurations
+- Do not change cache eviction policy.
+- Do not automatically rebuild or repopulate evicted closures.
+- Do not make Flake Explorer reads trigger cache traffic.
+- Do not treat a historical push receipt as current presence.
+- The Pipeline pane that consumes this contract is tracked by TASK-440.1.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Background job periodically verifies cache presence for built configurations and updates database with results and timestamp
-- [ ] #2 Flake detail view displays cache presence indicator for each system configuration with clear visual states (cached/not-cached/never-built/unknown)
-- [ ] #3 Cache presence status includes last-verified timestamp so users can assess staleness
-- [ ] #4 Verification job respects rate limits and does not impact cache performance
-- [ ] #5 UI gracefully handles missing or stale cache verification data
-- [ ] #6 Database schema supports storing cache presence status and verification timestamp per built configuration
+- [ ] #1 Every successful cache publication records an authoritative receipt for the exact cache destination revision configuration and closure paths with an observation timestamp
+- [ ] #2 Presence observations distinguish present partial evicted unverified pending and not-applicable states and never infer current presence only from a historical push receipt
+- [ ] #3 Hot revisions that are deployed or block a scan are re-verified at the configured short cadence and warm recent deployable revisions use a longer cadence
+- [ ] #4 Cold revisions are not polled on a timer and an authorized explicit verification can refresh them on demand
+- [ ] #5 Verification batches narinfo or equivalent checks per cache and tier with bounded work rate limits backoff and no request-path N+1 polling
+- [ ] #6 Each per-cache verdict includes when it was observed and stale or missing observations remain explicitly unknown
+- [ ] #7 Deploy scan and push operations opportunistically refresh observations when those operations already contact the cache
+- [ ] #8 Bounded visibility-scoped APIs expose exact full-revision per-configuration closure status without disclosing hidden systems environments caches or signed URLs
+- [ ] #9 Additive migrations preserve existing build and cache records and SQLx metadata matches all changed query shapes
+- [ ] #10 Focused receipt scheduler batching staleness on-demand authorization and migration tests pass through the repository Nix environment and the observation contract is documented
 <!-- AC:END -->

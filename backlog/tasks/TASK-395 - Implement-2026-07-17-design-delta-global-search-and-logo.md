@@ -1,11 +1,10 @@
 ---
 id: TASK-395
-title: >-
-  Implement the 2026-07-17 design delta for global search and sidebar logo
+title: Implement the 2026-07-17 design delta for global search and sidebar logo
 status: To Do
 assignee: []
 created_date: '2026-07-17 00:00'
-updated_date: '2026-07-17 00:00'
+updated_date: '2026-09-11 15:33'
 labels:
   - design-parity
   - web-ui
@@ -21,7 +20,6 @@ references:
   - packages/web-ui/src/components/layout/topbar.rs
   - packages/web-ui/src/components/layout/sidebar.rs
   - packages/web-ui/assets/app.css
-documentation: []
 priority: high
 ordinal: 395000
 ---
@@ -476,3 +474,17 @@ than expanding scope.
 - [ ] #11 **Screenshots captured**: search dropdown open with results, empty state "No matches", and mobile drawer brand mark are captured as MR attachments per the screenshot workflow
 - [ ] #12 **No scope creep**: only files listed in Impact Areas are modified; unrelated issues found during implementation are filed as separate Backlog tasks
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+### Parallel TASK-440 execution
+
+TASK-395 is safe to implement in parallel with TASK-440. While TASK-440 remains active, create the implementation branch from the latest remote `TASK-440-system-config-flake-parity` head. The child MR targets `TASK-440-system-config-flake-parity`, not `dev`, and must be rebased onto the latest TASK-440 before deployment or final merge.
+
+The stacked pass must not touch Config Explorer, System Config behavior, config-inspector, compliance or policy evaluation, or TASK-440 database/schema contracts. Keep the implementation schema-neutral; introduce no database migrations in the stacked TASK-395 pass. If full backend global-search support genuinely requires a new server contract or migration, stop and leave it as Pass 2/follow-up after the TASK-440 base is stable. Pass 1 should prefer existing real in-memory/context data. Do not add fixture or fake search results to a production deployment for visual parity; represent unavailable result types truthfully and finish them in Pass 2.
+
+Keep changes confined to topbar/sidebar/global-search/app-shell/CSS and narrowly necessary navigation state. Focused formatting, unit, WASM, and browser checks are appropriate during stacked iteration. Do not run the broad/hour-long web-ui suite locally unless a concrete defect requires it; final or CI verification can satisfy the existing final AC.
+
+Re-audit current `dev` before changing the logo requirement. Current `dev` still contains the MobileDrawer `CF` brand mark, so do not mark that acceptance criterion complete based only on old MR !312 notes. Preserve the existing final acceptance criteria; this note changes execution order, not the final product requirement.
+<!-- SECTION:NOTES:END -->
