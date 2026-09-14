@@ -5029,48 +5029,18 @@ function arrangeTask433CompletedScan(derivationId, criticalCount) {
   return scanId;
 }
 
-function arrangeTask433DeployedAssessment(systemId, hostname, assessment) {
+function arrangeTask433DeployedAssessment(hostname, targetStorePath) {
   // The agent is not connected in this browser check. Arrange its deployment
-  // observation and retained generation binding so compliance reads the exact
-  // assessment that production evaluation persisted for this target.
-  const retainedCount = Number(runFixtureSql(`
-    WITH target AS (
-      SELECT id, commit_id, derivation_name
-      FROM derivations
-      WHERE id=${Number(assessment.derivation_id)}
-        AND COALESCE(store_path, expected_store_path)=$path$${assessment.target_store_path}$path$
-        AND derivation_type='nixos'
-    ), snapshot AS (
-      SELECT candidate.id, candidate.commit_id, candidate.configuration_name
-      FROM evaluation_snapshots candidate
-      JOIN target ON target.commit_id=candidate.commit_id
-                 AND target.derivation_name=candidate.configuration_name
-      WHERE candidate.lifecycle='available' AND candidate.integrity_version=1
-      ORDER BY candidate.completed_at DESC NULLS LAST, candidate.id DESC
-      LIMIT 1
-    ), retained AS (
-      INSERT INTO evaluation_generation_snapshots (
-        system_id, generation, snapshot_id, derivation_id, commit_id,
-        source_store_path, configuration_name, lineage_verified
-      )
-      SELECT '${systemId}'::uuid, 1, snapshot.id, target.id, target.commit_id,
-             $path$${assessment.target_store_path}$path$,
-             target.derivation_name, true
-      FROM target JOIN snapshot ON snapshot.commit_id=target.commit_id
-      RETURNING id
-    )
-    SELECT COUNT(*) FROM retained;
-  `));
-  if (retainedCount !== 1) {
-    throw new Error(`Could not retain exact deployed assessment for ${hostname}: ${JSON.stringify(assessment)}`);
-  }
+  // observation. The production evaluator can persist valid policy evidence
+  // without producing a certified Config snapshot, so this fixture must not
+  // fabricate an available retained-generation artifact.
   runFixtureSql(`
     INSERT INTO system_states(
       hostname, change_reason, store_path, generation,
       generation_matches_current_store_path, timestamp
     )
     VALUES ($hostname$${hostname}$hostname$, 'cf_deployment',
-            $path$${assessment.target_store_path}$path$, 1, true, CURRENT_TIMESTAMP);
+            $path$${targetStorePath}$path$, 1, true, CURRENT_TIMESTAMP);
   `);
 }
 
@@ -11300,10 +11270,10 @@ const steps = [
       const drawerCveId = drawer.locator(".mono:has-text('CVE-2024-1234')").first();
       await assertVisible(drawerCveId, "Expected CVE id in drawer header");
 
-      await assertVisible(drawer.getByText("MIXED"), "Expected authoritative mixed fleet rollup");
-      await assertVisible(drawer.getByText("ACCEPTED"), "Expected accepted environment state");
-      await assertVisible(drawer.getByText("SCHEDULED"), "Expected scheduled environment state");
-      await assertVisible(drawer.getByText("OPEN"), "Expected open environment state");
+      await assertVisible(drawer.getByText("MIXED", { exact: true }), "Expected authoritative mixed fleet rollup");
+      await assertVisible(drawer.getByText("ACCEPTED", { exact: true }), "Expected accepted environment state");
+      await assertVisible(drawer.getByText("SCHEDULED", { exact: true }), "Expected scheduled environment state");
+      await assertVisible(drawer.getByText("OPEN", { exact: true }), "Expected open environment state");
       await assertVisible(drawer.getByText("Morgan Reyes"), "Expected disposition actor");
       await assertVisible(drawer.getByText("POAM-0042: Existing OpenSSL fleet remediation"), "Expected useful scheduled POA&M link label");
       await assertVisible(drawer.getByText("review 2026-10-01"), "Expected accepted review date");
@@ -13822,7 +13792,7 @@ By using this IS (which includes any device attached to this IS), you consent to
       if (cveResult.evidence.count !== 2 || cveResult.evidence.max_allowed !== 0 || outcome.overall !== "fail") {
         throw new Error(`Server produced incorrect all-mode aggregate evidence: ${JSON.stringify(outcome)}`);
       }
-      arrangeTask433DeployedAssessment(systemId, hostname, outcome);
+      arrangeTask433DeployedAssessment(hostname, outcome.target_store_path);
       const findingId = outcome.finding_id;
       if (!findingId) throw new Error("Production assessment did not establish the canonical finding identity");
 
@@ -17324,8 +17294,8 @@ security.audit.enable = true;</fixtext>
       let assessmentId = assessmentFixture.assessment_id;
       let derivationId = assessmentFixture.derivation_id;
       const findingId = assessmentFixture.finding_id;
-      arrangeTask433DeployedAssessment(systemId, hostname, assessmentFixture);
-      arrangeTask433DeployedAssessment(linkedSystemId, linkedHostname, linkedAssessment);
+      arrangeTask433DeployedAssessment(hostname, assessmentFixture.target_store_path);
+      arrangeTask433DeployedAssessment(linkedHostname, linkedAssessment.target_store_path);
       const fixture = {
         policy,
         policyVersionId,
