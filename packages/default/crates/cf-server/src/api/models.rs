@@ -565,12 +565,16 @@ pub enum CveEnvironmentDisposition {
         /// Records when the actor accepted risk.
         accepted_at: DateTime<Utc>,
     },
-    /// Records remediation scheduling through one POA&M.
+    /// Records coherent remediation scheduling through one active POA&M.
     Scheduled {
         /// Identifies the POA&M that owns the exact subjects.
         poam_id: Uuid,
-        /// Gives the active POA&M metadata required for compatible reuse.
-        poam: ScheduledPoamMetadata,
+        /// Gives the complete active POA&M metadata for compatible reuse.
+        ///
+        /// The server uses `None` only while it validates a persisted scheduled
+        /// disposition. An emitted scheduled disposition always contains
+        /// `Some` metadata.
+        poam: Option<ScheduledPoamMetadata>,
         /// Identifies the authenticated actor that scheduled remediation.
         actor: CveDispositionActor,
         /// Records when the actor scheduled remediation.

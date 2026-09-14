@@ -3430,59 +3430,58 @@ async fn fleet_cve_dispositions_tx(
                             "scheduled CVE disposition lacks POA&M"
                         ))
                     })?,
-                    poam: {
-                        let id = row.active_poam_id.ok_or_else(|| {
-                            PoamError::Database(anyhow::anyhow!(
-                                "scheduled CVE disposition lacks active POA&M metadata"
-                            ))
-                        })?;
-                        if row.poam_id != Some(id) {
-                            return Err(PoamError::Database(anyhow::anyhow!(
-                                "scheduled CVE disposition POA&M metadata does not match"
-                            )));
-                        }
-                        let risk = match row.poam_risk.as_deref() {
-                            Some("high") => PoamRisk::High,
-                            Some("medium") => PoamRisk::Medium,
-                            Some("low") => PoamRisk::Low,
-                            _ => {
-                                return Err(PoamError::Database(anyhow::anyhow!(
-                                    "scheduled CVE disposition has incompatible POA&M risk"
-                                )));
+                    // SECURITY: Build an optional candidate before coherence
+                    // cleanup. Stale persisted rows fail closed as OPEN instead
+                    // of turning the complete drawer read into a database error.
+                    poam: match (
+                        row.active_poam_id,
+                        row.poam_human_id,
+                        row.poam_title,
+                        row.poam_plan,
+                        row.poam_target_date,
+                        row.poam_risk.as_deref(),
+                        row.poam_assignee,
+                    ) {
+                        (
+                            Some(id),
+                            Some(human_id),
+                            Some(title),
+                            Some(plan),
+                            Some(target_date),
+                            Some(risk),
+                            Some(assignee),
+                        ) if row.poam_id == Some(id) => {
+                            let risk = match risk {
+                                "high" => Some(PoamRisk::High),
+                                "medium" => Some(PoamRisk::Medium),
+                                "low" => Some(PoamRisk::Low),
+                                _ => None,
+                            };
+                            let assignee = assignee.0;
+                            if matches!(
+                                &assignee,
+                                PoamAssigneeView::User {
+                                    available: true,
+                                    ..
+                                } | PoamAssigneeView::OidcGroup {
+                                    available: true,
+                                    ..
+                                }
+                            ) {
+                                risk.map(|risk| ScheduledPoamMetadata {
+                                    id,
+                                    human_id,
+                                    title,
+                                    plan,
+                                    target_date,
+                                    risk,
+                                    assignee,
+                                })
+                            } else {
+                                None
                             }
-                        };
-                        ScheduledPoamMetadata {
-                            id,
-                            human_id: row.poam_human_id.ok_or_else(|| {
-                                PoamError::Database(anyhow::anyhow!(
-                                    "scheduled CVE disposition lacks POA&M human ID"
-                                ))
-                            })?,
-                            title: row.poam_title.ok_or_else(|| {
-                                PoamError::Database(anyhow::anyhow!(
-                                    "scheduled CVE disposition lacks POA&M title"
-                                ))
-                            })?,
-                            plan: row.poam_plan.ok_or_else(|| {
-                                PoamError::Database(anyhow::anyhow!(
-                                    "scheduled CVE disposition lacks POA&M plan"
-                                ))
-                            })?,
-                            target_date: row.poam_target_date.ok_or_else(|| {
-                                PoamError::Database(anyhow::anyhow!(
-                                    "scheduled CVE disposition lacks POA&M target date"
-                                ))
-                            })?,
-                            risk,
-                            assignee: row
-                                .poam_assignee
-                                .ok_or_else(|| {
-                                    PoamError::Database(anyhow::anyhow!(
-                                        "scheduled CVE disposition lacks POA&M assignee"
-                                    ))
-                                })?
-                                .0,
                         }
+                        _ => None,
                     },
                     actor: CveDispositionActor {
                         user_id: row.scheduled_by.ok_or_else(|| {
@@ -3519,8 +3518,8 @@ async fn retain_coherent_scheduled_dispositions_tx(
     let scheduled = dispositions
         .iter()
         .filter_map(|(environment_id, disposition)| match disposition {
-            CveEnvironmentDisposition::Scheduled { poam_id, .. } => {
-                Some((*environment_id, *poam_id))
+            CveEnvironmentDisposition::Scheduled { poam_id, poam, .. } => {
+                Some((*environment_id, *poam_id, poam.is_some()))
             }
             CveEnvironmentDisposition::Accepted { .. } => None,
         })
@@ -3548,18 +3547,22 @@ async fn retain_coherent_scheduled_dispositions_tx(
     .bind(package_name)
     .fetch_all(&mut **tx)
     .await?;
-    for (environment_id, poam_id) in scheduled {
+    for (environment_id, poam_id, has_complete_metadata) in scheduled {
         let expected = subjects
             .iter()
             .filter(|subject| subject.environment_id == environment_id)
             .map(|subject| subject.system_id)
             .collect::<BTreeSet<_>>();
-        let coherent = rows.iter().any(|row| {
-            row.0 == environment_id
-                && row.1 == poam_id
-                && row.2 != "completed"
-                && row.3.iter().copied().collect::<BTreeSet<_>>() == expected
-        });
+        // INVARIANT: This set equality mirrors
+        // cve_coherent_environment_disposition_state(). Both missing current
+        // subjects and stale active links make the environment OPEN.
+        let coherent = has_complete_metadata
+            && rows.iter().any(|row| {
+                row.0 == environment_id
+                    && row.1 == poam_id
+                    && row.2 != "completed"
+                    && row.3.iter().copied().collect::<BTreeSet<_>>() == expected
+            });
         if !coherent {
             // SECURITY: Corrupt, stale, or completed remediation references
             // fail closed as OPEN instead of claiming current fleet coverage.
