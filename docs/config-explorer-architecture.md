@@ -1,7 +1,9 @@
 # Config Explorer Architecture
 
-**Status:** Accepted / implemented initially by TASK-440  
-**Scope:** Crystal Forge Config inspection and exploration  
+**Status:** Accepted / implemented initially by TASK-440
+
+**Scope:** Crystal Forge Config inspection and exploration
+
 **Related:** TASK-440, MR !323
 
 ## Problem statement
@@ -531,16 +533,16 @@ option observation retains readable metadata and returns a bounded
 
 ## Decision record
 
-**Decision 1:** Config Explorer is observational, not deployment authority.  
-**Decision 2:** Policy enforcement continues to evaluate policies independently.  
-**Decision 3:** Config browsing is lazy and path-scoped.  
-**Decision 4:** Complete V2 snapshots are optional enrichment and comparison artifacts.  
-**Decision 5:** Partial or unreadable branches remain local failures.  
-**Decision 6:** Waiting for evaluator capacity is distinct from running inspection.  
-**Decision 7:** Explorer results are cached against immutable exact target identity.  
-**Decision 8:** Arbitrary Nix expressions are never accepted from clients.  
-**Decision 9:** Exact revision inspection is read-only.  
-**Decision 10:** Cached or partial Explorer data cannot produce authoritative Changed or Drift conclusions.
+- **Decision 1:** Config Explorer is observational, not deployment authority.
+- **Decision 2:** Policy enforcement continues to evaluate policies independently.
+- **Decision 3:** Config browsing is lazy and path-scoped.
+- **Decision 4:** Complete V2 snapshots are optional enrichment and comparison artifacts.
+- **Decision 5:** Partial or unreadable branches remain local failures.
+- **Decision 6:** Waiting for evaluator capacity is distinct from running inspection.
+- **Decision 7:** Explorer results are cached against immutable exact target identity.
+- **Decision 8:** Arbitrary Nix expressions are never accepted from clients.
+- **Decision 9:** Exact revision inspection is read-only.
+- **Decision 10:** Cached or partial Explorer data cannot produce authoritative Changed or Drift conclusions.
 
 Future work that violates one of these decisions MUST amend this document as
 an explicit architecture change instead of silently changing the behavior.
