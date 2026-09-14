@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-14 17:19'
+updated_date: '2026-09-14 17:27'
 labels:
   - design-parity
   - web-ui
@@ -81,6 +81,8 @@ references:
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2847810285'
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/jobs/16490032119'
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/jobs/16491838085'
+  - git commit e17248395830dff1d3e87a496f3a5f3abe2c1e89
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2848127618'
 documentation:
   - docs/design/CrystalForge/app.jsx
   - docs/design/CrystalForge/components/SystemDetail.jsx
@@ -293,6 +295,8 @@ Exact-head pipeline 2846507817 at f80578e5 proved the bounded Config Inspector o
 Exact-head pipeline 2847810285 reached the Web UI gate but job 16490032119 was killed at the GitLab 3600-second limit before the browser suite emitted final semantic or visual reports. All other executed required jobs passed. Trace evidence shows Web UI Rust 403/403 and server Rust 1495/1495 passed; the browser reached workflow 119/135 (`12l-task440-config-lifecycle`). Its live Config Inspector completed successfully, but build/setup consumed about 814 seconds before the browser process and the job deadline left insufficient margin for the configured browser/result timeouts. This run does not prove semantic pass or failure and exported no final visual summary. Retried the exact-head Web UI job as 16491838085 to distinguish a cold-build timeout from a repeatable suite/runtime defect; it is pending.
 
 Retry job 16491838085 completed in 1802 seconds and produced authoritative browser results. TASK-440 Config/flake/navigation workflows now pass, including 12l/12la/12m/12n/12p/12q, 13j/13l-13q, 13k, 12o, and 14d. Critical failures are reduced from eight to three: `16-cves`, `task433-canonical-mixed-nix-cve-evidence`, and `task433-canonical-poam-lifecycle`. Typed assignee workflow `29i` now passes. Visual result is 40 match, 2 differ, 182 new, 32 skipped; only strict failures remain the dark/light `20af-policy-catalog-selection-delete-regressions` differences. The CI job failed with those three critical semantics plus the two strict visual differences and uploaded no artifact because the expected runner path was absent.
+
+Diagnosed the three remaining critical failures as browser-harness defects. `16-cves` used substring text locators for ACCEPTED/SCHEDULED, which matched both status chips and explanatory prose; exact text locators now assert the intended chips. The two TASK-433 failures shared one invalid fixture assumption: production policy evaluation can persist authoritative assessment evidence without producing a certified available Config snapshot, so the helper must record only the disconnected agent's deployment observation and must not fabricate or require a retained-generation artifact. Commit e17248395830dff1d3e87a496f3a5f3abe2c1e89 applies those focused corrections. `node --check checks/web-ui/tests/integration-test.js` and `git diff --check` passed. Exact-head pipeline 2848127618 is running.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
