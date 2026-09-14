@@ -192,6 +192,11 @@ fn sync_cve_url_state(
     );
 }
 
+/// Renders the fleet CVE dashboard and its reload-safe exact-CVE selection.
+///
+/// The view hydrates drawer selection from the URL before synchronizing local
+/// state back to browser history. Later selection changes and `popstate`
+/// events remain authoritative after hydration.
 #[component]
 pub fn CvesView() -> Element {
     let app_state = use_context::<Signal<AppState>>();
@@ -214,6 +219,7 @@ pub fn CvesView() -> Element {
     let mut sort_by = use_signal(move || initial_sort.clone());
     let mut view_mode = use_signal(move || initial_view.clone()); // "flat" or "grouped"
     let mut selected_cve = use_signal(move || initial_selection.clone());
+    let mut selection_hydrated = use_signal(|| false);
     let mut toast_message: Signal<Option<(String, bool)>> = use_signal(|| None);
     // CONCURRENCY: Publishing or dismissing feedback advances the lifecycle.
     // A success timer can clear only the publication that created the timer.
@@ -225,6 +231,15 @@ pub fn CvesView() -> Element {
     let flash_crit = flash_crit_signal();
 
     use_effect(move || {
+        if !selection_hydrated() {
+            // CONCURRENCY: The first effect can run before the mounted URL
+            // selection reaches component state. Hydrate and yield so this
+            // run cannot erase the deep link with `replaceState`.
+            selected_cve.set(selection_from_query());
+            selection_hydrated.set(true);
+            return;
+        }
+
         let severity = severity_filter();
         let fix_status = fix_status_filter();
         let triage_status = triage_status_filter();

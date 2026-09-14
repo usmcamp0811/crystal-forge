@@ -13610,7 +13610,7 @@ By using this IS (which includes any device attached to this IS), you consent to
       const systemId = "43300000-0000-4000-8000-000000000010";
       const hostname = "task433-mixed-evidence-target";
       let systemInserted = false;
-      let sourceConfigurationHeld = false;
+      let reservedConfigurationIds = [];
       let primaryError = null;
       try {
         const reservedCount = Number(runFixtureSql(`
@@ -13620,18 +13620,19 @@ By using this IS (which includes any device attached to this IS), you consent to
         if (reservedCount !== 0) {
           throw new Error(`Canonical mixed-evidence reserved system already exists: ${systemId} / ${hostname}`);
         }
-        const heldSourceCount = Number(runFixtureSql(`
-          WITH held AS (
-            UPDATE systems
-            SET system_configuration_name='task433-held-mixed-source'
-            WHERE id='${sourceSystemId}'::uuid
-              AND system_configuration_name='test-agent'
-            RETURNING id
+        reservedConfigurationIds = JSON.parse(runFixtureSql(`
+          WITH reserved AS (
+            UPDATE systems candidate
+            SET system_configuration_name='task433-held-mixed-test-agent-' || replace(candidate.id::text, '-', '')
+            FROM systems source
+            WHERE source.id='${sourceSystemId}'::uuid
+              AND candidate.flake_id=source.flake_id
+              AND COALESCE(NULLIF(BTRIM(candidate.system_configuration_name), ''), candidate.hostname)='test-agent'
+              AND candidate.id <> '${systemId}'::uuid
+            RETURNING candidate.id
           )
-          SELECT COUNT(*) FROM held;
+          SELECT COALESCE(json_agg(id ORDER BY id), '[]'::json)::text FROM reserved;
         `));
-        if (heldSourceCount !== 1) throw new Error("Canonical mixed-evidence source configuration could not be reserved");
-        sourceConfigurationHeld = true;
         const insertedCount = Number(runFixtureSql(`
           WITH inserted AS (
             INSERT INTO systems (
@@ -13654,7 +13655,7 @@ By using this IS (which includes any device attached to this IS), you consent to
           FROM systems candidate
           JOIN systems source ON source.id='${sourceSystemId}'::uuid
           WHERE candidate.flake_id=source.flake_id
-            AND candidate.system_configuration_name='test-agent';
+            AND COALESCE(NULLIF(BTRIM(candidate.system_configuration_name), ''), candidate.hostname)='test-agent';
         `));
         // Persistence lookup does not filter inactive systems, so identity must
         // be unique across all rows for this flake before evaluation starts.
@@ -13793,7 +13794,7 @@ By using this IS (which includes any device attached to this IS), you consent to
         primaryError = error;
         throw error;
       } finally {
-        if (systemInserted || sourceConfigurationHeld) {
+        if (systemInserted || reservedConfigurationIds.length) {
           try {
             runFixtureSql(`
               BEGIN;
@@ -13804,14 +13805,12 @@ By using this IS (which includes any device attached to this IS), you consent to
                 AND ${systemInserted ? "true" : "false"};
               UPDATE systems
               SET is_active=false,
-                  system_configuration_name='task433-retired-mixed-target'
+                  system_configuration_name='task433-retired-mixed-${systemId}'
               WHERE id='${systemId}'::uuid
                 AND ${systemInserted ? "true" : "false"};
               UPDATE systems
               SET system_configuration_name='test-agent'
-              WHERE id='${sourceSystemId}'::uuid
-                AND system_configuration_name='task433-held-mixed-source'
-                AND ${sourceConfigurationHeld ? "true" : "false"};
+              WHERE id IN (${reservedConfigurationIds.map((id) => `'${id}'::uuid`).join(", ") || "NULL"});
               COMMIT;
             `);
           } catch (cleanupError) {
@@ -17062,7 +17061,8 @@ security.audit.enable = true;</fixtext>
       const linkedHostname = "task433-linked-canonical";
       let primarySystemInserted = false;
       let linkedSystemInserted = false;
-      let sourceConfigurationHeld = false;
+      let reservedTestAgentIds = [];
+      let reservedCfTestSysIds = [];
       let primaryError = null;
       try {
         const reservedCount = Number(runFixtureSql(`
@@ -17073,18 +17073,32 @@ security.audit.enable = true;</fixtext>
         if (reservedCount !== 0) {
           throw new Error("Canonical POA&M reserved system IDs or hostnames already exist");
         }
-        const heldSourceCount = Number(runFixtureSql(`
-          WITH held AS (
-            UPDATE systems
-            SET system_configuration_name='task433-held-poam-source'
-            WHERE id='${sourceSystemId}'::uuid
-              AND system_configuration_name='test-agent'
-            RETURNING id
+        reservedTestAgentIds = JSON.parse(runFixtureSql(`
+          WITH reserved AS (
+            UPDATE systems candidate
+            SET system_configuration_name='task433-held-poam-test-agent-' || replace(candidate.id::text, '-', '')
+            FROM systems source
+            WHERE source.id='${sourceSystemId}'::uuid
+              AND candidate.flake_id=source.flake_id
+              AND COALESCE(NULLIF(BTRIM(candidate.system_configuration_name), ''), candidate.hostname)='test-agent'
+              AND candidate.id NOT IN ('${systemId}'::uuid, '${linkedSystemId}'::uuid)
+            RETURNING candidate.id
           )
-          SELECT COUNT(*) FROM held;
+          SELECT COALESCE(json_agg(id ORDER BY id), '[]'::json)::text FROM reserved;
         `));
-        if (heldSourceCount !== 1) throw new Error("Canonical POA&M source configuration could not be reserved");
-        sourceConfigurationHeld = true;
+        reservedCfTestSysIds = JSON.parse(runFixtureSql(`
+          WITH reserved AS (
+            UPDATE systems candidate
+            SET system_configuration_name='task433-held-poam-cf-test-sys-' || replace(candidate.id::text, '-', '')
+            FROM systems source
+            WHERE source.id='${sourceSystemId}'::uuid
+              AND candidate.flake_id=source.flake_id
+              AND COALESCE(NULLIF(BTRIM(candidate.system_configuration_name), ''), candidate.hostname)='cf-test-sys'
+              AND candidate.id NOT IN ('${systemId}'::uuid, '${linkedSystemId}'::uuid)
+            RETURNING candidate.id
+          )
+          SELECT COALESCE(json_agg(id ORDER BY id), '[]'::json)::text FROM reserved;
+        `));
         const insertedCount = Number(runFixtureSql(`
           WITH inserted AS (
             INSERT INTO systems (
@@ -17197,8 +17211,8 @@ security.audit.enable = true;</fixtext>
 
         const configurationCounts = JSON.parse(runFixtureSql(`
           SELECT json_build_object(
-            'testAgent', COUNT(*) FILTER (WHERE candidate.system_configuration_name='test-agent'),
-            'cfTestSys', COUNT(*) FILTER (WHERE candidate.system_configuration_name='cf-test-sys')
+            'testAgent', COUNT(*) FILTER (WHERE COALESCE(NULLIF(BTRIM(candidate.system_configuration_name), ''), candidate.hostname)='test-agent'),
+            'cfTestSys', COUNT(*) FILTER (WHERE COALESCE(NULLIF(BTRIM(candidate.system_configuration_name), ''), candidate.hostname)='cf-test-sys')
           )::text
           FROM systems candidate
           JOIN systems source ON source.id='${sourceSystemId}'::uuid
@@ -17487,7 +17501,7 @@ security.audit.enable = true;</fixtext>
         throw error;
       } finally {
         try {
-          if (primarySystemInserted || linkedSystemInserted || sourceConfigurationHeld) {
+          if (primarySystemInserted || linkedSystemInserted || reservedTestAgentIds.length || reservedCfTestSysIds.length) {
             const insertedIds = [
               ...(primarySystemInserted ? [`'${systemId}'::uuid`] : []),
               ...(linkedSystemInserted ? [`'${linkedSystemId}'::uuid`] : []),
@@ -17500,15 +17514,16 @@ security.audit.enable = true;</fixtext>
               UPDATE systems
               SET is_active=false,
                   system_configuration_name=CASE id
-                    WHEN '${systemId}'::uuid THEN 'task433-retired-poam-primary'
-                    WHEN '${linkedSystemId}'::uuid THEN 'task433-retired-poam-linked'
+                    WHEN '${systemId}'::uuid THEN 'task433-retired-poam-${systemId}'
+                    WHEN '${linkedSystemId}'::uuid THEN 'task433-retired-poam-${linkedSystemId}'
                   END
               WHERE id IN (${insertedIds || "NULL"});
               UPDATE systems
               SET system_configuration_name='test-agent'
-              WHERE id='${sourceSystemId}'::uuid
-                AND system_configuration_name='task433-held-poam-source'
-                AND ${sourceConfigurationHeld ? "true" : "false"};
+              WHERE id IN (${reservedTestAgentIds.map((id) => `'${id}'::uuid`).join(", ") || "NULL"});
+              UPDATE systems
+              SET system_configuration_name='cf-test-sys'
+              WHERE id IN (${reservedCfTestSysIds.map((id) => `'${id}'::uuid`).join(", ") || "NULL"});
               COMMIT;
             `);
           }
@@ -18335,10 +18350,10 @@ security.audit.enable = true;</fixtext>
       const configUrl = `${baseUrl}/systems/${TASK_440_SYSTEM_ID}?tab=config&config_mode=commit&revision=${TASK_440_NEVER_DEPLOYED_SHA}`;
       await page.goto(configUrl, { timeout: LOAD_TIMEOUT });
       await assertVisible(page.locator(".cfgx").getByText("TARGET", { exact: true }), `Expected Config Explorer; fixture requests: ${state.handledRequests.join(",")}`, 15000);
-      await assertVisible(page.locator(".cfg-hist-note").filter({ hasText: /never deployed here/ }), "Expected never-deployed warning");
+      await assertVisible(page.locator(".cfgx-hist").filter({ hasText: /never deployed here/ }), "Expected never-deployed warning");
       if (!page.url().includes(TASK_440_NEVER_DEPLOYED_SHA)) throw new Error("Expected full revision in Config deep link");
       await page.reload({ timeout: LOAD_TIMEOUT });
-      await assertVisible(page.locator(".cfg-hist-note").filter({ hasText: /never deployed here/ }), "Expected revision context after reload", 15000);
+      await assertVisible(page.locator(".cfgx-hist").filter({ hasText: /never deployed here/ }), "Expected revision context after reload", 15000);
 
       state.lifecycle = "unavailable";
       await page.reload({ timeout: LOAD_TIMEOUT });
@@ -18493,7 +18508,7 @@ security.audit.enable = true;</fixtext>
       await commitSelect.selectOption(TASK_440_NEVER_DEPLOYED_SHA);
       await newestRootPost;
       state.releaseHeldObservation("root");
-      await assertVisible(page.getByRole("button", { name: "Expand 9999999-root" }), "Newest revision root did not render after releasing held responses", 15000);
+      await assertVisible(page.getByRole("button", { name: /^(?:Expand|Collapse) 9999999-root$/ }), "Newest revision root did not render after releasing held responses", 15000);
       await assertHidden(page.getByRole("button", { name: "Expand abcdef0-root" }), "Old revision root overwrote the newer exact revision");
       const requestIds = state.observationPosts.map((request) => request.request_id);
       const observationIds = state.observationPosts.map((request) => request.observation_id);
@@ -18501,7 +18516,7 @@ security.audit.enable = true;</fixtext>
         throw new Error(`Config observation route reused an identity: ${JSON.stringify({ requestIds, observationIds })}`);
       }
       await commitSelect.selectOption(TASK_440_CURRENT_SHA);
-      await assertVisible(page.getByRole("button", { name: `Expand ${TASK_440_CURRENT_SHA.slice(0, 7)}-root` }), "Current revision did not recover after stale-response scenario", 15000);
+      await assertVisible(page.getByRole("button", { name: new RegExp(`^(?:Expand|Collapse) ${TASK_440_CURRENT_SHA.slice(0, 7)}-root$`) }), "Current revision did not recover after stale-response scenario", 15000);
       await page.getByRole("button", { name: "Configured", exact: true }).click();
       await page.getByRole("button", { name: "Inspect configured option services.openssh.enable" }).click();
       for (const theme of ["dark", "light"]) {
