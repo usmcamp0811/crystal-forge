@@ -322,6 +322,7 @@ fn PoamAssigneeSelect(props: PoamAssigneeSelectProps) -> Element {
         _ => &empty_catalog,
     };
     let selected = props.selection.read().clone();
+    let selected_value = selected.option_value();
     // COMPATIBILITY: Keep the selected option at one stable DOM location while
     // the asynchronous catalog loads. Moving the selected value into an
     // optgroup can make the browser reset the native select to Unassigned.
@@ -331,21 +332,21 @@ fn PoamAssigneeSelect(props: PoamAssigneeSelectProps) -> Element {
         select {
             class: "input focus-ring",
             "data-testid": "poam-assignee-select",
-            value: "{selected.option_value()}",
+            value: "{selected_value}",
             disabled: props.disabled || matches!(props.catalog, AssigneeCatalogState::Loading),
             onchange: move |event| {
                 if let Some(next) = assignee_from_option(&event.value(), &catalog_for_change) {
                     selection.set(next);
                 }
             },
-            option { value: "unassigned", "Unassigned" }
+            option { value: "unassigned", selected: selected_value == "unassigned", "Unassigned" }
             if include_current {
-                option { value: "{selected.option_value()}", "{selected.unavailable_label()}" }
+                option { value: "{selected_value}", selected: true, "{selected.unavailable_label()}" }
             }
             if !catalog.people.is_empty() {
                 optgroup { label: "People",
                     for person in &catalog.people {
-                        if selected.option_value() != format!("user:{}", person.user_id) {
+                        if selected_value != format!("user:{}", person.user_id) {
                             option { value: "user:{person.user_id}", "{person.label}" }
                         }
                     }
@@ -354,7 +355,7 @@ fn PoamAssigneeSelect(props: PoamAssigneeSelectProps) -> Element {
             if !catalog.groups.is_empty() {
                 optgroup { label: "Groups",
                     for group in &catalog.groups {
-                        if selected.option_value() != format!("group:{}", group.group_name) {
+                        if selected_value != format!("group:{}", group.group_name) {
                             option { value: "group:{group.group_name}", "{group.group_name}" }
                         }
                     }

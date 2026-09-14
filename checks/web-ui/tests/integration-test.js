@@ -1378,6 +1378,15 @@ async function routeStandaloneUiBootstrap(page, role = "Admin") {
       return;
     }
 
+    if (path === "/api/v1/poams/assignees" && method === "GET") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ people: [], groups: [] }),
+      });
+      return;
+    }
+
     if (path === "/api/v1/admin/setup-progress" && method === "GET") {
       await route.fulfill({
         status: 200,
@@ -5020,14 +5029,48 @@ function arrangeTask433CompletedScan(derivationId, criticalCount) {
   return scanId;
 }
 
-function arrangeTask433DeployedAssessment(hostname, targetStorePath) {
+function arrangeTask433DeployedAssessment(systemId, hostname, assessment) {
   // The agent is not connected in this browser check. Arrange its deployment
-  // observation so compliance reads the assessment that production evaluation
-  // persisted for this exact target.
+  // observation and retained generation binding so compliance reads the exact
+  // assessment that production evaluation persisted for this target.
+  const retainedCount = Number(runFixtureSql(`
+    WITH target AS (
+      SELECT id, commit_id, derivation_name
+      FROM derivations
+      WHERE id=${Number(assessment.derivation_id)}
+        AND COALESCE(store_path, expected_store_path)=$path$${assessment.target_store_path}$path$
+        AND derivation_type='nixos'
+    ), snapshot AS (
+      SELECT candidate.id, candidate.commit_id, candidate.configuration_name
+      FROM evaluation_snapshots candidate
+      JOIN target ON target.commit_id=candidate.commit_id
+                 AND target.derivation_name=candidate.configuration_name
+      WHERE candidate.lifecycle='available' AND candidate.integrity_version=1
+      ORDER BY candidate.completed_at DESC NULLS LAST, candidate.id DESC
+      LIMIT 1
+    ), retained AS (
+      INSERT INTO evaluation_generation_snapshots (
+        system_id, generation, snapshot_id, derivation_id, commit_id,
+        source_store_path, configuration_name, lineage_verified
+      )
+      SELECT '${systemId}'::uuid, 1, snapshot.id, target.id, target.commit_id,
+             $path$${assessment.target_store_path}$path$,
+             target.derivation_name, true
+      FROM target JOIN snapshot ON snapshot.commit_id=target.commit_id
+      RETURNING id
+    )
+    SELECT COUNT(*) FROM retained;
+  `));
+  if (retainedCount !== 1) {
+    throw new Error(`Could not retain exact deployed assessment for ${hostname}: ${JSON.stringify(assessment)}`);
+  }
   runFixtureSql(`
-    INSERT INTO system_states(hostname, change_reason, store_path, generation, timestamp)
+    INSERT INTO system_states(
+      hostname, change_reason, store_path, generation,
+      generation_matches_current_store_path, timestamp
+    )
     VALUES ($hostname$${hostname}$hostname$, 'cf_deployment',
-            $path$${targetStorePath}$path$, 1, CURRENT_TIMESTAMP);
+            $path$${assessment.target_store_path}$path$, 1, true, CURRENT_TIMESTAMP);
   `);
 }
 
@@ -5473,7 +5516,7 @@ async function createPhase6PoamFixture(page, label, systemCount = 1, options = {
       WITH selected_environment AS (
         SELECT id FROM environments ORDER BY created_at NULLS LAST, id LIMIT 1
       ), selected_commit AS (
-        SELECT id FROM commits ORDER BY id LIMIT 1
+        SELECT id, flake_id FROM commits ORDER BY id LIMIT 1
       ), inserted_derivation AS (
         INSERT INTO derivations (
           commit_id, derivation_type, derivation_name, derivation_path, store_path,
@@ -5483,10 +5526,12 @@ async function createPhase6PoamFixture(page, label, systemCount = 1, options = {
                $path$${storePath}$path$, $path$${storePath}$path$, 10, 0, now(), '{}'::jsonb
         FROM selected_commit RETURNING id, store_path
       ), inserted_system AS (
-        INSERT INTO systems (id, hostname, environment_id, is_active, public_key, derivation)
-        SELECT '${systemId}'::uuid, $name$${hostname}$name$, environment.id, true,
+        INSERT INTO systems (id, hostname, environment_id, flake_id, is_active, public_key, derivation)
+        SELECT '${systemId}'::uuid, $name$${hostname}$name$, environment.id, commit.flake_id, true,
                'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPhase6BrowserFixture', derivation.store_path
-        FROM selected_environment environment CROSS JOIN inserted_derivation derivation
+        FROM selected_environment environment
+        CROSS JOIN inserted_derivation derivation
+        CROSS JOIN selected_commit commit
         RETURNING id, hostname
       ), inserted_state AS (
         INSERT INTO system_states (hostname, change_reason, store_path, generation, timestamp)
@@ -13777,7 +13822,7 @@ By using this IS (which includes any device attached to this IS), you consent to
       if (cveResult.evidence.count !== 2 || cveResult.evidence.max_allowed !== 0 || outcome.overall !== "fail") {
         throw new Error(`Server produced incorrect all-mode aggregate evidence: ${JSON.stringify(outcome)}`);
       }
-      arrangeTask433DeployedAssessment(hostname, outcome.target_store_path);
+      arrangeTask433DeployedAssessment(systemId, hostname, outcome);
       const findingId = outcome.finding_id;
       if (!findingId) throw new Error("Production assessment did not establish the canonical finding identity");
 
@@ -17279,8 +17324,8 @@ security.audit.enable = true;</fixtext>
       let assessmentId = assessmentFixture.assessment_id;
       let derivationId = assessmentFixture.derivation_id;
       const findingId = assessmentFixture.finding_id;
-      arrangeTask433DeployedAssessment(hostname, assessmentFixture.target_store_path);
-        arrangeTask433DeployedAssessment(linkedHostname, linkedAssessment.target_store_path);
+      arrangeTask433DeployedAssessment(systemId, hostname, assessmentFixture);
+      arrangeTask433DeployedAssessment(linkedSystemId, linkedHostname, linkedAssessment);
       const fixture = {
         policy,
         policyVersionId,
