@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-14 10:14'
+updated_date: '2026-09-14 10:23'
 labels:
   - design-parity
   - web-ui
@@ -265,6 +265,8 @@ Fix the Config Explorer lifecycle regression by using one scope-reset effect tha
 2026-09-14 integration-test diff cleanup: restored HEAD indentation/content for whitespace-only changes in checks/web-ui/tests/integration-test.js while preserving the full semantic CI-fix patch. Final standard diff is 528 changed lines (429 additions, 99 deletions); whitespace-insensitive diff is 526 lines (428 additions, 98 deletions), down from 2,502 lines. Retained focused context/listener/policy cleanup without reindenting unchanged bodies. Verified `node --check checks/web-ui/tests/integration-test.js`, `CF_UI_STATIC_CONTRACTS=1 node checks/web-ui/tests/integration-test.js` (`web-ui harness static contracts OK`), and `git diff --check HEAD -- checks/web-ui/tests/integration-test.js`. No behavior was deliberately dropped. Did not run VM/browser/Nix checks, commit, or push.
 
 Exact-head pipeline 2845881618 at merge commit 6de5666c failed only after running the authoritative Web UI VM suite. The failure exposed stale Dioxus/typed-assignee/config-explorer locators, incomplete standalone CVE routes, onboarding overlay leakage after browser recovery, and persistent canonical workflow fixture contamination. Commit da7473a18a5f4f907350a402da413b75975bcb57 applies focused harness corrections without changing production behavior or committed strict visual baselines. `node --check checks/web-ui/tests/integration-test.js`, `CF_UI_STATIC_CONTRACTS=1 nix develop -c node checks/web-ui/tests/integration-test.js`, and `git diff --check` passed. Exact-head pipeline 2846236338 is the runtime authority and is currently running.
+
+2026-09-14 exact-head CI fix implementation at da7473a: updated only checks/web-ui/default.nix, checks/web-ui/tests/integration-test.js, docs/config-explorer-architecture.md, and config_inspections.rs. Added validated private 300-second default/1..=3600 stage-deadline resolution, Web UI VM-only 600-second service override, and 660-second browser fixture wait. Tightened 16-cves, 20af, 29i, 12m, and canonical TASK-433 workflow ordering/identity/cleanup without changing exact FAIL semantics. Verification passed: `nix develop -c rustfmt --edition 2024 --check packages/default/crates/cf-server/src/services/config_inspections.rs`; `nix develop -c cargo test --manifest-path packages/default/Cargo.toml -p cf-server services::config_inspections::tests::stage_deadline_parser --lib` (5 passed, 0 failed, 2010 filtered; pre-existing package warnings); `node --check checks/web-ui/tests/integration-test.js`; `CF_UI_STATIC_CONTRACTS=1 node checks/web-ui/tests/integration-test.js` (`web-ui harness static contracts OK`); `git diff --check`. Per user instruction, no VM/browser workflow, full flake check, commit, or push was run. Final diff: 4 files changed, 223 insertions, 33 deletions. Runtime uncertainty remains for the VM-backed canonical workflows and the actual 600-second Config Inspector path because those heavyweight checks were explicitly excluded.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
