@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-14 16:48'
+updated_date: '2026-09-14 17:19'
 labels:
   - design-parity
   - web-ui
@@ -291,6 +291,8 @@ Exact-head pipeline 2846507817 at f80578e5 proved the bounded Config Inspector o
 2026-09-14 follow-up from pipeline 2847541632: Config Explorer 12m passed, but Web UI remained red with eight critical POA&M/evidence workflows and the two known 20af visual differences. Commit 990975d6d7f38d063afe9f03c5854070b3069102 adds the missing standalone assignee-catalog fixture, persists flake identity for shared Phase-6 systems, records canonical deployed assessments with exact retained generation/derivation bindings and current-store confirmation, and makes the hydrated typed assignee option explicitly selected. Node syntax, static harness contracts, touched-file rustfmt, and diff checks passed. Authoritative pipeline 2847810285 is running. The candidate job from 2847541632 failed because critical workflows remained, so it produced no reviewable visual artifacts.
 
 Exact-head pipeline 2847810285 reached the Web UI gate but job 16490032119 was killed at the GitLab 3600-second limit before the browser suite emitted final semantic or visual reports. All other executed required jobs passed. Trace evidence shows Web UI Rust 403/403 and server Rust 1495/1495 passed; the browser reached workflow 119/135 (`12l-task440-config-lifecycle`). Its live Config Inspector completed successfully, but build/setup consumed about 814 seconds before the browser process and the job deadline left insufficient margin for the configured browser/result timeouts. This run does not prove semantic pass or failure and exported no final visual summary. Retried the exact-head Web UI job as 16491838085 to distinguish a cold-build timeout from a repeatable suite/runtime defect; it is pending.
+
+Retry job 16491838085 completed in 1802 seconds and produced authoritative browser results. TASK-440 Config/flake/navigation workflows now pass, including 12l/12la/12m/12n/12p/12q, 13j/13l-13q, 13k, 12o, and 14d. Critical failures are reduced from eight to three: `16-cves`, `task433-canonical-mixed-nix-cve-evidence`, and `task433-canonical-poam-lifecycle`. Typed assignee workflow `29i` now passes. Visual result is 40 match, 2 differ, 182 new, 32 skipped; only strict failures remain the dark/light `20af-policy-catalog-selection-delete-regressions` differences. The CI job failed with those three critical semantics plus the two strict visual differences and uploaded no artifact because the expected runner path was absent.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
