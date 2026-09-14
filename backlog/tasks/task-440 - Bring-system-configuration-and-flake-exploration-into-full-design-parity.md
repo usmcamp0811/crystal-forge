@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-14 23:28'
+updated_date: '2026-09-14 23:41'
 labels:
   - design-parity
   - web-ui
@@ -48,46 +48,7 @@ references:
   - git commit 88d3218d4b194f0a6c5253f760327cb5fae144fb
   - git commit 27f93478837b9b726c5cda807faf6182fb0d3229
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2840805787'
-  - git commit fa204eb8
-  - git commit ad13f4b7
-  - git commit dbb04121126ea1b78b2678f7f548165bde8a5daf
-  - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2842357571'
-  - git commit e6f0ceb57342941214a28f748aa3e42e7b5efdf0
-  - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2842484224'
-  - git commit c34670ad744f30589fefc060111aff853fbcd88f
-  - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2842732664'
-  - git commit 37d1ed38ce39a86635c9ae7280315d5db27d95de
-  - git commit fa4f16826fb9b4481b27b36598eb0a4083a4260a
-  - git commit 3708ef3abe94c52778d2dfe1f1fc86a4596e08cb
-  - git commit 54278885f2212d0cb15045fab1708da7ad89ce4b
-  - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2843619053'
-  - git commit 606b3a90178a76251f2dae839023ce49890ec083
-  - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2843645262'
-  - git commit d4230ddf318112cff6626f76f5084b252389180a
-  - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2843864208'
-  - git commit 1204efdc8cf7e25ed01a634832456df0262c08af
-  - git commit def63adf405e52ceb249459688c0cae6ff564a54
-  - git commit 0867808d1aa54dd4ead8b6b403c84285ce15420b
-  - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2845881618'
-  - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2846236338'
-  - da7473a18a5f4f907350a402da413b75975bcb57
-  - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2846507817'
-  - f80578e54d956f56b0570d48a2b8811433116f08
-  - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2847225242'
-  - dcdaacdc38c34a11eb8cd936862577260a0efb75
-  - git commit 92db3791f6f3df97462050d23871a552163e97ad
-  - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2847541632'
-  - git commit 990975d6d7f38d063afe9f03c5854070b3069102
-  - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2847810285'
-  - 'https://gitlab.com/crystal-forge/crystal-forge/-/jobs/16490032119'
-  - 'https://gitlab.com/crystal-forge/crystal-forge/-/jobs/16491838085'
-  - git commit e17248395830dff1d3e87a496f3a5f3abe2c1e89
-  - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2848127618'
-  - 'https://gitlab.com/crystal-forge/crystal-forge/-/jobs/16492561399'
-  - git commit 133fd9a79f2ce75acb7fbf282cf409e42153bdd8
-  - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2848220069'
-  - git commit d2ca1c180d0a9e7c9b1a72439709fc98469ede5f
-  - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2848322724'
+  - git commit 0aa38dba
 documentation:
   - docs/design/CrystalForge/app.jsx
   - docs/design/CrystalForge/components/SystemDetail.jsx
@@ -244,6 +205,8 @@ Fix the deployment-smoke zombie compliance assignment defect from exact clean SH
 2026-09-14 deployed CVE inventory blocker remediation from exact clean head `d2ca1c180d0a9e7c9b1a72439709fc98469ede5f`: stop browser-CI iteration and separate rolling-upgrade CVE inventory authority from strict exact-CVE remediation authority. Preserve all exact retained-generation, verified-lineage, certified-artifact, schema-1 scan, immutable-observation predicates for POA&M, scheduling, verification, closure, link/reopen, and existing exact justification mutation semantics. Add a backward-compatible inventory response path that selects exact evidence when available, otherwise reads the prior bounded current-system inventory source and marks it `legacy`, otherwise reports `no_scan`; include scan timestamp and a typed first failed exact-authority reason. Never union exact and legacy rows, backfill schema-0 scans, fabricate immutable occurrences, or fabricate retained lineage. Update system and fleet read UI so legacy findings remain visible and counts do not collapse, while exact remediation controls are disabled with truthful guidance; distinguish exact clean, legacy clean, no scan, legacy findings, and exact findings. Add production-shaped upgraded PostgreSQL regressions for legacy vulnerable/clean/no-scan, exact current, generation/store mismatch, lineage false, and exact precedence/no duplicates, plus focused API/UI/browser coverage and contract documentation. Verify focused PostgreSQL CVE and exact-POA&M tests, cve-processing-test, server-regressions, focused Web UI CVE tests, WASM check, formatting, and `git diff --check`; then commit narrowly, push, redeploy to the authorized real non-production environment, and verify existing CVEs reappear without enabling legacy remediation before resuming broad Web UI CI. Do not merge MR !323.
 
 Verification constraint added by maintainer on 2026-09-14: do not run costly Web UI Nix/browser checks during this blocker remediation. Use focused PostgreSQL/server tests, exact-CVE regressions, cve-processing-test/server-regressions as requested, lightweight Web UI unit/static checks, WASM check, formatting, and diff checks. Defer broad/costly Web UI gates until the maintainer explicitly resumes them after deployed smoke.
+
+2026-09-14 next recovery sequence after CVE commit: Phase 1B adds one shared observational current-revision resolver for Config. Resolution priority is retained exact identity, then unambiguous durable deployment identity with exact observed store/system/flake/configuration, then unique legacy exact-store derivation mapping constrained to the same flake and effective configuration; mismatch or ambiguity remains unmapped and never grants rollback authority. Harden generation fallback, populate `/commits.current_commit`, expose per-commit Config inspectability, and make Commit mode select the newest inspectable completed revision rather than `commits[0]`. Verify focused DB/API/UI/WASM checks, commit as `TASK-440: Restore Config upgrade inspection`, push, deploy, and smoke before distributed scanning. Phase 2 then designs a server-authoritative DB-free remote scan lease protocol for scanner-capable API builders with build priority, post-build affinity, conservative capacity, old-builder compatibility, bounded validated result submission, stale-session fencing, and server-local fallback. Immediate/manual/periodic/post-build triggers converge on one scan work lifecycle; split protocol/server/builder/Nix changes into reviewable commits. Phase 3 reproduces generation retention in both deployment-first and observation-first order through current production paths; change retention only if focused reproduction fails. Do not rebase, force-push, merge !323, mutate legacy evidence, or run broad Web UI checks as an inner loop.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -322,6 +285,8 @@ Commit B was created locally as df58dbd6b408cfa1d718dd766690f3834201f033 with ex
 2026-09-14 real deployed root cause confirmed by maintainer evidence: active upgraded systems have current generation/store state but no matching `evaluation_generation_snapshots` retained binding. All 173 completed deployed scans are legacy `evidence_schema_version = 0` with 331,763 reported vulnerabilities and zero schema-1 scans/immutable occurrences. `view_system_vulnerabilities` still reports large nonzero current inventories (for example reckless 1,711 distinct CVEs and chesty 1,331). The TASK-440 exact-generation INNER JOIN therefore creates a false empty inventory, not data loss. Existing historical scans and legacy inventory remain. No deployed data may be mutated or synthesized for this correction. The manually started targeted `web-ui-baseline-candidates` job 16494079743 was canceled at the next safe boundary when this blocker took precedence.
 
 2026-09-14 final focused CVE inventory audit: corrected the fleet mutation regression to count three exact system targets across two environments. Hardened exact row-hydration coverage now persists the actor role and proves that relationship disclosure reloads current PostgreSQL role/membership state: a stale in-memory Admin actor succeeds with a current Viewer membership and returns non-disclosing NotFound after membership revocation. Added public field documentation for the affected-system DTO mirrors. Passed focused fleet triage, exact stale-identity/closure, exact row hydration/current-membership, authorized inventory, exact/legacy/no-scan precedence, and 1,001-row overflow regressions; server and Web UI offline checks; focused Web UI inventory and legacy-only triage tests; changed-file rustfmt; Node syntax; and git diff check. Existing repository warnings remain. Broad/costly browser and VM checks were not run per the maintainer constraint. No commit, push, deployment, shared database mutation, acceptance-criteria change, or status change was performed.
+
+2026-09-14 CVE rolling-upgrade recovery committed and pushed as `0aa38dba` (`TASK-440: Restore CVE upgrade inventory`) from exact parent `d2ca1c18`. The additive typed inventory read prefers exact current schema-1 evidence, falls back to scoped bounded legacy inventory, and distinguishes legacy clean/no scan without synthesizing exact authority. Exact remediation remains fail-closed; ordinary legacy justification semantics remain unchanged. Focused PostgreSQL authority/RBAC/dedup/precedence and relationship tests, exact-CVE mutation regression, offline server checks, focused Web UI unit tests, changed-file formatting, Node syntax, and diff checks passed with existing warnings. Costly Web UI checks were not run per maintainer instruction. Independent final review found no remaining P0/P1 blocker. Live redeploy smoke remains required.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
