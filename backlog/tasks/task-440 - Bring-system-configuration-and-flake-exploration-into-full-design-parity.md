@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-14 10:32'
+updated_date: '2026-09-14 12:10'
 labels:
   - design-parity
   - web-ui
@@ -249,6 +249,8 @@ Fix the Config Explorer lifecycle regression by using one scope-reset effect tha
 2026-09-14 focused integration-test diff cleanup from exact worktree HEAD 6de5666c7d55f8a4d6ff674d7b3f3c3eb88d3ca7: modify only checks/web-ui/tests/integration-test.js to restore HEAD indentation/content for unchanged regions and reduce the uncommitted diff below 700 changed lines where practical. Preserve the requested Dioxus/auth independence, coach suppression and cleanup, deterministic fixture/DTO/locator corrections, canonical systems and production evaluation links, deterministic shell data, and only focused listener/context/policy cleanup. Remove broad try/finally wrappers when their indentation churn is nonessential. Verify repeatedly against HEAD, then run node --check, repository static contracts, and git diff --check. Do not run VM/browser/Nix checks, commit, or push.
 
 2026-09-14 exact-head CI fixes from clean dedicated worktree SHA da7473a18a5f4f907350a402da413b75975bcb57: make only the requested integration-test ordering/focus/identity/canonical-clone corrections; add a private pure validated Config Inspector stage-deadline environment parser with a 300-second deployed default and 3600-second maximum; set only the Web UI VM service deadline to 600 seconds and its Node fixture wait to 660 seconds; update the Config Explorer timeout contract. Preserve strict static workflow guards, exact FAIL semantics, existing APIs/schema, heartbeat/cleanup behavior, and the cloned-system test approach. Verify touched Rust formatting, Node syntax, static contracts, focused config_inspections unit tests through nix develop, and git diff --check. Do not commit, push, run a VM check, or run the full flake check.
+
+2026-09-14 pipeline 2846507817 focused remediation in existing TASK-440 worktree at f80578e5: guard first CVE URL synchronization run by hydrating exact query selection before any replaceState; explicitly focus the conditionally rendered milestone title input after one WASM event-loop turn while retaining existing Save/Cancel restoration; correct only stale Config Explorer locators and exact expand/collapse recovery locators; make both TASK433 production clone workflows reserve every pre-existing owner of each required COALESCE configuration identity on the selected flake by exact ID, assert one owner after clone insertion, retire inserted clone identities, and restore only reserved IDs. Verify touched Rust formatting/check/tests, bounded WASM check, JavaScript syntax, static harness contracts, and git diff --check. Do not run VM/full-flake checks, alter visual baselines, commit, or push.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
