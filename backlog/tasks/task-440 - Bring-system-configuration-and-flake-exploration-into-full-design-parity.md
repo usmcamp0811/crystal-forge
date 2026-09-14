@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-14 09:03'
+updated_date: '2026-09-14 10:14'
 labels:
   - design-parity
   - web-ui
@@ -245,6 +245,8 @@ Fix the Config Explorer lifecycle regression by using one scope-reset effect tha
 2026-09-13 notification-center parity starts from clean synchronized SHA 0867808d1aa54dd4ead8b6b403c84285ce15420b. Preserve the existing durable account-scoped notification schema, materialization, current authorization, read/dismiss distinction, cursor pagination, event sources, route fallbacks, and navigate-immediately/read-asynchronously behavior. Add a testable frontend feed coordinator that fences same-account stale GET responses across read, dismiss, and mark-all mutations; preserves loaded older pages during head refresh; queues one refresh when opening overlaps a poll; deduplicates append pages; and resets by auth generation. Match Shell.jsx presentation with a bounded 99+ badge, explicit retry, all-caught-up empty state, Home/End plus Arrow keyboard navigation, outside-click/Escape close, focus restoration, timestamps, and responsive behavior. Do not add migrations, event categories, bulk dismiss, retention, typed navigation expansion, ATO, or exact-CVE changes. Extend focused Rust/static/browser contracts and fast Nix-compatible verification. Commit exactly as `TASK-440: Match notification center design` and push only after a clean remote-head guard.
 
 2026-09-14 focused integration-test diff cleanup from exact worktree HEAD 6de5666c7d55f8a4d6ff674d7b3f3c3eb88d3ca7: modify only checks/web-ui/tests/integration-test.js to restore HEAD indentation/content for unchanged regions and reduce the uncommitted diff below 700 changed lines where practical. Preserve the requested Dioxus/auth independence, coach suppression and cleanup, deterministic fixture/DTO/locator corrections, canonical systems and production evaluation links, deterministic shell data, and only focused listener/context/policy cleanup. Remove broad try/finally wrappers when their indentation churn is nonessential. Verify repeatedly against HEAD, then run node --check, repository static contracts, and git diff --check. Do not run VM/browser/Nix checks, commit, or push.
+
+2026-09-14 exact-head CI fixes from clean dedicated worktree SHA da7473a18a5f4f907350a402da413b75975bcb57: make only the requested integration-test ordering/focus/identity/canonical-clone corrections; add a private pure validated Config Inspector stage-deadline environment parser with a 300-second deployed default and 3600-second maximum; set only the Web UI VM service deadline to 600 seconds and its Node fixture wait to 660 seconds; update the Config Explorer timeout contract. Preserve strict static workflow guards, exact FAIL semantics, existing APIs/schema, heartbeat/cleanup behavior, and the cloned-system test approach. Verify touched Rust formatting, Node syntax, static contracts, focused config_inspections unit tests through nix develop, and git diff --check. Do not commit, push, run a VM check, or run the full flake check.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
