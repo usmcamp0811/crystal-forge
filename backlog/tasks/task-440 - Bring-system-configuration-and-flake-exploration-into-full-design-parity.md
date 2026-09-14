@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-14 03:23'
+updated_date: '2026-09-14 08:51'
 labels:
   - design-parity
   - web-ui
@@ -240,6 +240,8 @@ Fix the Config Explorer lifecycle regression by using one scope-reset effect tha
 2026-09-13 backend-only hostile-review P1 correction in the existing dirty/staged TASK-440 worktree: make scheduled POA&M reuse require exact equality with the recomputed full active exact-CVE subject set and canonical CVE/package/domain metadata; acquire the complete parsed scan CVE union before all lower publication locks; batch all affected systems' policy keys between sentinels and exact keys for verify/close/reopen and audit every exact-CVE writer for the same level order; construct fleet triage response state transactionally and make identical ACCEPTED retries no-op without history churn. Update only backend API documentation and backend/PostgreSQL/HTTP regressions. Preserve all Web UI files and existing index state. Run focused exact scan and PostgreSQL tests, full poam_workflows, SQLX offline check, Rust formatting/rustdoc, and staged plus unstaged diff checks. Do not stage, unstage, commit, or push.
 
 2026-09-13 notification-center parity starts from clean synchronized SHA 0867808d1aa54dd4ead8b6b403c84285ce15420b. Preserve the existing durable account-scoped notification schema, materialization, current authorization, read/dismiss distinction, cursor pagination, event sources, route fallbacks, and navigate-immediately/read-asynchronously behavior. Add a testable frontend feed coordinator that fences same-account stale GET responses across read, dismiss, and mark-all mutations; preserves loaded older pages during head refresh; queues one refresh when opening overlaps a poll; deduplicates append pages; and resets by auth generation. Match Shell.jsx presentation with a bounded 99+ badge, explicit retry, all-caught-up empty state, Home/End plus Arrow keyboard navigation, outside-click/Escape close, focus restoration, timestamps, and responsive behavior. Do not add migrations, event categories, bulk dismiss, retention, typed navigation expansion, ATO, or exact-CVE changes. Extend focused Rust/static/browser contracts and fast Nix-compatible verification. Commit exactly as `TASK-440: Match notification center design` and push only after a clean remote-head guard.
+
+2026-09-14 focused integration-test diff cleanup from exact worktree HEAD 6de5666c7d55f8a4d6ff674d7b3f3c3eb88d3ca7: modify only checks/web-ui/tests/integration-test.js to restore HEAD indentation/content for unchanged regions and reduce the uncommitted diff below 700 changed lines where practical. Preserve the requested Dioxus/auth independence, coach suppression and cleanup, deterministic fixture/DTO/locator corrections, canonical systems and production evaluation links, deterministic shell data, and only focused listener/context/policy cleanup. Remove broad try/finally wrappers when their indentation churn is nonessential. Verify repeatedly against HEAD, then run node --check, repository static contracts, and git diff --check. Do not run VM/browser/Nix checks, commit, or push.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
