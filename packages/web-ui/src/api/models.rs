@@ -424,6 +424,12 @@ pub struct CveListItem {
     pub fixed_version: Option<String>,
     pub fix_status: String,
     pub affected_count: i64,
+    /// Counts affected systems backed by exact immutable observations.
+    #[serde(default)]
+    pub exact_affected_count: i64,
+    /// Counts affected systems visible only through legacy scan inventory.
+    #[serde(default)]
+    pub legacy_affected_count: i64,
     pub affected_environments: Option<Vec<String>>,
     pub first_seen: Option<DateTime<Utc>>,
     pub last_seen: Option<DateTime<Utc>>,
@@ -473,15 +479,30 @@ pub struct CveDetail {
 /// System affected by a CVE (for drawer detail view).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CveAffectedSystemDetail {
+    /// Identifies the affected managed system.
     pub system_id: Uuid,
+    /// Gives the system hostname.
     pub hostname: String,
+    /// Identifies the visible environment when one is assigned.
+    #[serde(default)]
+    pub environment_id: Option<Uuid>,
+    /// Gives the visible environment name when one is assigned.
     pub environment: Option<String>,
+    /// Gives the latest reported primary IP address when available.
     pub primary_ip_address: Option<String>,
+    /// Gives the managed flake name when one is assigned.
     pub flake_name: Option<String>,
+    /// Identifies the managed flake when one is assigned.
     pub flake_id: Option<i32>,
+    /// Gives the selected revision when the read resolves one.
     pub commit_hash: Option<String>,
+    /// Gives the system deployment-policy identifier.
     pub deployment_policy: String,
+    /// Gives the package version observed by the selected inventory source.
     pub current_package_version: Option<String>,
+    /// Identifies whether the displayed finding is exact or display-only.
+    #[serde(default)]
+    pub inventory_authority: SystemCveInventoryAuthority,
 }
 
 /// CVE justification (triage) record.
@@ -517,6 +538,15 @@ pub struct CveFleetStats {
     pub fixable: i64,
     pub environments_affected: i64,
     pub systems_affected: i64,
+    /// Counts distinct affected systems with at least one exact finding.
+    #[serde(default)]
+    pub exact_systems_affected: i64,
+    /// Counts distinct affected systems with at least one legacy-only finding.
+    #[serde(default)]
+    pub legacy_systems_affected: i64,
+    /// Counts visible active systems without a usable completed scan.
+    #[serde(default)]
+    pub no_scan_systems: i64,
     pub outstanding: i64,
     pub accepted: i64,
     pub scheduled: i64,
@@ -4589,6 +4619,72 @@ pub struct SystemVulnerability {
     pub remediation: Option<crate::views::poam_api::CvePoamRelationship>,
 }
 
+/// Identifies the evidence authority used for a system CVE inventory read.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemCveInventoryAuthority {
+    /// Uses immutable schema-1 observations for the exact deployed generation.
+    #[default]
+    Exact,
+    /// Uses the bounded latest completed legacy scan.
+    Legacy,
+    /// Reports that no completed scan is usable for inventory display.
+    NoScan,
+}
+
+/// Reports the first prerequisite that prevented exact CVE authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExactCveAuthorityFailureReason {
+    /// The latest state has no usable generation or store path.
+    MissingCurrentGeneration,
+    /// The generation is not verified to own the current store path.
+    CurrentStoreMismatch,
+    /// No retained snapshot binds the latest generation.
+    RetainedGenerationUnavailable,
+    /// The retained generation binds a different store path.
+    RetainedStoreMismatch,
+    /// The retained generation lineage is not verified.
+    LineageUnverified,
+    /// The retained evaluation snapshot is missing or unavailable.
+    SnapshotUnavailable,
+    /// The retained evaluation snapshot uses an unsupported integrity version.
+    SnapshotUnsupported,
+    /// The retained generation has no matching NixOS derivation.
+    ExactDerivationUnavailable,
+    /// The exact derivation has no completed schema-1 scan.
+    NoSchema1CurrentScan,
+}
+
+/// Gives provenance for the selected completed CVE scan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SystemCveInventorySource {
+    /// Identifies the selected scan.
+    pub scan_id: Uuid,
+    /// Gives the scanner implementation name.
+    pub scanner_name: String,
+    /// Gives the scanner implementation version when recorded.
+    pub scanner_version: Option<String>,
+    /// Gives the real scan completion time.
+    pub completed_at: DateTime<Utc>,
+}
+
+/// Contains one non-unioned source for a system CVE inventory.
+///
+/// Legacy authority disables exact remediation context. It does not redefine
+/// the ordinary system justification endpoint.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SystemCveInventoryResponse {
+    /// Identifies the selected inventory authority.
+    pub authority: SystemCveInventoryAuthority,
+    /// Reports why exact authority was unavailable for a fallback response.
+    pub exact_authority_failure: Option<ExactCveAuthorityFailureReason>,
+    /// Gives scan provenance, including when the scan is clean.
+    pub source: Option<SystemCveInventorySource>,
+    /// Contains findings from only the selected source.
+    pub vulnerabilities: Vec<SystemVulnerability>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SaveSystemCveJustificationRequest {
     pub category: Option<String>,
@@ -5748,7 +5844,9 @@ mod tests {
     use super::{
         ComplianceControlEvidence, ConfigObservationLifecycle, ConfigObservationPayload,
         ConfigObservationRequestResponse, ConfigObservationResponse, CreatePolicyDraftRequest,
-        CreatePolicyDraftResponse, EvaluatedOption, EvaluationModuleSummary, XccdfPreviewResponse,
+        CreatePolicyDraftResponse, EvaluatedOption, EvaluationModuleSummary,
+        ExactCveAuthorityFailureReason, SystemCveInventoryAuthority, SystemCveInventoryResponse,
+        XccdfPreviewResponse,
     };
 
     #[test]
@@ -5772,6 +5870,56 @@ mod tests {
         assert_eq!(response.version, "2.0.0");
         assert_eq!(response.publication_state, "draft");
         assert_eq!(response.derived_from_version_id, source_id);
+    }
+
+    #[test]
+    fn system_cve_inventory_deserializes_exact_legacy_and_no_scan_states() {
+        let exact: SystemCveInventoryResponse = serde_json::from_value(serde_json::json!({
+            "authority": "exact",
+            "exact_authority_failure": null,
+            "source": {
+                "scan_id": "00000000-0000-0000-0000-000000000441",
+                "scanner_name": "vulnix",
+                "scanner_version": "1.10.1",
+                "completed_at": "2026-09-14T21:00:00Z"
+            },
+            "vulnerabilities": []
+        }))
+        .expect("exact-clean inventory should deserialize");
+        assert_eq!(exact.authority, SystemCveInventoryAuthority::Exact);
+        assert!(exact.exact_authority_failure.is_none());
+        assert!(exact.source.is_some());
+        assert!(exact.vulnerabilities.is_empty());
+
+        let legacy: SystemCveInventoryResponse = serde_json::from_value(serde_json::json!({
+            "authority": "legacy",
+            "exact_authority_failure": "retained_generation_unavailable",
+            "source": {
+                "scan_id": "00000000-0000-0000-0000-000000000440",
+                "scanner_name": "vulnix",
+                "scanner_version": "1.10.1",
+                "completed_at": "2026-09-14T20:00:00Z"
+            },
+            "vulnerabilities": []
+        }))
+        .expect("legacy-clean inventory should deserialize");
+        assert_eq!(legacy.authority, SystemCveInventoryAuthority::Legacy);
+        assert_eq!(
+            legacy.exact_authority_failure,
+            Some(ExactCveAuthorityFailureReason::RetainedGenerationUnavailable)
+        );
+        assert!(legacy.source.is_some());
+        assert!(legacy.vulnerabilities.is_empty());
+
+        let no_scan: SystemCveInventoryResponse = serde_json::from_value(serde_json::json!({
+            "authority": "no_scan",
+            "exact_authority_failure": "missing_current_generation",
+            "source": null,
+            "vulnerabilities": []
+        }))
+        .expect("no-scan inventory should deserialize");
+        assert_eq!(no_scan.authority, SystemCveInventoryAuthority::NoScan);
+        assert!(no_scan.source.is_none());
     }
 
     #[test]

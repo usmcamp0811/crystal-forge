@@ -845,6 +845,33 @@ Fleet triage uses exact deployed evidence. The identity is a canonical CVE ID
 plus a canonical package name. Package version is evidence context and is not
 part of the stable finding identity.
 
+### System CVE Inventory
+
+| Method | Endpoint | Role | Description |
+|--------|----------|------|-------------|
+| GET | `/systems/:id/cves` | Viewer+ | Return the compatible bare array of current exact findings |
+| GET | `/systems/:id/cve-inventory` | Viewer+ | Return typed exact, legacy, or no-scan inventory state |
+
+The typed inventory response contains `authority`,
+`exact_authority_failure`, `source`, and `vulnerabilities`. `authority` is
+`exact`, `legacy`, or `no_scan`. `source` contains the real scan ID, scanner
+name and optional version, and completion time. The server selects exact
+authority independently of finding count in one repeatable-read transaction.
+An exact clean scan therefore cannot fall back to stale legacy findings.
+
+When exact authority is unavailable, the server selects the latest completed
+legacy scan under the bounded `view_system_vulnerabilities` semantics. A
+completed legacy scan with no findings returns `legacy` with an empty array. No
+usable completed scan returns `no_scan`. Sources are never unioned. Legacy
+findings can include ordinary system justification state, but never
+server-issued exact remediation context. The pre-existing ordinary system
+justification API continues to accept a qualifying legacy finding. That write
+does not create exact remediation authority. POA&M creation, patch scheduling,
+finding attach/link/reopen, verification, and closure continue to resolve
+retained generation, store path, verified lineage, certified snapshot,
+schema-1 scan, and immutable observation authority independently and fail
+closed for legacy or no-scan input.
+
 ### Exact-CVE POA&M Routes
 
 | Method | Endpoint | Role | Description |
@@ -925,12 +952,20 @@ stale/lifecycle conflicts use 409, and failed closure preconditions use 412.
 | GET | `/cves/:cve_id/fleet?package=:pname` | Viewer+ | Return visible affected environments and current dispositions |
 | POST | `/cves/:cve_id/triage` | Operator+ | Apply environment actions atomically |
 
-The GET response contains `cve`, `canonical_package_name`, `rollup`,
-`affected_system_count`, and `environments`. Each environment contains its UUID,
-name, affected-system count, bounded system details, and an optional tagged
-`disposition`. A missing disposition means OPEN. `rollup` is `outstanding`,
-`accepted`, `scheduled`, or `partial`. The endpoint returns `404` when no current
-exact subject is visible. It does not reveal hidden environment names or counts.
+The GET response contains `cve`, `canonical_package_name`, `rollup`, total,
+exact, legacy-affected, no-scan, and unassigned system counts, `environments`,
+and bounded `unassigned_systems`. Each
+environment contains its UUID, name, total, exact, and legacy-affected counts,
+bounded system details, and an optional tagged `disposition`. Each system row
+identifies `inventory_authority` as `exact` or `legacy`. A missing disposition
+means OPEN only for that environment's exact subjects. A legacy-only environment is
+inventory-only and cannot be triaged. `rollup` is `outstanding`, `accepted`,
+`scheduled`, or `partial` and describes exact dispositions only. Admin-visible
+unassigned systems are returned as inventory-only because fleet triage is
+environment-scoped. The endpoint rejects more than 1,000 affected systems
+instead of returning a partial drawer. The endpoint
+returns `404` when no current exact or legacy finding is visible. It does not
+reveal hidden environment names or counts.
 
 A `scheduled` disposition always includes the referenced active POA&M as nested
 `poam` metadata on a new server:
@@ -1009,11 +1044,16 @@ environments. The server includes every current exact subject in each
 environment. All scheduled subjects use one POA&M. ACCEPTED records operator
 rationale only; it does not create remediation links or PASS evidence.
 
-Authenticated CVE dashboard reads use retained deployed-generation schema-1 occurrences and
-active dispositions for the exact canonical CVE, canonical package, and
-environment identity. Legacy `system_cve_justifications` rows do not determine
+Authenticated CVE dashboard reads combine retained deployed-generation
+schema-1 occurrences with bounded legacy inventory for systems that lack exact
+authority. An exact clean scan suppresses stale legacy findings. Rows and fleet
+statistics expose separate exact and legacy-affected counts; fleet statistics
+also count visible active no-scan systems. Active dispositions apply only to
+exact canonical CVE, canonical package, and environment identities. A row with
+any legacy subject is `inventory_only` and cannot imply accepted risk or
+scheduled remediation. Legacy `system_cve_justifications` rows do not determine
 list status. Admin reads cover the fleet. Viewer and Operator reads first limit
-occurrences to current `user_environment_memberships`. Scoped reads exclude
+subjects to current `user_environment_memberships`. Scoped reads exclude
 unassigned systems and do not disclose hidden environment names, counts,
 statuses, package names, CVE presence, or fleet-wide justification rows. The
 legacy `GET /cves/:cve_id` returns the alphabetically first visible canonical
@@ -1025,14 +1065,17 @@ ACCEPTED. A row is `scheduled` only when all affected environments are
 SCHEDULED. Any OPEN or mixed state is `outstanding`. Grouped counts, list
 filters, export/list responses, and fleet statistics consume this conservative
 summary. Package cards count distinct affected systems per package after active
-filters. Fleet statistics count distinct affected systems across scoped
-occurrences; they do not sum per-CVE counts. CVE totals continue to count exact
-CVE/package rows. The exact drawer keeps its more precise `partial`/MIXED rollup
-and exact-matches both the canonical CVE and canonical package when it loads
-installed version, fixed version, and fix status.
+filters. Fleet statistics count distinct affected systems across scoped mixed
+inventory; they do not sum per-CVE counts. CVE totals count canonical
+CVE/package inventory rows. The exact mutation rollup keeps its more precise
+`partial`/MIXED state and exact-matches both the canonical CVE and canonical
+package when it loads installed version, fixed version, and fix status.
 
-The successful response contains transaction-owned `detail`, `poam_id`, and
-`poam_reused`; response construction completes before the mutation commits.
+The successful response contains transaction-owned `detail`, `detail_scope`,
+`poam_id`, and `poam_reused`; response construction completes before the
+mutation commits. `detail_scope` is `exact_mutation_subjects`. The returned
+`detail` excludes legacy and unassigned inventory rows. A client must refetch
+the fleet inventory endpoint after success before it renders the drawer again.
 Repeating an identical accepted-risk request does not retire and recreate its
 disposition history. Repeating a schedule request reuses an existing POA&M only
 when its complete active exact-finding set equals the recomputed scheduled

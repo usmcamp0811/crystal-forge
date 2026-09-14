@@ -255,6 +255,33 @@ pub async fn cve_finding_poam_summaries(
     environment_ids: &[Uuid],
     history_page: (i64, i64),
 ) -> Result<Vec<(Uuid, bool, PoamSummary)>> {
+    let mut tx = pool.begin().await?;
+    let summaries = cve_finding_poam_summaries_tx(
+        &mut tx,
+        finding_ids,
+        today,
+        is_admin,
+        environment_ids,
+        history_page,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(summaries)
+}
+
+/// Loads exact-CVE POA&M summaries inside the caller's transaction.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot execute or decode the query.
+pub(crate) async fn cve_finding_poam_summaries_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    finding_ids: &[Uuid],
+    today: NaiveDate,
+    is_admin: bool,
+    environment_ids: &[Uuid],
+    history_page: (i64, i64),
+) -> Result<Vec<(Uuid, bool, PoamSummary)>> {
     if finding_ids.is_empty() {
         return Ok(Vec::new());
     }
@@ -278,7 +305,7 @@ pub async fn cve_finding_poam_summaries(
         .push(" ORDER BY related.cve_finding_id,related.relation_active DESC,related.relationship_at DESC,related.relationship_id DESC");
     Ok(builder
         .build_query_as::<RelatedPoamSummary>()
-        .fetch_all(pool)
+        .fetch_all(&mut **tx)
         .await?
         .into_iter()
         .map(RelatedPoamSummary::into_parts)

@@ -16,7 +16,7 @@ use crate::api::models::{
     CveAffectedEnvironment, CveAffectedSystemDetail, CveDispositionActor,
     CveEnvironmentDisposition, CveEnvironmentTriageAction, CveTriageConflictSubject,
     FleetCveDetail, FleetCvePoamRequest, FleetCveTriageRequest, FleetCveTriageResponse,
-    FleetCveTriageRollup, ScheduledPoamMetadata,
+    FleetCveTriageRollup, ScheduledPoamMetadata, SystemCveInventoryAuthority,
 };
 use crate::compliance::canonical::semantic_digest;
 use crate::compliance::resolver::{
@@ -301,6 +301,45 @@ async fn current_mutating_actor_tx(
     }
     let environment_ids = sqlx::query_scalar::<_, Uuid>(
         "SELECT environment_id FROM user_environment_memberships WHERE user_id=$1 ORDER BY environment_id FOR SHARE",
+    )
+    .bind(request_actor.user_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    Ok(PoamActor {
+        user_id: request_actor.user_id,
+        identifier: user.0,
+        is_admin,
+        can_mutate,
+        environment_ids,
+        request_origin: request_actor.request_origin.clone(),
+    })
+}
+
+async fn current_reading_actor_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    request_actor: &PoamActor,
+) -> Result<PoamActor, PoamError> {
+    let user = sqlx::query_as::<_, (String, bool)>("SELECT email,is_active FROM users WHERE id=$1")
+        .bind(request_actor.user_id)
+        .fetch_optional(&mut **tx)
+        .await?
+        .ok_or(PoamError::Forbidden)?;
+    if !user.1 {
+        return Err(PoamError::Forbidden);
+    }
+    let roles = sqlx::query_scalar::<_, AuthRole>(
+        "SELECT role FROM user_role_assignments WHERE user_id=$1 ORDER BY role",
+    )
+    .bind(request_actor.user_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    let is_admin = roles.contains(&AuthRole::Admin);
+    let can_mutate = is_admin || roles.contains(&AuthRole::Operator);
+    if !is_admin && !can_mutate && !roles.contains(&AuthRole::Viewer) {
+        return Err(PoamError::Forbidden);
+    }
+    let environment_ids = sqlx::query_scalar::<_, Uuid>(
+        "SELECT environment_id FROM user_environment_memberships WHERE user_id=$1 ORDER BY environment_id",
     )
     .bind(request_actor.user_id)
     .fetch_all(&mut **tx)
@@ -1150,14 +1189,16 @@ async fn current_cve_occurrence_tx(
                       AND (justification.system_id IS NULL
                         OR justification.system_id=system.id)) AS is_justified
            FROM systems system
-           JOIN LATERAL (
-             SELECT state.store_path,state.generation FROM system_states state
-             WHERE state.hostname=system.hostname AND state.store_path IS NOT NULL
-               AND state.generation IS NOT NULL
-               AND state.generation_matches_current_store_path IS TRUE
-               AND btrim(state.store_path)<>''
-             ORDER BY state.timestamp DESC,state.id DESC LIMIT 1
-            ) deployed ON true
+            JOIN LATERAL (
+              SELECT state.store_path,state.generation,
+                     state.generation_matches_current_store_path
+              FROM system_states state
+              WHERE state.hostname=system.hostname
+              ORDER BY state.timestamp DESC,state.id DESC LIMIT 1
+             ) deployed ON deployed.store_path IS NOT NULL
+               AND deployed.generation IS NOT NULL
+               AND deployed.generation_matches_current_store_path IS TRUE
+               AND btrim(deployed.store_path)<>''
            JOIN evaluation_generation_snapshots retained
              ON retained.system_id=system.id
             AND retained.generation=deployed.generation
@@ -3294,16 +3335,16 @@ async fn fleet_cve_subjects_tx(
                     observation.observed_derivation_path AS occurrence_derivation_path
              FROM systems system
              JOIN environments environment ON environment.id=system.environment_id
-             JOIN LATERAL (
-               SELECT current.store_path,current.generation,current.primary_ip_address
-               FROM system_states current
-               WHERE current.hostname=system.hostname
-                 AND current.store_path IS NOT NULL
-                 AND current.generation IS NOT NULL
-                 AND current.generation_matches_current_store_path IS TRUE
-                 AND btrim(current.store_path)<>''
-               ORDER BY current.timestamp DESC,current.id DESC LIMIT 1
-             ) state ON true
+              JOIN LATERAL (
+                SELECT current.store_path,current.generation,current.primary_ip_address,
+                       current.generation_matches_current_store_path
+                FROM system_states current
+                WHERE current.hostname=system.hostname
+                ORDER BY current.timestamp DESC,current.id DESC LIMIT 1
+              ) state ON state.store_path IS NOT NULL
+                AND state.generation IS NOT NULL
+                AND state.generation_matches_current_store_path IS TRUE
+                AND btrim(state.store_path)<>''
              JOIN evaluation_generation_snapshots retained
                ON retained.system_id=system.id
               AND retained.generation=state.generation
@@ -3654,6 +3695,7 @@ async fn fleet_cve_detail_tx(
             .map(|subject| CveAffectedSystemDetail {
                 system_id: subject.system_id,
                 hostname: subject.hostname.clone(),
+                environment_id: Some(subject.environment_id),
                 environment: Some(subject.environment_name.clone()),
                 primary_ip_address: subject.primary_ip_address.clone(),
                 flake_name: subject.flake_name.clone(),
@@ -3661,12 +3703,15 @@ async fn fleet_cve_detail_tx(
                 commit_hash: subject.commit_hash.clone(),
                 deployment_policy: subject.deployment_policy.clone(),
                 current_package_version: Some(subject.observed_package_version.clone()),
+                inventory_authority: SystemCveInventoryAuthority::Exact,
             })
             .collect::<Vec<_>>();
         environments.push(CveAffectedEnvironment {
             environment_id,
             environment_name,
             affected_system_count: systems.len() as i64,
+            exact_affected_system_count: systems.len() as i64,
+            legacy_affected_system_count: 0,
             systems,
             disposition: dispositions.remove(&environment_id),
         });
@@ -3676,6 +3721,12 @@ async fn fleet_cve_detail_tx(
         canonical_package_name: package_name.to_owned(),
         rollup: fleet_cve_rollup(&environments),
         affected_system_count: subjects.len() as i64,
+        exact_affected_system_count: subjects.len() as i64,
+        exact_mutation_target_count: subjects.len() as i64,
+        legacy_affected_system_count: 0,
+        no_scan_system_count: 0,
+        unassigned_affected_system_count: 0,
+        unassigned_systems: Vec::new(),
         environments,
     })
 }
@@ -3714,6 +3765,155 @@ pub async fn fleet_cve_detail(
     let detail = fleet_cve_detail_tx(&mut tx, actor, &cve_id, package_name).await?;
     tx.commit().await?;
     Ok(detail)
+}
+
+/// Returns display inventory for one visible fleet CVE/package identity.
+///
+/// The function adds bounded legacy findings to the exact drawer read and
+/// labels every system with its read authority. Dispositions remain attached
+/// only to exact environments. This read does not supply subjects to any
+/// mutation; fleet mutations independently call [`fleet_cve_subjects_tx`].
+///
+/// # Errors
+///
+/// Returns not found when no exact or legacy finding is visible. Returns a
+/// validation or database error when the identity or bounded reads fail.
+pub async fn fleet_cve_inventory_detail(
+    pool: &PgPool,
+    actor: &PoamActor,
+    cve_id: &str,
+    package_name: &str,
+) -> Result<FleetCveDetail, PoamError> {
+    let cve_id = cve_id.trim().to_ascii_uppercase();
+    let package_name = package_name.trim();
+    if !is_canonical_cve_id(&cve_id) || package_name.is_empty() {
+        return Err(PoamError::Validation(
+            "invalid_cve_identity",
+            "A canonical CVE ID and package name are required".into(),
+        ));
+    }
+    validate_text_length(
+        package_name,
+        MAX_SHORT_TEXT_BYTES,
+        "text_too_long",
+        "package",
+    )?;
+    let read_scope = if actor.is_admin {
+        crate::queries::cves::CveReadScope::All
+    } else {
+        crate::queries::cves::CveReadScope::Environments(actor.environment_ids.clone())
+    };
+    let systems = match crate::queries::cves::fetch_cve_inventory_systems(
+        pool,
+        &read_scope,
+        &cve_id,
+        Some(package_name),
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(error) if crate::queries::cves::is_cve_inventory_overflow(&error) => {
+            return Err(PoamError::Validation(
+                "cve_scope_too_large",
+                "CVE inventory is limited to 1000 affected systems".into(),
+            ));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if systems.is_empty() {
+        return Err(PoamError::NotFound);
+    }
+
+    let exact_detail = match fleet_cve_detail(pool, actor, &cve_id, package_name).await {
+        Ok(detail) => Some(detail),
+        Err(PoamError::NotFound) => None,
+        Err(error) => return Err(error),
+    };
+    let dispositions = exact_detail
+        .as_ref()
+        .map(|detail| {
+            detail
+                .environments
+                .iter()
+                .map(|environment| (environment.environment_id, environment.disposition.clone()))
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
+    let mut grouped = BTreeMap::<Uuid, (String, Vec<CveAffectedSystemDetail>)>::new();
+    let mut unassigned_systems = Vec::new();
+    for system in systems {
+        let Some(environment_id) = system.environment_id else {
+            unassigned_systems.push(system);
+            continue;
+        };
+        let environment_name = system
+            .environment
+            .clone()
+            .unwrap_or_else(|| "Unknown environment".to_string());
+        grouped
+            .entry(environment_id)
+            .or_insert_with(|| (environment_name, Vec::new()))
+            .1
+            .push(system);
+    }
+    let mut environments = Vec::with_capacity(grouped.len());
+    for (environment_id, (environment_name, systems)) in grouped {
+        let exact_count = systems
+            .iter()
+            .filter(|system| system.inventory_authority == SystemCveInventoryAuthority::Exact)
+            .count() as i64;
+        let legacy_count = systems.len() as i64 - exact_count;
+        environments.push(CveAffectedEnvironment {
+            environment_id,
+            environment_name,
+            affected_system_count: systems.len() as i64,
+            exact_affected_system_count: exact_count,
+            legacy_affected_system_count: legacy_count,
+            systems,
+            disposition: dispositions.get(&environment_id).cloned().flatten(),
+        });
+    }
+    let exact_count = environments
+        .iter()
+        .map(|environment| environment.exact_affected_system_count)
+        .sum::<i64>()
+        + unassigned_systems
+            .iter()
+            .filter(|system| system.inventory_authority == SystemCveInventoryAuthority::Exact)
+            .count() as i64;
+    let exact_mutation_target_count = environments
+        .iter()
+        .map(|environment| environment.exact_affected_system_count)
+        .sum();
+    let legacy_count = environments
+        .iter()
+        .map(|environment| environment.legacy_affected_system_count)
+        .sum::<i64>()
+        + unassigned_systems
+            .iter()
+            .filter(|system| system.inventory_authority == SystemCveInventoryAuthority::Legacy)
+            .count() as i64;
+    let mut cve = crate::queries::cves::fetch_cve_detail(pool, &read_scope, &cve_id).await?;
+    cve.package_name = Some(package_name.to_owned());
+    let no_scan_system_count = crate::queries::cves::fetch_cve_fleet_stats(pool, &read_scope)
+        .await?
+        .no_scan_systems;
+    Ok(FleetCveDetail {
+        cve,
+        canonical_package_name: package_name.to_owned(),
+        rollup: exact_detail
+            .as_ref()
+            .map(|detail| detail.rollup)
+            .unwrap_or(FleetCveTriageRollup::Outstanding),
+        affected_system_count: exact_count + legacy_count,
+        exact_affected_system_count: exact_count,
+        exact_mutation_target_count,
+        legacy_affected_system_count: legacy_count,
+        no_scan_system_count,
+        unassigned_affected_system_count: unassigned_systems.len() as i64,
+        unassigned_systems,
+        environments,
+    })
 }
 
 async fn lock_fleet_cve_scope_tx(
@@ -4430,6 +4630,7 @@ async fn triage_fleet_cve_once(
     tx.commit().await?;
     Ok(FleetCveTriageResponse {
         detail,
+        detail_scope: crate::api::models::FleetCveMutationDetailScope::ExactMutationSubjects,
         poam_id,
         poam_reused,
     })
@@ -4448,7 +4649,9 @@ fn is_canonical_cve_id(value: &str) -> bool {
 /// Returns server-issued exact-CVE occurrence context and POA&M relationships.
 ///
 /// The response is derived only from the latest completed schema-1 scan for
-/// the system's exact deployed derivation. Inaccessible systems return
+/// the system's exact deployed derivation. The read reloads the actor and
+/// resolves authorization, occurrences, and all disclosed POA&M summaries in
+/// one repeatable-read transaction. Inaccessible systems return
 /// [`PoamError::NotFound`] before evidence details are loaded.
 ///
 /// # Errors
@@ -4466,7 +4669,11 @@ pub async fn cve_relationships(
     let history_page = relationship_page_bounds(history_limit, history_offset)?
         .unwrap_or((LEGACY_RELATIONSHIP_HISTORY_LIMIT, 0));
     let mut tx = pool.begin().await?;
-    if !actor_can_access_systems_tx(&mut tx, actor, &[system_id]).await? {
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .execute(&mut *tx)
+        .await?;
+    let actor = current_reading_actor_tx(&mut tx, actor).await?;
+    if !actor_can_access_systems_tx(&mut tx, &actor, &[system_id]).await? {
         return Err(PoamError::NotFound);
     }
     let occurrences = sqlx::query_as::<_, CurrentCveOccurrence>(
@@ -4486,14 +4693,16 @@ pub async fn cve_relationships(
                       AND (justification.system_id IS NULL
                         OR justification.system_id=system.id)) AS is_justified
            FROM systems system
-           JOIN LATERAL (
-             SELECT state.store_path,state.generation FROM system_states state
-             WHERE state.hostname=system.hostname AND state.store_path IS NOT NULL
-               AND state.generation IS NOT NULL
-               AND state.generation_matches_current_store_path IS TRUE
-               AND btrim(state.store_path)<>''
-             ORDER BY state.timestamp DESC,state.id DESC LIMIT 1
-            ) deployed ON true
+            JOIN LATERAL (
+              SELECT state.store_path,state.generation,
+                     state.generation_matches_current_store_path
+              FROM system_states state
+              WHERE state.hostname=system.hostname
+              ORDER BY state.timestamp DESC,state.id DESC LIMIT 1
+            ) deployed ON deployed.store_path IS NOT NULL
+              AND deployed.generation IS NOT NULL
+              AND deployed.generation_matches_current_store_path IS TRUE
+              AND btrim(deployed.store_path)<>''
            JOIN evaluation_generation_snapshots retained
              ON retained.system_id=system.id
             AND retained.generation=deployed.generation
@@ -4527,8 +4736,11 @@ pub async fn cve_relationships(
     .bind(MAX_POAM_RELATIONSHIPS)
     .fetch_all(&mut *tx)
     .await?;
+    let relationships =
+        hydrate_cve_relationships_tx(&mut tx, &actor, system_id, occurrences, history_page, clock)
+            .await?;
     tx.commit().await?;
-    hydrate_cve_relationships(pool, actor, system_id, occurrences, history_page, clock).await
+    Ok(relationships)
 }
 
 /// Returns exact-CVE remediation context for the supplied vulnerability rows.
@@ -4554,6 +4766,42 @@ pub async fn cve_relationships_for_rows(
     history_offset: Option<i64>,
     clock: &dyn PoamClock,
 ) -> Result<Vec<CvePoamRelationship>, PoamError> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .execute(&mut *tx)
+        .await?;
+    let relationships = cve_relationships_for_rows_tx(
+        &mut tx,
+        actor,
+        system_id,
+        row_keys,
+        history_limit,
+        history_offset,
+        clock,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(relationships)
+}
+
+/// Returns exact-CVE remediation context inside the caller's snapshot.
+///
+/// The function reloads the actor's active roles and memberships before it
+/// authorizes disclosure. The caller must use the same transaction for the
+/// inventory rows that supplied `row_keys`.
+///
+/// # Errors
+///
+/// Returns the same errors as [`cve_relationships_for_rows`].
+pub(crate) async fn cve_relationships_for_rows_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    actor: &PoamActor,
+    system_id: Uuid,
+    row_keys: &[CveRelationshipRowKey],
+    history_limit: Option<i64>,
+    history_offset: Option<i64>,
+    clock: &dyn PoamClock,
+) -> Result<Vec<CvePoamRelationship>, PoamError> {
     let history_page = relationship_page_bounds(history_limit, history_offset)?
         .unwrap_or((LEGACY_RELATIONSHIP_HISTORY_LIMIT, 0));
     if row_keys.len() > MAX_CVE_RELATIONSHIP_ROWS {
@@ -4562,12 +4810,11 @@ pub async fn cve_relationships_for_rows(
             "At most 1000 CVE vulnerability rows can be hydrated".into(),
         ));
     }
-    let mut tx = pool.begin().await?;
-    if !actor_can_access_systems_tx(&mut tx, actor, &[system_id]).await? {
+    let actor = current_reading_actor_tx(tx, actor).await?;
+    if !actor_can_access_systems_tx(tx, &actor, &[system_id]).await? {
         return Err(PoamError::NotFound);
     }
     if row_keys.is_empty() {
-        tx.commit().await?;
         return Ok(Vec::new());
     }
     let cve_ids = row_keys
@@ -4607,14 +4854,16 @@ pub async fn cve_relationships_for_rows(
                         OR justification.system_id=system.id)) AS is_justified
            FROM requested
            JOIN systems system ON system.id=$1
-           JOIN LATERAL (
-             SELECT state.store_path,state.generation FROM system_states state
-             WHERE state.hostname=system.hostname AND state.store_path IS NOT NULL
-               AND state.generation IS NOT NULL
-               AND state.generation_matches_current_store_path IS TRUE
-               AND btrim(state.store_path)<>''
-             ORDER BY state.timestamp DESC,state.id DESC LIMIT 1
-           ) deployed ON true
+            JOIN LATERAL (
+              SELECT state.store_path,state.generation,
+                     state.generation_matches_current_store_path
+              FROM system_states state
+              WHERE state.hostname=system.hostname
+              ORDER BY state.timestamp DESC,state.id DESC LIMIT 1
+            ) deployed ON deployed.store_path IS NOT NULL
+              AND deployed.generation IS NOT NULL
+              AND deployed.generation_matches_current_store_path IS TRUE
+              AND btrim(deployed.store_path)<>''
            JOIN evaluation_generation_snapshots retained
              ON retained.system_id=system.id
             AND retained.generation=deployed.generation
@@ -4653,14 +4902,13 @@ pub async fn cve_relationships_for_rows(
     .bind(&package_names)
     .bind(&scan_ids)
     .bind(&occurrence_derivation_paths)
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut **tx)
     .await?;
-    tx.commit().await?;
-    hydrate_cve_relationships(pool, actor, system_id, occurrences, history_page, clock).await
+    hydrate_cve_relationships_tx(tx, &actor, system_id, occurrences, history_page, clock).await
 }
 
-async fn hydrate_cve_relationships(
-    pool: &PgPool,
+async fn hydrate_cve_relationships_tx(
+    tx: &mut Transaction<'_, Postgres>,
     actor: &PoamActor,
     system_id: Uuid,
     occurrences: Vec<CurrentCveOccurrence>,
@@ -4688,11 +4936,11 @@ async fn hydrate_cve_relationships(
     .bind(system_id)
     .bind(&cve_ids)
     .bind(&package_names)
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await?;
     let finding_ids = finding_rows.iter().map(|row| row.0).collect::<Vec<_>>();
-    let summaries = poam::cve_finding_poam_summaries(
-        pool,
+    let summaries = poam::cve_finding_poam_summaries_tx(
+        tx,
         &finding_ids,
         clock.today(),
         actor.is_admin,
@@ -5332,14 +5580,16 @@ async fn current_cve_verification_items_tx(
         let deployed: Option<(i32, String, Uuid, i32)> = sqlx::query_as(
             r#"SELECT derivation.id,deployed.store_path,retained.id,retained.generation
                FROM systems system
-               JOIN LATERAL (
-                 SELECT state.store_path,state.generation FROM system_states state
-                 WHERE state.hostname=system.hostname AND state.store_path IS NOT NULL
-                   AND state.generation IS NOT NULL
-                   AND state.generation_matches_current_store_path IS TRUE
-                   AND btrim(state.store_path)<>''
-                 ORDER BY state.timestamp DESC,state.id DESC LIMIT 1
-               ) deployed ON true
+                JOIN LATERAL (
+                  SELECT state.store_path,state.generation,
+                         state.generation_matches_current_store_path
+                  FROM system_states state
+                  WHERE state.hostname=system.hostname
+                  ORDER BY state.timestamp DESC,state.id DESC LIMIT 1
+                ) deployed ON deployed.store_path IS NOT NULL
+                  AND deployed.generation IS NOT NULL
+                  AND deployed.generation_matches_current_store_path IS TRUE
+                  AND btrim(deployed.store_path)<>''
                JOIN evaluation_generation_snapshots retained
                  ON retained.system_id=system.id
                 AND retained.generation=deployed.generation

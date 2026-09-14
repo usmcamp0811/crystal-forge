@@ -223,15 +223,21 @@ pub enum CveEnvironmentDisposition {
     },
 }
 
-/// Reports one visible environment affected by an exact CVE/package subject.
+/// Reports one visible environment affected by a CVE/package inventory row.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CveAffectedEnvironment {
     /// Identifies the environment for a triage intention.
     pub environment_id: Uuid,
     /// Gives the visible environment name.
     pub environment_name: String,
-    /// Counts the server-resolved current exact subjects in this environment.
+    /// Counts all displayed affected systems in this environment.
     pub affected_system_count: i64,
+    /// Counts systems backed by exact immutable subjects.
+    #[serde(default)]
+    pub exact_affected_system_count: i64,
+    /// Counts systems visible only through legacy inventory.
+    #[serde(default)]
+    pub legacy_affected_system_count: i64,
     /// Lists the bounded server-resolved host details.
     #[serde(default)]
     pub systems: Vec<CveAffectedSystemDetail>,
@@ -240,20 +246,66 @@ pub struct CveAffectedEnvironment {
     pub disposition: Option<CveEnvironmentDisposition>,
 }
 
-/// Provides authoritative fleet detail for one exact CVE/package identity.
+/// Provides read-only fleet inventory for one CVE/package identity.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FleetCveDetail {
     /// Gives advisory metadata for the canonical CVE.
     pub cve: CveDetail,
     /// Gives the canonical package identity selected by the server.
     pub canonical_package_name: String,
-    /// Gives the visible environment disposition rollup.
+    /// Gives the disposition rollup for visible exact subjects only.
     pub rollup: FleetCveTriageRollup,
-    /// Counts all visible current exact subjects.
+    /// Counts all visible affected systems.
     pub affected_system_count: i64,
+    /// Counts visible systems backed by exact immutable subjects.
+    #[serde(default)]
+    pub exact_affected_system_count: i64,
+    /// Counts exact systems assigned to environments and eligible for mutation.
+    #[serde(default)]
+    pub exact_mutation_target_count: i64,
+    /// Counts visible systems backed only by legacy inventory.
+    #[serde(default)]
+    pub legacy_affected_system_count: i64,
+    /// Counts visible active systems without a usable completed scan.
+    #[serde(default)]
+    pub no_scan_system_count: i64,
+    /// Counts affected systems visible to an Admin without an environment.
+    #[serde(default)]
+    pub unassigned_affected_system_count: i64,
+    /// Lists bounded affected systems that have no environment.
+    #[serde(default)]
+    pub unassigned_systems: Vec<CveAffectedSystemDetail>,
     /// Lists visible affected environments in server order.
     #[serde(default)]
     pub environments: Vec<CveAffectedEnvironment>,
+}
+
+impl FleetCveDetail {
+    // COMPATIBILITY: Servers from before inventory-authority rollout emitted
+    // exact-only rows without the additive authority counters.
+    fn normalize_inventory_counts(&mut self) {
+        if self.exact_affected_system_count == 0
+            && self.legacy_affected_system_count == 0
+            && self.affected_system_count > 0
+        {
+            self.exact_affected_system_count = self.affected_system_count;
+        }
+        for environment in &mut self.environments {
+            if environment.exact_affected_system_count == 0
+                && environment.legacy_affected_system_count == 0
+                && environment.affected_system_count > 0
+            {
+                environment.exact_affected_system_count = environment.affected_system_count;
+            }
+        }
+        if self.exact_mutation_target_count == 0 {
+            self.exact_mutation_target_count = self
+                .environments
+                .iter()
+                .map(|environment| environment.exact_affected_system_count)
+                .sum();
+        }
+    }
 }
 
 /// Selects one atomic action for an affected environment.
@@ -315,17 +367,29 @@ pub struct FleetCveTriageRequest {
     pub poam: Option<FleetCvePoamRequest>,
 }
 
-/// Reports the authoritative result of an atomic fleet triage mutation.
+/// Reports the exact-subject result of an atomic fleet triage mutation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FleetCveTriageResponse {
-    /// Gives the transaction-owned refreshed fleet detail.
+    /// Gives transaction-owned exact mutation subjects, not mixed inventory.
     pub detail: FleetCveDetail,
+    /// Identifies the intentionally narrow evidence scope of `detail`.
+    #[serde(default)]
+    pub detail_scope: FleetCveMutationDetailScope,
     /// Identifies the created or reused POA&M when remediation was scheduled.
     #[serde(default)]
     pub poam_id: Option<Uuid>,
     /// Indicates whether the server reused a compatible active POA&M.
     #[serde(default)]
     pub poam_reused: bool,
+}
+
+/// Identifies the evidence scope returned by a fleet CVE mutation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FleetCveMutationDetailScope {
+    /// Contains only exact environment-assigned mutation subjects.
+    #[default]
+    ExactMutationSubjects,
 }
 
 /// Represents the persisted POA&M risk category.
@@ -1577,7 +1641,9 @@ pub async fn fetch_fleet_cve_detail(
         encode_uri_component(cve_id),
         encode_uri_component(package)
     );
-    request::<FleetCveDetail, ()>("GET", &url, None).await
+    let mut detail = request::<FleetCveDetail, ()>("GET", &url, None).await?;
+    detail.normalize_inventory_counts();
+    Ok(detail)
 }
 
 /// Applies one atomic fleet triage request for an exact CVE/package pair.
@@ -1590,7 +1656,7 @@ pub async fn triage_fleet_cve(
     cve_id: &str,
     body: &FleetCveTriageRequest,
 ) -> Result<FleetCveTriageResponse, PoamApiError> {
-    request(
+    let response: FleetCveTriageResponse = request(
         "POST",
         &format!(
             "{}/cves/{}/triage",
@@ -1599,7 +1665,8 @@ pub async fn triage_fleet_cve(
         ),
         Some(body),
     )
-    .await
+    .await?;
+    Ok(response)
 }
 
 macro_rules! poam_body_mutation {
@@ -2177,7 +2244,7 @@ mod tests {
 
     #[test]
     fn fleet_detail_accepts_additive_environment_rollout_fields() {
-        let detail: FleetCveDetail = serde_json::from_value(serde_json::json!({
+        let mut detail: FleetCveDetail = serde_json::from_value(serde_json::json!({
             "cve": {
                 "cve_id": "CVE-2026-1000",
                 "cvss_v3_score": 8.1,
@@ -2209,6 +2276,17 @@ mod tests {
 
         assert_eq!(detail.environments[0].disposition, None);
         assert!(detail.environments[0].systems.is_empty());
+        detail.normalize_inventory_counts();
+        assert_eq!(detail.exact_affected_system_count, 1);
+        assert_eq!(detail.legacy_affected_system_count, 0);
+        assert_eq!(detail.exact_mutation_target_count, 1);
+        assert_eq!(detail.environments[0].exact_affected_system_count, 1);
+
+        detail.environments.clear();
+        detail.exact_mutation_target_count = 0;
+        detail.normalize_inventory_counts();
+        assert_eq!(detail.exact_affected_system_count, 1);
+        assert_eq!(detail.exact_mutation_target_count, 0);
     }
 
     #[test]

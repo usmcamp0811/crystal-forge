@@ -509,10 +509,11 @@ pub async fn cve_relationships(
     }
 }
 
-/// Returns the visible exact-evidence fleet drawer for one CVE and package.
+/// Returns the visible exact and legacy fleet inventory for one CVE and package.
 ///
 /// Returns a structured error response for malformed inputs, hidden scope,
-/// unavailable exact evidence, or persistence failures.
+/// unavailable inventory, or persistence failures. Legacy rows are read-only;
+/// fleet mutations resolve exact evidence again in the mutation transaction.
 pub async fn fleet_cve_detail(
     State(pool): State<PgPool>,
     RequireAuth(user): RequireAuth,
@@ -532,7 +533,7 @@ pub async fn fleet_cve_detail(
         Ok(value) => value,
         Err(response) => return response,
     };
-    match poam::fleet_cve_detail(&pool, &actor, &cve_id, &query.package).await {
+    match poam::fleet_cve_inventory_detail(&pool, &actor, &cve_id, &query.package).await {
         Ok(value) => Json(value).into_response(),
         Err(error) => error_response(error),
     }

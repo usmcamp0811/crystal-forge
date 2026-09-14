@@ -964,11 +964,11 @@ where
     }
 }
 
-/// Fetch CVE vulnerabilities for a single system.
-pub async fn fetch_system_cves(
+/// Fetches the typed read-only CVE inventory for a single system.
+pub async fn fetch_system_cve_inventory(
     id: &uuid::Uuid,
-) -> Result<Vec<SystemVulnerability>, ApiClientError> {
-    let url = format!("{}/systems/{}/cves", base_url(), id);
+) -> Result<SystemCveInventoryResponse, ApiClientError> {
+    let url = format!("{}/systems/{}/cve-inventory", base_url(), id);
     fetch_json(&url).await
 }
 

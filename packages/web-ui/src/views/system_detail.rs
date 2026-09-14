@@ -23,9 +23,10 @@ use wasm_bindgen::closure::Closure;
 
 use crate::api::client::{
     ApiClientError, fetch_compliance_system_evidence, fetch_flake_timeline_for_tray,
-    fetch_system_assignments, fetch_system_compliance_bundles, fetch_system_cve_scan_eligibility,
-    fetch_system_cves, fetch_system_evaluated_options, fetch_system_evaluation_module_sources,
-    fetch_system_evaluation_summary, fetch_system_hardening, fetch_system_hardening_justifications,
+    fetch_system_assignments, fetch_system_compliance_bundles, fetch_system_cve_inventory,
+    fetch_system_cve_scan_eligibility, fetch_system_evaluated_options,
+    fetch_system_evaluation_module_sources, fetch_system_evaluation_summary,
+    fetch_system_hardening, fetch_system_hardening_justifications,
     fetch_system_hardening_scan_eligibility, get_system_deployment_progress,
     queue_system_config_inspection, request_system_generation_rollback, request_system_rollback,
     request_system_sync, save_system_hardening_justification,
@@ -42,9 +43,10 @@ use crate::api::models::{
     OptionChangeKind, OptionDefinitionProvenance, OptionInventoryState, SafeOptionValue,
     SaveHardeningJustificationRequest, SelectedEvaluationSummary, SevenDayDriftStatus,
     SnapshotLifecycle, SnapshotRevisionMode, SystemAgentEvent, SystemCommitHistory,
-    SystemComplianceBundle, SystemDeploymentProgress, SystemDetail, SystemGeneration,
-    SystemHistoryEntry, SystemRollbackGenerationRequest, SystemRollbackRequest,
-    SystemVulnerability, TrackedFlakeIdentity, TypedOptionDiff, VerifyGenerationClosureRequest,
+    SystemComplianceBundle, SystemCveInventoryAuthority, SystemCveInventoryResponse,
+    SystemDeploymentProgress, SystemDetail, SystemGeneration, SystemHistoryEntry,
+    SystemRollbackGenerationRequest, SystemRollbackRequest, SystemVulnerability,
+    TrackedFlakeIdentity, TypedOptionDiff, VerifyGenerationClosureRequest,
 };
 use crate::components::compliance::EvidenceDrawer;
 use crate::components::cve::CvesTab;
@@ -139,7 +141,7 @@ const POLICY_JSON_SAMPLE: &str = r#"[
 /// renders as a real empty/error state (TASK-353 review).
 #[derive(Debug, Clone, PartialEq)]
 struct VulnerabilitiesLoad {
-    items: Vec<SystemVulnerability>,
+    inventory: Option<SystemCveInventoryResponse>,
     error: Option<String>,
     redirect_to_login: bool,
 }
@@ -597,27 +599,27 @@ pub fn SystemDetailView(
             // render fake vulnerabilities (TASK-353 review).
             let Ok(system_id) = Uuid::parse_str(&id) else {
                 return VulnerabilitiesLoad {
-                    items: Vec::new(),
+                    inventory: None,
                     error: Some("Invalid system identifier.".to_string()),
                     redirect_to_login: false,
                 };
             };
 
-            match fetch_system_cves(&system_id).await {
-                Ok(items) => VulnerabilitiesLoad {
-                    items,
+            match fetch_system_cve_inventory(&system_id).await {
+                Ok(inventory) => VulnerabilitiesLoad {
+                    inventory: Some(inventory),
                     error: None,
                     redirect_to_login: false,
                 },
                 Err(ApiClientError::Status {
                     code: 401 | 403, ..
                 }) => VulnerabilitiesLoad {
-                    items: Vec::new(),
+                    inventory: None,
                     error: None,
                     redirect_to_login: true,
                 },
                 Err(err) => VulnerabilitiesLoad {
-                    items: Vec::new(),
+                    inventory: None,
                     error: Some(format!("Unable to load vulnerabilities: {err}")),
                     redirect_to_login: false,
                 },
@@ -932,7 +934,7 @@ pub fn SystemDetailView(
         .read_unchecked()
         .clone()
         .unwrap_or_else(|| VulnerabilitiesLoad {
-            items: Vec::new(),
+            inventory: None,
             error: None,
             redirect_to_login: false,
         });
@@ -946,7 +948,11 @@ pub fn SystemDetailView(
         };
     }
     let vulnerabilities_loading = vulnerabilities_resource.read_unchecked().is_none();
-    let vulnerabilities = vulnerabilities_load.items.clone();
+    let cve_inventory = vulnerabilities_load.inventory.clone();
+    let vulnerabilities = cve_inventory
+        .as_ref()
+        .map(|inventory| inventory.vulnerabilities.clone())
+        .unwrap_or_default();
     let vulnerabilities_error = vulnerabilities_load.error.clone();
     let deployment_logs = map_agent_events_to_logs(
         agent_events_resource
@@ -1490,8 +1496,16 @@ pub fn SystemDetailView(
                         CvesTab {
                             system_id: system.id,
                             hostname: system.hostname.clone(),
-                            cve_counts: system.cve_counts.clone(),
                             vulnerabilities: vulnerabilities.clone(),
+                            inventory_authority: cve_inventory
+                                .as_ref()
+                                .map(|inventory| inventory.authority),
+                            inventory_source: cve_inventory
+                                .as_ref()
+                                .and_then(|inventory| inventory.source.clone()),
+                            exact_authority_failure: cve_inventory
+                                .as_ref()
+                                .and_then(|inventory| inventory.exact_authority_failure),
                             allow_mutations: can_mutate,
                             loading: vulnerabilities_loading,
                             error: vulnerabilities_error.clone(),

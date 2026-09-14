@@ -7,7 +7,8 @@ use uuid::Uuid;
 
 use crate::api::client::save_system_cve_justification;
 use crate::api::models::{
-    CveSeverity, CveSummary, SaveSystemCveJustificationRequest, SystemVulnerability,
+    CveSeverity, ExactCveAuthorityFailureReason, SaveSystemCveJustificationRequest,
+    SystemCveInventoryAuthority, SystemCveInventorySource, SystemVulnerability,
 };
 use crate::components::poam::{CvePoamContext, CvePoamCreateModal};
 use crate::theme;
@@ -87,8 +88,13 @@ const JUSTIFICATION_PRESETS: [(&str, &str); 5] = [
 pub fn CvesTab(
     system_id: Uuid,
     hostname: String,
-    cve_counts: CveSummary,
     vulnerabilities: Vec<SystemVulnerability>,
+    /// Identifies the single inventory source selected by the server.
+    inventory_authority: Option<SystemCveInventoryAuthority>,
+    /// Gives real provenance for the selected completed scan.
+    inventory_source: Option<SystemCveInventorySource>,
+    /// Reports why exact remediation authority was unavailable.
+    exact_authority_failure: Option<ExactCveAuthorityFailureReason>,
     allow_mutations: bool,
     on_saved: EventHandler<()>,
     /// Opens the common POA&M detail route or tray.
@@ -120,7 +126,11 @@ pub fn CvesTab(
     let shown_cve_count: usize = filtered_groups.iter().map(|group| group.cves.len()).sum();
     let shown_package_count = filtered_groups.len();
     let shown_package_suffix = if shown_package_count == 1 { "" } else { "s" };
-    let total_cves = cve_counts.total();
+    let total_cves = shown_cve_count as i64;
+    let exact_remediation_allowed =
+        inventory_allows_exact_remediation(inventory_authority, allow_mutations);
+    let ordinary_justification_allowed =
+        inventory_allows_ordinary_justification(inventory_authority, allow_mutations);
 
     let status_is_error = save_status
         .read()
@@ -160,6 +170,40 @@ pub fn CvesTab(
             div {
                 style: "display:flex;flex-direction:column;gap:14px;",
 
+            match inventory_authority {
+                Some(SystemCveInventoryAuthority::Exact) => rsx! {
+                    div { class: "sd-callout sd-callout-success", "data-testid": "system-cves-exact",
+                        strong { if vulnerabilities.is_empty() { "Exact scan clean. " } else { "Exact scan findings. " } }
+                        "This inventory is bound to the current evaluated deployment and supports exact remediation."
+                        if let Some(source) = inventory_source.as_ref() {
+                            div { class: "text-xs", "Completed {source.completed_at} by {source.scanner_name}." }
+                        }
+                    }
+                },
+                Some(SystemCveInventoryAuthority::Legacy) => rsx! {
+                    div { class: "sd-callout sd-callout-warning", "data-testid": "system-cves-legacy",
+                        strong { if vulnerabilities.is_empty() { "Legacy scan clean. " } else { "Legacy scan findings. " } }
+                        "The current evaluated deployment and a schema-1 CVE scan are required for POA&M, patch scheduling, verification, and closure. Ordinary inventory justification remains available and does not create exact remediation authority."
+                        if let Some(reason) = exact_authority_failure {
+                            div { class: "text-xs", "Exact authority unavailable: {exact_authority_reason_label(reason)}." }
+                        }
+                        if let Some(source) = inventory_source.as_ref() {
+                            div { class: "text-xs", "Completed {source.completed_at} by {source.scanner_name}." }
+                        }
+                    }
+                },
+                Some(SystemCveInventoryAuthority::NoScan) => rsx! {
+                    div { class: "sd-callout sd-callout-warning", "data-testid": "system-cves-no-scan",
+                        strong { "No completed CVE scan. " }
+                        "The current evaluated deployment and a CVE scan are required before inventory or exact remediation is available."
+                        if let Some(reason) = exact_authority_failure {
+                            div { class: "text-xs", "Exact authority unavailable: {exact_authority_reason_label(reason)}." }
+                        }
+                    }
+                },
+                None => rsx! {},
+            }
+
             if let Some(message) = save_status() {
                 div {
                     class: if status_is_error {
@@ -189,8 +233,13 @@ pub fn CvesTab(
                 if filtered_groups.is_empty() {
                     div {
                         class: "empty",
-                        h3 { "No vulnerabilities detected" }
-                        div { "Last scan data did not report any package-level CVEs for this host." }
+                        if inventory_authority == Some(SystemCveInventoryAuthority::NoScan) {
+                            h3 { "No scan inventory available" }
+                            div { "Run a CVE scan after the current deployment is evaluated." }
+                        } else {
+                            h3 { "No vulnerabilities detected" }
+                            div { "The selected completed scan did not report package-level CVEs for this host." }
+                        }
                     }
                 } else {
                     div {
@@ -329,7 +378,7 @@ pub fn CvesTab(
                                                                                         severity: cve.severity.label().to_string(),
                                                                                         cvss_score: cve.cvss_score,
                                                                                     };
-                                                                                    if allow_mutations {
+                                                                                     if exact_remediation_allowed {
                                                                                         rsx! { button { class: "btn btn-ghost xs focus-ring", title: "Create POA&M", onclick: move |_| create_context.set(Some(context.clone())), "Create POA&M" } }
                                                                                     } else {
                                                                                         rsx! {}
@@ -341,7 +390,7 @@ pub fn CvesTab(
                                                                                 ExactCveAction::Justified => rsx! { span { class: "poam-chip poam-result-waiver", "Justified, not remediated" } },
                                                                                 ExactCveAction::Unavailable => rsx! { span { class: "poam-muted", "Exact remediation unavailable" } },
                                                                             }
-                                                                            if allow_mutations { button {
+                                                                             if ordinary_justification_allowed { button {
                                                                                 class: "btn-icon focus-ring",
                                                                                 title: if has_justification { "Edit justification" } else { "Justify" },
                                                                                 onclick: {
@@ -445,7 +494,7 @@ pub fn CvesTab(
                                                                                 div { class: "flex items-center gap-2",
                                                                                     button {
                                                                                         class: "px-3 py-2 rounded-md {theme::interactive::PRIMARY_BTN} text-sm font-semibold text-white transition-colors disabled:opacity-50 {theme::interactive::FOCUS_RING}",
-                                                                                        disabled: *save_in_progress.read() || !allow_mutations,
+                                                                                        disabled: *save_in_progress.read() || !ordinary_justification_allowed,
                                                                                         onclick: {
                                                                                             let cve_id = cve_id.clone();
                                                                                             move |_| {
@@ -481,7 +530,7 @@ pub fn CvesTab(
                                                                                                 });
                                                                                             }
                                                                                         },
-                                                                                        if !allow_mutations {
+                                                                                        if !ordinary_justification_allowed {
                                                                                             "Operator/Admin required"
                                                                                         } else if *save_in_progress.read() {
                                                                                             "Saving..."
@@ -529,6 +578,46 @@ pub fn CvesTab(
             }
         }
     }
+}
+
+fn exact_authority_reason_label(reason: ExactCveAuthorityFailureReason) -> &'static str {
+    match reason {
+        ExactCveAuthorityFailureReason::MissingCurrentGeneration => "current generation missing",
+        ExactCveAuthorityFailureReason::CurrentStoreMismatch => "current generation/store mismatch",
+        ExactCveAuthorityFailureReason::RetainedGenerationUnavailable => {
+            "retained generation unavailable"
+        }
+        ExactCveAuthorityFailureReason::RetainedStoreMismatch => {
+            "retained generation/store mismatch"
+        }
+        ExactCveAuthorityFailureReason::LineageUnverified => "deployment lineage unverified",
+        ExactCveAuthorityFailureReason::SnapshotUnavailable => "evaluation snapshot unavailable",
+        ExactCveAuthorityFailureReason::SnapshotUnsupported => "evaluation snapshot unsupported",
+        ExactCveAuthorityFailureReason::ExactDerivationUnavailable => {
+            "exact derivation unavailable"
+        }
+        ExactCveAuthorityFailureReason::NoSchema1CurrentScan => {
+            "no schema-1 scan for the current deployment"
+        }
+    }
+}
+
+fn inventory_allows_exact_remediation(
+    authority: Option<SystemCveInventoryAuthority>,
+    role_allows_mutation: bool,
+) -> bool {
+    role_allows_mutation && authority == Some(SystemCveInventoryAuthority::Exact)
+}
+
+fn inventory_allows_ordinary_justification(
+    authority: Option<SystemCveInventoryAuthority>,
+    role_allows_mutation: bool,
+) -> bool {
+    role_allows_mutation
+        && matches!(
+            authority,
+            Some(SystemCveInventoryAuthority::Exact | SystemCveInventoryAuthority::Legacy)
+        )
 }
 
 fn group_vulnerabilities_by_cve(vulnerabilities: &[SystemVulnerability]) -> Vec<GroupedCve> {
@@ -973,5 +1062,33 @@ mod tests {
             exact_cve_action(cve, Uuid::from_u128(9), None),
             ExactCveAction::Conflict
         );
+    }
+
+    #[test]
+    fn inventory_authority_distinguishes_remediation_from_justification() {
+        assert!(inventory_allows_exact_remediation(
+            Some(SystemCveInventoryAuthority::Exact),
+            true
+        ));
+        assert!(!inventory_allows_exact_remediation(
+            Some(SystemCveInventoryAuthority::Legacy),
+            true
+        ));
+        assert!(!inventory_allows_exact_remediation(
+            Some(SystemCveInventoryAuthority::NoScan),
+            true
+        ));
+        assert!(!inventory_allows_exact_remediation(
+            Some(SystemCveInventoryAuthority::Exact),
+            false
+        ));
+        assert!(inventory_allows_ordinary_justification(
+            Some(SystemCveInventoryAuthority::Legacy),
+            true
+        ));
+        assert!(!inventory_allows_ordinary_justification(
+            Some(SystemCveInventoryAuthority::NoScan),
+            true
+        ));
     }
 }

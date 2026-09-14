@@ -15,11 +15,12 @@ use crate::api::models::{
     DeploymentStatus, FieldUpdate, ManualDeploymentAction, ManualDeploymentConversionState,
     ManualDeploymentPolicyState, ManualDeploymentRequestState, ManualDeploymentResponse,
     PipelineStage, SaveSystemCveJustificationRequest, SortOrder, SystemAgentEvent,
-    SystemCommitsResponse, SystemDeploymentProgress, SystemDetail, SystemGeneration,
-    SystemGenerationsResponse, SystemHardwareInfo, SystemHistoryEntry, SystemMutationResponse,
-    SystemNetworkInfo, SystemRollbackGenerationRequest, SystemRollbackRequest, SystemSecurityInfo,
-    SystemSummary, SystemVulnerability, SystemsListParams, UpdateSystemPublicKeyRequest,
-    UpdateSystemRequest, VerifyGenerationClosureRequest, VerifyGenerationClosureResponse,
+    SystemCommitsResponse, SystemCveInventoryResponse, SystemDeploymentProgress, SystemDetail,
+    SystemGeneration, SystemGenerationsResponse, SystemHardwareInfo, SystemHistoryEntry,
+    SystemMutationResponse, SystemNetworkInfo, SystemRollbackGenerationRequest,
+    SystemRollbackRequest, SystemSecurityInfo, SystemSummary, SystemVulnerability,
+    SystemsListParams, UpdateSystemPublicKeyRequest, UpdateSystemRequest,
+    VerifyGenerationClosureRequest, VerifyGenerationClosureResponse,
 };
 use crate::auth::models::Role;
 use crate::handlers::agent_request::CFState;
@@ -46,7 +47,10 @@ use crate::models::evaluation_snapshots::{
 use crate::models::poam::CveRelationshipRowKey;
 use crate::queries::build_jobs::enqueue_build_job_for_derivation;
 use crate::queries::cve_scans::{get_scan_by_id, resolve_system_cve_scan_target};
-use crate::queries::cves::fetch_exact_system_vulnerabilities;
+use crate::queries::cves::{
+    fetch_authorized_system_cve_inventory_tx, fetch_exact_system_vulnerabilities,
+    is_cve_inventory_overflow,
+};
 use crate::queries::derivations::reset_derivation_for_rebuild;
 use crate::queries::system_events::{
     deployment_progress_kind, deployment_progress_stage, get_system_deployment_progress_row,
@@ -1543,12 +1547,140 @@ pub async fn get_system_cves(
     (StatusCode::OK, Json(vulnerabilities)).into_response()
 }
 
+/// Returns the typed read-only CVE inventory for one visible system.
+///
+/// The response separates display inventory authority from exact remediation
+/// authority. Legacy findings remain visible but never receive exact
+/// relationship context. Authentication and environment failures remain
+/// non-disclosing, consistent with the existing system CVE endpoint.
+pub async fn get_system_cve_inventory(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(system_id): Path<Uuid>,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+    let Some(caller_role) = highest_role(&roles) else {
+        return forbidden();
+    };
+    let environment_memberships = match load_membership_environment_ids(&pool, user_id).await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to load environment memberships"),
+    };
+    let actor = PoamActor {
+        user_id,
+        identifier: user_id.to_string(),
+        is_admin: matches!(caller_role, Role::Admin),
+        can_mutate: caller_role.can_mutate_systems(),
+        environment_ids: environment_memberships.iter().copied().collect(),
+        request_origin: None,
+    };
+    let mut transaction = match pool.begin().await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to load system CVE inventory"),
+    };
+    if sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .execute(&mut *transaction)
+        .await
+        .is_err()
+    {
+        return internal_error("Failed to load system CVE inventory");
+    }
+    let inventory = match fetch_authorized_system_cve_inventory_tx(
+        &mut transaction,
+        system_id,
+        user_id,
+    )
+    .await
+    {
+        Ok(Some(value)) => value,
+        Ok(None) => return not_found(),
+        Err(error) if is_cve_inventory_overflow(&error) => {
+            return bad_request("CVE inventory exceeds the 1000-row limit");
+        }
+        Err(_) => return internal_error("Failed to load system CVE inventory"),
+    };
+    let relationships =
+        if inventory.authority == crate::api::models::SystemCveInventoryAuthority::Exact {
+            let keys = inventory
+                .rows
+                .iter()
+                .map(|row| CveRelationshipRowKey {
+                    canonical_cve_id: row.cve_id.clone(),
+                    canonical_package_name: row.canonical_package_name.clone(),
+                    scan_id: row.scan_id,
+                    occurrence_derivation_path: row.occurrence_derivation_path.clone(),
+                })
+                .collect::<Vec<_>>();
+            match poam_service::cve_relationships_for_rows_tx(
+                &mut transaction,
+                &actor,
+                system_id,
+                &keys,
+                None,
+                None,
+                &SystemClock,
+            )
+            .await
+            {
+                Ok(value) => value,
+                Err(_) => return internal_error("Failed to load CVE remediation context"),
+            }
+        } else {
+            Vec::new()
+        };
+    if transaction.commit().await.is_err() {
+        return internal_error("Failed to load system CVE inventory");
+    }
+    let vulnerabilities = inventory
+        .rows
+        .into_iter()
+        .map(|row| {
+            let remediation = relationships
+                .iter()
+                .find(|relationship| {
+                    relationship.observation.canonical_cve_id == row.cve_id
+                        && relationship.observation.canonical_package_name
+                            == row.canonical_package_name
+                })
+                .cloned();
+            SystemVulnerability {
+                cve_id: row.cve_id,
+                severity: parse_cve_severity(&row.severity),
+                cvss_score: row.cvss_score,
+                description: row.description,
+                package_name: row.package_name,
+                installed_version: row.installed_version,
+                fixed_version: row.fixed_version,
+                first_seen: row.first_seen,
+                published_at: row.published_at,
+                status: row.status,
+                justification_category: row.justification_category,
+                justification_reason: row.justification_reason,
+                justification_updated_at: row.justification_updated_at,
+                remediation,
+            }
+        })
+        .collect();
+    (
+        StatusCode::OK,
+        Json(SystemCveInventoryResponse {
+            authority: inventory.authority,
+            exact_authority_failure: inventory.exact_authority_failure,
+            source: inventory.source,
+            vulnerabilities,
+        }),
+    )
+        .into_response()
+}
+
 /// Saves or revokes one system-scoped CVE justification.
 ///
-/// The handler locks the system and exact-CVE evidence before it rechecks the
-/// user's active state, role, and environment membership. Authorization that
-/// changes while the mutation waits for a lock therefore cannot authorize the
-/// write.
+/// The handler preserves the ordinary legacy inventory justification contract.
+/// A current exact or qualifying legacy finding can be justified. This write
+/// does not create exact remediation authority. The handler locks the shared
+/// CVE scope and rechecks active role and environment membership before write.
 pub async fn save_system_cve_justification(
     State(pool): State<PgPool>,
     headers: HeaderMap,
@@ -1591,7 +1723,7 @@ pub async fn save_system_cve_justification(
     }
 
     // SECURITY: Authentication identifies the session before the transaction,
-    // but role, membership, system scope, and exact evidence are all re-read
+    // but role, membership, system scope, and current inventory are all re-read
     // under the mutation locks below.
     let mut tx = match pool.begin().await {
         Ok(value) => value,
@@ -1705,7 +1837,11 @@ pub async fn save_system_cve_justification(
                ON observation.scan_id=scan.id
               AND observation.canonical_cve_id=$2
               AND NOT observation.is_whitelisted
-             WHERE system.id=$1)"#,
+              WHERE system.id=$1)
+            OR EXISTS(
+              SELECT 1 FROM view_system_vulnerabilities vulnerability
+              JOIN systems system ON system.hostname=vulnerability.hostname
+              WHERE system.id=$1 AND vulnerability.cve_id=$2)"#,
     )
     .bind(system_id)
     .bind(&cve_id)
@@ -4675,6 +4811,23 @@ mod tests {
             .expect("lazy pool should construct");
 
         let response = get_system_cves(
+            State(pool),
+            HeaderMap::new(),
+            Path(Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("uuid")),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn get_system_cve_inventory_requires_authenticated_role() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
+            .expect("lazy pool should construct");
+
+        let response = get_system_cve_inventory(
             State(pool),
             HeaderMap::new(),
             Path(Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("uuid")),

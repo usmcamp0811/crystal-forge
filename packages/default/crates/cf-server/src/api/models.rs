@@ -419,6 +419,74 @@ pub struct SystemVulnerability {
     pub remediation: Option<crate::models::poam::CvePoamRelationship>,
 }
 
+/// Identifies the evidence authority used for a system CVE inventory read.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemCveInventoryAuthority {
+    /// Uses immutable schema-1 observations for the exact deployed generation.
+    #[default]
+    Exact,
+    /// Uses the latest completed legacy scan selected by the bounded legacy view.
+    Legacy,
+    /// Reports that no completed scan is usable for inventory display.
+    NoScan,
+}
+
+/// Reports the first prerequisite that prevented exact CVE authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExactCveAuthorityFailureReason {
+    /// The latest system state has no usable generation or store path.
+    MissingCurrentGeneration,
+    /// The agent did not verify that the generation owns the current store path.
+    CurrentStoreMismatch,
+    /// No retained snapshot binds the latest reported generation.
+    RetainedGenerationUnavailable,
+    /// The retained generation binds a different store path.
+    RetainedStoreMismatch,
+    /// The retained generation lineage is not verified.
+    LineageUnverified,
+    /// The retained evaluation snapshot is missing or unavailable.
+    SnapshotUnavailable,
+    /// The retained evaluation snapshot uses an unsupported integrity version.
+    SnapshotUnsupported,
+    /// The retained generation does not bind a matching NixOS derivation.
+    ExactDerivationUnavailable,
+    /// The exact derivation has no completed schema-1 CVE scan.
+    NoSchema1CurrentScan,
+}
+
+/// Gives provenance for the scan selected by a system inventory read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SystemCveInventorySource {
+    /// Identifies the selected scan.
+    pub scan_id: Uuid,
+    /// Gives the scanner implementation name recorded at completion.
+    pub scanner_name: String,
+    /// Gives the scanner implementation version when the scan recorded one.
+    pub scanner_version: Option<String>,
+    /// Gives the real scan completion time.
+    pub completed_at: DateTime<Utc>,
+}
+
+/// Returns one non-unioned CVE inventory source for a system.
+///
+/// `Exact` takes precedence even when `vulnerabilities` is empty. `Legacy`
+/// rows never contain server-issued exact remediation context. Inventory
+/// authority does not redefine the ordinary system justification API. `NoScan`
+/// has no source and no rows.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemCveInventoryResponse {
+    /// Identifies the authority selected for this response.
+    pub authority: SystemCveInventoryAuthority,
+    /// Reports why exact authority was unavailable for a fallback response.
+    pub exact_authority_failure: Option<ExactCveAuthorityFailureReason>,
+    /// Gives the selected scan provenance, including for a clean scan.
+    pub source: Option<SystemCveInventorySource>,
+    /// Contains findings from only the selected source.
+    pub vulnerabilities: Vec<SystemVulnerability>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SaveSystemCveJustificationRequest {
     pub category: Option<String>,
@@ -456,6 +524,10 @@ pub struct CveListItem {
     pub fixed_version: Option<String>,
     pub fix_status: String,
     pub affected_count: i64,
+    /// Counts affected systems backed by exact immutable observations.
+    pub exact_affected_count: i64,
+    /// Counts affected systems visible only through legacy scan inventory.
+    pub legacy_affected_count: i64,
     pub affected_environments: Option<Vec<String>>,
     pub first_seen: Option<DateTime<Utc>>,
     pub last_seen: Option<DateTime<Utc>>,
@@ -589,25 +661,41 @@ pub struct CveAffectedEnvironment {
     pub environment_id: Uuid,
     /// Gives the visible environment name.
     pub environment_name: String,
-    /// Counts all current exact subjects in this environment.
+    /// Counts all displayed affected systems in this environment.
     pub affected_system_count: i64,
+    /// Counts systems backed by exact immutable subjects.
+    pub exact_affected_system_count: i64,
+    /// Counts systems visible only through legacy inventory.
+    pub legacy_affected_system_count: i64,
     /// Lists the bounded affected systems for drawer presentation.
     pub systems: Vec<CveAffectedSystemDetail>,
     /// Gives the current disposition. `None` means OPEN.
     pub disposition: Option<CveEnvironmentDisposition>,
 }
 
-/// Provides the bounded fleet drawer model for one exact CVE/package identity.
+/// Provides the bounded inventory drawer for one CVE/package identity.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FleetCveDetail {
     /// Gives advisory metadata retained by the existing CVE detail contract.
     pub cve: CveDetail,
     /// Gives the canonical package identity selected by this drawer.
     pub canonical_package_name: String,
-    /// Gives the visible environment disposition rollup.
+    /// Gives the disposition rollup for visible exact subjects only.
     pub rollup: FleetCveTriageRollup,
-    /// Counts visible current exact subjects.
+    /// Counts all visible affected systems.
     pub affected_system_count: i64,
+    /// Counts visible systems backed by exact immutable subjects.
+    pub exact_affected_system_count: i64,
+    /// Counts exact systems assigned to environments and eligible for mutation.
+    pub exact_mutation_target_count: i64,
+    /// Counts visible systems backed only by legacy inventory.
+    pub legacy_affected_system_count: i64,
+    /// Counts visible active systems without a usable completed scan.
+    pub no_scan_system_count: i64,
+    /// Counts affected systems that an Admin can see without an environment.
+    pub unassigned_affected_system_count: i64,
+    /// Lists bounded affected systems that have no environment.
+    pub unassigned_systems: Vec<CveAffectedSystemDetail>,
     /// Lists visible affected environments in deterministic order.
     pub environments: Vec<CveAffectedEnvironment>,
 }
@@ -697,26 +785,52 @@ pub struct CveTriageConflictSubject {
 /// Reports the result of one atomic fleet triage mutation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FleetCveTriageResponse {
-    /// Gives the refreshed visible fleet drawer state.
+    /// Gives transaction-owned detail for exact mutation subjects only.
+    ///
+    /// Clients must refetch the fleet inventory endpoint to restore legacy and
+    /// unassigned display rows after a successful mutation.
     pub detail: FleetCveDetail,
+    /// Identifies the evidence scope represented by `detail`.
+    pub detail_scope: FleetCveMutationDetailScope,
     /// Identifies the created or reused POA&M when patching was scheduled.
     pub poam_id: Option<Uuid>,
     /// Indicates that all scheduled subjects already used a compatible POA&M.
     pub poam_reused: bool,
 }
 
+/// Identifies the intentionally narrow detail returned by fleet CVE mutation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FleetCveMutationDetailScope {
+    /// Contains only exact environment-assigned mutation subjects.
+    ExactMutationSubjects,
+}
+
 /// System affected by a CVE (for drawer detail view).
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CveAffectedSystemDetail {
+    /// Identifies the affected managed system.
     pub system_id: Uuid,
+    /// Gives the system hostname.
     pub hostname: String,
+    /// Identifies the visible environment when one is assigned.
+    pub environment_id: Option<Uuid>,
+    /// Gives the visible environment name when one is assigned.
     pub environment: Option<String>,
+    /// Gives the latest reported primary IP address when available.
     pub primary_ip_address: Option<String>,
+    /// Gives the managed flake name when one is assigned.
     pub flake_name: Option<String>,
+    /// Identifies the managed flake when one is assigned.
     pub flake_id: Option<i32>,
+    /// Gives the selected revision when the read resolves one.
     pub commit_hash: Option<String>,
+    /// Gives the system deployment-policy identifier.
     pub deployment_policy: String,
+    /// Gives the package version observed by the selected inventory source.
     pub current_package_version: Option<String>,
+    /// Identifies whether the displayed finding is exact or display-only.
+    pub inventory_authority: SystemCveInventoryAuthority,
 }
 
 /// CVE justification (triage) record.
@@ -754,6 +868,12 @@ pub struct CveFleetStats {
     pub fixable: i64,
     pub environments_affected: i64,
     pub systems_affected: i64,
+    /// Counts distinct affected systems with at least one exact finding.
+    pub exact_systems_affected: i64,
+    /// Counts distinct affected systems with at least one legacy-only finding.
+    pub legacy_systems_affected: i64,
+    /// Counts visible active systems without a usable completed scan.
+    pub no_scan_systems: i64,
     pub outstanding: i64,
     pub accepted: i64,
     pub scheduled: i64,

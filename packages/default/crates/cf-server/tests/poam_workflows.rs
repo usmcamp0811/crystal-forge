@@ -1,8 +1,8 @@
 use axum::{Router, routing::get};
 use chrono::{DateTime, NaiveDate, TimeDelta, TimeZone, Utc};
 use crystal_forge::api::models::{
-    CveEnvironmentDisposition, CveEnvironmentTriageAction, CveFilters, FleetCvePoamRequest,
-    FleetCveTriageRequest, FleetCveTriageRollup,
+    CveEnvironmentDisposition, CveEnvironmentTriageAction, CveFilters, FleetCveMutationDetailScope,
+    FleetCvePoamRequest, FleetCveTriageRequest, FleetCveTriageRollup,
 };
 use crystal_forge::auth::extractors::AuthenticatedUser;
 use crystal_forge::auth::session::{
@@ -1022,6 +1022,11 @@ async fn fleet_cve_triage_is_atomic_environment_scoped_and_semantically_idempote
     .unwrap();
     let poam_id = scheduled.poam_id.unwrap();
     assert!(!scheduled.poam_reused);
+    assert_eq!(
+        scheduled.detail_scope,
+        FleetCveMutationDetailScope::ExactMutationSubjects
+    );
+    assert_eq!(scheduled.detail.exact_mutation_target_count, 3);
     assert_eq!(scheduled.detail.rollup, FleetCveTriageRollup::Scheduled);
     for environment in &scheduled.detail.environments {
         let Some(CveEnvironmentDisposition::Scheduled {
@@ -3165,10 +3170,13 @@ async fn exact_cve_poam_rejects_stale_identity_and_closes_only_on_clean_evidence
     )
     .await
     .unwrap_err();
-    assert!(matches!(
-        stale,
-        PoamError::Precondition("stale_cve_observation", _, _)
-    ));
+    assert!(
+        matches!(
+            stale,
+            PoamError::Precondition("stale_cve_observation", _, _)
+        ),
+        "unexpected stale-observation error: {stale:?}"
+    );
 
     let relationships =
         poam_service::cve_relationships(&pool, &actor, fixture.system_id, None, None, &clock)
@@ -4613,6 +4621,9 @@ async fn exact_cve_justification_mutations_require_matching_csrf_before_writes(p
 async fn exact_cve_row_hydration_reaches_past_legacy_relationship_ceiling(pool: PgPool) {
     let fixture = assessment_fixture(&pool).await;
     let actor = admin_actor(fixture.user_id);
+    sync_user_role(&pool, actor.user_id, AuthRole::Admin)
+        .await
+        .unwrap();
     let clock = FixedClock(Utc::now());
     let scan_id = Uuid::new_v4();
     sqlx::query(
@@ -4669,16 +4680,17 @@ async fn exact_cve_row_hydration_reaches_past_legacy_relationship_ceiling(pool: 
             .all(|relationship| relationship.observation.canonical_cve_id != "CVE-2099-0101")
     );
 
+    let row_keys = [CveRelationshipRowKey {
+        canonical_cve_id: "CVE-2099-0101".into(),
+        canonical_package_name: "package-101".into(),
+        scan_id,
+        occurrence_derivation_path: "/nix/store/package-101.drv".into(),
+    }];
     let requested = poam_service::cve_relationships_for_rows(
         &pool,
         &actor,
         fixture.system_id,
-        &[CveRelationshipRowKey {
-            canonical_cve_id: "CVE-2099-0101".into(),
-            canonical_package_name: "package-101".into(),
-            scan_id,
-            occurrence_derivation_path: "/nix/store/package-101.drv".into(),
-        }],
+        &row_keys,
         None,
         None,
         &clock,
@@ -4688,6 +4700,69 @@ async fn exact_cve_row_hydration_reaches_past_legacy_relationship_ceiling(pool: 
     assert_eq!(requested.len(), 1);
     assert_eq!(requested[0].observation.canonical_cve_id, "CVE-2099-0101");
     assert_eq!(requested[0].observed_package_name, "package-101");
+
+    let environment_id: Uuid =
+        sqlx::query_scalar("INSERT INTO environments(name) VALUES($1) RETURNING id")
+            .bind(format!("row-hydration-{scan_id}"))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    sqlx::query("UPDATE systems SET environment_id=$2 WHERE id=$1")
+        .bind(fixture.system_id)
+        .bind(environment_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sync_user_role(&pool, actor.user_id, AuthRole::Viewer)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO user_environment_memberships(user_id,environment_id) VALUES($1,$2)")
+        .bind(actor.user_id)
+        .bind(environment_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let current_member = poam_service::cve_relationships_for_rows(
+        &pool,
+        &actor,
+        fixture.system_id,
+        &row_keys,
+        None,
+        None,
+        &clock,
+    )
+    .await
+    .unwrap();
+    assert_eq!(current_member.len(), 1);
+    let direct_current_member =
+        poam_service::cve_relationships(&pool, &actor, fixture.system_id, None, None, &clock)
+            .await
+            .unwrap();
+    assert_eq!(direct_current_member.len(), 100);
+
+    sqlx::query("DELETE FROM user_environment_memberships WHERE user_id=$1 AND environment_id=$2")
+        .bind(actor.user_id)
+        .bind(environment_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let revoked = poam_service::cve_relationships_for_rows(
+        &pool,
+        &actor,
+        fixture.system_id,
+        &row_keys,
+        None,
+        None,
+        &clock,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(revoked, PoamError::NotFound));
+    let direct_revoked =
+        poam_service::cve_relationships(&pool, &actor, fixture.system_id, None, None, &clock)
+            .await
+            .unwrap_err();
+    assert!(matches!(direct_revoked, PoamError::NotFound));
 }
 
 #[sqlx::test(migrations = "./migrations")]

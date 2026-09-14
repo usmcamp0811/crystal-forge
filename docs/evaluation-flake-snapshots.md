@@ -257,10 +257,16 @@ its generation matches its current store path. A path-only derivation match does
 not authorize exact-CVE creation or verification. Missing or inconsistent
 generation lineage fails closed.
 
-Fleet CVE triage uses `(canonical CVE ID, canonical package name)` as the
-advisory identity and the environment UUID as the action scope. The server
-derives every affected system from the same current retained-generation
-authority. A client cannot select, omit, or fabricate host identities. A fleet
+Fleet CVE reads use `(canonical CVE ID, canonical package name)` as the advisory
+identity. They combine exact current occurrences with bounded legacy inventory
+only for systems that do not have exact scan authority. Counts identify exact,
+legacy-affected, and no-scan systems separately. Exact authority suppresses
+legacy rows even when the exact scan is clean.
+
+Fleet triage uses the same advisory identity and the environment UUID as the
+action scope, but it independently derives every mutation subject from current
+retained-generation authority. A client cannot select, omit, or fabricate host
+identities. Legacy and no-scan systems never enter a triage mutation. A fleet
 read does not enqueue a scan or mutate evidence.
 
 A schema-1 CVE scan is an immutable terminal evidence seal with a non-null
@@ -283,14 +289,32 @@ omits the exact occurrence. A scan completed at or before the baseline cannot
 pass verification. No newer scan or changed deployment lineage returns MISSING
 and blocks closure.
 
-`GET /systems/:id/cves` uses the same retained deployed-generation authority and
-latest schema-1 scan. It does not select vulnerability rows by hostname. Missing
-exact evidence returns an empty row set instead of inferred mutable rows. The
-response is limited to 1,000 stable CVE and canonical-package identities. A
-deterministic occurrence supplies each row's observed name and complete version
-text. Package version is evidence and is not part of relationship identity.
+`GET /systems/:id/cves` remains the compatible bare-array exact-evidence route.
+It uses the same retained deployed-generation authority and latest schema-1
+scan. It does not select vulnerability rows by hostname. Missing exact evidence
+returns an empty row set instead of inferred mutable rows.
 
-Exact-CVE POA&M, justification, and deployment-state writers use `READ
+`GET /systems/:id/cve-inventory` is the read-only inventory route. It selects
+authority before it reads findings in one repeatable-read snapshot. An exact
+schema-1 scan wins even when the scan is clean. If exact authority is
+unavailable, the route uses the bounded latest completed scan semantics from
+`view_system_vulnerabilities` and marks the response `legacy`. A completed
+legacy scan with no findings is a legacy-clean result. If no completed scan is
+usable, the response is `no_scan`. The response includes the real scan ID,
+scanner name and version, completion time, and the first typed exact-authority
+failure. It never unions exact and legacy rows.
+
+Both routes limit findings to 1,000 stable CVE and canonical-package identities.
+A deterministic exact occurrence supplies each exact row's observed name and
+complete version text. Package version is evidence and is not part of exact
+relationship identity. Legacy rows can show or update ordinary inventory
+justification state, but they do not contain exact relationship context and
+cannot authorize POA&M creation, patch scheduling, verification, closure,
+finding linking, or reopening. An ordinary justification does not create exact
+remediation authority. The server does not backfill schema-0 scans, synthesize
+observations, or infer retained lineage.
+
+Exact-CVE POA&M and deployment-state writers use `READ
 COMMITTED` transactions and acquire locks in this order: all canonical CVE
 keys, applicable environment rows, all system sentinels, all policy finding
 keys, all exact-CVE finding keys, and then lifecycle or evidence rows. Keys at
