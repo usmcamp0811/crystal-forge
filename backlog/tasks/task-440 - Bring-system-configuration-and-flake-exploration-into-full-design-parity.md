@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-14 18:08'
+updated_date: '2026-09-14 18:51'
 labels:
   - design-parity
   - web-ui
@@ -86,6 +86,8 @@ references:
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/jobs/16492561399'
   - git commit 133fd9a79f2ce75acb7fbf282cf409e42153bdd8
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2848220069'
+  - git commit d2ca1c180d0a9e7c9b1a72439709fc98469ede5f
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2848322724'
 documentation:
   - docs/design/CrystalForge/app.jsx
   - docs/design/CrystalForge/components/SystemDetail.jsx
@@ -304,6 +306,8 @@ Diagnosed the three remaining critical failures as browser-harness defects. `16-
 Pipeline 2848127618 Web UI job 16492561399 completed in 1775 seconds. The prior fixes advanced each critical workflow but did not clear them: `16-cves` now reaches the actor assertion and fails because `Morgan Reyes` appears in multiple environment cards; mixed evidence reaches the evidence drawer but falls back to individual Nix PASS with `No composite assessment`; canonical POA&M lifecycle shows the two persisted open findings but no remediation controls. The observation-only deployment fixture therefore does not provide sufficient exact derivation identity for these browser workflows. Strict visual failures remain only the dark/light 20af differences. Further fixture diagnosis is in progress; no production behavior change is assumed.
 
 Commit 133fd9a79f2ce75acb7fbf282cf409e42153bdd8 corrects the remaining exact-assessment test setup. The disconnected-agent fixture now creates and certifies a valid empty V1 artifact for the exact persisted assessment and uses it only as the retained deployment lineage carrier; it does not change the current snapshot selector. The retained row binds the observed generation to the exact assessment derivation, avoiding ambiguous same-store-path fallback. CVE disposition assertions are now scoped to Development, Production, and Lab cards so both Morgan Reyes actor occurrences are verified without Playwright strict-locator ambiguity. Node syntax, harness static contracts, and diff checks passed. Exact-head pipeline 2848220069 is running.
+
+Pipeline 2848220069 showed the intended fixes advanced again but exposed two harness mechanics: psql appended the INSERT command tag to a bare RETURNING UUID, and the CVE focus assertion ran before the asynchronous focus effect settled. Commit d2ca1c180d0a9e7c9b1a72439709fc98469ede5f wraps the artifact insert in a CTE SELECT so `runFixtureSql` returns only the UUID and waits for the triage close button to become the active element before asserting it. Node syntax, harness static contracts, and diff checks passed. Exact-head pipeline 2848322724 is running.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
