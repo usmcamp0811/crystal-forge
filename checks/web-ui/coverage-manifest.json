@@ -767,7 +767,7 @@
     },
     {
       "name": "09g-topbar-notifications-dark",
-      "description": "Durable POA&M notification panel across desktop, narrow desktop, and mobile in both themes",
+      "description": "Mocked API adaptation covers populated durable-feed, mutation, keyboard, and responsive panel states",
       "route": "/systems",
       "designRef": "docs/design/CrystalForge/components/Shell.jsx",
       "profiles": [
@@ -776,12 +776,12 @@
       ],
       "semanticAssertions": true,
       "interactions": true,
-      "mockedData": false,
+      "mockedData": true,
       "baseline": "advisory"
     },
     {
       "name": "09h-topbar-notifications-light",
-      "description": "Light theme notifications panel opens with unread badge and settings placeholder",
+      "description": "Mocked API adaptation covers keyset reconciliation, exact retries, stale responses, mutation errors, accessibility, and responsive containment",
       "route": "/systems",
       "designRef": "docs/design/CrystalForge/components/Shell.jsx",
       "profiles": [
@@ -790,12 +790,12 @@
       ],
       "semanticAssertions": true,
       "interactions": true,
-      "mockedData": false,
+      "mockedData": true,
       "baseline": "advisory"
     },
     {
       "name": "09i-topbar-notifications-non-admin",
-      "description": "Non-admin shell hides admin-gated notifications",
+      "description": "Mocked API response verifies allowed notification presentation in a viewer shell",
       "route": "/systems",
       "designRef": "docs/design/CrystalForge/components/Shell.jsx",
       "profiles": [
@@ -804,7 +804,7 @@
       ],
       "semanticAssertions": true,
       "interactions": true,
-      "mockedData": false,
+      "mockedData": true,
       "baseline": "advisory"
     },
     {

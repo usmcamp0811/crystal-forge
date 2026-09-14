@@ -435,6 +435,180 @@ async function mockAccountNotifications(page, notification = null) {
   return requests;
 }
 
+function notificationTimestampMicros(item) {
+  return BigInt(Date.parse(item.created_at)) * 1000n;
+}
+
+function encodeMockNotificationCursor(item) {
+  return `${notificationTimestampMicros(item)}|${item.id}`;
+}
+
+function decodeMockNotificationCursor(cursor) {
+  const separator = cursor.lastIndexOf("|");
+  if (separator < 0) throw new Error(`Invalid mocked notification cursor: ${cursor}`);
+  return { createdAtMicros: BigInt(cursor.slice(0, separator)), id: cursor.slice(separator + 1) };
+}
+
+function notificationIsOlderThanCursor(item, cursor) {
+  const createdAtMicros = notificationTimestampMicros(item);
+  return createdAtMicros < cursor.createdAtMicros ||
+    (createdAtMicros === cursor.createdAtMicros && item.id < cursor.id);
+}
+
+async function mockNotificationCoordinatorScenario(page) {
+  const requests = { get: [], read: [], dismiss: [], markAll: [] };
+  let failNextGet = false;
+  const failNextRead = new Set();
+  const failNextDismiss = new Set();
+  let failNextMarkAll = false;
+  let holdNextHead = false;
+  let releaseHeldHead = null;
+  const baseTimestamp = Date.parse("2026-09-13T12:00:00.000Z");
+  let insertedSequence = 0;
+  let notifications = Array.from({ length: 120 }, (_, index) => ({
+    id: `10000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+    category: index % 2 === 0 ? "build_failures" : "policy_violations",
+    title: `Notification ${index + 1}`,
+    summary: `Durable event summary ${index + 1}`,
+    route: "/systems",
+    created_at: new Date(baseTimestamp - Math.floor(index / 2) * 60_000).toISOString(),
+    read_at: null,
+  }));
+  let unread = notifications.filter((item) => item.read_at == null).length;
+
+  const ordered = (items) => [...items].sort((left, right) =>
+    right.created_at.localeCompare(left.created_at) || right.id.localeCompare(left.id));
+  await page.route("**/api/v1/user/notifications**", async (route) => {
+    if (route.request().method() !== "GET") {
+      await route.fallback();
+      return;
+    }
+    const url = new URL(route.request().url());
+    requests.get.push(url.toString());
+    if (failNextGet) {
+      failNextGet = false;
+      await route.fulfill({ status: 503, body: "notification feed unavailable" });
+      return;
+    }
+    const cursor = url.searchParams.get("cursor");
+    const limit = Math.min(50, Math.max(1, Number.parseInt(url.searchParams.get("limit") || "20", 10)));
+    const snapshot = ordered(notifications).map((item) => ({ ...item }));
+    const snapshotUnread = unread;
+    if (!cursor && holdNextHead) {
+      holdNextHead = false;
+      await new Promise((resolve) => { releaseHeldHead = resolve; });
+      releaseHeldHead = null;
+    }
+    const eligible = cursor
+      ? snapshot.filter((item) => notificationIsOlderThanCursor(item, decodeMockNotificationCursor(cursor)))
+      : snapshot;
+    const pageItems = eligible.slice(0, limit);
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        unread_count: snapshotUnread,
+        next_cursor: pageItems.length === limit ? encodeMockNotificationCursor(pageItems.at(-1)) : null,
+        notifications: pageItems,
+      }),
+    });
+  });
+  await page.route("**/api/v1/user/notifications/read-all", async (route) => {
+    requests.markAll.push(route.request().url());
+    if (failNextMarkAll) {
+      failNextMarkAll = false;
+      await route.fulfill({ status: 503, body: "mark all unavailable" });
+      return;
+    }
+    unread = 0;
+    const readAt = new Date().toISOString();
+    notifications = notifications.map((item) => ({ ...item, read_at: readAt }));
+    await route.fulfill({ status: 204 });
+  });
+  await page.route("**/api/v1/user/notifications/*/read", async (route) => {
+    const id = route.request().url().split("/").at(-2);
+    requests.read.push(id);
+    if (failNextRead.delete(id)) {
+      await route.fulfill({ status: 503, body: "read unavailable" });
+      return;
+    }
+    notifications = notifications.map((item) => item.id === id
+      ? { ...item, read_at: new Date().toISOString() }
+      : item);
+    unread = Math.max(0, unread - 1);
+    await route.fulfill({ status: 204 });
+  });
+  await page.route("**/api/v1/user/notifications/*", async (route) => {
+    if (route.request().method() !== "DELETE") {
+      await route.fallback();
+      return;
+    }
+    const id = route.request().url().split("/").at(-1);
+    requests.dismiss.push(id);
+    if (failNextDismiss.delete(id)) {
+      await route.fulfill({ status: 503, body: "dismiss unavailable" });
+      return;
+    }
+    const dismissed = notifications.find((item) => item.id === id);
+    if (dismissed?.read_at == null) unread = Math.max(0, unread - 1);
+    notifications = notifications.filter((item) => item.id !== id);
+    await route.fulfill({ status: 204 });
+  });
+
+  return {
+    requests,
+    failNextGet() { failNextGet = true; },
+    failNextRead(id) { failNextRead.add(id); },
+    failNextDismiss(id) { failNextDismiss.add(id); },
+    failNextMarkAll() { failNextMarkAll = true; },
+    holdNextHead() { holdNextHead = true; },
+    async waitForHeldHead() {
+      const deadline = Date.now() + 5000;
+      while (!releaseHeldHead && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      if (!releaseHeldHead) throw new Error("Notification head request was not held");
+    },
+    releaseHeldHead() {
+      if (!releaseHeldHead) throw new Error("No held notification head request");
+      releaseHeldHead();
+    },
+    insertNew(count) {
+      const inserted = Array.from({ length: count }, () => {
+        insertedSequence += 1;
+        return {
+          id: `20000000-0000-4000-8000-${String(insertedSequence).padStart(12, "0")}`,
+          category: "build_failures",
+          title: `Inserted notification ${insertedSequence}`,
+          summary: `Inserted durable event ${insertedSequence}`,
+          route: "/systems",
+          created_at: new Date(baseTimestamp + Math.ceil(insertedSequence / 2) * 60_000).toISOString(),
+          read_at: null,
+        };
+      });
+      notifications.push(...inserted);
+      unread += count;
+      return inserted;
+    },
+    dismissOnServer(id) {
+      const dismissed = notifications.find((item) => item.id === id);
+      if (dismissed?.read_at == null) unread = Math.max(0, unread - 1);
+      notifications = notifications.filter((item) => item.id !== id);
+    },
+    setEmpty() { notifications = []; unread = 0; },
+  };
+}
+
+async function waitForNotificationRowCount(page, expected) {
+  await page.waitForFunction(
+    ({ panelTestId, expectedCount }) => document
+      .querySelector(`[data-testid='${panelTestId}']`)
+      ?.querySelectorAll("[data-notification-id]").length === expectedCount,
+    { panelTestId: "topbar-notifications-panel", expectedCount: expected },
+    { timeout: 10_000 },
+  );
+}
+
 async function mockProfileNotificationAndSessionApis(page) {
   let notificationPreferences = {
     deploy_failures: true,
@@ -7011,7 +7185,7 @@ const steps = [
   },
   {
     name: "09g-topbar-notifications-dark",
-    description: "Durable POA&M notification panel across desktop, narrow desktop, and mobile in both themes",
+    description: "Mocked API adaptation covers populated durable-feed, mutation, keyboard, and responsive panel states",
     action: async (page) => {
       const fixture = await createPhase6PoamFixture(page, "phase-7-notification");
       const poam = await createFixturePoam(page, fixture.systems[0].assessmentId, {
@@ -7081,7 +7255,7 @@ const steps = [
       const reopenedPanel = page.locator("[data-testid='topbar-notifications-panel']");
       const reopenedRow = reopenedPanel.locator(`[data-testid="topbar-notification-item-${notificationId}"]`);
       await assertVisible(reopenedRow, "Read POA&M notification should remain durable until dismissed");
-      const dismissNotification = reopenedPanel.getByRole("menuitem", {
+      const dismissNotification = reopenedPanel.getByRole("button", {
         name: `Dismiss ${notificationTitle}`,
         exact: true,
       });
@@ -7101,6 +7275,13 @@ const steps = [
         throw new Error("POA&M notification dismiss request failed");
       }
       await assertHidden(reopenedPanel.getByText(notificationTitle, { exact: true }), "Dismissed POA&M notification should leave the inbox");
+      const settingsAfterFinalDismiss = reopenedPanel.locator("[data-testid='topbar-notifications-settings-button']");
+      await page.waitForFunction(
+        () => document.activeElement?.getAttribute("data-testid") === "topbar-notifications-settings-button",
+      );
+      if (!(await settingsAfterFinalDismiss.evaluate((element) => element === document.activeElement))) {
+        throw new Error("Dismissing the final notification must keep focus inside the open dialog");
+      }
       if (notificationRequests.dismiss.length !== 1) {
         throw new Error(`Expected one durable dismiss mutation, got ${notificationRequests.dismiss.length}`);
       }
@@ -7126,21 +7307,227 @@ const steps = [
   },
   {
     name: "09h-topbar-notifications-light",
-    description: "Light theme notifications panel opens with server-backed notifications",
+    description: "Mocked API adaptation covers keyset reconciliation, exact retries, stale responses, mutation errors, accessibility, and responsive containment",
     action: async (page) => {
-      await mockAccountNotifications(page);
+      const scenario = await mockNotificationCoordinatorScenario(page);
       await page.setViewportSize(VIEWPORTS.desktop);
       await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
       await setAccountPreferences(page, { theme: "light" });
+      scenario.holdNextHead();
       await page.reload({ timeout: LOAD_TIMEOUT });
-      await page.waitForTimeout(1500);
 
       const bell = page.locator("[data-testid='topbar-notifications-button']");
       await assertVisible(bell, "Expected notifications bell button");
       await bell.click();
       const panel = page.locator("[data-testid='topbar-notifications-panel']");
       await assertVisible(panel, "Expected notifications panel to open");
-      await assertVisible(panel.getByText("Build failed"), "Expected server-backed notification row");
+      if ((await panel.getAttribute("role")) !== "dialog" ||
+          (await panel.getAttribute("aria-modal")) !== "true" ||
+          (await bell.getAttribute("aria-haspopup")) !== "dialog") {
+        throw new Error("Notification bell and focus-trapped panel must expose one consistent modal dialog model");
+      }
+      await assertVisible(panel.getByText("Loading notifications...", { exact: true }), "Expected notification loading state");
+      await scenario.waitForHeldHead();
+      scenario.releaseHeldHead();
+      await assertVisible(panel.getByText("Notification 1", { exact: true }), "Expected first mocked durable notification");
+      await waitForNotificationRowCount(page, 50);
+      const badge = page.locator("[data-testid='topbar-notifications-badge']");
+      if ((await badge.textContent())?.trim() !== "99+") {
+        throw new Error("Notification badge must be visually bounded at 99+");
+      }
+      if ((await bell.getAttribute("aria-label")) !== "Notifications (120 unread)") {
+        throw new Error("Notification bell must preserve the exact unread count in its accessible label");
+      }
+      await panel.focus();
+      await page.keyboard.press("Tab");
+      const markAllButton = panel.locator("[data-testid='topbar-notifications-mark-read']");
+      if (!(await markAllButton.evaluate((element) => element === document.activeElement))) {
+        throw new Error("Notification Tab order must reach Mark all read first");
+      }
+      await page.keyboard.press("Tab");
+      const firstTabRow = panel.locator("[data-notification-id]").first();
+      if (!(await firstTabRow.evaluate((element) => element === document.activeElement))) {
+        throw new Error("Notification Tab order must reach the first primary row");
+      }
+      await page.keyboard.press("Tab");
+      if (!(await firstTabRow.locator("..").getByTitle("Dismiss notification").evaluate(
+        (element) => element === document.activeElement,
+      ))) {
+        throw new Error("Notification Tab order must reach the row dismiss button");
+      }
+      await panel.focus();
+      await page.keyboard.press("End");
+      const lastHeadRow = panel.locator("[data-notification-id]").nth(49);
+      if (!(await lastHeadRow.evaluate((element) => element === document.activeElement))) {
+        throw new Error("Notification End must focus the last visible row");
+      }
+      await page.keyboard.press("Home");
+      const firstRow = panel.locator("[data-notification-id]").first();
+      if (!(await firstRow.evaluate((element) => element === document.activeElement))) {
+        throw new Error("Notification Home must focus the first visible row");
+      }
+      if (!((await firstRow.getAttribute("aria-label")) || "").startsWith("Unread notification.")) {
+        throw new Error("Unread notification state must be available without color");
+      }
+      const titleBox = await firstRow.locator(".notif-title").boundingBox();
+      const unreadMarkerBox = await firstRow.locator(".notif-unread-marker").boundingBox();
+      if (!titleBox || !unreadMarkerBox ||
+          unreadMarkerBox.x < titleBox.x + titleBox.width ||
+          unreadMarkerBox.y + unreadMarkerBox.height <= titleBox.y ||
+          unreadMarkerBox.y >= titleBox.y + titleBox.height) {
+        throw new Error("Unread marker must remain inline after the notification title");
+      }
+      const firstTwoTitles = await panel.locator("[data-notification-id] .notif-title").evaluateAll(
+        (elements) => elements.slice(0, 2).map((element) => element.textContent?.trim()),
+      );
+      if (!isDeepStrictEqual(firstTwoTitles, ["Notification 2", "Notification 1"])) {
+        throw new Error(`Equal timestamps must use descending notification ID: ${JSON.stringify(firstTwoTitles)}`);
+      }
+
+      scenario.insertNew(1);
+      scenario.failNextGet();
+      const loadMore = panel.locator("[data-testid='topbar-notifications-load-more']");
+      await loadMore.focus();
+      await page.keyboard.press("Tab");
+      const settings = panel.locator("[data-testid='topbar-notifications-settings-button']");
+      if (!(await settings.evaluate((element) => element === document.activeElement))) {
+        throw new Error("Notification Tab order must reach settings after Load more");
+      }
+      await page.keyboard.press("Tab");
+      if (!(await markAllButton.evaluate((element) => element === document.activeElement))) {
+        throw new Error("Notification Tab must wrap from settings to the first dialog control");
+      }
+      await page.keyboard.press("Shift+Tab");
+      if (!(await settings.evaluate((element) => element === document.activeElement))) {
+        throw new Error("Notification Shift+Tab must wrap to the last dialog control");
+      }
+      await loadMore.click();
+      const appendAlert = panel.getByRole("alert").filter({ hasText: "Could not load notifications" });
+      await assertVisible(appendAlert, "Append failure must remain visible");
+      const failedAppendUrl = new URL(scenario.requests.get.at(-1));
+      const failedAppendCursor = failedAppendUrl.searchParams.get("cursor");
+      if (!/^\d+\|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(failedAppendCursor || "")) {
+        throw new Error(`Mock notification cursor must use timestamp_micros|uuid: ${failedAppendCursor}`);
+      }
+      await panel.focus();
+      await page.keyboard.press("Tab");
+      await page.keyboard.press("Tab");
+      const appendRetry = appendAlert.getByRole("button", { name: "Retry", exact: true });
+      if (!(await appendRetry.evaluate((element) => element === document.activeElement))) {
+        throw new Error("Notification Tab order must reach the load Retry action");
+      }
+      await appendRetry.click();
+      await waitForNotificationRowCount(page, 100);
+      const retriedAppendUrl = new URL(scenario.requests.get.at(-1));
+      if (!failedAppendUrl.searchParams.get("cursor") ||
+          retriedAppendUrl.searchParams.get("cursor") !== failedAppendUrl.searchParams.get("cursor")) {
+        throw new Error("Append Retry must repeat the exact failed cursor request");
+      }
+      await assertHidden(appendAlert, "Successful append retry must clear only the append error");
+
+      const middleSuffixTombstoneId = await panel.locator("[data-notification-id]").nth(70).getAttribute("data-notification-id");
+      const oldestSuffixTombstoneId = await panel.locator("[data-notification-id]").nth(99).getAttribute("data-notification-id");
+      scenario.dismissOnServer(middleSuffixTombstoneId);
+      scenario.dismissOnServer(oldestSuffixTombstoneId);
+      const inserted = scenario.insertNew(51);
+      await page.keyboard.press("Escape");
+      await bell.click();
+      await waitForNotificationRowCount(page, 150);
+      await assertVisible(panel.getByText(inserted.at(-1).title, { exact: true }), "Reconciliation must bridge more than one new head page");
+      await assertHidden(
+        panel.locator(`[data-notification-id="${middleSuffixTombstoneId}"]`),
+        "Authoritative range reconciliation must remove a middle suffix tombstone",
+      );
+      await assertHidden(
+        panel.locator(`[data-notification-id="${oldestSuffixTombstoneId}"]`),
+        "Authoritative range reconciliation must remove the oldest suffix tombstone",
+      );
+
+      const failedReadRow = panel.locator("[data-notification-id]").nth(4);
+      const failedReadId = await failedReadRow.getAttribute("data-notification-id");
+      scenario.failNextRead(failedReadId);
+      await failedReadRow.click();
+      await bell.click();
+      const readAlert = panel.getByRole("alert").filter({ hasText: "Could not mark notification read" });
+      await assertVisible(readAlert, "Read failure must expose its exact Retry");
+      await readAlert.getByRole("button", { name: "Retry", exact: true }).click();
+      await assertHidden(readAlert, "Successful read Retry must clear its own error");
+      if (!isDeepStrictEqual(scenario.requests.read.slice(-2), [failedReadId, failedReadId])) {
+        throw new Error("Read Retry must target the exact failed notification");
+      }
+
+      const failedDismissRow = panel.locator("[data-notification-id]").nth(2);
+      const failedDismissId = await failedDismissRow.getAttribute("data-notification-id");
+      const expectedFocusId = await panel.locator("[data-notification-id]").nth(3).getAttribute("data-notification-id");
+      scenario.failNextDismiss(failedDismissId);
+      await failedDismissRow.getByTitle("Dismiss notification").click();
+      const dismissAlert = panel.getByRole("alert").filter({ hasText: "Could not dismiss notification" });
+      await assertVisible(dismissAlert, "Dismiss failure must preserve the row and expose Retry");
+      await assertVisible(panel.locator(`[data-notification-id="${failedDismissId}"]`), "Failed dismiss must preserve row state");
+      await dismissAlert.getByRole("button", { name: "Retry", exact: true }).click();
+      await assertHidden(panel.locator(`[data-notification-id="${failedDismissId}"]`), "Dismiss Retry must remove only its row after success");
+      await page.waitForFunction(
+        (id) => document.activeElement?.getAttribute("data-notification-id") === id,
+        expectedFocusId,
+      );
+
+      scenario.failNextMarkAll();
+      await panel.locator("[data-testid='topbar-notifications-mark-read']").click();
+      const markAllAlert = panel.getByRole("alert").filter({ hasText: "Could not mark notifications read" });
+      await assertVisible(markAllAlert, "Mark-all failure must expose Retry without changing rows");
+      await assertVisible(badge, "Failed mark-all must preserve unread state");
+      await markAllAlert.getByRole("button", { name: "Retry", exact: true }).click();
+      await assertHidden(markAllAlert, "Successful mark-all Retry must clear its own error");
+      await assertHidden(badge, "Successful mark-all Retry must clear unread state");
+
+      await page.keyboard.press("Escape");
+      scenario.holdNextHead();
+      await bell.click();
+      await scenario.waitForHeldHead();
+      const staleDismissRow = panel.locator("[data-notification-id]").nth(1);
+      const staleDismissId = await staleDismissRow.getAttribute("data-notification-id");
+      await staleDismissRow.getByTitle("Dismiss notification").click();
+      const heldHeadResponse = page.waitForResponse((response) => {
+        const url = new URL(response.url());
+        return response.request().method() === "GET" &&
+          url.pathname === "/api/v1/user/notifications" &&
+          !url.searchParams.has("cursor");
+      });
+      scenario.releaseHeldHead();
+      await heldHeadResponse;
+      await assertHidden(
+        panel.locator(`[data-notification-id="${staleDismissId}"]`),
+        "A stale held GET must not restore a successfully dismissed row",
+      );
+
+      await page.keyboard.press("Escape");
+      scenario.setEmpty();
+      scenario.failNextGet();
+      await page.reload({ timeout: LOAD_TIMEOUT });
+      await bell.click();
+      await assertVisible(
+        panel.getByText("You're all caught up", { exact: true }),
+        "Bell-open refresh must recover automatically after a transient head failure",
+      );
+      await assertHidden(
+        panel.getByRole("alert").filter({ hasText: "Could not load notifications" }),
+        "A successful bell-open refresh must clear the superseded head failure",
+      );
+
+      await page.setViewportSize({ width: 390, height: 700 });
+      const geometry = await panel.evaluate((element) => {
+        const rect = element.getBoundingClientRect();
+        return { left: rect.left, right: rect.right, bottom: rect.bottom, height: rect.height, viewportHeight: innerHeight };
+      });
+      if (geometry.left < 0 || geometry.right > 390 || geometry.bottom > geometry.viewportHeight) {
+        throw new Error(`Notification panel must remain scrollable and contained on narrow viewports: ${JSON.stringify(geometry)}`);
+      }
+
+      await page.mouse.click(2, 2);
+      await assertHidden(panel, "Outside click must close notifications");
+      if (!(await bell.evaluate((element) => element === document.activeElement))) {
+        throw new Error("Outside click must restore focus to the notification bell");
+      }
       const theme = await page.locator("html").getAttribute("data-theme");
       if (theme !== "light") {
         throw new Error(`Expected light theme for notifications screenshot, got: ${theme}`);
@@ -7149,7 +7536,7 @@ const steps = [
   },
   {
     name: "09i-topbar-notifications-non-admin",
-    description: "Non-admin shell hides admin-gated notifications",
+    description: "Mocked API response verifies allowed notification presentation in a viewer shell",
     action: async (page) => {
       await mockAccountNotifications(page);
       await page.setViewportSize(VIEWPORTS.desktop);
@@ -7164,11 +7551,7 @@ const steps = [
 
       const panel = page.locator("[data-testid='topbar-notifications-panel']");
       await assertVisible(panel, "Expected notifications panel to open for non-admin shell");
-      await assertVisible(panel.getByText("Build failed"), "Expected non-admin-visible server notification");
-      await assertHidden(
-        panel.getByText("New critical CVE: CVE-2026-31822"),
-        "Expected admin-gated CVE notification to be hidden for non-admin shell",
-      );
+      await assertVisible(panel.getByText("Build failed"), "Expected mocked allowed notification for viewer shell");
     },
   },
   {
@@ -18426,12 +18809,25 @@ security.audit.enable = true;</fixtext>
 
 function runStaticHarnessContracts() {
   const sourceDir = process.env.CF_WEB_UI_SOURCE_DIR || path.resolve(__dirname, "..");
+  const rustSourceDir = process.env.CF_WEB_UI_RUST_SOURCE_DIR || path.resolve(sourceDir, "../..");
+  const requiredRustSources = [
+    "packages/web-ui/src/components/cve/mod.rs",
+    "packages/web-ui/src/views/cves.rs",
+    "packages/web-ui/src/components/poam/mod.rs",
+    "packages/web-ui/src/views/poam_api.rs",
+    "packages/web-ui/src/components/layout/topbar.rs",
+  ];
   const defaultNix = fs.readFileSync(path.join(sourceDir, "default.nix"), "utf8");
   const source = fs.readFileSync(__filename, "utf8");
-  const cveComponent = fs.readFileSync(path.join(sourceDir, "../../packages/web-ui/src/components/cve/mod.rs"), "utf8");
-  const cveView = fs.readFileSync(path.join(sourceDir, "../../packages/web-ui/src/views/cves.rs"), "utf8");
-  const poamComponent = fs.readFileSync(path.join(sourceDir, "../../packages/web-ui/src/components/poam/mod.rs"), "utf8");
-  const poamApi = fs.readFileSync(path.join(sourceDir, "../../packages/web-ui/src/views/poam_api.rs"), "utf8");
+  const rustSources = new Map(requiredRustSources.map((relativePath) => [
+    relativePath,
+    fs.readFileSync(path.join(rustSourceDir, relativePath), "utf8"),
+  ]));
+  const cveComponent = rustSources.get(requiredRustSources[0]);
+  const cveView = rustSources.get(requiredRustSources[1]);
+  const poamComponent = rustSources.get(requiredRustSources[2]);
+  const poamApi = rustSources.get(requiredRustSources[3]);
+  const topbar = rustSources.get(requiredRustSources[4]);
   const assertContract = (condition, message) => {
     if (!condition) throw new Error(message);
   };
@@ -18442,6 +18838,17 @@ function runStaticHarnessContracts() {
   assertContract(defaultNix.includes("invalid counts schema"), "Nix driver must validate visual report counts");
   assertContract(defaultNix.includes("invalid failures schema"), "Nix driver must validate visual report failures");
   assertContract(defaultNix.includes("CF_UI_BASELINES_DIR=/tmp/web-ui-baselines"), "Nix driver must configure repository visual baselines");
+  assertContract(
+    defaultNix.includes("CF_WEB_UI_RUST_SOURCE_DIR=/tmp/web-ui-source"),
+    "Nix static preflight must configure its hermetic Rust source root",
+  );
+  for (const relativePath of requiredRustSources) {
+    assertContract(
+      defaultNix.includes(`inputs.self + "/${relativePath}"`) &&
+        defaultNix.includes(`/tmp/web-ui-source/${relativePath}`),
+      `Nix static preflight must copy ${relativePath} from a Nix path input`,
+    );
+  }
   assertContract(defaultNix.includes("server-journal.log"), "Nix driver must export the server journal on browser failure");
   assertContract(defaultNix.includes('print_browser_diagnostics("timed out waiting for integration.exit")'), "Nix driver must print browser logs before rethrowing a timeout");
   assertContract(defaultNix.includes('if ${if updateVisualBaselines then "False" else "True"}:'), "Baseline update mode must bypass only strict visual rejection");
@@ -18450,6 +18857,84 @@ function runStaticHarnessContracts() {
   assertContract(source.includes('context.on("page", attachFatalPageHandlers)'), "Every context page must make runtime errors fatal");
   assertContract(source.includes("counts: { match: 0, diff: 0, new: 0, skipped: 0, error: 0 }"), "Visual report must initialize every consumed count");
   assertContract(source.includes("failures: []"), "Visual report must initialize strict failures");
+  const notificationWorkflow = source.slice(
+    source.indexOf('name: "09h-topbar-notifications-light"'),
+    source.indexOf('name: "09i-topbar-notifications-non-admin"'),
+  );
+  for (const contract of [
+    '"99+"',
+    'page.keyboard.press("Home")',
+    'page.keyboard.press("End")',
+    "scenario.holdNextHead()",
+    "scenario.releaseHeldHead()",
+    'name: "Retry"',
+    '"You\'re all caught up"',
+    "topbar-notifications-load-more",
+  ]) {
+    assertContract(notificationWorkflow.includes(contract), `09h notification workflow is missing ${contract}`);
+  }
+  assertContract(topbar.includes("mutation_epoch != request.mutation_epoch"), "Notification coordinator must discard whole stale GET responses after mutations");
+  assertContract(
+    topbar.includes("NotificationReconciliation") &&
+      topbar.includes("MAX_NOTIFICATION_RECONCILIATION_PAGES") &&
+      topbar.includes("reconciliation_reached_boundary"),
+    "Notification coordinator must model bounded composite-key range reconciliation",
+  );
+  assertContract(topbar.includes("load_failure") && topbar.includes("mutation_failures"), "Notification coordinator must preserve operation-scoped failures");
+  assertContract(
+    topbar.includes("pending_mutations: HashSet<NotificationMutation>") &&
+      topbar.includes("if !self.pending_mutations.insert(operation.clone())") &&
+      topbar.includes('"aria-busy": dismiss_pending') &&
+      topbar.includes('disabled: dismiss_pending'),
+    "Notification mutations must deduplicate durable operation identities and expose disabled working controls",
+  );
+  assertContract(
+    topbar.includes("dismiss_focus_is_current(") &&
+      topbar.includes("feed.owner.as_ref()") &&
+      topbar.includes("let (applied, request) = ctx.feed.write().dismiss_succeeded") &&
+      topbar.includes("stale_account_dismiss_neither_applies_nor_owns_focus"),
+    "Dismiss focus restoration must require a current applied account-owned response",
+  );
+  assertContract(
+    topbar.includes("prior append retry cannot be valid against it") &&
+      topbar.includes("self.load_failure = None;"),
+    "Authoritative reconciliation must retire every obsolete append retry cursor",
+  );
+  assertContract(
+    topbar.includes('role: "dialog"') &&
+      topbar.includes('"aria-modal": "true"') &&
+      topbar.includes('"aria-haspopup": "dialog"'),
+    "Notification bell and focus-trapped panel must use a consistent modal dialog model",
+  );
+  assertContract(
+    topbar.includes('class: "notif-title-line"') &&
+      topbar.includes('class: "notif-unread-marker"') &&
+      topbar.includes('class: "sr-only", "Unread notification."'),
+    "Unread notifications must keep the visible marker inline with the title and expose a non-color label",
+  );
+  assertContract(topbar.includes("trap_notification_tab") && topbar.includes("focus_notification_settings"), "Notification dialog must trap focus and retain in-dialog focus after final dismissal");
+  assertContract(source.includes("Array.from({ length: 120 }"), "The 99+ browser fixture must contain at least 100 real unread notifications");
+  const cursorTimestamp = "2026-09-13T12:00:00.000Z";
+  const cursorItem = {
+    created_at: cursorTimestamp,
+    id: "10000000-0000-4000-8000-000000000002",
+  };
+  const equalTimestampOlderItem = {
+    created_at: cursorTimestamp,
+    id: "10000000-0000-4000-8000-000000000001",
+  };
+  const productionCursor = `${BigInt(Date.parse(cursorTimestamp)) * 1000n}|${cursorItem.id}`;
+  assertContract(
+    encodeMockNotificationCursor(cursorItem) === productionCursor &&
+      notificationIsOlderThanCursor(equalTimestampOlderItem, decodeMockNotificationCursor(productionCursor)),
+    "Notification cursor helpers must preserve production wire shape and equal-timestamp UUID ordering",
+  );
+  assertContract(
+    source.includes("function encodeMockNotificationCursor(item)") &&
+      source.includes("return `${notificationTimestampMicros(item)}|${item.id}`"),
+    "Notification browser cursors must use the production timestamp_micros|uuid wire shape",
+  );
+  assertContract(!topbar.includes('role: "menuitem"'), "Notification controls must retain ordinary button semantics");
   const scenario12h = source.slice(source.indexOf('name: "12h-'), source.indexOf('name: "12d-systems-api-error'));
   const scenario16 = source.slice(source.indexOf('name: "16-cves"'), source.indexOf('name: "16b-cves'));
   assertContract(!scenario12h.includes("triageBodies") && !scenario12h.includes("fleetDetail"), "System-detail scenario must not own global CVE triage fixtures");
@@ -18557,9 +19042,9 @@ function runStaticHarnessContracts() {
   };
   const notificationWorkflowSource = isolateWorkflow("09g-topbar-notifications-dark");
   assertContract(
-    notificationWorkflowSource.includes('reopenedPanel.getByRole("menuitem"') &&
+    notificationWorkflowSource.includes('reopenedPanel.getByRole("button"') &&
       !notificationWorkflowSource.includes('reopenedRow.getByTitle("Dismiss notification")'),
-    "Notification dismissal must locate the accessible sibling menu item",
+    "Notification dismissal must locate the accessible sibling button",
   );
   assertContract(
     /const dismissResponseResult = page\.waitForResponse\([\s\S]*?\)\.then\(/.test(notificationWorkflowSource) &&

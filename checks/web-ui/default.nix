@@ -57,6 +57,11 @@ let
 
   designExampleSrc = inputs.self + "/docs/design/CrystalForge";
   designTargets = inputs.self.packages.${pkgs.system}.design-targets;
+  cveComponentSource = inputs.self + "/packages/web-ui/src/components/cve/mod.rs";
+  cveViewSource = inputs.self + "/packages/web-ui/src/views/cves.rs";
+  poamComponentSource = inputs.self + "/packages/web-ui/src/components/poam/mod.rs";
+  poamApiSource = inputs.self + "/packages/web-ui/src/views/poam_api.rs";
+  topbarSource = inputs.self + "/packages/web-ui/src/components/layout/topbar.rs";
 
   # Offline copy of the design example with the CDN <script> tags rewritten
   # to the vendored local files so Playwright can render it with no network.
@@ -633,6 +638,14 @@ in pkgs.testers.runNixOSTest {
     machine.succeed("mkdir -p /tmp/web-ui-baselines && cp -r ${baselinesDir}/. /tmp/web-ui-baselines/")
     machine.succeed("cp ${./default.nix} /tmp/web-ui-tests/default.nix")
 
+    # Static contracts inspect these production sources without relying on a
+    # repository checkout in the VM.
+    machine.succeed("install -Dm644 ${cveComponentSource} /tmp/web-ui-source/packages/web-ui/src/components/cve/mod.rs")
+    machine.succeed("install -Dm644 ${cveViewSource} /tmp/web-ui-source/packages/web-ui/src/views/cves.rs")
+    machine.succeed("install -Dm644 ${poamComponentSource} /tmp/web-ui-source/packages/web-ui/src/components/poam/mod.rs")
+    machine.succeed("install -Dm644 ${poamApiSource} /tmp/web-ui-source/packages/web-ui/src/views/poam_api.rs")
+    machine.succeed("install -Dm644 ${topbarSource} /tmp/web-ui-source/packages/web-ui/src/components/layout/topbar.rs")
+
     # Design-parity harness inputs must be present before static contracts run.
     machine.succeed("mkdir -p /tmp/web-ui-tests/design-parity")
     machine.succeed("cp -r ${designParityDir}/. /tmp/web-ui-tests/design-parity/")
@@ -641,7 +654,8 @@ in pkgs.testers.runNixOSTest {
         "${pkgs.nodejs}/bin/node /tmp/web-ui-tests/design-parity/generate-design-targets-test.js"
     )
     machine.succeed(
-        "env CF_WEB_UI_SOURCE_DIR=/tmp/web-ui-tests CF_UI_STATIC_CONTRACTS=1 "
+        "env CF_WEB_UI_SOURCE_DIR=/tmp/web-ui-tests "
+        "CF_WEB_UI_RUST_SOURCE_DIR=/tmp/web-ui-source CF_UI_STATIC_CONTRACTS=1 "
         "${pkgs.nodejs}/bin/node /tmp/web-ui-tests/integration-test.js"
     )
 
