@@ -1056,7 +1056,7 @@
     },
     {
       "name": "12h-system-detail-cves-grouped-justification",
-      "description": "System detail CVEs tab grouped list, filters, details link, and justification save",
+      "description": "System detail package-first CVEs preserve exact evidence for POA&M creation and keep justification distinct",
       "route": "/systems/:id",
       "designRef": "docs/design/CrystalForge/components/SystemDetail.jsx",
       "profiles": [
@@ -1485,7 +1485,7 @@
     },
     {
       "name": "16-cves",
-      "description": "CVE dashboard - fleet overview",
+      "description": "CVE dashboard - exact CVE/package fleet detail, history, mixed triage validation, typed assignee, evidence conflict refresh, server-owned scope, POA&M link, and keyboard focus",
       "route": "/cves",
       "designRef": "docs/design/CrystalForge/components/CvesView.jsx",
       "profiles": [

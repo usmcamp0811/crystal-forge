@@ -6,7 +6,6 @@ use axum::{
 };
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
-use sqlx::Row;
 use std::collections::BTreeSet;
 use uuid::Uuid;
 
@@ -44,8 +43,10 @@ use crate::models::evaluation_snapshots::{
     SelectedEvaluationSummary, SelectedEvaluationSummaryParams, SevenDayDriftStatus,
     SnapshotLifecycle, SnapshotRevisionMode, TrackedFlakeIdentity, typed_option_diff,
 };
+use crate::models::poam::CveRelationshipRowKey;
 use crate::queries::build_jobs::enqueue_build_job_for_derivation;
 use crate::queries::cve_scans::{get_scan_by_id, resolve_system_cve_scan_target};
+use crate::queries::cves::fetch_exact_system_vulnerabilities;
 use crate::queries::derivations::reset_derivation_for_rebuild;
 use crate::queries::system_events::{
     deployment_progress_kind, deployment_progress_stage, get_system_deployment_progress_row,
@@ -63,6 +64,7 @@ use crate::queries::systems::{
     update_public_key, update_system_metadata,
 };
 use crate::services::cve_scans::{CveScanError, trigger_immediate_cve_scan};
+use crate::services::poam::{self as poam_service, PoamActor, SystemClock};
 use crate::services::systems::SystemsListContext;
 
 /// Allowed CVE justification categories (server-side validation).
@@ -1470,67 +1472,70 @@ pub async fn get_system_cves(
         return not_found();
     }
 
-    let rows = match sqlx::query(
-        r#"
-        WITH deduped AS (
-            SELECT DISTINCT ON (v.cve_id, v.package_name, v.package_version)
-                v.cve_id,
-                lower(v.severity) AS severity,
-                v.cvss_v3_score::double precision AS cvss_score,
-                COALESCE(v.description, '') AS description,
-                v.package_name,
-                v.package_version AS installed_version,
-                v.fixed_version,
-                v.completed_at AS first_seen,
-                c.published_date::timestamptz AS published_at,
-                -- 'fix_available' = upstream patched version exists; does NOT mean system is patched.
-                -- 'open' = no upstream fix known yet.
-                CASE WHEN v.fixed_version IS NULL THEN 'open' ELSE 'fix_available' END AS status,
-                j.category AS justification_category,
-                j.reason AS justification_reason,
-                j.updated_at AS justification_updated_at
-            FROM view_system_vulnerabilities v
-            JOIN systems s ON s.hostname = v.hostname
-            LEFT JOIN cves c ON c.id = v.cve_id
-            LEFT JOIN system_cve_justifications j
-                ON j.system_id = s.id
-               AND j.cve_id = v.cve_id
-            WHERE s.id = $1
-            ORDER BY v.cve_id, v.package_name, v.package_version, v.completed_at DESC
-        )
-        SELECT *
-        FROM deduped
-        ORDER BY cvss_score DESC NULLS LAST, cve_id ASC, package_name ASC, installed_version ASC
-        "#,
+    let actor = PoamActor {
+        user_id,
+        identifier: user_id.to_string(),
+        is_admin: matches!(caller_role, Role::Admin),
+        can_mutate: caller_role.can_mutate_systems(),
+        environment_ids: environment_memberships.iter().copied().collect(),
+        request_origin: None,
+    };
+    let rows = match fetch_exact_system_vulnerabilities(&pool, system_id).await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to load system CVEs"),
+    };
+    let relationship_keys = rows
+        .iter()
+        .map(|row| CveRelationshipRowKey {
+            canonical_cve_id: row.cve_id.clone(),
+            canonical_package_name: row.canonical_package_name.clone(),
+            scan_id: row.scan_id,
+            occurrence_derivation_path: row.occurrence_derivation_path.clone(),
+        })
+        .collect::<Vec<_>>();
+    let relationships = match poam_service::cve_relationships_for_rows(
+        &pool,
+        &actor,
+        system_id,
+        &relationship_keys,
+        None,
+        None,
+        &SystemClock,
     )
-    .bind(system_id)
-    .fetch_all(&pool)
     .await
     {
         Ok(value) => value,
-        Err(_) => return internal_error("Failed to load system CVEs"),
+        Err(_) => return internal_error("Failed to load CVE remediation context"),
     };
 
     let vulnerabilities = rows
         .into_iter()
         .map(|row| {
-            let severity_raw: String = row.get("severity");
-            let severity = parse_cve_severity(&severity_raw);
+            let severity = parse_cve_severity(&row.severity);
+            let remediation = relationships
+                .iter()
+                .find(|relationship| {
+                    relationship.observation.canonical_cve_id == row.cve_id
+                        && relationship.observation.canonical_package_name
+                            == row.canonical_package_name
+                })
+                .cloned();
 
             SystemVulnerability {
-                cve_id: row.get("cve_id"),
+                cve_id: row.cve_id,
                 severity,
-                cvss_score: row.get("cvss_score"),
-                description: row.get("description"),
-                package_name: row.get("package_name"),
-                installed_version: row.get("installed_version"),
-                fixed_version: row.get("fixed_version"),
-                first_seen: row.get("first_seen"),
-                published_at: row.get("published_at"),
-                status: row.get("status"),
-                justification_category: row.get("justification_category"),
-                justification_reason: row.get("justification_reason"),
-                justification_updated_at: row.get("justification_updated_at"),
+                cvss_score: row.cvss_score,
+                description: row.description,
+                package_name: row.package_name,
+                installed_version: row.installed_version,
+                fixed_version: row.fixed_version,
+                first_seen: row.first_seen,
+                published_at: row.published_at,
+                status: row.status,
+                justification_category: row.justification_category,
+                justification_reason: row.justification_reason,
+                justification_updated_at: row.justification_updated_at,
+                remediation,
             }
         })
         .collect::<Vec<_>>();
@@ -1538,37 +1543,23 @@ pub async fn get_system_cves(
     (StatusCode::OK, Json(vulnerabilities)).into_response()
 }
 
+/// Saves or revokes one system-scoped CVE justification.
+///
+/// The handler locks the system and exact-CVE evidence before it rechecks the
+/// user's active state, role, and environment membership. Authorization that
+/// changes while the mutation waits for a lock therefore cannot authorize the
+/// write.
 pub async fn save_system_cve_justification(
     State(pool): State<PgPool>,
     headers: HeaderMap,
     Path((system_id, cve_id)): Path<(Uuid, String)>,
     Json(payload): Json<SaveSystemCveJustificationRequest>,
 ) -> impl IntoResponse {
-    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+    let Some((user_id, _)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
     };
-
-    let Some(caller_role) = highest_role(&roles) else {
-        return forbidden();
-    };
-
-    if !caller_role.can_mutate_systems() {
-        return forbidden_mutation();
-    }
-
-    let environment_memberships = match load_membership_environment_ids(&pool, user_id).await {
-        Ok(value) => value,
-        Err(_) => return internal_error("Failed to load environment memberships"),
-    };
-
-    let row = match find_system_access_row(&pool, system_id).await {
-        Ok(Some(value)) => value,
-        Ok(None) => return not_found(),
-        Err(_) => return internal_error("Failed to load system"),
-    };
-
-    if !caller_role.can_access_system_environment(row.environment_id, &environment_memberships) {
-        return not_found();
+    if let Err(response) = require_csrf(&headers) {
+        return response;
     }
 
     let cve_id = cve_id.trim().to_string();
@@ -1599,42 +1590,141 @@ pub async fn save_system_cve_justification(
         return bad_request("Invalid justification category");
     }
 
-    let cve_present_on_system = match sqlx::query_scalar::<_, bool>(
-        r#"
-        SELECT EXISTS (
-            SELECT 1
-            FROM view_system_vulnerabilities v
-            JOIN systems s ON s.hostname = v.hostname
-            WHERE s.id = $1
-              AND v.cve_id = $2
-        )
-        "#,
+    // SECURITY: Authentication identifies the session before the transaction,
+    // but role, membership, system scope, and exact evidence are all re-read
+    // under the mutation locks below.
+    let mut tx = match pool.begin().await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to begin transaction"),
+    };
+    // CONCURRENCY: A current justification changes exact-CVE verification.
+    // Use the global CVE, system, policy, then exact-finding lock order.
+    if crate::services::composite_enforcement::lock_poam_cve_scope_for_systems_tx(
+        &mut tx,
+        &cve_id,
+        &[system_id],
+    )
+    .await
+    .is_err()
+    {
+        let _ = tx.rollback().await;
+        return internal_error("Failed to lock CVE remediation state");
+    }
+
+    // CONCURRENCY: UPDATE takes the system row lock before changing its
+    // environment. If a move wins, this read observes the new environment. If
+    // this read wins, the move waits until the justification commits.
+    let row = match sqlx::query_as::<_, (Uuid, String, Option<Uuid>)>(
+        "SELECT id,hostname,environment_id FROM systems WHERE id=$1 FOR UPDATE",
+    )
+    .bind(system_id)
+    .fetch_optional(&mut *tx)
+    .await
+    {
+        Ok(Some(value)) => value,
+        Ok(None) => return not_found(),
+        Err(_) => return internal_error("Failed to load system"),
+    };
+    let is_active =
+        match sqlx::query_scalar::<_, bool>("SELECT is_active FROM users WHERE id=$1 FOR SHARE")
+            .bind(user_id)
+            .fetch_optional(&mut *tx)
+            .await
+        {
+            Ok(value) => value,
+            Err(_) => return internal_error("Failed to load current user"),
+        };
+    if is_active != Some(true) {
+        return forbidden();
+    }
+    let current_roles = match sqlx::query_scalar::<_, AuthRole>(
+        "SELECT role FROM user_role_assignments WHERE user_id=$1 ORDER BY role FOR SHARE",
+    )
+    .bind(user_id)
+    .fetch_all(&mut *tx)
+    .await
+    {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to load current role"),
+    };
+    let Some(caller_role) = highest_role(&current_roles) else {
+        return forbidden();
+    };
+    if !caller_role.can_mutate_systems() {
+        return forbidden_mutation();
+    }
+    let memberships = match sqlx::query_scalar::<_, Uuid>(
+        "SELECT environment_id FROM user_environment_memberships WHERE user_id=$1 ORDER BY environment_id FOR SHARE",
+    )
+    .bind(user_id)
+    .fetch_all(&mut *tx)
+    .await
+    {
+        Ok(value) => value.into_iter().collect::<BTreeSet<_>>(),
+        Err(_) => return internal_error("Failed to load current environment memberships"),
+    };
+    if !caller_role.can_access_system_environment(row.2, &memberships) {
+        return not_found();
+    }
+
+    let cve_present_on_system: bool = match sqlx::query_scalar(
+        r#"SELECT EXISTS(
+             SELECT 1 FROM systems system
+             JOIN LATERAL (
+               SELECT state.store_path,state.generation FROM system_states state
+               WHERE state.hostname=system.hostname AND state.store_path IS NOT NULL
+                 AND state.generation IS NOT NULL
+                 AND state.generation_matches_current_store_path IS TRUE
+                 AND btrim(state.store_path)<>''
+               ORDER BY state.timestamp DESC,state.id DESC LIMIT 1
+             ) deployed ON true
+             JOIN evaluation_generation_snapshots retained
+               ON retained.system_id=system.id
+              AND retained.generation=deployed.generation
+              AND retained.source_store_path=deployed.store_path
+              AND retained.lineage_verified
+             JOIN evaluation_snapshots artifact
+               ON artifact.id=retained.snapshot_id
+              AND artifact.commit_id=retained.commit_id
+              AND artifact.configuration_name=retained.configuration_name
+              AND artifact.lifecycle='available' AND artifact.integrity_version=1
+             JOIN derivations derivation
+               ON derivation.id=retained.derivation_id
+              AND derivation.commit_id=retained.commit_id
+              AND derivation.derivation_name=retained.configuration_name
+              AND derivation.derivation_type='nixos'
+              AND COALESCE(derivation.store_path,derivation.expected_store_path)=
+                  retained.source_store_path
+             JOIN LATERAL (
+               SELECT scan.id FROM cve_scans scan
+               WHERE scan.derivation_id=derivation.id AND scan.status='completed'
+                 AND scan.evidence_schema_version=1
+               ORDER BY scan.completed_at DESC,scan.id DESC LIMIT 1
+             ) scan ON true
+             JOIN cve_scan_vulnerability_observations observation
+               ON observation.scan_id=scan.id
+              AND observation.canonical_cve_id=$2
+              AND NOT observation.is_whitelisted
+             WHERE system.id=$1)"#,
     )
     .bind(system_id)
     .bind(&cve_id)
-    .fetch_one(&pool)
+    .fetch_one(&mut *tx)
     .await
     {
         Ok(value) => value,
         Err(_) => return internal_error("Failed to validate system CVE"),
     };
-
     if !cve_present_on_system {
         return bad_request("CVE was not found for this system");
     }
-
-    // Begin transaction to ensure atomic write + audit
-    let mut tx = match pool.begin().await {
-        Ok(value) => value,
-        Err(_) => return internal_error("Failed to begin transaction"),
-    };
 
     // Upsert justification
     if sqlx::query(
         r#"
         INSERT INTO system_cve_justifications (system_id, cve_id, category, reason, updated_by, updated_at)
         VALUES ($1, $2, $3, $4, $5, NOW())
-        ON CONFLICT (system_id, cve_id)
+        ON CONFLICT (system_id, cve_id) WHERE system_id IS NOT NULL
         DO UPDATE SET
             category = EXCLUDED.category,
             reason = EXCLUDED.reason,
@@ -1678,12 +1768,12 @@ pub async fn save_system_cve_justification(
     .bind(user_id)
     .bind(&actor_identifier)
     .bind("user_updated")
-    .bind(format!("{} ({})", row.hostname, row.id))
+    .bind(format!("{} ({})", row.1, row.0))
     .bind(extract_request_origin(&headers))
     .bind(serde_json::json!({
         "operation": "cve_justification_saved",
-        "system_id": row.id,
-        "hostname": row.hostname,
+        "system_id": row.0,
+        "hostname": row.1,
         "cve_id": cve_id,
         "category": category,
         "reason_length": reason.len()
@@ -1868,7 +1958,7 @@ pub async fn get_cve_scan_status(
     headers: HeaderMap,
     Path(scan_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
     };
 
@@ -1931,6 +2021,22 @@ fn parse_cve_severity(value: &str) -> crate::api::models::CveSeverity {
     }
 }
 
+/// Updates system metadata and returns the committed representation.
+///
+/// The handler locks the source and destination environments before the system
+/// remediation sentinel and row. It then reloads the user's active state,
+/// roles, and memberships. A scoped Operator must retain access to both
+/// environments. A matching double-submit CSRF token is required before payload
+/// validation or transaction work. The response is built in the same
+/// transaction before commit.
+///
+/// # Errors
+///
+/// Returns `403 Forbidden` for invalid authentication, authorization, or CSRF
+/// credentials. Returns `404 Not Found` when the system is absent or outside
+/// the caller's environment scope. Returns `400 Bad Request` for invalid system
+/// metadata. Returns `500 Internal Server Error` when locking, persistence, or
+/// response loading fails.
 pub async fn update_system_handler(
     State(state): State<CFState>,
     State(pool): State<PgPool>,
@@ -1938,7 +2044,7 @@ pub async fn update_system_handler(
     Path(system_id): Path<Uuid>,
     Json(payload): Json<UpdateSystemRequest>,
 ) -> impl IntoResponse {
-    let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
     };
 
@@ -1948,6 +2054,9 @@ pub async fn update_system_handler(
 
     if !caller_role.can_mutate_systems() {
         return forbidden_mutation();
+    }
+    if let Err(response) = require_csrf(&headers) {
+        return response;
     }
 
     let hostname = payload.hostname.trim();
@@ -1997,82 +2106,263 @@ pub async fn update_system_handler(
         return bad_request("Invalid deployment policy (must be: manual, auto_latest, or pinned)");
     }
 
-    // Resolve environment name → id.
-    // A non-empty name that does not match any environment is a 400, not a silent NULL.
-    let environment_id = if let Some(env_name) = payload.environment.as_ref() {
-        let env_name_trimmed = env_name.trim();
-        if !env_name_trimmed.is_empty() {
-            match sqlx::query_scalar::<_, Uuid>("SELECT id FROM environments WHERE name = $1")
-                .bind(env_name_trimmed)
-                .fetch_optional(&pool)
-                .await
-            {
-                Ok(Some(id)) => Some(id),
-                Ok(None) => {
-                    return bad_request(&format!("Environment '{}' not found", env_name_trimmed));
-                }
-                Err(_) => return internal_error("Failed to lookup environment"),
-            }
-        } else {
-            None
-        }
-    } else {
-        None
-    };
+    let environment_name = payload
+        .environment
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let flake_name = payload
+        .flake_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
 
-    // Resolve flake name → id.
-    // A non-empty name that does not match any registered flake is a 400, not a silent NULL.
-    let flake_id = if let Some(flake_name) = payload.flake_name.as_ref() {
-        let flake_name_trimmed = flake_name.trim();
-        if !flake_name_trimmed.is_empty() {
-            match sqlx::query_scalar::<_, i32>(
-                "SELECT id FROM flakes WHERE name = $1 AND deleted_at IS NULL",
-            )
-            .bind(flake_name_trimmed)
-            .fetch_optional(&pool)
+    for retry in 0..3 {
+        let mut tx = match pool.begin().await {
+            Ok(value) => value,
+            Err(_) => return internal_error("Failed to begin system update"),
+        };
+        let preliminary_environment_id = match sqlx::query_scalar::<_, Option<Uuid>>(
+            "SELECT environment_id FROM systems WHERE id=$1",
+        )
+        .bind(system_id)
+        .fetch_optional(&mut *tx)
+        .await
+        {
+            Ok(Some(value)) => value,
+            Ok(None) => return not_found(),
+            Err(_) => return internal_error("Failed to load system"),
+        };
+        let canonical_cve_keys = match sqlx::query_scalar::<_, String>(
+            r#"SELECT DISTINCT canonical_cve_id
+               FROM poam_cve_findings
+               WHERE system_id=$1
+               ORDER BY canonical_cve_id"#,
+        )
+        .bind(system_id)
+        .fetch_all(&mut *tx)
+        .await
+        {
+            Ok(value) => value,
+            Err(_) => return internal_error("Failed to load system CVE remediation keys"),
+        };
+        // CONCURRENCY: Canonical CVE locks precede environment and system
+        // locks. The metadata trigger reacquires these locks and fails with
+        // 40001 if a newly committed key was not in this preliminary set.
+        if sqlx::query(
+            r#"SELECT lock_poam_cve_key(key.cve_id)
+               FROM (SELECT unnest($1::text[]) AS cve_id ORDER BY cve_id) key"#,
+        )
+        .bind(&canonical_cve_keys)
+        .execute(&mut *tx)
+        .await
+        .is_err()
+        {
+            return internal_error("Failed to lock system CVE remediation scope");
+        }
+        let environment_id = match environment_name {
+            Some(name) => {
+                match sqlx::query_scalar::<_, Uuid>("SELECT id FROM environments WHERE name=$1")
+                    .bind(name)
+                    .fetch_optional(&mut *tx)
+                    .await
+                {
+                    Ok(value) => value,
+                    Err(_) => return internal_error("Failed to lookup environment"),
+                }
+            }
+            None => None,
+        };
+        let environment_lock_ids = preliminary_environment_id
+            .into_iter()
+            .chain(environment_id)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        // CONCURRENCY: Fleet triage locks requested environments before sorted
+        // system sentinels. A move locks source and destination in the same
+        // order, so no exact subject can enter or leave a triage scope midway.
+        if sqlx::query("SELECT id FROM environments WHERE id=ANY($1) ORDER BY id FOR UPDATE")
+            .bind(&environment_lock_ids)
+            .execute(&mut *tx)
             .await
-            {
-                Ok(Some(id)) => Some(id),
-                Ok(None) => {
-                    return bad_request(&format!("Flake '{}' not found", flake_name_trimmed));
-                }
-                Err(_) => return internal_error("Failed to lookup flake"),
-            }
-        } else {
-            None
+            .is_err()
+        {
+            return internal_error("Failed to lock environment scope");
         }
-    } else {
-        None
-    };
+        if crate::services::composite_enforcement::lock_poam_system_key_tx(&mut tx, system_id)
+            .await
+            .is_err()
+        {
+            return internal_error("Failed to lock system remediation scope");
+        }
+        if sqlx::query(
+            r#"SELECT lock_poam_finding_key(key.system_id,key.policy_lineage_id)
+               FROM (
+                 SELECT finding.system_id,finding.policy_lineage_id
+                 FROM poam_findings finding WHERE finding.system_id=$1
+                 ORDER BY finding.system_id,finding.policy_lineage_id
+               ) key"#,
+        )
+        .bind(system_id)
+        .execute(&mut *tx)
+        .await
+        .is_err()
+        {
+            return internal_error("Failed to lock system policy remediation scope");
+        }
+        if sqlx::query(
+            r#"SELECT lock_poam_cve_finding_key(
+                        key.system_id,key.canonical_cve_id,key.canonical_package_name)
+               FROM (
+                 SELECT finding.system_id,finding.canonical_cve_id,
+                        finding.canonical_package_name
+                 FROM poam_cve_findings finding WHERE finding.system_id=$1
+                 ORDER BY finding.system_id,finding.canonical_cve_id,
+                          finding.canonical_package_name
+               ) key"#,
+        )
+        .bind(system_id)
+        .execute(&mut *tx)
+        .await
+        .is_err()
+        {
+            return internal_error("Failed to lock system exact-CVE remediation scope");
+        }
+        let current_environment_id = match sqlx::query_scalar::<_, Option<Uuid>>(
+            "SELECT environment_id FROM systems WHERE id=$1 FOR UPDATE",
+        )
+        .bind(system_id)
+        .fetch_optional(&mut *tx)
+        .await
+        {
+            Ok(Some(value)) => value,
+            Ok(None) => return not_found(),
+            Err(_) => return internal_error("Failed to lock system"),
+        };
+        if current_environment_id != preliminary_environment_id {
+            continue;
+        }
 
-    if update_system_metadata(
-        &pool,
-        system_id,
-        hostname,
-        fqdn,
-        environment_id,
-        flake_id,
-        payload
-            .system_configuration_name
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty()),
-        &payload.deployment_policy,
-        heartbeat_interval,
-    )
-    .await
-    .is_err()
-    {
-        return internal_error("Failed to update system");
+        // SECURITY: Request-time authentication is only an identity hint. The
+        // active user, roles, and memberships are locked and reloaded after the
+        // writer scope so a waiting request cannot use revoked authorization.
+        let active = match sqlx::query_scalar::<_, bool>(
+            "SELECT is_active FROM users WHERE id=$1 FOR SHARE",
+        )
+        .bind(user_id)
+        .fetch_optional(&mut *tx)
+        .await
+        {
+            Ok(value) => value,
+            Err(_) => return internal_error("Failed to load current user"),
+        };
+        if active != Some(true) {
+            return forbidden();
+        }
+        let current_roles = match sqlx::query_scalar::<_, AuthRole>(
+            "SELECT role FROM user_role_assignments WHERE user_id=$1 ORDER BY role FOR SHARE",
+        )
+        .bind(user_id)
+        .fetch_all(&mut *tx)
+        .await
+        {
+            Ok(value) => value,
+            Err(_) => return internal_error("Failed to load current role"),
+        };
+        let Some(current_role) = highest_role(&current_roles) else {
+            return forbidden();
+        };
+        if !current_role.can_mutate_systems() {
+            return forbidden_mutation();
+        }
+        let memberships = match sqlx::query_scalar::<_, Uuid>(
+            "SELECT environment_id FROM user_environment_memberships WHERE user_id=$1 ORDER BY environment_id FOR SHARE",
+        )
+        .bind(user_id)
+        .fetch_all(&mut *tx)
+        .await
+        {
+            Ok(value) => value.into_iter().collect::<BTreeSet<_>>(),
+            Err(_) => return internal_error("Failed to load current environment memberships"),
+        };
+        if !current_role.can_access_system_environment(current_environment_id, &memberships)
+            || !current_role.can_access_system_environment(environment_id, &memberships)
+        {
+            return not_found();
+        }
+        if environment_name.is_some() && environment_id.is_none() {
+            return bad_request(&format!(
+                "Environment '{}' not found",
+                environment_name.unwrap_or_default()
+            ));
+        }
+        let flake_id = match resolve_update_flake_id(&mut tx, flake_name).await {
+            Ok(value) => value,
+            Err(response) => return response,
+        };
+        if let Err(error) = update_system_metadata(
+            &mut *tx,
+            system_id,
+            hostname,
+            fqdn,
+            environment_id,
+            flake_id,
+            payload
+                .system_configuration_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+            &payload.deployment_policy,
+            heartbeat_interval,
+        )
+        .await
+        {
+            if retry < 2 && is_system_metadata_serialization_failure(&error) {
+                continue;
+            }
+            return internal_error("Failed to update system");
+        }
+        let detail = match get_system_detail_by_id(&mut *tx, system_id).await {
+            Ok(Some(row)) => {
+                detail_row_to_api_model(row, state.server_config.heartbeat_interval_secs)
+            }
+            Ok(None) => return not_found(),
+            Err(_) => return internal_error("Failed to load updated system"),
+        };
+        if tx.commit().await.is_err() {
+            return internal_error("Failed to commit system update");
+        }
+        return (StatusCode::OK, Json(detail)).into_response();
     }
+    internal_error("System environment changed repeatedly; retry the update")
+}
 
-    let detail = match get_system_detail_by_id(&pool, system_id).await {
-        Ok(Some(row)) => detail_row_to_api_model(row, state.server_config.heartbeat_interval_secs),
-        Ok(None) => return not_found(),
-        Err(_) => return internal_error("Failed to load updated system"),
+fn is_system_metadata_serialization_failure(error: &anyhow::Error) -> bool {
+    matches!(
+        error
+            .downcast_ref::<sqlx::Error>()
+            .and_then(|error| error.as_database_error())
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("40001")
+    )
+}
+
+async fn resolve_update_flake_id(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    flake_name: Option<&str>,
+) -> Result<Option<i32>, axum::response::Response> {
+    let Some(name) = flake_name else {
+        return Ok(None);
     };
-
-    (StatusCode::OK, Json(detail)).into_response()
+    sqlx::query_scalar::<_, i32>("SELECT id FROM flakes WHERE name=$1 AND deleted_at IS NULL")
+        .bind(name)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|_| internal_error("Failed to lookup flake"))?
+        .map(Some)
+        .ok_or_else(|| bad_request(&format!("Flake '{name}' not found")))
 }
 
 pub async fn sync_system(

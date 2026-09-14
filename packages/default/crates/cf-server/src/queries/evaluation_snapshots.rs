@@ -4324,7 +4324,9 @@ pub async fn reclaim_orphaned_snapshot_content(pool: &PgPool) -> Result<Snapshot
     .rows_affected();
     // RETENTION: Source reset preserves exact deployment lineage until the
     // ingestion window closes. Reclaim only archived derivations for which no
-    // retained generation, deployment binding, or system target remains.
+    // retained generation, deployment binding, system target, or sealed POA&M
+    // verification item remains. Unreferenced schema-1 scans follow their
+    // parent derivation lifecycle.
     let derivation_rows = sqlx::query(
         r#"
         DELETE FROM derivations derivation
@@ -4353,6 +4355,15 @@ pub async fn reclaim_orphaned_snapshot_content(pool: &PgPool) -> Result<Snapshot
                   SELECT 1 FROM systems system
                   WHERE system.desired_derivation_id = candidate.id
               )
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM cve_scans scan
+                   JOIN poam_cve_verification_items item ON item.scan_id = scan.id
+                   JOIN poam_verification_attempts attempt ON attempt.id = item.attempt_id
+                   WHERE scan.derivation_id = candidate.id
+                     AND scan.evidence_schema_version = 1
+                     AND attempt.sealed_at IS NOT NULL
+               )
             ORDER BY candidate.id
             LIMIT 100
         )
@@ -5740,6 +5751,71 @@ mod tests {
         )
         .await
         .expect("system insert should succeed")
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn snapshot_gc_reclaims_unreferenced_exact_cve_scan_with_parent_derivation(pool: PgPool) {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let repo_url = format!("https://example.test/exact-cve-gc-{suffix}.git");
+        let flake = insert_flake(
+            &pool,
+            &format!("exact-cve-gc-{suffix}"),
+            &repo_url,
+            "main",
+            "cf_systems_only",
+        )
+        .await
+        .expect("GC flake should persist");
+        let commit = insert_test_commit(&pool, &repo_url, &"9".repeat(40)).await;
+        assert_eq!(commit.flake_id, flake.id);
+        let derivation = insert_derivation(
+            &pool,
+            Some(&commit),
+            &format!("exact-cve-gc-{suffix}"),
+            "nixos",
+        )
+        .await
+        .expect("GC derivation should persist");
+        let scan_id = Uuid::new_v4();
+        sqlx::query(
+            r#"INSERT INTO cve_scans(id,derivation_id,scanner_name,status)
+               VALUES($1,$2,'gc-test','in_progress')"#,
+        )
+        .bind(scan_id)
+        .bind(derivation.id)
+        .execute(&pool)
+        .await
+        .expect("unreferenced scan should persist");
+        sqlx::query(
+            "UPDATE cve_scans SET status='completed',completed_at=NOW(),evidence_schema_version=1 WHERE id=$1",
+        )
+        .bind(scan_id)
+        .execute(&pool)
+        .await
+        .expect("unreferenced scan should seal");
+        sqlx::query("UPDATE commits SET source_archived=true WHERE id=$1")
+            .bind(commit.id)
+            .execute(&pool)
+            .await
+            .expect("source commit should be archived");
+
+        reclaim_orphaned_snapshot_content(&pool)
+            .await
+            .expect("GC should reclaim the unreferenced parent lineage");
+
+        let remains: (bool, bool, bool) = sqlx::query_as(
+            r#"SELECT EXISTS(SELECT 1 FROM cve_scans WHERE id=$1),
+                      EXISTS(SELECT 1 FROM derivations WHERE id=$2),
+                      EXISTS(SELECT 1 FROM commits WHERE id=$3)"#,
+        )
+        .bind(scan_id)
+        .bind(derivation.id)
+        .bind(commit.id)
+        .fetch_one(&pool)
+        .await
+        .expect("GC state should resolve");
+        assert_eq!(remains, (false, false, false));
     }
 
     #[sqlx::test]

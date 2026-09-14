@@ -8,35 +8,36 @@
 //! - Triage workflow
 
 use dioxus::prelude::*;
+use std::{cell::Cell, rc::Rc};
+
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::{JsCast, closure::Closure};
 
 use crate::alerts::{NAV_BADGES, acknowledge_with_cursor_and_ids, should_flash};
 
 use crate::api::client;
-use crate::api::models::{
-    CveAffectedSystemDetail, CveDetail, CveFilters, CveFleetStats, CveJustification,
-    CveJustificationInput, CveListItem, CvePackageGroup,
+use crate::api::models::{CveFilters, CveFleetStats, CveListItem, CvePackageGroup};
+use crate::components::dialog_focus::{
+    DialogFocusBoundary, DialogFocusRestore, DialogFocusSentinel,
 };
-use crate::components::environments::with_alpha;
 use crate::components::layout::Card;
 use crate::components::notifications::Toast;
-use crate::environments::adapter::load_environment_colors_with_fallback;
 use crate::routes::Route;
 use crate::state::app_state::AppState;
 use crate::state::auth;
-use crate::theme;
+use crate::views::poam_api::{self, PoamApiError};
 
-/// Derive fg / bg / border for an environment name from the live color map.
-/// Falls back to a neutral gray if the env isn't found.
-fn env_style_from_colors(env: &str, colors: &[(String, String)]) -> (String, String, String) {
-    let hex = colors
-        .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case(env))
-        .map(|(_, h)| h.as_str())
-        .unwrap_or("#6b7280");
-    let fg = hex.to_string();
-    let bg = with_alpha(hex, 0.13);
-    let border = with_alpha(hex, 0.40);
-    (fg, bg, border)
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ExactCveSelection {
+    cve_id: String,
+    package: String,
+}
+
+fn selection_from_query() -> Option<ExactCveSelection> {
+    Some(ExactCveSelection {
+        cve_id: query_param("cve")?,
+        package: query_param("cve_package")?,
+    })
 }
 
 fn query_param(name: &str) -> Option<String> {
@@ -59,15 +60,6 @@ fn query_param(name: &str) -> Option<String> {
     }
 
     None
-}
-
-fn deployment_policy_status_color(policy: &str) -> &'static str {
-    match policy.to_lowercase().as_str() {
-        "automatic" => "#34d399",
-        "scheduled" => "#60a5fa",
-        "manual" => "#fbbf24",
-        _ => "#9ca3af",
-    }
 }
 
 const SUCCESS_TOAST_DURATION_MS: u32 = 3000;
@@ -114,7 +106,8 @@ fn sync_cve_url_query(
     search: Option<&str>,
     sort: &str,
     view: &str,
-    cve: Option<&str>,
+    selection: Option<&ExactCveSelection>,
+    push_history: bool,
 ) {
     let Some(window) = web_sys::window() else {
         return;
@@ -149,8 +142,9 @@ fn sync_cve_url_query(
     if view != "grouped" {
         push(&mut parts, "view", view);
     }
-    if let Some(v) = cve {
-        push(&mut parts, "cve", v);
+    if let Some(selection) = selection {
+        push(&mut parts, "cve", &selection.cve_id);
+        push(&mut parts, "cve_package", &selection.package);
     }
 
     let query = if parts.is_empty() {
@@ -165,12 +159,37 @@ fn sync_cve_url_query(
         .ok()
         .unwrap_or_else(|| "/cves".to_string());
     if let Ok(history) = window.history() {
-        let _ = history.replace_state_with_url(
-            &wasm_bindgen::JsValue::NULL,
-            "",
-            Some(&format!("{pathname}{query}")),
-        );
+        let url = format!("{pathname}{query}");
+        if push_history {
+            let _ = history.push_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(&url));
+        } else {
+            let _ = history.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(&url));
+        }
     }
+}
+
+fn sync_cve_url_state(
+    severity: Option<String>,
+    fix_status: Option<String>,
+    triage_status: Option<String>,
+    package: Option<String>,
+    search: String,
+    sort: String,
+    view: String,
+    selection: Option<&ExactCveSelection>,
+    push_history: bool,
+) {
+    sync_cve_url_query(
+        severity.as_deref(),
+        fix_status.as_deref(),
+        triage_status.as_deref(),
+        package.as_deref(),
+        (!search.trim().is_empty()).then_some(search.as_str()),
+        &sort,
+        &view,
+        selection,
+        push_history,
+    );
 }
 
 #[component]
@@ -184,7 +203,7 @@ pub fn CvesView() -> Element {
     let initial_search = query_param("search").unwrap_or_default();
     let initial_sort = query_param("sort").unwrap_or_else(|| "severity".to_string());
     let initial_view = query_param("view").unwrap_or_else(|| "grouped".to_string());
-    let initial_cve = query_param("cve");
+    let initial_selection = selection_from_query();
 
     // Filter state
     let mut severity_filter = use_signal(move || initial_severity.clone());
@@ -194,7 +213,7 @@ pub fn CvesView() -> Element {
     let mut search_query = use_signal(move || initial_search.clone());
     let mut sort_by = use_signal(move || initial_sort.clone());
     let mut view_mode = use_signal(move || initial_view.clone()); // "flat" or "grouped"
-    let mut selected_cve_id = use_signal(move || initial_cve.clone());
+    let mut selected_cve = use_signal(move || initial_selection.clone());
     let mut toast_message: Signal<Option<(String, bool)>> = use_signal(|| None);
     // CONCURRENCY: Publishing or dismissing feedback advances the lifecycle.
     // A success timer can clear only the publication that created the timer.
@@ -213,7 +232,7 @@ pub fn CvesView() -> Element {
         let search = search_query();
         let sort = sort_by();
         let view = view_mode();
-        let cve = selected_cve_id();
+        let selection = selected_cve();
 
         sync_cve_url_query(
             severity.as_deref(),
@@ -227,9 +246,35 @@ pub fn CvesView() -> Element {
             },
             &sort,
             &view,
-            cve.as_deref(),
+            selection.as_ref(),
+            false,
         );
     });
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        let popstate_listener = use_hook(|| {
+            let callback = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+                selected_cve.set(selection_from_query());
+            });
+            if let Some(window) = web_sys::window() {
+                let _ = window.add_event_listener_with_callback(
+                    "popstate",
+                    callback.as_ref().unchecked_ref(),
+                );
+            }
+            Rc::new(callback)
+        });
+        let listener_for_drop = popstate_listener.clone();
+        use_drop(move || {
+            if let Some(window) = web_sys::window() {
+                let _ = window.remove_event_listener_with_callback(
+                    "popstate",
+                    listener_for_drop.as_ref().as_ref().unchecked_ref(),
+                );
+            }
+        });
+    }
 
     // Data resources
     let stats = use_resource(move || async move { client::fetch_cve_fleet_stats().await });
@@ -619,8 +664,13 @@ pub fn CvesView() -> Element {
             if view_mode() == "grouped" {
                 CvePackageGroupsView {
                     key: "{severity_filter().as_deref().unwrap_or(\"all\")}|{fix_status_filter().as_deref().unwrap_or(\"all\")}|{triage_status_filter().as_deref().unwrap_or(\"all\")}|{package_filter().as_deref().unwrap_or(\"all\")}|{search_query()}|{sort_by()}|{view_mode()}",
-                    on_open_cve: move |cve_id: String| {
-                        selected_cve_id.set(Some(cve_id));
+                    on_open_cve: move |selection: ExactCveSelection| {
+                        sync_cve_url_state(
+                            severity_filter(), fix_status_filter(), triage_status_filter(),
+                            package_filter(), search_query(), sort_by(), view_mode(),
+                            Some(&selection), true,
+                        );
+                        selected_cve.set(Some(selection));
                     },
                     filters: CveFilters {
                         severity: severity_filter(),
@@ -668,8 +718,13 @@ pub fn CvesView() -> Element {
                                             CveRow {
                                                 cve: cve.clone(),
                                                 total_systems: stats.read().as_ref().and_then(|r| r.as_ref().ok()).map(|s| s.systems_affected).unwrap_or(0),
-                                                on_open: move |cve_id: String| {
-                                                    selected_cve_id.set(Some(cve_id));
+                                                on_open: move |selection: ExactCveSelection| {
+                                                    sync_cve_url_state(
+                                                        severity_filter(), fix_status_filter(), triage_status_filter(),
+                                                        package_filter(), search_query(), sort_by(), view_mode(),
+                                                        Some(&selection), true,
+                                                    );
+                                                    selected_cve.set(Some(selection));
                                                 }
                                             }
                                         }
@@ -694,10 +749,17 @@ pub fn CvesView() -> Element {
             }
 
             // CVE Detail Drawer
-            if let Some(cve_id) = selected_cve_id() {
-                CveDrawer {
-                    cve_id: cve_id.clone(),
-                    on_close: move |_| selected_cve_id.set(None)
+            if let Some(selection) = selected_cve() {
+                ExactCveFleetDrawer {
+                    key: "{selection.cve_id}|{selection.package}",
+                    selection,
+                    on_close: move |_| {
+                        sync_cve_url_state(
+                            severity_filter(), fix_status_filter(), triage_status_filter(),
+                            package_filter(), search_query(), sort_by(), view_mode(), None, true,
+                        );
+                        selected_cve.set(None);
+                    }
                 }
             }
 
@@ -720,7 +782,11 @@ pub fn CvesView() -> Element {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[component]
-fn CveRow(cve: CveListItem, total_systems: i64, on_open: EventHandler<String>) -> Element {
+fn CveRow(
+    cve: CveListItem,
+    total_systems: i64,
+    on_open: EventHandler<ExactCveSelection>,
+) -> Element {
     let sev_cls = match cve.severity.to_uppercase().as_str() {
         "CRITICAL" => "chip-critical",
         "HIGH" => "chip-warning",
@@ -735,14 +801,22 @@ fn CveRow(cve: CveListItem, total_systems: i64, on_open: EventHandler<String>) -
     };
 
     let cve_id_for_onclick = cve.cve_id.clone();
-    let cve_id_for_row = cve_id_for_onclick.clone();
+    let selection_for_row = cve.package_name.clone().map(|package| ExactCveSelection {
+        cve_id: cve_id_for_onclick.clone(),
+        package,
+    });
+    let selection_for_open = selection_for_row.clone();
     let cve_id_for_link = cve_id_for_onclick.clone();
-    let cve_id_for_open = cve_id_for_onclick.clone();
 
     rsx! {
         tr {
             style: "cursor: pointer;",
-            onclick: move |_| on_open.call(cve_id_for_row.clone()),
+            "data-testid": "cve-row",
+            onclick: move |_| {
+                if let Some(selection) = selection_for_row.clone() {
+                    on_open.call(selection);
+                }
+            },
 
             // CVE ID
             td {
@@ -937,9 +1011,13 @@ fn CveRow(cve: CveListItem, total_systems: i64, on_open: EventHandler<String>) -
                     button {
                         class: "btn-icon focus-ring",
                         title: "Details",
+                        aria_label: "Open exact fleet detail for {cve.cve_id} {cve.package_name.as_deref().unwrap_or(\"unknown package\")}",
+                        "data-testid": "cve-fleet-open",
                         onclick: move |evt| {
                             evt.stop_propagation();
-                            on_open.call(cve_id_for_open.clone());
+                            if let Some(selection) = selection_for_open.clone() {
+                                on_open.call(selection);
+                            }
                         },
                         // Arrow-right icon
                         svg {
@@ -966,7 +1044,10 @@ fn CveRow(cve: CveListItem, total_systems: i64, on_open: EventHandler<String>) -
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[component]
-fn CvePackageGroupsView(filters: CveFilters, on_open_cve: EventHandler<String>) -> Element {
+fn CvePackageGroupsView(
+    filters: CveFilters,
+    on_open_cve: EventHandler<ExactCveSelection>,
+) -> Element {
     let grouped_cves = use_resource(move || {
         let f = filters.clone();
         async move { client::fetch_cves_grouped(&f).await }
@@ -1014,7 +1095,10 @@ fn CvePackageGroupsView(filters: CveFilters, on_open_cve: EventHandler<String>) 
 }
 
 #[component]
-fn CvePackageGroupCard(group: CvePackageGroup, on_open_cve: EventHandler<String>) -> Element {
+fn CvePackageGroupCard(
+    group: CvePackageGroup,
+    on_open_cve: EventHandler<ExactCveSelection>,
+) -> Element {
     let mut is_expanded = use_signal(|| false);
 
     let sev_color = if group.critical_count > 0 {
@@ -1184,8 +1268,8 @@ fn CvePackageGroupCard(group: CvePackageGroup, on_open_cve: EventHandler<String>
                                     CveRowInGroup {
                                         cve: cve.clone(),
                                         total_systems: group.total_affected_systems,
-                                        on_open: move |cve_id: String| {
-                                            on_open_cve.call(cve_id);
+                                        on_open: move |selection: ExactCveSelection| {
+                                            on_open_cve.call(selection);
                                         }
                                     }
                                 }
@@ -1200,7 +1284,11 @@ fn CvePackageGroupCard(group: CvePackageGroup, on_open_cve: EventHandler<String>
 
 /// CVE row inside a grouped package card (no actions column, matching JSX reference)
 #[component]
-fn CveRowInGroup(cve: CveListItem, total_systems: i64, on_open: EventHandler<String>) -> Element {
+fn CveRowInGroup(
+    cve: CveListItem,
+    total_systems: i64,
+    on_open: EventHandler<ExactCveSelection>,
+) -> Element {
     let sev_cls = match cve.severity.to_uppercase().as_str() {
         "CRITICAL" => "chip-critical",
         "HIGH" => "chip-warning",
@@ -1214,12 +1302,20 @@ fn CveRowInGroup(cve: CveListItem, total_systems: i64, on_open: EventHandler<Str
         _ => "#9ca3af",
     };
 
-    let cve_id_for_row = cve.cve_id.clone();
+    let selection_for_row = cve.package_name.clone().map(|package| ExactCveSelection {
+        cve_id: cve.cve_id.clone(),
+        package,
+    });
 
     rsx! {
         tr {
             style: "cursor: pointer;",
-            onclick: move |_| on_open.call(cve_id_for_row.clone()),
+            "data-testid": "cve-row",
+            onclick: move |_| {
+                if let Some(selection) = selection_for_row.clone() {
+                    on_open.call(selection);
+                }
+            },
 
             // CVE ID
             td {
@@ -1381,938 +1477,452 @@ fn CveRowInGroup(cve: CveListItem, total_systems: i64, on_open: EventHandler<Str
 // CVE Detail Drawer
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[component]
-fn CveDrawer(cve_id: String, on_close: EventHandler<()>) -> Element {
-    let cve_id_label = cve_id.clone();
-    let cve_id_for_save_seed = cve_id.clone();
-    let mut justification_category = use_signal(|| "accepted_risk".to_string());
-    let mut justification_reason = use_signal(String::new);
-    let mut justification_review_date = use_signal(String::new);
-    // "all" or "some" — mirrors JSX scopeMode
-    let mut scope_mode = use_signal(|| "all".to_string());
-    // Set of environment names the user toggled on (used when scope_mode == "some")
-    let mut scope_envs: Signal<Vec<String>> = use_signal(Vec::new);
-    let mut save_status = use_signal(|| Option::<String>::None);
-    let mut justifications_refresh = use_signal(|| 0_u64);
-    let mut esc_listener_attached = use_signal(|| false);
-    let mut show_accept = use_signal(|| false);
-    let advisory_cve_id = cve_id.clone();
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EnvironmentTriageChoice {
+    Open,
+    Accepted,
+    Scheduled,
+}
 
-    let cve_id_detail = cve_id.clone();
-    let cve_detail = use_resource(move || {
-        let id = cve_id_detail.clone();
-        async move { client::fetch_cve_detail(&id).await }
-    });
+impl EnvironmentTriageChoice {
+    fn value(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Accepted => "accepted",
+            Self::Scheduled => "scheduled",
+        }
+    }
+}
 
-    let cve_id_systems = cve_id.clone();
-    let affected_systems = use_resource(move || {
-        let id = cve_id_systems.clone();
-        async move { client::fetch_cve_systems(&id).await }
-    });
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct EnvironmentTriageDraft {
+    environment_id: uuid::Uuid,
+    environment_name: String,
+    choice: EnvironmentTriageChoice,
+    justification: String,
+    review_date: String,
+}
 
-    let cve_id_justs = cve_id.clone();
-    let justifications = use_resource(move || {
-        let _tick = justifications_refresh();
-        let id = cve_id_justs.clone();
-        async move { client::fetch_cve_justifications(&id).await }
-    });
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FleetTriageDraft {
+    environments: Vec<EnvironmentTriageDraft>,
+    title: String,
+    target_date: String,
+    plan: String,
+    assignee: String,
+    assignee_label: Option<String>,
+    risk: poam_api::PoamRisk,
+    preservation_error: Option<String>,
+    default_milestones: bool,
+}
 
-    // Environment color map: Vec<(name, color_hex)> from the environments API.
-    // Used by EnvBadge and the scope picker so colors match whatever the user
-    // has configured, rather than a hard-coded palette.
-    let env_colors =
-        use_resource(move || async move { load_environment_colors_with_fallback().await.colors });
+impl FleetTriageDraft {
+    fn from_detail(detail: &poam_api::FleetCveDetail) -> Self {
+        let environments = detail
+            .environments
+            .iter()
+            .map(|environment| {
+                let (choice, justification, review_date) = match &environment.disposition {
+                    Some(poam_api::CveEnvironmentDisposition::Accepted {
+                        justification,
+                        review_date,
+                        ..
+                    }) => (
+                        EnvironmentTriageChoice::Accepted,
+                        justification.clone(),
+                        review_date.map(|date| date.to_string()).unwrap_or_default(),
+                    ),
+                    Some(poam_api::CveEnvironmentDisposition::Scheduled { .. }) => (
+                        EnvironmentTriageChoice::Scheduled,
+                        String::new(),
+                        String::new(),
+                    ),
+                    None => (EnvironmentTriageChoice::Open, String::new(), String::new()),
+                };
+                EnvironmentTriageDraft {
+                    environment_id: environment.environment_id,
+                    environment_name: environment.environment_name.clone(),
+                    choice,
+                    justification,
+                    review_date,
+                }
+            })
+            .collect();
+        let mut draft = Self {
+            environments,
+            title: format!(
+                "{} - patch {}",
+                detail.cve.cve_id, detail.canonical_package_name
+            ),
+            target_date: String::new(),
+            plan: String::new(),
+            assignee: String::new(),
+            assignee_label: None,
+            risk: fleet_risk(&detail.cve.severity),
+            preservation_error: None,
+            default_milestones: true,
+        };
+        let scheduled = detail
+            .environments
+            .iter()
+            .filter_map(|environment| match &environment.disposition {
+                Some(poam_api::CveEnvironmentDisposition::Scheduled { poam_id, poam, .. }) => {
+                    Some((*poam_id, poam.as_ref()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if scheduled.is_empty() {
+            return draft;
+        }
+        if scheduled.iter().any(|(_, poam)| poam.is_none()) {
+            draft.preservation_error = Some(
+                "Scheduled POA&M metadata is unavailable from this server version. Change all scheduled environments to OPEN or ACCEPTED, or retry after the server upgrade."
+                    .to_string(),
+            );
+            return draft;
+        }
+        let first_id = scheduled[0].0;
+        if scheduled.iter().any(|(poam_id, _)| *poam_id != first_id) {
+            draft.preservation_error = Some(
+                "Scheduled environments reference different POA&Ms. Change all scheduled environments to OPEN or ACCEPTED before submitting."
+                    .to_string(),
+            );
+            return draft;
+        }
+        let metadata = scheduled[0].1.expect("checked scheduled metadata");
+        if metadata.id != first_id
+            || scheduled
+                .iter()
+                .any(|(_, candidate)| candidate.is_some_and(|candidate| candidate != metadata))
+        {
+            draft.preservation_error = Some(
+                "Scheduled environments have conflicting POA&M metadata. Change all scheduled environments to OPEN or ACCEPTED before submitting."
+                    .to_string(),
+            );
+            return draft;
+        }
+        if metadata.title.trim().is_empty() || metadata.plan.trim().is_empty() {
+            draft.preservation_error = Some(
+                "The scheduled POA&M metadata cannot satisfy compatible reuse. Change all scheduled environments to OPEN or ACCEPTED before submitting."
+                    .to_string(),
+            );
+            return draft;
+        }
+        draft.title = metadata.title.clone();
+        draft.plan = metadata.plan.clone();
+        draft.target_date = metadata.target_date.to_string();
+        draft.risk = metadata.risk;
+        match scheduled_assignee_selection(&metadata.assignee) {
+            Ok((value, label)) => {
+                draft.assignee = value;
+                draft.assignee_label = Some(label);
+            }
+            Err(message) => draft.preservation_error = Some(message),
+        }
+        draft
+    }
 
-    use_effect(move || {
-        use wasm_bindgen::JsCast;
-        use wasm_bindgen::closure::Closure;
+    fn set_choice(&mut self, environment_id: uuid::Uuid, choice: EnvironmentTriageChoice) {
+        if let Some(environment) = self
+            .environments
+            .iter_mut()
+            .find(|environment| environment.environment_id == environment_id)
+        {
+            environment.choice = choice;
+        }
+    }
 
-        let Some(window) = web_sys::window() else {
-            return;
+    fn request(&self, package: &str) -> Result<poam_api::FleetCveTriageRequest, String> {
+        let mut actions = Vec::with_capacity(self.environments.len());
+        let mut scheduled = false;
+        for environment in &self.environments {
+            let action = match environment.choice {
+                EnvironmentTriageChoice::Open => poam_api::CveEnvironmentTriageAction::LeaveOpen {
+                    environment_id: environment.environment_id,
+                },
+                EnvironmentTriageChoice::Accepted => {
+                    if environment.justification.trim().is_empty() {
+                        return Err(format!(
+                            "Enter an acceptance justification for {}.",
+                            environment.environment_name
+                        ));
+                    }
+                    let review_date = if environment.review_date.trim().is_empty() {
+                        None
+                    } else {
+                        Some(
+                            chrono::NaiveDate::parse_from_str(
+                                environment.review_date.trim(),
+                                "%Y-%m-%d",
+                            )
+                            .map_err(|_| {
+                                format!(
+                                    "Enter a valid review date for {}.",
+                                    environment.environment_name
+                                )
+                            })?,
+                        )
+                    };
+                    poam_api::CveEnvironmentTriageAction::AcceptRisk {
+                        environment_id: environment.environment_id,
+                        justification: environment.justification.trim().to_string(),
+                        review_date,
+                    }
+                }
+                EnvironmentTriageChoice::Scheduled => {
+                    scheduled = true;
+                    poam_api::CveEnvironmentTriageAction::SchedulePatch {
+                        environment_id: environment.environment_id,
+                    }
+                }
+            };
+            actions.push(action);
+        }
+
+        let poam = if scheduled {
+            if let Some(message) = &self.preservation_error {
+                return Err(message.clone());
+            }
+            if self.title.trim().is_empty() {
+                return Err("Enter a POA&M title for scheduled patching.".to_string());
+            }
+            if self.plan.trim().is_empty() {
+                return Err("Enter a remediation plan for scheduled patching.".to_string());
+            }
+            let target_date =
+                chrono::NaiveDate::parse_from_str(self.target_date.trim(), "%Y-%m-%d")
+                    .map_err(|_| "Enter a valid POA&M target date.".to_string())?;
+            let assignee = parse_fleet_assignee(&self.assignee)?;
+            Some(poam_api::FleetCvePoamRequest {
+                title: self.title.trim().to_string(),
+                plan: self.plan.trim().to_string(),
+                assignee,
+                target_date,
+                risk: self.risk,
+                default_milestones: self.default_milestones,
+            })
+        } else {
+            None
         };
 
-        if esc_listener_attached() {
-            return;
+        Ok(poam_api::FleetCveTriageRequest {
+            canonical_package_name: package.to_string(),
+            actions,
+            poam,
+        })
+    }
+}
+
+fn scheduled_assignee_selection(
+    assignee: &poam_api::PoamAssigneeView,
+) -> Result<(String, String), String> {
+    match assignee {
+        poam_api::PoamAssigneeView::User {
+            user_id,
+            display,
+            available: true,
+        } => Ok((format!("user:{user_id}"), display.clone())),
+        poam_api::PoamAssigneeView::OidcGroup {
+            group_name,
+            display,
+            available: true,
+        } => Ok((format!("group:{group_name}"), display.clone())),
+        poam_api::PoamAssigneeView::User { .. }
+        | poam_api::PoamAssigneeView::OidcGroup { .. }
+        | poam_api::PoamAssigneeView::Unassigned
+        | poam_api::PoamAssigneeView::Legacy { .. } => Err(
+            "The scheduled POA&M assignee is no longer available for compatible reuse. Change all scheduled environments to OPEN or ACCEPTED before submitting."
+                .to_string(),
+        ),
+    }
+}
+
+fn parse_fleet_assignee(value: &str) -> Result<poam_api::PoamAssigneeRequest, String> {
+    if let Some(user_id) = value.strip_prefix("user:") {
+        return uuid::Uuid::parse_str(user_id)
+            .map(|user_id| poam_api::PoamAssigneeRequest::User { user_id })
+            .map_err(|_| "Select a valid POA&M assignee.".to_string());
+    }
+    if let Some(group_name) = value.strip_prefix("group:")
+        && !group_name.trim().is_empty()
+        && group_name == group_name.trim()
+    {
+        return Ok(poam_api::PoamAssigneeRequest::OidcGroup {
+            group_name: group_name.to_string(),
+        });
+    }
+    Err("Select a valid POA&M assignee.".to_string())
+}
+
+fn fleet_risk(severity: &str) -> poam_api::PoamRisk {
+    match severity.to_ascii_lowercase().as_str() {
+        "critical" | "high" => poam_api::PoamRisk::High,
+        "medium" => poam_api::PoamRisk::Medium,
+        _ => poam_api::PoamRisk::Low,
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum FleetDetailState {
+    Loading,
+    Loaded(poam_api::FleetCveDetail),
+    Empty,
+    Unauthorized,
+    Error(String),
+}
+
+fn fleet_error_state(error: &PoamApiError) -> FleetDetailState {
+    match error {
+        PoamApiError::Server(server) if server.status == 401 || server.status == 403 => {
+            FleetDetailState::Unauthorized
         }
-        esc_listener_attached.set(true);
+        PoamApiError::Server(server) if server.status == 404 => FleetDetailState::Empty,
+        _ => FleetDetailState::Error(error.to_string()),
+    }
+}
 
-        let on_close_for_esc = on_close.clone();
-        let handler = Closure::wrap(Box::new(move |event: web_sys::KeyboardEvent| {
-            if event.key() == "Escape" {
-                // Mirror JSX: if accept form is open, close it first; otherwise close drawer
-                if show_accept() {
-                    show_accept.set(false);
-                } else {
-                    on_close_for_esc.call(());
-                }
+fn request_token_is_current(component_active: bool, requested: u64, current: u64) -> bool {
+    component_active && requested == current
+}
+
+fn fleet_rollup_label(rollup: poam_api::FleetCveTriageRollup) -> &'static str {
+    match rollup {
+        poam_api::FleetCveTriageRollup::Outstanding => "OUTSTANDING",
+        poam_api::FleetCveTriageRollup::Accepted => "ACCEPTED",
+        poam_api::FleetCveTriageRollup::Scheduled => "SCHEDULED",
+        poam_api::FleetCveTriageRollup::Partial => "MIXED",
+    }
+}
+
+#[component]
+fn ExactCveFleetDrawer(selection: ExactCveSelection, on_close: EventHandler<()>) -> Element {
+    let app_state = use_context::<Signal<AppState>>();
+    let can_triage = auth::is_operator_or_above(&app_state.read().auth);
+    let navigator = navigator();
+    let mut state = use_signal(|| FleetDetailState::Loading);
+    let mut load_generation = use_signal(|| 0_u64);
+    let mut refresh_generation = use_signal(|| 0_u64);
+    let mut refreshing = use_signal(|| false);
+    let mut triage_open = use_signal(|| false);
+    let mut mutation_error = use_signal(|| None::<String>);
+    let mut result_poam = use_signal(|| None::<(uuid::Uuid, bool)>);
+    let component_active = use_hook(|| Rc::new(Cell::new(true)));
+    {
+        let component_active = component_active.clone();
+        use_drop(move || component_active.set(false));
+    }
+
+    use_effect({
+        let selection = selection.clone();
+        let component_active = component_active.clone();
+        move || {
+            let _refresh = refresh_generation();
+            let generation = (*load_generation.peek()).wrapping_add(1);
+            load_generation.set(generation);
+            if !matches!(&*state.peek(), FleetDetailState::Loaded(_)) {
+                state.set(FleetDetailState::Loading);
             }
-        }) as Box<dyn FnMut(_)>);
-
-        let _ =
-            window.add_event_listener_with_callback("keydown", handler.as_ref().unchecked_ref());
-        handler.forget();
+            let cve_id = selection.cve_id.clone();
+            let package = selection.package.clone();
+            let component_active = component_active.clone();
+            spawn(async move {
+                let result = poam_api::fetch_fleet_cve_detail(&cve_id, &package).await;
+                // CONCURRENCY: Only the newest request for this mounted exact
+                // selection can replace authoritative drawer state.
+                if !request_token_is_current(
+                    component_active.get(),
+                    generation,
+                    *load_generation.peek(),
+                ) {
+                    return;
+                }
+                refreshing.set(false);
+                match result {
+                    Ok(detail) => state.set(FleetDetailState::Loaded(detail)),
+                    Err(error) => state.set(fleet_error_state(&error)),
+                }
+            });
+        }
     });
 
+    let dialog_label = format!("{} {} fleet triage", selection.cve_id, selection.package);
     rsx! {
-        // Backdrop
-        div {
-            class: "fl-tray-backdrop fixed inset-0 bg-black/50 z-40",
+        DialogFocusRestore {}
+        button {
+            class: "fl-tray-backdrop cve-fleet-backdrop",
+            aria_label: "Close {dialog_label}",
+            tabindex: "-1",
             onclick: move |_| on_close.call(()),
         }
-
-        // Drawer panel
         aside {
-            class: "fl-tray fixed top-0 right-0 h-full w-full max-w-2xl bg-gray-900 border-l border-white/10 z-50 flex flex-col shadow-xl",
+            id: "cve-fleet-drawer",
+            class: "fl-tray cve-fleet-drawer",
             role: "dialog",
-            aria_label: "{cve_id_label}",
-
-            // Header
-            header {
-                class: "fl-tray-head",
-                match &*cve_detail.read_unchecked() {
-                    Some(Ok(detail)) => {
-                        let sev_color = match detail.severity.to_uppercase().as_str() {
-                            "CRITICAL" => "#f87171",
-                            "HIGH" => "#fbbf24",
-                            "MEDIUM" => "#60a5fa",
-                            _ => "#9ca3af",
-                        };
-                        let sev_cls = match detail.severity.to_uppercase().as_str() {
-                            "CRITICAL" => "chip-critical",
-                            "HIGH" => "chip-warning",
-                            "MEDIUM" => "chip-info",
-                            _ => "chip-unknown",
-                        };
-                        rsx! {
-                            div {
-                                style: "display: flex; align-items: center; gap: 12px; min-width: 0; flex: 1;",
-                                // Shield icon colored by severity
-                                svg {
-                                    width: "18",
-                                    height: "18",
-                                    view_box: "0 0 24 24",
-                                    fill: "none",
-                                    stroke: "currentColor",
-                                    stroke_width: "2",
-                                    stroke_linecap: "round",
-                                    stroke_linejoin: "round",
-                                    style: "color: {sev_color}; flex-shrink: 0;",
-                                    path { d: "M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" }
-                                }
-                                div {
-                                    style: "min-width: 0;",
-                                    div {
-                                        style: "display: flex; align-items: center; gap: 8px; flex-wrap: wrap;",
-                                        span {
-                                            class: "mono",
-                                            style: "font-weight: 700; font-size: 15px;",
-                                            "{detail.cve_id}"
-                                        }
-                                        span {
-                                            class: "chip {sev_cls}",
-                                            span {
-                                                class: "chip-dot",
-                                                style: "background: {sev_color};",
-                                            }
-                                            "{detail.severity}"
-                                        }
-                                        if detail.exploited {
-                                            span {
-                                                class: "chip chip-critical",
-                                                "exploited in the wild"
-                                            }
-                                        }
-                                    }
-                                    div {
-                                        style: "font-size: 12px; color: var(--cf-text-secondary); margin-top: 3px;",
-                                        "{detail.title}"
-                                    }
-                                }
-                            }
-                        }
-                    },
-                    _ => rsx! {
-                        span { class: "mono", style: "font-weight: 700;", "{cve_id_label}" }
+            aria_modal: "true",
+            aria_label: "{dialog_label}",
+            "data-testid": "cve-fleet-drawer",
+            tabindex: "-1",
+            onkeydown: move |event| if event.key() == Key::Escape && !triage_open() { on_close.call(()); },
+            DialogFocusSentinel { dialog_id: "cve-fleet-drawer", boundary: DialogFocusBoundary::Last }
+            header { class: "fl-tray-head",
+                div { class: "cve-fleet-heading",
+                    span { class: "mono", "{selection.cve_id}" }
+                    span { " / " }
+                    span { class: "mono", "{selection.package}" }
+                    if let FleetDetailState::Loaded(detail) = &*state.read() {
+                        span { class: "chip chip-{detail.cve.severity.to_ascii_lowercase()}", "{detail.cve.severity}" }
                     }
                 }
-                div {
-                    style: "display: flex; gap: 6px;",
-                    button {
-                        class: "btn btn-ghost focus-ring xs",
-                        title: "https://nvd.nist.gov/vuln/detail/{advisory_cve_id}",
-                        onclick: move |_| {
-                            let _ = web_sys::window().and_then(|w| {
-                                w.open_with_url_and_target(
-                                    &format!("https://nvd.nist.gov/vuln/detail/{}", advisory_cve_id),
-                                    "_blank"
-                                ).ok()
-                            });
-                        },
-                        // Link icon
-                        svg {
-                            width: "11",
-                            height: "11",
-                            view_box: "0 0 24 24",
-                            fill: "none",
-                            stroke: "currentColor",
-                            stroke_width: "2",
-                            stroke_linecap: "round",
-                            stroke_linejoin: "round",
-                            path { d: "M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" }
-                            path { d: "M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" }
-                        }
-                        " Advisory"
+                div { class: "cve-fleet-actions",
+                    if can_triage && matches!(&*state.read(), FleetDetailState::Loaded(_)) {
+                        button { class: "btn btn-primary xs focus-ring", "data-testid": "cve-triage-open", onclick: move |_| { mutation_error.set(None); triage_open.set(true); }, "Edit triage" }
                     }
-                    // Accept risk / Edit justification — driven by latest justification state
-                    {
-                        let (is_outstanding, existing_category, existing_reason) =
-                            match &*justifications.read_unchecked() {
-                                Some(Ok(justs)) => {
-                                    if let Some(j) = justs.first() {
-                                        let outstanding = j.category != "accepted_risk"
-                                            && j.category != "patch_scheduled";
-                                        (outstanding, j.category.clone(), j.reason.clone())
-                                    } else {
-                                        (true, "accepted_risk".to_string(), String::new())
-                                    }
-                                }
-                                _ => (true, "accepted_risk".to_string(), String::new()),
-                            };
-                        if is_outstanding {
-                            rsx! {
-                                button {
-                                    class: "btn btn-primary focus-ring xs",
-                                    onclick: move |_| {
-                                        // New acceptance — reset form to defaults
-                                        justification_category.set("accepted_risk".to_string());
-                                        justification_reason.set(String::new());
-                                        justification_review_date.set(String::new());
-                                        scope_mode.set("all".to_string());
-                                        scope_envs.set(Vec::new()); // will re-default to all on open
-                                        show_accept.set(true);
-                                    },
-                                    svg {
-                                        width: "11", height: "11", view_box: "0 0 24 24",
-                                        fill: "none", stroke: "currentColor", stroke_width: "3",
-                                        stroke_linecap: "round", stroke_linejoin: "round",
-                                        polyline { points: "20 6 9 17 4 12" }
-                                    }
-                                    " Accept risk"
-                                }
-                            }
-                        } else {
-                            rsx! {
-                                button {
-                                    class: "btn btn-ghost focus-ring xs",
-                                    onclick: move |_| {
-                                        // Editing — prefill from existing justification
-                                        justification_category.set(existing_category.clone());
-                                        justification_reason.set(existing_reason.clone());
-                                        justification_review_date.set(String::new());
-                                        show_accept.set(true);
-                                    },
-                                    svg {
-                                        width: "11", height: "11", view_box: "0 0 24 24",
-                                        fill: "none", stroke: "currentColor", stroke_width: "2",
-                                        stroke_linecap: "round", stroke_linejoin: "round",
-                                        path { d: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" }
-                                        polyline { points: "14 2 14 8 20 8" }
-                                    }
-                                    " Edit justification"
-                                }
-                            }
-                        }
-                    }
-                    button {
-                        class: "btn-icon focus-ring",
-                        onclick: move |_| on_close.call(()),
-                        // X icon
-                        svg {
-                            width: "16",
-                            height: "16",
-                            view_box: "0 0 24 24",
-                            fill: "none",
-                            stroke: "currentColor",
-                            stroke_width: "2",
-                            stroke_linecap: "round",
-                            stroke_linejoin: "round",
-                            path { d: "M18 6 6 18" }
-                            path { d: "M6 6l12 12" }
-                        }
-                    }
+                    button { class: "btn-icon focus-ring", aria_label: "Close fleet triage", autofocus: true, onclick: move |_| on_close.call(()), "×" }
                 }
             }
-
-            // Stats band
-            match &*cve_detail.read_unchecked() {
-                Some(Ok(detail)) => {
-                    let sev_color = match detail.severity.to_uppercase().as_str() {
-                        "CRITICAL" => "#f87171",
-                        "HIGH" => "#fbbf24",
-                        "MEDIUM" => "#60a5fa",
-                        _ => "#9ca3af",
-                    };
-                    rsx! {
-                        div {
-                            class: "ed-stats",
-                            div {
-                                class: "ed-stat",
-                                div { class: "ed-stat-label", "CVSS" }
-                                div {
-                                    class: "ed-stat-val",
-                                    style: "color: {sev_color};",
-                                    if let Some(cvss) = detail.cvss_v3_score {
-                                        "{cvss:.1}"
-                                    } else {
-                                        "N/A"
-                                    }
-                                }
-                            }
-                            div {
-                                class: "ed-stat",
-                                div { class: "ed-stat-label", "Package" }
-                                div {
-                                    class: "ed-stat-val mono",
-                                    style: "font-size: 14px;",
-                                    "{detail.package_name.as_deref().unwrap_or(\"N/A\")}"
-                                }
-                            }
-                            div {
-                                class: "ed-stat",
-                                div { class: "ed-stat-label", "Affected" }
-                                div {
-                                    class: "ed-stat-val",
-                                    "{affected_systems.read().as_ref().and_then(|r| r.as_ref().ok()).map(|s| s.len()).unwrap_or(0)}"
-                                }
-                            }
-                            div {
-                                class: "ed-stat",
-                                div { class: "ed-stat-label", "Fix" }
-                                div {
-                                    class: "ed-stat-val",
-                                    style: "font-size: 14px;",
-                                    if detail.fix_status == "fix_available" {
-                                        span {
-                                            class: "mono",
-                                            style: "color: #34d399;",
-                                            "{detail.fixed_version.as_deref().unwrap_or(\"available\")}"
-                                        }
-                                    } else {
-                                        span {
-                                            style: "color: #fbbf24;",
-                                            "pending"
-                                        }
-                                    }
-                                }
-                            }
-                            div {
-                                class: "ed-stat",
-                                div { class: "ed-stat-label", "Discovered" }
-                                div {
-                                    class: "ed-stat-val",
-                                    style: "font-size: 14px;",
-                                    if let Some(date) = detail.published_date {
-                                        "{date}"
-                                    } else {
-                                        "N/A"
-                                    }
-                                }
-                            }
-                        }
+            div { class: "ed-body cve-fleet-body",
+                if refreshing() {
+                    div { class: "sd-callout sd-callout-warn", role: "status", "Fleet evidence changed. Refreshing authoritative detail..." }
+                }
+                if let Some(error) = mutation_error() {
+                    div { class: "sd-callout sd-callout-danger", role: "alert", "{error}" }
+                }
+                if let Some((poam_id, reused)) = result_poam() {
+                    div { class: "sd-callout sd-callout-info", role: "status",
+                        if reused { "Scheduled environments use the existing POA&M. " } else { "Scheduled environments now use a new POA&M. " }
+                        button { class: "btn btn-ghost xs focus-ring", "data-testid": "cve-triage-poam-link", onclick: move |_| { navigator.push(Route::ComplianceView { bundle: String::new(), version: String::new(), system: String::new(), policy: String::new(), poam: poam_id.to_string(), view: String::new() }); }, "Open POA&M" }
                     }
-                },
-                _ => rsx! { }
+                }
+                match &*state.read() {
+                    FleetDetailState::Loading => rsx! { div { class: "empty", role: "status", "Loading exact fleet impact..." } },
+                    FleetDetailState::Empty => rsx! { div { class: "empty", h3 { "No current exact subjects" } p { "No visible active system currently reports this exact CVE and package." } } },
+                    FleetDetailState::Unauthorized => rsx! { div { class: "empty", role: "alert", h3 { "Fleet detail unavailable" } p { "Your session cannot read this exact fleet subject." } } },
+                    FleetDetailState::Error(error) => rsx! { div { class: "empty", role: "alert", h3 { "Could not load fleet detail" } p { "{error}" } button { class: "btn btn-ghost focus-ring", onclick: move |_| { refreshing.set(true); let next = (*refresh_generation.peek()).wrapping_add(1); refresh_generation.set(next); }, "Retry" } } },
+                    FleetDetailState::Loaded(detail) => rsx! { FleetCveDetailBody { detail: detail.clone() } },
+                }
             }
-
-            // Body (scrollable)
-            div {
-                class: "ed-body",
-                style: "padding: 18px 22px; display: flex; flex-direction: column; gap: 18px; overflow: auto;",
-
-                match &*cve_detail.read_unchecked() {
-                    Some(Ok(detail)) => rsx! {
-                        // CVSS Vector
-                        section {
-                            h3 {
-                                style: "font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--cf-text-muted); margin: 0 0 8px; font-weight: 600;",
-                                "CVSS vector"
-                            }
-                            if let Some(vector) = &detail.cvss_vector {
-                                code {
-                                    class: "mono",
-                                    style: "font-size: 12px; color: var(--cf-text-primary); background: var(--cf-subtle-bg); padding: 6px 10px; border-radius: 6px; display: inline-block;",
-                                    "{vector}"
-                                }
-                            } else {
-                                div { style: "font-size: 12px; color: var(--cf-text-muted);", "No CVSS vector available." }
-                            }
-                        }
-
-                        // Triage / Acceptance — matches JSX CveDrawer triage section
-                        section {
-                            h3 {
-                                style: "font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--cf-text-muted); margin: 0 0 10px; font-weight: 600;",
-                                "Triage status"
-                            }
-
-                            {
-                                // Derive triage state from justifications data
-                                let (triage_state, latest_reason, latest_by, latest_at, existing_category, existing_reason) =
-                                    match &*justifications.read_unchecked() {
-                                        Some(Ok(justs)) => {
-                                            if let Some(j) = justs.first() {
-                                                let state = if j.category == "accepted_risk" {
-                                                    "accepted"
-                                                } else if j.category == "patch_scheduled" {
-                                                    "scheduled"
-                                                } else {
-                                                    "outstanding"
-                                                };
-                                                (
-                                                    state,
-                                                    Some(j.reason.clone()),
-                                                    j.updated_by_username.clone(),
-                                                    Some(j.updated_at.format("%Y-%m-%d %H:%M UTC").to_string()),
-                                                    j.category.clone(),
-                                                    j.reason.clone(),
-                                                )
-                                            } else {
-                                                ("outstanding", None, None, None, "accepted_risk".to_string(), String::new())
-                                            }
-                                        }
-                                        _ => ("outstanding", None, None, None, "accepted_risk".to_string(), String::new()),
-                                    };
-
-                                let total_affected = affected_systems
-                                    .read()
-                                    .as_ref()
-                                    .and_then(|r| r.as_ref().ok())
-                                    .map(|s| s.len())
-                                    .unwrap_or(0);
-
-                                if show_accept() {
-                                    // ── Acceptance / edit form ──────────────────────────────────
-                                    // Compute env lists from affected systems for the scope picker
-                                    let (all_envs, env_counts_vec): (Vec<String>, Vec<(String, usize)>) = {
-                                        let mut counts: Vec<(String, usize)> = Vec::new();
-                                        if let Some(Ok(systems)) = &*affected_systems.read_unchecked() {
-                                            for sys in systems {
-                                                let env = sys.environment.clone().unwrap_or_else(|| "unknown".to_string());
-                                                if let Some(entry) = counts.iter_mut().find(|(k, _)| k == &env) {
-                                                    entry.1 += 1;
-                                                } else {
-                                                    counts.push((env, 1));
-                                                }
-                                            }
-                                        }
-                                        let envs: Vec<String> = counts.iter().map(|(e, _)| e.clone()).collect();
-                                        (envs, counts)
-                                    };
-
-                                    // If scope_envs is empty (first open), default to all envs
-                                    if scope_envs.read().is_empty() && !all_envs.is_empty() {
-                                        scope_envs.set(all_envs.clone());
-                                    }
-
-                                    let effective_envs = if scope_mode() == "all" {
-                                        all_envs.clone()
-                                    } else {
-                                        scope_envs.read().clone()
-                                    };
-
-                                    let covered_count = if let Some(Ok(systems)) = &*affected_systems.read_unchecked() {
-                                        systems.iter().filter(|s| {
-                                            let env = s.environment.as_deref().unwrap_or("unknown");
-                                            effective_envs.iter().any(|e| e == env)
-                                        }).count()
-                                    } else {
-                                        0
-                                    };
-
-                                    let all_affected_count = if let Some(Ok(systems)) = &*affected_systems.read_unchecked() {
-                                        systems.len()
-                                    } else {
-                                        0
-                                    };
-
-                                    rsx! {
-                                        div {
-                                            style: "padding: 14px; border-radius: 10px; border: 1px solid var(--cf-card-border); background: var(--cf-card-bg); display: flex; flex-direction: column; gap: 12px;",
-
-                                            // Apply to — scope picker
-                                            div {
-                                                class: "field",
-                                                label { "Apply to" }
-                                                div {
-                                                    class: "seg",
-                                                    style: "width: fit-content;",
-                                                    button {
-                                                        class: if scope_mode() == "all" { "active" } else { "" },
-                                                        onclick: move |_| scope_mode.set("all".to_string()),
-                                                        "All environments"
-                                                    }
-                                                    button {
-                                                        class: if scope_mode() == "some" { "active" } else { "" },
-                                                        onclick: move |_| scope_mode.set("some".to_string()),
-                                                        "Specific environments"
-                                                    }
-                                                }
-                                                if scope_mode() == "some" {
-                                                    div {
-                                                        style: "display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px;",
-                                                        for (env, count) in env_counts_vec.iter() {
-                                                            {
-                                                                let env_str = env.clone();
-                                                                let all_envs_for_click = all_envs.clone();
-                                                                // is_on: if scope_envs is still empty (not yet initialised),
-                                                                // treat every env as selected — same as "All environments" default.
-                                                                let envs_snap = scope_envs.read();
-                                                                let is_on = envs_snap.is_empty() || envs_snap.contains(env);
-                                                                drop(envs_snap);
-
-                                                                // Derive colors from the live env_colors resource (API-sourced).
-                                                                let colors_snap = env_colors.read();
-                                                                let colors_ref: &[(String, String)] = colors_snap
-                                                                    .as_ref()
-                                                                    .map(|v| v.as_slice())
-                                                                    .unwrap_or(&[]);
-                                                                let (env_fg, env_bg_on, env_border_on) = env_style_from_colors(env, colors_ref);
-                                                                let style = if is_on {
-                                                                    format!("padding: 4px 10px; border-radius: 99px; font-size: 11px; cursor: pointer; font-family: inherit; border: 1px solid {env_border_on}; background: {env_bg_on}; color: {env_fg}; display: inline-flex; align-items: center; gap: 6px;")
-                                                                } else {
-                                                                    "padding: 4px 10px; border-radius: 99px; font-size: 11px; cursor: pointer; font-family: inherit; border: 1px solid var(--cf-card-border); background: transparent; color: var(--cf-text-secondary); display: inline-flex; align-items: center; gap: 6px;".to_string()
-                                                                };
-                                                                let dot_color = if is_on { env_fg.clone() } else { "var(--cf-text-muted)".to_string() };
-                                                                rsx! {
-                                                                    button {
-                                                                        class: "focus-ring",
-                                                                        style: "{style}",
-                                                                        onclick: move |_| {
-                                                                            let mut envs = scope_envs.read().clone();
-                                                                            // On first click when empty, populate all first then toggle
-                                                                            if envs.is_empty() {
-                                                                                envs = all_envs_for_click.clone();
-                                                                            }
-                                                                            if let Some(pos) = envs.iter().position(|e| e == &env_str) {
-                                                                                envs.remove(pos);
-                                                                            } else {
-                                                                                envs.push(env_str.clone());
-                                                                            }
-                                                                            scope_envs.set(envs);
-                                                                        },
-                                                                        span {
-                                                                            style: "width: 6px; height: 6px; border-radius: 50%; background: {dot_color};",
-                                                                        }
-                                                                        "{env}"
-                                                                        span {
-                                                                            class: "mono",
-                                                                            style: "font-size: 10px; opacity: 0.7;",
-                                                                            "{count}"
-                                                                        }
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                                // "Covers N of M" help line
-                                                div {
-                                                    class: "help",
-                                                    style: "margin-top: 6px;",
-                                                    "Covers "
-                                                    strong {
-                                                        style: "color: var(--cf-text-primary);",
-                                                        "{covered_count}"
-                                                    }
-                                                    {
-                                                        let sys_s = if all_affected_count == 1 { "" } else { "s" };
-                                                        format!(" of {all_affected_count} affected system{sys_s}")
-                                                    }
-                                                    if scope_mode() == "some" && covered_count < all_affected_count {
-                                                        {
-                                                            let remaining = all_affected_count - covered_count;
-                                                            format!(" · {remaining} remain outstanding")
-                                                        }
-                                                    }
-                                                    "."
-                                                }
-                                            }
-
-                                            // Disposition
-                                            div {
-                                                class: "field",
-                                                label { "Disposition" }
-                                                div {
-                                                    class: "seg",
-                                                    style: "width: fit-content;",
-                                                    button {
-                                                        class: if justification_category() == "accepted_risk" { "active" } else { "" },
-                                                        onclick: move |_| justification_category.set("accepted_risk".to_string()),
-                                                        "Accept risk"
-                                                    }
-                                                    button {
-                                                        class: if justification_category() == "patch_scheduled" { "active" } else { "" },
-                                                        onclick: move |_| justification_category.set("patch_scheduled".to_string()),
-                                                        "Schedule patch"
-                                                    }
-                                                }
-                                            }
-
-                                            // Justification textarea + presets
-                                            div {
-                                                class: "field",
-                                                label { "Justification" }
-                                                textarea {
-                                                    class: "input focus-ring",
-                                                    rows: "3",
-                                                    value: "{justification_reason}",
-                                                    oninput: move |evt| justification_reason.set(evt.value()),
-                                                    placeholder: "Why is this acceptable / what is the compensating control?",
-                                                    style: "resize: vertical;",
-                                                }
-                                                // Preset buttons
-                                                div {
-                                                    style: "display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px;",
-                                                    for preset in [
-                                                        "Mitigated by network segmentation; service is internal-only.",
-                                                        "Compensating control via WAF rule.",
-                                                        "Vulnerable code path not reachable in this deployment.",
-                                                        "Acceptable in non-production; tracked for prod patch.",
-                                                        "False positive — upstream backport already applied.",
-                                                    ] {
-                                                        button {
-                                                            class: "focus-ring",
-                                                            style: "all: unset; cursor: pointer; font-size: 10px; padding: 3px 8px; border-radius: 99px; background: var(--cf-subtle-bg); color: var(--cf-text-secondary); border: 1px solid var(--cf-divider);",
-                                                            onclick: move |_| justification_reason.set(preset.to_string()),
-                                                            {
-                                                                if preset.len() > 42 {
-                                                                    format!("{}…", &preset[..40])
-                                                                } else {
-                                                                    preset.to_string()
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                                if !justification_reason().is_empty() && justification_reason().trim().len() < 10 {
-                                                    div {
-                                                        class: "help",
-                                                        style: "color: #fbbf24;",
-                                                        "Add a bit more detail (min 10 chars)."
-                                                    }
-                                                }
-                                            }
-
-                                            // Review / target patch date — parity with the JSX accept-risk form.
-                                            div {
-                                                class: "field",
-                                                style: "max-width: 220px;",
-                                                label {
-                                                    if justification_category() == "patch_scheduled" {
-                                                        "Target patch date"
-                                                    } else {
-                                                        "Review / expiry date (optional)"
-                                                    }
-                                                }
-                                                input {
-                                                    r#type: "date",
-                                                    class: "input focus-ring",
-                                                    disabled: true,
-                                                    value: "{justification_review_date}",
-                                                    oninput: move |evt| justification_review_date.set(evt.value()),
-                                                }
-                                                div {
-                                                    class: "help",
-                                                    style: "margin-top: 6px; color: var(--cf-text-muted);",
-                                                    "Date persistence is not yet implemented; tracked in TASK-348.1.1."
-                                                }
-                                            }
-
-                                            // Audit trail callout
-                                            div {
-                                                class: "sd-callout sd-callout-info",
-                                                style: "font-size: 11px;",
-                                                svg {
-                                                    width: "12", height: "12", view_box: "0 0 24 24",
-                                                    fill: "none", stroke: "currentColor", stroke_width: "3",
-                                                    stroke_linecap: "round", stroke_linejoin: "round",
-                                                    polyline { points: "20 6 9 17 4 12" }
-                                                }
-                                                div { "Recorded against your account and attached to each covered system's compliance evidence trail." }
-                                            }
-
-                                            // Cancel / Save
-                                            div {
-                                                style: "display: flex; justify-content: flex-end; gap: 8px;",
-                                                button {
-                                                    class: "btn btn-ghost focus-ring",
-                                                    onclick: move |_| show_accept.set(false),
-                                                    "Cancel"
-                                                }
-                                                button {
-                                                    class: "btn btn-primary focus-ring",
-                                                    style: if justification_reason().trim().len() < 10 {
-                                                        "opacity: 0.5; cursor: not-allowed;"
-                                                    } else {
-                                                        "opacity: 1; cursor: pointer;"
-                                                    },
-                                                    onclick: move |_| {
-                                                        let cve_id = cve_id_for_save_seed.clone();
-                                                        let category = justification_category();
-                                                        let reason = justification_reason();
-
-                                                        if reason.trim().len() < 10 || reason.trim().len() > 2000 {
-                                                            save_status.set(Some("Reason must be 10-2000 characters".to_string()));
-                                                            return;
-                                                        }
-
-                                                        spawn(async move {
-                                                            let payload = CveJustificationInput {
-                                                                system_id: None,
-                                                                category,
-                                                                reason,
-                                                            };
-
-                                                            match client::save_cve_justification(&cve_id, &payload).await {
-                                                                Ok(_) => {
-                                                                    save_status.set(Some("Justification saved".to_string()));
-                                                                    justification_reason.set(String::new());
-                                                                    justification_review_date.set(String::new());
-                                                                    justifications_refresh.set(justifications_refresh() + 1);
-                                                                    show_accept.set(false);
-                                                                }
-                                                                Err(err) => {
-                                                                    save_status.set(Some(format!("Save failed: {}", err)));
-                                                                }
-                                                            }
-                                                        });
-                                                    },
-                                                    {
-                                                        let verb = if justification_category() == "accepted_risk" { "Accept" } else { "Schedule" };
-                                                        let s = if covered_count == 1 { "" } else { "s" };
-                                                        format!("{verb} for {covered_count} system{s}")
-                                                    }
-                                                }
-                                            }
-                                            if let Some(msg) = save_status() {
-                                                p { class: "text-xs {theme::text::SECONDARY}", style: "margin-top: 4px; text-align: right;", "{msg}" }
-                                            }
-                                        }
-                                    }
-                                } else if triage_state == "outstanding" {
-                                    // ── Outstanding callout ─────────────────────────────────────
-                                    rsx! {
-                                        div {
-                                            class: "sd-callout sd-callout-warn",
-                                            svg {
-                                                width: "13", height: "13", view_box: "0 0 24 24",
-                                                fill: "none", stroke: "currentColor", stroke_width: "2",
-                                                stroke_linecap: "round", stroke_linejoin: "round",
-                                                path { d: "M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" }
-                                                line { x1: "12", y1: "9", x2: "12", y2: "13" }
-                                                line { x1: "12", y1: "17", x2: "12.01", y2: "17" }
-                                            }
-                                            div {
-                                                style: "font-size: 12px;",
-                                                strong { "Outstanding — needs triage." }
-                                                " Patch the affected systems, or accept the risk with a justification. You can scope it to all environments or only specific ones (e.g. accept in dev, keep open in prod)."
-                                            }
-                                        }
-                                    }
-                                } else {
-                                    // ── Accepted / Scheduled card ───────────────────────────────
-                                    let border_color = if triage_state == "accepted" { "rgba(167,139,250,0.3)" } else { "rgba(96,165,250,0.3)" };
-                                    let bg_color = if triage_state == "accepted" { "rgba(167,139,250,0.07)" } else { "rgba(96,165,250,0.07)" };
-                                    rsx! {
-                                        div {
-                                            style: "padding: 14px; border-radius: 10px; border: 1px solid {border_color}; background: {bg_color};",
-                                            // Header row: chip + "covers N of M systems"
-                                            div {
-                                                style: "display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px;",
-                                                span {
-                                                    class: "chip chip-info",
-                                                    style: if triage_state == "accepted" { "background: rgba(167,139,250,0.18); color: #a78bfa;" } else { "" },
-                                                    if triage_state == "accepted" { "Risk accepted" } else { "Patch scheduled" }
-                                                }
-                                                span {
-                                                    style: "font-size: 11px; color: var(--cf-text-muted);",
-                                                    "fleet-wide justification"
-                                                }
-                                            }
-                                            // Reason text
-                                            if let Some(reason) = &latest_reason {
-                                                div {
-                                                    style: "font-size: 13px; color: var(--cf-text-primary); line-height: 1.5;",
-                                                    "{reason}"
-                                                }
-                                            }
-                                            // By / at + Edit + Revoke
-                                            div {
-                                                style: "font-size: 11px; color: var(--cf-text-muted); margin-top: 8px; display: flex; gap: 8px; align-items: center;",
-                                                svg {
-                                                    width: "11", height: "11", view_box: "0 0 24 24",
-                                                    fill: "none", stroke: "currentColor", stroke_width: "2",
-                                                    stroke_linecap: "round", stroke_linejoin: "round",
-                                                    path { d: "M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" }
-                                                    circle { cx: "12", cy: "7", r: "4" }
-                                                }
-                                                span {
-                                                    "by "
-                                                    span {
-                                                        class: "mono",
-                                                        "{latest_by.as_deref().unwrap_or(\"—\")}"
-                                                    }
-                                                }
-                                                if let Some(at) = &latest_at {
-                                                    span { "· {at}" }
-                                                }
-                                                // Edit button — prefill form from existing justification
-                                                button {
-                                                    class: "btn btn-ghost focus-ring xs",
-                                                    style: "margin-left: auto;",
-                                                    onclick: move |_| {
-                                                        justification_category.set(existing_category.clone());
-                                                        justification_reason.set(existing_reason.clone());
-                                                        justification_review_date.set(String::new());
-                                                        show_accept.set(true);
-                                                    },
-                                                    svg {
-                                                        width: "10", height: "10", view_box: "0 0 24 24",
-                                                        fill: "none", stroke: "currentColor", stroke_width: "2",
-                                                        stroke_linecap: "round", stroke_linejoin: "round",
-                                                        path { d: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" }
-                                                        polyline { points: "14 2 14 8 20 8" }
-                                                    }
-                                                    " Edit"
-                                                }
-                                                 // Revoke button — calls DELETE endpoint
-                                                 button {
-                                                     class: "btn btn-ghost focus-ring xs",
-                                                     onclick: move |_| {
-                                                         let cve_id = cve_id_for_save_seed.clone();
-                                                         spawn(async move {
-                                                             match client::revoke_cve_justification(&cve_id).await {
-                                                                 Ok(_) => {
-                                                                     justifications_refresh.set(justifications_refresh() + 1);
-                                                                 }
-                                                                 Err(err) => {
-                                                                     save_status.set(Some(format!("Revoke failed: {}", err)));
-                                                                 }
-                                                             }
-                                                         });
-                                                     },
-                                                    svg {
-                                                        width: "10", height: "10", view_box: "0 0 24 24",
-                                                        fill: "none", stroke: "currentColor", stroke_width: "2",
-                                                        stroke_linecap: "round", stroke_linejoin: "round",
-                                                        path { d: "M18 6 6 18" }
-                                                        path { d: "M6 6l12 12" }
-                                                    }
-                                                    " Revoke"
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // Remediation
-                        section {
-                            h3 {
-                                style: "font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--cf-text-muted); margin: 0 0 10px; font-weight: 600;",
-                                "Remediation"
-                            }
-                            if detail.fix_status == "fix_available" {
-                                div {
-                                    class: "sd-callout sd-callout-info",
-                                    svg {
-                                        width: "13", height: "13", view_box: "0 0 24 24",
-                                        fill: "none", stroke: "currentColor", stroke_width: "3",
-                                        stroke_linecap: "round", stroke_linejoin: "round",
-                                        polyline { points: "20 6 9 17 4 12" }
-                                    }
-                                    div {
-                                        style: "font-size: 12px;",
-                                        "Fixed in "
-                                        span {
-                                            class: "mono",
-                                            style: "font-weight: 600; color: #34d399;",
-                                            "{detail.package_name.as_deref().unwrap_or(\"package\")}-{detail.fixed_version.as_deref().unwrap_or(\"version\")}"
-                                        }
-                                        ". Affected systems will pick up the fix automatically once the upstream flake bumps the package and an eval passes."
-                                    }
-                                }
-                            } else {
-                                div {
-                                    class: "sd-callout sd-callout-danger",
-                                    svg {
-                                        width: "13", height: "13", view_box: "0 0 24 24",
-                                        fill: "none", stroke: "currentColor", stroke_width: "2",
-                                        stroke_linecap: "round", stroke_linejoin: "round",
-                                        path { d: "M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" }
-                                        line { x1: "12", y1: "9", x2: "12", y2: "13" }
-                                        line { x1: "12", y1: "17", x2: "12.01", y2: "17" }
-                                    }
-                                    div {
-                                        style: "font-size: 12px;",
-                                        strong { "No upstream patch yet." }
-                                        " Watch the advisory for updates. Consider applying compensating controls (network isolation, WAF rule) on affected hosts."
-                                    }
-                                }
-                            }
-                            dl {
-                                class: "kv-grid",
-                                style: "margin-top: 10px;",
-                                dt { "Introduced in" }
-                                dd { class: "mono", "{detail.package_name.as_deref().unwrap_or(\"\")}-{detail.installed_version.as_deref().unwrap_or(\"N/A\")}" }
-                                dt { "Fixed in" }
-                                dd { class: "mono", if detail.fix_status == "fix_available" { "{detail.package_name.as_deref().unwrap_or(\"\")}-{detail.fixed_version.as_deref().unwrap_or(\"\")}" } else { "—" } }
-                                dt { "Advisory" }
-                                dd {
-                                    class: "mono",
-                                    a {
-                                        href: "https://nvd.nist.gov/vuln/detail/{cve_id_label}",
-                                        target: "_blank",
-                                        style: "color: var(--cf-brand-purple);",
-                                        "nvd.nist.gov"
-                                    }
-                                }
-                            }
-                        }
-
-                        // Affected Systems
-                        section {
-                            h3 {
-                                style: "font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--cf-text-muted); margin: 0 0 10px; font-weight: 600;",
-                                "Affected systems · {affected_systems.read().as_ref().and_then(|r| r.as_ref().ok()).map(|s| s.len()).unwrap_or(0)}"
-                            }
-                            match &*affected_systems.read_unchecked() {
-                                Some(Ok(systems)) => rsx! {
-                                    if systems.is_empty() {
-                                        p { class: "text-xs {theme::text::SECONDARY}", "No active systems affected." }
-                                    } else {
-                                        AffectedSystemsList {
-                                            systems: systems.clone(),
-                                            colors: env_colors.read().as_ref().cloned().unwrap_or_default(),
-                                        }
-                                    }
-                                },
-                                Some(Err(err)) => rsx! {
-                                    p { class: "text-xs text-red-400", "Error loading systems: {err}" }
-                                },
-                                None => rsx! {
-                                    p { class: "text-xs {theme::text::SECONDARY}", "Loading systems..." }
-                                }
-                            }
-                        }
+            DialogFocusSentinel { dialog_id: "cve-fleet-drawer", boundary: DialogFocusBoundary::First }
+        }
+        if triage_open() {
+            if let FleetDetailState::Loaded(detail) = &*state.read() {
+                FleetCveTriageDialog {
+                    key: "{detail.cve.cve_id}|{detail.canonical_package_name}",
+                    detail: detail.clone(),
+                    on_close: move |_| triage_open.set(false),
+                    on_success: move |response: poam_api::FleetCveTriageResponse| {
+                        result_poam.set(response.poam_id.map(|id| (id, response.poam_reused)));
+                        mutation_error.set(None);
+                        state.set(FleetDetailState::Loaded(response.detail));
+                        triage_open.set(false);
                     },
-                    Some(Err(err)) => rsx! {
-                        p { class: "text-sm text-red-400", "Error loading CVE details: {err}" }
+                    on_conflict: move |message: String| {
+                        mutation_error.set(Some(message));
+                        triage_open.set(false);
+                        refreshing.set(true);
+                        let next = (*refresh_generation.peek()).wrapping_add(1);
+                        refresh_generation.set(next);
                     },
-                    None => rsx! {
-                        p { class: "text-sm {theme::text::SECONDARY}", "Loading CVE details..." }
-                    }
                 }
             }
         }
@@ -2320,212 +1930,321 @@ fn CveDrawer(cve_id: String, on_close: EventHandler<()>) -> Element {
 }
 
 #[component]
-fn AffectedSystemsList(
-    systems: Vec<CveAffectedSystemDetail>,
-    colors: Vec<(String, String)>,
-) -> Element {
-    // Group by environment while preserving encounter order for stable rendering.
-    let mut by_env: Vec<(String, Vec<CveAffectedSystemDetail>)> = Vec::new();
-    for sys in systems {
-        let env = sys
-            .environment
-            .clone()
-            .unwrap_or_else(|| "unknown".to_string());
-
-        if let Some((_, entries)) = by_env.iter_mut().find(|(k, _)| k == &env) {
-            entries.push(sys);
-        } else {
-            by_env.push((env, vec![sys]));
+fn FleetCveDetailBody(detail: poam_api::FleetCveDetail) -> Element {
+    let total = detail.affected_system_count;
+    let cvss = detail
+        .cve
+        .cvss_v3_score
+        .map(|score| format!("{score:.1}"))
+        .unwrap_or_else(|| "N/A".to_string());
+    rsx! {
+        div { class: "ed-stats cve-fleet-stats",
+            div { class: "ed-stat", div { class: "ed-stat-label", "CVSS" } div { class: "ed-stat-val", "{cvss}" } }
+            div { class: "ed-stat", div { class: "ed-stat-label", "Package" } div { class: "ed-stat-val mono", "{detail.canonical_package_name}" } }
+            div { class: "ed-stat", div { class: "ed-stat-label", "Affected" } div { class: "ed-stat-val", "{total}" } }
+            div { class: "ed-stat", div { class: "ed-stat-label", "Fleet rollup" } div { class: "ed-stat-val", "{fleet_rollup_label(detail.rollup)}" } }
+        }
+        section { class: "cve-fleet-section",
+            h3 { "Triage status" }
+            p { class: "cve-fleet-truth", "Accepted risk records rationale only. It does not verify or remediate the vulnerability. Scheduled patching remains separate from accepted risk." }
+            if detail.environments.is_empty() {
+                div { class: "empty", "No visible affected environments." }
+            }
+            for environment in detail.environments.clone() {
+                FleetEnvironmentCard { environment }
+            }
         }
     }
+}
 
-    // If empty, show message
-    if by_env.is_empty() {
-        return rsx! {
-            div {
-                style: "font-size: 12px; color: var(--cf-text-muted); padding: 12px 0;",
-                "No active systems affected. This CVE may apply to systems no longer in the registry."
+#[component]
+fn FleetEnvironmentCard(environment: poam_api::CveAffectedEnvironment) -> Element {
+    let status = match &environment.disposition {
+        Some(poam_api::CveEnvironmentDisposition::Accepted { .. }) => "ACCEPTED",
+        Some(poam_api::CveEnvironmentDisposition::Scheduled { .. }) => "SCHEDULED",
+        None => "OPEN",
+    };
+    rsx! {
+        article { class: "cve-fleet-env", "data-testid": "cve-fleet-environment", "data-state": "{status.to_ascii_lowercase()}",
+            header { div { strong { "{environment.environment_name}" } span { class: "mono", " · {environment.affected_system_count} host(s)" } } span { class: "chip", "{status}" } }
+            match &environment.disposition {
+                Some(poam_api::CveEnvironmentDisposition::Accepted { justification, review_date, actor, accepted_at }) => { let accepted_date = accepted_at.format("%Y-%m-%d").to_string(); rsx! {
+                    p { "{justification}" }
+                    small { "Accepted by {actor.display} on {accepted_date}" if let Some(review_date) = review_date { " · review {review_date}" } else { " · no review date" } }
+                } },
+                Some(poam_api::CveEnvironmentDisposition::Scheduled { poam_id, poam, actor, scheduled_at }) => { let scheduled_date = scheduled_at.format("%Y-%m-%d").to_string(); let label = poam.as_ref().map(|poam| format!("{}: {}", poam.human_id, poam.title)).unwrap_or_else(|| format!("POA&M {poam_id}")); rsx! {
+                    div { class: "cve-fleet-scheduled", span { "Scheduled by {actor.display} on {scheduled_date}" } Link { to: Route::ComplianceView { bundle: String::new(), version: String::new(), system: String::new(), policy: String::new(), poam: poam_id.to_string(), view: String::new() }, class: "poam-ref focus-ring", "{label}" } }
+                } },
+                None => rsx! { small { "No active disposition. This environment remains outstanding." } },
+            }
+            div { class: "cve-fleet-hosts",
+                for system in environment.systems.iter() {
+                    div { class: "cve-fleet-host", "data-testid": "cve-fleet-host",
+                        Link { to: Route::SystemDetailView { id: system.system_id.to_string(), tab: "cves".to_string(), poam: String::new(), config_mode: String::new(), revision: String::new(), generation: String::new(), deploy_generation: String::new() }, class: "mono focus-ring", "{system.hostname}" }
+                        span { class: "mono truncate", title: "{system.flake_name.as_deref().unwrap_or(\"Unknown flake\")}", "{system.flake_name.as_deref().unwrap_or(\"Unknown flake\")}" }
+                        span { class: "mono truncate", title: "{system.commit_hash.as_deref().unwrap_or(\"Unknown revision\")}", "{system.commit_hash.as_deref().unwrap_or(\"Unknown revision\")}" }
+                        span { class: "mono", "{system.current_package_version.as_deref().unwrap_or(\"Unknown version\")}" }
+                    }
+                }
+                if environment.systems.len() < environment.affected_system_count.max(0) as usize {
+                    small { "Showing {environment.systems.len()} of {environment.affected_system_count} affected hosts." }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn FleetCveTriageDialog(
+    detail: poam_api::FleetCveDetail,
+    on_close: EventHandler<()>,
+    on_success: EventHandler<poam_api::FleetCveTriageResponse>,
+    on_conflict: EventHandler<String>,
+) -> Element {
+    let mut draft = use_signal(|| FleetTriageDraft::from_detail(&detail));
+    let mut catalog = use_signal(|| None::<Result<poam_api::PoamAssigneeCatalog, String>>);
+    let mut error = use_signal(|| None::<String>);
+    let mut pending = use_signal(|| false);
+    use_effect(move || {
+        spawn(async move {
+            catalog.set(Some(
+                poam_api::fetch_assignee_catalog()
+                    .await
+                    .map_err(|error| error.to_string()),
+            ));
+        });
+    });
+    let scheduled = draft
+        .read()
+        .environments
+        .iter()
+        .any(|environment| environment.choice == EnvironmentTriageChoice::Scheduled);
+    let dialog_label = format!(
+        "Triage {} {}",
+        detail.cve.cve_id, detail.canonical_package_name
+    );
+    let submit_detail = detail.clone();
+    let submit = move |_: MouseEvent| {
+        let request = match draft.read().request(&submit_detail.canonical_package_name) {
+            Ok(request) => request,
+            Err(message) => {
+                error.set(Some(message));
+                return;
             }
         };
-    }
-
+        pending.set(true);
+        error.set(None);
+        let cve_id = submit_detail.cve.cve_id.clone();
+        spawn(async move {
+            match poam_api::triage_fleet_cve(&cve_id, &request).await {
+                Ok(response) => {
+                    pending.set(false);
+                    on_success.call(response);
+                }
+                Err(PoamApiError::Server(server))
+                    if server.status == 409 || server.status == 412 =>
+                {
+                    pending.set(false);
+                    on_conflict.call(format!(
+                        "{} Refresh completed with the server's current exact fleet state.",
+                        server.message
+                    ));
+                }
+                Err(request_error) => {
+                    pending.set(false);
+                    error.set(Some(format!("Triage was not applied: {request_error}")));
+                }
+            }
+        });
+    };
     rsx! {
-        div {
-            style: "display: flex; flex-direction: column; gap: 14px;",
-            for (env, sys_list) in by_env.iter() {
-                div {
-                    // Environment header with badge and host count
-                    div {
-                        style: "display: flex; align-items: center; gap: 8px; margin-bottom: 6px;",
-                        EnvBadge { env: env.clone(), colors: colors.clone() }
-                        span {
-                            style: "font-size: 11px; color: var(--cf-text-muted);",
-                            {
-                                let host_plural = if sys_list.len() == 1 { "" } else { "s" };
-                                format!("{} host{}", sys_list.len(), host_plural)
-                            }
-                        }
-                    }
-                    // Card with table
-                    div {
-                        class: "card",
-                        style: "overflow: hidden; border: 1px solid var(--cf-divider);",
-                        table {
-                            class: "sys-table",
-                            style: "font-size: 12px;",
-                            tbody {
-                                for sys in sys_list {
-                                    tr {
-                                        // Hostname with status dot (40% width)
-                                        td {
-                                            style: "width: 40%;",
-                                            div {
-                                                style: "display: flex; align-items: center; gap: 8px;",
-                                                // Status dot - green for healthy
-                                                span {
-                                                    class: "status-dot",
-                                                    style: "--status-color: {deployment_policy_status_color(&sys.deployment_policy)};",
-                                                }
-                                                span {
-                                                    class: "mono",
-                                                    style: "font-weight: 600;",
-                                                    "{sys.hostname}"
-                                                }
-                                            }
-                                        }
-                                        // Flake name
-                                        td {
-                                            class: "mono",
-                                            style: "font-size: 11px; color: var(--cf-text-muted);",
-                                            if let Some(flake) = &sys.flake_name {
-                                                "{flake}"
-                                            }
-                                        }
-                                        // Commit hash (first 7 chars)
-                                        td {
-                                            class: "mono",
-                                            style: "font-size: 11px;",
-                                            if let Some(commit) = &sys.commit_hash {
-                                                "{commit}"
-                                            }
-                                        }
-                                        // Deployment chip (based on deployment_policy)
-                                        td {
-                                            DeploymentChip { state: sys.deployment_policy.clone() }
-                                        }
-                                        // Arrow button to open system
-                                        td {
-                                            style: "text-align: right;",
-                                            Link {
-                                                to: Route::SystemDetailView { id: sys.system_id.to_string(), tab: String::new(), poam: String::new(), config_mode: String::new(), revision: String::new(), generation: String::new(), deploy_generation: String::new() },
-                                                class: "btn-icon focus-ring",
-                                                title: "Open {sys.hostname}",
-                                                // Arrow-right icon
-                                                svg {
-                                                    width: "13",
-                                                    height: "13",
-                                                    view_box: "0 0 24 24",
-                                                    fill: "none",
-                                                    stroke: "currentColor",
-                                                    stroke_width: "2",
-                                                    stroke_linecap: "round",
-                                                    stroke_linejoin: "round",
-                                                    line { x1: "5", y1: "12", x2: "19", y2: "12" }
-                                                    polyline { points: "12 5 19 12 12 19" }
-                                                }
-                                            }
-                                        }
-                                    }
+        DialogFocusRestore {}
+        button { class: "modal-backdrop cve-triage-backdrop", aria_label: "Close {dialog_label}", tabindex: "-1", onclick: move |_| if !pending() { on_close.call(()) } }
+        div { id: "cve-triage-dialog", class: "modal cve-triage-modal", role: "dialog", aria_modal: "true", aria_label: "{dialog_label}", "data-testid": "cve-triage-dialog", tabindex: "-1", onkeydown: move |event| if event.key() == Key::Escape && !pending() { event.stop_propagation(); on_close.call(()); },
+            DialogFocusSentinel { dialog_id: "cve-triage-dialog", boundary: DialogFocusBoundary::Last }
+            div { class: "modal-head", h2 { "Triage {detail.cve.cve_id} / {detail.canonical_package_name}" } button { class: "btn-icon focus-ring", aria_label: "Close triage editor", autofocus: true, disabled: pending(), onclick: move |_| on_close.call(()), "×" } }
+            div { class: "modal-body cve-triage-body",
+                p { "Choose one intention for every affected environment. The server recomputes exact host scope when you submit." }
+                if let Some(message) = error() { div { class: "sd-callout sd-callout-danger", role: "alert", "{message}" } }
+                for environment in detail.environments.clone() {
+                    { let environment_id = environment.environment_id; let current = draft.read().environments.iter().find(|item| item.environment_id == environment_id).cloned(); rsx! {
+                        fieldset { class: "cve-triage-env", "data-testid": "cve-triage-environment",
+                            legend { "{environment.environment_name} · {environment.affected_system_count} host(s)" }
+                            div { class: "seg", role: "group", aria_label: "Disposition for {environment.environment_name}",
+                                for (choice, label) in [(EnvironmentTriageChoice::Open, "Leave open"), (EnvironmentTriageChoice::Accepted, "Accept risk"), (EnvironmentTriageChoice::Scheduled, "Schedule patch")] {
+                                    button { r#type: "button", class: if current.as_ref().map(|item| item.choice) == Some(choice) { "active" } else { "" }, aria_pressed: if current.as_ref().map(|item| item.choice) == Some(choice) { "true" } else { "false" }, "data-action": "{choice.value()}", onclick: move |_| draft.write().set_choice(environment_id, choice), "{label}" }
                                 }
                             }
+                            if current.as_ref().map(|item| item.choice) == Some(EnvironmentTriageChoice::Accepted) {
+                                label { class: "field", span { "Justification · required" } textarea { value: "{current.as_ref().map(|item| item.justification.as_str()).unwrap_or_default()}", "data-testid": "cve-accept-justification", oninput: move |event| if let Some(item) = draft.write().environments.iter_mut().find(|item| item.environment_id == environment_id) { item.justification = event.value(); } } }
+                                label { class: "field", span { "Review date · optional" } input { r#type: "date", value: "{current.as_ref().map(|item| item.review_date.as_str()).unwrap_or_default()}", "data-testid": "cve-accept-review-date", oninput: move |event| if let Some(item) = draft.write().environments.iter_mut().find(|item| item.environment_id == environment_id) { item.review_date = event.value(); } } }
+                            }
                         }
+                    } }
+                }
+                if scheduled {
+                    fieldset { class: "cve-triage-poam", legend { "Shared POA&M for scheduled environments" }
+                        if let Some(message) = &draft.read().preservation_error { div { class: "sd-callout sd-callout-warn", role: "alert", "{message}" } }
+                        label { class: "field", span { "Title" } input { value: "{draft.read().title}", "data-testid": "cve-poam-title", oninput: move |event| draft.write().title = event.value() } }
+                        label { class: "field", span { "Target completion" } input { r#type: "date", value: "{draft.read().target_date}", "data-testid": "cve-poam-target", oninput: move |event| draft.write().target_date = event.value() } }
+                        label { class: "field", span { "Remediation plan" } textarea { value: "{draft.read().plan}", "data-testid": "cve-poam-plan", oninput: move |event| draft.write().plan = event.value() } }
+                        label { class: "field", span { "Assignee · required" }
+                            select { value: "{draft.read().assignee}", "data-testid": "cve-poam-assignee", disabled: catalog.read().is_none(), onchange: move |event| draft.write().assignee = event.value(),
+                                option { value: "", disabled: true, "Select a user or group" }
+                                if let Some(label) = &draft.read().assignee_label { option { value: "{draft.read().assignee}", "{label} (current)" } }
+                                if let Some(Ok(catalog)) = &*catalog.read() {
+                                    optgroup { label: "People", for person in &catalog.people { option { value: "user:{person.user_id}", "{person.label}" } } }
+                                    optgroup { label: "Groups", for group in &catalog.groups { option { value: "group:{group.group_name}", "{group.group_name}" } } }
+                                }
+                            }
+                            if let Some(Err(message)) = &*catalog.read() { small { role: "alert", "Assignees unavailable: {message}" } }
+                        }
+                        label { class: "poam-check", input { r#type: "checkbox", checked: draft.read().default_milestones, onchange: move |event| draft.write().default_milestones = event.checked() } span { "Add the default vulnerability remediation milestones" } }
                     }
                 }
             }
-        }
-    }
-}
-
-/// Environment badge with colored dot and text.
-/// Colors are looked up from the live environment color map (API-sourced).
-#[component]
-fn EnvBadge(env: String, colors: Vec<(String, String)>) -> Element {
-    let (fg, bg, border) = env_style_from_colors(&env, &colors);
-    rsx! {
-        span {
-            class: "env-badge",
-            style: "--env-bg: {bg}; --env-fg: {fg}; --env-border: {border};",
-            span { class: "chip-dot" }
-            "{env}"
-        }
-    }
-}
-
-/// Deployment state chip.
-/// Matches JSX DeploymentChip component.
-#[component]
-fn DeploymentChip(state: String) -> Element {
-    let (chip_class, label) = match state.to_lowercase().as_str() {
-        "up-to-date" => ("chip-healthy", "up to date"),
-        "behind" => ("chip-warning", "behind"),
-        "failed" => ("chip-critical", "deploy failed"),
-        "drift" => ("chip-warning", "drift"),
-        "deploying" => ("chip-info", "deploying"),
-        "automatic" => ("chip-healthy", "automatic"),
-        "manual" => ("chip-info", "manual"),
-        "scheduled" => ("chip-info", "scheduled"),
-        _ => ("chip-unknown", "unknown"),
-    };
-
-    rsx! {
-        span {
-            class: "chip {chip_class}",
-            "{label}"
-        }
-    }
-}
-
-#[component]
-fn JustificationCard(justification: CveJustification) -> Element {
-    let category_label = match justification.category.as_str() {
-        "mitigated" => "Mitigated",
-        "false_positive" => "False Positive",
-        "accepted_risk" => "Accepted Risk",
-        "patch_scheduled" => "Patch Scheduled",
-        _ => "Other",
-    };
-
-    rsx! {
-        div {
-            class: "p-3 rounded border border-white/10 bg-white/5 text-xs space-y-1",
-            div {
-                class: "flex items-center justify-between",
-                span {
-                    class: "px-2 py-1 rounded bg-purple-500/20 text-purple-300 text-xs font-semibold",
-                    "{category_label}"
-                }
-                span {
-                    class: "{theme::text::SECONDARY}",
-                    { format!("Updated {}", justification.updated_at.format("%Y-%m-%d %H:%M UTC")) }
-                }
+            div { class: "modal-foot",
+                button { class: "btn btn-ghost focus-ring", disabled: pending(), onclick: move |_| on_close.call(()), "Cancel" }
+                button { class: "btn btn-primary focus-ring", "data-testid": "cve-triage-submit", disabled: pending() || (scheduled && draft.read().preservation_error.is_some()), onclick: submit, if pending() { "Applying..." } else { "Apply triage" } }
             }
-            p {
-                class: "text-sm",
-                "{justification.reason}"
-            }
-            if let Some(username) = &justification.updated_by_username {
-                p {
-                    class: "{theme::text::SECONDARY}",
-                    "by {username}"
-                }
-            }
+            DialogFocusSentinel { dialog_id: "cve-triage-dialog", boundary: DialogFocusBoundary::First }
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::ToastLifecycle;
+    use super::{
+        EnvironmentTriageChoice, EnvironmentTriageDraft, FleetDetailState, FleetTriageDraft,
+        ToastLifecycle, fleet_error_state, request_token_is_current,
+    };
+    use crate::views::poam_api::{
+        self, CveEnvironmentTriageAction, PoamApiError, PoamRisk, PoamServerError,
+    };
+    use uuid::Uuid;
+
+    fn environment(
+        id: &str,
+        name: &str,
+        choice: EnvironmentTriageChoice,
+    ) -> EnvironmentTriageDraft {
+        EnvironmentTriageDraft {
+            environment_id: Uuid::parse_str(id).unwrap(),
+            environment_name: name.to_string(),
+            choice,
+            justification: String::new(),
+            review_date: String::new(),
+        }
+    }
+
+    fn triage_draft() -> FleetTriageDraft {
+        FleetTriageDraft {
+            environments: vec![
+                environment(
+                    "00000000-0000-0000-0000-0000000000a1",
+                    "Development",
+                    EnvironmentTriageChoice::Accepted,
+                ),
+                environment(
+                    "00000000-0000-0000-0000-0000000000b2",
+                    "Production",
+                    EnvironmentTriageChoice::Scheduled,
+                ),
+                environment(
+                    "00000000-0000-0000-0000-0000000000c3",
+                    "Lab",
+                    EnvironmentTriageChoice::Open,
+                ),
+            ],
+            title: "Patch openssl fleet".to_string(),
+            target_date: "2026-10-15".to_string(),
+            plan: "Promote the fixed package through environments.".to_string(),
+            assignee: "group:platform-operators".to_string(),
+            assignee_label: None,
+            risk: PoamRisk::High,
+            preservation_error: None,
+            default_milestones: true,
+        }
+    }
+
+    fn scheduled_detail(
+        assignee: serde_json::Value,
+        include_metadata: bool,
+        second_poam_id: Option<&str>,
+    ) -> poam_api::FleetCveDetail {
+        let poam_id = "00000000-0000-0000-0000-0000000000d1";
+        let metadata = serde_json::json!({
+            "id": poam_id,
+            "human_id": "POAM-0042",
+            "title": "Existing fleet remediation",
+            "plan": "Preserve the exact remediation plan.",
+            "target_date": "2026-11-20",
+            "risk": "medium",
+            "assignee": assignee,
+        });
+        let disposition = |id: &str| {
+            let mut value = serde_json::json!({
+                "state": "scheduled",
+                "poam_id": id,
+                "actor": {
+                    "user_id": "00000000-0000-0000-0000-0000000000f1",
+                    "display": "Operator"
+                },
+                "scheduled_at": "2026-09-13T12:00:00Z"
+            });
+            if include_metadata {
+                let mut row_metadata = metadata.clone();
+                row_metadata["id"] = serde_json::Value::String(id.to_string());
+                value["poam"] = row_metadata;
+            }
+            value
+        };
+        serde_json::from_value(serde_json::json!({
+            "cve": {
+                "cve_id": "CVE-2026-44010",
+                "cvss_v3_score": 9.8,
+                "severity": "critical",
+                "title": "Test CVE",
+                "cvss_vector": null,
+                "cwe_id": null,
+                "published_date": null,
+                "modified_date": null,
+                "exploited": false,
+                "package_name": "openssl",
+                "installed_version": "3.0.1",
+                "fixed_version": "3.0.2",
+                "detection_method": "test",
+                "fix_status": "fix_available"
+            },
+            "canonical_package_name": "openssl",
+            "rollup": "scheduled",
+            "affected_system_count": 2,
+            "environments": [
+                {
+                    "environment_id": "00000000-0000-0000-0000-0000000000e1",
+                    "environment_name": "Production",
+                    "affected_system_count": 1,
+                    "systems": [],
+                    "disposition": disposition(poam_id)
+                },
+                {
+                    "environment_id": "00000000-0000-0000-0000-0000000000e2",
+                    "environment_name": "Staging",
+                    "affected_system_count": 1,
+                    "systems": [],
+                    "disposition": disposition(second_poam_id.unwrap_or(poam_id))
+                }
+            ]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn exact_fleet_request_token_rejects_stale_and_unmounted_responses() {
+        assert!(request_token_is_current(true, 2, 2));
+        assert!(!request_token_is_current(true, 1, 2));
+        assert!(!request_token_is_current(false, 2, 2));
+    }
 
     #[test]
     fn toast_lifecycle_fences_timers_and_manual_dismissal() {
@@ -2544,5 +2263,180 @@ mod tests {
         let current_success = lifecycle.publish(true);
         assert!(lifecycle.expire(current_success));
         assert!(!lifecycle.expire(current_success));
+    }
+
+    #[test]
+    fn triage_validation_requires_environment_specific_acceptance_fields() {
+        let mut draft = triage_draft();
+        assert_eq!(
+            draft.request("openssl").unwrap_err(),
+            "Enter an acceptance justification for Development."
+        );
+
+        draft.environments[0].justification = "Internal-only service.".to_string();
+        draft.environments[0].review_date = "not-a-date".to_string();
+        assert_eq!(
+            draft.request("openssl").unwrap_err(),
+            "Enter a valid review date for Development."
+        );
+    }
+
+    #[test]
+    fn triage_validation_rejects_incomplete_poam_and_invalid_assignee_shape() {
+        let mut draft = triage_draft();
+        draft.environments[0].justification = "Internal-only service.".to_string();
+        draft.plan.clear();
+        assert_eq!(
+            draft.request("openssl").unwrap_err(),
+            "Enter a remediation plan for scheduled patching."
+        );
+
+        draft.plan = "Promote and verify the fixed package.".to_string();
+        draft.assignee = "platform-operators".to_string();
+        assert_eq!(
+            draft.request("openssl").unwrap_err(),
+            "Select a valid POA&M assignee."
+        );
+    }
+
+    #[test]
+    fn mixed_triage_request_contains_only_environment_intentions_and_shared_poam() {
+        let mut draft = triage_draft();
+        draft.environments[0].justification = "Internal-only service.".to_string();
+        draft.environments[0].review_date = "2026-10-01".to_string();
+        let request = draft.request("openssl").unwrap();
+
+        assert!(matches!(
+            request.actions[0],
+            CveEnvironmentTriageAction::AcceptRisk { .. }
+        ));
+        assert!(matches!(
+            request.actions[1],
+            CveEnvironmentTriageAction::SchedulePatch { .. }
+        ));
+        assert!(matches!(
+            request.actions[2],
+            CveEnvironmentTriageAction::LeaveOpen { .. }
+        ));
+        let json = serde_json::to_value(request).unwrap();
+        assert_eq!(json["canonical_package_name"], "openssl");
+        assert_eq!(json["poam"]["assignee"]["kind"], "oidc_group");
+        let serialized = json.to_string();
+        assert!(!serialized.contains("system_id"));
+        assert!(!serialized.contains("hostname"));
+        assert!(!serialized.contains("actor"));
+        assert!(!serialized.contains("evidence"));
+    }
+
+    #[test]
+    fn scheduled_draft_initializes_exact_user_and_group_metadata() {
+        for (assignee, expected) in [
+            (
+                serde_json::json!({
+                    "kind": "user",
+                    "user_id": "00000000-0000-0000-0000-0000000000f2",
+                    "display": "Fleet Owner",
+                    "available": true
+                }),
+                "user:00000000-0000-0000-0000-0000000000f2",
+            ),
+            (
+                serde_json::json!({
+                    "kind": "oidc_group",
+                    "group_name": "platform-operators",
+                    "display": "platform-operators",
+                    "available": true
+                }),
+                "group:platform-operators",
+            ),
+        ] {
+            let draft = FleetTriageDraft::from_detail(&scheduled_detail(assignee, true, None));
+            assert_eq!(draft.title, "Existing fleet remediation");
+            assert_eq!(draft.plan, "Preserve the exact remediation plan.");
+            assert_eq!(draft.target_date, "2026-11-20");
+            assert_eq!(draft.risk, PoamRisk::Medium);
+            assert_eq!(draft.assignee, expected);
+            assert!(draft.preservation_error.is_none());
+            let request = draft.request("openssl").unwrap();
+            assert_eq!(request.poam.unwrap().risk, PoamRisk::Medium);
+        }
+    }
+
+    #[test]
+    fn scheduled_draft_blocks_old_or_conflicting_metadata_but_allows_removal() {
+        let assignee = serde_json::json!({
+            "kind": "oidc_group",
+            "group_name": "platform-operators",
+            "display": "platform-operators",
+            "available": true
+        });
+        let mut old_server =
+            FleetTriageDraft::from_detail(&scheduled_detail(assignee.clone(), false, None));
+        assert!(
+            old_server
+                .request("openssl")
+                .unwrap_err()
+                .contains("server version")
+        );
+        for environment in &mut old_server.environments {
+            environment.choice = EnvironmentTriageChoice::Open;
+        }
+        assert!(old_server.request("openssl").unwrap().poam.is_none());
+
+        let conflicting = FleetTriageDraft::from_detail(&scheduled_detail(
+            assignee,
+            true,
+            Some("00000000-0000-0000-0000-0000000000d2"),
+        ));
+        assert!(
+            conflicting
+                .request("openssl")
+                .unwrap_err()
+                .contains("different POA&Ms")
+        );
+
+        for unavailable in [
+            serde_json::json!({
+                "kind": "user",
+                "user_id": "00000000-0000-0000-0000-0000000000f2",
+                "display": "Former owner",
+                "available": false
+            }),
+            serde_json::json!({"kind": "legacy", "display": "Historical owner"}),
+        ] {
+            let draft = FleetTriageDraft::from_detail(&scheduled_detail(unavailable, true, None));
+            assert!(
+                draft
+                    .request("openssl")
+                    .unwrap_err()
+                    .contains("no longer available")
+            );
+        }
+    }
+
+    #[test]
+    fn fleet_detail_errors_preserve_empty_unauthorized_and_retryable_states() {
+        let error = |status| {
+            PoamApiError::Server(PoamServerError {
+                status,
+                code: "test_error".to_string(),
+                message: "test failure".to_string(),
+                details: None,
+            })
+        };
+
+        assert_eq!(fleet_error_state(&error(404)), FleetDetailState::Empty);
+        assert_eq!(
+            fleet_error_state(&error(403)),
+            FleetDetailState::Unauthorized
+        );
+        assert_eq!(
+            fleet_error_state(&error(401)),
+            FleetDetailState::Unauthorized
+        );
+        assert!(matches!(
+            fleet_error_state(&error(500)),
+            FleetDetailState::Error(_)
+        ));
     }
 }

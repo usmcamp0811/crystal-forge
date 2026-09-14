@@ -4584,6 +4584,9 @@ pub struct SystemVulnerability {
     /// Last update timestamp for saved justification.
     #[serde(default)]
     pub justification_updated_at: Option<DateTime<Utc>>,
+    /// Contains server-issued exact-CVE remediation context when available.
+    #[serde(default)]
+    pub remediation: Option<crate::views::poam_api::CvePoamRelationship>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

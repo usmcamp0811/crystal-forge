@@ -257,13 +257,31 @@ its generation matches its current store path. A path-only derivation match does
 not authorize exact-CVE creation or verification. Missing or inconsistent
 generation lineage fails closed.
 
+Fleet CVE triage uses `(canonical CVE ID, canonical package name)` as the
+advisory identity and the environment UUID as the action scope. The server
+derives every affected system from the same current retained-generation
+authority. A client cannot select, omit, or fabricate host identities. A fleet
+read does not enqueue a scan or mutate evidence.
+
 A schema-1 CVE scan is an immutable terminal evidence seal with a non-null
 completion time. Each occurrence stores its observed derivation path, package
 name, package version, canonical package name, and canonical CVE directly. It
 does not rely on a mutable package-derivation row for identity. Unreferenced
-sealed scans and their occurrences remain reclaimable. A verification item uses
-restrictive foreign keys to retain its cited scan and occurrence for as long as
-the POA&M evidence exists.
+sealed scans and their occurrences remain reclaimable. Each exact-CVE finding
+link stores an immutable baseline with the link-time scan, scan derivation,
+completion time, retained generation snapshot, generation number, target store
+path, occurrence derivation path, and observed package version. Clients cannot
+provide or modify this baseline. Restrictive foreign keys retain the baseline
+scan and occurrence while the link exists. A verification item uses restrictive
+foreign keys to retain its cited current scan for as long as the POA&M evidence
+exists.
+
+The link-time scan is evidence that the finding existed. It is not remediation
+evidence. Verification returns PASS only when a strictly newer completed
+schema-1 scan for the unchanged baseline generation and deployment lineage
+omits the exact occurrence. A scan completed at or before the baseline cannot
+pass verification. No newer scan or changed deployment lineage returns MISSING
+and blocks closure.
 
 `GET /systems/:id/cves` uses the same retained deployed-generation authority and
 latest schema-1 scan. It does not select vulnerability rows by hostname. Missing
@@ -272,11 +290,52 @@ response is limited to 1,000 stable CVE and canonical-package identities. A
 deterministic occurrence supplies each row's observed name and complete version
 text. Package version is evidence and is not part of relationship identity.
 
-Exact-CVE POA&M, justification, and deployment-state writers acquire locks in
-this order: canonical CVE, system sentinel, policy finding keys, and exact-CVE
-finding keys. Keys at each level use deterministic lexical order. Scan
-publication uses the shared system and finding keys, so verification cannot read
-a partially published scan.
+Exact-CVE POA&M, justification, and deployment-state writers use `READ
+COMMITTED` transactions and acquire locks in this order: all canonical CVE
+keys, applicable environment rows, all system sentinels, all policy finding
+keys, all exact-CVE finding keys, and then lifecycle or evidence rows. Keys at
+each level use deterministic lexical order. Snapshot and derivation sentinels,
+when required by an infrastructure writer, precede this hierarchy. `READ
+COMMITTED` is required because a statement that runs after an advisory-lock wait
+must see the writer that released the lock. A repeatable transaction snapshot
+could retain stale evidence from before the wait.
+
+The protocol is complete rather than best-effort. A system metadata update
+enumerates and locks every canonical CVE key for the system before it locks an
+environment or the system. It then locks the system sentinel, every policy key,
+and every exact-CVE key before PostgreSQL row-locks and updates the system. The
+metadata trigger reacquires those locks reentrantly. Trigger-only writers use
+nonblocking advisory locks after PostgreSQL has already row-locked the system;
+contention raises SQLSTATE `40001` and makes the complete transaction retry
+instead of waiting in inverted order or skipping a key. Environment row locks
+prevent a subject from entering or leaving fleet triage during recomputation.
+System sentinels serialize subject membership and finding materialization.
+Policy and exact-finding advisory locks plus lifecycle row locks prevent
+concurrent evidence, link, disposition, verification, or closure writes from
+forming disjoint snapshots. Together these locks prevent write skew without a
+serializable transaction snapshot. Scan publication uses the same hierarchy, so
+triage and verification cannot read a partially published scan. After the writer
+locks are held, mutation transactions re-read the active user, current role
+assignments, and current environment memberships. Request-time actor state
+cannot authorize a create, link, or justification after its role or scope is
+revoked.
+
+`cve_environment_dispositions` stores append-only environment decisions.
+Absence of an active row means OPEN. ACCEPTED requires a justification, actor,
+timestamp, and optional review date. ACCEPTED has no POA&M foreign key and never
+creates a finding link or verification item. SCHEDULED requires one active
+POA&M and actor snapshot. A partial unique index permits one active disposition
+for each CVE, package, and environment while retaining retired history.
+
+One fleet triage request is one `READ COMMITTED` transaction. The transaction
+re-resolves all selected environments after it has the complete writer lock set. Scheduling
+materializes one stable finding for every current exact subject and links all
+scheduled environments to one POA&M. Existing links are reused only when every
+scheduled subject belongs to the same active POA&M and the title, plan, typed
+assignee, target date, and risk match. A stale subject set, hidden environment,
+partial ownership, incompatible metadata, or final-subject removal aborts all
+actions. Changing one environment retires only that environment's links. It
+cannot leave an active POA&M with no finding.
 
 Generation rollback accepts a retained generation UUID or system-local
 generation number and resolves the exact derivation and store path on the

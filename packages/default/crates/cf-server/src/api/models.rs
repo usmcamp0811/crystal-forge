@@ -414,6 +414,9 @@ pub struct SystemVulnerability {
     pub justification_reason: Option<String>,
     #[serde(default)]
     pub justification_updated_at: Option<DateTime<Utc>>,
+    /// Provides bounded server-issued exact-evidence remediation context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remediation: Option<crate::models::poam::CvePoamRelationship>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -498,6 +501,204 @@ pub struct CveDetail {
     pub fixed_version: Option<String>,
     pub detection_method: Option<String>,
     pub fix_status: String,
+}
+
+/// Reports the fleet triage rollup for one exact CVE and package identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FleetCveTriageRollup {
+    /// Every currently affected visible environment has no active disposition.
+    Outstanding,
+    /// Every currently affected visible environment has accepted risk.
+    Accepted,
+    /// Every currently affected visible environment has scheduled remediation.
+    Scheduled,
+    /// Affected environments have different states or include OPEN.
+    Partial,
+}
+
+/// Identifies the authenticated actor retained with a disposition.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CveDispositionActor {
+    /// Identifies the actor account.
+    pub user_id: Uuid,
+    /// Gives the current safe account display label.
+    pub display: String,
+}
+
+/// Reports the active POA&M metadata required to preserve scheduled ownership.
+///
+/// The assignee retains its stable typed identity and display snapshot.
+/// `available` indicates current catalog eligibility only. A false value or a
+/// compatibility assignee does not remove the historical assignment and does
+/// not grant authorization.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScheduledPoamMetadata {
+    /// Identifies the POA&M by its stable UUID.
+    pub id: Uuid,
+    /// Gives the stable operator-facing POA&M identifier.
+    pub human_id: String,
+    /// Gives the exact persisted remediation title.
+    pub title: String,
+    /// Gives the exact persisted remediation plan.
+    pub plan: String,
+    /// Gives the exact persisted target completion date.
+    pub target_date: chrono::NaiveDate,
+    /// Gives the exact persisted remediation risk.
+    pub risk: crate::models::poam::PoamRisk,
+    /// Reports the typed or compatibility assignee without authorization data.
+    pub assignee: crate::models::poam::PoamAssigneeView,
+}
+
+/// Reports the active disposition for one environment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum CveEnvironmentDisposition {
+    /// Records accepted risk without claiming remediation or verification PASS.
+    Accepted {
+        /// Gives the required operator justification.
+        justification: String,
+        /// Gives the optional date for risk review.
+        review_date: Option<chrono::NaiveDate>,
+        /// Identifies the authenticated actor that accepted risk.
+        actor: CveDispositionActor,
+        /// Records when the actor accepted risk.
+        accepted_at: DateTime<Utc>,
+    },
+    /// Records remediation scheduling through one POA&M.
+    Scheduled {
+        /// Identifies the POA&M that owns the exact subjects.
+        poam_id: Uuid,
+        /// Gives the active POA&M metadata required for compatible reuse.
+        poam: ScheduledPoamMetadata,
+        /// Identifies the authenticated actor that scheduled remediation.
+        actor: CveDispositionActor,
+        /// Records when the actor scheduled remediation.
+        scheduled_at: DateTime<Utc>,
+    },
+}
+
+/// Reports one currently affected environment in the fleet CVE drawer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CveAffectedEnvironment {
+    /// Identifies the environment used by triage actions.
+    pub environment_id: Uuid,
+    /// Gives the visible environment name.
+    pub environment_name: String,
+    /// Counts all current exact subjects in this environment.
+    pub affected_system_count: i64,
+    /// Lists the bounded affected systems for drawer presentation.
+    pub systems: Vec<CveAffectedSystemDetail>,
+    /// Gives the current disposition. `None` means OPEN.
+    pub disposition: Option<CveEnvironmentDisposition>,
+}
+
+/// Provides the bounded fleet drawer model for one exact CVE/package identity.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FleetCveDetail {
+    /// Gives advisory metadata retained by the existing CVE detail contract.
+    pub cve: CveDetail,
+    /// Gives the canonical package identity selected by this drawer.
+    pub canonical_package_name: String,
+    /// Gives the visible environment disposition rollup.
+    pub rollup: FleetCveTriageRollup,
+    /// Counts visible current exact subjects.
+    pub affected_system_count: i64,
+    /// Lists visible affected environments in deterministic order.
+    pub environments: Vec<CveAffectedEnvironment>,
+}
+
+/// Selects one atomic action for an affected environment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum CveEnvironmentTriageAction {
+    /// Removes the active disposition and leaves the environment OPEN.
+    LeaveOpen {
+        /// Identifies the affected environment.
+        environment_id: Uuid,
+    },
+    /// Accepts risk for the environment without creating remediation evidence.
+    AcceptRisk {
+        /// Identifies the affected environment.
+        environment_id: Uuid,
+        /// Gives the required acceptance justification.
+        justification: String,
+        /// Gives an optional risk review date.
+        review_date: Option<chrono::NaiveDate>,
+    },
+    /// Schedules every current exact subject in the environment on one POA&M.
+    SchedulePatch {
+        /// Identifies the affected environment.
+        environment_id: Uuid,
+    },
+}
+
+impl CveEnvironmentTriageAction {
+    /// Returns the stable environment identity selected by the action.
+    pub fn environment_id(&self) -> Uuid {
+        match self {
+            Self::LeaveOpen { environment_id }
+            | Self::AcceptRisk { environment_id, .. }
+            | Self::SchedulePatch { environment_id } => *environment_id,
+        }
+    }
+}
+
+/// Supplies POA&M metadata when any environment schedules patching.
+#[derive(Debug, Clone, Deserialize)]
+pub struct FleetCvePoamRequest {
+    /// Gives the remediation title.
+    pub title: String,
+    /// Gives the remediation plan.
+    pub plan: String,
+    /// Selects one server-validated typed assignee.
+    pub assignee: crate::models::poam::PoamAssigneeRequest,
+    /// Gives the operator-selected target date.
+    pub target_date: chrono::NaiveDate,
+    /// Gives the operator-selected remediation risk.
+    pub risk: crate::models::poam::PoamRisk,
+    /// Requests the standard patch milestones for a newly created POA&M.
+    #[serde(default = "default_true_value")]
+    pub default_milestones: bool,
+}
+
+fn default_true_value() -> bool {
+    true
+}
+
+/// Applies environment actions for one exact CVE/package identity atomically.
+#[derive(Debug, Clone, Deserialize)]
+pub struct FleetCveTriageRequest {
+    /// Gives the canonical package identity. The browser does not send hosts.
+    pub canonical_package_name: String,
+    /// Gives one action for each selected environment.
+    pub actions: Vec<CveEnvironmentTriageAction>,
+    /// Supplies one POA&M payload when at least one action schedules patching.
+    pub poam: Option<FleetCvePoamRequest>,
+}
+
+/// Identifies one bounded subject involved in a scheduling conflict.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CveTriageConflictSubject {
+    /// Identifies the affected system.
+    pub system_id: Uuid,
+    /// Gives the visible hostname.
+    pub hostname: String,
+    /// Identifies the system environment.
+    pub environment_id: Uuid,
+    /// Identifies the conflicting active POA&M when one exists.
+    pub poam_id: Option<Uuid>,
+}
+
+/// Reports the result of one atomic fleet triage mutation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FleetCveTriageResponse {
+    /// Gives the refreshed visible fleet drawer state.
+    pub detail: FleetCveDetail,
+    /// Identifies the created or reused POA&M when patching was scheduled.
+    pub poam_id: Option<Uuid>,
+    /// Indicates that all scheduled subjects already used a compatible POA&M.
+    pub poam_reused: bool,
 }
 
 /// System affected by a CVE (for drawer detail view).

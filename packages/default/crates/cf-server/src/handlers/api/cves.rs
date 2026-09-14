@@ -23,9 +23,10 @@ use crate::queries::cves;
 pub async fn list_cves(
     State(state): State<CFState>,
     Query(filters): Query<CveFilters>,
-    _user: RequireAuth,
+    RequireAuth(user): RequireAuth,
 ) -> Result<Json<Vec<CveListItem>>, (StatusCode, String)> {
-    let cves = cves::fetch_cve_list(&state.pool, &filters)
+    let scope = cve_read_scope(&state, &user).await?;
+    let cves = cves::fetch_cve_list(&state.pool, &scope, &filters)
         .await
         .map_err(|e| {
             (
@@ -42,9 +43,10 @@ pub async fn list_cves(
 pub async fn list_cves_grouped(
     State(state): State<CFState>,
     Query(filters): Query<CveFilters>,
-    _user: RequireAuth,
+    RequireAuth(user): RequireAuth,
 ) -> Result<Json<Vec<CvePackageGroup>>, (StatusCode, String)> {
-    let groups = cves::fetch_cve_packages_grouped(&state.pool, &filters)
+    let scope = cve_read_scope(&state, &user).await?;
+    let groups = cves::fetch_cve_packages_grouped(&state.pool, &scope, &filters)
         .await
         .map_err(|e| {
             (
@@ -60,9 +62,10 @@ pub async fn list_cves_grouped(
 /// Get fleet-wide CVE statistics.
 pub async fn get_fleet_stats(
     State(state): State<CFState>,
-    _user: RequireAuth,
+    RequireAuth(user): RequireAuth,
 ) -> Result<Json<CveFleetStats>, (StatusCode, String)> {
-    let stats = cves::fetch_cve_fleet_stats(&state.pool)
+    let scope = cve_read_scope(&state, &user).await?;
+    let stats = cves::fetch_cve_fleet_stats(&state.pool, &scope)
         .await
         .map_err(|e| {
             (
@@ -78,14 +81,17 @@ pub async fn get_fleet_stats(
 /// Get list of package names for autocomplete.
 pub async fn list_package_names(
     State(state): State<CFState>,
-    _user: RequireAuth,
+    RequireAuth(user): RequireAuth,
 ) -> Result<Json<Vec<String>>, (StatusCode, String)> {
-    let packages = cves::fetch_package_names(&state.pool).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to fetch package names: {}", e),
-        )
-    })?;
+    let scope = cve_read_scope(&state, &user).await?;
+    let packages = cves::fetch_package_names(&state.pool, &scope)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to fetch package names: {}", e),
+            )
+        })?;
 
     Ok(Json(packages))
 }
@@ -95,15 +101,23 @@ pub async fn list_package_names(
 pub async fn get_cve_detail(
     State(state): State<CFState>,
     Path(cve_id): Path<String>,
-    _user: RequireAuth,
+    RequireAuth(user): RequireAuth,
 ) -> Result<Json<CveDetail>, (StatusCode, String)> {
-    let detail = cves::fetch_cve_detail(&state.pool, &cve_id)
+    let scope = cve_read_scope(&state, &user).await?;
+    let detail = cves::fetch_cve_detail(&state.pool, &scope, &cve_id)
         .await
         .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to fetch CVE detail: {}", e),
-            )
+            if matches!(
+                e.downcast_ref::<sqlx::Error>(),
+                Some(sqlx::Error::RowNotFound)
+            ) {
+                (StatusCode::NOT_FOUND, "CVE not found".to_string())
+            } else {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to fetch CVE detail: {e}"),
+                )
+            }
         })?;
 
     Ok(Json(detail))
@@ -114,9 +128,10 @@ pub async fn get_cve_detail(
 pub async fn get_cve_systems(
     State(state): State<CFState>,
     Path(cve_id): Path<String>,
-    _user: RequireAuth,
+    RequireAuth(user): RequireAuth,
 ) -> Result<Json<Vec<CveAffectedSystemDetail>>, (StatusCode, String)> {
-    let systems = cves::fetch_cve_affected_systems(&state.pool, &cve_id)
+    let scope = cve_read_scope(&state, &user).await?;
+    let systems = cves::fetch_cve_affected_systems(&state.pool, &scope, &cve_id)
         .await
         .map_err(|e| {
             (
@@ -134,6 +149,7 @@ pub async fn save_justification(
     State(state): State<CFState>,
     Path(cve_id): Path<String>,
     RequireAdmin(user): RequireAdmin,
+    _csrf: RequireCsrf,
     Json(payload): Json<CveJustificationRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     // Validate category
@@ -197,6 +213,7 @@ pub async fn revoke_justification(
     State(state): State<CFState>,
     Path(cve_id): Path<String>,
     _user: RequireAdmin,
+    _csrf: RequireCsrf,
 ) -> Result<StatusCode, (StatusCode, String)> {
     cves::revoke_fleet_cve_justification(&state.pool, &cve_id)
         .await
@@ -215,9 +232,10 @@ pub async fn revoke_justification(
 pub async fn list_justifications(
     State(state): State<CFState>,
     Path(cve_id): Path<String>,
-    _user: RequireAuth,
+    RequireAuth(user): RequireAuth,
 ) -> Result<Json<Vec<CveJustification>>, (StatusCode, String)> {
-    let justifications = cves::fetch_cve_justifications(&state.pool, &cve_id)
+    let scope = cve_read_scope(&state, &user).await?;
+    let justifications = cves::fetch_cve_justifications(&state.pool, &scope, &cve_id)
         .await
         .map_err(|e| {
             (
@@ -301,20 +319,37 @@ fn csv_field(value: &str) -> String {
     }
 }
 
-/// GET /api/v1/cves/export
-/// Export CVEs as CSV.
+/// Exports the caller's complete filtered CVE result as CSV.
+///
+/// List pagination does not apply. The handler returns `422 Unprocessable
+/// Entity` and no CSV when the result exceeds
+/// [`cves::MAX_CVE_EXPORT_ROWS`].
+///
+/// # Errors
+///
+/// Returns an authentication or scope-resolution error before querying rows.
+/// Returns `422 Unprocessable Entity` when the caller must narrow the filters.
+/// Returns `500 Internal Server Error` when PostgreSQL cannot load the export.
 pub async fn export_cves(
     State(state): State<CFState>,
     Query(filters): Query<CveFilters>,
-    _user: RequireAuth,
+    RequireAuth(user): RequireAuth,
 ) -> Result<Response, (StatusCode, String)> {
-    let cves = cves::fetch_cve_list(&state.pool, &filters)
+    let scope = cve_read_scope(&state, &user).await?;
+    let cves = cves::fetch_cves_for_export(&state.pool, &scope, &filters)
         .await
-        .map_err(|e| {
-            (
+        .map_err(|error| match error {
+            cves::CveExportError::TooManyRows => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!(
+                    "CVE export exceeds the {}-row limit; narrow the filters and retry",
+                    cves::MAX_CVE_EXPORT_ROWS
+                ),
+            ),
+            cves::CveExportError::Database(error) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to fetch CVEs for export: {}", e),
-            )
+                format!("Failed to fetch CVEs for export: {error}"),
+            ),
         })?;
 
     // Build CSV with proper RFC 4180 field escaping
@@ -374,6 +409,20 @@ pub async fn export_cves(
 }
 
 use serde::Serialize;
+
+async fn cve_read_scope(
+    state: &CFState,
+    user: &crate::auth::extractors::AuthenticatedUser,
+) -> Result<cves::CveReadScope, (StatusCode, String)> {
+    cves::CveReadScope::for_user(&state.pool, user)
+        .await
+        .map_err(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to resolve CVE read scope: {error}"),
+            )
+        })
+}
 
 #[cfg(test)]
 mod tests {

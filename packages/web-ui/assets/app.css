@@ -7293,6 +7293,7 @@ tr.attention-flash {
 .poam-context dl div:nth-child(3n) { border-right: 0; }
 .poam-context dt, .poam-meta-grid span { color: var(--cf-text-muted); font-size: 9.5px; font-weight: 650; letter-spacing: .06em; text-transform: uppercase; }
 .poam-context dd { overflow: hidden; margin: 3px 0 0; color: var(--cf-text-primary); font-size: 11.5px; text-overflow: ellipsis; }
+.poam-context dd[title] { white-space: nowrap; }
 
 .poam-form-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
 .poam-span-all { grid-column: 1 / -1; }
@@ -7421,6 +7422,12 @@ tr.attention-flash {
 .poam-table-wrap { max-width: 100%; overflow-x: auto; }
 .poam-table { min-width: 680px; }
 .poam-findings-table { min-width: 820px; }
+.poam-cve-findings-table { min-width: 940px; }
+.poam-cve-findings-table td strong,
+.poam-cve-findings-table td small { display: block; }
+.poam-cve-findings-table td small { margin-top: 3px; }
+.poam-cve-verification-item .poam-verification-identity { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 2px 8px; }
+.poam-cve-verification-item .poam-verification-identity :is(span, code, strong) { margin: 0; min-width: 0; }
 .poam-requirement { max-width: 240px; font-size: 10.5px; white-space: normal !important; }
 .poam-requirement-context + .poam-requirement-context { margin-top: 7px; padding-top: 7px; border-top: 1px solid var(--cf-divider); }
 .poam-requirement-framework, .poam-requirement-title { display: block; overflow: hidden; color: var(--cf-text-muted); text-overflow: ellipsis; white-space: nowrap; }
@@ -7512,3 +7519,44 @@ tr.attention-flash {
 .sd-callout-warn svg { color: #fbbf24; flex-shrink: 0; margin-top: 1px; }
 .sd-callout-healthy { background: rgba(52,211,153,0.08); border-color: rgba(52,211,153,0.28); color: var(--cf-text-primary); }
 .sd-callout-healthy svg { color: #34d399; flex-shrink: 0; margin-top: 1px; }
+
+/* Exact-CVE fleet triage keeps server-owned scope visible and compact. */
+.cve-fleet-backdrop,
+.cve-triage-backdrop {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+}
+.cve-fleet-drawer { width: min(900px, 100vw); }
+.cve-fleet-heading { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 15px; font-weight: 700; }
+.cve-fleet-heading .mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cve-fleet-actions { display: flex; align-items: center; gap: 6px; margin-left: auto; }
+.cve-fleet-body { display: flex; flex: 1; min-height: 0; flex-direction: column; gap: 16px; padding: 18px 22px; overflow: auto; }
+.cve-fleet-stats { flex: 0 0 auto; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.cve-fleet-section { display: flex; flex-direction: column; gap: 9px; }
+.cve-fleet-section > h3 { margin: 0; color: var(--cf-text-muted); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
+.cve-fleet-truth { margin: 0 0 2px; color: var(--cf-text-secondary); font-size: 12px; }
+.cve-fleet-env { padding: 12px; border: 1px solid var(--cf-divider); border-radius: 9px; background: var(--cf-subtle-bg); }
+.cve-fleet-env > header { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.cve-fleet-env > p { margin: 9px 0 4px; font-size: 12.5px; line-height: 1.5; }
+.cve-fleet-env small { color: var(--cf-text-muted); }
+.cve-fleet-scheduled { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 8px; color: var(--cf-text-secondary); font-size: 11px; }
+.cve-fleet-hosts { display: flex; flex-direction: column; gap: 1px; margin-top: 10px; border-top: 1px solid var(--cf-divider); }
+.cve-fleet-host { display: grid; grid-template-columns: minmax(140px, 1.1fr) minmax(110px, 1fr) minmax(120px, 1fr) minmax(90px, auto); gap: 10px; align-items: center; min-width: 0; padding: 7px 3px; border-bottom: 1px solid var(--cf-divider); font-size: 11px; }
+.cve-triage-backdrop { z-index: 200; }
+.cve-triage-modal { position: fixed; top: 50%; left: 50%; z-index: 201; width: min(760px, calc(100vw - 32px)); max-height: min(90vh, 900px); transform: translate(-50%, -50%); }
+.cve-triage-body { display: flex; flex-direction: column; gap: 12px; overflow: auto; }
+.cve-triage-body > p { margin: 0; color: var(--cf-text-secondary); font-size: 12px; }
+.cve-triage-env,
+.cve-triage-poam { display: flex; flex-direction: column; gap: 10px; min-width: 0; padding: 11px; border: 1px solid var(--cf-divider); border-radius: 9px; }
+.cve-triage-env legend,
+.cve-triage-poam legend { padding: 0 5px; font-size: 12px; font-weight: 650; }
+.cve-triage-env .seg { width: fit-content; max-width: 100%; flex-wrap: wrap; }
+
+@media (max-width: 700px) {
+  .cve-fleet-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .cve-fleet-host { grid-template-columns: minmax(120px, 1fr) minmax(90px, 1fr); }
+  .cve-fleet-host > :nth-child(3), .cve-fleet-host > :nth-child(4) { display: none; }
+  .cve-triage-modal { width: calc(100vw - 16px); max-height: calc(100vh - 16px); }
+  .cve-triage-body { padding: 14px; }
+}

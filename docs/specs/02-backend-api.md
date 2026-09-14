@@ -163,6 +163,15 @@ Systems are the NixOS machines CF manages.
 | POST | `/systems/:id/config-inspections/:revision` | Admin | Queue or reuse targeted Config inspection |
 | POST | `/systems/:id/evaluations/:revision` | Admin | Explicit whole-commit evaluation prerequisite |
 
+`PATCH /systems/:id` applies authorization, environment and system locking,
+metadata changes, and response construction in one transaction. An Operator
+must have current membership in both the source and destination environments.
+Admin is not environment-scoped. The transaction re-reads the active user,
+roles, and memberships after it acquires the environment and system locks, so a
+concurrent revocation prevents the move. Unknown and unauthorized environments
+use the same not-found behavior for scoped callers. The success body is built
+from the transaction's updated row before commit.
+
 ### Query Parameters
 
 ```bash
@@ -827,6 +836,237 @@ GET /api/v1/admin/audit?start_date=2024-01-01&end_date=2024-01-31&actor=john
 | POST | `/admin/oidc-mappings` | Admin+ | Create mapping |
 | PATCH | `/admin/oidc-mappings/:id` | Admin+ | Update mapping |
 | DELETE | `/admin/oidc-mappings/:id` | Admin+ | Delete mapping |
+
+---
+
+## Fleet CVE Triage
+
+Fleet triage uses exact deployed evidence. The identity is a canonical CVE ID
+plus a canonical package name. Package version is evidence context and is not
+part of the stable finding identity.
+
+### Exact-CVE POA&M Routes
+
+| Method | Endpoint | Role | Description |
+|--------|----------|------|-------------|
+| POST | `/poams/cves` | Operator+ | Create a POA&M from one server-issued exact occurrence |
+| GET | `/poams/relationships/cves?system_id=:id` | Viewer+ | Return bounded current exact occurrences and POA&M relationships |
+| POST | `/poams/:id/cve-findings` | Operator+ | Link one current exact occurrence |
+| DELETE | `/poams/:id/cve-findings/:finding_id?revision=:revision` | Operator+ | Retire one exact finding link |
+| POST | `/poams/:id/verify` | Operator+ | Seal exact current verification evidence |
+| POST | `/poams/:id/close` | Operator+ | Verify and close atomically |
+| POST | `/poams/:id/reopen` | Operator+ | Restore the exact closure finding set |
+
+All routes require an authenticated session. Mutation routes require matching
+CSRF cookie and header values. Operator and Admin roles can mutate. Viewer can
+read visible relationships but cannot mutate. A typed POA&M assignee does not
+grant environment access or mutation authority. Unknown resources and resources
+outside the caller's environment scope return the same `404` response. Create,
+link, and system-CVE justification transactions re-read the caller's active-user
+state, roles, and environment memberships after they acquire their writer
+locks. Revocation during a concurrent request prevents mutation even when the
+request-time actor snapshot was authorized.
+
+The create and link bodies contain an opaque `observation` with `system_id`,
+`scan_id`, `occurrence_derivation_path`, `canonical_cve_id`, and
+`canonical_package_name`. The server re-resolves this context against the latest
+completed evidence-schema-1 scan for the exact retained deployed generation.
+Clients must not construct or modify this context. Create accepts at most 100
+assignment-version references. A POA&M accepts at most 100 active findings.
+Relationship history defaults to 100 rows, accepts a limit from 1 through 100,
+and returns no more than 1,000 current exact occurrence rows.
+
+Exact-CVE unlink, verify, close, and reopen operations and fleet triage also
+re-read the active user, roles, and memberships after their domain writer
+locks. A concurrent role or membership revocation therefore cannot authorize a
+waiting mutation.
+
+Link, unlink, verify, close, reopen, update, and transition operations use the
+current POA&M `revision`. A stale revision returns `409 stale_revision`. Exact
+finding links retain an immutable server-resolved link-time baseline: scan,
+derivation, completion time, retained generation, target store path, occurrence
+derivation path, and observed package version. The API does not accept baseline
+fields from clients. Exact verification returns `pass` only when a strictly
+newer authoritative schema-1 scan for unchanged retained deployment lineage
+omits the exact CVE/package occurrence. The baseline scan and scans completed
+before it cannot pass verification. Present, whitelisted, justified, missing,
+legacy, changed-deployment, or inconsistent evidence does not pass. No newer
+evidence and changed lineage return `missing`. A rejected close records and
+returns the committed verification attempt as `412 closure_not_ready`; clients
+must continue with the returned committed revision.
+
+POA&M detail and verification responses are rolling-compatible. `findings` and
+`items` retain policy-finding meanings. New servers add `cve_findings` to POA&M
+detail and `cve_items` to verification attempts and verify/close results. Older
+clients must ignore these fields. New clients must default absent fields to an
+empty array while servers are upgraded. Exact finding rows include stable
+system/CVE/package identity and evidence context. Exact verification rows also
+include the observed package version, scan, deployed generation binding,
+result, and bounded diagnostic detail. Each row distinguishes the immutable
+baseline evidence from the current verification evidence. Both cited scans are
+retained for audit while their finding or verification records exist.
+
+POA&M detail returns active and retired exact finding links. Retired rows retain
+their link-time scan, scan completion time, deployed generation, target store
+path, occurrence path, observed package version, retirement time, and retirement
+reason. Retired rows are immutable and cannot be unlinked again. Completed
+POA&Ms retain these rows as their exact-vulnerability audit display.
+
+Important exact-CVE errors include `invalid_cve_identity`,
+`stale_cve_observation`, `cve_occurrence_whitelisted`,
+`cve_occurrence_justified`, `finding_already_managed`, `incompatible_finding`,
+`too_many_findings`, `finding_required`, `concurrent_finding_change`,
+`invalid_transition`, `stale_revision`, and `closure_not_ready`. Validation
+errors use HTTP 400, authorization uses 403, hidden or absent resources use 404,
+stale/lifecycle conflicts use 409, and failed closure preconditions use 412.
+
+| Method | Endpoint | Role | Description |
+|--------|----------|------|-------------|
+| GET | `/cves/:cve_id/fleet?package=:pname` | Viewer+ | Return visible affected environments and current dispositions |
+| POST | `/cves/:cve_id/triage` | Operator+ | Apply environment actions atomically |
+
+The GET response contains `cve`, `canonical_package_name`, `rollup`,
+`affected_system_count`, and `environments`. Each environment contains its UUID,
+name, affected-system count, bounded system details, and an optional tagged
+`disposition`. A missing disposition means OPEN. `rollup` is `outstanding`,
+`accepted`, `scheduled`, or `partial`. The endpoint returns `404` when no current
+exact subject is visible. It does not reveal hidden environment names or counts.
+
+A `scheduled` disposition always includes the referenced active POA&M as nested
+`poam` metadata on a new server:
+
+```json
+{
+  "state": "scheduled",
+  "poam_id": "...",
+  "poam": {
+    "id": "...",
+    "human_id": "POAM-0042",
+    "title": "Remediate CVE-2026-12345",
+    "plan": "Promote the fixed package through environments",
+    "target_date": "2026-10-15",
+    "risk": "high",
+    "assignee": {
+      "kind": "user",
+      "user_id": "...",
+      "display": "Fleet owner",
+      "available": true
+    }
+  },
+  "actor": {"user_id": "...", "display": "Scheduling operator"},
+  "scheduled_at": "2026-09-13T12:00:00Z"
+}
+```
+
+The nested value contains the exact title, plan, target date, risk, and typed
+assignee required for semantic POA&M reuse. `id` is the stable UUID and
+`human_id` is the stable operator-facing label. The assignee can be `user`,
+`oidc_group`, `unassigned`, or `legacy`. For typed assignees, `available`
+reports current catalog eligibility only. An unavailable or compatibility
+assignee remains visible as historical ownership but cannot be selected for a
+new fleet scheduling request. An assignee never grants authorization. Fleet
+reads fail closed instead of returning SCHEDULED when the referenced POA&M is
+completed or lacks compatible metadata.
+
+The nested `poam` field is additive for rolling upgrades. New Web UI clients
+accept an absent field from an old server. If scheduled rows omit it, refer to
+different POA&Ms, or contain an assignee that cannot be reused, the editor shows
+a non-destructive upgrade or ownership conflict and blocks submission while any
+environment remains scheduled. The operator can still change all scheduled
+environments to OPEN or ACCEPTED and submit when POA&M lifecycle rules permit.
+When scheduled rows share one reusable POA&M, the editor initializes the shared
+draft from this metadata so an unchanged scheduled row survives mixed edits.
+
+The POST body contains one action for every currently visible affected
+environment:
+
+```json
+{
+  "canonical_package_name": "openssl",
+  "actions": [
+    {"action": "accept_risk", "environment_id": "...", "justification": "...", "review_date": "2026-10-01"},
+    {"action": "schedule_patch", "environment_id": "..."},
+    {"action": "leave_open", "environment_id": "..."}
+  ],
+  "poam": {
+    "title": "Remediate CVE-2026-12345",
+    "plan": "Promote the fixed package through environments",
+    "assignee": {"kind": "user", "user_id": "..."},
+    "target_date": "2026-10-15",
+    "risk": "high",
+    "default_milestones": true
+  }
+}
+```
+
+`poam` is required exactly when at least one action is `schedule_patch`. The
+assignee must be a server-validated user or OIDC group. Clients do not send host
+IDs. After writer locks and a fresh actor-membership check, the server recomputes
+the complete visible affected-environment set. The request environment IDs must
+equal that set. Omitted, extra, forged, hidden, or duplicate IDs return the same
+typed evidence conflict without mutation and without identifying hidden
+environments. The server includes every current exact subject in each
+environment. All scheduled subjects use one POA&M. ACCEPTED records operator
+rationale only; it does not create remediation links or PASS evidence.
+
+Authenticated CVE dashboard reads use retained deployed-generation schema-1 occurrences and
+active dispositions for the exact canonical CVE, canonical package, and
+environment identity. Legacy `system_cve_justifications` rows do not determine
+list status. Admin reads cover the fleet. Viewer and Operator reads first limit
+occurrences to current `user_environment_memberships`. Scoped reads exclude
+unassigned systems and do not disclose hidden environment names, counts,
+statuses, package names, CVE presence, or fleet-wide justification rows. The
+legacy `GET /cves/:cve_id` returns the alphabetically first visible canonical
+package row and returns `404` when the CVE is absent or hidden. Lists return only
+visible rows.
+
+A row is `accepted` only when all affected environments are
+ACCEPTED. A row is `scheduled` only when all affected environments are
+SCHEDULED. Any OPEN or mixed state is `outstanding`. Grouped counts, list
+filters, export/list responses, and fleet statistics consume this conservative
+summary. Package cards count distinct affected systems per package after active
+filters. Fleet statistics count distinct affected systems across scoped
+occurrences; they do not sum per-CVE counts. CVE totals continue to count exact
+CVE/package rows. The exact drawer keeps its more precise `partial`/MIXED rollup
+and exact-matches both the canonical CVE and canonical package when it loads
+installed version, fixed version, and fix status.
+
+The successful response contains transaction-owned `detail`, `poam_id`, and
+`poam_reused`; response construction completes before the mutation commits.
+Repeating an identical accepted-risk request does not retire and recreate its
+disposition history. Repeating a schedule request reuses an existing POA&M only
+when its complete active exact-finding set equals the recomputed scheduled
+subjects plus links that another action in the same request explicitly retires.
+This permits one atomic request to retain scheduled coverage in one environment
+and accept or open another environment. All CVE, package, domain, and semantic
+POA&M metadata must also match. A schedule-only subset never reuses a stale
+superset.
+
+Closing a fleet-created POA&M retires its active SCHEDULED dispositions with
+its exact links. A later recurrence therefore reads as OPEN, not SCHEDULED by a
+completed POA&M. Reopen restores SCHEDULED only when each environment's current
+exact subject set equals its closure set and no active disposition conflicts.
+Systems without an environment restore their exact links without an
+environment disposition. Unlinking an environment's final active exact link
+retires that environment's SCHEDULED disposition and does not change another
+environment's disposition. Fleet reads suppress a SCHEDULED disposition when
+its POA&M is completed or its active links no longer equal current exact
+subjects.
+
+The following conflict codes are significant:
+
+| HTTP | Error | Meaning |
+|------|-------|---------|
+| 404 | `not_found` | An environment is unknown or outside the caller's scope |
+| 409 | `environment_not_affected` | A selected environment has no current exact subject |
+| 409 | `cve_evidence_changed` | Current affected systems changed while locks were acquired |
+| 409 | `cve_subjects_already_managed` | Subjects are partially owned or POA&M metadata is incompatible |
+| 409 | `cve_disposition_conflict` | Reopen cannot restore exact environment coverage |
+| 409 | `poam_final_subject` | The action would leave an active POA&M without a finding |
+
+Conflict responses use
+`{"error":"code","message":"...","details":{...}}`. Subject conflict
+details are bounded. Every conflict rolls back all requested actions.
 
 ---
 

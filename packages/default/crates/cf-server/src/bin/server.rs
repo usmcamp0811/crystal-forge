@@ -283,6 +283,7 @@ async fn main() -> anyhow::Result<()> {
             get(dashboard::dashboard_summary),
         )
         .route("/api/v1/poams", get(poam::list).post(poam::create))
+        .route("/api/v1/poams/cves", post(poam::create_cve))
         .route("/api/v1/poams/dashboard", get(poam::dashboard))
         .route("/api/v1/poams/dashboard/watchlist", get(poam::watchlist))
         .route("/api/v1/poams/rollups/systems", get(poam::system_rollups))
@@ -294,6 +295,10 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/v1/poams/relationships/assignments",
             get(poam::assignment_relationships),
+        )
+        .route(
+            "/api/v1/poams/relationships/cves",
+            get(poam::cve_relationships),
         )
         .route("/api/v1/poams/compatible", get(poam::compatible_poams))
         .route("/api/v1/poams/assignees", get(poam::assignee_catalog))
@@ -309,6 +314,14 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/v1/poams/:id/findings/:finding_id",
             delete(poam::unlink_finding),
+        )
+        .route(
+            "/api/v1/poams/:id/cve-findings",
+            post(poam::link_cve_finding),
+        )
+        .route(
+            "/api/v1/poams/:id/cve-findings/:finding_id",
+            delete(poam::unlink_cve_finding),
         )
         .route("/api/v1/poams/:id/assignments", post(poam::link_assignment))
         .route(
@@ -404,6 +417,8 @@ async fn main() -> anyhow::Result<()> {
             post(cves::trigger_fleet_rescan),
         )
         .route("/api/v1/cves/export", get(cves::export_cves))
+        .route("/api/v1/cves/:cve_id/fleet", get(poam::fleet_cve_detail))
+        .route("/api/v1/cves/:cve_id/triage", post(poam::triage_fleet_cve))
         .route("/api/v1/cves/:cve_id", get(cves::get_cve_detail))
         .route("/api/v1/cves/:cve_id/systems", get(cves::get_cve_systems))
         .route(

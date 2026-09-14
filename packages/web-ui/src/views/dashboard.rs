@@ -1733,6 +1733,7 @@ mod tests {
             revision: 4,
             overdue: true,
             finding_count: 1,
+            cve_finding_count: 0,
             created_at: timestamp,
             updated_at: timestamp,
             closed_at: None,

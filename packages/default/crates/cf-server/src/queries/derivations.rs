@@ -155,7 +155,9 @@ pub async fn record_synthetic_eval_failure(
             match existing {
                 Some((id, status_id)) => {
                     crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx(
-                        &mut tx, id,
+                        &mut tx,
+                        id,
+                        &[],
                     )
                     .await?;
                     sqlx::query(
@@ -230,6 +232,7 @@ pub async fn record_synthetic_eval_failure(
             | SyntheticFailureWrite::UpdatedPendingEvaluation { derivation_id }
             | SyntheticFailureWrite::PreservedExisting { derivation_id, .. } => *derivation_id,
         },
+        &[],
     )
     .await?;
     tx.commit().await?;
@@ -502,7 +505,9 @@ pub async fn record_successful_eval_result(
             match existing {
                 Some((id, status_id)) => {
                     crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx(
-                        &mut tx, id,
+                        &mut tx,
+                        id,
+                        &[],
                     )
                     .await?;
                     sqlx::query(
@@ -597,6 +602,7 @@ pub async fn record_successful_eval_result(
             | SuccessfulEvalWrite::PreservedBuildState { derivation_id, .. }
             | SuccessfulEvalWrite::LegacyPathConflict { derivation_id } => *derivation_id,
         },
+        &[],
     )
     .await?;
     tx.commit().await?;
@@ -721,9 +727,11 @@ pub async fn record_successful_eval_result_in_tx(
                         Ok(SuccessfulEvalWrite::LegacyPathConflict { derivation_id: id })
                     } else {
                         crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx(
-                        tx, id,
-                    )
-                    .await?;
+                            tx,
+                            id,
+                            &[],
+                        )
+                        .await?;
                         sqlx::query(
                             "DELETE FROM composite_policy_assessments WHERE derivation_id = $1",
                         )
@@ -863,6 +871,7 @@ pub async fn record_successful_eval_result_in_tx(
             | SuccessfulEvalWrite::PreservedBuildState { derivation_id, .. }
             | SuccessfulEvalWrite::LegacyPathConflict { derivation_id } => *derivation_id,
         },
+        &[],
     )
     .await?;
     Ok(result)
@@ -933,7 +942,9 @@ pub async fn record_synthetic_eval_failure_in_tx(
             match existing {
                 Some((id, status_id)) => {
                     crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx(
-                        tx, id,
+                        tx,
+                        id,
+                        &[],
                     )
                     .await?;
                     sqlx::query(
@@ -996,6 +1007,7 @@ pub async fn record_synthetic_eval_failure_in_tx(
             | SyntheticFailureWrite::UpdatedPendingEvaluation { derivation_id }
             | SyntheticFailureWrite::PreservedExisting { derivation_id, .. } => *derivation_id,
         },
+        &[],
     )
     .await?;
     Ok(result)

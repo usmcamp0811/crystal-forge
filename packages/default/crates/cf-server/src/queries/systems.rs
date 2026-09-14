@@ -4,7 +4,7 @@ use crate::queries::system_events::set_pending_deployment_target_tx;
 use anyhow::{Context, Result};
 use chrono::Duration as ChronoDuration;
 use chrono::{DateTime, Utc};
-use sqlx::PgPool;
+use sqlx::{Executor, PgPool, Postgres};
 use std::collections::BTreeSet;
 use uuid::Uuid;
 
@@ -162,9 +162,17 @@ pub enum HeartbeatIntervalUpdate {
     Set(i32),
 }
 
+/// Updates system metadata through the supplied database executor.
+///
+/// Passing a transaction lets callers keep authorization, locking, mutation,
+/// and response construction in one atomic operation.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL rejects or cannot execute the update.
 #[allow(clippy::too_many_arguments)]
-pub async fn update_system_metadata(
-    pool: &PgPool,
+pub async fn update_system_metadata<'e, E>(
+    executor: E,
     system_id: Uuid,
     hostname: &str,
     fqdn: FqdnUpdate<'_>,
@@ -173,7 +181,10 @@ pub async fn update_system_metadata(
     system_configuration_name: Option<&str>,
     deployment_policy: &str,
     heartbeat_interval_secs: HeartbeatIntervalUpdate,
-) -> Result<()> {
+) -> Result<()>
+where
+    E: Executor<'e, Database = Postgres>,
+{
     // Both `fqdn` and `heartbeat_interval_secs` use tri-state update semantics.
     // We must branch the SQL to avoid touching columns when the caller wants
     // to preserve their current values (Keep).
@@ -196,7 +207,7 @@ pub async fn update_system_metadata(
             .bind(system_configuration_name)
             .bind(deployment_policy)
             .bind(system_id)
-            .execute(pool)
+            .execute(executor)
             .await?;
         }
         (FqdnUpdate::Keep, _) => {
@@ -223,7 +234,7 @@ pub async fn update_system_metadata(
             .bind(deployment_policy)
             .bind(hb_value)
             .bind(system_id)
-            .execute(pool)
+            .execute(executor)
             .await?;
         }
         (_, HeartbeatIntervalUpdate::Keep) => {
@@ -250,7 +261,7 @@ pub async fn update_system_metadata(
             .bind(system_configuration_name)
             .bind(deployment_policy)
             .bind(system_id)
-            .execute(pool)
+            .execute(executor)
             .await?;
         }
         (_, _) => {
@@ -283,7 +294,7 @@ pub async fn update_system_metadata(
             .bind(deployment_policy)
             .bind(hb_value)
             .bind(system_id)
-            .execute(pool)
+            .execute(executor)
             .await?;
         }
     }
@@ -1816,11 +1827,18 @@ pub struct SystemDetailRow {
     pub public_key: Option<String>,
 }
 
-/// Fetch system detail from view_system_detail
-pub async fn get_system_detail_by_id(
-    pool: &PgPool,
+/// Fetches system detail from `view_system_detail` through an executor.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot load or decode the detail row.
+pub async fn get_system_detail_by_id<'e, E>(
+    executor: E,
     system_id: Uuid,
-) -> Result<Option<SystemDetailRow>> {
+) -> Result<Option<SystemDetailRow>>
+where
+    E: Executor<'e, Database = Postgres>,
+{
     let row = sqlx::query_as::<_, SystemDetailRow>(
         "SELECT vsd.*, s.public_key
          FROM view_system_detail vsd
@@ -1828,7 +1846,7 @@ pub async fn get_system_detail_by_id(
          WHERE vsd.id = $1",
     )
     .bind(system_id)
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await?;
     Ok(row)
 }

@@ -10,10 +10,11 @@ use sqlx::{PgPool, Postgres, QueryBuilder, Transaction};
 use uuid::Uuid;
 
 use crate::models::poam::{
-    ActivityView, AssignmentReferenceView, CompatibleFinding, DashboardSummary,
-    FindingRequirementView, FindingView, HistoryCursor, MilestoneView, Page, PoamAssigneeCatalog,
-    PoamAssigneeGroup, PoamAssigneePerson, PoamDetail, PoamListQuery, PoamSummary, Rollup,
-    VerificationAttemptView, VerificationItemView, WaiverListQuery, WaiverView,
+    ActivityView, AssignmentReferenceView, CompatibleFinding, CveFindingView,
+    CveVerificationItemView, DashboardSummary, FindingRequirementView, FindingView, HistoryCursor,
+    MilestoneView, Page, PoamAssigneeCatalog, PoamAssigneeGroup, PoamAssigneePerson, PoamDetail,
+    PoamListQuery, PoamSummary, Rollup, VerificationAttemptView, VerificationItemView,
+    WaiverListQuery, WaiverView,
 };
 
 const SUMMARY_COLUMNS: &str = r#"
@@ -23,6 +24,9 @@ const SUMMARY_COLUMNS: &str = r#"
     (SELECT COUNT(DISTINCT l.finding_id) FROM poam_finding_links l
       WHERE l.poam_id = p.id AND ((p.status <> 'completed' AND l.retired_at IS NULL)
         OR (p.status = 'completed' AND l.retirement_reason='closed:'||p.closure_attempt_id::text))) AS finding_count,
+    (SELECT COUNT(DISTINCT l.cve_finding_id) FROM poam_cve_finding_links l
+      WHERE l.poam_id = p.id AND ((p.status <> 'completed' AND l.retired_at IS NULL)
+        OR (p.status = 'completed' AND l.retirement_reason='closed:'||p.closure_attempt_id::text))) AS cve_finding_count,
     p.created_at, p.updated_at, p.closed_at, p.closure_attempt_id
 "#;
 
@@ -36,6 +40,9 @@ const SUMMARY_COLUMNS_AFTER_TODAY: &str = r#", FALSE) AS overdue,
     (SELECT COUNT(DISTINCT l.finding_id) FROM poam_finding_links l
       WHERE l.poam_id = p.id AND ((p.status <> 'completed' AND l.retired_at IS NULL)
         OR (p.status = 'completed' AND l.retirement_reason='closed:'||p.closure_attempt_id::text))) AS finding_count,
+    (SELECT COUNT(DISTINCT l.cve_finding_id) FROM poam_cve_finding_links l
+      WHERE l.poam_id = p.id AND ((p.status <> 'completed' AND l.retired_at IS NULL)
+        OR (p.status = 'completed' AND l.retirement_reason='closed:'||p.closure_attempt_id::text))) AS cve_finding_count,
     p.created_at, p.updated_at, p.closed_at, p.closure_attempt_id
 "#;
 
@@ -55,6 +62,7 @@ struct RelatedPoamSummary {
     revision: i64,
     overdue: bool,
     finding_count: i64,
+    cve_finding_count: i64,
     created_at: chrono::DateTime<chrono::Utc>,
     updated_at: chrono::DateTime<chrono::Utc>,
     closed_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -79,6 +87,7 @@ impl RelatedPoamSummary {
                 revision: self.revision,
                 overdue: self.overdue,
                 finding_count: self.finding_count,
+                cve_finding_count: self.cve_finding_count,
                 created_at: self.created_at,
                 updated_at: self.updated_at,
                 closed_at: self.closed_at,
@@ -221,6 +230,52 @@ pub async fn finding_poam_summaries(
             .push_bind(history_offset + history_limit + 1);
     }
     builder.push(" ORDER BY related.finding_id,related.relation_active DESC,related.relationship_at DESC,related.relationship_id DESC");
+    Ok(builder
+        .build_query_as::<RelatedPoamSummary>()
+        .fetch_all(pool)
+        .await?
+        .into_iter()
+        .map(RelatedPoamSummary::into_parts)
+        .collect())
+}
+
+/// Loads active and historical POA&M summaries for exact-CVE findings.
+///
+/// Each finding receives at most one extra historical row for continuation
+/// detection. Missing finding IDs produce no rows.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot execute or decode the query.
+pub async fn cve_finding_poam_summaries(
+    pool: &PgPool,
+    finding_ids: &[Uuid],
+    today: NaiveDate,
+    is_admin: bool,
+    environment_ids: &[Uuid],
+    history_page: (i64, i64),
+) -> Result<Vec<(Uuid, bool, PoamSummary)>> {
+    if finding_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut builder = QueryBuilder::<Postgres>::new(
+        "WITH base AS (SELECT DISTINCT ON (link.cve_finding_id,p.id) link.cve_finding_id,p.id,(p.status<>'completed' AND link.retired_at IS NULL) AS relation_active,link.linked_at AS relationship_at,link.id AS relationship_id FROM poam_cve_finding_links link JOIN poams p ON p.id=link.poam_id WHERE link.cve_finding_id=ANY(",
+    );
+    builder
+        .push_bind(finding_ids)
+        .push(") AND (")
+        .push_bind(is_admin)
+        .push(" OR poam_visible_to_environments(p.id,")
+        .push_bind(environment_ids)
+        .push(")) ORDER BY link.cve_finding_id,p.id,(p.status<>'completed' AND link.retired_at IS NULL) DESC,link.linked_at DESC,link.id DESC),related AS (SELECT base.*,COUNT(*) FILTER (WHERE NOT base.relation_active) OVER (PARTITION BY base.cve_finding_id ORDER BY base.relationship_at DESC,base.relationship_id DESC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS history_row FROM base) SELECT related.cve_finding_id AS relation_id,related.relation_active,")
+        .push(SUMMARY_COLUMNS_BEFORE_TODAY)
+        .push_bind(today)
+        .push(SUMMARY_COLUMNS_AFTER_TODAY)
+        .push(" FROM related JOIN poams p ON p.id=related.id WHERE related.relation_active OR related.history_row BETWEEN ")
+        .push_bind(history_page.1 + 1)
+        .push(" AND ")
+        .push_bind(history_page.1 + history_page.0 + 1)
+        .push(" ORDER BY related.cve_finding_id,related.relation_active DESC,related.relationship_at DESC,related.relationship_id DESC");
     Ok(builder
         .build_query_as::<RelatedPoamSummary>()
         .fetch_all(pool)
@@ -467,6 +522,13 @@ pub async fn list(
             .push(")")
             .push(" OR ('POAM-' || lpad(p.human_number::text, 4, '0')) ILIKE ")
             .push_bind(format!("%{q}%"))
+            .push(" OR EXISTS (SELECT 1 FROM poam_cve_finding_links cve_link JOIN poam_cve_findings cve_finding ON cve_finding.id=cve_link.cve_finding_id JOIN systems cve_system ON cve_system.id=cve_finding.system_id WHERE cve_link.poam_id=p.id AND (cve_finding.canonical_cve_id ILIKE ")
+            .push_bind(format!("%{q}%"))
+            .push(" OR cve_finding.canonical_package_name ILIKE ")
+            .push_bind(format!("%{q}%"))
+            .push(" OR cve_system.hostname ILIKE ")
+            .push_bind(format!("%{q}%"))
+            .push("))")
             .push(")");
     }
     if let Some(system_id) = query.system_id {
@@ -584,8 +646,60 @@ pub async fn detail(
     else {
         return Ok(None);
     };
+    // PAGINATION: Select one keyset page across both finding families before
+    // hydrating either response array. Otherwise each family can consume the
+    // full limit and the shared cursor can skip or repeat the other family.
+    let finding_page = sqlx::query_as::<_, (String, Uuid, chrono::DateTime<chrono::Utc>)>(
+        r#"
+        WITH visible_findings AS (
+          SELECT 'policy'::text AS family,l.id AS link_id,l.linked_at
+          FROM poam_finding_links l
+          JOIN poam_findings finding ON finding.id=l.finding_id
+          JOIN systems system ON system.id=finding.system_id
+          WHERE l.poam_id=$1 AND ($2 OR system.environment_id=ANY($3))
+          UNION ALL
+          SELECT 'cve'::text AS family,link.id AS link_id,link.linked_at
+          FROM poam_cve_finding_links link
+          JOIN poam_cve_findings finding ON finding.id=link.cve_finding_id
+          JOIN systems system ON system.id=finding.system_id
+          WHERE link.poam_id=$1 AND ($2 OR system.environment_id=ANY($3))
+        )
+        SELECT family,link_id,linked_at FROM visible_findings
+        WHERE ($5::timestamptz IS NULL OR (linked_at,link_id)<($5,$6))
+        ORDER BY linked_at DESC,link_id DESC LIMIT $4"#,
+    )
+    .bind(poam_id)
+    .bind(is_admin)
+    .bind(environment_ids)
+    .bind(finding_limit + 1)
+    .bind(finding_before_at)
+    .bind(finding_before_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    let findings_has_more = finding_page.len() as i64 > finding_limit;
+    let finding_page = finding_page
+        .into_iter()
+        .take(finding_limit as usize)
+        .collect::<Vec<_>>();
+    let findings_next_cursor = findings_has_more
+        .then(|| {
+            finding_page
+                .last()
+                .map(|(_, id, at)| HistoryCursor { at: *at, id: *id })
+        })
+        .flatten();
+    let policy_link_ids = finding_page
+        .iter()
+        .filter(|(family, _, _)| family == "policy")
+        .map(|(_, id, _)| *id)
+        .collect::<Vec<_>>();
+    let cve_link_ids = finding_page
+        .iter()
+        .filter(|(family, _, _)| family == "cve")
+        .map(|(_, id, _)| *id)
+        .collect::<Vec<_>>();
     let findings = sqlx::query_as::<_, FindingView>(r#"
-        SELECT f.id, f.system_id, s.hostname, s.environment_id, f.policy_lineage_id,
+                SELECT f.id, f.system_id, s.hostname, s.environment_id, f.policy_lineage_id,
                policy.name AS policy_name, l.id AS link_id, l.linked_at,
                l.linked_by,l.retired_at,l.retired_by,l.retirement_reason,
                l.retired_at IS NULL AS link_active,
@@ -607,23 +721,46 @@ pub async fn detail(
         LEFT JOIN poam_verification_items closure_item
           ON closure_item.attempt_id=closure_attempt.id AND closure_item.finding_id=l.finding_id
         WHERE l.poam_id=$1 AND ($2 OR s.environment_id=ANY($3))
-          AND ($5::timestamptz IS NULL OR (l.linked_at,l.id)<($5,$6))
-        ORDER BY l.linked_at DESC,l.id DESC LIMIT $4"#)
-        .bind(poam_id).bind(is_admin).bind(environment_ids).bind(finding_limit + 1)
-        .bind(finding_before_at).bind(finding_before_id).fetch_all(&mut **tx).await?;
-    let findings_has_more = findings.len() as i64 > finding_limit;
-    let findings = findings
-        .into_iter()
-        .take(finding_limit as usize)
-        .collect::<Vec<_>>();
-    let findings_next_cursor = findings_has_more
-        .then(|| {
-            findings.last().map(|finding| HistoryCursor {
-                at: finding.linked_at,
-                id: finding.link_id,
-            })
-        })
-        .flatten();
+          AND l.id=ANY($4)
+        ORDER BY l.linked_at DESC,l.id DESC"#)
+        .bind(poam_id).bind(is_admin).bind(environment_ids).bind(&policy_link_ids)
+        .fetch_all(&mut **tx).await?;
+    let cve_findings = sqlx::query_as::<_, CveFindingView>(
+        r#"
+        SELECT finding.id,finding.system_id,system.hostname,system.environment_id,
+               finding.canonical_cve_id,finding.canonical_package_name,
+               link.id AS link_id,link.linked_at,link.linked_by,link.retired_at,
+               link.retired_by,link.retirement_reason,
+               link.retired_at IS NULL AS link_active,
+               link.baseline_scan_id,link.baseline_scan_completed_at,
+               link.baseline_generation,link.baseline_target_store_path,
+               link.baseline_occurrence_derivation_path,
+               link.baseline_observed_package_version,
+               closure_item.scan_derivation_id AS current_derivation_id,
+                closure_item.target_store_path AS current_target_store_path,
+                closure_item.scan_id AS current_scan_id,
+                closure_item.occurrence_derivation_path AS current_occurrence_derivation_path,
+                closure_item.observed_package_version AS current_observed_package_version,
+               COALESCE(closure_item.result,'unknown') AS resolution_state
+        FROM poam_cve_finding_links link
+        JOIN poam_cve_findings finding ON finding.id=link.cve_finding_id
+        JOIN systems system ON system.id=finding.system_id
+        LEFT JOIN poam_verification_attempts closure_attempt
+          ON link.retirement_reason='closed:'||closure_attempt.id::text
+         AND closure_attempt.poam_id=link.poam_id
+        LEFT JOIN poam_cve_verification_items closure_item
+          ON closure_item.attempt_id=closure_attempt.id
+         AND closure_item.cve_finding_id=link.cve_finding_id
+        WHERE link.poam_id=$1 AND ($2 OR system.environment_id=ANY($3))
+          AND link.id=ANY($4)
+        ORDER BY link.linked_at DESC,link.id DESC"#,
+    )
+    .bind(poam_id)
+    .bind(is_admin)
+    .bind(environment_ids)
+    .bind(&cve_link_ids)
+    .fetch_all(&mut **tx)
+    .await?;
     let milestones = sqlx::query_as::<_, MilestoneView>(
         "SELECT id, ordinal, title, target_date, completed_at, completed_by, created_by, updated_by, created_at, updated_at FROM poam_milestones WHERE poam_id=$1 ORDER BY ordinal")
         .bind(poam_id).fetch_all(&mut **tx).await?;
@@ -675,6 +812,27 @@ pub async fn detail(
         WHERE item.attempt_id=ANY($1) AND ($2 OR system.environment_id=ANY($3))
         ORDER BY item.finding_id"#)
         .bind(&attempt_ids).bind(is_admin).bind(environment_ids).fetch_all(&mut **tx).await?;
+    let cve_verification_items = sqlx::query_as::<_, CveVerificationItemView>(
+        r#"
+        SELECT attempt_id,cve_finding_id,system_id,canonical_cve_id,
+               canonical_package_name,baseline_scan_id,
+               baseline_scan_derivation_id,baseline_scan_completed_at,
+               baseline_generation_snapshot_id,baseline_generation,
+               baseline_target_store_path,baseline_occurrence_derivation_path,
+               baseline_observed_package_version,result,scan_id,scan_derivation_id,
+               scan_completed_at,generation_snapshot_id,generation,
+               target_store_path,occurrence_present,
+               occurrence_derivation_path,observed_package_version,observed_at,detail
+        FROM poam_cve_verification_items item
+        JOIN systems system ON system.id=item.system_id
+        WHERE attempt_id=ANY($1) AND ($2 OR system.environment_id=ANY($3))
+        ORDER BY cve_finding_id"#,
+    )
+    .bind(&attempt_ids)
+    .bind(is_admin)
+    .bind(environment_ids)
+    .fetch_all(&mut **tx)
+    .await?;
     let verification_attempts = attempt_rows
         .into_iter()
         .map(|row| VerificationAttemptView {
@@ -684,6 +842,11 @@ pub async fn detail(
             attempted_by: row.3,
             attempted_at: row.4,
             items: verification_items
+                .iter()
+                .filter(|item| item.attempt_id == row.0)
+                .cloned()
+                .collect(),
+            cve_items: cve_verification_items
                 .iter()
                 .filter(|item| item.attempt_id == row.0)
                 .cloned()
@@ -700,7 +863,8 @@ pub async fn detail(
           AND ($3::timestamptz IS NULL OR (activity.created_at,activity.id)<($3,$4))
           AND ($5 OR (
             (
-              COALESCE(activity.payload->>'finding_id',activity.payload#>>'{finding,finding_id}') IS NULL
+              (COALESCE(activity.payload->>'finding_id',activity.payload#>>'{finding,finding_id}') IS NULL
+               AND COALESCE(activity.payload->>'cve_finding_id',activity.payload#>>'{finding,cve_finding_id}') IS NULL)
               OR EXISTS (
                 SELECT 1 FROM poam_findings finding
                 JOIN systems system ON system.id=finding.system_id
@@ -708,6 +872,24 @@ pub async fn detail(
                   activity.payload->>'finding_id',activity.payload#>>'{finding,finding_id}'
                 )::uuid AND system.environment_id=ANY($6)
               )
+              OR EXISTS (
+                SELECT 1 FROM poam_cve_findings finding
+                JOIN systems system ON system.id=finding.system_id
+                WHERE finding.id=COALESCE(
+                  activity.payload->>'cve_finding_id',activity.payload#>>'{finding,cve_finding_id}'
+                )::uuid AND system.environment_id=ANY($6)
+              )
+            )
+            AND NOT EXISTS (
+              SELECT 1
+              FROM jsonb_array_elements(COALESCE(activity.payload->'cve_items','[]'::jsonb)) item
+              WHERE item->>'cve_finding_id' IS NOT NULL
+                AND NOT EXISTS (
+                  SELECT 1 FROM poam_cve_findings finding
+                  JOIN systems system ON system.id=finding.system_id
+                  WHERE finding.id=(item->>'cve_finding_id')::uuid
+                    AND system.environment_id=ANY($6)
+                )
             )
             AND NOT EXISTS (
               SELECT 1
@@ -740,6 +922,7 @@ pub async fn detail(
     Ok(Some(PoamDetail {
         poam,
         findings,
+        cve_findings,
         findings_has_more,
         findings_next_cursor,
         milestones,

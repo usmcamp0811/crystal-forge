@@ -8,6 +8,7 @@
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Postgres, Transaction};
+use std::collections::BTreeSet;
 use uuid::Uuid;
 
 use crate::compliance::canonical::semantic_digest;
@@ -464,7 +465,6 @@ pub(crate) async fn fail_eval_passed_attempt_in_tx(
     .bind(failure_class)
     .execute(&mut **tx)
     .await?;
-
     let assessment_ids: Vec<Uuid> = sqlx::query_scalar(
         r#"
         UPDATE composite_policy_rule_results rule_result
@@ -1398,8 +1398,10 @@ pub async fn persist_scan_phase(pool: &PgPool, scan_id: Uuid) -> Result<()> {
 /// Locks all POA&M finding keys affected by one derivation.
 ///
 /// Callers must retain the transaction until the related evidence mutation is
-/// complete. The function uses the common derivation, system, and finding lock
-/// order used by assessment and POA&M writers.
+/// complete. `extra_canonical_cve_ids` contains canonical IDs that the caller
+/// parsed but has not persisted yet. The function locks their union with
+/// persisted IDs before it discovers or locks any system, policy, or exact
+/// finding key.
 ///
 /// # Errors
 ///
@@ -1408,8 +1410,53 @@ pub async fn persist_scan_phase(pool: &PgPool, scan_id: Uuid) -> Result<()> {
 pub(crate) async fn lock_poam_findings_for_derivation_tx(
     tx: &mut Transaction<'_, Postgres>,
     derivation_id: i32,
+    extra_canonical_cve_ids: &[String],
 ) -> Result<()> {
+    // CONCURRENCY: Infrastructure derivation locks precede the exact-CVE lock
+    // hierarchy. State ingestion uses the same prerequisite order.
     lock_poam_derivation_key_tx(tx, derivation_id).await?;
+    // COMPATIBILITY: Current writers can run while the additive exact-CVE
+    // migration is pending. Only inspect exact tables after they exist.
+    let exact_cve_schema_exists: bool =
+        sqlx::query_scalar("SELECT to_regclass('public.poam_cve_findings') IS NOT NULL")
+            .fetch_one(&mut **tx)
+            .await?;
+    if exact_cve_schema_exists {
+        // CONCURRENCY: Canonical CVE keys are the first exact-CVE lock level.
+        // Existing findings cover lifecycle writers; sealed observations cover
+        // scan publication and verification even before a finding exists.
+        sqlx::query(
+            r#"SELECT lock_poam_cve_key(key.canonical_cve_id)
+               FROM (
+                  SELECT unnest($2::text[]) AS canonical_cve_id
+                  UNION
+                  SELECT canonical_cve_id FROM poam_cve_findings
+                 WHERE system_id IN (
+                   SELECT system.id FROM derivations derivation
+                   JOIN systems system ON true
+                   JOIN LATERAL (
+                     SELECT state.store_path FROM system_states state
+                     WHERE state.hostname=system.hostname
+                       AND state.store_path IS NOT NULL
+                       AND btrim(state.store_path)<>''
+                     ORDER BY state.timestamp DESC,state.id DESC LIMIT 1
+                   ) deployed ON deployed.store_path=COALESCE(
+                     derivation.store_path,derivation.expected_store_path)
+                   WHERE derivation.id=$1)
+                 UNION
+                 SELECT observation.canonical_cve_id
+                 FROM cve_scans scan
+                 JOIN cve_scan_vulnerability_observations observation
+                   ON observation.scan_id=scan.id
+                 WHERE scan.derivation_id=$1
+                 ORDER BY canonical_cve_id
+               ) key"#,
+        )
+        .bind(derivation_id)
+        .bind(extra_canonical_cve_ids)
+        .execute(&mut **tx)
+        .await?;
+    }
     // CONCURRENCY: Legacy policies have no composite assessment rows. Include
     // findings for systems that currently deploy this derivation so legacy Nix
     // results and CVE scans use the same commit boundary as POA&M actions.
@@ -1467,6 +1514,31 @@ pub(crate) async fn lock_poam_findings_for_derivation_tx(
     .bind(derivation_id)
     .execute(&mut **tx)
     .await?;
+    if exact_cve_schema_exists {
+        sqlx::query(
+        r#"SELECT lock_poam_cve_finding_key(key.system_id,key.canonical_cve_id,key.canonical_package_name)
+           FROM (
+             SELECT finding.system_id,finding.canonical_cve_id,
+                    finding.canonical_package_name
+             FROM derivations derivation
+             JOIN systems system ON true
+             JOIN LATERAL (
+               SELECT state.store_path FROM system_states state
+               WHERE state.hostname=system.hostname AND state.store_path IS NOT NULL
+                 AND btrim(state.store_path)<>''
+               ORDER BY state.timestamp DESC,state.id DESC LIMIT 1
+             ) deployed ON deployed.store_path=COALESCE(
+               derivation.store_path,derivation.expected_store_path)
+             JOIN poam_cve_findings finding ON finding.system_id=system.id
+             WHERE derivation.id=$1
+             ORDER BY finding.system_id,finding.canonical_cve_id,
+                      finding.canonical_package_name
+           ) key"#,
+        )
+        .bind(derivation_id)
+        .execute(&mut **tx)
+        .await?;
+    }
     Ok(())
 }
 
@@ -1550,6 +1622,22 @@ pub(crate) async fn lock_poam_findings_for_system_tx(
     // CONCURRENCY: All callers acquire these stable finding keys before system,
     // assessment, or rule row locks. POA&M actions use the same key order, so an
     // action observes either the complete old state or the complete new state.
+    let exact_cve_schema_exists: bool =
+        sqlx::query_scalar("SELECT to_regclass('public.poam_cve_findings') IS NOT NULL")
+            .fetch_one(&mut **tx)
+            .await?;
+    if exact_cve_schema_exists {
+        // CONCURRENCY: Acquire every canonical CVE key before the system
+        // sentinel. Policy and exact keys follow as separate sorted levels.
+        sqlx::query(
+            r#"SELECT lock_poam_cve_key(canonical_cve_id)
+               FROM (SELECT DISTINCT canonical_cve_id FROM poam_cve_findings
+                     WHERE system_id=$1 ORDER BY canonical_cve_id) key"#,
+        )
+        .bind(system_id)
+        .execute(&mut **tx)
+        .await?;
+    }
     lock_poam_system_key_tx(tx, system_id).await?;
     sqlx::query(
         r#"SELECT lock_poam_finding_key(key.system_id,key.policy_lineage_id)
@@ -1561,6 +1649,73 @@ pub(crate) async fn lock_poam_findings_for_system_tx(
            ) key"#,
     )
     .bind(system_id)
+    .execute(&mut **tx)
+    .await?;
+    if exact_cve_schema_exists {
+        sqlx::query(
+            r#"SELECT lock_poam_cve_finding_key(
+              finding.system_id,finding.canonical_cve_id,
+              finding.canonical_package_name)
+           FROM poam_cve_findings finding
+           WHERE finding.system_id=$1
+           ORDER BY finding.system_id,finding.canonical_cve_id,
+                    finding.canonical_package_name"#,
+        )
+        .bind(system_id)
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok(())
+}
+
+/// Locks one canonical CVE scope for a sorted set of systems.
+///
+/// The function acquires the canonical CVE key, every system sentinel, every
+/// policy finding key, and every matching exact-CVE finding key as separate
+/// ordered levels. Callers must acquire no key from a later level first.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot enumerate or acquire the locks.
+pub(crate) async fn lock_poam_cve_scope_for_systems_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    cve_id: &str,
+    system_ids: &[Uuid],
+) -> Result<()> {
+    sqlx::query("SELECT lock_poam_cve_key($1)")
+        .bind(cve_id)
+        .execute(&mut **tx)
+        .await?;
+    let system_ids = system_ids.iter().copied().collect::<BTreeSet<_>>();
+    for system_id in &system_ids {
+        lock_poam_system_key_tx(tx, *system_id).await?;
+    }
+    let system_ids = system_ids.into_iter().collect::<Vec<_>>();
+    sqlx::query(
+        r#"SELECT lock_poam_finding_key(key.system_id,key.policy_lineage_id)
+           FROM (
+             SELECT finding.system_id,finding.policy_lineage_id
+             FROM poam_findings finding WHERE finding.system_id=ANY($1)
+             ORDER BY finding.system_id,finding.policy_lineage_id
+           ) key"#,
+    )
+    .bind(&system_ids)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        r#"SELECT lock_poam_cve_finding_key(
+                    key.system_id,key.canonical_cve_id,key.canonical_package_name)
+           FROM (
+             SELECT finding.system_id,finding.canonical_cve_id,
+                    finding.canonical_package_name
+             FROM poam_cve_findings finding
+             WHERE finding.system_id=ANY($1) AND finding.canonical_cve_id=$2
+             ORDER BY finding.system_id,finding.canonical_cve_id,
+                      finding.canonical_package_name
+           ) key"#,
+    )
+    .bind(&system_ids)
+    .bind(cve_id)
     .execute(&mut **tx)
     .await?;
     Ok(())
@@ -1599,7 +1754,7 @@ pub(crate) async fn persist_scan_phase_in_tx(
     if newest_id != Some(scan.id) {
         return Ok(());
     }
-    lock_poam_findings_for_derivation_tx(tx, scan.derivation_id).await?;
+    lock_poam_findings_for_derivation_tx(tx, scan.derivation_id, &[]).await?;
     let assessments = sqlx::query_as::<_, (Uuid, serde_json::Value)>(
         r#"
         SELECT assessment.id, assessment.effective_config

@@ -17,11 +17,12 @@ use crate::components::icon::{Icon, IconName};
 use crate::state::app_state::AppState;
 use crate::views::poam_api::{
     self, ActivityView, AddFindingRequest, AddMilestoneRequest, AddNoteRequest, AssessmentOutcome,
-    AssignmentReferenceRequest, ClosePreconditionDetails, FindingObservationReference,
-    FindingRelationshipEntry, FindingRequirementView, FindingView, MilestoneView, PoamApiError,
-    PoamAssigneeCatalog, PoamAssigneeRequest, PoamAssigneeView, PoamDetail, PoamDetailQuery,
-    PoamRisk, PoamStatus, PoamSummary, RevisionRequest, Rollup, TransitionPoamRequest,
-    UpdateMilestoneRequest, UpdatePoamRequest, VerificationResult,
+    AssignmentReferenceRequest, ClosePreconditionDetails, CreateCvePoamRequest, CveFindingView,
+    CveObservationReference, FindingObservationReference, FindingRelationshipEntry,
+    FindingRequirementView, FindingView, MilestoneView, PoamApiError, PoamAssigneeCatalog,
+    PoamAssigneeRequest, PoamAssigneeView, PoamDetail, PoamDetailQuery, PoamRisk, PoamStatus,
+    PoamSummary, RevisionRequest, Rollup, TransitionPoamRequest, UpdateMilestoneRequest,
+    UpdatePoamRequest, VerificationResult,
 };
 
 /// Describes an immutable assignment version that a POA&M can reference.
@@ -98,6 +99,25 @@ pub enum FindingPoamEvent {
     Linked(PoamDetail),
     /// Requests invalidation of cached assessment or finding evidence.
     InvalidateAssessment(Uuid),
+}
+
+/// Provides read-only display fields beside opaque exact-CVE mutation context.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CvePoamContext {
+    /// Contains the server-issued exact occurrence identity.
+    pub observation: CveObservationReference,
+    /// Contains the affected hostname.
+    pub hostname: String,
+    /// Contains the scanner-observed package name.
+    pub observed_package_name: String,
+    /// Contains the scanner-observed installed version.
+    pub installed_version: String,
+    /// Contains the advisory fixed version when supplied.
+    pub fixed_version: Option<String>,
+    /// Contains the severity label shown by the system CVE response.
+    pub severity: String,
+    /// Contains the CVSS score when supplied.
+    pub cvss_score: Option<f32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -471,6 +491,30 @@ pub const fn result_class(result: VerificationResult) -> &'static str {
     }
 }
 
+/// Returns the explicit server exact-CVE verification label.
+pub fn cve_result_label(result: &str) -> &'static str {
+    match result {
+        "pass" => "PASS",
+        "fail" => "FAIL",
+        "missing" => "MISSING",
+        "stale" => "STALE",
+        "whitelisted" => "WHITELISTED",
+        "justified" => "JUSTIFIED",
+        "error" => "ERROR",
+        _ => "ERROR",
+    }
+}
+
+fn cve_result_class(result: &str) -> &'static str {
+    match result {
+        "pass" => "poam-result-pass",
+        "fail" | "error" => "poam-result-fail",
+        "whitelisted" | "justified" => "poam-result-waiver",
+        "missing" | "stale" => "poam-result-unknown",
+        _ => "poam-result-fail",
+    }
+}
+
 fn assessment_label(result: AssessmentOutcome) -> &'static str {
     match result {
         AssessmentOutcome::Pass => "PASS",
@@ -776,6 +820,136 @@ fn PoamCreateModal(props: PoamCreateModalProps) -> Element {
     }
 }
 
+/// Configures the exact-CVE POA&M creation dialog.
+#[derive(Props, Clone, PartialEq)]
+pub struct CvePoamCreateModalProps {
+    /// Provides immutable display fields and opaque server-issued identity.
+    pub context: CvePoamContext,
+    /// Receives a request to close the dialog.
+    pub on_close: EventHandler<()>,
+    /// Receives authoritative detail after successful creation.
+    pub on_created: EventHandler<PoamDetail>,
+}
+
+/// Creates a remediation plan from server-issued exact-CVE evidence.
+#[component]
+pub fn CvePoamCreateModal(props: CvePoamCreateModalProps) -> Element {
+    let app_state = use_context::<Signal<AppState>>();
+    let current_user_id = app_state
+        .read()
+        .auth
+        .as_ref()
+        .and_then(|auth| auth.user.as_ref())
+        .and_then(|user| Uuid::parse_str(&user.id).ok());
+    let mut title = use_signal(|| {
+        format!(
+            "{} - patch {} on {}",
+            props.context.observation.canonical_cve_id,
+            props.context.observation.canonical_package_name,
+            props.context.hostname
+        )
+    });
+    let mut assignee = use_signal(|| PoamAssigneeDraft::Unassigned);
+    let mut assignee_catalog = use_signal(|| AssigneeCatalogState::Loading);
+    let default_days = match props.context.severity.to_ascii_lowercase().as_str() {
+        "critical" => 14,
+        "high" => 30,
+        _ => 56,
+    };
+    let mut target = use_signal(|| {
+        (chrono::Utc::now().date_naive() + chrono::Duration::days(default_days)).to_string()
+    });
+    let initial_risk = match props.context.severity.to_ascii_lowercase().as_str() {
+        "critical" | "high" => PoamRisk::High,
+        "low" => PoamRisk::Low,
+        _ => PoamRisk::Medium,
+    };
+    let mut risk = use_signal(|| initial_risk);
+    let mut plan = use_signal(String::new);
+    let mut milestones = use_signal(|| true);
+    let mut pending = use_signal(|| false);
+    let mut error = use_signal(|| None::<String>);
+    let close = props.on_close;
+
+    use_effect(move || {
+        spawn(async move {
+            match poam_api::fetch_assignee_catalog().await {
+                Ok(catalog) => {
+                    assignee.set(default_assignee(current_user_id, &catalog));
+                    assignee_catalog.set(AssigneeCatalogState::Loaded(catalog));
+                }
+                Err(fetch_error) => {
+                    assignee_catalog.set(AssigneeCatalogState::Failed(api_message(&fetch_error)))
+                }
+            }
+        });
+    });
+    let catalog_loading = matches!(&*assignee_catalog.read(), AssigneeCatalogState::Loading);
+    let fixed_version = props
+        .context
+        .fixed_version
+        .as_deref()
+        .unwrap_or("Unavailable");
+    let cvss = props
+        .context
+        .cvss_score
+        .map(|score| format!("{score:.1}"))
+        .unwrap_or_else(|| "Unavailable".to_string());
+
+    rsx! {
+        div { class: "modal-backdrop", onclick: move |_| if !pending() { close.call(()) },
+            div { id: "cve-poam-create-dialog", class: "modal poam-modal", role: "dialog", aria_modal: "true", aria_labelledby: "cve-poam-create-title", tabindex: "-1", "data-testid": "cve-poam-create", onclick: |event| event.stop_propagation(), onkeydown: move |event| {
+                event.stop_propagation();
+                if event.key() == Key::Escape && !pending() { close.call(()); }
+            },
+                DialogFocusRestore {}
+                DialogFocusSentinel { dialog_id: "cve-poam-create-dialog".to_string(), boundary: DialogFocusBoundary::Last }
+                div { class: "modal-head poam-modal-head",
+                    div { h2 { id: "cve-poam-create-title", "Create POA&M" } p { "Track remediation for a known vulnerability. Only a later exact scan that no longer contains the occurrence permits closure." } }
+                    button { class: "btn-icon focus-ring", aria_label: "Close", disabled: pending(), onclick: move |_| close.call(()), Icon { name: IconName::X, size: 16 } }
+                }
+                div { class: "modal-body poam-modal-body",
+                    section { class: "poam-context", "data-testid": "cve-poam-context",
+                        header { Icon { name: IconName::Shield, size: 12 } "Vulnerability context" span { "Authoritative and read-only" } }
+                        dl {
+                            div { dt { "System" } dd { class: "mono", "{props.context.hostname}" } }
+                            div { dt { "CVE" } dd { class: "mono", "{props.context.observation.canonical_cve_id}" } }
+                            div { dt { "Canonical package" } dd { class: "mono", "{props.context.observation.canonical_package_name}" } }
+                            div { dt { "Installed version" } dd { class: "mono", "{props.context.installed_version}" } }
+                            div { dt { "Fixed version" } dd { class: "mono", "{fixed_version}" } }
+                            div { dt { "Severity / CVSS" } dd { "{props.context.severity} / {cvss}" } }
+                            div { dt { "Scan" } dd { class: "mono", "{props.context.observation.scan_id}" } }
+                            div { dt { "Occurrence" } dd { class: "mono", title: "{props.context.observation.occurrence_derivation_path}", "{props.context.observation.occurrence_derivation_path}" } }
+                        }
+                    }
+                    div { class: "poam-form-grid",
+                        label { class: "field poam-span-all", span { "Title" } input { class: "input focus-ring", autofocus: true, value: "{title}", disabled: pending(), oninput: move |event| title.set(event.value()) } }
+                        label { class: "field", span { "Assignee" } PoamAssigneeSelect { selection: assignee, catalog: assignee_catalog.read().clone(), disabled: pending() } }
+                        label { class: "field", span { "Target completion" } input { class: "input focus-ring mono", r#type: "date", value: "{target}", disabled: pending(), oninput: move |event| target.set(event.value()) } }
+                        label { class: "field", span { "Risk" } select { class: "input focus-ring", value: "{risk:?}", disabled: pending(), onchange: move |event| risk.set(match event.value().as_str() { "High" => PoamRisk::High, "Low" => PoamRisk::Low, _ => PoamRisk::Medium }), option { value: "High", "CAT I - High" } option { value: "Medium", "CAT II - Medium" } option { value: "Low", "CAT III - Low" } } }
+                        label { class: "field poam-span-all", span { "Remediation plan" } textarea { class: "input focus-ring", rows: "4", value: "{plan}", placeholder: "What will change, where, and how the exact CVE absence will be verified", disabled: pending(), oninput: move |event| plan.set(event.value()) } }
+                    }
+                    label { class: "poam-check", input { r#type: "checkbox", checked: milestones(), disabled: pending(), onchange: move |event| milestones.set(event.checked()) } span { "Start with server-standard patch milestones" small { " The server creates identify, stage, deploy, and exact-scan verification milestones." } } }
+                    div { class: "sd-callout sd-callout-info", Icon { name: IconName::Shield, size: 13 } div { "Justification and scanner whitelisting are separate risk decisions. Neither remediates this vulnerability nor permits closure." } }
+                    if let Some(message) = error() { div { role: "alert", class: "sd-callout sd-callout-danger", Icon { name: IconName::Warn, size: 13 } div { "{message}" } } }
+                }
+                div { class: "modal-foot",
+                    button { class: "btn btn-ghost focus-ring", disabled: pending(), onclick: move |_| close.call(()), "Cancel" }
+                    button { class: "btn btn-primary focus-ring", disabled: pending() || catalog_loading || title.read().trim().is_empty(), onclick: move |_| {
+                        let parsed_target = if target.read().trim().is_empty() { Ok(None) } else { NaiveDate::parse_from_str(target.read().trim(), "%Y-%m-%d").map(Some).map_err(|_| "Enter a valid target date.".to_string()) };
+                        let Ok(target_date) = parsed_target else { error.set(parsed_target.err()); return; };
+                        let request = CreateCvePoamRequest { observation: props.context.observation.clone(), title: title.read().trim().to_string(), plan: plan.read().trim().to_string(), owner: String::new(), assignee: assignee.read().request(), target_date, risk: risk(), default_milestones: milestones(), assignment_version_ids: Vec::new() };
+                        let mut pending = pending; let mut error = error; let on_created = props.on_created;
+                        spawn(async move { pending.set(true); match poam_api::create_cve_poam(&request).await { Ok(detail) => on_created.call(detail), Err(err) => { error.set(Some(if err.is_active_remediation() { "This exact vulnerability already has an active remediation plan. Refresh before retrying.".to_string() } else { api_message(&err) })); pending.set(false); } } });
+                    }, if pending() { "Creating..." } else { "Create POA&M" } }
+                    if pending() { span { role: "status", aria_live: "polite", class: "sr-only", "Creating exact-CVE POA&M." } }
+                }
+                DialogFocusSentinel { dialog_id: "cve-poam-create-dialog".to_string(), boundary: DialogFocusBoundary::First }
+            }
+        }
+    }
+}
+
 #[component]
 fn FindingContextPanel(context: FindingPoamContext) -> Element {
     let bundle = match (&context.bundle_name, &context.bundle_version) {
@@ -937,6 +1111,9 @@ pub struct PoamDetailHostProps {
     pub on_close: EventHandler<()>,
     /// Receives requests to open a linked finding.
     pub on_open_finding: EventHandler<FindingView>,
+    /// Receives requests to open exact-CVE evidence when the host supports it.
+    #[props(default)]
+    pub on_open_cve_finding: Option<EventHandler<CveFindingView>>,
     /// Receives reconciled server state after successful mutations.
     #[props(default)]
     pub on_changed: Option<EventHandler<PoamDetail>>,
@@ -948,7 +1125,7 @@ pub fn PoamDetailHost(props: PoamDetailHostProps) -> Element {
     let Some(poam_id) = props.poam_id else {
         return rsx! {};
     };
-    rsx! { PoamDetailTray { key: "{poam_id}", poam_id, viewer: props.viewer, assignment_versions: props.assignment_versions, on_close: props.on_close, on_open_finding: props.on_open_finding, on_changed: props.on_changed } }
+    rsx! { PoamDetailTray { key: "{poam_id}", poam_id, viewer: props.viewer, assignment_versions: props.assignment_versions, on_close: props.on_close, on_open_finding: props.on_open_finding, on_open_cve_finding: props.on_open_cve_finding, on_changed: props.on_changed } }
 }
 
 /// Configures the server-backed POA&M detail tray.
@@ -966,6 +1143,9 @@ pub struct PoamDetailTrayProps {
     pub on_close: EventHandler<()>,
     /// Receives requests to open a linked finding.
     pub on_open_finding: EventHandler<FindingView>,
+    /// Receives requests to open exact-CVE evidence when supported.
+    #[props(default)]
+    pub on_open_cve_finding: Option<EventHandler<CveFindingView>>,
     /// Receives reconciled server state after successful mutations.
     #[props(default)]
     pub on_changed: Option<EventHandler<PoamDetail>>,
@@ -1004,6 +1184,16 @@ fn append_history_page(current: &mut PoamDetail, page: PoamDetail, kind: History
                 page.findings
                     .into_iter()
                     .filter(|item| !existing.contains(&item.link_id)),
+            );
+            let existing_cves = current
+                .cve_findings
+                .iter()
+                .map(|item| item.link_id)
+                .collect::<HashSet<_>>();
+            current.cve_findings.extend(
+                page.cve_findings
+                    .into_iter()
+                    .filter(|item| !existing_cves.contains(&item.link_id)),
             );
             current.findings_has_more = page.findings_has_more;
             current.findings_next_cursor = page.findings_next_cursor;
@@ -1263,6 +1453,18 @@ pub fn PoamDetailTray(props: PoamDetailTrayProps) -> Element {
         .filter(|finding| finding.link_active)
         .cloned()
         .collect::<Vec<_>>();
+    let active_cve_findings = detail
+        .cve_findings
+        .iter()
+        .filter(|finding| finding.link_active)
+        .cloned()
+        .collect::<Vec<_>>();
+    let historical_cve_findings = detail
+        .cve_findings
+        .iter()
+        .filter(|finding| !finding.link_active)
+        .cloned()
+        .collect::<Vec<_>>();
     let progress = if detail.milestones.is_empty() {
         0
     } else {
@@ -1379,6 +1581,43 @@ pub fn PoamDetailTray(props: PoamDetailTrayProps) -> Element {
                         label { class: "field", span { "Assignee" } PoamAssigneeSelect { selection: assignee, catalog: assignee_catalog.read().clone(), disabled: readonly } }
                         label { class: "field", span { "Target completion" } input { class: "input focus-ring mono", r#type: "date", value: "{target}", disabled: readonly, oninput: move |event| target.set(event.value()) } }
                         label { class: "field", span { "Risk" } select { class: "input focus-ring", value: "{risk:?}", disabled: readonly, onchange: move |event| risk.set(match event.value().as_str() { "High" => PoamRisk::High, "Low" => PoamRisk::Low, _ => PoamRisk::Medium }), option { value: "High", "CAT I - High" } option { value: "Medium", "CAT II - Medium" } option { value: "Low", "CAT III - Low" } } }
+                    }
+                }
+                section { class: "poam-tray-section", "data-testid": "poam-linked-vulnerabilities",
+                    header { h3 { "Linked vulnerabilities · {detail.cve_findings.len()}" } }
+                    p { class: "poam-section-help", "Justification or whitelisting is not remediation. Only PASS from exact absence permits closure." }
+                    if active_cve_findings.is_empty() && historical_cve_findings.is_empty() { div { role: "status", class: "poam-empty", "No exact vulnerabilities are linked." } }
+                    if !active_cve_findings.is_empty() {
+                        div { class: "poam-table-wrap", table { class: "sys-table compact sys-table-dense poam-cve-findings-table",
+                            thead { tr { th { "Host" } th { "CVE / package" } th { "Installed / fixed" } th { "Current exact scan" } th { "Result" } th { "Actions" } } }
+                            tbody { for finding in active_cve_findings.clone() { { let finding_id = finding.id; let finding_for_evidence = finding.clone(); let scan = finding.current_scan_id.map(|id| id.to_string()).unwrap_or_else(|| "Unavailable".to_string()); let installed = finding.current_observed_package_version.as_deref().or(finding.baseline_observed_package_version.as_deref()).unwrap_or("Unavailable"); let fixed = "Unavailable"; rsx! {
+                                tr { key: "{finding.link_id}", "data-testid": "poam-linked-vulnerability", "data-cve-finding-id": "{finding.id}",
+                                    td { class: "mono", "{finding.hostname}" }
+                                    td { strong { class: "mono", "{finding.canonical_cve_id}" } small { class: "mono poam-muted", "{finding.canonical_package_name}" } }
+                                    td { span { class: "mono", "{installed}" } small { class: "poam-muted", "Fixed: {fixed}" } }
+                                    td { class: "mono", title: "{scan}", "{scan}" }
+                                    td { span { class: "poam-chip {cve_result_class(&finding.resolution_state)}", "{cve_result_label(&finding.resolution_state)}" } }
+                                    td { class: "poam-row-actions",
+                                        if let Some(handler) = props.on_open_cve_finding { button { class: "btn btn-ghost xs focus-ring", onclick: move |_| handler.call(finding_for_evidence.clone()), "Evidence" } }
+                                        button { class: "btn-icon focus-ring", title: "Unlink vulnerability", aria_label: "Unlink vulnerability {finding.canonical_cve_id} {finding.canonical_package_name}", disabled: readonly, onclick: move |_| { busy.set(Some("Unlinking vulnerability".to_string())); spawn(async move { match poam_api::unlink_poam_cve_finding(props.poam_id, finding_id, revision).await { Ok(next) => reconcile(next), Err(err) => handle_error("unlinking vulnerability", err) } }); }, Icon { name: IconName::X, size: 12 } }
+                                    }
+                                }
+                            } } } }
+                        } }
+                    }
+                    if !historical_cve_findings.is_empty() {
+                        h4 { "Retired vulnerability history" }
+                        p { class: "poam-section-help", "Retired links are immutable audit evidence and cannot be unlinked." }
+                        div { class: "poam-table-wrap", table { class: "sys-table compact sys-table-dense poam-cve-findings-table",
+                            thead { tr { th { "Host" } th { "CVE / package" } th { "Baseline version" } th { "Immutable baseline" } th { "Retired" } } }
+                            tbody { for finding in historical_cve_findings.clone() { { let baseline_version = finding.baseline_observed_package_version.as_deref().unwrap_or("Unavailable"); let baseline_scan = finding.baseline_scan_id.map(|id| id.to_string()).unwrap_or_else(|| "Unavailable".to_string()); let baseline_generation = finding.baseline_generation.map(|generation| generation.to_string()).unwrap_or_else(|| "Unavailable".to_string()); let baseline_store_path = finding.baseline_target_store_path.as_deref().unwrap_or("Unavailable"); let baseline_occurrence = finding.baseline_occurrence_derivation_path.as_deref().unwrap_or("Unavailable"); rsx! { tr { key: "history-{finding.link_id}", "data-testid": "poam-retired-vulnerability", "data-cve-finding-id": "{finding.id}",
+                                td { class: "mono", "{finding.hostname}" }
+                                td { strong { class: "mono", "{finding.canonical_cve_id}" } small { class: "mono poam-muted", "{finding.canonical_package_name}" } }
+                                td { class: "mono", "{baseline_version}" }
+                                td { small { class: "mono", "Scan {baseline_scan}" } small { class: "mono poam-muted", "Generation {baseline_generation} · {baseline_store_path}" } small { class: "mono poam-muted", "{baseline_occurrence}" } }
+                                td { span { class: "poam-chip", "RETIRED" } small { class: "poam-muted", "{finding.retired_at.map(|at| at.to_rfc3339()).unwrap_or_else(|| \"Unknown time\".to_string())}" } small { class: "poam-muted", "{finding.retirement_reason.as_deref().unwrap_or(\"No reason recorded\")}" } }
+                            } } } } }
+                        } }
                     }
                 }
                 section { class: "poam-tray-section",
@@ -1529,6 +1768,24 @@ fn LifecycleSection(props: LifecycleSectionProps) -> Element {
                                     }
                                 }
                             }
+                        }
+                    }
+                    for item in attempt.cve_items.clone() {
+                        {
+                        let installed_version = item.observed_package_version.as_deref().unwrap_or("Unavailable");
+                        let scan_id = item.scan_id.map(|id| id.to_string()).unwrap_or_else(|| "Unavailable".to_string());
+                        rsx! { div { class: "poam-verification-item poam-cve-verification-item", "data-cve-finding-id": "{item.cve_finding_id}",
+                            div { class: "poam-verification-identity",
+                                span { "System" } code { class: "mono", "{item.system_id}" }
+                                span { "Vulnerability" } strong { class: "mono", "{item.canonical_cve_id}" }
+                                span { "Canonical package" } strong { class: "mono", "{item.canonical_package_name}" }
+                                span { "Installed version" } code { class: "mono", "{installed_version}" }
+                                span { "Exact scan" } code { class: "mono", "{scan_id}" }
+                            }
+                            span { class: "poam-chip {cve_result_class(&item.result)}", "{cve_result_label(&item.result)}" }
+                            p { "{item.detail}" }
+                            if matches!(item.result.as_str(), "whitelisted" | "justified") { strong { class: "poam-verification-basis", "Not remediated. Exact absence PASS is required for closure." } }
+                        } }
                         }
                     }
                 }
@@ -1903,6 +2160,7 @@ mod tests {
             revision: 1,
             overdue,
             finding_count: 1,
+            cve_finding_count: 0,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             closed_at: None,
@@ -1934,6 +2192,16 @@ mod tests {
             &[PoamStatus::InProgress, PoamStatus::Blocked]
         );
         assert!(available_status_transitions(PoamStatus::Completed).is_empty());
+    }
+
+    #[test]
+    fn exact_cve_results_never_present_waivers_as_absence() {
+        assert_eq!(cve_result_label("pass"), "PASS");
+        assert_eq!(cve_result_label("whitelisted"), "WHITELISTED");
+        assert_eq!(cve_result_label("justified"), "JUSTIFIED");
+        assert_ne!(cve_result_class("pass"), cve_result_class("whitelisted"));
+        assert_ne!(cve_result_class("pass"), cve_result_class("justified"));
+        assert_eq!(cve_result_label("unexpected"), "ERROR");
     }
 
     #[test]

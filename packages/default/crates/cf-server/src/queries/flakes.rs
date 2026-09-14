@@ -631,7 +631,9 @@ pub async fn reset_flake_source(
 
     // RETENTION: Source replacement must remain operational when old commits
     // back retained generations or deployment-bound derivations or artifacts.
-    // Delete only derivations that none of these durable identities requires.
+    // Delete only derivations that none of these durable identities or sealed
+    // exact-CVE POA&M verification items requires. Unreferenced schema-1 scans
+    // follow their parent derivation lifecycle.
     sqlx::query(
         r#"
         DELETE FROM derivations d
@@ -647,13 +649,22 @@ pub async fn reset_flake_source(
                WHERE pending.requested_derivation_id = d.id
            )
            AND NOT EXISTS (
-               SELECT 1
-               FROM pending_system_deployments pending
+                SELECT 1
+                FROM pending_system_deployments pending
                JOIN evaluation_snapshots snapshot
                  ON snapshot.id = pending.evaluation_snapshot_id
                 AND snapshot.commit_id = pending.requested_commit_id
                WHERE snapshot.commit_id = d.commit_id
-                 AND snapshot.configuration_name = d.derivation_name
+                  AND snapshot.configuration_name = d.derivation_name
+           )
+           AND NOT EXISTS (
+               SELECT 1
+               FROM cve_scans scan
+               JOIN poam_cve_verification_items item ON item.scan_id = scan.id
+               JOIN poam_verification_attempts attempt ON attempt.id = item.attempt_id
+               WHERE scan.derivation_id = d.id
+                 AND scan.evidence_schema_version = 1
+                 AND attempt.sealed_at IS NOT NULL
            )
         "#,
     )
@@ -662,14 +673,14 @@ pub async fn reset_flake_source(
     .await
     .context("Failed to clear derivations during source reset")?;
 
-    // RETENTION: Mark generation-, deployment-, or reservation-bound history
-    // as belonging to the replaced source before the flake row receives its
-    // new source identity. Source mutation never asks an ON DELETE action to
-    // decide whether a deployment identity can be released. The bounded
-    // maintenance path owns that decision, including for legacy and path-only
-    // rows without exact artifact or derivation bindings. Explicit request
-    // reservations remain durable without a time limit. Active revision APIs
-    // reject this flag.
+    // RETENTION: Mark generation-, deployment-, reservation-, or exact-CVE-
+    // bound history as belonging to the replaced source before the flake row
+    // receives its new source identity. Source mutation never asks an ON DELETE
+    // action to decide whether a retained identity can be released. The bounded
+    // maintenance path owns deployment retention, including for legacy and
+    // path-only rows without exact artifact or derivation bindings. Explicit
+    // request reservations and sealed exact-CVE POA&M evidence remain durable
+    // without a time limit. Active revision APIs reject this flag.
     sqlx::query(
         "UPDATE commits c SET source_archived = true WHERE c.flake_id = $1
          AND (
@@ -687,11 +698,20 @@ pub async fn reset_flake_source(
                    ON snapshot.id = pending.evaluation_snapshot_id
                   AND snapshot.commit_id = pending.requested_commit_id
                   WHERE snapshot.commit_id = c.id
-             ) OR EXISTS (
-                 SELECT 1
-                 FROM deployment_request_reservations reservation
-                 WHERE reservation.requested_commit_id = c.id
-             )
+              ) OR EXISTS (
+                  SELECT 1
+                  FROM deployment_request_reservations reservation
+                  WHERE reservation.requested_commit_id = c.id
+               ) OR EXISTS (
+                   SELECT 1
+                   FROM derivations derivation
+                   JOIN cve_scans scan ON scan.derivation_id = derivation.id
+                   JOIN poam_cve_verification_items item ON item.scan_id = scan.id
+                   JOIN poam_verification_attempts attempt ON attempt.id = item.attempt_id
+                   WHERE derivation.commit_id = c.id
+                     AND scan.evidence_schema_version = 1
+                     AND attempt.sealed_at IS NOT NULL
+               )
          )",
     )
     .bind(flake_id)
@@ -703,8 +723,11 @@ pub async fn reset_flake_source(
     // as revisions of the new source.
     sqlx::query(
         "DELETE FROM commits c WHERE c.flake_id = $1
-          AND NOT EXISTS (
-              SELECT 1 FROM evaluation_generation_snapshots retained
+           AND NOT EXISTS (
+               SELECT 1 FROM derivations derivation
+               WHERE derivation.commit_id = c.id
+           ) AND NOT EXISTS (
+               SELECT 1 FROM evaluation_generation_snapshots retained
               WHERE retained.commit_id = c.id
            ) AND NOT EXISTS (
                SELECT 1
@@ -1150,6 +1173,8 @@ pub async fn accept_history_rewrite_reset(pool: &PgPool, flake_id: i32) -> Resul
     // RETENTION: A retained generation or deployment request owns its exact
     // derivation. Preserve that row during rewrite acceptance so restrictive
     // foreign keys do not abort recovery and each request remains attributable.
+    // A sealed exact-CVE POA&M verification item retains its cited system
+    // derivation. Unreferenced schema-1 scans follow the parent lifecycle.
     sqlx::query(
         r#"
         DELETE FROM derivations d
@@ -1163,6 +1188,15 @@ pub async fn accept_history_rewrite_reset(pool: &PgPool, flake_id: i32) -> Resul
           AND NOT EXISTS (
               SELECT 1 FROM pending_system_deployments pending
               WHERE pending.requested_derivation_id = d.id
+          )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM cve_scans scan
+              JOIN poam_cve_verification_items item ON item.scan_id = scan.id
+              JOIN poam_verification_attempts attempt ON attempt.id = item.attempt_id
+              WHERE scan.derivation_id = d.id
+                AND scan.evidence_schema_version = 1
+                AND attempt.sealed_at IS NOT NULL
           )
         "#,
     )
@@ -1186,6 +1220,10 @@ pub async fn accept_history_rewrite_reset(pool: &PgPool, flake_id: i32) -> Resul
         r#"
         DELETE FROM commits c
         WHERE c.flake_id = $1
+          AND NOT EXISTS (
+              SELECT 1 FROM derivations derivation
+              WHERE derivation.commit_id = c.id
+          )
           AND NOT EXISTS (
               SELECT 1 FROM evaluation_snapshots snapshot
               WHERE snapshot.commit_id = c.id

@@ -489,6 +489,11 @@ pub fn SystemDetailView(
     let initial_navigation = SystemDetailNavigation::from_query(&initial_query);
     let mut navigation_state = use_signal(|| initial_navigation.clone());
     let mut active_tab = use_signal(|| Tab::from_navigation(initial_navigation.tab));
+    let initial_cve_poam = (active_tab() == Tab::Cves)
+        .then(|| query_value(&initial_query, "poam"))
+        .flatten()
+        .and_then(|value| Uuid::parse_str(&value).ok());
+    let mut cve_poam = use_signal(|| initial_cve_poam);
     #[cfg(target_arch = "wasm32")]
     {
         let popstate_listener = use_hook(|| {
@@ -1484,6 +1489,7 @@ pub fn SystemDetailView(
                     Tab::Cves => rsx! {
                         CvesTab {
                             system_id: system.id,
+                            hostname: system.hostname.clone(),
                             cve_counts: system.cve_counts.clone(),
                             vulnerabilities: vulnerabilities.clone(),
                             allow_mutations: can_mutate,
@@ -1491,7 +1497,12 @@ pub fn SystemDetailView(
                             error: vulnerabilities_error.clone(),
                             on_saved: move |_| {
                                 vulnerabilities_resource.restart();
-                            }
+                            },
+                            on_open_poam: move |poam_id| {
+                                cve_poam.set(Some(poam_id));
+                                let query = query_with_parameter(&current_system_detail_query(), "poam", Some(&poam_id.to_string()));
+                                sync_system_detail_query(&query, true);
+                            },
                         }
                     },
                     Tab::Hardening => rsx! {
@@ -1550,6 +1561,25 @@ pub fn SystemDetailView(
                     on_dismiss: move |_| toast_message.set(None)
                 }
             }
+        }
+
+        PoamDetailHost {
+            poam_id: cve_poam(),
+            viewer: !auth::is_operator_or_above(&auth_context),
+            on_close: move |_| {
+                cve_poam.set(None);
+                let query = query_with_parameter(&current_system_detail_query(), "poam", None);
+                sync_system_detail_query(&query, false);
+            },
+            on_open_finding: move |_| {},
+            on_open_cve_finding: move |finding: poam_api::CveFindingView| {
+                if finding.system_id == system.id {
+                    cve_poam.set(None);
+                    let query = query_with_parameter(&current_system_detail_query(), "poam", None);
+                    sync_system_detail_query(&query, false);
+                    navigate_system_detail_tab(active_tab, navigation_state, Tab::Cves, false);
+                }
+            },
         }
 
         if let Some(peek) = current_flake_peek.clone() {

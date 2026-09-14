@@ -1311,7 +1311,8 @@ fn encode_query_value(value: &str) -> String {
 }
 
 /// URL-encode a path component (e.g., CVE ID) for safe interpolation into URL paths.
-fn encode_uri_component(value: &str) -> String {
+/// Percent-encodes one path segment or query value for an API URL.
+pub(crate) fn encode_uri_component(value: &str) -> String {
     js_sys::encode_uri_component(value).into()
 }
 
