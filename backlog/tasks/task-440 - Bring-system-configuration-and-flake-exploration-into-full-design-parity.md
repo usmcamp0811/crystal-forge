@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-14 20:41'
+updated_date: '2026-09-14 21:19'
 labels:
   - design-parity
   - web-ui
@@ -242,6 +242,8 @@ Fix the deployment-smoke zombie compliance assignment defect from exact clean SH
 2026-09-10 maintainer authorized rewriting only the two unpushed temporary implementation commits. Correct Commit A for runtime precedence when `expression` coexists with empty/non-empty rules, V1 source-digest verification before deterministic canonical normalization, shared API/import custom-check validation, and direct original/imported evaluator pass/fail/multi parity. Correct Commit B by replacing repeated list membership with one indexed key set and by deterministically bounding diagnostic detail with certified truncation state while traversal continues beyond 128 poison prefixes. Re-run focused checks and independent review, then require exactly two corrected commits above remote `1e986cd2` before a normal fast-forward push.
 
 2026-09-14 deployed CVE inventory blocker remediation from exact clean head `d2ca1c180d0a9e7c9b1a72439709fc98469ede5f`: stop browser-CI iteration and separate rolling-upgrade CVE inventory authority from strict exact-CVE remediation authority. Preserve all exact retained-generation, verified-lineage, certified-artifact, schema-1 scan, immutable-observation predicates for POA&M, scheduling, verification, closure, link/reopen, and existing exact justification mutation semantics. Add a backward-compatible inventory response path that selects exact evidence when available, otherwise reads the prior bounded current-system inventory source and marks it `legacy`, otherwise reports `no_scan`; include scan timestamp and a typed first failed exact-authority reason. Never union exact and legacy rows, backfill schema-0 scans, fabricate immutable occurrences, or fabricate retained lineage. Update system and fleet read UI so legacy findings remain visible and counts do not collapse, while exact remediation controls are disabled with truthful guidance; distinguish exact clean, legacy clean, no scan, legacy findings, and exact findings. Add production-shaped upgraded PostgreSQL regressions for legacy vulnerable/clean/no-scan, exact current, generation/store mismatch, lineage false, and exact precedence/no duplicates, plus focused API/UI/browser coverage and contract documentation. Verify focused PostgreSQL CVE and exact-POA&M tests, cve-processing-test, server-regressions, focused Web UI CVE tests, WASM check, formatting, and `git diff --check`; then commit narrowly, push, redeploy to the authorized real non-production environment, and verify existing CVEs reappear without enabling legacy remediation before resuming broad Web UI CI. Do not merge MR !323.
+
+Verification constraint added by maintainer on 2026-09-14: do not run costly Web UI Nix/browser checks during this blocker remediation. Use focused PostgreSQL/server tests, exact-CVE regressions, cve-processing-test/server-regressions as requested, lightweight Web UI unit/static checks, WASM check, formatting, and diff checks. Defer broad/costly Web UI gates until the maintainer explicitly resumes them after deployed smoke.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
