@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-14 15:24'
+updated_date: '2026-09-14 16:48'
 labels:
   - design-parity
   - web-ui
@@ -79,6 +79,8 @@ references:
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2847541632'
   - git commit 990975d6d7f38d063afe9f03c5854070b3069102
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2847810285'
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/jobs/16490032119'
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/jobs/16491838085'
 documentation:
   - docs/design/CrystalForge/app.jsx
   - docs/design/CrystalForge/components/SystemDetail.jsx
@@ -287,6 +289,8 @@ Exact-head pipeline 2846507817 at f80578e5 proved the bounded Config Inspector o
 2026-09-14 exact-head remediation: pipeline 2847225242 failed only the web-ui job with five critical workflows and two strict 20af visual differences. Commit 92db3791f6f3df97462050d23871a552163e97ad preserves CVE query state in the Dioxus route, binds compliance evidence to retained generation identity when available and otherwise to the exact flake/configuration lineage, keeps typed assignee options stable while the catalog loads, and corrects Config Explorer held-response and quoted accessible-name assertions. Focused verification passed: server SQLX_OFFLINE offline lib check, Web UI wasm32 check, 13 POA&M tests, Web UI harness static contracts, Node syntax, touched-file rustfmt, and git diff --check. Exact-head pipeline 2847541632 is running. AC #24 and #27 remain open pending authoritative browser and visual evidence.
 
 2026-09-14 follow-up from pipeline 2847541632: Config Explorer 12m passed, but Web UI remained red with eight critical POA&M/evidence workflows and the two known 20af visual differences. Commit 990975d6d7f38d063afe9f03c5854070b3069102 adds the missing standalone assignee-catalog fixture, persists flake identity for shared Phase-6 systems, records canonical deployed assessments with exact retained generation/derivation bindings and current-store confirmation, and makes the hydrated typed assignee option explicitly selected. Node syntax, static harness contracts, touched-file rustfmt, and diff checks passed. Authoritative pipeline 2847810285 is running. The candidate job from 2847541632 failed because critical workflows remained, so it produced no reviewable visual artifacts.
+
+Exact-head pipeline 2847810285 reached the Web UI gate but job 16490032119 was killed at the GitLab 3600-second limit before the browser suite emitted final semantic or visual reports. All other executed required jobs passed. Trace evidence shows Web UI Rust 403/403 and server Rust 1495/1495 passed; the browser reached workflow 119/135 (`12l-task440-config-lifecycle`). Its live Config Inspector completed successfully, but build/setup consumed about 814 seconds before the browser process and the job deadline left insufficient margin for the configured browser/result timeouts. This run does not prove semantic pass or failure and exported no final visual summary. Retried the exact-head Web UI job as 16491838085 to distinguish a cold-build timeout from a repeatable suite/runtime defect; it is pending.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
