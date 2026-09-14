@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-14 23:41'
+updated_date: '2026-09-14 23:44'
 labels:
   - design-parity
   - web-ui
@@ -287,6 +287,8 @@ Commit B was created locally as df58dbd6b408cfa1d718dd766690f3834201f033 with ex
 2026-09-14 final focused CVE inventory audit: corrected the fleet mutation regression to count three exact system targets across two environments. Hardened exact row-hydration coverage now persists the actor role and proves that relationship disclosure reloads current PostgreSQL role/membership state: a stale in-memory Admin actor succeeds with a current Viewer membership and returns non-disclosing NotFound after membership revocation. Added public field documentation for the affected-system DTO mirrors. Passed focused fleet triage, exact stale-identity/closure, exact row hydration/current-membership, authorized inventory, exact/legacy/no-scan precedence, and 1,001-row overflow regressions; server and Web UI offline checks; focused Web UI inventory and legacy-only triage tests; changed-file rustfmt; Node syntax; and git diff check. Existing repository warnings remain. Broad/costly browser and VM checks were not run per the maintainer constraint. No commit, push, deployment, shared database mutation, acceptance-criteria change, or status change was performed.
 
 2026-09-14 CVE rolling-upgrade recovery committed and pushed as `0aa38dba` (`TASK-440: Restore CVE upgrade inventory`) from exact parent `d2ca1c18`. The additive typed inventory read prefers exact current schema-1 evidence, falls back to scoped bounded legacy inventory, and distinguishes legacy clean/no scan without synthesizing exact authority. Exact remediation remains fail-closed; ordinary legacy justification semantics remain unchanged. Focused PostgreSQL authority/RBAC/dedup/precedence and relationship tests, exact-CVE mutation regression, offline server checks, focused Web UI unit tests, changed-file formatting, Node syntax, and diff checks passed with existing warnings. Costly Web UI checks were not run per maintainer instruction. Independent final review found no remaining P0/P1 blocker. Live redeploy smoke remains required.
+
+Non-production deployment remains blocked after push of `0aa38dba`: repository/session evidence identifies only `reckless`, which is explicitly production, and local `cf-test-sys` fixtures. No named authorized real non-production target or exact deployment command is documented. Per maintainer instruction, no target was guessed and no deployment occurred. Config recovery work proceeds while waiting for an unambiguous target/procedure.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
