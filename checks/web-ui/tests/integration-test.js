@@ -922,6 +922,29 @@ async function fillDioxusInput(locator, value) {
   }, value);
 }
 
+async function selectAuthenticatedPoamAssignee(page, scope) {
+  const identity = await page.evaluate(async (base) => {
+    const response = await fetch(`${base}/api/auth/whoami`, { credentials: "include" });
+    return { status: response.status, body: response.ok ? await response.json() : null };
+  }, apiBaseUrl);
+  const userId = identity.body?.user?.id;
+  if (identity.status !== 200 || identity.body?.is_authenticated !== true || !userId) {
+    throw new Error(`POA&M assignee selection requires an authenticated user: ${JSON.stringify(identity)}`);
+  }
+
+  const select = scope.getByTestId("poam-assignee-select");
+  await assertEnabled(select, "POA&M assignee catalog must load eligible typed assignees");
+  const option = await select.locator("option").evaluateAll((options, expectedValue) => {
+    const match = options.find((candidate) => candidate.value === expectedValue);
+    return match ? { value: match.value, label: match.textContent.trim() } : null;
+  }, `user:${userId}`);
+  if (!option) {
+    throw new Error(`POA&M assignee catalog did not contain authenticated user ${userId}`);
+  }
+  await select.selectOption(option.value);
+  return { ...option, id: userId };
+}
+
 /**
  * Show the security-controls policy group.
  *
@@ -1024,6 +1047,7 @@ async function filterPolicyCatalog(page, name) {
 async function suppressOnboardingCoach(page) {
   await page.context().addInitScript(() => {
     try {
+      if (window.localStorage.getItem("cf.coach.force_show") === "true") return;
       window.localStorage.setItem("cf.coach.collapsed", "true");
       window.localStorage.setItem("cf.coach.force_show", "false");
     } catch (_) {
@@ -1290,6 +1314,19 @@ async function ensureAuthenticated(page) {
 }
 
 async function routeStandaloneUiBootstrap(page, role = "Admin") {
+  const standaloneUserId = role === "Admin"
+    ? "43300000-0000-4000-8000-0000000000a0"
+    : "43300000-0000-4000-8000-0000000000a1";
+  const preferenceResponse = {
+    preferences: {
+      user_id: standaloneUserId,
+      theme: "dark",
+      density: "comfortable",
+      sidebar_collapsed: false,
+      default_systems_view: "cards",
+      updated_at: "2026-09-13T12:00:00Z",
+    },
+  };
   await page.route("**/api/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
@@ -1303,7 +1340,7 @@ async function routeStandaloneUiBootstrap(page, role = "Admin") {
         body: JSON.stringify({
           is_authenticated: true,
           auth_mode: "local",
-          user: { id: `standalone-${role.toLowerCase()}`, email: `${role.toLowerCase()}@example.com`, display_name: `Standalone ${role}` },
+          user: { id: standaloneUserId, email: `${role.toLowerCase()}@example.com`, display_name: `Standalone ${role}` },
           roles: [role],
           is_admin: role === "Admin",
         }),
@@ -1315,7 +1352,7 @@ async function routeStandaloneUiBootstrap(page, role = "Admin") {
       await route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ preferences: null }),
+        body: JSON.stringify(preferenceResponse),
       });
       return;
     }
@@ -1367,7 +1404,7 @@ async function routeStandaloneUiBootstrap(page, role = "Admin") {
       await route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ preferences: null }),
+        body: JSON.stringify(preferenceResponse),
       });
       return;
     }
@@ -5704,13 +5741,10 @@ const steps = [
         "Expected email input on registration page",
       );
 
-      // Fill out registration form - use more robust selectors
-      await page.locator('input[type="text"]').first().fill(TEST_USER.username);
-      await page.locator('input[type="email"]').fill(TEST_USER.email);
-      await page.locator('input[type="password"]').first().fill(TEST_USER.password);
-      await page.locator('input[type="password"]').last().fill(TEST_USER.password);
-
-
+      await fillDioxusInput(page.locator('input[type="text"]').first(), TEST_USER.username);
+      await fillDioxusInput(page.locator('input[type="email"]'), TEST_USER.email);
+      await fillDioxusInput(page.locator('input[type="password"]').first(), TEST_USER.password);
+      await fillDioxusInput(page.locator('input[type="password"]').last(), TEST_USER.password);
       await assertEnabled(
         page.locator('button[type="submit"]').first(),
         "Expected registration submit to be enabled after filling the form",
@@ -5721,8 +5755,8 @@ const steps = [
     name: "03-registration-submit",
     description: "After clicking register",
     action: async (page) => {
-      // Click submit button
-      const submitBtn = page.locator('button[type="submit"]');
+      const submitBtn = page.locator('button[type="submit"]').first();
+      await assertEnabled(submitBtn, "Expected registration submit to remain enabled before submission");
       await submitBtn.click();
       await page.waitForTimeout(3000); // Wait for registration + redirect
 
@@ -5735,6 +5769,7 @@ const steps = [
     name: "04-post-register-login",
     description: "Login page after registration",
     action: async (page) => {
+      await page.context().clearCookies();
       await page.goto(`${baseUrl}/login`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000);
 
@@ -5743,30 +5778,34 @@ const steps = [
         "Expected password input on post-registration login page",
       );
 
-      // Fill login form
-      await page.locator('input[type="text"]').fill(TEST_USER.username);
-      await page.locator('input[type="password"]').fill(TEST_USER.password);
-      await page.waitForTimeout(500);
+      await fillDioxusInput(page.locator('input[type="text"]').first(), TEST_USER.username);
+      await fillDioxusInput(page.locator('input[type="password"]').first(), TEST_USER.password);
+      await assertEnabled(
+        page.locator('button[type="submit"]').first(),
+        "Expected post-registration sign-in submit to be enabled",
+      );
     },
   },
   {
     name: "05-login-submit",
     description: "After clicking sign in",
     action: async (page) => {
-      // Click sign in
-      const submitBtn = page.locator('button[type="submit"]');
+      await page.context().clearCookies();
+      await page.goto(`${baseUrl}/login`, { timeout: LOAD_TIMEOUT });
+      await fillDioxusInput(page.locator('input[type="text"]').first(), TEST_USER.username);
+      await fillDioxusInput(page.locator('input[type="password"]').first(), TEST_USER.password);
+      const submitBtn = page.locator('button[type="submit"]').first();
+      await assertEnabled(submitBtn, "Expected sign-in submit to be enabled after filling both fields");
       await submitBtn.click();
-      await page.waitForTimeout(3000); // Wait for login + redirect
 
-      if (page.url().includes("/login")) {
-        throw new Error("Expected login to navigate away from /login");
-      }
       await page.waitForFunction(async (base) => {
         const response = await fetch(`${base}/api/auth/whoami`, { credentials: "include" });
         if (!response.ok) return false;
         const auth = await response.json();
         return auth.is_authenticated === true;
       }, apiBaseUrl, { timeout: 5000 });
+      await page.waitForURL((url) => url.pathname !== "/login", { timeout: LOAD_TIMEOUT });
+      await assertVisible(page.locator("[data-testid='dashboard']"), "Successful sign-in must render the dashboard");
     },
   },
 
@@ -6814,7 +6853,11 @@ const steps = [
       await captureRequiredResponsiveArtifact(page, "06h-onboarding-coach-all-configured", "completed-nine-step");
 
       await page.unroute("**/api/v1/admin/setup-progress*");
-      await page.evaluate(() => localStorage.setItem("cf.coach.force_show", "false"));
+      await page.evaluate(() => {
+        localStorage.setItem("cf.coach.force_show", "false");
+        localStorage.setItem("cf.coach.collapsed", "true");
+      });
+      await collapseOnboardingCoach(page);
     },
   },
   {
@@ -8274,12 +8317,26 @@ const steps = [
         });
 
         await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
+      await collapseOnboardingCoach(page);
         await page.waitForTimeout(2200);
         await page.getByRole("button", { name: "Table" }).first().click();
         await page.waitForTimeout(300);
-        const systemRow = page.locator("tr").filter({ hasText: "warning-system-01" }).first();
+      const systemRow = page.getByTestId("systems-table").locator("tbody tr").filter({
+        has: page.getByText("warning-system-01", { exact: true }),
+      });
+      await assertCount(systemRow, 1, "Systems table must contain exactly one warning-system-01 row");
         await assertVisible(systemRow, "Expected warning-system-01 row to be visible", 15000);
-        await systemRow.getByRole("button", { name: "Edit" }).first().click({ force: true });
+      const [detailResponse] = await Promise.all([
+        page.waitForResponse((response) => {
+          const url = new URL(response.url());
+          return url.pathname === `/api/v1/systems/${systemId}` &&
+            response.request().method() === "GET";
+        }),
+        systemRow.getByRole("button", { name: "Edit", exact: true }).click(),
+      ]);
+      if (detailResponse.status() !== 200) {
+        throw new Error(`Exact system detail GET returned ${detailResponse.status()}`);
+      }
 
         const modal = page.locator(".modal").filter({ hasText: "Edit warning-system-01" }).first();
         await assertVisible(modal, "Expected edit modal to open", 15000);
@@ -10917,7 +10974,59 @@ const steps = [
       if (!browserInstance) throw new Error("Viewer CVE contract requires a browser instance");
       const viewerContext = await browserInstance.newContext({ viewport: VIEWPORTS.desktop });
       const viewerPage = await viewerContext.newPage();
+      let releaseLoadingFleet;
+      try {
+        await suppressOnboardingCoach(viewerPage);
       await routeStandaloneUiBootstrap(viewerPage, "Viewer");
+        await viewerPage.route("**/api/v1/user/notifications**", async (route) => {
+          if (route.request().method() !== "GET") {
+            await route.fallback();
+            return;
+          }
+          await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify({ unread_count: 0, next_cursor: null, notifications: [] }),
+          });
+        });
+        await viewerPage.route("**/api/v1/cves/stats*", async (route) => {
+          if (route.request().method() !== "GET") {
+            await route.fallback();
+            return;
+          }
+          await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify({
+              total_cves: 1, critical: 1, high: 0, medium: 0, low: 0,
+              fixable: 1, exploited: 1, environments_affected: 3,
+              systems_affected: 3, outstanding: 1, accepted: 1, scheduled: 1,
+            }),
+          });
+        });
+        await viewerPage.route("**/api/v1/cves/packages*", async (route) => {
+          if (route.request().method() !== "GET") {
+            await route.fallback();
+            return;
+          }
+          await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(["openssl"]) });
+        });
+        await viewerPage.route(/\/api\/v1\/cves\/grouped(?:\?.*)?$/, async (route) => {
+          await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify([{
+              package_name: "openssl", cve_count: 1, critical_count: 1,
+              high_count: 0, medium_count: 0, low_count: 0,
+              environments_count: 3, total_affected_systems: 3,
+              fixable_count: 1, outstanding_count: 1, exploited_count: 1,
+              max_cvss: 9.8, severity_score: 1000, cves: [cveRowFixture],
+            }]),
+          });
+        });
+        await viewerPage.route(/\/api\/v1\/cves(?:\?.*)?$/, async (route) => {
+          await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([cveRowFixture]) });
+        });
       await viewerPage.route(/\/api\/v1\/cves\/CVE-2024-1234\/fleet\?package=openssl$/, async (route) => {
         await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(fleetDetail) });
       });
@@ -10936,7 +11045,6 @@ const steps = [
           });
         });
       }
-      let releaseLoadingFleet;
       let markLoadingFleetStarted;
       let markLoadingFleetFinished;
       const loadingFleetStarted = new Promise((resolve) => { markLoadingFleetStarted = resolve; });
@@ -10947,10 +11055,27 @@ const steps = [
         await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(fleetDetail) });
         markLoadingFleetFinished();
       });
-      await viewerPage.goto(
+        const [viewerFleetResponse] = await Promise.all([
+          viewerPage.waitForResponse((response) => {
+            const url = new URL(response.url());
+            return url.pathname === "/api/v1/cves/CVE-2024-1234/fleet" &&
+              url.searchParams.get("package") === "openssl" &&
+              [...url.searchParams.keys()].length === 1 &&
+              response.request().method() === "GET";
+          }),
+          viewerPage.goto(
         `${baseUrl}/cves?cve=CVE-2024-1234&cve_package=openssl`,
         { timeout: LOAD_TIMEOUT },
-      );
+          ),
+        ]);
+        if (viewerFleetResponse.status() !== 200) {
+          throw new Error(`Viewer exact fleet detail returned ${viewerFleetResponse.status()}`);
+        }
+        const viewerUrl = new URL(viewerPage.url());
+        if (viewerUrl.searchParams.get("cve") !== "CVE-2024-1234" ||
+            viewerUrl.searchParams.get("cve_package") !== "openssl") {
+          throw new Error(`Viewer deep link lost exact CVE query parameters: ${viewerPage.url()}`);
+        }
       const viewerDrawer = viewerPage.getByRole("dialog", { name: "CVE-2024-1234 openssl fleet triage" });
       await assertVisible(viewerPage.getByRole("link", { name: "CVEs" }).first(), "Viewer should see CVE navigation");
       await assertVisible(viewerDrawer, "Viewer should read exact fleet detail from a deep link");
@@ -10977,11 +11102,17 @@ const steps = [
       await viewerPage.goto(`${baseUrl}/cves?cve=CVE-ERROR&cve_package=openssl`, { timeout: LOAD_TIMEOUT });
       await assertVisible(viewerPage.getByText("Could not load fleet detail"), "500 should render the retryable exact-fleet error state");
       await assertVisible(viewerPage.getByRole("button", { name: "Retry" }), "Retryable fleet errors should expose retry");
-      await viewerContext.close();
+      } finally {
+        if (releaseLoadingFleet) releaseLoadingFleet();
+        await viewerPage.unrouteAll({ behavior: "ignoreErrors" }).catch(() => {});
+        await viewerContext.close().catch(() => {});
+      }
 
       const completedPoamId = "00000000-0000-0000-0000-0000000000d3";
       const completedContext = await browserInstance.newContext({ viewport: VIEWPORTS.desktop });
       const completedPage = await completedContext.newPage();
+      try {
+        await suppressOnboardingCoach(completedPage);
       await routeStandaloneUiBootstrap(completedPage, "Admin");
       await completedPage.route(new RegExp(`/api/v1/poams/${completedPoamId}(?:\\?.*)?$`), async (route) => {
         await route.fulfill({
@@ -11054,7 +11185,10 @@ const steps = [
       await assertVisible(retiredExactLink.getByText("CVE-2024-1234"), "Retired exact link should retain its CVE identity");
       await assertVisible(retiredExactLink.getByText("Generation 42"), "Retired exact link should retain its generation baseline");
       await assertCount(retiredExactLink.getByRole("button"), 0, "Retired exact links must not expose an unlink action");
-      await completedContext.close();
+      } finally {
+        await completedPage.unrouteAll({ behavior: "ignoreErrors" }).catch(() => {});
+        await completedContext.close().catch(() => {});
+      }
 
       // Assert summary stat cards are rendered.
       const patchableCard = page.locator("main").getByText("Patchable now");
@@ -11474,6 +11608,38 @@ const steps = [
       const stepName = "20af-policy-catalog-selection-delete-regressions";
       await suppressOnboardingCoach(page);
       const prefix = "TASK433 catalog deletion";
+      const authenticatedWhoami = await page.evaluate(async (base) => {
+        const response = await fetch(`${base}/api/auth/whoami`, { credentials: "include" });
+        return { status: response.status, body: response.ok ? await response.json() : null };
+      }, apiBaseUrl);
+      if (authenticatedWhoami.status !== 200 || authenticatedWhoami.body?.is_authenticated !== true ||
+          !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(authenticatedWhoami.body?.user?.id || "")) {
+        throw new Error(`20af requires the real authenticated whoami identity: ${JSON.stringify(authenticatedWhoami)}`);
+      }
+      await page.route("**/api/auth/whoami", async (route) => {
+        if (route.request().method() !== "GET") {
+          await route.fallback();
+          return;
+        }
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify(authenticatedWhoami.body),
+        });
+      });
+      await page.route("**/api/v1/user/notifications**", async (route) => {
+        if (route.request().method() !== "GET") {
+          await route.fallback();
+          return;
+        }
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ unread_count: 0, next_cursor: null, notifications: [] }),
+        });
+      });
+      let primaryError = null;
+      try {
       runFixtureSql(`
         INSERT INTO deployment_policies (name, description, policy_type, config, enabled)
         SELECT $name$${prefix} $name$ || lpad(series::text, 3, '0'),
@@ -11728,6 +11894,30 @@ const steps = [
       await assertVisible(refreshedDrawer.getByRole("button", { name: "Edit", exact: true }), "Current policy draft must be editable after refresh");
       await assertVisible(refreshedDrawer.getByRole("button", { name: "Trust", exact: true }), "Current policy draft must expose its draft lifecycle action");
       await assertHidden(refreshedDrawer.getByRole("button", { name: "Create draft", exact: true }), "Current editable draft must replace the accepted-policy draft action");
+      } catch (error) {
+        primaryError = error;
+        throw error;
+      } finally {
+        try {
+          runFixtureSql(`
+            DELETE FROM deployment_policies policy
+            WHERE policy.name LIKE $name$${prefix} %$name$
+              AND NOT EXISTS (
+                SELECT 1 FROM deployment_policy_versions version
+                WHERE version.policy_id=policy.id
+                  AND version.publication_state='accepted'
+              );
+          `);
+        } catch (cleanupError) {
+          if (primaryError) {
+            console.error(`20af cleanup also failed: ${cleanupError.message}`);
+          } else {
+            throw cleanupError;
+          }
+        }
+        await page.unroute("**/api/v1/user/notifications**").catch(() => {});
+        await page.unroute("**/api/auth/whoami").catch(() => {});
+      }
     },
   },
   {
@@ -13393,11 +13583,35 @@ By using this IS (which includes any device attached to this IS), you consent to
         LIMIT 1;
       `).split("|");
       if (target.length !== 3) throw new Error(`Canonical evaluator target is unavailable: ${JSON.stringify(target)}`);
-      const [systemId, hostname, commitId] = target;
-      runFixtureSql(`
-        UPDATE systems SET system_configuration_name='test-agent'
-        WHERE id='${systemId}'::uuid;
-      `);
+      const [sourceSystemId, , commitId] = target;
+      const systemId = "43300000-0000-4000-8000-000000000010";
+      const hostname = "task433-mixed-evidence-target";
+      let systemInserted = false;
+      let primaryError = null;
+      try {
+        const reservedCount = Number(runFixtureSql(`
+          SELECT COUNT(*) FROM systems
+          WHERE id='${systemId}'::uuid OR hostname=$hostname$${hostname}$hostname$;
+        `));
+        if (reservedCount !== 0) {
+          throw new Error(`Canonical mixed-evidence reserved system already exists: ${systemId} / ${hostname}`);
+        }
+        const insertedCount = Number(runFixtureSql(`
+          WITH inserted AS (
+            INSERT INTO systems (
+            id, hostname, environment_id, flake_id, is_active, public_key,
+            system_configuration_name, derivation
+            )
+            SELECT '${systemId}'::uuid, '${hostname}', environment_id, flake_id, true,
+                   'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITask433MixedEvidenceTarget',
+                   'test-agent', derivation
+            FROM systems WHERE id='${sourceSystemId}'::uuid
+            RETURNING id
+          )
+          SELECT COUNT(*) FROM inserted;
+        `));
+        if (insertedCount !== 1) throw new Error("Canonical mixed-evidence system insertion did not create one row");
+        systemInserted = true;
 
       await page.goto(`${baseUrl}/deployment-policies`, { timeout: LOAD_TIMEOUT });
       await collapseOnboardingCoach(page);
@@ -13526,6 +13740,27 @@ By using this IS (which includes any device attached to this IS), you consent to
       await assertVisible(page.getByText(cveResult.detail, { exact: true }), "Server-derived scan detail must render unchanged");
       await captureWorkflowState(page, stepName, "server-derived-phases-sources-outcomes");
       await captureWorkflowViewportState(page, stepName, "server-derived-evidence", "mobile");
+      } catch (error) {
+        primaryError = error;
+        throw error;
+      } finally {
+        if (systemInserted) {
+          try {
+            runFixtureSql(`
+              UPDATE compliance_bundle_assignments
+              SET active=false
+              WHERE system_id='${systemId}'::uuid AND active;
+              UPDATE systems SET is_active=false WHERE id='${systemId}'::uuid;
+            `);
+          } catch (cleanupError) {
+            if (primaryError) {
+              console.error(`Canonical mixed-evidence cleanup also failed: ${cleanupError.message}`);
+            } else {
+              throw cleanupError;
+            }
+          }
+        }
+      }
     },
   },
   {
@@ -16420,6 +16655,7 @@ security.audit.enable = true;</fixtext>
         }
       };
       page.on("request", onWaiverRequest);
+      try {
       const bar = await openPhase6Evidence(page, fixture, system);
       await assertVisible(bar, "Expected remediation controls for the persisted legacy FAIL observation");
       await assertVisible(bar.getByText("FAIL", { exact: true }), "The finding must render FAIL before remediation");
@@ -16444,8 +16680,8 @@ security.audit.enable = true;</fixtext>
         "The create flow must keep remediation separate from waiver risk acceptance",
       );
 
-      await modal.getByLabel("Title").fill("Disable direct root SSH login");
-      await modal.getByLabel("Owner").fill("Host Security");
+        await modal.getByLabel("Title", { exact: true }).fill("Disable direct root SSH login");
+        const eligibleAssignee = await selectAuthenticatedPoamAssignee(page, modal);
       await modal.getByLabel("Target completion").fill("2026-09-19");
       await modal.getByLabel("Risk").selectOption("High");
       await modal.getByLabel("Remediation plan").fill("Deploy PermitRootLogin=no and verify the exact assessment target.");
@@ -16460,14 +16696,23 @@ security.audit.enable = true;</fixtext>
       if (posted.assessment_id !== undefined || posted.finding_id !== system.findingId) {
         throw new Error(`Legacy create did not use only stable finding identity: ${JSON.stringify(posted)}`);
       }
+        if (posted.assignee?.kind !== "user" || posted.assignee.user_id !== eligibleAssignee.id) {
+          throw new Error(`Legacy create did not submit the selected typed assignee: ${JSON.stringify(posted.assignee)}`);
+        }
       if (posted.observation?.source !== "nix_policy_result" || posted.observation?.source_id !== String(system.derivationId) || posted.observation?.policy_version_id !== fixture.policyVersionId || !posted.observation?.token) {
         throw new Error(`Legacy create omitted the authoritative observation reference: ${JSON.stringify(posted.observation)}`);
       }
       const created = await createResponse.json();
+        if (created.assignee?.kind !== "user" || created.assignee.user_id !== eligibleAssignee.id) {
+          throw new Error(`Legacy create did not return the selected typed assignee: ${JSON.stringify(created.assignee)}`);
+        }
       const detail = page.getByTestId("poam-detail");
       await assertVisible(detail.getByText(created.human_id, { exact: true }), "Expected returned human POA&M ID");
       await assertVisible(detail.getByText("Open", { exact: true }).first(), "Expected returned Open status");
-      await assertVisible(detail.getByText("Host Security", { exact: true }), "Expected returned owner");
+      await assertVisible(
+        detail.getByTestId("poam-metadata-summary").getByText(eligibleAssignee.label, { exact: true }),
+        "Expected returned typed assignee",
+      );
       await assertVisible(detail.getByText("2026-09-19", { exact: true }), "Expected returned due date");
       if (!page.url().includes(`poam=${created.id}`)) throw new Error(`POA&M detail route omitted exact ID: ${page.url()}`);
 
@@ -16494,8 +16739,10 @@ security.audit.enable = true;</fixtext>
       if (compositeCount !== 0) throw new Error(`Legacy POA&M create fabricated ${compositeCount} composite assessments`);
       const persistedResults = JSON.parse(runFixtureSql(`SELECT policy_results::text FROM derivations WHERE id=${system.derivationId};`));
       if (!isDeepStrictEqual(persistedResults, policyResults)) throw new Error(`Legacy POA&M create changed policy evidence: ${JSON.stringify(persistedResults)}`);
-      page.off("request", onWaiverRequest);
       if (waiverMutations.length !== 0) throw new Error(`POA&M create used waiver mutations: ${waiverMutations.join(", ")}`);
+      } finally {
+        page.off("request", onWaiverRequest);
+      }
     },
   },
   {
@@ -16583,8 +16830,8 @@ security.audit.enable = true;</fixtext>
       if ((await verificationPagePromise).status() !== 200) throw new Error("Verification continuation request failed");
       await page.waitForFunction(() => document.querySelectorAll('[data-testid="poam-detail"] [data-testid="poam-verification-result"]').length === 11);
 
-      await detail.getByLabel("Title").fill("Persisted remediation metadata");
-      await detail.getByLabel("Owner").fill("Security Engineering");
+      await detail.getByLabel("Title", { exact: true }).fill("Persisted remediation metadata");
+      const metadataAssignee = await selectAuthenticatedPoamAssignee(page, detail);
       await detail.getByLabel("Target completion").fill("2026-11-12");
       await detail.getByLabel("Risk").selectOption("Low");
       await detail.getByPlaceholder("What will change, where, and how it will be verified").fill("Persist this exact remediation plan.");
@@ -16594,17 +16841,20 @@ security.audit.enable = true;</fixtext>
       await detail.getByRole("button", { name: "Save metadata", exact: true }).click();
       const metadataResponse = await metadataResponsePromise;
       const metadataRequest = metadataResponse.request().postDataJSON();
-      if (metadataResponse.status() !== 200 || metadataRequest.plan != null) {
+      const metadataDetail = await metadataResponse.json();
+      if (metadataResponse.status() !== 200 || metadataRequest.plan != null ||
+          metadataRequest.assignee?.kind !== "user" || metadataRequest.assignee.user_id !== metadataAssignee.id ||
+          metadataDetail.assignee?.kind !== "user" || metadataDetail.assignee.user_id !== metadataAssignee.id) {
         throw new Error(`Metadata save must not implicitly persist the remediation plan: ${JSON.stringify(metadataRequest)}`);
       }
-      await assertVisible(detail.getByText("Security Engineering", { exact: true }).first(), "Saved owner must reconcile from server response");
+      await assertVisible(detail.getByText(metadataAssignee.label, { exact: true }).first(), "Saved typed assignee must reconcile from server response");
       const planResponsePromise = page.waitForResponse(
         (response) => response.url().endsWith(`/api/v1/poams/${poam.id}`) && response.request().method() === "PATCH",
       );
       await detail.getByRole("button", { name: "Save plan", exact: true }).click();
       const planResponse = await planResponsePromise;
       const planRequest = planResponse.request().postDataJSON();
-      if (planResponse.status() !== 200 || planRequest.plan !== "Persist this exact remediation plan." || planRequest.title != null || planRequest.owner != null || planRequest.target_date != null || planRequest.risk != null) {
+      if (planResponse.status() !== 200 || planRequest.plan !== "Persist this exact remediation plan." || planRequest.title != null || planRequest.owner != null || planRequest.assignee != null || planRequest.target_date != null || planRequest.risk != null) {
         throw new Error(`Plan save must persist only the labeled remediation-plan field: ${JSON.stringify(planRequest)}`);
       }
       const progressResponsePromise = page.waitForResponse(
@@ -16694,8 +16944,8 @@ security.audit.enable = true;</fixtext>
       await reloaded.waitFor({ state: "visible", timeout: 15000 });
       await waitForPhase6Target(page, reloaded, "Reloaded POA&M detail");
       await page.waitForTimeout(500);
-      await assertValue(reloaded.getByLabel("Title"), "Persisted remediation metadata", "Title must survive reload");
-      await assertValue(reloaded.getByLabel("Owner"), "Security Engineering", "Owner must survive reload");
+      await assertValue(reloaded.getByLabel("Title", { exact: true }), "Persisted remediation metadata", "Title must survive reload");
+      await assertValue(reloaded.getByTestId("poam-assignee-select"), metadataAssignee.value, "Typed assignee must survive reload");
       await assertValue(reloaded.getByLabel("Target completion"), "2026-11-12", "Target must survive reload");
       await assertValue(reloaded.getByLabel("Risk"), "Low", "Risk must survive reload");
       await assertValue(reloaded.getByPlaceholder("What will change, where, and how it will be verified"), "Persist this exact remediation plan.", "Plan must survive reload");
@@ -16707,7 +16957,7 @@ security.audit.enable = true;</fixtext>
         method: "POST",
         body: JSON.stringify({ revision: current.revision, text: "Concurrent revision" }),
       });
-      await reloaded.getByLabel("Owner").fill("Preserved stale draft");
+      await reloaded.getByLabel("Title", { exact: true }).fill("Preserved stale draft title");
       const staleResponsePromise = page.waitForResponse(
         (response) => response.url().endsWith(`/api/v1/poams/${poam.id}`) && response.request().method() === "PATCH",
       );
@@ -16715,7 +16965,7 @@ security.audit.enable = true;</fixtext>
       const staleResponse = await staleResponsePromise;
       if (staleResponse.status() !== 409) throw new Error(`Expected real stale revision 409, got ${staleResponse.status()}`);
       await assertVisible(reloaded.getByText(/changed before saving metadata/i), "Stale revision must have actionable presentation");
-      await assertValue(reloaded.getByLabel("Owner"), "Preserved stale draft", "Stale refresh must preserve entered values");
+      await assertValue(reloaded.getByLabel("Title", { exact: true }), "Preserved stale draft title", "Stale refresh must preserve the exact Title draft");
     },
   },
   {
@@ -16738,11 +16988,40 @@ security.audit.enable = true;</fixtext>
         LIMIT 1;
       `).split("|");
       if (target.length !== 3) throw new Error(`Canonical POA&M evaluator target is unavailable: ${JSON.stringify(target)}`);
-      const [systemId, hostname, commitId] = target;
-      runFixtureSql(`
-        UPDATE systems SET system_configuration_name='test-agent'
-        WHERE id='${systemId}'::uuid;
-      `);
+      const [sourceSystemId, , commitId] = target;
+      const systemId = "43300000-0000-4000-8000-000000000020";
+      const hostname = "task433-poam-lifecycle-target";
+      const linkedSystemId = "43300000-0000-4000-8000-000000000021";
+      const linkedHostname = "task433-linked-canonical";
+      let primarySystemInserted = false;
+      let linkedSystemInserted = false;
+      let primaryError = null;
+      try {
+        const reservedCount = Number(runFixtureSql(`
+          SELECT COUNT(*) FROM systems
+          WHERE id IN ('${systemId}'::uuid, '${linkedSystemId}'::uuid)
+             OR hostname IN ($hostname$${hostname}$hostname$, $hostname$${linkedHostname}$hostname$);
+        `));
+        if (reservedCount !== 0) {
+          throw new Error("Canonical POA&M reserved system IDs or hostnames already exist");
+        }
+        const insertedCount = Number(runFixtureSql(`
+          WITH inserted AS (
+            INSERT INTO systems (
+              id, hostname, environment_id, flake_id, is_active, public_key,
+              system_configuration_name, derivation
+            )
+            SELECT '${systemId}'::uuid, '${hostname}', environment_id, flake_id, true,
+                   'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITask433PoamLifecycleTarget',
+                   'test-agent', derivation
+            FROM systems WHERE id='${sourceSystemId}'::uuid
+            RETURNING id
+          )
+          SELECT COUNT(*) FROM inserted;
+        `));
+        if (insertedCount !== 1) throw new Error("Canonical POA&M primary system insertion did not create one row");
+        primarySystemInserted = true;
+
       const requirementContext = await loadTask433RequirementContext(page);
       const nixRuleId = "43300000-0000-4000-8000-000000000001";
       const cveRuleId = "43300000-0000-4000-8000-000000000002";
@@ -16818,9 +17097,8 @@ security.audit.enable = true;</fixtext>
         }),
       });
 
-      const linkedSystemId = "43300000-0000-4000-8000-000000000003";
-      const linkedHostname = "task433-linked-canonical";
-      runFixtureSql(`
+        const linkedInsertedCount = Number(runFixtureSql(`
+          WITH inserted AS (
         INSERT INTO systems (
           id, hostname, environment_id, flake_id, is_active, public_key,
           system_configuration_name, derivation
@@ -16829,8 +17107,13 @@ security.audit.enable = true;</fixtext>
                flake_id, true,
                'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITask433CanonicalLinkedHost',
                'cf-test-sys', derivation
-        FROM systems WHERE id='${systemId}'::uuid;
-      `);
+            FROM systems WHERE id='${systemId}'::uuid
+            RETURNING id
+          )
+          SELECT COUNT(*) FROM inserted;
+        `));
+        if (linkedInsertedCount !== 1) throw new Error("Canonical POA&M linked system insertion did not create one row");
+        linkedSystemInserted = true;
       await phase6Api(page, "/api/v1/compliance/assignments", {
         method: "POST",
         body: JSON.stringify({
@@ -16850,19 +17133,13 @@ security.audit.enable = true;</fixtext>
         commitId,
         policyId: policy.id,
       });
-      const linkedInitial = JSON.parse(runFixtureSql(`
-        SELECT json_build_object(
-          'assessment_id', assessment.id,
-          'derivation_id', assessment.derivation_id,
-          'target_store_path', assessment.target_store_path
-        )::text
-        FROM composite_policy_assessments assessment
-        WHERE assessment.system_id='${linkedSystemId}'::uuid
-          AND assessment.policy_lineage_id='${policy.id}'::uuid
-        ORDER BY assessment.updated_at DESC LIMIT 1;
-      `));
+        const linkedInitial = await runTask433ProductionEvaluation(page, {
+          systemId: linkedSystemId,
+          commitId,
+          policyId: policy.id,
+        });
       const failingScanId = arrangeTask433CompletedScan(initialEvaluation.derivation_id, 2);
-      arrangeTask433CompletedScan(linkedInitial.derivation_id, 2);
+        const linkedFailingScanId = arrangeTask433CompletedScan(linkedInitial.derivation_id, 2);
       const assessmentFixture = await runTask433ProductionEvaluation(page, {
         systemId,
         commitId,
@@ -16871,28 +17148,20 @@ security.audit.enable = true;</fixtext>
       if (!assessmentFixture.rows.some((row) => row.kind === "cve_block" && row.source_scan_id === failingScanId && row.outcome === "fail")) {
         throw new Error(`Production re-evaluation did not consume the failing scan: ${JSON.stringify(assessmentFixture)}`);
       }
-      const linkedAssessment = JSON.parse(runFixtureSql(`
-        SELECT json_build_object(
-          'assessment_id', assessment.id,
-          'finding_id', finding.id,
-          'overall', assessment.overall_outcome
-        )::text
-        FROM composite_policy_assessments assessment
-        JOIN poam_findings finding
-          ON finding.system_id=assessment.system_id
-         AND finding.policy_lineage_id=assessment.policy_lineage_id
-        WHERE assessment.system_id='${linkedSystemId}'::uuid
-          AND assessment.policy_lineage_id='${policy.id}'::uuid
-        ORDER BY assessment.updated_at DESC LIMIT 1;
-      `));
-      if (linkedAssessment.overall !== "fail" || !linkedAssessment.finding_id) {
+        const linkedAssessment = await runTask433ProductionEvaluation(page, {
+          systemId: linkedSystemId,
+          commitId,
+          policyId: policy.id,
+        });
+        if (linkedAssessment.overall !== "fail" || !linkedAssessment.finding_id ||
+            !linkedAssessment.rows.some((row) => row.kind === "cve_block" && row.source_scan_id === linkedFailingScanId && row.outcome === "fail")) {
         throw new Error(`Production re-evaluation did not create the compatible FAIL finding: ${JSON.stringify(linkedAssessment)}`);
       }
       let assessmentId = assessmentFixture.assessment_id;
       let derivationId = assessmentFixture.derivation_id;
       const findingId = assessmentFixture.finding_id;
       arrangeTask433DeployedAssessment(hostname, assessmentFixture.target_store_path);
-      arrangeTask433DeployedAssessment(linkedHostname, linkedInitial.target_store_path);
+        arrangeTask433DeployedAssessment(linkedHostname, linkedAssessment.target_store_path);
       const fixture = {
         policy,
         policyVersionId,
@@ -16911,8 +17180,8 @@ security.audit.enable = true;</fixtext>
       await assertVisible(page.getByText("FAIL", { exact: true }).first(), "Canonical POA&M lifecycle must begin from persisted FAIL evidence");
       await remediation.getByRole("button", { name: "Create POA&M", exact: true }).click();
       const createModal = page.getByRole("dialog", { name: "Create POA&M", exact: true });
-      await createModal.getByLabel("Title").fill("Canonical authoritative remediation");
-      await createModal.getByLabel("Owner").fill("Security Operations");
+        await createModal.getByLabel("Title", { exact: true }).fill("Canonical authoritative remediation");
+        const createAssignee = await selectAuthenticatedPoamAssignee(page, createModal);
       await createModal.getByLabel("Target completion").fill("2026-10-15");
       await createModal.getByLabel("Risk").selectOption("High");
       await createModal.getByLabel("Remediation plan").fill("Correct the mixed enforcement failure and verify authoritative evidence.");
@@ -16921,17 +17190,33 @@ security.audit.enable = true;</fixtext>
         createModal.getByRole("button", { name: "Create POA&M", exact: true }).click(),
       ]);
       if (createResponse.status() !== 201) throw new Error(`Canonical POA&M create returned ${createResponse.status()}`);
+        const createRequest = createResponse.request().postDataJSON();
+        if (createRequest.assignee?.kind !== "user" || createRequest.assignee.user_id !== createAssignee.id) {
+          throw new Error(`Canonical POA&M create did not submit its typed assignee: ${JSON.stringify(createRequest.assignee)}`);
+        }
       const poam = await createResponse.json();
+        if (poam.assignee?.kind !== "user" || poam.assignee.user_id !== createAssignee.id) {
+          throw new Error(`Canonical POA&M create did not return its typed assignee: ${JSON.stringify(poam.assignee)}`);
+        }
       const detail = page.getByTestId("poam-detail");
       await waitForPhase6Target(page, detail, "Created canonical POA&M detail");
       const primaryFinding = detail.locator(`[data-testid="poam-linked-finding"][data-finding-id="${findingId}"]`);
       await assertVisible(primaryFinding.getByText(`${requirementContext.framework.name} · ${requirementContext.version.version}`, { exact: true }), "Linked finding must render the mapped framework and release");
       await assertVisible(primaryFinding.getByText(requirementContext.requirement.external_id, { exact: true }), "Linked finding must render the mapped requirement identifier");
       await assertVisible(primaryFinding.getByText(requirementContext.requirement.title, { exact: true }), "Linked finding must render the mapped requirement title");
-      await detail.getByLabel("Owner").fill("Platform Security");
+        await detail.getByLabel("Risk").selectOption("Low");
       await detail.getByPlaceholder("What will change, where, and how it will be verified").fill("Deploy the correction, rerun evaluation, and retain the exact PASS evidence.");
+        const metadataResponsePromise = page.waitForResponse(
+          (response) => response.url().endsWith(`/api/v1/poams/${poam.id}`) && response.request().method() === "PATCH",
+        );
       await detail.getByRole("button", { name: "Save metadata", exact: true }).click();
-      await assertVisible(detail.getByText("Platform Security", { exact: true }).first(), "Canonical metadata edit must reconcile before the plan save");
+        const metadataResponse = await metadataResponsePromise;
+        const metadataRequest = metadataResponse.request().postDataJSON();
+        const metadataDetail = await metadataResponse.json();
+        if (metadataResponse.status() !== 200 || metadataRequest.risk !== "low" || metadataDetail.risk !== "low") {
+          throw new Error(`Canonical Risk edit did not reconcile: ${JSON.stringify({ request: metadataRequest, response: metadataDetail })}`);
+        }
+        await assertValue(detail.getByLabel("Risk"), "Low", "Canonical Risk edit must reconcile before the plan save");
       const planResponsePromise = page.waitForResponse(
         (response) => response.url().endsWith(`/api/v1/poams/${poam.id}`) && response.request().method() === "PATCH",
       );
@@ -17102,12 +17387,38 @@ security.audit.enable = true;</fixtext>
       await assertVisible(detail.locator('[data-activity-kind="closed"]'), "Closure activity must survive reload");
       await captureWorkflowState(page, stepName, "reloaded-completed-history");
       await captureWorkflowViewportState(page, stepName, "reloaded-completed-history", "mobile");
+      } catch (error) {
+        primaryError = error;
+        throw error;
+      } finally {
+        try {
+          if (primarySystemInserted || linkedSystemInserted) {
+            const insertedIds = [
+              ...(primarySystemInserted ? [`'${systemId}'::uuid`] : []),
+              ...(linkedSystemInserted ? [`'${linkedSystemId}'::uuid`] : []),
+            ].join(", ");
+            runFixtureSql(`
+              UPDATE compliance_bundle_assignments
+              SET active=false
+              WHERE system_id IN (${insertedIds}) AND active;
+              UPDATE systems SET is_active=false WHERE id IN (${insertedIds});
+            `);
+          }
+        } catch (cleanupError) {
+          if (primaryError) {
+            console.error(`Canonical POA&M cleanup also failed: ${cleanupError.message}`);
+          } else {
+            throw cleanupError;
+          }
+        }
+      }
     },
   },
   {
     name: "29k-poam-system-rollups-navigation",
     description: "System compliance uses real Open, Overdue, and Closed rollups with common detail and exact evidence navigation",
     action: async (page) => {
+      await suppressOnboardingCoach(page);
       const fixture = await createPhase6PoamFixture(page, "system-rollup");
       const system = fixture.systems[0];
       const overdue = await createFixturePoam(page, system.assessmentId, { title: "System overdue remediation", targetDate: "2020-01-01" });
@@ -17124,6 +17435,7 @@ security.audit.enable = true;</fixtext>
 
       const expected = (await phase6Api(page, `/api/v1/poams/rollups/systems?ids=${system.id}`)).body[0];
       await page.goto(`${baseUrl}/systems/${system.id}?tab=compliance`, { timeout: LOAD_TIMEOUT });
+      await collapseOnboardingCoach(page);
       const section = page.locator("section.poam-system-section");
       await waitForPhase6Target(page, section, "System POA&M section");
       for (const [label, value] of [["Open findings", expected.open_findings], ["On POA&M", expected.on_poam_findings], ["No POA&M", expected.no_poam_findings], ["Overdue", expected.overdue], ["Awaiting verification", expected.awaiting_verification], ["Closed", expected.completed]]) {
@@ -17501,7 +17813,10 @@ security.audit.enable = true;</fixtext>
     action: async (page) => {
       const policyName = `Evidence Test Policy ${Date.now()}`;
       const policyCard = () => page.locator(`[data-policy-card][data-policy-name="${policyName}"]`);
+      let createdPolicy = null;
+      let primaryError = null;
       // STEP 1: Create a policy with initial evidence
+      try {
       await page.goto(`${baseUrl}/deployment-policies`, { timeout: LOAD_TIMEOUT });
       await collapseOnboardingCoach(page);
       await page.getByRole("button", { name: /New custom policy/i }).first().click();
@@ -17542,13 +17857,15 @@ security.audit.enable = true;</fixtext>
       await expectOutput.fill("active");
       
       // Save policy with first evidence
-      const createResponsePromise = page.waitForResponse(
-        (response) => response.url().includes("/api/v1/deployment-policies") && response.request().method() === "POST",
-      );
-      await page.getByRole("button", { name: /Create policy/i }).click();
-      const createResponse = await createResponsePromise;
+      const createEditorModal = page.getByTestId("policy-editor-modal");
+      const [createResponse] = await Promise.all([
+        page.waitForResponse(
+          (response) => response.url().includes("/api/v1/deployment-policies") && response.request().method() === "POST",
+        ),
+        createEditorModal.getByRole("button", { name: "Create policy", exact: true }).click(),
+      ]);
       if (createResponse.status() !== 201) throw new Error(`Evidence policy create returned ${createResponse.status()}`);
-      const createdPolicy = await createResponse.json();
+      createdPolicy = await createResponse.json();
       await filterPolicyCatalog(page, policyName);
       await assertVisible(policyCard(), "Expected policy created with evidence");
       
@@ -17664,7 +17981,22 @@ security.audit.enable = true;</fixtext>
         "Expected evidence cleared and persisted after reload",
       );
       await page.getByRole("button", { name: "Cancel", exact: true }).last().click();
+      } catch (error) {
+        primaryError = error;
+        throw error;
+      } finally {
+        if (createdPolicy?.id) {
+          try {
       await phase6Api(page, `/api/v1/deployment-policies/${createdPolicy.id}`, { method: "DELETE" });
+          } catch (cleanupError) {
+            if (primaryError) {
+              console.error(`Evidence policy cleanup also failed: ${cleanupError.message}`);
+            } else {
+              throw new Error(`Evidence policy cleanup failed: ${cleanupError.message}`);
+            }
+          }
+        }
+      }
     },
   },
   {
@@ -17895,10 +18227,10 @@ security.audit.enable = true;</fixtext>
       const configUrl = `${baseUrl}/systems/${TASK_440_SYSTEM_ID}?tab=config&config_mode=commit&revision=${TASK_440_NEVER_DEPLOYED_SHA}`;
       await page.goto(configUrl, { timeout: LOAD_TIMEOUT });
       await assertVisible(page.locator(".cfgx").getByText("TARGET", { exact: true }), `Expected Config Explorer; fixture requests: ${state.handledRequests.join(",")}`, 15000);
-      await assertVisible(page.locator(".cfg-hist-note").filter({ hasText: "revision never deployed here" }), "Expected never-deployed warning");
+      await assertVisible(page.locator(".cfg-hist-note").filter({ hasText: /never deployed here/ }), "Expected never-deployed warning");
       if (!page.url().includes(TASK_440_NEVER_DEPLOYED_SHA)) throw new Error("Expected full revision in Config deep link");
       await page.reload({ timeout: LOAD_TIMEOUT });
-      await assertVisible(page.locator(".cfg-hist-note").filter({ hasText: "revision never deployed here" }), "Expected revision context after reload", 15000);
+      await assertVisible(page.locator(".cfg-hist-note").filter({ hasText: /never deployed here/ }), "Expected revision context after reload", 15000);
 
       state.lifecycle = "unavailable";
       await page.reload({ timeout: LOAD_TIMEOUT });
@@ -18034,7 +18366,7 @@ security.audit.enable = true;</fixtext>
       }
       await page.getByRole("button", { name: "Configured", exact: true }).click();
       await page.getByRole("button", { name: "Inspect configured option services.broken.value" }).click();
-      await assertVisible(page.getByText("not evaluated: fixture dependency failed", { exact: true }), "Failed value did not remain local to its option", 15000);
+      await assertVisible(page.getByRole("complementary", { name: "Configuration inspector" }).getByText("not evaluated: fixture dependency failed", { exact: true }), "Failed value did not remain local to its option", 15000);
       await assertVisible(page.getByRole("button", { name: "Inspect configured option networking.hostName" }), "Failed value displaced a healthy configured sibling");
       await page.getByRole("button", { name: "Search", exact: true }).click();
       await assertVisible(page.getByText("Complete search over the certified inventory for this exact target.", { exact: true }), "Complete inventory did not advertise certified search scope");
@@ -19267,6 +19599,7 @@ if (process.env.CF_UI_STATIC_CONTRACTS === "1") {
     context = await browser.newContext(contextOptions);
     context.on("page", attachFatalPageHandlers);
     page = await createStepPage();
+    await suppressOnboardingCoach(page);
     if (process.env.CF_UI_TEST_STANDALONE === "1") {
       await routeStandaloneUiBootstrap(page);
     }
