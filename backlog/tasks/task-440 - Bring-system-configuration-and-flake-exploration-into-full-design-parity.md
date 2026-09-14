@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-14 21:19'
+updated_date: '2026-09-14 23:28'
 labels:
   - design-parity
   - web-ui
@@ -320,6 +320,8 @@ Commit B was created locally as df58dbd6b408cfa1d718dd766690f3834201f033 with ex
 2026-09-10 verification policy: no successful broad Web UI, full flake, full integration, or broad server-regressions gate was run for this pass. One broad Web UI command was accidentally started during the initial temporary implementation and timed out; no pass is claimed. The corrected exact-head UI changes were verified with changed-file rustfmt, Node syntax, focused model/API tests, and WASM cargo check; no expensive browser/Nix Web UI command was required after correction. Final independent P0/P1 review found no deployment-smoke blocker. Normal fast-forward push succeeded from remote `1e986cd2351652e866f9b72bff956a312fc0827a`; local, remote-tracking, and ls-remote all equal `27f93478837b9b726c5cda807faf6182fb0d3229`; worktree is clean. Exact-head pipeline 2840805787 is running. Policy Create-draft production files were not changed. TASK-440 remains In Progress; AC #24 and #27 remain unchecked.
 
 2026-09-14 real deployed root cause confirmed by maintainer evidence: active upgraded systems have current generation/store state but no matching `evaluation_generation_snapshots` retained binding. All 173 completed deployed scans are legacy `evidence_schema_version = 0` with 331,763 reported vulnerabilities and zero schema-1 scans/immutable occurrences. `view_system_vulnerabilities` still reports large nonzero current inventories (for example reckless 1,711 distinct CVEs and chesty 1,331). The TASK-440 exact-generation INNER JOIN therefore creates a false empty inventory, not data loss. Existing historical scans and legacy inventory remain. No deployed data may be mutated or synthesized for this correction. The manually started targeted `web-ui-baseline-candidates` job 16494079743 was canceled at the next safe boundary when this blocker took precedence.
+
+2026-09-14 final focused CVE inventory audit: corrected the fleet mutation regression to count three exact system targets across two environments. Hardened exact row-hydration coverage now persists the actor role and proves that relationship disclosure reloads current PostgreSQL role/membership state: a stale in-memory Admin actor succeeds with a current Viewer membership and returns non-disclosing NotFound after membership revocation. Added public field documentation for the affected-system DTO mirrors. Passed focused fleet triage, exact stale-identity/closure, exact row hydration/current-membership, authorized inventory, exact/legacy/no-scan precedence, and 1,001-row overflow regressions; server and Web UI offline checks; focused Web UI inventory and legacy-only triage tests; changed-file rustfmt; Node syntax; and git diff check. Existing repository warnings remain. Broad/costly browser and VM checks were not run per the maintainer constraint. No commit, push, deployment, shared database mutation, acceptance-criteria change, or status change was performed.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
