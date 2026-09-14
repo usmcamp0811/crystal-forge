@@ -72,8 +72,8 @@ pub enum Route {
     #[route("/caches")]
     CachesView {},
 
-    #[route("/cves")]
-    CvesView {},
+    #[route("/cves?:..query")]
+    CvesView { query: String },
 
     #[route("/scanning")]
     ScanningView {},

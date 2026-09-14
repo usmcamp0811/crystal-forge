@@ -216,6 +216,7 @@ impl PoamAssigneeDraft {
         }
     }
 
+    #[cfg(test)]
     fn is_catalogued_in(&self, catalog: &PoamAssigneeCatalog) -> bool {
         match self {
             Self::Unassigned => true,
@@ -321,10 +322,10 @@ fn PoamAssigneeSelect(props: PoamAssigneeSelectProps) -> Element {
         _ => &empty_catalog,
     };
     let selected = props.selection.read().clone();
-    // COMPATIBILITY: The bounded catalog can omit the current assignee. Keep
-    // that server-provided value selected without making it a new choice.
-    let include_current =
-        !selected.is_catalogued_in(catalog) && !matches!(selected, PoamAssigneeDraft::Unassigned);
+    // COMPATIBILITY: Keep the selected option at one stable DOM location while
+    // the asynchronous catalog loads. Moving the selected value into an
+    // optgroup can make the browser reset the native select to Unassigned.
+    let include_current = !matches!(selected, PoamAssigneeDraft::Unassigned);
     let catalog_for_change = catalog.clone();
     rsx! {
         select {
@@ -344,14 +345,18 @@ fn PoamAssigneeSelect(props: PoamAssigneeSelectProps) -> Element {
             if !catalog.people.is_empty() {
                 optgroup { label: "People",
                     for person in &catalog.people {
-                        option { value: "user:{person.user_id}", "{person.label}" }
+                        if selected.option_value() != format!("user:{}", person.user_id) {
+                            option { value: "user:{person.user_id}", "{person.label}" }
+                        }
                     }
                 }
             }
             if !catalog.groups.is_empty() {
                 optgroup { label: "Groups",
                     for group in &catalog.groups {
-                        option { value: "group:{group.group_name}", "{group.group_name}" }
+                        if selected.option_value() != format!("group:{}", group.group_name) {
+                            option { value: "group:{group.group_name}", "{group.group_name}" }
+                        }
                     }
                 }
             }

@@ -377,7 +377,7 @@ pub fn ScanningView() -> Element {
                                                         div { class: "row-actions",
                                                             button { class: "btn-icon focus-ring", disabled: true, title: "Rescan endpoint not available yet", Icon { name: IconName::Sync, size: 14 } }
                                                             if has_findings {
-                                                                button { class: "btn-icon focus-ring", title: "View CVEs", onclick: move |_| { let _ = nav.push(Route::CvesView {}); }, Icon { name: IconName::ArrowRight, size: 14 } }
+                                                                button { class: "btn-icon focus-ring", title: "View CVEs", onclick: move |_| { let _ = nav.push(Route::CvesView { query: String::new() }); }, Icon { name: IconName::ArrowRight, size: 14 } }
                                                             }
                                                         }
                                                     }

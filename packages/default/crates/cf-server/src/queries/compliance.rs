@@ -2230,20 +2230,29 @@ pub async fn list_bundle_systems_for_version(
         .map(|(effective, policy)| (effective.policy_version_id, policy))
         .collect();
 
-    // Load assessment context for all systems in one batch
+    // INVARIANT: Prefer the retained generation's derivation identity. Legacy
+    // deployments without a retained binding can fall back only within the
+    // system's exact flake and configuration lineage.
     let contexts: std::collections::HashMap<Uuid, AssessmentContext> = {
         let context_rows: Vec<(Uuid, i32, String, Value)> = sqlx::query_as(
             r#"
             SELECT s.id, d.id AS derivation_id, deployed.store_path, d.policy_results
             FROM systems s
             JOIN LATERAL (
-                SELECT ss.store_path
+                SELECT ss.store_path, ss.generation
                 FROM system_states ss
                 WHERE ss.hostname = s.hostname
                 ORDER BY ss.timestamp DESC, ss.id DESC
                 LIMIT 1
             ) deployed ON true
+            LEFT JOIN evaluation_generation_snapshots retained
+              ON retained.system_id = s.id
+             AND retained.generation = deployed.generation
+             AND retained.source_store_path = deployed.store_path
             JOIN derivations d ON COALESCE(d.store_path, d.expected_store_path) = deployed.store_path
+              AND d.derivation_name = COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname)
+              AND (retained.derivation_id IS NULL OR d.id = retained.derivation_id)
+            JOIN commits c ON c.id = d.commit_id AND c.flake_id = s.flake_id
             WHERE s.id = ANY($1)
               AND d.derivation_type = 'nixos'
             ORDER BY s.id, d.completed_at DESC NULLS LAST, d.id DESC
@@ -3851,18 +3860,27 @@ async fn effective_policy_rollups_with_evidence_batch(
         .collect::<std::collections::HashSet<_>>()
         .into_iter()
         .collect();
+    // INVARIANT: This aggregate uses the same retained-generation preference
+    // and bounded legacy fallback as the detail evidence path.
     let context_rows: Vec<(Uuid, i32, String, Value)> = sqlx::query_as(
         r#"
         SELECT s.id, d.id AS derivation_id, deployed.store_path, d.policy_results
         FROM systems s
         JOIN LATERAL (
-            SELECT ss.store_path
+            SELECT ss.store_path, ss.generation
             FROM system_states ss
             WHERE ss.hostname = s.hostname
             ORDER BY ss.timestamp DESC, ss.id DESC
             LIMIT 1
         ) deployed ON true
+        LEFT JOIN evaluation_generation_snapshots retained
+          ON retained.system_id = s.id
+         AND retained.generation = deployed.generation
+         AND retained.source_store_path = deployed.store_path
         JOIN derivations d ON COALESCE(d.store_path, d.expected_store_path) = deployed.store_path
+          AND d.derivation_name = COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname)
+          AND (retained.derivation_id IS NULL OR d.id = retained.derivation_id)
+        JOIN commits c ON c.id = d.commit_id AND c.flake_id = s.flake_id
         WHERE s.id = ANY($1)
           AND d.derivation_type = 'nixos'
         ORDER BY s.id, d.completed_at DESC NULLS LAST, d.id DESC
@@ -4597,18 +4615,28 @@ async fn load_current_eval_attempt_results(
 }
 
 async fn assessment_context(pool: &PgPool, system_id: Uuid) -> Result<Option<AssessmentContext>> {
+    // INVARIANT: A store path can occur in more than one lineage. Prefer the
+    // retained generation's exact derivation. Legacy deployments without that
+    // binding can fall back only within the system's flake and configuration.
     sqlx::query_as(
         r#"
         SELECT d.id AS derivation_id, deployed.store_path AS target_store_path, d.policy_results
         FROM systems s
         JOIN LATERAL (
-            SELECT ss.store_path
+            SELECT ss.store_path, ss.generation
             FROM system_states ss
             WHERE ss.hostname = s.hostname
             ORDER BY ss.timestamp DESC, ss.id DESC
             LIMIT 1
         ) deployed ON true
+        LEFT JOIN evaluation_generation_snapshots retained
+          ON retained.system_id = s.id
+         AND retained.generation = deployed.generation
+         AND retained.source_store_path = deployed.store_path
         JOIN derivations d ON COALESCE(d.store_path, d.expected_store_path) = deployed.store_path
+          AND d.derivation_name = COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname)
+          AND (retained.derivation_id IS NULL OR d.id = retained.derivation_id)
+        JOIN commits c ON c.id = d.commit_id AND c.flake_id = s.flake_id
         WHERE s.id = $1
           AND d.derivation_type = 'nixos'
         ORDER BY d.completed_at DESC NULLS LAST, d.id DESC

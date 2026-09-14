@@ -859,7 +859,9 @@ fn notification_target(route: &str) -> Option<NotificationTarget> {
             query: String::new(),
         })),
         "/builds" => Some(NotificationTarget::Route(Route::BuildsView {})),
-        "/cves" => Some(NotificationTarget::Route(Route::CvesView {})),
+        "/cves" => Some(NotificationTarget::Route(Route::CvesView {
+            query: String::new(),
+        })),
         "/evaluations" => Some(NotificationTarget::Route(Route::EvaluationsView {})),
         "/profile" => Some(NotificationTarget::Route(Route::ProfileView {})),
         _ => None,
@@ -1859,7 +1861,9 @@ mod tests {
         );
         assert_eq!(
             notification_target("/cves"),
-            Some(NotificationTarget::Route(Route::CvesView {}))
+            Some(NotificationTarget::Route(Route::CvesView {
+                query: String::new(),
+            }))
         );
         assert_eq!(
             notification_target("/evaluations"),

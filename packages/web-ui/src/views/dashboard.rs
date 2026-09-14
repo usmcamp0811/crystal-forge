@@ -1553,7 +1553,9 @@ fn route_for_nav(route: &str) -> Option<Route> {
         },
         "builds" => Route::BuildsView {},
         "evals" => Route::EvaluationsView {},
-        "cves" => Route::CvesView {},
+        "cves" => Route::CvesView {
+            query: String::new(),
+        },
         "caches" => Route::CachesView {},
         "environments" => Route::EnvironmentsView {
             query: String::new(),

@@ -879,7 +879,9 @@ mod tests {
 
     #[test]
     fn cve_route_uses_authenticated_api_visibility_for_every_role() {
-        let route = Route::CvesView {};
+        let route = Route::CvesView {
+            query: String::new(),
+        };
         assert!(!should_show_admin_denied(
             &route,
             &auth_context(true, vec![Role::Operator])

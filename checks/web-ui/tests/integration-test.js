@@ -3540,6 +3540,7 @@ async function routeTask440SystemData(page, overrides = {}) {
     observationRequests: new Map(),
     observationPostWaiters: [],
     heldObservationResolvers: new Map(),
+    heldObservationWaiters: [],
     holdObservationKinds: new Set(),
     prefixFailureCounts: new Map(),
     largeServicesPrefix: false,
@@ -3591,6 +3592,11 @@ async function routeTask440SystemData(page, overrides = {}) {
     const ready = () => kinds.every((kind) => state.observationPosts.some((request) => request.kind === kind));
     if (ready()) return Promise.resolve();
     return new Promise((resolve) => state.observationPostWaiters.push({ ready, resolve }));
+  };
+  state.waitForHeldObservationCount = (kind, count) => {
+    const ready = () => (state.heldObservationResolvers.get(kind) || []).length >= count;
+    if (ready()) return Promise.resolve();
+    return new Promise((resolve) => state.heldObservationWaiters.push({ ready, resolve }));
   };
   state.releaseHeldObservation = (kind) => {
     state.holdObservationKinds.delete(kind);
@@ -4016,6 +4022,10 @@ async function routeTask440SystemData(page, overrides = {}) {
         const resolvers = state.heldObservationResolvers.get(body.kind) || [];
         resolvers.push(resolve);
         state.heldObservationResolvers.set(body.kind, resolvers);
+        for (const waiter of state.heldObservationWaiters.splice(0)) {
+          if (waiter.ready()) waiter.resolve();
+          else state.heldObservationWaiters.push(waiter);
+        }
       });
     }
     const dotted = body.path_components.join(".");
@@ -18507,9 +18517,10 @@ security.audit.enable = true;</fixtext>
       const newestRootPost = page.waitForRequest((request) => request.method() === "POST" && request.url().includes("/config-observations/") && request.url().includes(TASK_440_NEVER_DEPLOYED_SHA) && request.postDataJSON().kind === "root");
       await commitSelect.selectOption(TASK_440_NEVER_DEPLOYED_SHA);
       await newestRootPost;
+      await state.waitForHeldObservationCount("root", 2);
       state.releaseHeldObservation("root");
-      await assertVisible(page.getByRole("button", { name: /^(?:Expand|Collapse) 9999999-root$/ }), "Newest revision root did not render after releasing held responses", 15000);
-      await assertHidden(page.getByRole("button", { name: "Expand abcdef0-root" }), "Old revision root overwrote the newer exact revision");
+      await assertVisible(page.getByRole("button", { name: /^(?:Expand|Collapse) "9999999-root"$/ }), "Newest revision root did not render after releasing held responses", 15000);
+      await assertHidden(page.getByRole("button", { name: /^(?:Expand|Collapse) abcdef0-root$/ }), "Old revision root overwrote the newer exact revision");
       const requestIds = state.observationPosts.map((request) => request.request_id);
       const observationIds = state.observationPosts.map((request) => request.observation_id);
       if (new Set(requestIds).size !== requestIds.length || new Set(observationIds).size !== observationIds.length) {

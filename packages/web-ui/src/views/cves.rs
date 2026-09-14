@@ -194,11 +194,12 @@ fn sync_cve_url_state(
 
 /// Renders the fleet CVE dashboard and its reload-safe exact-CVE selection.
 ///
-/// The view hydrates drawer selection from the URL before synchronizing local
-/// state back to browser history. Later selection changes and `popstate`
-/// events remain authoritative after hydration.
+/// `query` makes filter and drawer state part of the Dioxus route during a
+/// direct page load. The view reads the browser URL so later selection changes
+/// and `popstate` events remain authoritative.
 #[component]
-pub fn CvesView() -> Element {
+pub fn CvesView(query: String) -> Element {
+    let _ = query;
     let app_state = use_context::<Signal<AppState>>();
     let is_admin_user = auth::is_admin(&app_state.read().auth);
     let initial_severity = query_param("severity");

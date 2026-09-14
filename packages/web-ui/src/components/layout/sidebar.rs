@@ -420,7 +420,7 @@ pub fn SidebarNav() -> Element {
                 NavSection { collapsed: is_collapsed, label: "Compliance" }
                 NavLink {
                     collapsed: is_collapsed,
-                    to: Route::CvesView {},
+                    to: Route::CvesView { query: String::new() },
                     label: "CVEs",
                     badge_count: if cves_critical > 0 { Some(cves_critical) } else { None },
                     badge_attention: cves_critical > 0,
@@ -790,7 +790,7 @@ pub fn MobileDrawer() -> Element {
                 NavSection { collapsed: false, label: "Compliance" }
                 NavLink {
                     collapsed: false,
-                    to: Route::CvesView {},
+                    to: Route::CvesView { query: String::new() },
                     label: "CVEs",
                     icon: rsx!(
                         svg {
