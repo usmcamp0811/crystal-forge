@@ -5036,23 +5036,26 @@ function arrangeTask433DeployedAssessment(systemId, hostname, assessment) {
   // only to carry the deployment's commit, configuration, and derivation
   // identity. The current snapshot selector remains unchanged.
   const snapshotId = runFixtureSql(`
-    INSERT INTO evaluation_snapshots (
-      commit_id, configuration_name, schema_version, lifecycle,
-      first_parent_sha, option_count, module_count, evaluation_duration_ms,
-      content_bytes, completed_at
+    WITH inserted AS (
+      INSERT INTO evaluation_snapshots (
+        commit_id, configuration_name, schema_version, lifecycle,
+        first_parent_sha, option_count, module_count, evaluation_duration_ms,
+        content_bytes, completed_at
+      )
+      SELECT derivation.commit_id, derivation.derivation_name, 1, 'available',
+             commit_row.first_parent_sha, 0, 0, 0, 0, CURRENT_TIMESTAMP
+      FROM composite_policy_assessments persisted
+      JOIN derivations derivation ON derivation.id=persisted.derivation_id
+      JOIN commits commit_row ON commit_row.id=derivation.commit_id
+      WHERE persisted.id='${assessment.assessment_id}'::uuid
+        AND persisted.system_id='${systemId}'::uuid
+        AND derivation.id=${Number(assessment.derivation_id)}
+        AND COALESCE(derivation.store_path, derivation.expected_store_path)=
+            $path$${assessment.target_store_path}$path$
+        AND derivation.derivation_type='nixos'
+      RETURNING id
     )
-    SELECT derivation.commit_id, derivation.derivation_name, 1, 'available',
-           commit_row.first_parent_sha, 0, 0, 0, 0, CURRENT_TIMESTAMP
-    FROM composite_policy_assessments persisted
-    JOIN derivations derivation ON derivation.id=persisted.derivation_id
-    JOIN commits commit_row ON commit_row.id=derivation.commit_id
-    WHERE persisted.id='${assessment.assessment_id}'::uuid
-      AND persisted.system_id='${systemId}'::uuid
-      AND derivation.id=${Number(assessment.derivation_id)}
-      AND COALESCE(derivation.store_path, derivation.expected_store_path)=
-          $path$${assessment.target_store_path}$path$
-      AND derivation.derivation_type='nixos'
-    RETURNING id;
+    SELECT id FROM inserted;
   `);
   if (!/^[0-9a-f-]{36}$/.test(snapshotId)) {
     throw new Error(`Could not create deployed assessment fixture for ${hostname}: ${JSON.stringify(assessment)}`);
@@ -11370,6 +11373,9 @@ const steps = [
       let triageDialog = page.getByRole("dialog", { name: "Triage CVE-2024-1234 openssl" });
       await assertVisible(triageDialog, "Operator/Admin should receive the exact fleet triage editor");
       const triageClose = triageDialog.getByRole("button", { name: "Close triage editor" });
+      await page.waitForFunction(
+        () => document.activeElement?.getAttribute("aria-label") === "Close triage editor",
+      );
       if (!(await triageClose.evaluate((element) => element === document.activeElement))) {
         throw new Error("Exact fleet triage editor did not receive initial focus");
       }
