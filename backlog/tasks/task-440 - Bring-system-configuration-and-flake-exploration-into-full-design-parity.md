@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-14 17:27'
+updated_date: '2026-09-14 17:58'
 labels:
   - design-parity
   - web-ui
@@ -83,6 +83,7 @@ references:
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/jobs/16491838085'
   - git commit e17248395830dff1d3e87a496f3a5f3abe2c1e89
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2848127618'
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/jobs/16492561399'
 documentation:
   - docs/design/CrystalForge/app.jsx
   - docs/design/CrystalForge/components/SystemDetail.jsx
@@ -297,6 +298,8 @@ Exact-head pipeline 2847810285 reached the Web UI gate but job 16490032119 was k
 Retry job 16491838085 completed in 1802 seconds and produced authoritative browser results. TASK-440 Config/flake/navigation workflows now pass, including 12l/12la/12m/12n/12p/12q, 13j/13l-13q, 13k, 12o, and 14d. Critical failures are reduced from eight to three: `16-cves`, `task433-canonical-mixed-nix-cve-evidence`, and `task433-canonical-poam-lifecycle`. Typed assignee workflow `29i` now passes. Visual result is 40 match, 2 differ, 182 new, 32 skipped; only strict failures remain the dark/light `20af-policy-catalog-selection-delete-regressions` differences. The CI job failed with those three critical semantics plus the two strict visual differences and uploaded no artifact because the expected runner path was absent.
 
 Diagnosed the three remaining critical failures as browser-harness defects. `16-cves` used substring text locators for ACCEPTED/SCHEDULED, which matched both status chips and explanatory prose; exact text locators now assert the intended chips. The two TASK-433 failures shared one invalid fixture assumption: production policy evaluation can persist authoritative assessment evidence without producing a certified available Config snapshot, so the helper must record only the disconnected agent's deployment observation and must not fabricate or require a retained-generation artifact. Commit e17248395830dff1d3e87a496f3a5f3abe2c1e89 applies those focused corrections. `node --check checks/web-ui/tests/integration-test.js` and `git diff --check` passed. Exact-head pipeline 2848127618 is running.
+
+Pipeline 2848127618 Web UI job 16492561399 completed in 1775 seconds. The prior fixes advanced each critical workflow but did not clear them: `16-cves` now reaches the actor assertion and fails because `Morgan Reyes` appears in multiple environment cards; mixed evidence reaches the evidence drawer but falls back to individual Nix PASS with `No composite assessment`; canonical POA&M lifecycle shows the two persisted open findings but no remediation controls. The observation-only deployment fixture therefore does not provide sufficient exact derivation identity for these browser workflows. Strict visual failures remain only the dark/light 20af differences. Further fixture diagnosis is in progress; no production behavior change is assumed.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
