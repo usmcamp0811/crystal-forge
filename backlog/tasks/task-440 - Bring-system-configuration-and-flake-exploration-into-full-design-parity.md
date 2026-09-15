@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-15 21:27'
+updated_date: '2026-09-15 23:20'
 labels:
   - design-parity
   - web-ui
@@ -51,6 +51,7 @@ references:
   - git commit 0aa38dba
   - git commit 7e1f0846
   - git commit 27cd67aa0705a011a3b67f8727dfc27d62dac4da
+  - git commit 31819e2f
 documentation:
   - docs/design/CrystalForge/app.jsx
   - docs/design/CrystalForge/components/SystemDetail.jsx
@@ -222,7 +223,7 @@ Updated recovery order: (1) exact all-builder verified-source mismatch reproduct
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-2026-09-15 bounded System CVE pagination committed and pushed as `27cd67aa` (`TASK-440: Page system CVE inventory`). The tracked 14-file slice adds the separate paged route, deterministic canonical CVE/package keyset paging, server-side filters and totals, exact/legacy/no-scan authority metadata, explicit paged Unknown severity, UI append/dedup/restart behavior, and 1,315-finding DB/browser regressions while retaining the legacy endpoint for rolling compatibility. Final read-only P0/P1 audit found no blocker. Verification passed before commit: isolated PostgreSQL traversal of 500 + 500 + 315 rows; focused server/API/auth checks; server all-target/offline checks and rustdoc; Web UI unit/WASM checks; `12ha-system-detail-cve-inventory-fallbacks` in dark and light themes including 409 restart; `nix build .#server .#web-ui --no-link`; JavaScript/manifest checks; rustfmt; and `git diff --check`. The task-owned preview was rebuilt from the committed source and is healthy at http://localhost:8080 with API port 3445 and isolated PostgreSQL port 3042. Only generated untracked `packages/web-ui/assets/tailwind.css` remains and was excluded from the commit. Real non-production deployment proof, one verified builder build, and live `webb` >1,000-finding CVE-tab smoke remain required before restoring the preserved scanner-server stash.
+2026-09-15 exact-head CI correction committed and pushed as `31819e2f` (`TASK-440: Correct CVE inventory regressions`). Pipeline 2852445060 exposed four narrow issues: the Web UI runner expected list omitted new workflow 12ha; a stale static assertion still expected direct `allow_mutations` gates instead of stricter authority-aware gates; fleet affected-system rows were not deduplicated by system before the 1,001-system overflow probe; and one exact-CVE relationship test claimed Admin without persisting that role. The correction updates the two test contracts, deterministically selects one CVE/package occurrence per system before applying the system bound, and persists the fixture role without weakening production authorization. Verification passed: both originally failing PostgreSQL regressions in a disposable isolated PostgreSQL cluster; Web UI static contracts; `nix build .#checks.x86_64-linux.web-ui-test-runner --no-link -L`; `nix build .#checks.x86_64-linux.server-regressions --no-link -L` (full check); package rustfmt; and `git diff --check`. Read-only P0/P1 audit found no blocker. The task preview was rebuilt at `31819e2f`; authenticated HTTPS LAN access remains at https://10.8.0.177:8090. The new exact-head CI pipeline must still validate the costly full Web UI VM check.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
