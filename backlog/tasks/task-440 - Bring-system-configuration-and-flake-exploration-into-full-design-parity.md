@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-14 23:44'
+updated_date: '2026-09-15 02:40'
 labels:
   - design-parity
   - web-ui
@@ -49,6 +49,7 @@ references:
   - git commit 27f93478837b9b726c5cda807faf6182fb0d3229
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2840805787'
   - git commit 0aa38dba
+  - git commit 7e1f0846
 documentation:
   - docs/design/CrystalForge/app.jsx
   - docs/design/CrystalForge/components/SystemDetail.jsx
@@ -289,6 +290,8 @@ Commit B was created locally as df58dbd6b408cfa1d718dd766690f3834201f033 with ex
 2026-09-14 CVE rolling-upgrade recovery committed and pushed as `0aa38dba` (`TASK-440: Restore CVE upgrade inventory`) from exact parent `d2ca1c18`. The additive typed inventory read prefers exact current schema-1 evidence, falls back to scoped bounded legacy inventory, and distinguishes legacy clean/no scan without synthesizing exact authority. Exact remediation remains fail-closed; ordinary legacy justification semantics remain unchanged. Focused PostgreSQL authority/RBAC/dedup/precedence and relationship tests, exact-CVE mutation regression, offline server checks, focused Web UI unit tests, changed-file formatting, Node syntax, and diff checks passed with existing warnings. Costly Web UI checks were not run per maintainer instruction. Independent final review found no remaining P0/P1 blocker. Live redeploy smoke remains required.
 
 Non-production deployment remains blocked after push of `0aa38dba`: repository/session evidence identifies only `reckless`, which is explicitly production, and local `cf-test-sys` fixtures. No named authorized real non-production target or exact deployment command is documented. Per maintainer instruction, no target was guessed and no deployment occurred. Config recovery work proceeds while waiting for an unambiguous target/procedure.
+
+2026-09-14 Config upgraded-fleet recovery committed and pushed as `7e1f0846` (`TASK-440: Restore Config upgrade inspection`) after `0aa38dba`. The server now resolves observational Current via strict retained/deployment/unique same-flake-config-store identity, hardens generation fallback, returns full-SHA `current_commit`, and marks exact Config-inspectable commits. The UI uses server Current authority only, selects the newest inspectable historical commit, shows unmapped Current truthfully, and gates automatic Root observation to Admin. Observational mapping does not grant rollback authority. Focused PostgreSQL tests (26 across four filters), five Web UI unit tests, native/WASM checks, server SQLx-offline test compile, rustfmt, and diff checks passed with existing warnings. Costly browser checks were not run. Commit is pushed and branch was synchronized before push. Non-production deploy/smoke remains blocked by missing target/procedure. Distributed CVE scanning audit starts next.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
