@@ -17,6 +17,10 @@ pub const CVE_SCAN_MAX_ENTRIES: usize = 50_000;
 pub const CVE_SCAN_MAX_OBSERVATIONS: usize = 250_000;
 /// Current structured CVE result schema advertised by capable builders.
 pub const CVE_SCAN_SCHEMA_VERSION: u32 = 1;
+/// Current evaluator contract understood by verified-source builders.
+pub const VERIFIED_SOURCE_EVALUATOR_CONTRACT_VERSION: u32 = 1;
+/// Current canonical Git-tree-to-Nix-store materialization schema.
+pub const VERIFIED_SOURCE_MATERIALIZATION_SCHEMA_VERSION: u32 = 1;
 
 /// Describes optional work that a builder can execute.
 ///
@@ -64,17 +68,18 @@ pub enum RemoteBuildExecutionStrategy {
 }
 
 /// Source/input delivery mode for verified source re-evaluation.
+///
+/// Evaluator contract version 1 accepts only [`Self::ServerBundledArchive`].
+/// The server rejects every other mode before claim and does not fall back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SourceInputDeliveryMode {
     /// Not applicable for the current job strategy.
     #[default]
     None,
-    /// Server packages the top-level flake repository as a tar.gz of its
-    /// bare Git mirror and serves it via an authenticated API endpoint.
-    /// The builder downloads, verifies (SHA-256), and extracts the archive
-    /// into a job-scoped bare mirror, then evaluates the flake from a
-    /// detached worktree.
+    /// Server serves the canonical tracked-tree tar artifact used by its
+    /// authoritative evaluator through an authenticated API endpoint. The
+    /// builder verifies its authorized size and SHA-256 digest before extraction.
     ///
     /// **Scope:** only the top-level repository is bundled. Locked flake
     /// inputs that are NOT already in the builder's Nix store or reachable
@@ -82,12 +87,13 @@ pub enum SourceInputDeliveryMode {
     /// `nix eval`. Private flake inputs must be publicly accessible, cached,
     /// or pre-seeded on the builder for air-gapped operation.
     ServerBundledArchive,
-    /// Builder uses or creates a detached local Git worktree from a local mirror
-    /// at the authorized commit. Colocated server/builder deployments may share
-    /// these roots.
+    /// Reserved local Git worktree delivery mode.
+    ///
+    /// Evaluator contract version 1 does not support this mode.
     LocalGitWorktree,
-    /// Builder may fetch public flake inputs itself. Builders still must not
-    /// receive broad private Git credentials.
+    /// Reserved builder-side public input fetch mode.
+    ///
+    /// Evaluator contract version 1 does not support this mode.
     BuilderFetchPublicInputs,
 }
 
@@ -98,31 +104,84 @@ pub enum SourceInputDeliveryMode {
 /// Immutable source identity for verified source re-evaluation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VerifiedSourceIdentity {
+    /// Credential-free repository locator used to identify the bare mirror.
     pub repo_url: String,
+    /// Full Git commit object ID authorized by the server.
     pub commit_hash: String,
+    /// Flake output attribute evaluated from the immutable source.
     pub flake_target: String,
+    /// Stable server-selected mirror identifier.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mirror_id: Option<String>,
+    /// Legacy builder-local mirror path; absent for contract version 1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mirror_path: Option<String>,
+    /// Legacy builder-local worktree path; absent for contract version 1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_path: Option<String>,
+    /// Legacy lock-file digest retained for wire compatibility.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lock_hash: Option<String>,
+    /// Authenticated server route for the canonical source artifact.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archive_url: Option<String>,
+    /// Legacy artifact digest mirrored from [`Self::immutable_source`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archive_sha256: Option<String>,
+    /// Canonical Nix store source authorized during server evaluation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub immutable_source: Option<ImmutableSourceIdentity>,
 }
 
-/// Evaluator fingerprint recorded in the job manifest for auditability.
+/// Identifies a canonical tracked Git tree after Nix store ingestion.
+///
+/// The NAR hash and store name form the portable identity. A builder MUST
+/// recreate and verify both values from the server-bundled commit before
+/// evaluation. The server store path is an audit value and MUST NOT be trusted
+/// as a builder-local path because stores can use different roots.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImmutableSourceIdentity {
+    /// Materialization algorithm version.
+    pub schema_version: u32,
+    /// Name passed to `nix store add-path` on every evaluator host.
+    pub store_name: String,
+    /// SRI SHA-256 hash of the canonical source NAR.
+    pub nar_hash: String,
+    /// SHA-256 hex digest of the committed `flake.lock` bytes.
+    pub lock_hash: String,
+    /// Canonical source artifact format version.
+    pub artifact_format_version: u32,
+    /// SHA-256 hex digest of the exact artifact bytes consumed by both hosts.
+    pub artifact_sha256: String,
+    /// Exact artifact size in bytes.
+    pub artifact_size: u64,
+    /// Store path produced on the authoritative server, for audit diagnostics.
+    pub server_store_path: String,
+}
+
+/// Records the evaluator dimensions enforced before verified re-evaluation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EvaluatorFingerprint {
+    /// Evaluator contract schema, or `0` for a legacy fingerprint.
+    #[serde(default)]
+    pub contract_version: u32,
+    /// Nix language version reported by the evaluator that executes the job.
     pub nix_version: String,
+    /// Nix system reported by `builtins.currentSystem` for the evaluator.
+    #[serde(default)]
+    pub evaluator_system: String,
+    /// Whether evaluation prohibits access to ambient host state.
     #[serde(default)]
     pub pure_eval: bool,
+    /// Whether evaluation can update or create `flake.lock`.
     #[serde(default)]
     pub lockfile_mutation_allowed: bool,
+    /// Explicit `allow-import-from-derivation` evaluator setting.
+    #[serde(default)]
+    pub allow_import_from_derivation: bool,
+    /// Canonical source materialization schema used by the evaluator.
+    #[serde(default)]
+    pub source_materialization_schema_version: u32,
 }
 
 // =============================================================================
@@ -277,10 +336,37 @@ pub struct NextJobResponse {
 /// Signed request body for POST /api/v1/builders/:id/next-job.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NextJobRequest {
+    /// Builder polling protocol version.
     #[serde(default = "default_builder_protocol_version")]
     pub protocol_version: u32,
+    /// Remote execution strategies that this builder can execute.
     #[serde(default = "default_supported_execution_strategies")]
     pub supported_execution_strategies: Vec<RemoteBuildExecutionStrategy>,
+    /// Evaluator contracts that this builder can validate before evaluation.
+    #[serde(default)]
+    pub supported_evaluator_contract_versions: Vec<u32>,
+    /// Effective evaluator settings probed before this builder starts polling.
+    ///
+    /// Legacy requests omit this field and cannot claim verified-source work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evaluator: Option<EvaluatorFingerprint>,
+}
+
+/// Returns the NAR-qualified flake reference for an immutable Nix store path.
+///
+/// The function percent-encodes the NAR hash as an RFC 3986 query value. The
+/// server and builder MUST use the returned reference for contract-v1
+/// evaluation so they resolve identical flake inputs.
+pub fn nar_qualified_store_flake_ref(store_path: &str, nar_hash: &str) -> String {
+    let encoded_hash = nar_hash.bytes().fold(String::new(), |mut output, byte| {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            output.push(char::from(byte));
+        } else {
+            output.push_str(&format!("%{byte:02X}"));
+        }
+        output
+    });
+    format!("path:{store_path}?narHash={encoded_hash}")
 }
 
 fn default_builder_protocol_version() -> u32 {
@@ -341,11 +427,21 @@ pub struct EstablishBuilderSessionResponse {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BuildFailurePhase {
+    /// The builder could not obtain or inspect the authorized source.
     SourceFetch,
+    /// The source commit, lock file, or canonical NAR identity did not match.
+    SourceIdentityMismatch,
+    /// A required source input was unavailable to the builder.
     SourceInputAvailability,
+    /// The builder could not reproduce the server's evaluator contract.
+    EvaluatorIncompatible,
+    /// Nix could not evaluate the verified source.
     Evaluation,
+    /// The evaluated derivation differed from the server-authorized derivation.
     DerivationMismatch,
+    /// The builder could not make the authorized derivation locally available.
     PathMaterialization,
+    /// The authorized derivation failed to build.
     Build,
 }
 
@@ -365,7 +461,9 @@ impl std::fmt::Display for BuildFailurePhase {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             BuildFailurePhase::SourceFetch => write!(f, "source_fetch"),
+            BuildFailurePhase::SourceIdentityMismatch => write!(f, "source_identity_mismatch"),
             BuildFailurePhase::SourceInputAvailability => write!(f, "source_input_availability"),
+            BuildFailurePhase::EvaluatorIncompatible => write!(f, "evaluator_incompatible"),
             BuildFailurePhase::Evaluation => write!(f, "evaluation"),
             BuildFailurePhase::DerivationMismatch => write!(f, "derivation_mismatch"),
             BuildFailurePhase::PathMaterialization => write!(f, "path_materialization"),
@@ -841,6 +939,38 @@ mod tests {
     }
 
     #[test]
+    fn legacy_evaluator_fingerprint_defaults_to_incompatible_contract() {
+        let fingerprint: EvaluatorFingerprint = serde_json::from_str(
+            r#"{"nix_version":"2.34.5","pure_eval":true,"lockfile_mutation_allowed":false}"#,
+        )
+        .expect("legacy fingerprint should parse");
+
+        assert_eq!(fingerprint.contract_version, 0);
+        assert!(fingerprint.evaluator_system.is_empty());
+        assert!(!fingerprint.allow_import_from_derivation);
+        assert_eq!(fingerprint.source_materialization_schema_version, 0);
+    }
+
+    #[test]
+    fn legacy_next_job_request_has_no_evaluator_contract_capability() {
+        let request: NextJobRequest = serde_json::from_str(
+            r#"{"protocol_version":2,"supported_execution_strategies":["source_re_evaluate_verified"]}"#,
+        )
+        .expect("legacy request should parse");
+
+        assert!(request.supported_evaluator_contract_versions.is_empty());
+        assert!(request.evaluator.is_none());
+    }
+
+    #[test]
+    fn nar_qualified_store_reference_uses_rfc3986_query_encoding() {
+        assert_eq!(
+            nar_qualified_store_flake_ref("/nix/store/abc-source", "sha256-a+b/c=d_~",),
+            "path:/nix/store/abc-source?narHash=sha256-a%2Bb%2Fc%3Dd_~"
+        );
+    }
+
+    #[test]
     fn verified_source_strategy_serializes_as_snake_case() {
         let payload = BuildJobDerivation {
             id: 42,
@@ -861,13 +991,29 @@ mod tests {
                 lock_hash: Some("sha256-lock".to_string()),
                 archive_url: Some("file:///tmp/source".to_string()),
                 archive_sha256: Some("sha256-source".to_string()),
+                immutable_source: Some(ImmutableSourceIdentity {
+                    schema_version: VERIFIED_SOURCE_MATERIALIZATION_SCHEMA_VERSION,
+                    store_name: "crystal-forge-source-abc123".to_string(),
+                    nar_hash: "sha256-source-nar".to_string(),
+                    lock_hash: "lock-sha256".to_string(),
+                    artifact_format_version:
+                        crate::source_artifact::VERIFIED_SOURCE_ARTIFACT_FORMAT_VERSION,
+                    artifact_sha256: "artifact-sha256".to_string(),
+                    artifact_size: 1024,
+                    server_store_path: "/nix/store/source".to_string(),
+                }),
             }),
             source_input_delivery: SourceInputDeliveryMode::ServerBundledArchive,
             expected_drv_path: Some("/nix/store/server-host-a.drv".to_string()),
             evaluator: Some(EvaluatorFingerprint {
+                contract_version: VERIFIED_SOURCE_EVALUATOR_CONTRACT_VERSION,
                 nix_version: "2.28.0".to_string(),
+                evaluator_system: "x86_64-linux".to_string(),
                 pure_eval: true,
                 lockfile_mutation_allowed: false,
+                allow_import_from_derivation: true,
+                source_materialization_schema_version:
+                    VERIFIED_SOURCE_MATERIALIZATION_SCHEMA_VERSION,
             }),
             cache_push: None,
         };

@@ -26,9 +26,8 @@ source_archive_root              = "/var/lib/crystal-forge/source-archives"
 # /etc/crystal-forge/builder.toml
 [builder]
 supported_execution_strategies = ["source_re_evaluate_verified"]
-source_mirror_root              = "/var/lib/crystal-forge/flake-mirrors"
 source_worktree_root            = "/var/lib/crystal-forge/flake-worktrees"
-cleanup_source_worktrees        = true
+allow_import_from_derivation    = true
 ```
 
 This is the most reliable and fastest startup path because:
@@ -54,12 +53,10 @@ such as `X-Forwarded-Proto: https`, `Forwarded: proto=https`, or
 credential-bearing builder cache-push jobs are rejected with HTTP `426 Upgrade
 Required` before any credentials are sent.
 
-Some flakes require Nix import-from-derivation (IFD) while evaluating
-`config.system.build.toplevel.drvPath`. Verified source re-evaluation disables
-IFD by default so remote builders do not run evaluation-time builds unless the
-operator opts in. If a builder log fails during the pre-build evaluation phase
-with `allow-import-from-derivation is disabled`, enable it explicitly for that
-deployment:
+Verified-source evaluator contract version 1 enables Nix
+import-from-derivation (IFD) to preserve the authoritative evaluation behavior.
+The NixOS module defaults the builder option to true. A builder that disables
+IFD must not advertise `source_re_evaluate_verified` contract version 1:
 
 ```nix
 services.crystal-forge.build.allow_import_from_derivation = true;
@@ -71,17 +68,30 @@ services.crystal-forge.build.allow_import_from_derivation = true;
 
 **Materialization:** When the `.drv` is not already in the builder's local Nix store, the builder streams the `.drv` closure archive directly from the CF server into `nix-store --import` — no Attic or binary cache required. In the background, the server pushes the closure to the configured cache so future builds can pull via normal Nix substituters.
 
-**Source delivery modes for `source_re_evaluate_verified`** are configured server-side via `source_delivery_mode`:
+**Source delivery for `source_re_evaluate_verified`** is configured server-side via `source_delivery_mode`:
 
-- **`local_git_worktree`** (default): Builder manages its own bare mirror. On first use it clones with `git clone --bare` from the repository URL; if the authorized commit is absent it fetches. The builder needs read access to the repository URL and credentials for private repos. Colocated server/builder deployments may share the same mirror root.
+- **`none`**: Not valid for verified-source jobs. The server rejects this mode before claim.
 
-- **`server_bundled_archive`**: Server packages the top-level flake repository as a `tar.gz` (from its own server-side bare mirror) and serves it via an authenticated API endpoint. The builder downloads, verifies SHA-256 incrementally while streaming to disk, extracts to a **job-scoped** directory, and evaluates without contacting the Git remote. Each job gets an isolated mirror directory so concurrent builds for the same repo do not interfere. Use this for air-gapped or GovCloud builders. Note: only the top-level repo is bundled; locked flake inputs not in the builder's Nix store or substituters may still require network during `nix eval`.
+- **`local_git_worktree`**: Reserved for a future evaluator contract. The server rejects this mode before a version-1 job is claimed.
 
-Job-scoped mirror layout for `server_bundled_archive`:
+- **`server_bundled_archive`**: Required by contract version 1. During authoritative evaluation, the server creates one uncompressed tracked-tree tar artifact for the exact commit. The server and builder consume the same bytes. Before claim, the server checks the published size and SHA-256 digest. The builder streams those bytes to a unique temporary file, enforces the authorized size, verifies SHA-256, applies bounded safe extraction, and evaluates the resulting Nix store source without Git credentials.
+
+  Materialization schema version 1 accepts full 40-character SHA-1 Git object
+  IDs. It rejects 64-character SHA-256 object IDs with a typed unsupported
+  object-format error before mirror initialization. A later schema must define
+  SHA-256 mirror initialization and compatibility before enabling those IDs.
+
+- **`builder_fetch_public_inputs`**: Reserved for a future evaluator contract. The server rejects this mode before a version-1 job is claimed.
+
+Contract version 1 has no source-delivery fallback. Only
+`server_bundled_archive` can claim a `source_re_evaluate_verified` job.
+
+Server publication layout for `server_bundled_archive`:
 
 ```
-<source_mirror_root>/server-bundled/<job_id>/<mirror_id>.git   ← deleted after build
-<source_worktree_root>/<mirror_id>/<commit_hash>/<job_id>/     ← deleted after build
+<source_archive_root>/mirrors/<mirror_id>.git
+<source_archive_root>/artifacts/<mirror_id>/<commit_hash>.tar
+<source_archive_root>/identities/<mirror_id>/<commit_hash>.json
 ```
 
 ### `server_derivation`
@@ -106,36 +116,54 @@ Build inputs (nixpkgs, dependencies) are pulled from configured Nix substituters
 
 Flow:
 
-1. The server evaluates the target with the equivalent of:
+1. The server fetches the exact commit into its credentialed bare mirror. It
+   exports only the tracked Git tree and ingests that tree with the canonical
+   `crystal-forge-source-v1-<commit>` name. It evaluates the resulting immutable
+   store flake in pure mode with lock mutation disabled and IFD set explicitly:
 
    ```bash
-   nix eval --raw .#nixosConfigurations.<host>.config.system.build.toplevel.drvPath
+   nix-eval-jobs --expr '<authoritative expression>' \
+       --option pure-eval true \
+       --option allow-import-from-derivation true \
+       --meta --apply 'derivation: derivation.meta.policies' \
+       --workers <n> --max-memory-size <MiB>
    ```
 
-   The resulting `.drvPath` is the server-authorized build-plan fingerprint. The server does not need `nix build --dry-run` for this identity.
+   The resulting `.drvPath` is the server-authorized build-plan fingerprint. The server does not need `nix build --dry-run` for this identity. The authoritative evaluator does not receive `BuildConfig` realization options such as sandbox, offline mode, substitution policy, max jobs, cores, max-silent-time, or build timeout. Those settings control realization and must not alter evaluation semantics.
 
-2. The server sends a job manifest containing immutable source identity, flake target, source/input delivery mode, evaluator fingerprint, and the expected server `.drvPath`.
+2. The server sends the full commit, lock digest, canonical store name, source
+   NAR hash, artifact format, artifact digest and size, evaluator contract,
+   flake target, and expected
+   `.drvPath`. The NAR hash and canonical name are the portable source identity.
+   The server's physical store path is diagnostic only.
 
-3. The builder obtains the immutable source without broad/reusable Git credentials. The preferred operational model is a local Git mirror plus detached worktree:
+3. The builder obtains the canonical artifact through the job-owned API endpoint.
+   The manifest repository URL has embedded user information, passwords, query
+   parameters, and fragments removed. The builder does not use the URL to fetch.
 
-    ```text
-    /var/lib/crystal-forge/flake-mirrors/<mirror-id>.git
-    /var/lib/crystal-forge/flake-worktrees/<mirror-id>/<commit-sha>/<job-id>
-    ```
+4. Before polling, the builder probes and caches its actual Nix version and
+   `builtins.currentSystem`. Each signed `NextJobRequest` advertises those values
+   with the contract version, pure-evaluation setting, lock-mutation setting,
+   IFD setting, and source materialization schema. The server compares the full
+   capability with its authoritative `nix-eval-jobs` fingerprint before queue
+   lookup or claim. Legacy requests and any mismatch receive HTTP 409 and do not
+   mutate a queued job.
 
-    The server serves enough source metadata or snapshot data for the builder to keep its local mirror current. The builder creates a detached per-job worktree at the exact authorized commit. If server and builder are colocated, both may point at the same mirror root to avoid duplicate clone storage; job worktrees remain builder-managed and are cleaned independently.
-
-   Locked-down deployments can still choose a server-bundled source/input archive (for example, a `nix flake archive`/NAR-style artifact). For public inputs, a deployment may allow the builder to fetch public flake inputs itself.
-
-4. The builder verifies the local worktree HEAD equals the manifest commit, then evaluates before building:
+5. The builder verifies artifact size, SHA-256, format, lock digest, store name,
+   and NAR hash. It rejects incompatible Nix version, purity,
+   lock-mutation, IFD, or materialization settings before evaluation. It then
+   evaluates the same NAR-qualified store reference as the server before building:
 
    ```bash
-   drv=$(nix eval --raw <source>#nixosConfigurations.<host>.config.system.build.toplevel.drvPath)
+   drv=$(nix eval --raw --no-write-lock-file \
+      --option pure-eval true \
+      --option allow-import-from-derivation true \
+     'path:/nix/store/<source>?narHash=<percent-encoded-SRI>#nixosConfigurations.<host>.config.system.build.toplevel.drvPath')
    ```
 
-5. The builder compares `$drv` to the server-provided expected `.drvPath`. A mismatch fails before any build starts with `derivation_mismatch`.
+6. The builder compares `$drv` to the server-provided expected `.drvPath`. A mismatch fails before any build starts with `derivation_mismatch`.
 
-6. If the strings match, the builder builds the exact verified derivation object:
+7. If the strings match, the builder builds the exact verified derivation object:
 
    ```bash
    nix build "$drv^*"
@@ -145,18 +173,53 @@ Flow:
 
 This strategy verifies derivation identity/build-plan equality. It does not prove bit-for-bit output reproducibility; output reproducibility is a separate concern.
 
+The evaluator fingerprint covers contract version, linked Nix version,
+`builtins.currentSystem`, pure evaluation, lock-file mutation policy, IFD policy,
+and source materialization schema. Server-only worker count, evaluator memory
+limit, outer process timeout, and cache-status reporting are resource or
+diagnostic controls. They can stop an evaluation or add metadata, but they
+cannot change a successful `.drvPath`.
+
+A post-claim fingerprint mismatch remains a defense-in-depth check. The server
+releases that job to the queue without consuming retry budget or failing the
+shared derivation. A pre-upgrade queued job with no usable contract-v1
+publication is instead failed with the server-owned `server_failure_code` value
+`evaluator_contract_obsolete`; selection continues to the next queue candidate.
+Builder logs and failure requests cannot set this field. A later authoritative
+re-evaluation can revive the unique row only after source publication and pure
+evaluation succeed and the derivation reaches `DryRunComplete`. The same
+transaction that queues the row consumes the code by setting it to null. Other
+terminal failures retain normal retry and manual-requeue semantics.
+
 Recommended controls:
 
-- Keep source identity immutable: commit hash, lock/source metadata, and archive hash where available.
-- Prefer detached worktrees from a local mirror over mutable branch checkouts.
-- Verify the worktree `HEAD` equals the manifest commit before evaluation.
-- Clean up job/commit worktrees after build completion and cache-push/reporting lifecycle is complete.
+- Keep source identity immutable: full commit hash, lock digest, artifact format,
+  artifact SHA-256 and size, canonical store name, and source NAR hash.
+- Retain canonical server artifacts independently of job completion. Dispatch
+  validates a published artifact before atomically claiming its exact job.
+- Extract builder artifacts only through the bounded contract-v1 tar validator
+  and remove each unique temporary directory after evaluation.
 - Prefer server-bundled inputs for locked-down or GovCloud-style builders with no internet egress.
 - Do not place broad private Git credentials on every builder.
 - Record or pin the Nix version/evaluator fingerprint across server and builders.
-- Disable lockfile mutation and avoid impure evaluation for this strategy.
+- Never use `--impure` for this strategy. Impure evaluation can observe host
+  `nix.conf`, environment variables, and files and can authorize a host-specific
+  derivation.
+- P2 hardening: launch authoritative and builder evaluators with an explicit
+  environment allowlist so ambient credential variables cannot influence input
+  resolution. Contract version 1 does not yet enforce this process boundary.
 
-Expected pre-build failure phases include `source_fetch`, `source_input_availability`, `evaluation`, `derivation_mismatch`, and `path_materialization`.
+Expected pre-build failure phases include `source_fetch`,
+`source_identity_mismatch`, `evaluator_incompatible`,
+`source_input_availability`, `evaluation`, `derivation_mismatch`, and
+`path_materialization`.
+
+During rolling upgrades, new builders advertise evaluator contract version 1.
+Old builders and old request payloads default to version 0. The server returns
+409 before job claim when the configured verified-source strategy requires a
+contract the builder cannot validate. It does not silently select another
+strategy. A new builder can still poll an old server because old serde readers
+ignore the additive capability field.
 
 ## Architecture
 

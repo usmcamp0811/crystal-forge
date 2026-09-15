@@ -39,7 +39,19 @@ Crystal Forge binary, grouped by service. Calls listed in execution order.
 | # | Purpose | Command | Source |
 |---|---------|---------|--------|
 | 13 | Resolve `.drv` → output store path | `nix-store --query --outputs <drv>` | line 87 |
-| 14 | Evaluate systems with deployment policies | `nix-eval-jobs --expr <nix-expr> --impure --meta --apply 'derivation: derivation.meta.policies' --workers <n> --max-memory-size <n> [--check-cache-status]` | line 291 |
+| 14 | Evaluate systems with deployment policies from the verified store source | `nix-eval-jobs --expr <nix-expr> --option pure-eval true --option allow-import-from-derivation true --meta --apply 'derivation: derivation.meta.policies' --workers <n> --max-memory-size <n> [--check-cache-status]` | `evaluate_with_nix_eval_jobs_inner` |
+
+Before command 14, `flake/verified_source.rs` initializes a bare mirror and runs
+credential-scoped explicit fetches, one canonical `git archive --format=tar`,
+bounded extraction, `nix store add-path --name
+crystal-forge-source-v1-<commit>`, and `nix hash path --type sha256 --sri`.
+Standalone recovery evaluation uses the same pure store source, lock policy, and
+IFD setting. `nix-eval-jobs` has no `--no-write-lock-file` option. The immutable
+path input and pure evaluation form the lock-mutation boundary. The unrelated
+command 17 remains explicitly impure. The authoritative and builder evaluators
+use the same `path:/nix/store/<source>?narHash=<percent-encoded-SRI>` reference.
+The startup capability probe reads `builtins.nixVersion` and
+`builtins.currentSystem`; it does not evaluate a build target.
 
 ### `derivations/eval.rs`
 
@@ -86,7 +98,7 @@ Crystal Forge binary, grouped by service. Calls listed in execution order.
 
 | # | Purpose | Command | Source |
 |---|---------|---------|--------|
-| 32 | Evaluate verified source flake attribute → drvPath | `nix eval --raw --no-write-lock-file --option allow-import-from-derivation false <attr>` | line 1132 |
+| 32 | Evaluate verified source flake attribute → drvPath | `nix eval --raw --no-write-lock-file --option pure-eval true --option allow-import-from-derivation true <attr>` | `evaluate_verified_source_drv` |
 | 33 | List all store paths in a `.drv`'s recursive closure | `nix-store --query --requisites <drv>` | line 1748 |
 | 34 | Check which store paths are invalid in local store | `nix-store --check-validity --print-invalid <paths...>` (batched, 1024/chunk) | line 1793 |
 

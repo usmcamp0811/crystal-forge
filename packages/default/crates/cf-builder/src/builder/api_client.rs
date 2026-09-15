@@ -3,9 +3,9 @@ use base64::Engine;
 use cf_config::config::BuilderConfig;
 use cf_protocol::builder::{
     BuildFailureClass, BuildFailurePhase, BuildProgressRequest, BuilderCapabilities,
-    EstablishBuilderSessionRequest, EstablishBuilderSessionResponse, NextJobRequest,
-    NextJobResponse, RemoteBuildExecutionStrategy, ReportMetricsRequest, ResolveBuilderIdRequest,
-    ResolveBuilderIdResponse,
+    EstablishBuilderSessionRequest, EstablishBuilderSessionResponse, EvaluatorFingerprint,
+    NextJobRequest, NextJobResponse, RemoteBuildExecutionStrategy, ReportMetricsRequest,
+    ResolveBuilderIdRequest, ResolveBuilderIdResponse,
 };
 use chrono::Utc;
 use ed25519_dalek::{Signature, Signer, SigningKey};
@@ -28,6 +28,26 @@ pub enum AppendLogsOutcome {
     Rejected,
     TerminalJob,
 }
+
+/// Classifies canonical source download failures before extraction.
+#[derive(Debug)]
+pub enum SourceArtifactDownloadError {
+    /// Signed artifact metadata or downloaded bytes do not match.
+    Identity(String),
+    /// HTTP or local I/O prevented the transfer from completing.
+    Transport(anyhow::Error),
+}
+
+impl std::fmt::Display for SourceArtifactDownloadError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Identity(message) => formatter.write_str(message),
+            Self::Transport(error) => write!(formatter, "{error:#}"),
+        }
+    }
+}
+
+impl std::error::Error for SourceArtifactDownloadError {}
 
 pub fn job_status_requests_cancellation(status: Option<&str>) -> bool {
     matches!(status, Some("cancelling" | "cancelled"))
@@ -115,6 +135,8 @@ pub struct BuilderApiClient {
     builder_session_id: Uuid,
     signing_key: SigningKey,
     supported_execution_strategies: Vec<RemoteBuildExecutionStrategy>,
+    supported_evaluator_contract_versions: Vec<u32>,
+    evaluator: Option<EvaluatorFingerprint>,
 }
 
 impl BuilderApiClient {
@@ -136,7 +158,17 @@ impl BuilderApiClient {
     /// public key has not yet been registered (or is currently disabled) does
     /// not crash the service or block a NixOS switch. Each failed attempt is
     /// logged with the builder's public key so an admin can register/enable it.
-    pub async fn new(config: &BuilderConfig) -> Result<Self> {
+    /// The caller supplies the evaluator capability probed before polling, or
+    /// `None` when this process cannot execute verified-source jobs.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when configuration, key loading, HTTP client creation,
+    /// builder resolution, or session establishment fails.
+    pub async fn new(
+        config: &BuilderConfig,
+        evaluator: Option<EvaluatorFingerprint>,
+    ) -> Result<Self> {
         let key_path = config.require_private_key_path()?;
         let server_url = config.require_server_url()?;
 
@@ -194,6 +226,11 @@ impl BuilderApiClient {
             builder_session_id,
             signing_key,
             supported_execution_strategies: config.supported_execution_strategies.clone(),
+            supported_evaluator_contract_versions: evaluator
+                .as_ref()
+                .map(|fingerprint| vec![fingerprint.contract_version])
+                .unwrap_or_default(),
+            evaluator,
         })
     }
 
@@ -536,6 +573,10 @@ impl BuilderApiClient {
         let body = serde_json::to_vec(&NextJobRequest {
             protocol_version: 2,
             supported_execution_strategies: self.supported_execution_strategies.clone(),
+            supported_evaluator_contract_versions: self
+                .supported_evaluator_contract_versions
+                .clone(),
+            evaluator: self.evaluator.clone(),
         })?;
 
         let response = self.send_next_job_request("POST", body).await?;
@@ -968,18 +1009,27 @@ impl BuilderApiClient {
         Ok(())
     }
 
-    /// Stream the source archive (tar.gz of the bare mirror) for a job using
-    /// ServerBundledArchive delivery directly to a temp file, verifying the
-    /// SHA-256 incrementally without buffering the whole archive in RAM.
+    /// Streams the canonical source artifact for a verified-source job.
+    ///
+    /// The method enforces the authorized artifact size and SHA-256 digest while it
+    /// streams. It never buffers the complete artifact in memory.
     ///
     /// Returns the path of the downloaded temp file. Callers are responsible
     /// for extracting it and removing it afterwards.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SourceArtifactDownloadError::Identity`] when signed metadata
+    /// or downloaded bytes violate the authorized identity. Returns
+    /// [`SourceArtifactDownloadError::Transport`] for HTTP and local I/O
+    /// failures that do not prove an identity mismatch.
     pub async fn stream_source_archive_to_tempfile(
         &self,
         job_id: uuid::Uuid,
-        expected_sha256: Option<&str>,
+        expected_sha256: &str,
+        expected_size: u64,
         dest_dir: &std::path::Path,
-    ) -> Result<std::path::PathBuf> {
+    ) -> std::result::Result<std::path::PathBuf, SourceArtifactDownloadError> {
         use sha2::{Digest, Sha256};
         use tokio::io::AsyncWriteExt;
 
@@ -1001,7 +1051,11 @@ impl BuilderApiClient {
             .timeout(DERIVATION_ARCHIVE_DOWNLOAD_TIMEOUT)
             .send()
             .await
-            .context("Failed to request source archive")?;
+            .map_err(|error| {
+                SourceArtifactDownloadError::Transport(
+                    anyhow::Error::new(error).context("Failed to request source archive"),
+                )
+            })?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -1009,46 +1063,94 @@ impl BuilderApiClient {
                 .text()
                 .await
                 .unwrap_or_else(|_| "unknown error".to_string());
-            anyhow::bail!(
-                "Download source archive failed with status {}: {}",
-                status,
-                error_text
-            );
+            return Err(SourceArtifactDownloadError::Transport(anyhow::anyhow!(
+                "Download source archive failed with status {status}: {error_text}"
+            )));
+        }
+        if expected_size > cf_protocol::source_artifact::VERIFIED_SOURCE_ARTIFACT_MAX_BYTES {
+            return Err(SourceArtifactDownloadError::Identity(
+                "source artifact exceeds the protocol size limit".to_string(),
+            ));
+        }
+        if response
+            .content_length()
+            .is_some_and(|size| size != expected_size)
+        {
+            return Err(SourceArtifactDownloadError::Identity(
+                "source artifact Content-Length does not match the authorized manifest".to_string(),
+            ));
         }
 
         // Stream to a temp file, computing SHA-256 on the fly.
-        tokio::fs::create_dir_all(dest_dir)
+        tokio::fs::create_dir_all(dest_dir).await.map_err(|error| {
+            SourceArtifactDownloadError::Transport(
+                anyhow::Error::new(error).context("Failed to create source archive temp directory"),
+            )
+        })?;
+        let tmp_path = dest_dir.join(format!(
+            "source-artifact-{job_id}-{}.tar.tmp",
+            uuid::Uuid::new_v4()
+        ));
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)
             .await
-            .context("Failed to create source archive temp directory")?;
-        let tmp_path = dest_dir.join(format!("source-archive-{job_id}.tar.gz.tmp"));
-        let mut file = tokio::fs::File::create(&tmp_path)
-            .await
-            .context("Failed to create source archive temp file")?;
+            .map_err(|error| {
+                SourceArtifactDownloadError::Transport(
+                    anyhow::Error::new(error).context("Failed to create source artifact temp file"),
+                )
+            })?;
 
         let mut hasher = Sha256::new();
+        let mut downloaded = 0_u64;
         let mut byte_stream = response.bytes_stream();
         use futures::StreamExt;
         while let Some(chunk) = byte_stream.next().await {
-            let chunk = chunk.context("Error reading source archive chunk from server")?;
+            let chunk = chunk.map_err(|error| {
+                SourceArtifactDownloadError::Transport(
+                    anyhow::Error::new(error)
+                        .context("Error reading source archive chunk from server"),
+                )
+            })?;
+            downloaded = downloaded.checked_add(chunk.len() as u64).ok_or_else(|| {
+                SourceArtifactDownloadError::Identity("source artifact size overflowed".to_string())
+            })?;
+            if downloaded > expected_size {
+                let _ = tokio::fs::remove_file(&tmp_path).await;
+                return Err(SourceArtifactDownloadError::Identity(
+                    "source artifact exceeds the authorized manifest size".to_string(),
+                ));
+            }
             hasher.update(&chunk);
-            file.write_all(&chunk)
-                .await
-                .context("Failed to write source archive chunk to temp file")?;
+            file.write_all(&chunk).await.map_err(|error| {
+                SourceArtifactDownloadError::Transport(
+                    anyhow::Error::new(error)
+                        .context("Failed to write source archive chunk to temp file"),
+                )
+            })?;
         }
-        file.flush()
-            .await
-            .context("Failed to flush source archive temp file")?;
+        file.flush().await.map_err(|error| {
+            SourceArtifactDownloadError::Transport(
+                anyhow::Error::new(error).context("Failed to flush source archive temp file"),
+            )
+        })?;
         drop(file);
 
-        // Verify SHA-256 if the server provided one.
-        if let Some(expected) = expected_sha256 {
-            let actual = format!("{:x}", hasher.finalize());
-            if actual != expected {
-                let _ = tokio::fs::remove_file(&tmp_path).await;
-                anyhow::bail!("source archive SHA-256 mismatch: expected {expected}, got {actual}");
-            }
-            info!("✅ Source archive SHA-256 verified: {}", actual);
+        if downloaded != expected_size {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return Err(SourceArtifactDownloadError::Identity(
+                "source artifact is shorter than the authorized manifest size".to_string(),
+            ));
         }
+        let actual = format!("{:x}", hasher.finalize());
+        if actual != expected_sha256 {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return Err(SourceArtifactDownloadError::Identity(format!(
+                "source artifact SHA-256 mismatch: expected {expected_sha256}, got {actual}"
+            )));
+        }
+        info!("✅ Source artifact SHA-256 verified: {}", actual);
 
         Ok(tmp_path)
     }
@@ -1472,7 +1574,7 @@ impl BuilderApiClient {
     }
 }
 
-/// API-backed [`BuildReporter`] for remote builders.
+/// API-backed build reporter for remote builders.
 ///
 /// Reports progress and checks cancellation entirely over the server API with no
 /// database access. Progress is sent via HTTP POST; cancellation is detected by
@@ -1557,6 +1659,8 @@ mod tests {
             builder_session_id: Uuid::new_v4(),
             signing_key: key,
             supported_execution_strategies: vec![RemoteBuildExecutionStrategy::ServerDerivation],
+            supported_evaluator_contract_versions: Vec::new(),
+            evaluator: None,
         };
 
         let body = b"test request body";
@@ -1639,6 +1743,19 @@ mod tests {
             supported_execution_strategies: vec![
                 RemoteBuildExecutionStrategy::SourceReEvaluateVerified,
             ],
+            supported_evaluator_contract_versions: vec![
+                cf_protocol::builder::VERIFIED_SOURCE_EVALUATOR_CONTRACT_VERSION,
+            ],
+            evaluator: Some(EvaluatorFingerprint {
+                contract_version: cf_protocol::builder::VERIFIED_SOURCE_EVALUATOR_CONTRACT_VERSION,
+                nix_version: "test".to_string(),
+                evaluator_system: "x86_64-linux".to_string(),
+                pure_eval: true,
+                lockfile_mutation_allowed: false,
+                allow_import_from_derivation: true,
+                source_materialization_schema_version:
+                    cf_protocol::builder::VERIFIED_SOURCE_MATERIALIZATION_SCHEMA_VERSION,
+            }),
         };
 
         let result = client.get_next_job().await;

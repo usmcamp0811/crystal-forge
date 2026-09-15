@@ -2920,6 +2920,40 @@ pub fn build_nix_eval_expression(
     flake_ref: &str,
     policies_by_configuration: &PoliciesByConfiguration,
 ) -> String {
+    let requested_revision =
+        crate::derivations::utils::flake_reference_revision(flake_ref).unwrap_or("");
+    build_nix_eval_expression_inner(
+        flake_ref,
+        requested_revision,
+        None,
+        policies_by_configuration,
+    )
+}
+
+/// Builds the primary expression with an explicit verified source revision.
+///
+/// Pure store-path flakes do not expose a Git revision in `sourceInfo`. The
+/// caller MUST verify that `flake_ref` contains the tracked tree for
+/// `requested_revision` before using this function.
+pub fn build_nix_eval_expression_for_source(
+    flake_ref: &str,
+    requested_revision: &str,
+    policies_by_configuration: &PoliciesByConfiguration,
+) -> String {
+    build_nix_eval_expression_inner(
+        flake_ref,
+        requested_revision,
+        Some(requested_revision),
+        policies_by_configuration,
+    )
+}
+
+fn build_nix_eval_expression_inner(
+    flake_ref: &str,
+    requested_revision: &str,
+    resolved_revision_override: Option<&str>,
+    policies_by_configuration: &PoliciesByConfiguration,
+) -> String {
     // Build per-configuration checker blocks.
     let checker_entries: Vec<String> = policies_by_configuration
         .iter()
@@ -2940,14 +2974,17 @@ pub fn build_nix_eval_expression(
         format!("{{\n{}\n      }}", checker_entries.join("\n"))
     };
 
-    let requested_revision =
-        nix_string(crate::derivations::utils::flake_reference_revision(flake_ref).unwrap_or(""));
+    let requested_revision = nix_string(requested_revision);
+    let resolved_revision_override = resolved_revision_override
+        .map(nix_string)
+        .unwrap_or_else(|| "null".to_string());
     format!(
-        "({}) {{ flakeRef = {}; policyCheckers = {}; requestedRevision = {}; }}",
+        "({}) {{ flakeRef = {}; policyCheckers = {}; requestedRevision = {}; resolvedRevisionOverride = {}; }}",
         include_str!("primary_evaluation.nix"),
         nix_string(flake_ref),
         checkers_block,
         requested_revision,
+        resolved_revision_override,
     )
 }
 
@@ -4146,6 +4183,8 @@ in {{ {fields} }}"#
         assert!(expr.contains("policyCheckers"));
         assert!(expr.contains("cfAgentEnabled"));
         assert!(expr.contains("cfg.config.system.build.toplevel"));
+        assert!(expr.contains("resolvedRevisionOverride = null"));
+        assert!(expr.contains("flake.sourceInfo.rev or null"));
 
         for forbidden in [
             "cfg.options",
@@ -4165,6 +4204,19 @@ in {{ {fields} }}"#
                 "primary evaluator must not contain {forbidden}"
             );
         }
+    }
+
+    #[test]
+    fn verified_store_source_uses_only_the_explicit_revision_override() {
+        let revision = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let expr = build_nix_eval_expression_for_source(
+            "path:/nix/store/source?narHash=sha256-example",
+            revision,
+            &PoliciesByConfiguration::new(),
+        );
+
+        assert!(expr.contains(&format!("resolvedRevisionOverride = \"{revision}\"")));
+        assert!(expr.contains("flake.sourceInfo.rev or null"));
     }
 
     #[test]

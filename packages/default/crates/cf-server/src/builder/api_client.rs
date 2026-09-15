@@ -1,9 +1,9 @@
 use crate::config::BuilderConfig;
 use crate::models::builders::{
     BuildFailureClass, BuildFailurePhase, BuildProgressRequest, BuilderCapabilities,
-    EstablishBuilderSessionRequest, EstablishBuilderSessionResponse, NextJobRequest,
-    NextJobResponse, RemoteBuildExecutionStrategy, ReportMetricsRequest, ResolveBuilderIdRequest,
-    ResolveBuilderIdResponse,
+    EstablishBuilderSessionRequest, EstablishBuilderSessionResponse, EvaluatorFingerprint,
+    NextJobRequest, NextJobResponse, RemoteBuildExecutionStrategy, ReportMetricsRequest,
+    ResolveBuilderIdRequest, ResolveBuilderIdResponse,
 };
 use anyhow::{Context, Result};
 use base64::Engine;
@@ -81,6 +81,8 @@ pub struct BuilderApiClient {
     builder_session_id: Uuid,
     signing_key: SigningKey,
     supported_execution_strategies: Vec<RemoteBuildExecutionStrategy>,
+    supported_evaluator_contract_versions: Vec<u32>,
+    evaluator: Option<EvaluatorFingerprint>,
 }
 
 impl BuilderApiClient {
@@ -160,6 +162,9 @@ impl BuilderApiClient {
             builder_session_id,
             signing_key,
             supported_execution_strategies: config.supported_execution_strategies.clone(),
+            // This legacy in-server client does not execute or probe Nix.
+            supported_evaluator_contract_versions: Vec::new(),
+            evaluator: None,
         })
     }
 
@@ -502,6 +507,10 @@ impl BuilderApiClient {
         let body = serde_json::to_vec(&NextJobRequest {
             protocol_version: 2,
             supported_execution_strategies: self.supported_execution_strategies.clone(),
+            supported_evaluator_contract_versions: self
+                .supported_evaluator_contract_versions
+                .clone(),
+            evaluator: self.evaluator.clone(),
         })?;
 
         let response = self.send_next_job_request("POST", body).await?;
@@ -1434,7 +1443,7 @@ impl BuilderApiClient {
     }
 }
 
-/// API-backed [`BuildReporter`] for remote builders.
+/// API-backed build reporter for remote builders.
 ///
 /// Reports progress and checks cancellation entirely over the server API with no
 /// database access. Progress is sent via HTTP POST; cancellation is detected by
@@ -1522,6 +1531,8 @@ mod tests {
             builder_session_id: Uuid::new_v4(),
             signing_key: key,
             supported_execution_strategies: vec![RemoteBuildExecutionStrategy::ServerDerivation],
+            supported_evaluator_contract_versions: Vec::new(),
+            evaluator: None,
         };
 
         let body = b"test request body";
@@ -1576,6 +1587,10 @@ mod tests {
             supported_execution_strategies: vec![
                 RemoteBuildExecutionStrategy::SourceReEvaluateVerified,
             ],
+            supported_evaluator_contract_versions: vec![
+                cf_protocol::builder::VERIFIED_SOURCE_EVALUATOR_CONTRACT_VERSION,
+            ],
+            evaluator: None,
         };
 
         let result = client.get_next_job().await;

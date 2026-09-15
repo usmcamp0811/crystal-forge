@@ -8,11 +8,14 @@ use cf_builder::derivations;
 use cf_config::config::{CacheConfig, CacheType, CrystalForgeConfig};
 use cf_protocol::builder::{
     BuildFailureClass, BuildFailurePhase, BuildJobDerivation, BuilderCachePushConfig,
-    BuilderCapabilities, NextJobResponse, RemoteBuildExecutionStrategy, ReportMetricsRequest,
-    SourceInputDeliveryMode, VerifiedSourceIdentity,
+    BuilderCapabilities, EvaluatorFingerprint, ImmutableSourceIdentity, NextJobResponse,
+    RemoteBuildExecutionStrategy, ReportMetricsRequest, SourceInputDeliveryMode,
+    VERIFIED_SOURCE_EVALUATOR_CONTRACT_VERSION, VERIFIED_SOURCE_MATERIALIZATION_SCHEMA_VERSION,
+    VerifiedSourceIdentity, nar_qualified_store_flake_ref,
 };
 #[allow(deprecated)]
 use nix::fcntl::{FlockArg, flock};
+use sha2::Digest;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::os::fd::AsRawFd;
@@ -153,9 +156,17 @@ async fn run_api_mode(cfg: &CrystalForgeConfig) -> anyhow::Result<()> {
     let builder_config = cfg.get_builder_config();
     let build_config = cfg.get_build_config();
     let cache_config = cfg.get_cache_config();
+    let verified_source_enabled = builder_config
+        .supported_execution_strategies
+        .contains(&RemoteBuildExecutionStrategy::SourceReEvaluateVerified);
+    let evaluator = if verified_source_enabled {
+        Some(probe_evaluator_fingerprint(builder_config.allow_import_from_derivation).await?)
+    } else {
+        None
+    };
 
     info!("Initializing API client...");
-    let api_client = BuilderApiClient::new(builder_config).await?;
+    let api_client = BuilderApiClient::new(builder_config, evaluator.clone()).await?;
 
     let builder_id = api_client.builder_id();
     info!("✅ Builder ID: {}", builder_id);
@@ -217,6 +228,14 @@ async fn run_api_mode(cfg: &CrystalForgeConfig) -> anyhow::Result<()> {
                 source_worktree_root: builder_config.source_worktree_root.clone(),
                 cleanup_source_worktrees: builder_config.cleanup_source_worktrees,
                 allow_import_from_derivation: builder_config.allow_import_from_derivation,
+                nix_version: evaluator
+                    .as_ref()
+                    .map(|value| value.nix_version.clone())
+                    .unwrap_or_default(),
+                evaluator_system: evaluator
+                    .as_ref()
+                    .map(|value| value.evaluator_system.clone())
+                    .unwrap_or_default(),
             },
         ) => {
             error!("Job loop exited unexpectedly: {:?}", result);
@@ -239,6 +258,52 @@ struct RemoteBuildRuntime {
     source_worktree_root: PathBuf,
     cleanup_source_worktrees: bool,
     allow_import_from_derivation: bool,
+    nix_version: String,
+    evaluator_system: String,
+}
+
+async fn probe_evaluator_fingerprint(
+    allow_import_from_derivation: bool,
+) -> anyhow::Result<EvaluatorFingerprint> {
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::process::Command::new("nix")
+            .kill_on_drop(true)
+            .args([
+                "eval",
+                "--json",
+                "--impure",
+                "--expr",
+                "{ nixVersion = builtins.nixVersion; evaluatorSystem = builtins.currentSystem; }",
+            ])
+            .output(),
+    )
+    .await
+    .context("nix --version probe timed out")??;
+    if !output.status.success() {
+        anyhow::bail!("nix --version probe failed");
+    }
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .context("Nix evaluator probe returned invalid JSON")?;
+    let nix_version = value
+        .get("nixVersion")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .context("Nix evaluator probe returned no Nix version")?;
+    let evaluator_system = value
+        .get("evaluatorSystem")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .context("Nix evaluator probe returned no builtins.currentSystem")?;
+    Ok(EvaluatorFingerprint {
+        contract_version: VERIFIED_SOURCE_EVALUATOR_CONTRACT_VERSION,
+        nix_version: nix_version.to_string(),
+        evaluator_system: evaluator_system.to_string(),
+        pure_eval: true,
+        lockfile_mutation_allowed: false,
+        allow_import_from_derivation,
+        source_materialization_schema_version: VERIFIED_SOURCE_MATERIALIZATION_SCHEMA_VERSION,
+    })
 }
 
 /// Heartbeat loop - sends metrics to server periodically
@@ -984,9 +1049,7 @@ async fn verify_worktree_head(
     }
 
     let actual = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if actual == expected_commit {
-        Ok(())
-    } else {
+    if actual != expected_commit {
         Err(PreBuildFailure {
             phase: BuildFailurePhase::SourceFetch,
             class: BuildFailureClass::Deterministic,
@@ -996,8 +1059,55 @@ async fn verify_worktree_head(
                 actual,
                 expected_commit
             ),
-        })
+        })?;
     }
+
+    let status = tokio::process::Command::new("git")
+        .kill_on_drop(true)
+        .arg("-C")
+        .arg(worktree_path)
+        .args(["status", "--porcelain", "--untracked-files=all"])
+        .output()
+        .await
+        .map_err(|error| PreBuildFailure {
+            phase: BuildFailurePhase::SourceFetch,
+            class: BuildFailureClass::Unknown,
+            message: format!("failed to inspect source cleanliness: {error}"),
+        })?;
+    if !status.status.success() || !status.stdout.is_empty() {
+        return Err(PreBuildFailure {
+            phase: BuildFailurePhase::SourceIdentityMismatch,
+            class: BuildFailureClass::Deterministic,
+            message: "authorized source worktree is not clean".to_string(),
+        });
+    }
+    let attached = tokio::process::Command::new("git")
+        .kill_on_drop(true)
+        .arg("-C")
+        .arg(worktree_path)
+        .args(["symbolic-ref", "-q", "HEAD"])
+        .output()
+        .await
+        .map_err(|error| PreBuildFailure {
+            phase: BuildFailurePhase::SourceFetch,
+            class: BuildFailureClass::Unknown,
+            message: format!("failed to verify detached source HEAD: {error}"),
+        })?;
+    if attached.status.success() {
+        return Err(PreBuildFailure {
+            phase: BuildFailurePhase::SourceIdentityMismatch,
+            class: BuildFailureClass::Deterministic,
+            message: "authorized source worktree HEAD is not detached".to_string(),
+        });
+    }
+    if attached.status.code() != Some(1) {
+        return Err(PreBuildFailure {
+            phase: BuildFailurePhase::SourceFetch,
+            class: BuildFailureClass::Unknown,
+            message: "failed to determine whether authorized source HEAD is detached".to_string(),
+        });
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1134,6 +1244,9 @@ fn verified_source_eval_args(eval_attr: &str, allow_import_from_derivation: bool
         "--raw".to_string(),
         "--no-write-lock-file".to_string(),
         "--option".to_string(),
+        "pure-eval".to_string(),
+        "true".to_string(),
+        "--option".to_string(),
         "allow-import-from-derivation".to_string(),
         if allow_import_from_derivation {
             "true".to_string()
@@ -1142,6 +1255,252 @@ fn verified_source_eval_args(eval_attr: &str, allow_import_from_derivation: bool
         },
         eval_attr.to_string(),
     ]
+}
+
+fn evaluator_incompatible(message: impl Into<String>) -> PreBuildFailure {
+    PreBuildFailure {
+        phase: BuildFailurePhase::EvaluatorIncompatible,
+        // A different compatible builder can execute this server-authorized job.
+        class: BuildFailureClass::Transient,
+        message: message.into(),
+    }
+}
+
+fn redact_builder_error(input: &str) -> String {
+    input
+        .split_whitespace()
+        .map(|token| {
+            let lower = token.to_ascii_lowercase();
+            if lower.contains("authorization")
+                || lower.contains("password=")
+                || lower.contains("token=")
+                || lower.contains("netrc")
+            {
+                return "[REDACTED]".to_string();
+            }
+            if let Some((scheme, remainder)) = token.split_once("://")
+                && (remainder.contains('@') || remainder.contains('?'))
+            {
+                return format!("{scheme}://[REDACTED]");
+            }
+            token.to_string()
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn validate_evaluator_contract(
+    expected: Option<&EvaluatorFingerprint>,
+    runtime: &RemoteBuildRuntime,
+) -> Result<EvaluatorFingerprint, PreBuildFailure> {
+    let expected = expected.ok_or_else(|| {
+        evaluator_incompatible("verified source job has no server evaluator contract")
+    })?;
+    if expected.contract_version != VERIFIED_SOURCE_EVALUATOR_CONTRACT_VERSION {
+        return Err(evaluator_incompatible(format!(
+            "unsupported evaluator contract version {} (builder supports {})",
+            expected.contract_version, VERIFIED_SOURCE_EVALUATOR_CONTRACT_VERSION
+        )));
+    }
+    if expected.nix_version != runtime.nix_version {
+        return Err(evaluator_incompatible(format!(
+            "Nix version mismatch: builder {}, server {}",
+            runtime.nix_version, expected.nix_version
+        )));
+    }
+    if expected.evaluator_system != runtime.evaluator_system {
+        return Err(evaluator_incompatible(format!(
+            "Nix evaluator system mismatch: builder {}, server {}",
+            runtime.evaluator_system, expected.evaluator_system
+        )));
+    }
+    if !expected.pure_eval || expected.lockfile_mutation_allowed {
+        return Err(evaluator_incompatible(
+            "server evaluator contract is not pure and lock-preserving",
+        ));
+    }
+    if expected.allow_import_from_derivation != runtime.allow_import_from_derivation {
+        return Err(evaluator_incompatible(format!(
+            "allow-import-from-derivation mismatch: builder {}, server {}",
+            runtime.allow_import_from_derivation, expected.allow_import_from_derivation
+        )));
+    }
+    if expected.source_materialization_schema_version
+        != VERIFIED_SOURCE_MATERIALIZATION_SCHEMA_VERSION
+    {
+        return Err(evaluator_incompatible(format!(
+            "unsupported source materialization schema {}",
+            expected.source_materialization_schema_version
+        )));
+    }
+    Ok(expected.clone())
+}
+
+async fn command_output(
+    command: &mut tokio::process::Command,
+    operation: &str,
+) -> Result<std::process::Output, PreBuildFailure> {
+    let output = command.output().await.map_err(|error| PreBuildFailure {
+        phase: BuildFailurePhase::SourceFetch,
+        class: BuildFailureClass::Unknown,
+        message: format!("failed to start {operation}: {error}"),
+    })?;
+    if !output.status.success() {
+        let stderr = redact_builder_error(String::from_utf8_lossy(&output.stderr).trim());
+        return Err(PreBuildFailure {
+            phase: BuildFailurePhase::SourceFetch,
+            class: classify_nix_failure(&stderr),
+            message: format!("{operation} failed: {stderr}"),
+        });
+    }
+    Ok(output)
+}
+
+async fn materialize_builder_source(
+    artifact_path: &Path,
+    commit_hash: &str,
+    expected: &ImmutableSourceIdentity,
+) -> Result<String, PreBuildFailure> {
+    if expected.schema_version != VERIFIED_SOURCE_MATERIALIZATION_SCHEMA_VERSION {
+        return Err(PreBuildFailure {
+            phase: BuildFailurePhase::SourceIdentityMismatch,
+            class: BuildFailureClass::Deterministic,
+            message: format!(
+                "unsupported immutable source schema {}",
+                expected.schema_version
+            ),
+        });
+    }
+    let expected_store_name = format!(
+        "crystal-forge-source-v{}-{commit_hash}",
+        VERIFIED_SOURCE_MATERIALIZATION_SCHEMA_VERSION
+    );
+    if expected.store_name != expected_store_name {
+        return Err(PreBuildFailure {
+            phase: BuildFailurePhase::SourceIdentityMismatch,
+            class: BuildFailureClass::Deterministic,
+            message: "immutable source store name does not match the authorized commit".to_string(),
+        });
+    }
+    if expected.artifact_format_version
+        != cf_protocol::source_artifact::VERIFIED_SOURCE_ARTIFACT_FORMAT_VERSION
+    {
+        return Err(PreBuildFailure {
+            phase: BuildFailurePhase::SourceIdentityMismatch,
+            class: BuildFailureClass::Deterministic,
+            message: format!(
+                "unsupported source artifact format {}",
+                expected.artifact_format_version
+            ),
+        });
+    }
+    let staging = tempfile::tempdir().map_err(|error| PreBuildFailure {
+        phase: BuildFailurePhase::SourceFetch,
+        class: BuildFailureClass::Unknown,
+        message: format!("failed to create source staging directory: {error}"),
+    })?;
+    let tree_path = staging.path().join("tree");
+    tokio::fs::create_dir(&tree_path)
+        .await
+        .map_err(|error| PreBuildFailure {
+            phase: BuildFailurePhase::SourceFetch,
+            class: BuildFailureClass::Unknown,
+            message: format!("failed to create source tree directory: {error}"),
+        })?;
+
+    let artifact = artifact_path.to_path_buf();
+    let tree = tree_path.clone();
+    tokio::task::spawn_blocking(move || {
+        cf_protocol::source_artifact::extract_verified_source_artifact(&artifact, &tree)
+    })
+    .await
+    .map_err(|error| PreBuildFailure {
+        phase: BuildFailurePhase::SourceFetch,
+        class: BuildFailureClass::Unknown,
+        message: format!("source artifact extraction task failed: {error}"),
+    })?
+    .map_err(|error| PreBuildFailure {
+        phase: BuildFailurePhase::SourceIdentityMismatch,
+        class: BuildFailureClass::Deterministic,
+        message: format!("source artifact extraction rejected: {error}"),
+    })?;
+
+    let lock_bytes = tokio::fs::read(tree_path.join("flake.lock"))
+        .await
+        .map_err(|error| PreBuildFailure {
+            phase: BuildFailurePhase::SourceIdentityMismatch,
+            class: BuildFailureClass::Deterministic,
+            message: format!("authorized source has no readable flake.lock: {error}"),
+        })?;
+    let actual_lock_hash = hex::encode(sha2::Sha256::digest(lock_bytes));
+    if actual_lock_hash != expected.lock_hash {
+        return Err(PreBuildFailure {
+            phase: BuildFailurePhase::SourceIdentityMismatch,
+            class: BuildFailureClass::Deterministic,
+            message: "authorized source lock identity does not match the server manifest"
+                .to_string(),
+        });
+    }
+
+    let mut add = tokio::process::Command::new("nix");
+    add.kill_on_drop(true)
+        .args(["store", "add-path", "--name", &expected.store_name])
+        .arg(&tree_path);
+    let output = command_output(&mut add, "Nix immutable source ingestion").await?;
+    let store_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !store_path.starts_with("/nix/store/")
+        || !store_path.ends_with(&format!("-{}", expected.store_name))
+    {
+        return Err(PreBuildFailure {
+            phase: BuildFailurePhase::SourceIdentityMismatch,
+            class: BuildFailureClass::Deterministic,
+            message: "Nix source ingestion returned an unexpected store path".to_string(),
+        });
+    }
+    let mut hash = tokio::process::Command::new("nix");
+    hash.kill_on_drop(true)
+        .args(["hash", "path", "--type", "sha256", "--sri"])
+        .arg(&store_path);
+    let output = command_output(&mut hash, "Nix immutable source hash").await?;
+    let actual_nar_hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if actual_nar_hash != expected.nar_hash {
+        return Err(PreBuildFailure {
+            phase: BuildFailurePhase::SourceIdentityMismatch,
+            class: BuildFailureClass::Deterministic,
+            message: format!(
+                "immutable source NAR mismatch: builder {actual_nar_hash}, server {}",
+                expected.nar_hash
+            ),
+        });
+    }
+    Ok(nar_qualified_store_flake_ref(
+        &store_path,
+        &expected.nar_hash,
+    ))
+}
+
+fn source_download_failure(
+    error: cf_builder::builder::api_client::SourceArtifactDownloadError,
+) -> PreBuildFailure {
+    match error {
+        cf_builder::builder::api_client::SourceArtifactDownloadError::Identity(message) => {
+            PreBuildFailure {
+                phase: BuildFailurePhase::SourceIdentityMismatch,
+                class: BuildFailureClass::Deterministic,
+                message: redact_builder_error(&message),
+            }
+        }
+        cf_builder::builder::api_client::SourceArtifactDownloadError::Transport(error) => {
+            PreBuildFailure {
+                phase: BuildFailurePhase::SourceFetch,
+                class: classify_nix_failure(&error.to_string()),
+                message: format!(
+                    "failed to stream canonical source artifact: {}",
+                    redact_builder_error(&error.to_string())
+                ),
+            }
+        }
+    }
 }
 
 fn verify_drv_identity(expected: &str, actual: &str) -> Result<(), PreBuildFailure> {
@@ -1161,108 +1520,58 @@ fn verify_drv_identity(expected: &str, actual: &str) -> Result<(), PreBuildFailu
 async fn evaluate_verified_source_drv(
     source: &VerifiedSourceIdentity,
     delivery: SourceInputDeliveryMode,
-    mirror_root: &Path,
+    _mirror_root: &Path,
     worktree_root: &Path,
     job_id: uuid::Uuid,
     pre_build_phase: &AtomicU8,
     client: Option<&cf_builder::builder::api_client::BuilderApiClient>,
     allow_import_from_derivation: bool,
 ) -> Result<String, PreBuildFailure> {
-    let source_ref = if delivery == SourceInputDeliveryMode::ServerBundledArchive {
-        // ServerBundledArchive: download the source archive from the server API,
-        // extract it to the mirror path, then create a worktree from the mirror.
-        let source_err = |msg: String| PreBuildFailure {
-            phase: BuildFailurePhase::SourceFetch,
-            class: classify_nix_failure(&msg),
-            message: msg,
-        };
-
-        let client = client.ok_or_else(|| {
-            source_err(
-                "ServerBundledArchive requires an API client for archive download".to_string(),
-            )
+    if delivery == SourceInputDeliveryMode::BuilderFetchPublicInputs {
+        return Err(PreBuildFailure {
+            phase: BuildFailurePhase::SourceIdentityMismatch,
+            class: BuildFailureClass::Deterministic,
+            message: "builder_fetch_public_inputs is not supported by evaluator contract version 1"
+                .to_string(),
+        });
+    }
+    let immutable_source = source
+        .immutable_source
+        .as_ref()
+        .ok_or_else(|| PreBuildFailure {
+            phase: BuildFailurePhase::SourceIdentityMismatch,
+            class: BuildFailureClass::Deterministic,
+            message: "verified source job has no immutable store-source identity".to_string(),
         })?;
-
-        // Determine the mirror_id for path construction.
-        let mirror_id = source
-            .mirror_id
-            .as_deref()
-            .filter(|v| !v.is_empty())
-            .ok_or_else(|| {
-                source_err("ServerBundledArchive delivery is missing mirror_id".to_string())
-            })?;
-
-        // Job-scoped mirror path: each job extracts into its own directory so
-        // concurrent jobs for the same repo never race on the same bare mirror.
-        // Layout: mirror_root/server-bundled/<job_id>/<mirror_id>.git
-        let job_mirror_dir = mirror_root.join("server-bundled").join(job_id.to_string());
-        let mirror_path = job_mirror_dir.join(format!("{mirror_id}.git"));
-
-        // Stream archive to a temp file, verifying SHA-256 incrementally.
-        // This avoids buffering the entire archive in RAM.
-        info!(
-            "📦 Streaming source archive for job {} to temp file...",
-            job_id
-        );
-        let tmp_archive = client
-            .stream_source_archive_to_tempfile(
-                job_id,
-                source.archive_sha256.as_deref(),
-                &job_mirror_dir,
-            )
-            .await
-            .map_err(|e| source_err(format!("failed to stream source archive: {e}")))?;
-
-        // Create the job-scoped mirror directory for extraction.
-        tokio::fs::create_dir_all(&job_mirror_dir)
-            .await
-            .map_err(|e| {
-                source_err(format!(
-                    "failed to create job mirror directory {}: {e}",
-                    job_mirror_dir.display()
-                ))
-            })?;
-
-        let output = tokio::process::Command::new("tar")
-            .kill_on_drop(true)
-            .arg("-xzf")
-            .arg(&tmp_archive)
-            .arg("-C")
-            .arg(&job_mirror_dir)
-            .output()
-            .await
-            .map_err(|e| source_err(format!("failed to spawn tar extraction: {e}")))?;
-
-        // Clean up the temp archive file regardless of extraction success.
-        let _ = tokio::fs::remove_file(&tmp_archive).await;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            // Clean up the job mirror dir on failure to avoid stale state.
-            let _ = tokio::fs::remove_dir_all(&job_mirror_dir).await;
-            return Err(source_err(format!("tar extraction failed: {stderr}")));
-        }
-
-        info!(
-            "✅ Source archive extracted to job-scoped mirror at {}",
-            mirror_path.display()
-        );
-
-        // Create a worktree from the job-scoped extracted mirror.
-        // ensure_source_worktree_from_mirror takes the mirror_path directly;
-        // the worktree is placed at worktree_root/<mirror_id>/<commit>/<job_id>.
-        ensure_source_worktree_from_mirror(source, &mirror_path, worktree_root, job_id)
-            .await?
-            .to_string_lossy()
-            .to_string()
-    } else if delivery == SourceInputDeliveryMode::LocalGitWorktree {
-        ensure_source_worktree(source, mirror_root, worktree_root, job_id)
-            .await?
-            .to_string_lossy()
-            .to_string()
-    } else {
-        source_flake_ref(source, delivery, mirror_root, worktree_root)?
-    };
+    let client = client.ok_or_else(|| PreBuildFailure {
+        phase: BuildFailurePhase::SourceFetch,
+        class: BuildFailureClass::Deterministic,
+        message: "verified source contract version 1 requires an API client".to_string(),
+    })?;
+    tokio::fs::create_dir_all(worktree_root)
+        .await
+        .map_err(|error| PreBuildFailure {
+            phase: BuildFailurePhase::SourceFetch,
+            class: BuildFailureClass::Unknown,
+            message: format!("failed to create source artifact root: {error}"),
+        })?;
+    let artifact_dir = tempfile::tempdir_in(worktree_root).map_err(|error| PreBuildFailure {
+        phase: BuildFailurePhase::SourceFetch,
+        class: BuildFailureClass::Unknown,
+        message: format!("failed to create source artifact directory: {error}"),
+    })?;
+    info!("📦 Streaming canonical source artifact for job {job_id}...");
+    let artifact_path = client
+        .stream_source_archive_to_tempfile(
+            job_id,
+            &immutable_source.artifact_sha256,
+            immutable_source.artifact_size,
+            artifact_dir.path(),
+        )
+        .await
+        .map_err(source_download_failure)?;
+    let source_ref =
+        materialize_builder_source(&artifact_path, &source.commit_hash, immutable_source).await?;
     let eval_attr = drv_path_eval_attr(&source_ref, &source.flake_target);
     info!("🔎 Evaluating verified source drvPath: {}", eval_attr);
 
@@ -1283,7 +1592,7 @@ async fn evaluate_verified_source_drv(
     })?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stderr = redact_builder_error(String::from_utf8_lossy(&output.stderr).trim());
         return Err(PreBuildFailure {
             phase: BuildFailurePhase::Evaluation,
             class: classify_nix_failure(&stderr),
@@ -1365,6 +1674,23 @@ async fn execute_build_job(
     if derivation_payload.execution_strategy
         == RemoteBuildExecutionStrategy::SourceReEvaluateVerified
     {
+        let evaluator = match validate_evaluator_contract(
+            derivation_payload.evaluator.as_ref(),
+            &remote_runtime,
+        ) {
+            Ok(evaluator) => evaluator,
+            Err(failure) => {
+                let message = redact_builder_error(&failure.message);
+                error!("Job #{} rejected before source access: {}", job_id, message);
+                if let Err(report_error) = client
+                    .fail_job_with_phase(job_id, failure.phase, failure.class, &message)
+                    .await
+                {
+                    error!("Failed to report evaluator incompatibility: {report_error}");
+                }
+                return;
+            }
+        };
         info!(
             "🔐 Verifying source build plan before build (timeout: {:?})",
             build_timeout
@@ -1380,7 +1706,7 @@ async fn execute_build_job(
                 job_id,
                 &pre_build_phase,
                 Some(&client),
-                remote_runtime.allow_import_from_derivation,
+                evaluator.allow_import_from_derivation,
             );
             wait_for_pre_build_verification(
                 verification_future,
@@ -1403,12 +1729,13 @@ async fn execute_build_job(
                 derivation_payload.derivation_path = Some(verified_drv_path);
             }
             VerificationOutcome::Completed(Err(failure)) => {
+                let message = redact_builder_error(&failure.message);
                 error!(
                     "❌ Job #{} failed before build during {}: {}",
-                    job_id, failure.phase, failure.message
+                    job_id, failure.phase, message
                 );
                 if let Err(report_err) = client
-                    .fail_job_with_phase(job_id, failure.phase, failure.class, &failure.message)
+                    .fail_job_with_phase(job_id, failure.phase, failure.class, &message)
                     .await
                 {
                     error!(
@@ -2038,7 +2365,7 @@ async fn missing_store_paths_batched(paths: &[String]) -> anyhow::Result<Vec<Str
         };
 
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stderr = redact_builder_error(&String::from_utf8_lossy(&output.stderr));
             let first_line = stderr.lines().next().unwrap_or("unknown error");
             anyhow::bail!("nix-store --check-validity --print-invalid failed: {first_line}");
         }
@@ -2358,7 +2685,7 @@ fn is_local_db_host(host: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::classify_nix_failure;
+    use super::{classify_nix_failure, source_download_failure};
     use cf_protocol::builder::BuildFailureClass;
 
     #[test]
@@ -2381,15 +2708,37 @@ mod tests {
         }
     }
 
+    #[test]
+    fn source_download_identity_failures_are_deterministic() {
+        let failure = source_download_failure(
+            cf_builder::builder::api_client::SourceArtifactDownloadError::Identity(
+                "signed digest mismatch".to_string(),
+            ),
+        );
+        assert_eq!(failure.phase, BuildFailurePhase::SourceIdentityMismatch);
+        assert_eq!(failure.class, BuildFailureClass::Deterministic);
+
+        let failure = source_download_failure(
+            cf_builder::builder::api_client::SourceArtifactDownloadError::Transport(
+                anyhow::anyhow!("connection reset"),
+            ),
+        );
+        assert_eq!(failure.phase, BuildFailurePhase::SourceFetch);
+        assert_eq!(failure.class, BuildFailureClass::Transient);
+    }
+
     use super::{
-        PRE_BUILD_SOURCE_FETCH, cleanup_candidate_worktree, drv_path_eval_attr,
+        PRE_BUILD_SOURCE_FETCH, RemoteBuildRuntime, cleanup_candidate_worktree, drv_path_eval_attr,
         ensure_mirror_has_commit, mock_store_path, should_mock_build_fail, source_flake_ref,
-        source_workspace_paths, source_workspace_paths_for_job, verified_source_eval_args,
-        verify_drv_identity, wait_for_pre_build_verification,
+        source_workspace_paths, source_workspace_paths_for_job, validate_evaluator_contract,
+        verified_source_eval_args, verify_drv_identity, wait_for_pre_build_verification,
     };
     use cf_protocol::builder::{
-        BuildFailurePhase, SourceInputDeliveryMode, VerifiedSourceIdentity,
+        BuildFailurePhase, EvaluatorFingerprint, SourceInputDeliveryMode,
+        VERIFIED_SOURCE_EVALUATOR_CONTRACT_VERSION, VERIFIED_SOURCE_MATERIALIZATION_SCHEMA_VERSION,
+        VerifiedSourceIdentity,
     };
+    use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
@@ -2404,7 +2753,85 @@ mod tests {
             lock_hash: Some("sha256-lock".to_string()),
             archive_url: archive_url.map(str::to_string),
             archive_sha256: Some("sha256-source".to_string()),
+            immutable_source: None,
         }
+    }
+
+    fn evaluator(nix_version: &str) -> EvaluatorFingerprint {
+        EvaluatorFingerprint {
+            contract_version: VERIFIED_SOURCE_EVALUATOR_CONTRACT_VERSION,
+            nix_version: nix_version.to_string(),
+            evaluator_system: "x86_64-linux".to_string(),
+            pure_eval: true,
+            lockfile_mutation_allowed: false,
+            allow_import_from_derivation: true,
+            source_materialization_schema_version: VERIFIED_SOURCE_MATERIALIZATION_SCHEMA_VERSION,
+        }
+    }
+
+    fn runtime(nix_version: &str) -> RemoteBuildRuntime {
+        RemoteBuildRuntime {
+            supported_execution_strategies: vec![],
+            source_mirror_root: PathBuf::from("/tmp/mirrors"),
+            source_worktree_root: PathBuf::from("/tmp/worktrees"),
+            cleanup_source_worktrees: true,
+            allow_import_from_derivation: true,
+            nix_version: nix_version.to_string(),
+            evaluator_system: "x86_64-linux".to_string(),
+        }
+    }
+
+    #[test]
+    fn matched_evaluator_contract_is_accepted_before_evaluation() {
+        let expected = evaluator("2.34.5");
+        let actual = validate_evaluator_contract(Some(&expected), &runtime("2.34.5"))
+            .expect("matching contract should pass");
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn nix_version_mismatch_is_typed_before_derivation_comparison() {
+        let failure = validate_evaluator_contract(Some(&evaluator("2.34.4")), &runtime("2.34.5"))
+            .expect_err("different Nix versions must be rejected");
+        assert_eq!(failure.phase, BuildFailurePhase::EvaluatorIncompatible);
+        assert_eq!(failure.class, BuildFailureClass::Transient);
+        assert!(failure.message.contains("Nix version mismatch"));
+    }
+
+    #[test]
+    fn ifd_mismatch_is_typed_before_derivation_comparison() {
+        let mut runtime = runtime("2.34.5");
+        runtime.allow_import_from_derivation = false;
+        let failure = validate_evaluator_contract(Some(&evaluator("2.34.5")), &runtime)
+            .expect_err("different IFD settings must be rejected");
+        assert_eq!(failure.phase, BuildFailurePhase::EvaluatorIncompatible);
+        assert_eq!(failure.class, BuildFailureClass::Transient);
+        assert!(failure.message.contains("allow-import-from-derivation"));
+    }
+
+    #[test]
+    fn every_static_evaluator_contract_dimension_is_enforced() {
+        let runtime = runtime("2.34.5");
+
+        let mut contract = evaluator("2.34.5");
+        contract.contract_version += 1;
+        assert!(validate_evaluator_contract(Some(&contract), &runtime).is_err());
+
+        let mut contract = evaluator("2.34.5");
+        contract.evaluator_system = "aarch64-linux".to_string();
+        assert!(validate_evaluator_contract(Some(&contract), &runtime).is_err());
+
+        let mut contract = evaluator("2.34.5");
+        contract.pure_eval = false;
+        assert!(validate_evaluator_contract(Some(&contract), &runtime).is_err());
+
+        let mut contract = evaluator("2.34.5");
+        contract.lockfile_mutation_allowed = true;
+        assert!(validate_evaluator_contract(Some(&contract), &runtime).is_err());
+
+        let mut contract = evaluator("2.34.5");
+        contract.source_materialization_schema_version += 1;
+        assert!(validate_evaluator_contract(Some(&contract), &runtime).is_err());
     }
 
     #[test]
@@ -2496,6 +2923,9 @@ mod tests {
                 "--raw",
                 "--no-write-lock-file",
                 "--option",
+                "pure-eval",
+                "true",
+                "--option",
                 "allow-import-from-derivation",
                 "false",
                 eval_attr,
@@ -2508,6 +2938,9 @@ mod tests {
                 "eval",
                 "--raw",
                 "--no-write-lock-file",
+                "--option",
+                "pure-eval",
+                "true",
                 "--option",
                 "allow-import-from-derivation",
                 "true",

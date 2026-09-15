@@ -1166,24 +1166,20 @@ in {
           How the builder obtains the flake source for
           `source_re_evaluate_verified` builds.
 
-          - `server_bundled_archive` (recommended default): the server packages
-            the top-level flake repository as a gzipped tar archive (from its
-            own bare Git mirror) and serves it via an authenticated API
-            endpoint. The builder downloads, verifies the SHA-256 digest, and
-            extracts to a job-scoped directory. The builder does not need Git
-            credentials or direct access to the Git remote. Each job uses an
-            isolated directory so concurrent builds for the same repository do
-            not interfere.
+          - `server_bundled_archive` (required for evaluator contract version
+            1): the server publishes one canonical tracked-tree tar artifact
+            during authoritative evaluation. The builder downloads the exact
+            bytes through an authenticated endpoint, verifies the authorized size
+            and SHA-256 digest, and extracts them to a job-scoped directory.
+            Contract version 1 accepts 40-character SHA-1 Git object IDs and
+            rejects SHA-256 Git object IDs before mirror initialization.
 
             Note: only the top-level repository is bundled. Locked flake inputs
             (nixpkgs, etc.) must be reachable via Nix substituters or already
             present in the builder's Nix store.
 
-          - `local_git_worktree`: the builder maintains its own bare Git mirror.
-            It clones on first use and fetches when the authorized commit is
-            absent. The builder needs network access and credentials for the
-            repository URL. Colocated server/builder deployments may share the
-            same mirror root.
+          - `local_git_worktree`: reserved for a future evaluator contract. The
+            server rejects this mode before a version-1 job is claimed.
 
           This option is written to the server config and controls what the
           server sends in job manifests. Ignored when
@@ -1195,13 +1191,14 @@ in {
         type = lib.types.path;
         default = "/var/lib/crystal-forge/source-archives";
         description = lib.mdDoc ''
-          Root directory on the **server** where bare Git mirrors and per-job
-          source archives are stored for `server_bundled_archive` delivery.
+          Root directory on the server where canonical source publication data
+          is stored for `server_bundled_archive` delivery.
 
           Layout under this directory:
-          - `mirrors/<mirror_id>.git` — shared bare Git mirror per repository
-          - `archives/jobs/<job_id>.tar.gz` — per-job source archive
-            (created at job-claim time, deleted on job complete/fail)
+          - `mirrors/<mirror_id>.git`: shared bare Git mirror per repository
+          - `artifacts/<mirror_id>/<commit>.tar`: immutable tracked-tree bytes
+          - `identities/<mirror_id>/<commit>.json`: published artifact identity
+          - `locks/<mirror_id>.lock`: cross-process publication lock
 
           Must be writable by the Crystal Forge server process. Only relevant
           when `source_delivery_mode = "server_bundled_archive"`.
@@ -1238,15 +1235,14 @@ in {
 
       allow_import_from_derivation = lib.mkOption {
         type = lib.types.bool;
-        default = false;
+        default = true;
         description = lib.mdDoc ''
           Allow builder-side verified source re-evaluation to run Nix
           import-from-derivation (IFD) during `nix eval`.
 
-          The default is `false` so remote builders do not perform
-          evaluation-time builds unless the operator explicitly opts in. Set to
-          `true` only for flakes whose NixOS configurations require IFD during
-          evaluation, such as generated package metadata or domain lists.
+          Evaluator contract version 1 requires this value to be `true` on both
+          the authoritative server and builder. Disable verified-source support
+          before setting this option to `false`.
         '';
       };
 
@@ -2113,7 +2109,8 @@ in {
       "d /var/lib/crystal-forge/.local/share 0755 crystal-forge crystal-forge -"
       "d /var/cache/crystal-forge/gc-roots 0755 crystal-forge crystal-forge -" # <-- ADD THIS
       "Z /var/lib/crystal-forge/ 0755 crystal-forge crystal-forge -"
-    ];
+    ] ++ lib.optional cfg.server.enable
+      "d ${toString cfg.build.source_archive_root} 0750 crystal-forge crystal-forge -";
 
     # Aggregate resource boundary that caps the combined memory of the API
     # server, the hardening worker, the Config Inspector worker, and all their
@@ -2888,6 +2885,7 @@ in {
         # Read/write permissions
         ReadWritePaths = [
           "/var/lib/crystal-forge"
+          (toString cfg.build.source_archive_root)
           "/var/lib/crystal-forge/.cache"
           "/tmp"
           "/run/crystal-forge"
@@ -3042,6 +3040,18 @@ in {
           on first start unless `services.crystal-forge.build.api_key_file` is
           set. Register the generated public key in the Crystal Forge UI.
         '';
+      }
+      {
+        assertion =
+          !(lib.elem "source_re_evaluate_verified" cfg.build.supported_execution_strategies)
+          || cfg.build.allow_import_from_derivation;
+        message = "Verified-source evaluator contract version 1 requires allow_import_from_derivation = true";
+      }
+      {
+        assertion =
+          cfg.build.remote_execution_strategy != "source_re_evaluate_verified"
+          || cfg.build.source_delivery_mode == "server_bundled_archive";
+        message = "Verified-source evaluator contract version 1 requires source_delivery_mode = server_bundled_archive";
       }
       {
         assertion =

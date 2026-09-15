@@ -43,8 +43,10 @@ pub use cf_protocol::builder::{
     CveScanHeartbeatResponse, CveScanLease, CveScanPolicy, CveScanResult, CveScanSchemaVersion,
     CveScannerIdentity, DerivationArchiveRequest, DerivationManifestResponse,
     EstablishBuilderSessionRequest, EstablishBuilderSessionResponse, EvaluatorFingerprint,
-    NextJobRequest, RemoteBuildExecutionStrategy, ReportMetricsRequest, ResolveBuilderIdRequest,
-    ResolveBuilderIdResponse, SourceInputDeliveryMode, VerifiedSourceIdentity,
+    ImmutableSourceIdentity, NextJobRequest, RemoteBuildExecutionStrategy, ReportMetricsRequest,
+    ResolveBuilderIdRequest, ResolveBuilderIdResponse, SourceInputDeliveryMode,
+    VERIFIED_SOURCE_EVALUATOR_CONTRACT_VERSION, VERIFIED_SOURCE_MATERIALIZATION_SCHEMA_VERSION,
+    VerifiedSourceIdentity,
 };
 
 // Re-export NextJobResponse as an alias using the protocol's BuildJob type.
@@ -153,6 +155,11 @@ pub struct BuildJob {
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
     pub logs: Option<String>,
+    /// Server-owned terminal failure authority that is never accepted from or
+    /// serialized to builders.
+    #[serde(skip)]
+    #[sqlx(default)]
+    pub server_failure_code: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -191,6 +198,9 @@ fn default_attempt_number() -> i32 {
 
 /// Internal alias for backward compatibility with query code.
 pub type BuildJobRow = BuildJob;
+
+/// Authorizes revival after evaluator contract version 1 is republished.
+pub const SERVER_FAILURE_CODE_EVALUATOR_CONTRACT_OBSOLETE: &str = "evaluator_contract_obsolete";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Builder status enum (server-owned: sqlx::Type for DB column mapping)
@@ -486,13 +496,29 @@ mod tests {
                 lock_hash: Some("sha256-lock".to_string()),
                 archive_url: Some("file:///tmp/source".to_string()),
                 archive_sha256: Some("sha256-source".to_string()),
+                immutable_source: Some(ImmutableSourceIdentity {
+                    schema_version: VERIFIED_SOURCE_MATERIALIZATION_SCHEMA_VERSION,
+                    store_name: "crystal-forge-source-v1-abc123".to_string(),
+                    nar_hash: "sha256-source-nar".to_string(),
+                    lock_hash: "lock-sha256".to_string(),
+                    artifact_format_version:
+                        cf_protocol::source_artifact::VERIFIED_SOURCE_ARTIFACT_FORMAT_VERSION,
+                    artifact_sha256: "artifact-sha256".to_string(),
+                    artifact_size: 1024,
+                    server_store_path: "/nix/store/source".to_string(),
+                }),
             }),
             source_input_delivery: SourceInputDeliveryMode::ServerBundledArchive,
             expected_drv_path: Some("/nix/store/server-host-a.drv".to_string()),
             evaluator: Some(EvaluatorFingerprint {
+                contract_version: VERIFIED_SOURCE_EVALUATOR_CONTRACT_VERSION,
                 nix_version: "2.28.0".to_string(),
+                evaluator_system: "x86_64-linux".to_string(),
                 pure_eval: true,
                 lockfile_mutation_allowed: false,
+                allow_import_from_derivation: true,
+                source_materialization_schema_version:
+                    VERIFIED_SOURCE_MATERIALIZATION_SCHEMA_VERSION,
             }),
             cache_push: None,
         };

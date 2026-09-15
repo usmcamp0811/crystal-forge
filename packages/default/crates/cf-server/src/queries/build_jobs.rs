@@ -8,6 +8,8 @@ use sqlx::{PgPool, Postgres, Transaction};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+use crate::models::builders::SERVER_FAILURE_CODE_EVALUATOR_CONTRACT_OBSOLETE;
+
 /// Advisory lock serializing all build-queue-position allocations.
 /// Using the ASCII encoding of 'CFBQ' as a 64-bit integer (0x43464251).
 pub const BUILD_QUEUE_ORDER_LOCK_KEY: i64 = 0x4346_4251;
@@ -199,6 +201,20 @@ pub async fn create_build_jobs_for_commit_tx(
     Ok(rows)
 }
 
+/// Creates an eligible derivation's queue row or revives its obsolete row.
+///
+/// The derivation must be in `DryRunComplete` and satisfy the agent and policy
+/// gates. An existing row is revived only when it is failed with the exact
+/// server-owned [`SERVER_FAILURE_CODE_EVALUATOR_CONTRACT_OBSOLETE`] code. The
+/// authoritative evaluation transaction calls this function only after it has
+/// republished and evaluated the matching contract-v1 source. The conflict
+/// update atomically consumes the code while returning the row to `queued`.
+/// All other existing rows remain unchanged and produce
+/// [`BuildJobInsertOutcome::AlreadyExists`].
+///
+/// # Errors
+///
+/// Returns an error when queue locking or a database operation fails.
 pub async fn create_build_job_for_derivation_tx(
     tx: &mut Transaction<'_, Postgres>,
     derivation_id: i32,
@@ -245,12 +261,28 @@ pub async fn create_build_job_for_derivation_tx(
             AND d.status_id = 5
             AND d.cf_agent_enabled = TRUE
             AND d.policy_requirements_met = TRUE
-        ON CONFLICT (derivation_id) DO NOTHING
+        ON CONFLICT (derivation_id) DO UPDATE
+        SET environment_id = EXCLUDED.environment_id,
+            priority_weight = EXCLUDED.priority_weight,
+            queue_position = EXCLUDED.queue_position,
+            status = 'queued',
+            builder_id = NULL,
+            builder_session_id = NULL,
+            started_at = NULL,
+            completed_at = NULL,
+            available_at = NOW(),
+            updated_at = NOW(),
+            server_failure_code = NULL,
+            logs = COALESCE(build_jobs.logs, '') ||
+                E'\n\nRecovery: authoritative evaluator contract was republished'
+        WHERE build_jobs.status = 'failed'
+          AND build_jobs.server_failure_code = $3
         RETURNING id
         "#,
     )
     .bind(derivation_id)
     .bind(next_pos)
+    .bind(SERVER_FAILURE_CODE_EVALUATOR_CONTRACT_OBSOLETE)
     .fetch_optional(&mut **tx)
     .await
     .context("Failed to create build job for derivation")?;
@@ -414,6 +446,7 @@ pub async fn get_next_job_for_builder(pool: &PgPool, builder_id: Uuid) -> Result
         SET 
             status = 'building',
             builder_id = $1,
+            server_failure_code = NULL,
             started_at = NOW(),
             updated_at = NOW()
         FROM available_jobs
@@ -952,6 +985,7 @@ pub async fn mark_job_success(pool: &PgPool, job_id: Uuid, logs: Option<&str>) -
         UPDATE build_jobs
         SET 
             status = 'success',
+            server_failure_code = NULL,
             completed_at = NOW(),
             logs = COALESCE($2, logs),
             updated_at = NOW()
@@ -1020,9 +1054,10 @@ mod tests {
         );
     }
 
-    /// The per-derivation SQL uses `ON CONFLICT (derivation_id) DO NOTHING` for
-    /// idempotent insertion, and shares status_id = 5 (DryRunComplete) as the
-    /// eligibility gate with the bulk `create_build_jobs_for_commit` function.
+    /// The per-derivation SQL uses `ON CONFLICT (derivation_id)` for idempotent
+    /// insertion or controlled obsolete-row revival. It shares status_id = 5
+    /// (DryRunComplete) as the eligibility gate with the bulk
+    /// `create_build_jobs_for_commit` function.
     ///
     /// This test documents the contract so regressions in the SQL predicate are caught.
     #[test]
@@ -1089,8 +1124,8 @@ mod tests {
             d.status_id == 5              // DryRunComplete
             && d.cf_agent_enabled == Some(true)  // policy passed
             && d.policy_requirements_met
-            // ON CONFLICT DO NOTHING handles existing jobs; has_existing_job
-            // is checked here for documentation of the expected outcome only.
+            // ON CONFLICT handles existing jobs; has_existing_job is checked
+            // here for documentation of the expected outcome only.
             && !d.has_existing_job
         }
 
@@ -1180,6 +1215,7 @@ pub async fn mark_job_failed(
                 ELSE 'queued'  -- Re-queue for retry
             END,
             builder_id = NULL,  -- Unassign so another builder can pick it up
+            server_failure_code = NULL,
             logs = COALESCE(logs, '') || COALESCE($2, '') || E'\n\nError: ' || $3,
             completed_at = CASE
                 WHEN retry_count + 1 >= max_retries THEN NOW()

@@ -417,15 +417,18 @@ impl Drop for NixEvalProcessGuard {
     }
 }
 
+use cf_protocol::builder::nar_qualified_store_flake_ref;
 use tracing::{debug, error, info, warn};
 
 use crate::config::{BuildConfig, ServerConfig};
 use crate::derivations::utils::{build_flake_reference, count_closure_packages};
 use crate::flake::credentials::FlakeCredentialEnv;
+use crate::flake::verified_source::materialize_immutable_source;
 use crate::models::commits::Commit;
 use crate::models::deployment_policies::{
     AssignedPolicy, EvaluationTerminalOutcome, PoliciesByConfiguration, PolicyCheckResult,
-    build_nix_eval_expression, policies_for_config, policy_requirements_met, policy_results_json,
+    build_nix_eval_expression_for_source, policies_for_config, policy_requirements_met,
+    policy_results_json,
 };
 use crate::models::evaluation_snapshots::{
     EvaluatedOption, OptionDefinitionProvenance, SafeOptionValue,
@@ -804,8 +807,62 @@ pub enum StandaloneSystemOutcome {
     },
 }
 
+fn isolate_authoritative_evaluator_credentials(command: &mut tokio::process::Command) {
+    // SECURITY: The evaluator consumes only the verified store source. It must
+    // not inherit credentials that could authorize any network source access.
+    command.env_remove("NETRC");
+    command.env_remove("GIT_SSH_COMMAND");
+}
+
+fn authoritative_evaluator_args(
+    nix_expression: &str,
+    workers: usize,
+    max_memory_mb: usize,
+    check_cache: bool,
+) -> Vec<String> {
+    let mut arguments = vec![
+        "--expr".to_string(),
+        nix_expression.to_string(),
+        "--option".to_string(),
+        "pure-eval".to_string(),
+        "true".to_string(),
+        "--option".to_string(),
+        "allow-import-from-derivation".to_string(),
+        "true".to_string(),
+        "--meta".to_string(),
+        "--apply".to_string(),
+        "derivation: derivation.meta.policies".to_string(),
+        "--workers".to_string(),
+        workers.to_string(),
+        "--max-memory-size".to_string(),
+        max_memory_mb.to_string(),
+    ];
+    if check_cache {
+        arguments.push("--check-cache-status".to_string());
+    }
+    arguments
+}
+
 pub(crate) fn build_single_system_eval_expression(
     flake_ref: &str,
+    system_name: &str,
+    assigned: &[crate::models::deployment_policies::AssignedPolicy],
+) -> String {
+    let requested_revision =
+        crate::derivations::utils::flake_reference_revision(flake_ref).unwrap_or("");
+    build_single_system_eval_expression_for_source(
+        flake_ref,
+        requested_revision,
+        None,
+        system_name,
+        assigned,
+    )
+}
+
+fn build_single_system_eval_expression_for_source(
+    flake_ref: &str,
+    requested_revision: &str,
+    resolved_revision_override: Option<&str>,
     system_name: &str,
     assigned: &[crate::models::deployment_policies::AssignedPolicy],
 ) -> String {
@@ -819,9 +876,9 @@ pub(crate) fn build_single_system_eval_expression(
     } else {
         format!("\n{}", field_lines.join("\n"))
     };
-    let requested_revision =
-        crate::derivations::utils::flake_reference_revision(flake_ref).unwrap_or("");
-
+    let resolved_revision_override = resolved_revision_override
+        .map(nix_string_pub)
+        .unwrap_or_else(|| "null".to_string());
     format!(
         r#"
 let
@@ -834,7 +891,9 @@ let
       || ((config.services.crystal-forge.enable or false)
           && (config.services.crystal-forge.client.enable or false));
     requestedSourceRevision = {requested_revision};
-    resolvedSourceRevision = flake.sourceInfo.rev or null;{policy_fields}
+    resolvedSourceRevision = if {resolved_revision_override} != null
+      then {resolved_revision_override}
+      else flake.sourceInfo.rev or null;{policy_fields}
   }};
 in {{
   drvPath = drv.drvPath;
@@ -845,6 +904,7 @@ in {{
         flake_ref = nix_string_pub(flake_ref),
         system_name = nix_string_pub(system_name),
         requested_revision = nix_string_pub(requested_revision),
+        resolved_revision_override = resolved_revision_override,
         policy_fields = policy_fields,
     )
 }
@@ -859,16 +919,33 @@ struct StandaloneEvalJson {
     policies: serde_json::Value,
 }
 
+/// Evaluates one system from a verified store flake with its assigned policies.
+///
+/// The caller MUST verify that `flake_ref` identifies the tracked tree for
+/// `commit_hash`. `repo_url` is retained only in the persisted derivation target;
+/// this function does not access the repository URL or apply Git credentials
+/// during Nix evaluation.
+///
+/// # Errors
+///
+/// Returns an error if the evaluator slot is unavailable, Nix cannot start, the
+/// evaluation times out, or Nix returns malformed or unsuccessful output.
 pub async fn evaluate_single_system_with_policies(
+    flake_ref: &str,
     repo_url: &str,
     commit_hash: &str,
     system_name: &str,
     assigned: &[crate::models::deployment_policies::AssignedPolicy],
-    creds: Option<&FlakeCredentialEnv>,
-    build_config: &BuildConfig,
+    _creds: Option<&FlakeCredentialEnv>,
+    _build_config: &BuildConfig,
 ) -> Result<StandaloneSystemOutcome> {
-    let flake_ref = build_flake_reference(repo_url, commit_hash);
-    let nix_expr = build_single_system_eval_expression(&flake_ref, system_name, assigned);
+    let nix_expr = build_single_system_eval_expression_for_source(
+        flake_ref,
+        commit_hash,
+        Some(commit_hash),
+        system_name,
+        assigned,
+    );
 
     // Acquire the process-wide standalone eval slot before spawning.
     // This semaphore caps total concurrent `nix eval` processes across all
@@ -884,7 +961,19 @@ pub async fn evaluate_single_system_with_policies(
     };
 
     let mut cmd = tokio::process::Command::new("nix");
-    cmd.args(["eval", "--impure", "--json", "--expr", &nix_expr]);
+    cmd.args([
+        "eval",
+        "--json",
+        "--no-write-lock-file",
+        "--option",
+        "pure-eval",
+        "true",
+        "--option",
+        "allow-import-from-derivation",
+        "true",
+        "--expr",
+        &nix_expr,
+    ]);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     // Spawn the evaluator in a new process group so that a SIGKILL on timeout
     // reaches nix and every subprocess it forks (sub-evaluators, builders,
@@ -892,10 +981,6 @@ pub async fn evaluate_single_system_with_policies(
     // is used.
     #[cfg(unix)]
     cmd.process_group(0);
-    build_config.apply_to_command(&mut cmd);
-    if let Some(c) = creds {
-        c.apply_to_nix_command(&mut cmd);
-    }
 
     let child = match cmd.spawn() {
         Ok(c) => c,
@@ -1043,14 +1128,12 @@ pub async fn evaluate_single_system_with_policies(
 /// `CommandFailed` outcome as a confirmed system failure.
 #[allow(dead_code)]
 async fn fallback_eval_single_system(
-    repo_url: &str,
-    commit_hash: &str,
+    flake_ref: &str,
+    _commit_hash: &str,
     system_name: &str,
-    creds: Option<&FlakeCredentialEnv>,
-    build_config: &BuildConfig,
+    _creds: Option<&FlakeCredentialEnv>,
+    _build_config: &BuildConfig,
 ) -> FallbackEvalOutcome {
-    let flake_ref = build_flake_reference(repo_url, commit_hash);
-
     // Use --argstr to pass flakeRef and systemName safely instead of
     // interpolating values into a Nix expression string. This avoids
     // escaping issues with dots, backslashes, ${...}, etc.
@@ -1066,23 +1149,22 @@ in
     let mut cmd = tokio::process::Command::new("nix");
     cmd.args([
         "eval",
-        "--impure",
+        "--no-write-lock-file",
+        "--option",
+        "pure-eval",
+        "true",
+        "--option",
+        "allow-import-from-derivation",
+        "true",
         "--expr",
         nix_expr.trim(),
         "--argstr",
         "flakeRef",
-        &flake_ref,
+        flake_ref,
         "--argstr",
         "systemName",
         system_name,
     ]);
-
-    // Apply the same Nix configuration as the main evaluator.
-    build_config.apply_to_command(&mut cmd);
-
-    if let Some(c) = creds {
-        c.apply_to_nix_command(&mut cmd);
-    }
 
     // Acquire the process-wide standalone eval slot before spawning.
     let _nix_permit = match heavy_nix_limiter().acquire_owned().await {
@@ -1210,7 +1292,7 @@ in
 /// phase races the entire buffered stream, not individual steps).
 #[allow(dead_code)]
 async fn evaluate_and_verify_missing_system(
-    repo_url: &str,
+    flake_ref: &str,
     commit_hash: &str,
     system_name: &str,
     control_system: Option<&str>,
@@ -1218,7 +1300,7 @@ async fn evaluate_and_verify_missing_system(
     build_config: &BuildConfig,
 ) -> VerifiedFallbackOutcome {
     let target =
-        fallback_eval_single_system(repo_url, commit_hash, system_name, creds, build_config).await;
+        fallback_eval_single_system(flake_ref, commit_hash, system_name, creds, build_config).await;
 
     match target {
         FallbackEvalOutcome::StandaloneEvaluationSucceeded { system_name } => {
@@ -1240,7 +1322,7 @@ async fn evaluate_and_verify_missing_system(
             };
 
             match fallback_eval_single_system(
-                repo_url,
+                flake_ref,
                 commit_hash,
                 control_name,
                 creds,
@@ -1536,6 +1618,14 @@ fn system_not_queued_reason(
 /// Returns [`SystemPersistenceOutcome`] which tells the caller whether build
 /// activation is needed, or if the system was recorded without a build, or
 /// if the evaluation was cancelled/superseded.
+/// An existing failed build with the server-owned obsolete-contract code
+/// returns [`SystemPersistenceOutcome::NeedsBuildPreparation`]. The later
+/// activation transaction consumes the code and revives the same queue row.
+/// Other existing build jobs return [`SystemPersistenceOutcome::ExistingBuildJob`].
+///
+/// # Errors
+///
+/// Returns an error when policy resolution or a database operation fails.
 pub async fn persist_evaluated_system(
     pool: &PgPool,
     commit_id: i32,
@@ -1805,14 +1895,26 @@ pub async fn persist_evaluated_system(
 
     // Check if a build job already exists (e.g. from a concurrent or
     // prior activation that succeeded between our steps).
-    let existing: Option<(uuid::Uuid, String)> = sqlx::query_as(
-        "SELECT id, status FROM build_jobs WHERE derivation_id = $1 ORDER BY created_at ASC LIMIT 1",
+    let existing: Option<(uuid::Uuid, String, Option<String>)> = sqlx::query_as(
+        r#"
+        SELECT id, status, server_failure_code
+        FROM build_jobs
+        WHERE derivation_id = $1
+        ORDER BY created_at ASC
+        LIMIT 1
+        "#,
     )
     .bind(derivation_id)
     .fetch_optional(&mut *tx)
     .await?;
 
-    if let Some((build_job_id, build_job_status)) = existing {
+    // SECURITY: Only the server-owned obsolete-contract code lets successful
+    // authoritative evaluation proceed to build preparation and consume that
+    // code during activation. All other existing jobs remain terminal.
+    if let Some((build_job_id, build_job_status, server_failure_code)) = existing
+        && server_failure_code.as_deref()
+            != Some(crate::models::builders::SERVER_FAILURE_CODE_EVALUATOR_CONTRACT_OBSOLETE)
+    {
         // Already has a build job; mark as queued so the state is consistent.
         sqlx::query(
             r#"
@@ -2944,7 +3046,6 @@ async fn evaluate_with_nix_eval_jobs_inner(
     // queued for build preparation and must not be included in this count.
     let mut build_prep_count: usize = 0;
 
-    let flake_ref = build_flake_reference(repo_url, commit_hash);
     let allowed_systems = load_allowed_systems(pool, flake, target_system).await?;
 
     // Load per-flake credentials (may be None for public flakes).
@@ -2958,8 +3059,30 @@ async fn evaluate_with_nix_eval_jobs_inner(
             }),
     );
 
+    // SECURITY: Only Git receives repository credentials. The authoritative
+    // evaluator consumes the credential-free tracked tree after Nix store
+    // ingestion, so host nix.conf and credential files cannot affect drvPath.
+    let immutable_source = materialize_immutable_source(
+        pool,
+        commit.id,
+        &server_config.source_archive_root,
+        repo_url,
+        commit_hash,
+        creds.as_ref().as_ref(),
+    )
+    .await
+    .context("failed to materialize authoritative immutable source")?;
+    // Pure `builtins.getFlake` accepts a path reference only when the reference
+    // carries its verified NAR hash. The hash also prevents resolution from
+    // observing a different tree if the expression is reused incorrectly.
+    let flake_ref = nar_qualified_store_flake_ref(
+        &immutable_source.server_store_path,
+        &immutable_source.nar_hash,
+    );
+
     // Build ONE Nix expression with per-configuration policy checkers.
-    let nix_expr = build_nix_eval_expression(&flake_ref, policies_by_configuration);
+    let nix_expr =
+        build_nix_eval_expression_for_source(&flake_ref, commit_hash, policies_by_configuration);
 
     // Compute summary counts for logging.
     let unique_policy_count: std::collections::BTreeSet<_> = policies_by_configuration
@@ -3072,9 +3195,9 @@ async fn evaluate_with_nix_eval_jobs_inner(
     // Nixpkgs derivations can sanitize custom `meta` fields before
     // nix-eval-jobs serializes them. `extraValue` preserves the policy payload
     // while the returned value remains the unchanged system derivation.
-    // --impure is required because the Nix expression uses builtins.getFlake with a
-    // remote git+ssh ref (e.g. git+git@github.com:...?rev=<hash>), which is only
-    // permitted in impure evaluation mode.
+    // The expression uses an immutable store path. It MUST remain pure. An
+    // impure evaluator can observe host nix.conf paths and authorize a drvPath
+    // that a clean API builder cannot reproduce.
 
     // ── Cross-process heavy-Nix serialization ───────────────────────────────
     // Acquire the PostgreSQL advisory lock BEFORE the in-process semaphore.
@@ -3110,29 +3233,17 @@ async fn evaluate_with_nix_eval_jobs_inner(
     // processes can accumulate and progressively degrade host RAM/CPU.
     #[cfg(unix)]
     cmd.process_group(0);
-    cmd.args([
-        "--expr",
+    // Evaluator semantics must match the builder's explicit `nix eval`
+    // invocation. BuildConfig controls realization, not source re-evaluation.
+    // Worker count, memory limits, and cache-status reporting can affect
+    // resource failure or diagnostics, but cannot change a successful drvPath.
+    cmd.args(authoritative_evaluator_args(
         &nix_expr,
-        "--impure", // Required: builtins.getFlake with remote git refs needs impure mode
-        "--meta",
-        "--apply",
-        "derivation: derivation.meta.policies",
-        "--workers",
-        &server_config.eval_workers.to_string(),
-        "--max-memory-size",
-        &server_config.eval_max_memory_mb.to_string(),
-    ]);
-
-    if server_config.eval_check_cache {
-        cmd.arg("--check-cache-status");
-    }
-    build_config.apply_to_command(&mut cmd);
-
-    // Inject per-flake credentials so Nix can access private repos.
-    // Deref the Arc to get the inner Option for pattern matching.
-    if let Some(c) = Option::as_ref(creds.as_ref()) {
-        c.apply_to_nix_command(&mut cmd);
-    }
+        server_config.eval_workers,
+        server_config.eval_max_memory_mb,
+        server_config.eval_check_cache,
+    ));
+    isolate_authoritative_evaluator_credentials(&mut cmd);
 
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
@@ -4272,7 +4383,7 @@ async fn evaluate_with_nix_eval_jobs_inner(
         let build_config_owned = build_config.clone();
         let mut fallback_futures = Vec::with_capacity(missing_systems.len());
         for system_name in &missing_systems {
-            let repo_url = repo_url.to_string();
+            let flake_ref = flake_ref.clone();
             let commit_hash = commit_hash.to_string();
             let system_name = system_name.to_string();
             let creds = Arc::clone(&creds_arc);
@@ -4285,7 +4396,8 @@ async fn evaluate_with_nix_eval_jobs_inner(
                     .collect();
             fallback_futures.push(async move {
                 evaluate_single_system_with_policies(
-                    &repo_url,
+                    &flake_ref,
+                    repo_url,
                     &commit_hash,
                     &system_name,
                     &assigned,
@@ -5380,8 +5492,66 @@ fn summarize_commit_metadata(
 
 #[cfg(test)]
 mod tests {
-    use super::classify_evaluation_failure;
+    use super::{
+        authoritative_evaluator_args, classify_evaluation_failure,
+        isolate_authoritative_evaluator_credentials,
+    };
     use crate::models::retry_policy::RetryFailureClass;
+
+    #[tokio::test]
+    async fn authoritative_evaluator_removes_inherited_source_credentials() {
+        let mut command = tokio::process::Command::new("env");
+        command.env("NETRC", "/secret/netrc");
+        command.env("GIT_SSH_COMMAND", "ssh -i /secret/key");
+        isolate_authoritative_evaluator_credentials(&mut command);
+
+        let removed = command
+            .as_std()
+            .get_envs()
+            .filter_map(|(key, value)| value.is_none().then_some(key.to_string_lossy().to_string()))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(removed.contains("NETRC"));
+        assert!(removed.contains("GIT_SSH_COMMAND"));
+
+        let environment = command
+            .output()
+            .await
+            .expect("credential-isolation probe should run");
+        assert!(environment.status.success());
+        let environment = String::from_utf8(environment.stdout)
+            .expect("credential-isolation probe should return UTF-8");
+        assert!(!environment.lines().any(|line| line.starts_with("NETRC=")));
+        assert!(
+            !environment
+                .lines()
+                .any(|line| line.starts_with("GIT_SSH_COMMAND="))
+        );
+    }
+
+    #[test]
+    fn authoritative_evaluator_uses_only_explicit_semantic_options() {
+        assert_eq!(
+            authoritative_evaluator_args("expression", 2, 4096, true),
+            vec![
+                "--expr",
+                "expression",
+                "--option",
+                "pure-eval",
+                "true",
+                "--option",
+                "allow-import-from-derivation",
+                "true",
+                "--meta",
+                "--apply",
+                "derivation: derivation.meta.policies",
+                "--workers",
+                "2",
+                "--max-memory-size",
+                "4096",
+                "--check-cache-status",
+            ]
+        );
+    }
 
     #[test]
     fn evaluation_failures_are_classified_at_source() {
@@ -7535,6 +7705,79 @@ mod tests {
             "build job must be claimable after activation; \
              expected Some({build_job_id}), got {after_activation:?}"
         );
+
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn authoritative_re_evaluation_revives_obsolete_job_during_activation() {
+        let pool = test_pool().await;
+        cleanup_throwaway_flakes(&pool).await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+        let attempt = start_eval(&pool, commit_id).await;
+        let system = successful_system("obsolete-contract-recovery");
+        let check = passing_policy_check("obsolete-contract-recovery");
+
+        let first = persist_evaluated_system(&pool, commit_id, attempt, &system, &check, &[])
+            .await
+            .expect("initial authoritative result should persist");
+        let derivation_id = match first {
+            SystemPersistenceOutcome::NeedsBuildPreparation { derivation_id, .. } => derivation_id,
+            other => panic!("initial persistence should require activation, got {other:?}"),
+        };
+        let initial = activate_evaluated_system_build(&pool, commit_id, attempt, derivation_id)
+            .await
+            .expect("initial activation should succeed");
+        let build_job_id = match initial {
+            SystemBuildActivationOutcome::Queued { build_job_id } => build_job_id,
+            other => panic!("initial activation should queue a job, got {other:?}"),
+        };
+
+        assert!(
+            crate::queries::builders::mark_queued_verified_source_job_obsolete(
+                &pool,
+                &build_job_id,
+                "published source uses an obsolete evaluator contract",
+            )
+            .await
+            .expect("obsolete transition should execute")
+        );
+
+        // A successful result reaches this persistence boundary only after the
+        // authoritative evaluator publishes and evaluates the verified source.
+        let republished = persist_evaluated_system(&pool, commit_id, attempt, &system, &check, &[])
+            .await
+            .expect("authoritative re-evaluation should persist");
+        assert!(
+            matches!(
+                republished,
+                SystemPersistenceOutcome::NeedsBuildPreparation {
+                    derivation_id: id,
+                    ..
+                } if id == derivation_id
+            ),
+            "obsolete job should require controlled reactivation, got {republished:?}"
+        );
+
+        let revived = activate_evaluated_system_build(&pool, commit_id, attempt, derivation_id)
+            .await
+            .expect("controlled reactivation should succeed");
+        assert_eq!(
+            revived,
+            SystemBuildActivationOutcome::Queued { build_job_id }
+        );
+        let state: (String, Option<String>) =
+            sqlx::query_as("SELECT status, server_failure_code FROM build_jobs WHERE id = $1")
+                .bind(build_job_id)
+                .fetch_one(&pool)
+                .await
+                .expect("revived job should load");
+        assert_eq!(state, ("queued".to_string(), None));
 
         let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
             .bind(flake_id)

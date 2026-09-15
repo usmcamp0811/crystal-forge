@@ -1,4 +1,4 @@
-{ flakeRef, policyCheckers, requestedRevision }:
+{ flakeRef, policyCheckers, requestedRevision, resolvedRevisionOverride ? null }:
 
 let
   flake = builtins.getFlake flakeRef;
@@ -18,7 +18,10 @@ builtins.mapAttrs
         policies = (checker cfg.config) // {
           cfAgentEnabled = cfAgentEnabled cfg.config;
           requestedSourceRevision = requestedRevision;
-          resolvedSourceRevision = flake.sourceInfo.rev or null;
+          resolvedSourceRevision =
+            if resolvedRevisionOverride != null
+            then resolvedRevisionOverride
+            else flake.sourceInfo.rev or null;
         };
       };
     })

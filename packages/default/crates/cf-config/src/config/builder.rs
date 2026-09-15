@@ -91,7 +91,7 @@ impl Default for BuilderConfig {
             source_mirror_root: PathBuf::from("/var/lib/crystal-forge/flake-mirrors"),
             source_worktree_root: PathBuf::from("/var/lib/crystal-forge/flake-worktrees"),
             cleanup_source_worktrees: true,
-            allow_import_from_derivation: false,
+            allow_import_from_derivation: true,
             cve_scanning_enabled: true,
         }
     }
@@ -152,7 +152,7 @@ mod tests {
         let config = BuilderConfig::default();
 
         assert!(config.supports_execution_strategy(RemoteBuildExecutionStrategy::ServerDerivation));
-        assert!(!config.allow_import_from_derivation);
+        assert!(config.allow_import_from_derivation);
         assert!(config.cve_scanning_enabled);
         assert!(
             !config.supports_execution_strategy(
