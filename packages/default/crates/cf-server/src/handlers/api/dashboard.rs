@@ -351,7 +351,8 @@ fn parse_cve_severity(value: &str) -> crate::api::models::CveSeverity {
         "critical" => crate::api::models::CveSeverity::Critical,
         "high" => crate::api::models::CveSeverity::High,
         "medium" => crate::api::models::CveSeverity::Medium,
-        _ => crate::api::models::CveSeverity::Low,
+        "low" => crate::api::models::CveSeverity::Low,
+        _ => crate::api::models::CveSeverity::Unknown,
     }
 }
 

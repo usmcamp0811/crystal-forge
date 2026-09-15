@@ -850,14 +850,16 @@ part of the stable finding identity.
 | Method | Endpoint | Role | Description |
 |--------|----------|------|-------------|
 | GET | `/systems/:id/cves` | Viewer+ | Return the compatible bare array of current exact findings |
-| GET | `/systems/:id/cve-inventory` | Viewer+ | Return typed exact, legacy, or no-scan inventory state |
+| GET | `/systems/:id/cve-inventory` | Viewer+ | Return the complete compatibility inventory up to 1,000 rows |
+| GET | `/systems/:id/cve-inventory-page` | Viewer+ | Return a bounded typed exact, legacy, or no-scan inventory page |
 
-The typed inventory response contains `authority`,
-`exact_authority_failure`, `source`, and `vulnerabilities`. `authority` is
-`exact`, `legacy`, or `no_scan`. `source` contains the real scan ID, scanner
-name and optional version, and completion time. The server selects exact
-authority independently of finding count in one repeatable-read transaction.
-An exact clean scan therefore cannot fall back to stale legacy findings.
+The paged inventory response contains `authority`,
+`exact_authority_failure`, `source`, `vulnerabilities`, `metadata`, `has_more`,
+`inventory_revision`, and `next_cursor`. `authority` is `exact`, `legacy`, or `no_scan`. `source`
+contains the real scan ID, scanner name and optional version, and completion
+time. The server selects exact authority independently of finding count in one
+read-only repeatable-read transaction. An exact clean scan therefore cannot
+fall back to stale legacy findings.
 
 When exact authority is unavailable, the server selects the latest completed
 legacy scan under the bounded `view_system_vulnerabilities` semantics. A
@@ -871,6 +873,39 @@ finding attach/link/reopen, verification, and closure continue to resolve
 retained generation, store path, verified lineage, certified snapshot,
 schema-1 scan, and immutable observation authority independently and fail
 closed for legacy or no-scan input.
+
+The paged route accepts `limit` from 1 through 500 with a default of 100, an opaque
+`after` cursor, `q` up to 200 normalized characters, comma-separated `severity`
+values (`critical`, `high`, `medium`, `low`, or `unknown`), and comma-separated
+fix-availability `status` values (`open` or `fix_available`). Status does not
+represent triage state. SQL applies filters before full-scope metadata and page
+selection. Severity metadata includes the active severity filter.
+
+Rows use C-collated keyset order by canonical CVE ID and canonical package
+name. Each row exposes both values as its stable identity. The versioned cursor
+binds the system, authority, scan, normalized filters, inventory revision, and
+last identity. The revision covers the selected source and every mutable field
+that affects stable identity, search, severity and fix-availability filters,
+order, or totals. Description, CVSS changes within one severity, justification,
+and exact remediation state do not invalidate membership pagination. The server
+hydrates those display and remediation fields from current authorized state for
+only the returned rows. The cursor position is unsigned and non-authoritative;
+tampering can only skip rows within an inventory that the caller can already
+read.
+Malformed cursors return 400 after system authorization. Source, system, or
+filter mismatch returns `inventory_changed` with status 409. Hidden and absent
+systems return the same 404 before cursor validation. Requests without query
+parameters receive the bounded first page; clients that need the full
+inventory must follow `next_cursor`. Exact remediation context is loaded only
+for exact rows in the returned page. Legacy rows never receive it.
+
+The compatibility route keeps the original DTO and severity-first order. It
+returns the complete selected inventory when there are at most 1,000 stable
+rows and returns HTTP 400 above that bound. Rolling deployments can therefore
+serve old clients from the compatibility route while the current Web UI uses
+the paged route. Unknown or unrecognized source severity serializes as `low` on
+the compatibility route; the paged route preserves the explicit `unknown`
+value.
 
 ### Exact-CVE POA&M Routes
 

@@ -43,13 +43,13 @@ use crate::api::models::{
     OptionChangeKind, OptionDefinitionProvenance, OptionInventoryState, SafeOptionValue,
     SaveHardeningJustificationRequest, SelectedEvaluationSummary, SevenDayDriftStatus,
     SnapshotLifecycle, SnapshotRevisionMode, SystemAgentEvent, SystemCommitHistory,
-    SystemComplianceBundle, SystemCveInventoryAuthority, SystemCveInventoryResponse,
+    SystemComplianceBundle, SystemCveInventoryAuthority, SystemCveInventoryPageResponse,
     SystemDeploymentProgress, SystemDetail, SystemGeneration, SystemHistoryEntry,
     SystemRollbackGenerationRequest, SystemRollbackRequest, SystemVulnerability,
     TrackedFlakeIdentity, TypedOptionDiff, VerifyGenerationClosureRequest,
 };
 use crate::components::compliance::EvidenceDrawer;
-use crate::components::cve::CvesTab;
+use crate::components::cve::{CveInventoryPaginationState, CvesTab};
 use crate::components::dialog_focus::{
     DialogFocusBoundary, DialogFocusRestore, DialogFocusSentinel,
 };
@@ -141,7 +141,7 @@ const POLICY_JSON_SAMPLE: &str = r#"[
 /// renders as a real empty/error state (TASK-353 review).
 #[derive(Debug, Clone, PartialEq)]
 struct VulnerabilitiesLoad {
-    inventory: Option<SystemCveInventoryResponse>,
+    inventory: Option<SystemCveInventoryPageResponse>,
     error: Option<String>,
     redirect_to_login: bool,
 }
@@ -556,6 +556,7 @@ pub fn SystemDetailView(
     let mut flake_commit_peek_reload = use_signal(|| 0_u64);
     // Reload nonce for system detail — incremented after edit-save to re-fetch the system.
     let mut detail_reload = use_signal(|| 0_u64);
+    let mut cve_pagination = use_signal(CveInventoryPaginationState::default);
 
     // Live clock tick for relative timers/heartbeat countdowns while page is open.
     let mut now_tick = use_signal(Utc::now);
@@ -605,7 +606,7 @@ pub fn SystemDetailView(
                 };
             };
 
-            match fetch_system_cve_inventory(&system_id).await {
+            match fetch_system_cve_inventory(&system_id, None).await {
                 Ok(inventory) => VulnerabilitiesLoad {
                     inventory: Some(inventory),
                     error: None,
@@ -625,6 +626,13 @@ pub fn SystemDetailView(
                 },
             }
         }
+    });
+    let vulnerabilities_resource_for_state = vulnerabilities_resource.clone();
+    use_effect(move || {
+        let Some(load) = vulnerabilities_resource_for_state.read().as_ref().cloned() else {
+            return;
+        };
+        cve_pagination.write().reset(load.inventory);
     });
 
     let mut deployment_progress_poll_tick = use_signal(|| 0_u64);
@@ -950,7 +958,7 @@ pub fn SystemDetailView(
         };
     }
     let vulnerabilities_loading = vulnerabilities_resource.read_unchecked().is_none();
-    let cve_inventory = vulnerabilities_load.inventory.clone();
+    let cve_inventory = cve_pagination.read().inventory.clone();
     let vulnerabilities = cve_inventory
         .as_ref()
         .map(|inventory| inventory.vulnerabilities.clone())
@@ -1500,6 +1508,10 @@ pub fn SystemDetailView(
                             system_id: system.id,
                             hostname: system.hostname.clone(),
                             vulnerabilities: vulnerabilities.clone(),
+                            inventory_metadata: cve_inventory
+                                .as_ref()
+                                .map(|inventory| inventory.metadata.clone())
+                                .unwrap_or_default(),
                             inventory_authority: cve_inventory
                                 .as_ref()
                                 .map(|inventory| inventory.authority),
@@ -1512,7 +1524,40 @@ pub fn SystemDetailView(
                             allow_mutations: can_mutate,
                             loading: vulnerabilities_loading,
                             error: vulnerabilities_error.clone(),
+                            has_more: cve_inventory
+                                .as_ref()
+                                .is_some_and(|inventory| inventory.has_more),
+                            continuation_loading: cve_pagination.read().continuation_loading,
+                            continuation_error: cve_pagination.read().continuation_error.clone(),
+                            on_load_more: move |_| {
+                                let Some(request) = cve_pagination.write().begin_continuation() else {
+                                    return;
+                                };
+                                let cursor = request.cursor.clone();
+                                spawn(async move {
+                                    match fetch_system_cve_inventory(&system.id, Some(&cursor)).await {
+                                        Ok(page) => {
+                                            let source_matches = cve_pagination
+                                                .write()
+                                                .complete_continuation(&request, page);
+                                            if !source_matches {
+                                                cve_pagination.write().reset(None);
+                                                vulnerabilities_resource.restart();
+                                            }
+                                        }
+                                        Err(ApiClientError::Status { code: 409, .. }) => {
+                                            cve_pagination.write().reset(None);
+                                            vulnerabilities_resource.restart();
+                                        }
+                                        Err(error) => cve_pagination.write().fail_continuation(
+                                            &request,
+                                            error.to_string(),
+                                        ),
+                                    }
+                                });
+                            },
                             on_saved: move |_| {
+                                cve_pagination.write().reset(None);
                                 vulnerabilities_resource.restart();
                             },
                             on_open_poam: move |poam_id| {

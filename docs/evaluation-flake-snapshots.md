@@ -294,7 +294,12 @@ It uses the same retained deployed-generation authority and latest schema-1
 scan. It does not select vulnerability rows by hostname. Missing exact evidence
 returns an empty row set instead of inferred mutable rows.
 
-`GET /systems/:id/cve-inventory` is the read-only inventory route. It selects
+`GET /systems/:id/cve-inventory` is the complete compatibility inventory route.
+It preserves the original response shape and severity-first order. It returns
+HTTP 400 when the selected inventory exceeds 1,000 stable rows. Unknown or
+unrecognized source severity serializes as `low` for legacy clients.
+
+`GET /systems/:id/cve-inventory-page` is the read-only paged inventory route. It selects
 authority before it reads findings in one repeatable-read snapshot. An exact
 schema-1 scan wins even when the scan is clean. If exact authority is
 unavailable, the route uses the bounded latest completed scan semantics from
@@ -304,15 +309,52 @@ usable, the response is `no_scan`. The response includes the real scan ID,
 scanner name and version, completion time, and the first typed exact-authority
 failure. It never unions exact and legacy rows.
 
-Both routes limit findings to 1,000 stable CVE and canonical-package identities.
-A deterministic exact occurrence supplies each exact row's observed name and
-complete version text. Package version is evidence and is not part of exact
-relationship identity. Legacy rows can show or update ordinary inventory
-justification state, but they do not contain exact relationship context and
-cannot authorize POA&M creation, patch scheduling, verification, closure,
-finding linking, or reopening. An ordinary justification does not create exact
-remediation authority. The server does not backfill schema-0 scans, synthesize
-observations, or infer retained lineage.
+The paged route uses keyset pagination ordered by the stable
+`(canonical_cve_id, canonical_package_name)` identity under PostgreSQL C
+collation. `limit` defaults to 100 and accepts 1 through 500. `after` is an
+opaque versioned cursor. The cursor binds the system, authority, selected scan,
+normalized filters, deterministic `inventory_revision`, and last stable
+identity. The revision covers only the selected source and fields that affect stable identity, search,
+severity and fix-availability filters, order, or totals. Description, CVSS
+changes within one severity, justification, and exact remediation state do not
+invalidate membership pagination. The server hydrates those values from current
+authorized state only for rows in the returned page. The cursor is unsigned and
+is not an authorization credential. Changing its position can only skip
+authorized rows. The server authorizes system visibility before it
+parses the cursor. A malformed cursor for a visible system returns 400. A valid
+cursor with a different system, authority, scan, or filter fingerprint returns
+409 with `inventory_changed`. Hidden and absent systems return the same 404
+without disclosing cursor validity.
+
+`q` is normalized to lower case with repeated whitespace collapsed and is
+limited to 200 characters. It searches canonical CVE ID, canonical package
+name, observed package name, and installed version case-insensitively.
+`severity` accepts comma-separated `critical`, `high`, `medium`, `low`, and
+`unknown` values. `status` accepts comma-separated `open` and `fix_available`
+values. These statuses report fix availability; they are not triage or POA&M
+states. Values within each filter are OR selections, and filter categories are
+combined with AND. SQL applies all filters before totals and page selection.
+
+Each paged response includes full filtered-scope stable finding, distinct CVE,
+distinct canonical package, and severity counts. Severity counts use the same
+scope, including the severity filter itself. The server fetches `limit + 1`
+rows and returns `has_more` and `next_cursor`. Metadata and revision computation
+can scan the complete selected inventory, but they use aggregate state with
+bounded memory. The row response and exact relationship hydration remain page
+bounded. Descriptions and selected justifications are hydrated only after page
+selection. Current Web UI clients call only the named paged route. Older clients
+continue to use the complete compatibility route during rolling upgrades.
+
+The compatible bare-array `/cves` route also retains its 1,000-row bound. A deterministic
+exact occurrence supplies each exact row's observed name and complete version
+text. Package version is evidence and is not part of exact relationship
+identity. The typed route loads exact remediation relationship context only for
+the exact rows in the current page. Legacy rows can show or update ordinary
+inventory justification state, but they do not contain exact relationship
+context and cannot authorize POA&M creation, patch scheduling, verification,
+closure, finding linking, or reopening. An ordinary justification does not
+create exact remediation authority. The server does not backfill schema-0
+scans, synthesize observations, or infer retained lineage.
 
 Exact-CVE POA&M and deployment-state writers use `READ
 COMMITTED` transactions and acquire locks in this order: all canonical CVE

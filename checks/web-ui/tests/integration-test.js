@@ -9378,7 +9378,7 @@ const steps = [
         canonical_package_name: "linux-kernel",
       };
 
-      await page.route("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cve-inventory", async (route) => {
+      await page.route("**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cve-inventory*", async (route) => {
         const vulnerabilities = [
           {
             cve_id: "CVE-2025-1111",
@@ -9441,7 +9441,14 @@ const steps = [
             justification_reason: null,
             justification_updated_at: null,
           },
-        ];
+        ].map((vulnerability) => ({
+          ...vulnerability,
+          stable_identity: {
+            canonical_cve_id: vulnerability.cve_id,
+            canonical_package_name: vulnerability.package_name,
+          },
+          canonical_package_name: vulnerability.package_name,
+        }));
 
         const payload = {
           authority: "exact",
@@ -9453,6 +9460,15 @@ const steps = [
             completed_at: "2026-04-10T09:00:00Z",
           },
           vulnerabilities,
+          metadata: {
+            total_findings: 3,
+            total_cves: 2,
+            total_packages: 3,
+            severity: { critical: 0, high: 2, medium: 0, low: 1, unknown: 0 },
+          },
+          inventory_revision: justificationSaved ? "justified-revision" : "initial-revision",
+          has_more: false,
+          next_cursor: null,
         };
 
         await route.fulfill({
@@ -9501,7 +9517,7 @@ const steps = [
       });
       await page.waitForTimeout(1200);
 
-      await page.getByRole("button", { name: "CVEs" }).first().click();
+      await page.getByRole("tab", { name: "CVEs" }).first().click();
 
       await assertVisible(
         page.getByTestId("system-cves-exact"),
@@ -9510,7 +9526,7 @@ const steps = [
       );
 
       await assertVisible(
-        page.getByText("3 of 3 shown · 3 packages").first(),
+        page.getByText("3 of 3 shown · 3 of 3 packages loaded").first(),
         "Expected package-first CVE count to preserve distinct package instances",
         12000,
       );
@@ -9642,17 +9658,116 @@ const steps = [
   },
   {
     name: "12ha-system-detail-cve-inventory-fallbacks",
-    description: "System detail preserves legacy CVE inventory while disabling remediation and distinguishes clean and no-scan states",
+    description: "System detail incrementally loads bounded CVE pages with authoritative totals and preserves exact, legacy, clean, and no-scan states",
     action: async (page) => {
       await routeSystemsWarningData(page);
-      let inventoryState = "legacy-findings";
+      let inventoryState = "exact-large";
+      const firstCursor = "page-100";
+      const inventoryRequests = [];
+      let rejectNextContinuation = true;
+      let inventoryRevision = 1;
+      const largeInventory = Array.from({ length: 1315 }, (_, index) => {
+        const suffix = String(index).padStart(4, "0");
+        return {
+          stable_identity: {
+            canonical_cve_id: `CVE-2026-${suffix}`,
+            canonical_package_name: `package-${suffix}`,
+          },
+          cve_id: `CVE-2026-${suffix}`,
+          canonical_package_name: `package-${suffix}`,
+          severity: index === 0 ? "unknown" : index % 2 === 0 ? "high" : "medium",
+          cvss_score: index === 0 ? null : index % 2 === 0 ? 8.1 : 5.4,
+          description: `Bounded inventory finding ${suffix}`,
+          package_name: `package-${suffix}`,
+          installed_version: `1.0.${index}`,
+          fixed_version: index % 2 === 0 ? `1.1.${index}` : null,
+          first_seen: "2026-04-10T09:00:00Z",
+          published_at: "2026-04-08T00:00:00Z",
+          status: index % 2 === 0 ? "fix_available" : "open",
+          justification_category: null,
+          justification_reason: null,
+          justification_updated_at: null,
+          remediation: null,
+        };
+      });
+      const metadata = (totalFindings, includesUnknown = false) => ({
+        total_findings: totalFindings,
+        total_cves: totalFindings,
+        total_packages: totalFindings,
+        severity: {
+          critical: 0,
+          high: Math.ceil(totalFindings / 2) - (includesUnknown ? 1 : 0),
+          medium: Math.floor(totalFindings / 2),
+          low: 0,
+          unknown: includesUnknown ? 1 : 0,
+        },
+      });
 
       await page.route(
-        "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cve-inventory",
+        "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cve-inventory*",
         async (route) => {
+          const requestUrl = new URL(route.request().url());
+          inventoryRequests.push(requestUrl);
+          if (!requestUrl.pathname.endsWith("/cve-inventory-page")) {
+            throw new Error(`Expected the versioned paged inventory route, got ${requestUrl.pathname}`);
+          }
+          if (requestUrl.searchParams.get("limit") !== "100") {
+            throw new Error(`Expected bounded limit=100, got ${requestUrl.search}`);
+          }
+          if (inventoryState === "exact-large") {
+            const after = requestUrl.searchParams.get("after");
+            if (after !== null && rejectNextContinuation) {
+              rejectNextContinuation = false;
+              inventoryRevision += 1;
+              await route.fulfill({
+                status: 409,
+                contentType: "application/json",
+                body: JSON.stringify({
+                  error: "inventory_changed",
+                  message: "System CVE inventory changed; restart from the first page",
+                }),
+              });
+              return;
+            }
+            const firstPage = after === null;
+            const start = firstPage ? 0 : Number.parseInt(after?.replace("page-", ""), 10);
+            if (!firstPage && (!after?.startsWith("page-") || !Number.isInteger(start))) {
+              throw new Error(`Expected an opaque continuation cursor, got ${after}`);
+            }
+            const vulnerabilities = firstPage
+              ? largeInventory.slice(0, 100)
+              : [largeInventory[start - 1], ...largeInventory.slice(start, start + 100)];
+            const hasMore = start + 100 < largeInventory.length;
+            await route.fulfill({
+              status: 200,
+              contentType: "application/json",
+              body: JSON.stringify({
+                authority: "exact",
+                exact_authority_failure: null,
+                source: {
+                  scan_id: "00000000-0000-0000-0000-000000000c45",
+                  scanner_name: "vulnix",
+                  scanner_version: "1.10.1",
+                  completed_at: "2026-04-10T09:00:00Z",
+                },
+                vulnerabilities,
+                metadata: metadata(1315, true),
+                inventory_revision: `exact-large-revision-${inventoryRevision}`,
+                has_more: hasMore,
+                next_cursor: hasMore ? `page-${start + 100}` : null,
+              }),
+            });
+            return;
+          }
+
           const vulnerabilities = inventoryState === "legacy-findings"
             ? [{
+                stable_identity: {
+                  canonical_cve_id: "CVE-2025-4400",
+                  canonical_package_name: "legacy-openssl",
+                },
                 cve_id: "CVE-2025-4400",
+                canonical_package_name: "legacy-openssl",
                 severity: "high",
                 cvss_score: 8.4,
                 description: "Finding retained from a pre-upgrade CVE scan",
@@ -9668,12 +9783,15 @@ const steps = [
               }]
             : [];
           const noScan = inventoryState === "no-scan";
+          const exact = inventoryState === "exact-clean";
           await route.fulfill({
             status: 200,
             contentType: "application/json",
             body: JSON.stringify({
-              authority: noScan ? "no_scan" : "legacy",
-              exact_authority_failure: noScan
+              authority: noScan ? "no_scan" : exact ? "exact" : "legacy",
+              exact_authority_failure: exact
+                ? null
+                : noScan
                 ? "missing_current_generation"
                 : "no_schema1_current_scan",
               source: noScan
@@ -9685,6 +9803,10 @@ const steps = [
                     completed_at: "2026-04-09T08:00:00Z",
                   },
               vulnerabilities,
+              metadata: metadata(vulnerabilities.length),
+              inventory_revision: `${inventoryState}-revision`,
+              has_more: false,
+              next_cursor: null,
             }),
           });
         },
@@ -9694,10 +9816,74 @@ const steps = [
         await page.goto(`${baseUrl}/systems/00000000-0000-0000-0000-0000000000a1`, {
           timeout: LOAD_TIMEOUT,
         });
-        await page.getByRole("button", { name: "CVEs" }).first().click();
+        await page.getByRole("tab", { name: "CVEs" }).first().click();
       };
 
       try {
+        await openCves();
+        await assertVisible(
+          page.getByTestId("system-cves-exact"),
+          "Expected exact CVE inventory state",
+          12000,
+        );
+        await assertVisible(
+          page.getByText("100 of 1,315 shown · 100 of 1,315 packages loaded", { exact: true }),
+          "Expected first page to show authoritative full-scope totals",
+        );
+        if (inventoryRequests.length !== 1 || inventoryRequests[0].searchParams.has("after")) {
+          throw new Error("Expected one bounded first-page request without a cursor");
+        }
+        const unknownPackage = page.getByRole("button", { name: /package-0000/ });
+        await assertVisible(unknownPackage, "Expected unknown-only package summary");
+        await assertVisible(
+          unknownPackage.getByText("max CVSS unavailable", { exact: false }),
+          "Expected unknown-only package not to report CVSS 0.0",
+        );
+        await assertVisible(
+          unknownPackage.getByText("1 unknown", { exact: true }),
+          "Expected explicit Unknown package summary",
+        );
+        await unknownPackage.click();
+        await assertVisible(
+          page.getByText("Unknown", { exact: true }).first(),
+          "Expected explicit Unknown row severity",
+        );
+        const conflictResponse = page.waitForResponse(
+          (response) => response.url().includes("/cve-inventory-page") && response.status() === 409,
+        );
+        const refreshedResponse = page.waitForResponse((response) => {
+          const responseUrl = new URL(response.url());
+          return responseUrl.pathname.endsWith("/cve-inventory-page")
+            && !responseUrl.searchParams.has("after")
+            && response.status() === 200;
+        });
+        await page.getByRole("button", { name: "Load more vulnerabilities" }).click();
+        await conflictResponse;
+        await refreshedResponse;
+        if (
+          inventoryRequests.length < 3
+          || inventoryRequests[1].searchParams.get("after") !== firstCursor
+          || inventoryRequests[2].searchParams.has("after")
+        ) {
+          throw new Error("Expected a changed-inventory conflict to restart from page zero");
+        }
+        while (await page.getByRole("button", { name: "Load more vulnerabilities" }).count()) {
+          await page.getByRole("button", { name: "Load more vulnerabilities" }).click();
+          await page.waitForTimeout(100);
+        }
+        await assertVisible(
+          page.getByText("1,315 of 1,315 shown · 1,315 of 1,315 packages loaded", { exact: true }),
+          "Expected every stable identity to remain reachable without duplicate rows",
+          12000,
+        );
+        if (inventoryRequests.length !== 16 || inventoryRequests[3].searchParams.get("after") !== firstCursor) {
+          throw new Error("Expected load-more request to preserve the opaque cursor");
+        }
+        if (await page.getByText("package-0099", { exact: true }).count() !== 1) {
+          throw new Error("Expected duplicate stable identity to render once after append");
+        }
+
+        inventoryState = "legacy-findings";
         await openCves();
         const legacy = page.getByTestId("system-cves-legacy");
         await assertVisible(legacy, "Expected legacy CVE inventory state", 12000);
@@ -9712,6 +9898,7 @@ const steps = [
         if (await page.getByRole("button", { name: "Create POA&M" }).count()) {
           throw new Error("Legacy inventory exposed exact POA&M creation");
         }
+        await page.getByRole("button", { name: /legacy-openssl/ }).click();
         const justify = page.getByRole("button", { name: "Justify" });
         await assertVisible(
           justify,
@@ -9721,6 +9908,14 @@ const steps = [
         await assertVisible(
           page.getByRole("heading", { name: "Justification — CVE-2025-4400" }),
           "Expected the legacy finding justification editor",
+        );
+
+        inventoryState = "exact-clean";
+        await openCves();
+        await assertVisible(
+          page.getByTestId("system-cves-exact").getByText("Exact scan clean.", { exact: false }),
+          "Expected exact-clean state to use authoritative zero totals",
+          12000,
         );
 
         inventoryState = "legacy-clean";
@@ -9748,7 +9943,7 @@ const steps = [
         );
       } finally {
         await page.unroute(
-          "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cve-inventory",
+          "**/api/v1/systems/00000000-0000-0000-0000-0000000000a1/cve-inventory*",
         );
         await unrouteSystemsWarningData(page);
       }

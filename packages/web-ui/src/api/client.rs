@@ -964,11 +964,37 @@ where
     }
 }
 
-/// Fetches the typed read-only CVE inventory for a single system.
+const SYSTEM_CVE_INVENTORY_PAGE_SIZE: u16 = 100;
+
+#[derive(serde::Serialize)]
+struct SystemCveInventoryPageQuery<'a> {
+    limit: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    after: Option<&'a str>,
+}
+
+fn system_cve_inventory_url(
+    base: &str,
+    id: &Uuid,
+    after: Option<&str>,
+) -> Result<String, ApiClientError> {
+    let query = serde_urlencoded::to_string(SystemCveInventoryPageQuery {
+        limit: SYSTEM_CVE_INVENTORY_PAGE_SIZE,
+        after,
+    })
+    .map_err(|error| ApiClientError::Deserialize(error.to_string()))?;
+    Ok(format!("{base}/systems/{id}/cve-inventory-page?{query}"))
+}
+
+/// Fetches one bounded page of the typed read-only CVE inventory for a system.
+///
+/// Callers must treat `after` as opaque and pass only a server-issued
+/// [`SystemCveInventoryPageResponse::next_cursor`] value.
 pub async fn fetch_system_cve_inventory(
-    id: &uuid::Uuid,
-) -> Result<SystemCveInventoryResponse, ApiClientError> {
-    let url = format!("{}/systems/{}/cve-inventory", base_url(), id);
+    id: &Uuid,
+    after: Option<&str>,
+) -> Result<SystemCveInventoryPageResponse, ApiClientError> {
+    let url = system_cve_inventory_url(&base_url(), id, after)?;
     fetch_json(&url).await
 }
 
@@ -3200,6 +3226,27 @@ pub async fn delete_policy_mapping(
 #[cfg(test)]
 mod config_observation_tests {
     use super::*;
+
+    #[test]
+    fn system_cve_inventory_url_bounds_pages_and_encodes_opaque_cursor() {
+        let id = Uuid::from_u128(440);
+        assert_eq!(
+            system_cve_inventory_url("https://example.test/api/v1", &id, None)
+                .expect("page URL should serialize"),
+            format!("https://example.test/api/v1/systems/{id}/cve-inventory-page?limit=100")
+        );
+        assert_eq!(
+            system_cve_inventory_url(
+                "https://example.test/api/v1",
+                &id,
+                Some("opaque+/= cursor&scope")
+            )
+            .expect("cursor URL should serialize"),
+            format!(
+                "https://example.test/api/v1/systems/{id}/cve-inventory-page?limit=100&after=opaque%2B%2F%3D+cursor%26scope"
+            )
+        );
+    }
 
     fn request(
         kind: ConfigObservationKind,

@@ -126,6 +126,8 @@ pub enum CveSeverity {
     High,
     Medium,
     Low,
+    /// Reports that no normalized CVSS severity is available.
+    Unknown,
 }
 
 /// Pipeline stage for a NixOS system's build/deploy lifecycle.
@@ -419,6 +421,56 @@ pub struct SystemVulnerability {
     pub remediation: Option<crate::models::poam::CvePoamRelationship>,
 }
 
+/// Identifies one stable system CVE inventory row.
+///
+/// Package version and observed derivation path are evidence context. They are
+/// not part of this identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SystemCveInventoryRowIdentity {
+    /// Gives the canonical CVE identifier.
+    pub canonical_cve_id: String,
+    /// Gives the canonical package name.
+    pub canonical_package_name: String,
+}
+
+/// Contains one vulnerability from a bounded system inventory page.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemCveInventoryVulnerability {
+    /// Gives the stable row identity used by pagination and remediation lookup.
+    pub stable_identity: SystemCveInventoryRowIdentity,
+    /// Gives the canonical CVE identifier.
+    pub cve_id: String,
+    /// Gives the canonical package name independent of scanner display text.
+    pub canonical_package_name: String,
+    /// Gives the normalized CVSS severity.
+    pub severity: CveSeverity,
+    /// Gives the current CVSS v3 score when available.
+    pub cvss_score: Option<f64>,
+    /// Gives the current CVE description.
+    pub description: String,
+    /// Gives the package name emitted by the selected evidence source.
+    pub package_name: String,
+    /// Gives the installed version emitted by the selected evidence source.
+    pub installed_version: String,
+    /// Gives the known fixed version when available.
+    pub fixed_version: Option<String>,
+    /// Gives the selected scan completion time when available.
+    pub first_seen: Option<DateTime<Utc>>,
+    /// Gives the CVE publication time when available.
+    pub published_at: Option<DateTime<Utc>>,
+    /// Gives the truthful fix status, either `open` or `fix_available`.
+    pub status: String,
+    /// Gives the applicable justification category when present.
+    pub justification_category: Option<String>,
+    /// Gives the applicable justification reason when present.
+    pub justification_reason: Option<String>,
+    /// Gives the applicable justification update time when present.
+    pub justification_updated_at: Option<DateTime<Utc>>,
+    /// Provides exact remediation context only for an exact row on this page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remediation: Option<crate::models::poam::CvePoamRelationship>,
+}
+
 /// Identifies the evidence authority used for a system CVE inventory read.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -469,12 +521,63 @@ pub struct SystemCveInventorySource {
     pub completed_at: DateTime<Utc>,
 }
 
-/// Returns one non-unioned CVE inventory source for a system.
+/// Counts severities over the same filtered scope as inventory totals.
+///
+/// The counts include the active severity filter. They are not an
+/// own-filter-excluding facet.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SystemCveInventorySeverityCounts {
+    /// Counts critical findings.
+    pub critical: i64,
+    /// Counts high findings.
+    pub high: i64,
+    /// Counts medium findings.
+    pub medium: i64,
+    /// Counts low findings.
+    pub low: i64,
+    /// Counts findings without a CVSS severity.
+    pub unknown: i64,
+}
+
+/// Contains authoritative totals for the complete filtered inventory source.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SystemCveInventoryMetadata {
+    /// Counts stable CVE and canonical-package identities.
+    pub total_findings: i64,
+    /// Counts distinct canonical CVE identifiers.
+    pub total_cves: i64,
+    /// Counts distinct canonical package names.
+    pub total_packages: i64,
+    /// Counts severities over the same active filter scope.
+    pub severity: SystemCveInventorySeverityCounts,
+}
+
+/// Defines bounded filters and keyset position for a system inventory read.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SystemCveInventoryParams {
+    /// Limits the page to 1 through 500 rows. The default is 100 rows.
+    pub limit: Option<u16>,
+    /// Continues after an opaque server-issued cursor.
+    pub after: Option<String>,
+    /// Searches canonical CVE, canonical package, observed package, and version.
+    /// The normalized search is limited to 200 Unicode scalar values.
+    pub q: Option<String>,
+    /// Selects comma-separated severities from critical, high, medium, low, and
+    /// unknown.
+    pub severity: Option<String>,
+    /// Selects comma-separated truthful fix states from open and fix_available.
+    pub status: Option<String>,
+}
+
+/// Returns one complete non-unioned CVE inventory source for a system.
 ///
 /// `Exact` takes precedence even when `vulnerabilities` is empty. `Legacy`
 /// rows never contain server-issued exact remediation context. Inventory
 /// authority does not redefine the ordinary system justification API. `NoScan`
-/// has no source and no rows.
+/// has no source and no rows. The legacy endpoint returns at most 1,000 rows and
+/// returns HTTP 400 when the complete inventory exceeds that bound. For client
+/// compatibility, the legacy handler maps unknown source severities to `low`
+/// before it constructs this DTO.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemCveInventoryResponse {
     /// Identifies the authority selected for this response.
@@ -483,8 +586,43 @@ pub struct SystemCveInventoryResponse {
     pub exact_authority_failure: Option<ExactCveAuthorityFailureReason>,
     /// Gives the selected scan provenance, including for a clean scan.
     pub source: Option<SystemCveInventorySource>,
-    /// Contains findings from only the selected source.
+    /// Contains all findings from only the selected source.
     pub vulnerabilities: Vec<SystemVulnerability>,
+}
+
+/// Returns one bounded page from a non-unioned system CVE inventory source.
+///
+/// Exact authority takes precedence over legacy evidence, including for a
+/// clean exact scan. The response metadata covers the complete filtered scope.
+/// Clients must restart from the first page after an `inventory_changed`
+/// conflict.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemCveInventoryPageResponse {
+    /// Identifies the authority selected for this response.
+    pub authority: SystemCveInventoryAuthority,
+    /// Reports why exact authority was unavailable for a fallback response.
+    pub exact_authority_failure: Option<ExactCveAuthorityFailureReason>,
+    /// Gives the selected scan provenance, including for a clean scan.
+    pub source: Option<SystemCveInventorySource>,
+    /// Contains findings from only the selected source and current page.
+    pub vulnerabilities: Vec<SystemCveInventoryVulnerability>,
+    /// Gives complete filtered-scope totals independent of the current page.
+    pub metadata: SystemCveInventoryMetadata,
+    /// Identifies the selected inventory and mutable membership dimensions.
+    ///
+    /// This opaque revision detects changes to ordering, filters, or totals
+    /// between page requests. Live remediation context does not invalidate the
+    /// inventory revision. The revision is not an authorization credential.
+    pub inventory_revision: String,
+    /// Reports whether another keyset page exists.
+    pub has_more: bool,
+    /// Continues this exact system, source, and normalized filter selection.
+    ///
+    /// The cursor is opaque but not an authorization credential. The server
+    /// first authorizes the requested system, then validates cursor version and
+    /// binding. Malformed cursors return 400. A changed system, authority,
+    /// source, or filter binding returns `inventory_changed` with status 409.
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3648,6 +3786,34 @@ pub struct ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn system_cve_inventory_page_serializes_pagination_contract() {
+        let response = SystemCveInventoryPageResponse {
+            authority: SystemCveInventoryAuthority::NoScan,
+            exact_authority_failure: Some(ExactCveAuthorityFailureReason::MissingCurrentGeneration),
+            source: None,
+            vulnerabilities: Vec::new(),
+            metadata: SystemCveInventoryMetadata::default(),
+            inventory_revision: "revision".into(),
+            has_more: false,
+            next_cursor: None,
+        };
+        let json = serde_json::to_value(response).expect("inventory response should serialize");
+        assert_eq!(json["authority"], "no_scan");
+        assert!(json["vulnerabilities"].is_array());
+        assert_eq!(json["metadata"]["total_findings"], 0);
+        assert_eq!(json["has_more"], false);
+        assert!(json["next_cursor"].is_null());
+
+        let identity = serde_json::to_value(SystemCveInventoryRowIdentity {
+            canonical_cve_id: "CVE-2099-0001".into(),
+            canonical_package_name: "openssl".into(),
+        })
+        .expect("stable identity should serialize");
+        assert_eq!(identity["canonical_cve_id"], "CVE-2099-0001");
+        assert_eq!(identity["canonical_package_name"], "openssl");
+    }
 
     #[test]
     fn cache_health_omits_unavailable_capacity() {

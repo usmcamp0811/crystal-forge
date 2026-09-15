@@ -1,15 +1,19 @@
 //! CVE-related database queries for the advanced CVE dashboard.
 
 use anyhow::Result;
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Transaction};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use uuid::Uuid;
 
 use crate::api::models::{
     CveAffectedSystemDetail, CveDetail, CveFilters, CveFleetStats, CveJustification,
     CveJustificationInput, CveListItem, CvePackageGroup, ExactCveAuthorityFailureReason,
-    SystemCveInventoryAuthority, SystemCveInventorySource,
+    SystemCveInventoryAuthority, SystemCveInventoryMetadata, SystemCveInventoryParams,
+    SystemCveInventorySeverityCounts, SystemCveInventorySource,
 };
 use crate::auth::extractors::AuthenticatedUser;
 
@@ -91,12 +95,17 @@ impl CveReadScope {
     }
 }
 
-// The inventory contracts reject a complete result above 1,000 stable
-// identities. Exact compatibility reads retain their existing truncation.
-const MAX_SYSTEM_CVE_INVENTORY_ROWS: usize = 1_000;
+/// Gives the default number of stable identities in an inventory page.
+pub const DEFAULT_SYSTEM_CVE_INVENTORY_PAGE_SIZE: u16 = 100;
+/// Gives the largest accepted system CVE inventory page.
+pub const MAX_SYSTEM_CVE_INVENTORY_PAGE_SIZE: u16 = 500;
+/// Gives the largest normalized inventory search in Unicode scalar values.
+pub const MAX_SYSTEM_CVE_INVENTORY_SEARCH_CHARS: usize = 200;
+const MAX_SYSTEM_CVE_INVENTORY_ROWS: u16 = 1_000;
 const MAX_EXACT_SYSTEM_VULNERABILITIES: i64 = 1_000;
+const MAX_FLEET_CVE_AFFECTED_SYSTEMS: usize = 1_000;
 
-/// Reports that a complete CVE inventory exceeds its supported row bound.
+/// Reports that a fleet CVE detail exceeds its complete affected-system bound.
 #[derive(Debug)]
 pub struct CveInventoryOverflow;
 
@@ -104,19 +113,74 @@ impl std::fmt::Display for CveInventoryOverflow {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             formatter,
-            "CVE inventory exceeds the {MAX_SYSTEM_CVE_INVENTORY_ROWS}-row limit"
+            "fleet CVE inventory exceeds the {MAX_FLEET_CVE_AFFECTED_SYSTEMS}-system limit"
         )
     }
 }
 
 impl std::error::Error for CveInventoryOverflow {}
 
-/// Reports whether an inventory read failed because its complete result was too large.
+/// Reports whether a fleet CVE detail exceeded its affected-system bound.
 pub fn is_cve_inventory_overflow(error: &anyhow::Error) -> bool {
     error.downcast_ref::<CveInventoryOverflow>().is_some()
 }
 
-/// Contains one vulnerability selected from authoritative deployed scan evidence.
+/// Reports that the complete legacy system inventory exceeds 1,000 rows.
+#[derive(Debug)]
+pub struct SystemCveInventoryOverflow;
+
+impl std::fmt::Display for SystemCveInventoryOverflow {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("system CVE inventory exceeds the 1000-row limit")
+    }
+}
+
+impl std::error::Error for SystemCveInventoryOverflow {}
+
+/// Reports whether a complete legacy system inventory exceeded 1,000 rows.
+pub fn is_system_cve_inventory_overflow(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<SystemCveInventoryOverflow>().is_some()
+}
+
+fn reject_inventory_overflow<T>(rows: Vec<T>) -> Result<Vec<T>> {
+    if rows.len() > MAX_FLEET_CVE_AFFECTED_SYSTEMS {
+        return Err(CveInventoryOverflow.into());
+    }
+    Ok(rows)
+}
+
+/// Reports a client-visible inventory pagination failure.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SystemCveInventoryPageError {
+    /// Reports an invalid page bound or filter value.
+    InvalidRequest(&'static str),
+    /// Reports a malformed or unsupported cursor.
+    InvalidCursor,
+    /// Reports that the cursor no longer names this source and filter scope.
+    InventoryChanged,
+}
+
+impl std::fmt::Display for SystemCveInventoryPageError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidRequest(message) => formatter.write_str(message),
+            Self::InvalidCursor => formatter.write_str("invalid system CVE inventory cursor"),
+            Self::InventoryChanged => formatter.write_str("system CVE inventory changed"),
+        }
+    }
+}
+
+impl std::error::Error for SystemCveInventoryPageError {}
+
+/// Returns the typed pagination failure contained in an inventory query error.
+pub fn system_cve_inventory_page_error(
+    error: &anyhow::Error,
+) -> Option<&SystemCveInventoryPageError> {
+    error.downcast_ref::<SystemCveInventoryPageError>()
+}
+
+/// Contains one vulnerability selected from authoritative deployed scan
+/// evidence.
 #[derive(Debug, sqlx::FromRow)]
 pub struct ExactSystemVulnerabilityRow {
     /// Identifies the authoritative scan that supplied this row.
@@ -153,7 +217,8 @@ pub struct ExactSystemVulnerabilityRow {
     pub justification_updated_at: Option<DateTime<Utc>>,
 }
 
-/// Contains one system inventory selected from either exact or legacy evidence.
+/// Contains one system inventory selected from either exact or legacy
+/// evidence.
 #[derive(Debug)]
 pub struct SystemCveInventoryQuery {
     /// Identifies the single selected inventory authority.
@@ -164,6 +229,172 @@ pub struct SystemCveInventoryQuery {
     pub source: Option<SystemCveInventorySource>,
     /// Contains rows from only the selected source.
     pub rows: Vec<ExactSystemVulnerabilityRow>,
+    /// Gives complete totals over the active filter scope.
+    pub metadata: SystemCveInventoryMetadata,
+    /// Identifies the source plus dimensions that affect page membership,
+    /// order, filters, or totals.
+    pub inventory_revision: String,
+    /// Reports whether another page exists after `rows`.
+    pub has_more: bool,
+    /// Continues after the last returned stable identity.
+    pub next_cursor: Option<String>,
+}
+
+/// Contains validated and normalized inventory page inputs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SystemCveInventoryPageRequest {
+    limit: u16,
+    after: Option<String>,
+    search: Option<String>,
+    severities: Vec<String>,
+    statuses: Vec<String>,
+}
+
+impl Default for SystemCveInventoryPageRequest {
+    fn default() -> Self {
+        Self {
+            limit: DEFAULT_SYSTEM_CVE_INVENTORY_PAGE_SIZE,
+            after: None,
+            search: None,
+            severities: Vec::new(),
+            statuses: Vec::new(),
+        }
+    }
+}
+
+impl SystemCveInventoryPageRequest {
+    /// Selects the complete legacy response up to its fixed compatibility bound.
+    pub(crate) fn legacy_complete() -> Self {
+        Self {
+            limit: MAX_SYSTEM_CVE_INVENTORY_ROWS,
+            ..Self::default()
+        }
+    }
+
+    /// Validates and normalizes API query parameters.
+    ///
+    /// Search matching is case-insensitive. Repeated whitespace is collapsed,
+    /// and case is lowered so equivalent searches have one cursor fingerprint.
+    /// Severity and status values are comma-separated OR selections.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SystemCveInventoryPageError::InvalidRequest`] when `limit` is
+    /// outside 1 through 500, search exceeds 200 Unicode scalar values, or a
+    /// severity or status is outside its documented domain.
+    pub fn from_params(params: SystemCveInventoryParams) -> Result<Self> {
+        let limit = params
+            .limit
+            .unwrap_or(DEFAULT_SYSTEM_CVE_INVENTORY_PAGE_SIZE);
+        if !(1..=MAX_SYSTEM_CVE_INVENTORY_PAGE_SIZE).contains(&limit) {
+            return Err(SystemCveInventoryPageError::InvalidRequest(
+                "limit must be between 1 and 500",
+            )
+            .into());
+        }
+        let search = params.q.and_then(|value| {
+            let normalized = value
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .to_lowercase();
+            (!normalized.is_empty()).then_some(normalized)
+        });
+        if search
+            .as_ref()
+            .is_some_and(|value| value.chars().count() > MAX_SYSTEM_CVE_INVENTORY_SEARCH_CHARS)
+        {
+            return Err(SystemCveInventoryPageError::InvalidRequest(
+                "q must be 200 characters or less after normalization",
+            )
+            .into());
+        }
+        let severities = normalize_inventory_set(
+            params.severity,
+            &["critical", "high", "medium", "low", "unknown"],
+            "severity must contain only critical, high, medium, low, or unknown",
+        )?;
+        let statuses = normalize_inventory_set(
+            params.status,
+            &["open", "fix_available"],
+            "status must contain only open or fix_available",
+        )?;
+        Ok(Self {
+            limit,
+            after: params.after,
+            search,
+            severities,
+            statuses,
+        })
+    }
+
+    fn filter_fingerprint(&self) -> String {
+        let mut digest = Sha256::new();
+        digest.update(self.search.as_deref().unwrap_or_default());
+        digest.update([0]);
+        digest.update(self.severities.join(","));
+        digest.update([0]);
+        digest.update(self.statuses.join(","));
+        hex::encode(digest.finalize())
+    }
+
+    fn search_pattern(&self) -> Option<String> {
+        self.search.as_ref().map(|value| {
+            let escaped = value
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_");
+            format!("%{escaped}%")
+        })
+    }
+}
+
+fn normalize_inventory_set(
+    value: Option<String>,
+    allowed: &[&str],
+    error_message: &'static str,
+) -> Result<Vec<String>> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let values = value
+        .split(',')
+        .map(|item| item.trim().to_lowercase())
+        .collect::<BTreeSet<_>>();
+    if values.is_empty()
+        || values
+            .iter()
+            .any(|item| item.is_empty() || !allowed.contains(&item.as_str()))
+    {
+        return Err(SystemCveInventoryPageError::InvalidRequest(error_message).into());
+    }
+    Ok(values.into_iter().collect())
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SystemCveInventoryCursor {
+    version: u8,
+    system_id: Uuid,
+    authority: SystemCveInventoryAuthority,
+    source_scan_id: Uuid,
+    filter_fingerprint: String,
+    inventory_revision: String,
+    canonical_cve_id: String,
+    canonical_package_name: String,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct SystemCveInventoryMetadataRow {
+    total_findings: i64,
+    total_cves: i64,
+    total_packages: i64,
+    critical: i64,
+    high: i64,
+    medium: i64,
+    low: i64,
+    unknown: i64,
+    revision_seed: String,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -213,21 +444,50 @@ fn parse_exact_authority_failure(value: &str) -> Result<ExactCveAuthorityFailure
 /// # Errors
 ///
 /// Returns a database error if the consistent snapshot, authority, scan
-/// provenance, or bounded finding rows cannot be loaded.
+/// provenance, or bounded finding rows cannot be loaded. Returns
+/// [`SystemCveInventoryOverflow`] when the complete compatibility response
+/// contains more than 1,000 stable rows.
 pub async fn fetch_system_cve_inventory(
     pool: &PgPool,
     system_id: Uuid,
+) -> Result<SystemCveInventoryQuery> {
+    let inventory = fetch_system_cve_inventory_page(
+        pool,
+        system_id,
+        &SystemCveInventoryPageRequest::legacy_complete(),
+    )
+    .await?;
+    if inventory.has_more {
+        return Err(SystemCveInventoryOverflow.into());
+    }
+    Ok(inventory)
+}
+
+/// Fetches one bounded inventory page without applying user visibility.
+///
+/// Authority selection, cursor validation, totals, and page rows share one
+/// read-only repeatable-read transaction. Callers that serve an authenticated
+/// request must use `fetch_authorized_system_cve_inventory_tx` instead.
+///
+/// # Errors
+///
+/// Returns a database error, malformed cursor error, or inventory-changed
+/// conflict when the cursor binding no longer matches the selected source.
+pub async fn fetch_system_cve_inventory_page(
+    pool: &PgPool,
+    system_id: Uuid,
+    page: &SystemCveInventoryPageRequest,
 ) -> Result<SystemCveInventoryQuery> {
     let mut transaction = pool.begin().await?;
     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
         .execute(&mut *transaction)
         .await?;
-    let inventory = fetch_system_cve_inventory_tx(&mut transaction, system_id).await?;
+    let inventory = fetch_system_cve_inventory_tx(&mut transaction, system_id, page).await?;
     transaction.commit().await?;
     Ok(inventory)
 }
 
-/// Fetches a system inventory only when the user can see the system in the same snapshot.
+/// Fetches an inventory when the user can see the system in the same snapshot.
 ///
 /// An active Viewer or Operator must have a current membership in the system's
 /// environment. An active Admin can also read an unassigned system. The
@@ -236,8 +496,8 @@ pub async fn fetch_system_cve_inventory(
 ///
 /// # Errors
 ///
-/// Returns a database or inventory-overflow error. Returns `Ok(None)` when the
-/// system is absent or hidden from the user.
+/// Returns a database or pagination error. Returns `Ok(None)` when the system
+/// is absent or hidden from the user.
 pub async fn fetch_authorized_system_cve_inventory(
     pool: &PgPool,
     system_id: Uuid,
@@ -247,22 +507,32 @@ pub async fn fetch_authorized_system_cve_inventory(
     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
         .execute(&mut *transaction)
         .await?;
-    let inventory =
-        fetch_authorized_system_cve_inventory_tx(&mut transaction, system_id, user_id).await?;
+    let inventory = fetch_authorized_system_cve_inventory_tx(
+        &mut transaction,
+        system_id,
+        user_id,
+        &SystemCveInventoryPageRequest::legacy_complete(),
+    )
+    .await?;
     transaction.commit().await?;
-    Ok(inventory)
+    match inventory {
+        Some(inventory) if inventory.has_more => Err(SystemCveInventoryOverflow.into()),
+        inventory => Ok(inventory),
+    }
 }
 
-/// Fetches authorized system inventory inside the caller's consistent snapshot.
+/// Fetches authorized inventory inside the caller's consistent snapshot.
 ///
 /// # Errors
 ///
-/// Returns a database or inventory-overflow error. Returns `Ok(None)` when the
-/// system is absent or hidden from the user.
+/// Returns a database or pagination error. Returns `Ok(None)` when the system
+/// is absent or hidden from the user. Visibility is decided before cursor
+/// parsing, which preserves hidden-as-absent non-disclosure.
 pub(crate) async fn fetch_authorized_system_cve_inventory_tx(
     transaction: &mut Transaction<'_, Postgres>,
     system_id: Uuid,
     user_id: Uuid,
+    page: &SystemCveInventoryPageRequest,
 ) -> Result<Option<SystemCveInventoryQuery>> {
     let visible = sqlx::query_scalar::<_, bool>(
         r#"SELECT EXISTS(
@@ -287,13 +557,17 @@ pub(crate) async fn fetch_authorized_system_cve_inventory_tx(
     if !visible {
         return Ok(None);
     }
-    let inventory = fetch_system_cve_inventory_tx(transaction, system_id).await?;
+    // SECURITY: Cursor parsing occurs only after this visibility decision. A
+    // hidden or absent system therefore returns the same result for every
+    // cursor value and does not disclose source identity or cursor validity.
+    let inventory = fetch_system_cve_inventory_tx(transaction, system_id, page).await?;
     Ok(Some(inventory))
 }
 
 async fn fetch_system_cve_inventory_tx(
     transaction: &mut Transaction<'_, Postgres>,
     system_id: Uuid,
+    page: &SystemCveInventoryPageRequest,
 ) -> Result<SystemCveInventoryQuery> {
     // SECURITY: This prerequisite order mirrors exact-CVE authority without
     // changing any writer predicate. The latest state is selected first, so an
@@ -360,7 +634,6 @@ async fn fetch_system_cve_inventory_tx(
         let scan_id = authority
             .exact_scan_id
             .ok_or_else(|| anyhow::anyhow!("exact CVE authority omitted its scan identity"))?;
-        let rows = fetch_inventory_rows_for_exact_scan(transaction, system_id, scan_id).await?;
         let source = SystemCveInventorySource {
             scan_id,
             scanner_name: authority
@@ -371,12 +644,15 @@ async fn fetch_system_cve_inventory_tx(
                 anyhow::anyhow!("exact CVE authority omitted its completion time")
             })?,
         };
-        return Ok(SystemCveInventoryQuery {
-            authority: SystemCveInventoryAuthority::Exact,
-            exact_authority_failure: None,
-            source: Some(source),
-            rows,
-        });
+        return fetch_inventory_page_for_source(
+            transaction,
+            system_id,
+            SystemCveInventoryAuthority::Exact,
+            None,
+            source,
+            page,
+        )
+        .await;
     }
 
     let failure = authority
@@ -406,122 +682,102 @@ async fn fetch_system_cve_inventory_tx(
     .await?;
 
     let Some((scan_id, completed_at, scanner_name, scanner_version)) = legacy_source else {
+        if let Some(cursor) = page.after.as_deref() {
+            decode_system_cve_inventory_cursor(cursor)?;
+            return Err(SystemCveInventoryPageError::InventoryChanged.into());
+        }
         return Ok(SystemCveInventoryQuery {
             authority: SystemCveInventoryAuthority::NoScan,
             exact_authority_failure: failure,
             source: None,
             rows: Vec::new(),
+            metadata: SystemCveInventoryMetadata::default(),
+            inventory_revision: inventory_revision(&format!("{}|no_scan|{:?}", system_id, failure)),
+            has_more: false,
+            next_cursor: None,
         });
     };
-    let rows = fetch_legacy_inventory_rows(transaction, system_id, scan_id).await?;
-    Ok(SystemCveInventoryQuery {
-        authority: SystemCveInventoryAuthority::Legacy,
-        exact_authority_failure: failure,
-        source: Some(SystemCveInventorySource {
+    fetch_inventory_page_for_source(
+        transaction,
+        system_id,
+        SystemCveInventoryAuthority::Legacy,
+        failure,
+        SystemCveInventorySource {
             scan_id,
             scanner_name,
             scanner_version,
             completed_at,
-        }),
-        rows,
-    })
+        },
+        page,
+    )
+    .await
 }
 
-async fn fetch_inventory_rows_for_exact_scan(
-    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    system_id: Uuid,
-    scan_id: Uuid,
-) -> Result<Vec<ExactSystemVulnerabilityRow>> {
-    let rows = sqlx::query_as::<_, ExactSystemVulnerabilityRow>(
-        r#"WITH selected_observations AS (
-             SELECT DISTINCT ON (observation.canonical_cve_id,
-                                  observation.canonical_package_name)
+const EXACT_INVENTORY_CTE: &str = r#"WITH selected_observations AS (
+             SELECT DISTINCT ON (observation.canonical_cve_id COLLATE "C",
+                                   observation.canonical_package_name COLLATE "C")
                     observation.canonical_cve_id,observation.canonical_package_name,
                     observation.observed_package_name,
                     observation.observed_package_version,
                     observation.observed_derivation_path
              FROM cve_scan_vulnerability_observations observation
-             WHERE observation.scan_id=$1 AND NOT observation.is_whitelisted
-             ORDER BY observation.canonical_cve_id,
-                      observation.canonical_package_name,
-                      observation.observed_derivation_path
-           )
-           SELECT $1::uuid AS scan_id,
+              WHERE observation.scan_id=$1 AND NOT observation.is_whitelisted
+              ORDER BY observation.canonical_cve_id COLLATE "C",
+                       observation.canonical_package_name COLLATE "C",
+                       observation.observed_derivation_path COLLATE "C"
+            ), inventory AS (
+            SELECT $1::uuid AS scan_id,
                   observation.observed_derivation_path AS occurrence_derivation_path,
                   observation.canonical_cve_id AS cve_id,
                   observation.canonical_package_name,
-                  observation.observed_package_name AS package_name,
-                  observation.observed_package_version AS installed_version,
-                  lower(severity_from_cvss(cve.cvss_v3_score)) AS severity,
-                  cve.cvss_v3_score::double precision AS cvss_score,
-                  COALESCE(cve.description,'') AS description,
-                  package_metadata.fixed_version,scan.completed_at AS first_seen,
-                  cve.published_date::timestamptz AS published_at,
-                  CASE WHEN package_metadata.fixed_version IS NULL
-                       THEN 'open' ELSE 'fix_available' END AS status,
-                  justification.category AS justification_category,
-                  justification.reason AS justification_reason,
-                  justification.updated_at AS justification_updated_at
+                   observation.observed_package_name AS package_name,
+                    observation.observed_package_version AS installed_version,
+                    lower(severity_from_cvss(cve.cvss_v3_score)) AS severity,
+                    cve.cvss_v3_score::double precision AS cvss_score,
+                    scan.completed_at AS first_seen,
+                    CASE WHEN EXISTS (
+                      SELECT 1
+                      FROM derivations package_derivation
+                      JOIN package_vulnerabilities vulnerability
+                        ON vulnerability.derivation_id=package_derivation.id
+                       AND vulnerability.cve_id=observation.canonical_cve_id
+                       AND vulnerability.fixed_version IS NOT NULL
+                      WHERE package_derivation.derivation_path=
+                            observation.observed_derivation_path
+                    ) THEN 'fix_available' ELSE 'open' END AS status
            FROM selected_observations observation
            JOIN cve_scans scan ON scan.id=$1
            JOIN cves cve ON cve.id=observation.canonical_cve_id
-           LEFT JOIN LATERAL (
-             SELECT vulnerability.fixed_version
-             FROM derivations package_derivation
-             JOIN package_vulnerabilities vulnerability
-               ON vulnerability.derivation_id=package_derivation.id
-              AND vulnerability.cve_id=observation.canonical_cve_id
-             WHERE package_derivation.derivation_path=observation.observed_derivation_path
-             ORDER BY package_derivation.id DESC LIMIT 1
-           ) package_metadata ON true
-           LEFT JOIN LATERAL (
-             SELECT candidate.category,candidate.reason,candidate.updated_at
-             FROM system_cve_justifications candidate
-             WHERE candidate.cve_id=observation.canonical_cve_id
-               AND (candidate.system_id=$2 OR candidate.system_id IS NULL)
-             ORDER BY (candidate.system_id IS NOT NULL) DESC,candidate.updated_at DESC LIMIT 1
-           ) justification ON true
-           ORDER BY cvss_score DESC NULLS LAST,cve_id,canonical_package_name
-            LIMIT $3"#,
-    )
-    .bind(scan_id)
-    .bind(system_id)
-    .bind((MAX_SYSTEM_CVE_INVENTORY_ROWS + 1) as i64)
-    .fetch_all(&mut **transaction)
-    .await?;
-    reject_inventory_overflow(rows)
-}
+            ), filtered AS (
+              SELECT * FROM inventory
+              WHERE ($3::text IS NULL OR cve_id ILIKE $3 ESCAPE '\'
+                     OR canonical_package_name ILIKE $3 ESCAPE '\'
+                     OR package_name ILIKE $3 ESCAPE '\'
+                     OR installed_version ILIKE $3 ESCAPE '\')
+                AND (cardinality($4::text[])=0 OR severity=ANY($4::text[]))
+                AND (cardinality($5::text[])=0 OR status=ANY($5::text[]))
+            )"#;
 
-async fn fetch_legacy_inventory_rows(
-    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    system_id: Uuid,
-    scan_id: Uuid,
-) -> Result<Vec<ExactSystemVulnerabilityRow>> {
-    let rows = sqlx::query_as::<_, ExactSystemVulnerabilityRow>(
-        r#"WITH selected_findings AS (
-             SELECT DISTINCT ON (
-                      cve.id,
-                      COALESCE(package_derivation.pname,package_derivation.derivation_name))
+const LEGACY_INVENTORY_CTE: &str = r#"WITH selected_findings AS (
+              SELECT DISTINCT ON (
+                       cve.id COLLATE "C",
+                       COALESCE(package_derivation.pname,package_derivation.derivation_name) COLLATE "C")
                     scan.id AS scan_id,
                    package_derivation.derivation_path AS occurrence_derivation_path,
                   cve.id AS cve_id,
                   COALESCE(package_derivation.pname,package_derivation.derivation_name)
                     AS canonical_package_name,
                   package_derivation.derivation_name AS package_name,
-                  COALESCE(package_derivation.version,'') AS installed_version,
-                  lower(severity_from_cvss(cve.cvss_v3_score)) AS severity,
-                  cve.cvss_v3_score::double precision AS cvss_score,
-                  COALESCE(cve.description,'') AS description,vulnerability.fixed_version,
-                  scan.completed_at AS first_seen,cve.published_date::timestamptz AS published_at,
-                  CASE WHEN vulnerability.fixed_version IS NULL THEN 'open'
-                       ELSE 'fix_available' END AS status,
-                  justification.category AS justification_category,
-                  justification.reason AS justification_reason,
-                   justification.updated_at AS justification_updated_at
+                   COALESCE(package_derivation.version,'') AS installed_version,
+                    lower(severity_from_cvss(cve.cvss_v3_score)) AS severity,
+                    cve.cvss_v3_score::double precision AS cvss_score,
+                    scan.completed_at AS first_seen,
+                   CASE WHEN vulnerability.fixed_version IS NULL THEN 'open'
+                        ELSE 'fix_available' END AS status
             FROM systems system
            JOIN derivations derivation ON derivation.derivation_name=system.hostname
              AND derivation.derivation_type='nixos'
-           JOIN cve_scans scan ON scan.id=$2 AND scan.derivation_id=derivation.id
+            JOIN cve_scans scan ON scan.id=$1 AND scan.derivation_id=derivation.id
            JOIN scan_packages scan_package ON scan_package.scan_id=scan.id
            JOIN derivations package_derivation
              ON package_derivation.id=scan_package.derivation_id
@@ -530,35 +786,246 @@ async fn fetch_legacy_inventory_rows(
              ON vulnerability.derivation_id=package_derivation.id
              AND NOT vulnerability.is_whitelisted
            JOIN cves cve ON cve.id=vulnerability.cve_id
+             WHERE system.id=$2
+             ORDER BY cve.id COLLATE "C",
+                      COALESCE(package_derivation.pname,package_derivation.derivation_name) COLLATE "C",
+                      package_derivation.derivation_path COLLATE "C"
+            ), inventory AS (
+              SELECT * FROM selected_findings
+            ), filtered AS (
+              SELECT * FROM inventory
+              WHERE ($3::text IS NULL OR cve_id ILIKE $3 ESCAPE '\'
+                     OR canonical_package_name ILIKE $3 ESCAPE '\'
+                     OR package_name ILIKE $3 ESCAPE '\'
+                     OR installed_version ILIKE $3 ESCAPE '\')
+                AND (cardinality($4::text[])=0 OR severity=ANY($4::text[]))
+                AND (cardinality($5::text[])=0 OR status=ANY($5::text[]))
+            )"#;
+
+async fn fetch_inventory_page_for_source(
+    transaction: &mut Transaction<'_, Postgres>,
+    system_id: Uuid,
+    authority: SystemCveInventoryAuthority,
+    exact_authority_failure: Option<ExactCveAuthorityFailureReason>,
+    source: SystemCveInventorySource,
+    page: &SystemCveInventoryPageRequest,
+) -> Result<SystemCveInventoryQuery> {
+    let fingerprint = page.filter_fingerprint();
+    let cursor = page
+        .after
+        .as_deref()
+        .map(decode_system_cve_inventory_cursor)
+        .transpose()?;
+    if cursor.as_ref().is_some_and(|cursor| {
+        cursor.system_id != system_id
+            || cursor.authority != authority
+            || cursor.source_scan_id != source.scan_id
+            || cursor.filter_fingerprint != fingerprint
+    }) {
+        return Err(SystemCveInventoryPageError::InventoryChanged.into());
+    }
+    let after_cve = cursor
+        .as_ref()
+        .map(|cursor| cursor.canonical_cve_id.as_str());
+    let after_package = cursor
+        .as_ref()
+        .map(|cursor| cursor.canonical_package_name.as_str());
+    let search_pattern = page.search_pattern();
+    let cte = match authority {
+        SystemCveInventoryAuthority::Exact => EXACT_INVENTORY_CTE,
+        SystemCveInventoryAuthority::Legacy => LEGACY_INVENTORY_CTE,
+        SystemCveInventoryAuthority::NoScan => {
+            return Err(anyhow::anyhow!("no-scan inventory cannot have a source"));
+        }
+    };
+    let metadata_sql = inventory_metadata_sql(cte);
+    let metadata = sqlx::query_as::<_, SystemCveInventoryMetadataRow>(&metadata_sql)
+        .bind(source.scan_id)
+        .bind(system_id)
+        .bind(search_pattern.as_deref())
+        .bind(&page.severities)
+        .bind(&page.statuses)
+        .bind(match authority {
+            SystemCveInventoryAuthority::Exact => "exact",
+            SystemCveInventoryAuthority::Legacy => "legacy",
+            SystemCveInventoryAuthority::NoScan => "no_scan",
+        })
+        .fetch_one(&mut **transaction)
+        .await?;
+    let inventory_revision = inventory_revision(&metadata.revision_seed);
+    if cursor
+        .as_ref()
+        .is_some_and(|cursor| cursor.inventory_revision != inventory_revision)
+    {
+        return Err(SystemCveInventoryPageError::InventoryChanged.into());
+    }
+    let page_sql = inventory_page_sql(cte);
+    let mut rows = sqlx::query_as::<_, ExactSystemVulnerabilityRow>(&page_sql)
+        .bind(source.scan_id)
+        .bind(system_id)
+        .bind(search_pattern.as_deref())
+        .bind(&page.severities)
+        .bind(&page.statuses)
+        .bind(after_cve)
+        .bind(after_package)
+        .bind(i64::from(page.limit) + 1)
+        .fetch_all(&mut **transaction)
+        .await?;
+    let has_more = rows.len() > usize::from(page.limit);
+    if has_more {
+        rows.pop();
+    }
+    let next_cursor = if has_more {
+        rows.last()
+            .map(|row| {
+                encode_system_cve_inventory_cursor(&SystemCveInventoryCursor {
+                    version: 1,
+                    system_id,
+                    authority,
+                    source_scan_id: source.scan_id,
+                    filter_fingerprint: fingerprint,
+                    inventory_revision: inventory_revision.clone(),
+                    canonical_cve_id: row.cve_id.clone(),
+                    canonical_package_name: row.canonical_package_name.clone(),
+                })
+            })
+            .transpose()?
+    } else {
+        None
+    };
+    Ok(SystemCveInventoryQuery {
+        authority,
+        exact_authority_failure,
+        source: Some(source),
+        rows,
+        metadata: SystemCveInventoryMetadata {
+            total_findings: metadata.total_findings,
+            total_cves: metadata.total_cves,
+            total_packages: metadata.total_packages,
+            severity: SystemCveInventorySeverityCounts {
+                critical: metadata.critical,
+                high: metadata.high,
+                medium: metadata.medium,
+                low: metadata.low,
+                unknown: metadata.unknown,
+            },
+        },
+        inventory_revision,
+        has_more,
+        next_cursor,
+    })
+}
+
+fn inventory_metadata_sql(cte: &str) -> String {
+    format!(
+        r#"{cte}
+           SELECT COUNT(*)::bigint AS total_findings,
+                  COUNT(DISTINCT cve_id)::bigint AS total_cves,
+                  COUNT(DISTINCT canonical_package_name)::bigint AS total_packages,
+                  COUNT(*) FILTER (WHERE severity='critical')::bigint AS critical,
+                  COUNT(*) FILTER (WHERE severity='high')::bigint AS high,
+                  COUNT(*) FILTER (WHERE severity='medium')::bigint AS medium,
+                  COUNT(*) FILTER (WHERE severity='low')::bigint AS low,
+                  COUNT(*) FILTER (WHERE severity='unknown')::bigint AS unknown,
+                  concat_ws('|',$1::text,$2::text,$6::text,
+                    (SELECT COUNT(*)::text FROM inventory),
+                    (SELECT COALESCE(SUM(hashtextextended(
+                       jsonb_build_array(
+                         cve_id,canonical_package_name,package_name,
+                         installed_version,severity,status)::text,440))::text,'0')
+                     FROM inventory)
+                  ) AS revision_seed
+           FROM filtered"#
+    )
+}
+
+fn inventory_page_sql(cte: &str) -> String {
+    format!(
+        r#"{cte}
+           , selected_page AS (
+             SELECT * FROM filtered
+             WHERE ($6::text IS NULL OR
+                    (cve_id COLLATE "C",canonical_package_name COLLATE "C") >
+                    ($6::text COLLATE "C",$7::text COLLATE "C"))
+             ORDER BY cve_id COLLATE "C",canonical_package_name COLLATE "C"
+             LIMIT $8
+           )
+           SELECT filtered.scan_id,filtered.occurrence_derivation_path,
+                  filtered.cve_id,filtered.canonical_package_name,
+                  filtered.package_name,filtered.installed_version,
+                  filtered.severity,filtered.cvss_score,
+                  COALESCE(cve.description,'') AS description,
+                   package_metadata.fixed_version,filtered.first_seen,
+                  cve.published_date::timestamptz AS published_at,
+                  filtered.status,
+                  justification.category AS justification_category,
+                  justification.reason AS justification_reason,
+                  justification.updated_at AS justification_updated_at
+           FROM selected_page filtered
+           JOIN cves cve ON cve.id=filtered.cve_id
+           LEFT JOIN LATERAL (
+             SELECT vulnerability.fixed_version
+             FROM derivations package_derivation
+             JOIN package_vulnerabilities vulnerability
+               ON vulnerability.derivation_id=package_derivation.id
+              AND vulnerability.cve_id=filtered.cve_id
+             WHERE package_derivation.derivation_path=
+                   filtered.occurrence_derivation_path
+             ORDER BY package_derivation.id DESC LIMIT 1
+           ) package_metadata ON true
            LEFT JOIN LATERAL (
              SELECT candidate.category,candidate.reason,candidate.updated_at
              FROM system_cve_justifications candidate
-             WHERE candidate.cve_id=cve.id
-               AND (candidate.system_id=system.id OR candidate.system_id IS NULL)
-             ORDER BY (candidate.system_id IS NOT NULL) DESC,candidate.updated_at DESC LIMIT 1
+             WHERE candidate.cve_id=filtered.cve_id
+               AND (candidate.system_id=$2 OR candidate.system_id IS NULL)
+             ORDER BY (candidate.system_id IS NOT NULL) DESC,
+                      candidate.updated_at DESC LIMIT 1
            ) justification ON true
-            WHERE system.id=$1
-            ORDER BY cve.id,
-                     COALESCE(package_derivation.pname,package_derivation.derivation_name),
-                     package_derivation.derivation_path
-           )
-           SELECT * FROM selected_findings
-            ORDER BY cvss_score DESC NULLS LAST,cve_id,canonical_package_name
-            LIMIT $3"#,
+           ORDER BY filtered.cve_id COLLATE "C",
+                    filtered.canonical_package_name COLLATE "C"
+           LIMIT $8"#
     )
-    .bind(system_id)
-    .bind(scan_id)
-    .bind((MAX_SYSTEM_CVE_INVENTORY_ROWS + 1) as i64)
-    .fetch_all(&mut **transaction)
-    .await?;
-    reject_inventory_overflow(rows)
 }
 
-fn reject_inventory_overflow<T>(rows: Vec<T>) -> Result<Vec<T>> {
-    if rows.len() > MAX_SYSTEM_CVE_INVENTORY_ROWS {
-        return Err(CveInventoryOverflow.into());
+fn decode_system_cve_inventory_cursor(value: &str) -> Result<SystemCveInventoryCursor> {
+    // SECURITY: The cursor is an unsigned position hint, not authority. A
+    // caller can only skip rows in an inventory that visibility checks already
+    // authorized; source, filter, and revision bindings are verified below.
+    if value.is_empty() || value.len() > 8_192 {
+        return Err(SystemCveInventoryPageError::InvalidCursor.into());
     }
-    Ok(rows)
+    let bytes = URL_SAFE_NO_PAD
+        .decode(value)
+        .map_err(|_| SystemCveInventoryPageError::InvalidCursor)?;
+    let cursor: SystemCveInventoryCursor =
+        serde_json::from_slice(&bytes).map_err(|_| SystemCveInventoryPageError::InvalidCursor)?;
+    if cursor.version != 1
+        || cursor.filter_fingerprint.len() != 64
+        || cursor.inventory_revision.len() != 64
+        || cursor.canonical_cve_id.is_empty()
+        || cursor.canonical_cve_id.len() > 20
+        || cursor.canonical_package_name.is_empty()
+        || cursor.canonical_package_name.len() > 4_096
+    {
+        return Err(SystemCveInventoryPageError::InvalidCursor.into());
+    }
+    Ok(cursor)
+}
+
+fn encode_system_cve_inventory_cursor(cursor: &SystemCveInventoryCursor) -> Result<String> {
+    let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(cursor)?);
+    if encoded.len() > 8_192 {
+        return Err(anyhow::anyhow!(
+            "system CVE inventory cursor exceeds its bound"
+        ));
+    }
+    Ok(encoded)
+}
+
+fn inventory_revision(seed: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(seed.as_bytes());
+    hex::encode(digest.finalize())
 }
 
 /// Fetches vulnerabilities from the latest exact scan for the deployed generation.
@@ -1350,7 +1817,7 @@ pub async fn fetch_cve_inventory_systems(
         .bind(scope.environment_ids())
         .bind(cve_id)
         .bind(package_name)
-        .bind((MAX_SYSTEM_CVE_INVENTORY_ROWS + 1) as i64)
+        .bind((MAX_FLEET_CVE_AFFECTED_SYSTEMS + 1) as i64)
         .fetch_all(pool)
         .await?;
 
@@ -1633,6 +2100,7 @@ pub async fn fetch_package_names(pool: &PgPool, scope: &CveReadScope) -> Result<
 mod tests {
     use chrono::Utc;
     use ed25519_dalek::SigningKey;
+    use std::time::{Duration, Instant};
 
     use crate::models::public_key::PublicKey;
     use crate::models::systems::System;
@@ -1965,6 +2433,48 @@ mod tests {
         assert_eq!(stats.scheduled, 0);
     }
 
+    #[test]
+    fn inventory_page_parameters_are_bounded_and_normalized() {
+        let request = SystemCveInventoryPageRequest::from_params(SystemCveInventoryParams {
+            limit: Some(500),
+            q: Some("  OpenSSL   PACKAGE ".into()),
+            severity: Some("HIGH,critical,high".into()),
+            status: Some("fix_available,open".into()),
+            ..SystemCveInventoryParams::default()
+        })
+        .expect("valid page parameters should normalize");
+        assert_eq!(request.limit, 500);
+        assert_eq!(request.search.as_deref(), Some("openssl package"));
+        assert_eq!(request.severities, vec!["critical", "high"]);
+        assert_eq!(request.statuses, vec!["fix_available", "open"]);
+
+        for params in [
+            SystemCveInventoryParams {
+                limit: Some(0),
+                ..SystemCveInventoryParams::default()
+            },
+            SystemCveInventoryParams {
+                limit: Some(501),
+                ..SystemCveInventoryParams::default()
+            },
+            SystemCveInventoryParams {
+                severity: Some("urgent".into()),
+                ..SystemCveInventoryParams::default()
+            },
+            SystemCveInventoryParams {
+                status: Some("accepted".into()),
+                ..SystemCveInventoryParams::default()
+            },
+        ] {
+            let error = SystemCveInventoryPageRequest::from_params(params)
+                .expect_err("invalid page parameter must fail");
+            assert!(matches!(
+                system_cve_inventory_page_error(&error),
+                Some(SystemCveInventoryPageError::InvalidRequest(_))
+            ));
+        }
+    }
+
     #[sqlx::test]
     #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
     async fn system_inventory_classifies_fallbacks_and_exact_precedence(pool: PgPool) {
@@ -2171,6 +2681,18 @@ mod tests {
         .await
         .expect("exact observation should persist");
         sqlx::query(
+            r#"INSERT INTO cve_scan_vulnerability_observations(
+                 scan_id,canonical_cve_id,canonical_package_name,
+                 observed_package_name,observed_package_version,
+                 observed_derivation_path,is_whitelisted,detection_method)
+               VALUES($1,'CVE-2099-4400','exact-package','duplicate-exact-package','2.1',
+                      '/nix/store/zzz-exact-package.drv',false,'exact-scanner')"#,
+        )
+        .bind(exact_scan_id)
+        .execute(&pool)
+        .await
+        .expect("duplicate exact observation should persist");
+        sqlx::query(
             r#"UPDATE cve_scans SET status='completed',
                  completed_at=now()-interval '1 minute',
                   evidence_schema_version=1 WHERE id=$1"#,
@@ -2198,6 +2720,10 @@ mod tests {
         assert_eq!(
             exact_vulnerable.rows[0].canonical_package_name,
             "exact-package"
+        );
+        assert_eq!(
+            exact_vulnerable.rows[0].occurrence_derivation_path, "/nix/store/exact-package.drv",
+            "duplicate exact observations must collapse before pagination"
         );
         assert!(exact_vulnerable.exact_authority_failure.is_none());
         let exact_list = fetch_cve_list(
@@ -2381,6 +2907,26 @@ mod tests {
                     .is_none()
             );
         }
+        let mut hidden_transaction = pool
+            .begin()
+            .await
+            .expect("hidden cursor transaction should begin");
+        let hidden_with_malformed_cursor = fetch_authorized_system_cve_inventory_tx(
+            &mut hidden_transaction,
+            system.id,
+            viewer,
+            &SystemCveInventoryPageRequest {
+                after: Some("not-a-cursor".into()),
+                ..SystemCveInventoryPageRequest::default()
+            },
+        )
+        .await
+        .expect("hidden system must not parse its cursor");
+        assert!(hidden_with_malformed_cursor.is_none());
+        hidden_transaction
+            .rollback()
+            .await
+            .expect("hidden cursor transaction should roll back");
         assert!(
             fetch_authorized_system_cve_inventory(&pool, Uuid::new_v4(), admin)
                 .await
@@ -2421,7 +2967,7 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
-    async fn system_inventory_rejects_more_than_one_thousand_stable_findings(pool: PgPool) {
+    async fn system_inventory_paginates_1315_stable_findings(pool: PgPool) {
         let suffix = Uuid::new_v4().simple().to_string();
         let (system, commit_id) = inventory_test_system(&pool, &suffix).await;
         let scan_id = completed_legacy_scan(&pool, &system, commit_id).await;
@@ -2429,7 +2975,7 @@ mod tests {
             r#"INSERT INTO cves(id,cvss_v3_score,description,published_date)
                SELECT 'CVE-2098-' || lpad(value::text,4,'0'),5.0,
                       'bounded inventory finding','2098-01-01'
-               FROM generate_series(1,1001) value"#,
+               FROM generate_series(1,1315) value"#,
         )
         .execute(&pool)
         .await
@@ -2442,7 +2988,7 @@ mod tests {
                       '/nix/store/overflow-package-' || value || '.drv','package',$1,
                       (SELECT id FROM derivation_statuses WHERE name='build-complete' LIMIT 1),
                       now(),'overflow-package-' || value,'1.0'
-               FROM generate_series(1,1001) value"#,
+                FROM generate_series(1,1315) value"#,
         )
         .bind(commit_id)
         .execute(&pool)
@@ -2470,11 +3016,382 @@ mod tests {
         .execute(&pool)
         .await
         .expect("overflow vulnerabilities should persist");
-
-        let error = fetch_system_cve_inventory(&pool, system.id)
+        sqlx::query("UPDATE cves SET cvss_v3_score=9.5 WHERE id<='CVE-2098-0010'")
+            .execute(&pool)
             .await
-            .expect_err("an oversized stable inventory must fail closed");
-        assert!(is_cve_inventory_overflow(&error));
+            .expect("critical fixture severities should persist");
+        sqlx::query(
+            "UPDATE package_vulnerabilities SET fixed_version='2.0' WHERE cve_id='CVE-2098-0001'",
+        )
+        .execute(&pool)
+        .await
+        .expect("fixed-version fixture should persist");
+
+        let empty_filters = Vec::<String>::new();
+        let metadata_plan_started = Instant::now();
+        let metadata_plan = sqlx::query_scalar::<_, String>(&format!(
+            "EXPLAIN (ANALYZE, BUFFERS) {}",
+            inventory_metadata_sql(LEGACY_INVENTORY_CTE)
+        ))
+        .bind(scan_id)
+        .bind(system.id)
+        .bind(Option::<String>::None)
+        .bind(&empty_filters)
+        .bind(&empty_filters)
+        .bind("legacy")
+        .fetch_all(&pool)
+        .await
+        .expect("metadata plan should execute")
+        .join("\n");
+        let metadata_plan_elapsed = metadata_plan_started.elapsed();
+        let page_plan_started = Instant::now();
+        let page_plan = sqlx::query_scalar::<_, String>(&format!(
+            "EXPLAIN (ANALYZE, BUFFERS) {}",
+            inventory_page_sql(LEGACY_INVENTORY_CTE)
+        ))
+        .bind(scan_id)
+        .bind(system.id)
+        .bind(Option::<String>::None)
+        .bind(&empty_filters)
+        .bind(&empty_filters)
+        .bind(Some("CVE-2098-0500"))
+        .bind(Some("overflow-package-500"))
+        .bind(501_i64)
+        .fetch_all(&pool)
+        .await
+        .expect("continuation page plan should execute")
+        .join("\n");
+        let page_plan_elapsed = page_plan_started.elapsed();
+        eprintln!(
+            "1,315-row inventory metadata plan ({:?}):\n{}\ncontinuation page plan ({page_plan_elapsed:?}):\n{}",
+            metadata_plan_elapsed, metadata_plan, page_plan
+        );
+        assert!(!inventory_metadata_sql(LEGACY_INVENTORY_CTE).contains("LATERAL"));
+        assert!(!inventory_metadata_sql(EXACT_INVENTORY_CTE).contains("LATERAL"));
+        assert!(!metadata_plan.contains("system_cve_justifications"));
+        assert!(!metadata_plan.contains("poam_"));
+        assert!(page_plan.contains("Limit"));
+        assert!(page_plan.contains("system_cve_justifications"));
+        assert!(
+            metadata_plan_elapsed < Duration::from_secs(10)
+                && page_plan_elapsed < Duration::from_secs(10),
+            "representative inventory plans must each execute within 10 seconds"
+        );
+
+        let legacy_error = fetch_system_cve_inventory(&pool, system.id)
+            .await
+            .expect_err("the complete compatibility response must retain its fixed bound");
+        assert!(
+            is_system_cve_inventory_overflow(&legacy_error),
+            "unexpected legacy inventory error: {legacy_error:#}"
+        );
+
+        let mut request = SystemCveInventoryPageRequest {
+            limit: 500,
+            ..SystemCveInventoryPageRequest::default()
+        };
+        let mut identities = Vec::new();
+        let mut page_count = 0;
+        loop {
+            let page = fetch_system_cve_inventory_page(&pool, system.id, &request)
+                .await
+                .expect("inventory page should load");
+            page_count += 1;
+            assert_eq!(page.metadata.total_findings, 1315);
+            assert_eq!(page.metadata.total_cves, 1315);
+            assert_eq!(page.metadata.total_packages, 1315);
+            assert_eq!(page.metadata.severity.critical, 10);
+            assert_eq!(page.metadata.severity.medium, 1305);
+            identities.extend(
+                page.rows
+                    .iter()
+                    .map(|row| (row.cve_id.clone(), row.canonical_package_name.clone())),
+            );
+            if !page.has_more {
+                assert!(page.next_cursor.is_none());
+                assert_eq!(page.rows.len(), 315);
+                break;
+            }
+            assert_eq!(page.rows.len(), 500);
+            request.after = page.next_cursor;
+        }
+        assert_eq!(page_count, 3);
+        assert_eq!(identities.len(), 1315);
+        assert!(identities.windows(2).all(|pair| pair[0] < pair[1]));
+        let unique = identities.iter().collect::<BTreeSet<_>>();
+        assert_eq!(unique.len(), identities.len());
+
+        let filtered = fetch_system_cve_inventory_page(
+            &pool,
+            system.id,
+            &SystemCveInventoryPageRequest::from_params(SystemCveInventoryParams {
+                q: Some("  CVE-2098-0001  ".into()),
+                severity: Some("critical,high".into()),
+                status: Some("fix_available".into()),
+                ..SystemCveInventoryParams::default()
+            })
+            .expect("filters should validate"),
+        )
+        .await
+        .expect("filtered inventory should load");
+        assert_eq!(filtered.rows.len(), 1);
+        assert_eq!(filtered.rows[0].cve_id, "CVE-2098-0001");
+        assert_eq!(filtered.metadata.total_findings, 1);
+        assert_eq!(filtered.metadata.total_cves, 1);
+        assert_eq!(filtered.metadata.total_packages, 1);
+        assert_eq!(filtered.metadata.severity.critical, 1);
+
+        let first_page = fetch_system_cve_inventory_page(
+            &pool,
+            system.id,
+            &SystemCveInventoryPageRequest {
+                limit: 1,
+                ..SystemCveInventoryPageRequest::default()
+            },
+        )
+        .await
+        .expect("cursor fixture page should load");
+        let stable_revision = first_page.inventory_revision.clone();
+        let cursor = first_page.next_cursor.expect("first page should continue");
+        let malformed = fetch_system_cve_inventory_page(
+            &pool,
+            system.id,
+            &SystemCveInventoryPageRequest {
+                after: Some("not-a-cursor".into()),
+                ..SystemCveInventoryPageRequest::default()
+            },
+        )
+        .await
+        .expect_err("malformed cursor must fail");
+        assert_eq!(
+            system_cve_inventory_page_error(&malformed),
+            Some(&SystemCveInventoryPageError::InvalidCursor)
+        );
+        sqlx::query("UPDATE cves SET description='changed between pages' WHERE id='CVE-2098-0001'")
+            .execute(&pool)
+            .await
+            .expect("display metadata change should persist");
+        let changed_display = fetch_system_cve_inventory_page(
+            &pool,
+            system.id,
+            &SystemCveInventoryPageRequest {
+                after: Some(cursor.clone()),
+                ..SystemCveInventoryPageRequest::default()
+            },
+        )
+        .await
+        .expect("display metadata must not invalidate membership pagination");
+        assert_eq!(changed_display.inventory_revision, stable_revision);
+        let justification_user = inventory_test_user(&pool, "operator", true).await;
+        sqlx::query(
+            r#"INSERT INTO system_cve_justifications(
+                 system_id,cve_id,category,reason,updated_by,updated_at)
+               VALUES($1,'CVE-2098-0001','accepted_risk','test',$2,now())"#,
+        )
+        .bind(system.id)
+        .bind(justification_user)
+        .execute(&pool)
+        .await
+        .expect("justification should persist");
+        let changed_justification = fetch_system_cve_inventory_page(
+            &pool,
+            system.id,
+            &SystemCveInventoryPageRequest {
+                after: Some(cursor.clone()),
+                ..SystemCveInventoryPageRequest::default()
+            },
+        )
+        .await
+        .expect("justification must not invalidate membership pagination");
+        assert_eq!(changed_justification.inventory_revision, stable_revision);
+
+        sqlx::query(
+            "UPDATE derivations SET version='1.1' WHERE commit_id=$1 AND pname='overflow-package-2'",
+        )
+        .bind(commit_id)
+        .execute(&pool)
+        .await
+        .expect("search field change should persist");
+        let changed_search = fetch_system_cve_inventory_page(
+            &pool,
+            system.id,
+            &SystemCveInventoryPageRequest {
+                after: Some(cursor),
+                ..SystemCveInventoryPageRequest::default()
+            },
+        )
+        .await
+        .expect_err("search field change must invalidate membership pagination");
+        assert_eq!(
+            system_cve_inventory_page_error(&changed_search),
+            Some(&SystemCveInventoryPageError::InventoryChanged)
+        );
+
+        let cursor = fetch_system_cve_inventory_page(
+            &pool,
+            system.id,
+            &SystemCveInventoryPageRequest {
+                limit: 1,
+                ..SystemCveInventoryPageRequest::default()
+            },
+        )
+        .await
+        .expect("replacement cursor page should load")
+        .next_cursor
+        .expect("replacement page should continue");
+        sqlx::query(
+            "UPDATE derivations SET pname='renamed-package-3' WHERE commit_id=$1 AND pname='overflow-package-3'",
+        )
+        .bind(commit_id)
+        .execute(&pool)
+        .await
+        .expect("stable identity change should persist");
+        let changed_identity = fetch_system_cve_inventory_page(
+            &pool,
+            system.id,
+            &SystemCveInventoryPageRequest {
+                after: Some(cursor),
+                ..SystemCveInventoryPageRequest::default()
+            },
+        )
+        .await
+        .expect_err("stable identity change must invalidate membership pagination");
+        assert_eq!(
+            system_cve_inventory_page_error(&changed_identity),
+            Some(&SystemCveInventoryPageError::InventoryChanged)
+        );
+
+        let cursor = fetch_system_cve_inventory_page(
+            &pool,
+            system.id,
+            &SystemCveInventoryPageRequest {
+                limit: 1,
+                ..SystemCveInventoryPageRequest::default()
+            },
+        )
+        .await
+        .expect("identity replacement cursor page should load")
+        .next_cursor
+        .expect("identity replacement page should continue");
+        sqlx::query("UPDATE cves SET cvss_v3_score=8.0 WHERE id='CVE-2098-0003'")
+            .execute(&pool)
+            .await
+            .expect("severity change should persist");
+        let changed_severity = fetch_system_cve_inventory_page(
+            &pool,
+            system.id,
+            &SystemCveInventoryPageRequest {
+                after: Some(cursor),
+                ..SystemCveInventoryPageRequest::default()
+            },
+        )
+        .await
+        .expect_err("severity change must invalidate membership pagination");
+        assert_eq!(
+            system_cve_inventory_page_error(&changed_severity),
+            Some(&SystemCveInventoryPageError::InventoryChanged)
+        );
+
+        let cursor = fetch_system_cve_inventory_page(
+            &pool,
+            system.id,
+            &SystemCveInventoryPageRequest {
+                limit: 1,
+                ..SystemCveInventoryPageRequest::default()
+            },
+        )
+        .await
+        .expect("severity replacement cursor page should load")
+        .next_cursor
+        .expect("severity replacement page should continue");
+        sqlx::query(
+            "UPDATE package_vulnerabilities SET fixed_version='2.0' WHERE cve_id='CVE-2098-0003'",
+        )
+        .execute(&pool)
+        .await
+        .expect("fix availability change should persist");
+        let changed_fix_status = fetch_system_cve_inventory_page(
+            &pool,
+            system.id,
+            &SystemCveInventoryPageRequest {
+                after: Some(cursor),
+                ..SystemCveInventoryPageRequest::default()
+            },
+        )
+        .await
+        .expect_err("fix availability change must invalidate membership pagination");
+        assert_eq!(
+            system_cve_inventory_page_error(&changed_fix_status),
+            Some(&SystemCveInventoryPageError::InventoryChanged)
+        );
+
+        let cursor = fetch_system_cve_inventory_page(
+            &pool,
+            system.id,
+            &SystemCveInventoryPageRequest {
+                limit: 1,
+                ..SystemCveInventoryPageRequest::default()
+            },
+        )
+        .await
+        .expect("fix-status replacement cursor page should load")
+        .next_cursor
+        .expect("fix-status replacement page should continue");
+        let filter_mismatch = fetch_system_cve_inventory_page(
+            &pool,
+            system.id,
+            &SystemCveInventoryPageRequest {
+                after: Some(cursor.clone()),
+                severities: vec!["critical".into()],
+                ..SystemCveInventoryPageRequest::default()
+            },
+        )
+        .await
+        .expect_err("filter-bound cursor must reject changed filters");
+        assert_eq!(
+            system_cve_inventory_page_error(&filter_mismatch),
+            Some(&SystemCveInventoryPageError::InventoryChanged)
+        );
+        let other_suffix = Uuid::new_v4().simple().to_string();
+        let (other_system, _) = inventory_test_system(&pool, &other_suffix).await;
+        let cross_system = fetch_system_cve_inventory_page(
+            &pool,
+            other_system.id,
+            &SystemCveInventoryPageRequest {
+                after: Some(cursor.clone()),
+                ..SystemCveInventoryPageRequest::default()
+            },
+        )
+        .await
+        .expect_err("cross-system cursor must not be accepted");
+        assert_eq!(
+            system_cve_inventory_page_error(&cross_system),
+            Some(&SystemCveInventoryPageError::InventoryChanged)
+        );
+        sqlx::query(
+            r#"INSERT INTO cve_scans(
+                 derivation_id,scanner_name,scanner_version,status,completed_at)
+               SELECT derivation_id,'legacy-scanner','1.0','completed',now()+interval '1 minute'
+               FROM cve_scans WHERE id=$1"#,
+        )
+        .bind(scan_id)
+        .execute(&pool)
+        .await
+        .expect("newer legacy scan should persist");
+        let stale = fetch_system_cve_inventory_page(
+            &pool,
+            system.id,
+            &SystemCveInventoryPageRequest {
+                after: Some(cursor),
+                ..SystemCveInventoryPageRequest::default()
+            },
+        )
+        .await
+        .expect_err("source-bound cursor must reject a newer selected scan");
+        assert_eq!(
+            system_cve_inventory_page_error(&stale),
+            Some(&SystemCveInventoryPageError::InventoryChanged)
+        );
     }
 
     // ── Live DB tests (require running PostgreSQL with migrations applied) ──

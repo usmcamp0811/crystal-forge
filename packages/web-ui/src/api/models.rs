@@ -203,6 +203,7 @@ pub enum CveSeverity {
     High,
     Medium,
     Low,
+    Unknown,
 }
 
 impl CveSeverity {
@@ -214,6 +215,7 @@ impl CveSeverity {
             Self::High => cve::HIGH_TEXT,
             Self::Medium => cve::MEDIUM_TEXT,
             Self::Low => cve::LOW_TEXT,
+            Self::Unknown => cve::UNKNOWN_TEXT,
         }
     }
 
@@ -224,6 +226,7 @@ impl CveSeverity {
             Self::High => "High",
             Self::Medium => "Medium",
             Self::Low => "Low",
+            Self::Unknown => "Unknown",
         }
     }
 }
@@ -4634,6 +4637,56 @@ pub struct SystemVulnerability {
     pub remediation: Option<crate::views::poam_api::CvePoamRelationship>,
 }
 
+/// Identifies one stable row in a system CVE inventory.
+///
+/// Display package names and versions are evidence context and are not part of
+/// this identity.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SystemCveInventoryRowIdentity {
+    /// Gives the canonical CVE identifier.
+    pub canonical_cve_id: String,
+    /// Gives the canonical package name.
+    pub canonical_package_name: String,
+}
+
+/// Contains one vulnerability from a bounded system CVE inventory page.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SystemCveInventoryVulnerability {
+    /// Gives the stable identity used for pagination, deduplication, and row keys.
+    pub stable_identity: SystemCveInventoryRowIdentity,
+    /// Gives the canonical CVE identifier.
+    pub cve_id: String,
+    /// Gives the canonical package name independent of scanner display text.
+    pub canonical_package_name: String,
+    /// Gives the normalized CVSS severity.
+    pub severity: CveSeverity,
+    /// Gives the current CVSS v3 score when available.
+    pub cvss_score: Option<f32>,
+    /// Gives the current CVE description.
+    pub description: String,
+    /// Gives the package name emitted by the selected evidence source.
+    pub package_name: String,
+    /// Gives the installed version emitted by the selected evidence source.
+    pub installed_version: String,
+    /// Gives the known fixed version when available.
+    pub fixed_version: Option<String>,
+    /// Gives the selected scan completion time when available.
+    pub first_seen: Option<DateTime<Utc>>,
+    /// Gives the CVE publication time when available.
+    pub published_at: Option<DateTime<Utc>>,
+    /// Gives the truthful fix state, either `open` or `fix_available`.
+    pub status: String,
+    /// Gives the applicable system or fleet justification category.
+    pub justification_category: Option<String>,
+    /// Gives the applicable system or fleet justification reason.
+    pub justification_reason: Option<String>,
+    /// Gives the applicable justification update time.
+    pub justification_updated_at: Option<DateTime<Utc>>,
+    /// Provides exact remediation context only for an exact row on this page.
+    #[serde(default)]
+    pub remediation: Option<crate::views::poam_api::CvePoamRelationship>,
+}
+
 /// Identifies the evidence authority used for a system CVE inventory read.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -4684,12 +4737,40 @@ pub struct SystemCveInventorySource {
     pub completed_at: DateTime<Utc>,
 }
 
+/// Counts severities over the complete active inventory scope.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SystemCveInventorySeverityCounts {
+    /// Counts critical findings.
+    pub critical: i64,
+    /// Counts high findings.
+    pub high: i64,
+    /// Counts medium findings.
+    pub medium: i64,
+    /// Counts low findings.
+    pub low: i64,
+    /// Counts findings without a normalized CVSS severity.
+    pub unknown: i64,
+}
+
+/// Contains authoritative totals for the complete active inventory scope.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SystemCveInventoryMetadata {
+    /// Counts stable CVE and canonical-package identities.
+    pub total_findings: i64,
+    /// Counts distinct canonical CVE identifiers.
+    pub total_cves: i64,
+    /// Counts distinct canonical package names.
+    pub total_packages: i64,
+    /// Counts severities over the same scope as the totals.
+    pub severity: SystemCveInventorySeverityCounts,
+}
+
 /// Contains one non-unioned source for a system CVE inventory.
 ///
 /// Legacy authority disables exact remediation context. It does not redefine
 /// the ordinary system justification endpoint.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SystemCveInventoryResponse {
+pub struct SystemCveInventoryPageResponse {
     /// Identifies the selected inventory authority.
     pub authority: SystemCveInventoryAuthority,
     /// Reports why exact authority was unavailable for a fallback response.
@@ -4697,7 +4778,15 @@ pub struct SystemCveInventoryResponse {
     /// Gives scan provenance, including when the scan is clean.
     pub source: Option<SystemCveInventorySource>,
     /// Contains findings from only the selected source.
-    pub vulnerabilities: Vec<SystemVulnerability>,
+    pub vulnerabilities: Vec<SystemCveInventoryVulnerability>,
+    /// Gives complete scope totals independent of loaded page count.
+    pub metadata: SystemCveInventoryMetadata,
+    /// Identifies the selected inventory and mutable rendered dimensions.
+    pub inventory_revision: String,
+    /// Reports whether another bounded page exists.
+    pub has_more: bool,
+    /// Continues this exact system, source, and filter scope.
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -4715,6 +4804,7 @@ impl CveSeverity {
             Self::High => cve::HIGH_BG,
             Self::Medium => cve::MEDIUM_BG,
             Self::Low => cve::LOW_BG,
+            Self::Unknown => cve::LOW_BG,
         }
     }
 }
@@ -5861,7 +5951,7 @@ mod tests {
         ConfigObservationRequestResponse, ConfigObservationResponse, CreatePolicyDraftRequest,
         CreatePolicyDraftResponse, EvaluatedOption, EvaluationModuleSummary,
         ExactCveAuthorityFailureReason, SystemCommitsResponse, SystemCveInventoryAuthority,
-        SystemCveInventoryResponse, XccdfPreviewResponse,
+        SystemCveInventoryPageResponse, XccdfPreviewResponse,
     };
 
     #[test]
@@ -5906,7 +5996,7 @@ mod tests {
 
     #[test]
     fn system_cve_inventory_deserializes_exact_legacy_and_no_scan_states() {
-        let exact: SystemCveInventoryResponse = serde_json::from_value(serde_json::json!({
+        let exact: SystemCveInventoryPageResponse = serde_json::from_value(serde_json::json!({
             "authority": "exact",
             "exact_authority_failure": null,
             "source": {
@@ -5915,15 +6005,50 @@ mod tests {
                 "scanner_version": "1.10.1",
                 "completed_at": "2026-09-14T21:00:00Z"
             },
-            "vulnerabilities": []
+            "vulnerabilities": [{
+                "stable_identity": {
+                    "canonical_cve_id": "CVE-2026-0440",
+                    "canonical_package_name": "openssl"
+                },
+                "cve_id": "CVE-2026-0440",
+                "canonical_package_name": "openssl",
+                "severity": "high",
+                "cvss_score": 8.1,
+                "description": "Test finding",
+                "package_name": "openssl-3.4.1",
+                "installed_version": "3.4.1",
+                "fixed_version": "3.4.2",
+                "first_seen": null,
+                "published_at": null,
+                "status": "fix_available",
+                "justification_category": null,
+                "justification_reason": null,
+                "justification_updated_at": null
+            }],
+            "metadata": {
+                "total_findings": 1315,
+                "total_cves": 1200,
+                "total_packages": 415,
+                "severity": {"critical": 15, "high": 300, "medium": 700, "low": 300, "unknown": 0}
+            },
+            "inventory_revision": "exact-revision",
+            "has_more": true,
+            "next_cursor": "opaque+/= cursor"
         }))
         .expect("exact-clean inventory should deserialize");
         assert_eq!(exact.authority, SystemCveInventoryAuthority::Exact);
         assert!(exact.exact_authority_failure.is_none());
         assert!(exact.source.is_some());
-        assert!(exact.vulnerabilities.is_empty());
+        assert_eq!(exact.vulnerabilities.len(), 1);
+        assert_eq!(exact.metadata.total_findings, 1315);
+        assert_eq!(exact.metadata.total_packages, 415);
+        assert_eq!(exact.next_cursor.as_deref(), Some("opaque+/= cursor"));
+        assert_eq!(
+            exact.vulnerabilities[0].stable_identity.canonical_cve_id,
+            "CVE-2026-0440"
+        );
 
-        let legacy: SystemCveInventoryResponse = serde_json::from_value(serde_json::json!({
+        let legacy: SystemCveInventoryPageResponse = serde_json::from_value(serde_json::json!({
             "authority": "legacy",
             "exact_authority_failure": "retained_generation_unavailable",
             "source": {
@@ -5932,7 +6057,16 @@ mod tests {
                 "scanner_version": "1.10.1",
                 "completed_at": "2026-09-14T20:00:00Z"
             },
-            "vulnerabilities": []
+            "vulnerabilities": [],
+            "metadata": {
+                "total_findings": 0,
+                "total_cves": 0,
+                "total_packages": 0,
+                "severity": {"critical": 0, "high": 0, "medium": 0, "low": 0, "unknown": 0}
+            },
+            "inventory_revision": "legacy-revision",
+            "has_more": false,
+            "next_cursor": null
         }))
         .expect("legacy-clean inventory should deserialize");
         assert_eq!(legacy.authority, SystemCveInventoryAuthority::Legacy);
@@ -5943,11 +6077,20 @@ mod tests {
         assert!(legacy.source.is_some());
         assert!(legacy.vulnerabilities.is_empty());
 
-        let no_scan: SystemCveInventoryResponse = serde_json::from_value(serde_json::json!({
+        let no_scan: SystemCveInventoryPageResponse = serde_json::from_value(serde_json::json!({
             "authority": "no_scan",
             "exact_authority_failure": "missing_current_generation",
             "source": null,
-            "vulnerabilities": []
+            "vulnerabilities": [],
+            "metadata": {
+                "total_findings": 0,
+                "total_cves": 0,
+                "total_packages": 0,
+                "severity": {"critical": 0, "high": 0, "medium": 0, "low": 0, "unknown": 0}
+            },
+            "inventory_revision": "no-scan-revision",
+            "has_more": false,
+            "next_cursor": null
         }))
         .expect("no-scan inventory should deserialize");
         assert_eq!(no_scan.authority, SystemCveInventoryAuthority::NoScan);

@@ -14,6 +14,7 @@
       "12a-systems-empty-state": { "category": "mock" },
       "12l-task440-config-lifecycle": { "category": "fixture" },
       "12la-task440-partial-config-inventory": { "category": "mock" },
+      "12ha-system-detail-cve-inventory-fallbacks": { "category": "mock" },
       "13j-task440-flake-states-panes-navigation": { "category": "mock" },
       "14d-task440-cross-surface-auth-navigation": { "category": "mock" }
     },
@@ -1057,6 +1058,20 @@
     {
       "name": "12h-system-detail-cves-grouped-justification",
       "description": "System detail package-first CVEs preserve exact evidence for POA&M creation and keep justification distinct",
+      "route": "/systems/:id",
+      "designRef": "docs/design/CrystalForge/components/SystemDetail.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "12ha-system-detail-cve-inventory-fallbacks",
+      "description": "System detail incrementally loads bounded CVE pages with authoritative totals and preserves exact, legacy, clean, and no-scan states",
       "route": "/systems/:id",
       "designRef": "docs/design/CrystalForge/components/SystemDetail.jsx",
       "profiles": [

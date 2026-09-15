@@ -15,11 +15,12 @@ use crate::api::models::{
     DeploymentStatus, FieldUpdate, ManualDeploymentAction, ManualDeploymentConversionState,
     ManualDeploymentPolicyState, ManualDeploymentRequestState, ManualDeploymentResponse,
     PipelineStage, SaveSystemCveJustificationRequest, SortOrder, SystemAgentEvent,
-    SystemCommitsResponse, SystemCveInventoryResponse, SystemDeploymentProgress, SystemDetail,
-    SystemGeneration, SystemGenerationsResponse, SystemHardwareInfo, SystemHistoryEntry,
-    SystemMutationResponse, SystemNetworkInfo, SystemRollbackGenerationRequest,
-    SystemRollbackRequest, SystemSecurityInfo, SystemSummary, SystemVulnerability,
-    SystemsListParams, UpdateSystemPublicKeyRequest, UpdateSystemRequest,
+    SystemCommitsResponse, SystemCveInventoryPageResponse, SystemCveInventoryParams,
+    SystemCveInventoryResponse, SystemCveInventoryRowIdentity, SystemCveInventoryVulnerability,
+    SystemDeploymentProgress, SystemDetail, SystemGeneration, SystemGenerationsResponse,
+    SystemHardwareInfo, SystemHistoryEntry, SystemMutationResponse, SystemNetworkInfo,
+    SystemRollbackGenerationRequest, SystemRollbackRequest, SystemSecurityInfo, SystemSummary,
+    SystemVulnerability, SystemsListParams, UpdateSystemPublicKeyRequest, UpdateSystemRequest,
     VerifyGenerationClosureRequest, VerifyGenerationClosureResponse,
 };
 use crate::auth::models::Role;
@@ -48,8 +49,9 @@ use crate::models::poam::CveRelationshipRowKey;
 use crate::queries::build_jobs::enqueue_build_job_for_derivation;
 use crate::queries::cve_scans::{get_scan_by_id, resolve_system_cve_scan_target};
 use crate::queries::cves::{
+    SystemCveInventoryPageError, SystemCveInventoryPageRequest,
     fetch_authorized_system_cve_inventory_tx, fetch_exact_system_vulnerabilities,
-    is_cve_inventory_overflow,
+    system_cve_inventory_page_error,
 };
 use crate::queries::derivations::reset_derivation_for_rebuild;
 use crate::queries::system_events::{
@@ -1547,12 +1549,10 @@ pub async fn get_system_cves(
     (StatusCode::OK, Json(vulnerabilities)).into_response()
 }
 
-/// Returns the typed read-only CVE inventory for one visible system.
+/// Returns the complete compatibility CVE inventory for one visible system.
 ///
-/// The response separates display inventory authority from exact remediation
-/// authority. Legacy findings remain visible but never receive exact
-/// relationship context. Authentication and environment failures remain
-/// non-disclosing, consistent with the existing system CVE endpoint.
+/// The response preserves the original DTO and rejects inventories above 1,000
+/// stable rows. New browser clients use [`get_system_cve_inventory_page`].
 pub async fn get_system_cve_inventory(
     State(pool): State<PgPool>,
     headers: HeaderMap,
@@ -1587,49 +1587,53 @@ pub async fn get_system_cve_inventory(
     {
         return internal_error("Failed to load system CVE inventory");
     }
-    let inventory = match fetch_authorized_system_cve_inventory_tx(
+    let mut inventory = match fetch_authorized_system_cve_inventory_tx(
         &mut transaction,
         system_id,
         user_id,
+        &SystemCveInventoryPageRequest::legacy_complete(),
     )
     .await
     {
         Ok(Some(value)) => value,
         Ok(None) => return not_found(),
-        Err(error) if is_cve_inventory_overflow(&error) => {
-            return bad_request("CVE inventory exceeds the 1000-row limit");
-        }
         Err(_) => return internal_error("Failed to load system CVE inventory"),
     };
-    let relationships =
-        if inventory.authority == crate::api::models::SystemCveInventoryAuthority::Exact {
-            let keys = inventory
-                .rows
-                .iter()
-                .map(|row| CveRelationshipRowKey {
-                    canonical_cve_id: row.cve_id.clone(),
-                    canonical_package_name: row.canonical_package_name.clone(),
-                    scan_id: row.scan_id,
-                    occurrence_derivation_path: row.occurrence_derivation_path.clone(),
-                })
-                .collect::<Vec<_>>();
-            match poam_service::cve_relationships_for_rows_tx(
-                &mut transaction,
-                &actor,
-                system_id,
-                &keys,
-                None,
-                None,
-                &SystemClock,
-            )
-            .await
-            {
-                Ok(value) => value,
-                Err(_) => return internal_error("Failed to load CVE remediation context"),
-            }
-        } else {
-            Vec::new()
-        };
+    if inventory.has_more {
+        return bad_request("CVE inventory exceeds the 1000-row limit");
+    }
+    // COMPATIBILITY: The legacy endpoint retains its severity-first order. The
+    // paged endpoint uses canonical keyset order instead.
+    inventory.rows.sort_by(|left, right| {
+        right
+            .cvss_score
+            .partial_cmp(&left.cvss_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.cve_id.cmp(&right.cve_id))
+            .then_with(|| {
+                left.canonical_package_name
+                    .cmp(&right.canonical_package_name)
+            })
+    });
+    let keys = inventory_relationship_keys(inventory.authority, &inventory.rows);
+    let relationships = if keys.is_empty() {
+        Vec::new()
+    } else {
+        match poam_service::cve_relationships_for_rows_tx(
+            &mut transaction,
+            &actor,
+            system_id,
+            &keys,
+            None,
+            None,
+            &SystemClock,
+        )
+        .await
+        {
+            Ok(value) => value,
+            Err(_) => return internal_error("Failed to load CVE remediation context"),
+        }
+    };
     if transaction.commit().await.is_err() {
         return internal_error("Failed to load system CVE inventory");
     }
@@ -1647,7 +1651,7 @@ pub async fn get_system_cve_inventory(
                 .cloned();
             SystemVulnerability {
                 cve_id: row.cve_id,
-                severity: parse_cve_severity(&row.severity),
+                severity: parse_legacy_cve_severity(&row.severity),
                 cvss_score: row.cvss_score,
                 description: row.description,
                 package_name: row.package_name,
@@ -1673,6 +1677,167 @@ pub async fn get_system_cve_inventory(
         }),
     )
         .into_response()
+}
+
+/// Returns one bounded typed CVE inventory page for one visible system.
+///
+/// The response separates display inventory authority from exact remediation
+/// authority. Legacy findings remain visible but never receive exact
+/// relationship context. Authentication and environment failures remain
+/// non-disclosing, consistent with the existing system CVE endpoint.
+pub async fn get_system_cve_inventory_page(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(system_id): Path<Uuid>,
+    Query(params): Query<SystemCveInventoryParams>,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+    let Some(caller_role) = highest_role(&roles) else {
+        return forbidden();
+    };
+    let environment_memberships = match load_membership_environment_ids(&pool, user_id).await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to load environment memberships"),
+    };
+    let actor = PoamActor {
+        user_id,
+        identifier: user_id.to_string(),
+        is_admin: matches!(caller_role, Role::Admin),
+        can_mutate: caller_role.can_mutate_systems(),
+        environment_ids: environment_memberships.iter().copied().collect(),
+        request_origin: None,
+    };
+    let page = match SystemCveInventoryPageRequest::from_params(params) {
+        Ok(value) => value,
+        Err(error) => {
+            let message = system_cve_inventory_page_error(&error)
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "Invalid inventory query".to_string());
+            return bad_request(&message);
+        }
+    };
+    let mut transaction = match pool.begin().await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to load system CVE inventory"),
+    };
+    if sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .execute(&mut *transaction)
+        .await
+        .is_err()
+    {
+        return internal_error("Failed to load system CVE inventory");
+    }
+    let inventory =
+        match fetch_authorized_system_cve_inventory_tx(&mut transaction, system_id, user_id, &page)
+            .await
+        {
+            Ok(Some(value)) => value,
+            Ok(None) => return not_found(),
+            Err(error) => return system_cve_inventory_page_error_response(&error),
+        };
+    // SECURITY: Relationship authority is resolved only for exact rows
+    // returned in this page. A cursor cannot cause legacy evidence or an
+    // off-page identity to receive remediation context.
+    let keys = inventory_relationship_keys(inventory.authority, &inventory.rows);
+    let relationships = if keys.is_empty() {
+        Vec::new()
+    } else {
+        match poam_service::cve_relationships_for_rows_tx(
+            &mut transaction,
+            &actor,
+            system_id,
+            &keys,
+            None,
+            None,
+            &SystemClock,
+        )
+        .await
+        {
+            Ok(value) => value,
+            Err(_) => return internal_error("Failed to load CVE remediation context"),
+        }
+    };
+    if transaction.commit().await.is_err() {
+        return internal_error("Failed to load system CVE inventory");
+    }
+    let vulnerabilities = inventory
+        .rows
+        .into_iter()
+        .map(|row| {
+            let remediation = relationships
+                .iter()
+                .find(|relationship| {
+                    relationship.observation.canonical_cve_id == row.cve_id
+                        && relationship.observation.canonical_package_name
+                            == row.canonical_package_name
+                })
+                .cloned();
+            SystemCveInventoryVulnerability {
+                stable_identity: SystemCveInventoryRowIdentity {
+                    canonical_cve_id: row.cve_id.clone(),
+                    canonical_package_name: row.canonical_package_name.clone(),
+                },
+                cve_id: row.cve_id,
+                canonical_package_name: row.canonical_package_name,
+                severity: parse_cve_severity(&row.severity),
+                cvss_score: row.cvss_score,
+                description: row.description,
+                package_name: row.package_name,
+                installed_version: row.installed_version,
+                fixed_version: row.fixed_version,
+                first_seen: row.first_seen,
+                published_at: row.published_at,
+                status: row.status,
+                justification_category: row.justification_category,
+                justification_reason: row.justification_reason,
+                justification_updated_at: row.justification_updated_at,
+                remediation,
+            }
+        })
+        .collect();
+    (
+        StatusCode::OK,
+        Json(SystemCveInventoryPageResponse {
+            authority: inventory.authority,
+            exact_authority_failure: inventory.exact_authority_failure,
+            source: inventory.source,
+            vulnerabilities,
+            metadata: inventory.metadata,
+            inventory_revision: inventory.inventory_revision,
+            has_more: inventory.has_more,
+            next_cursor: inventory.next_cursor,
+        }),
+    )
+        .into_response()
+}
+
+fn system_cve_inventory_page_error_response(error: &anyhow::Error) -> axum::response::Response {
+    match system_cve_inventory_page_error(error) {
+        Some(SystemCveInventoryPageError::InvalidCursor) => {
+            bad_request("Invalid or malformed pagination cursor")
+        }
+        Some(SystemCveInventoryPageError::InventoryChanged) => inventory_changed(),
+        _ => internal_error("Failed to load system CVE inventory"),
+    }
+}
+
+fn inventory_relationship_keys(
+    authority: crate::api::models::SystemCveInventoryAuthority,
+    rows: &[crate::queries::cves::ExactSystemVulnerabilityRow],
+) -> Vec<CveRelationshipRowKey> {
+    if authority != crate::api::models::SystemCveInventoryAuthority::Exact {
+        return Vec::new();
+    }
+    rows.iter()
+        .map(|row| CveRelationshipRowKey {
+            canonical_cve_id: row.cve_id.clone(),
+            canonical_package_name: row.canonical_package_name.clone(),
+            scan_id: row.scan_id,
+            occurrence_derivation_path: row.occurrence_derivation_path.clone(),
+        })
+        .collect()
 }
 
 /// Saves or revokes one system-scoped CVE justification.
@@ -2153,7 +2318,17 @@ fn parse_cve_severity(value: &str) -> crate::api::models::CveSeverity {
         "critical" => crate::api::models::CveSeverity::Critical,
         "high" => crate::api::models::CveSeverity::High,
         "medium" => crate::api::models::CveSeverity::Medium,
-        _ => crate::api::models::CveSeverity::Low,
+        "low" => crate::api::models::CveSeverity::Low,
+        _ => crate::api::models::CveSeverity::Unknown,
+    }
+}
+
+fn parse_legacy_cve_severity(value: &str) -> crate::api::models::CveSeverity {
+    match parse_cve_severity(value) {
+        // COMPATIBILITY: The original inventory DTO predates `unknown`. Older
+        // clients deserialize only the four established severity values.
+        crate::api::models::CveSeverity::Unknown => crate::api::models::CveSeverity::Low,
+        severity => severity,
     }
 }
 
@@ -3123,6 +3298,18 @@ fn bad_request(message: &str) -> axum::response::Response {
         Json(ApiError {
             error: "validation_error".to_string(),
             message: message.to_string(),
+            details: None,
+        }),
+    )
+        .into_response()
+}
+
+fn inventory_changed() -> axum::response::Response {
+    (
+        StatusCode::CONFLICT,
+        Json(ApiError {
+            error: "inventory_changed".to_string(),
+            message: "The inventory source or filters changed; restart pagination".to_string(),
             details: None,
         }),
     )
@@ -4844,6 +5031,118 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_system_cve_inventory_page_requires_authenticated_role() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
+            .expect("lazy pool should construct");
+
+        let response = get_system_cve_inventory_page(
+            State(pool),
+            HeaderMap::new(),
+            Path(Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("uuid")),
+            Query(SystemCveInventoryParams::default()),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn system_cve_inventory_handlers_map_validation_and_non_disclosure(pool: PgPool) {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let headers = mutation_headers(&pool, AuthRole::Admin, &suffix).await;
+        let absent_system = Uuid::new_v4();
+
+        let invalid_query = get_system_cve_inventory_page(
+            State(pool.clone()),
+            headers.clone(),
+            Path(absent_system),
+            Query(SystemCveInventoryParams {
+                limit: Some(0),
+                ..SystemCveInventoryParams::default()
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(invalid_query.status(), StatusCode::BAD_REQUEST);
+
+        let absent_legacy =
+            get_system_cve_inventory(State(pool.clone()), headers.clone(), Path(absent_system))
+                .await
+                .into_response();
+        assert_eq!(absent_legacy.status(), StatusCode::NOT_FOUND);
+
+        let absent_with_malformed_cursor = get_system_cve_inventory_page(
+            State(pool),
+            headers,
+            Path(absent_system),
+            Query(SystemCveInventoryParams {
+                after: Some("not-a-cursor".into()),
+                ..SystemCveInventoryParams::default()
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(absent_with_malformed_cursor.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn system_cve_inventory_page_errors_map_to_http_statuses() {
+        let invalid_cursor: anyhow::Error = SystemCveInventoryPageError::InvalidCursor.into();
+        assert_eq!(
+            system_cve_inventory_page_error_response(&invalid_cursor).status(),
+            StatusCode::BAD_REQUEST
+        );
+
+        let inventory_changed: anyhow::Error = SystemCveInventoryPageError::InventoryChanged.into();
+        assert_eq!(
+            system_cve_inventory_page_error_response(&inventory_changed).status(),
+            StatusCode::CONFLICT
+        );
+
+        assert_eq!(
+            system_cve_inventory_page_error_response(&anyhow::anyhow!("database failure")).status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[test]
+    fn inventory_remediation_keys_are_exact_and_page_local() {
+        let row = crate::queries::cves::ExactSystemVulnerabilityRow {
+            scan_id: Uuid::new_v4(),
+            occurrence_derivation_path: "/nix/store/page-row.drv".into(),
+            cve_id: "CVE-2099-0001".into(),
+            canonical_package_name: "page-package".into(),
+            package_name: "observed-page-package".into(),
+            installed_version: "1.0".into(),
+            severity: "high".into(),
+            cvss_score: Some(8.0),
+            description: "page finding".into(),
+            fixed_version: None,
+            first_seen: Some(chrono::Utc::now()),
+            published_at: None,
+            status: "open".into(),
+            justification_category: None,
+            justification_reason: None,
+            justification_updated_at: None,
+        };
+        let exact = inventory_relationship_keys(
+            crate::api::models::SystemCveInventoryAuthority::Exact,
+            std::slice::from_ref(&row),
+        );
+        assert_eq!(exact.len(), 1);
+        assert_eq!(exact[0].canonical_cve_id, row.cve_id);
+        assert_eq!(exact[0].canonical_package_name, row.canonical_package_name);
+        let legacy = inventory_relationship_keys(
+            crate::api::models::SystemCveInventoryAuthority::Legacy,
+            &[row],
+        );
+        assert!(legacy.is_empty());
+    }
+
+    #[tokio::test]
     async fn save_system_cve_justification_requires_authenticated_role() {
         let pool = PgPoolOptions::new()
             .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
@@ -4952,7 +5251,37 @@ mod tests {
         );
         assert_eq!(
             parse_cve_severity("unknown"),
-            crate::api::models::CveSeverity::Low
+            crate::api::models::CveSeverity::Unknown
+        );
+    }
+
+    #[test]
+    fn legacy_inventory_serializes_unrecognized_severity_as_low() {
+        let response = SystemCveInventoryResponse {
+            authority: crate::api::models::SystemCveInventoryAuthority::Legacy,
+            exact_authority_failure: None,
+            source: None,
+            vulnerabilities: vec![SystemVulnerability {
+                cve_id: "CVE-2099-0001".into(),
+                severity: parse_legacy_cve_severity("unrecognized"),
+                cvss_score: None,
+                description: "Unknown severity".into(),
+                package_name: "example".into(),
+                installed_version: "1.0".into(),
+                fixed_version: None,
+                first_seen: None,
+                published_at: None,
+                status: "open".into(),
+                justification_category: None,
+                justification_reason: None,
+                justification_updated_at: None,
+                remediation: None,
+            }],
+        };
+
+        assert_eq!(
+            serde_json::to_string(&response).expect("legacy response should serialize"),
+            r#"{"authority":"legacy","exact_authority_failure":null,"source":null,"vulnerabilities":[{"cve_id":"CVE-2099-0001","severity":"low","cvss_score":null,"description":"Unknown severity","package_name":"example","installed_version":"1.0","fixed_version":null,"first_seen":null,"published_at":null,"status":"open","justification_category":null,"justification_reason":null,"justification_updated_at":null}]}"#
         );
     }
 
