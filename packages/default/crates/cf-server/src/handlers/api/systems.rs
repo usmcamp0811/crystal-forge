@@ -64,8 +64,8 @@ use crate::queries::systems::{
     SystemListRow, commit_belongs_to_system_flake, deactivate_system, find_system_access_row,
     find_system_deployment_derivation, get_system_detail_by_id,
     get_user_environment_membership_ids, list_recent_commits_for_system, list_system_access_rows,
-    list_system_agent_event_rows, list_system_history_rows, touch_system_updated_at,
-    update_public_key, update_system_metadata,
+    list_system_agent_event_rows, list_system_history_rows, resolve_observational_current_revision,
+    touch_system_updated_at, update_public_key, update_system_metadata,
 };
 use crate::services::cve_scans::{CveScanError, trigger_immediate_cve_scan};
 use crate::services::poam::{self as poam_service, PoamActor, SystemClock};
@@ -3904,6 +3904,7 @@ pub async fn get_system_commits(
                     message: row.message.unwrap_or_default(),
                     author: row.author.unwrap_or_else(|| "unknown".to_string()),
                     timestamp: row.timestamp.to_rfc3339(),
+                    config_inspectable: row.config_inspectable,
                 }
             })
             .collect::<Vec<_>>(),
@@ -3920,9 +3921,13 @@ pub async fn get_system_commits(
         }
     };
 
+    let current_commit = match resolve_observational_current_revision(&pool, system_id).await {
+        Ok(revision) => revision,
+        Err(_) => return internal_error("Failed to resolve current system revision"),
+    };
     let response = SystemCommitsResponse {
         commits,
-        current_commit: None,
+        current_commit,
     };
 
     (StatusCode::OK, Json(response)).into_response()
@@ -6967,6 +6972,154 @@ mod tests {
         insert_system(pool, &system)
             .await
             .expect("insert_system should succeed")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn system_commits_reports_only_an_unambiguous_observational_current_revision() {
+        let pool = test_pool_from_env().await;
+        let suffix = Uuid::new_v4().simple().to_string();
+        let flake = insert_flake(
+            &pool,
+            &format!("commits-api-{suffix}"),
+            &format!("https://example.com/commits-api-{suffix}.git"),
+            "main",
+            "cf_systems_only",
+        )
+        .await
+        .expect("insert commits API flake");
+        let (_key, public_key) = rotation_key_material(61);
+        let mut system =
+            rotation_insert_system(&pool, &format!("commits-api-{suffix}"), &public_key, None)
+                .await;
+        system.flake_id = Some(flake.id);
+        system.system_configuration_name = Some("api-config".to_string());
+        system = insert_system(&pool, &system)
+            .await
+            .expect("attach commits API system to flake");
+        let revision = format!("{:0>40}", &suffix[..32]);
+        let store_path = format!("/nix/store/{suffix}-api-system");
+        let commit_id: i32 = sqlx::query_scalar(
+            "INSERT INTO commits (
+                flake_id, git_commit_hash, commit_timestamp, evaluation_status
+             ) VALUES ($1, $2, NOW(), 'complete') RETURNING id",
+        )
+        .bind(flake.id)
+        .bind(&revision)
+        .fetch_one(&pool)
+        .await
+        .expect("insert commits API revision");
+        sqlx::query(
+            "INSERT INTO derivations (
+                commit_id, derivation_type, derivation_name, status_id,
+                store_path, derivation_path, completed_at
+             ) VALUES ($1, 'nixos', 'api-config', 10, $2, $3, NOW())",
+        )
+        .bind(commit_id)
+        .bind(&store_path)
+        .bind(format!("{store_path}.drv"))
+        .execute(&pool)
+        .await
+        .expect("insert commits API derivation");
+        sqlx::query(
+            "INSERT INTO system_states (
+                hostname, change_reason, store_path, generation,
+                generation_matches_current_store_path, timestamp
+             ) VALUES ($1, 'startup', $2, 4, TRUE, NOW())",
+        )
+        .bind(&system.hostname)
+        .bind(&store_path)
+        .execute(&pool)
+        .await
+        .expect("insert matching commits API observation");
+        let headers = rotation_session_headers(&pool, &suffix, AuthRole::Admin).await;
+
+        let response = get_system_commits(State(pool.clone()), headers.clone(), Path(system.id))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: SystemCommitsResponse = response_json(response).await;
+        assert_eq!(body.current_commit.as_deref(), Some(revision.as_str()));
+        assert_eq!(body.commits.len(), 1);
+        assert!(body.commits[0].config_inspectable);
+
+        for index in 0_i64..50 {
+            let sequence = index + 1;
+            let newer_revision = format!("{sequence:08x}{}", &suffix[..32]);
+            sqlx::query(
+                "INSERT INTO commits (
+                    flake_id, git_commit_hash, commit_timestamp, evaluation_status
+                 ) VALUES ($1, $2, NOW() + ($3 * INTERVAL '1 second'), 'complete')",
+            )
+            .bind(flake.id)
+            .bind(newer_revision)
+            .bind(sequence)
+            .execute(&pool)
+            .await
+            .expect("insert newer bounded timeline commit");
+        }
+        let response = get_system_commits(State(pool.clone()), headers.clone(), Path(system.id))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: SystemCommitsResponse = response_json(response).await;
+        assert_eq!(body.current_commit.as_deref(), Some(revision.as_str()));
+        assert_eq!(body.commits.len(), 50);
+        assert!(body.commits.iter().all(|commit| commit.sha != revision));
+
+        sqlx::query(
+            "INSERT INTO system_states (
+                hostname, change_reason, store_path, generation,
+                generation_matches_current_store_path, timestamp
+             ) VALUES ($1, 'startup', $2, 4, FALSE, NOW() + INTERVAL '1 second')",
+        )
+        .bind(&system.hostname)
+        .bind(&store_path)
+        .execute(&pool)
+        .await
+        .expect("insert mismatched commits API observation");
+        let response = get_system_commits(State(pool.clone()), headers, Path(system.id))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: SystemCommitsResponse = response_json(response).await;
+        assert!(body.current_commit.is_none());
+
+        let hidden_environment = create_environment(
+            &pool,
+            &format!("commits-hidden-{suffix}"),
+            None,
+            "#112233",
+            true,
+            "manual",
+            false,
+            false,
+            false,
+        )
+        .await
+        .expect("insert commits API hidden environment");
+        sqlx::query("UPDATE systems SET environment_id = $1 WHERE id = $2")
+            .bind(hidden_environment.id)
+            .bind(system.id)
+            .execute(&pool)
+            .await
+            .expect("scope commits API system to hidden environment");
+        let viewer_headers =
+            rotation_session_headers(&pool, &format!("viewer-{suffix}"), AuthRole::Viewer).await;
+        let hidden =
+            get_system_commits(State(pool.clone()), viewer_headers.clone(), Path(system.id))
+                .await
+                .into_response();
+        let unknown = get_system_commits(State(pool), viewer_headers, Path(Uuid::new_v4()))
+            .await
+            .into_response();
+        assert_eq!(hidden.status(), StatusCode::NOT_FOUND);
+        assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+        let hidden_body: ApiError = response_json(hidden).await;
+        let unknown_body: ApiError = response_json(unknown).await;
+        assert_eq!(hidden_body.error, unknown_body.error);
+        assert_eq!(hidden_body.message, unknown_body.message);
+        assert_eq!(hidden_body.details, unknown_body.details);
     }
 
     #[test]

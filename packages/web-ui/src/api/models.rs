@@ -4168,19 +4168,31 @@ pub struct ManualDeploymentResponse {
     pub message: String,
 }
 
+/// Contains tracked commits and an observational current-revision mapping.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemCommitsResponse {
+    /// Tracked commits in stable newest-first order.
     pub commits: Vec<CommitInfo>,
+    /// Full current SHA when the server mapped the observation unambiguously.
     pub current_commit: Option<String>,
 }
 
+/// Describes one tracked commit and its targeted Config prerequisites.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CommitInfo {
+    /// Full immutable commit SHA used for requests and navigation.
     pub sha: String,
+    /// Display-only abbreviated SHA.
     pub short_sha: String,
+    /// Commit message.
     pub message: String,
+    /// Commit author.
     pub author: String,
+    /// RFC 3339 commit timestamp.
     pub timestamp: String,
+    /// Indicates that exact targeted Config observations can start.
+    #[serde(default)]
+    pub config_inspectable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -4543,6 +4555,9 @@ pub struct SystemCommitHistory {
     /// Optional config identity shown on timeline cards.
     #[serde(default)]
     pub config_identity: Option<String>,
+    /// Indicates that exact targeted Config observations can start.
+    #[serde(default)]
+    pub config_inspectable: bool,
 }
 
 /// Deployment log entry for the Logs tab.
@@ -5845,9 +5860,26 @@ mod tests {
         ComplianceControlEvidence, ConfigObservationLifecycle, ConfigObservationPayload,
         ConfigObservationRequestResponse, ConfigObservationResponse, CreatePolicyDraftRequest,
         CreatePolicyDraftResponse, EvaluatedOption, EvaluationModuleSummary,
-        ExactCveAuthorityFailureReason, SystemCveInventoryAuthority, SystemCveInventoryResponse,
-        XccdfPreviewResponse,
+        ExactCveAuthorityFailureReason, SystemCommitsResponse, SystemCveInventoryAuthority,
+        SystemCveInventoryResponse, XccdfPreviewResponse,
     };
+
+    #[test]
+    fn commit_inspectability_defaults_false_for_older_servers() {
+        let response: SystemCommitsResponse = serde_json::from_value(serde_json::json!({
+            "current_commit": null,
+            "commits": [{
+                "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "short_sha": "aaaaaaa",
+                "message": "pending",
+                "author": "Test",
+                "timestamp": "2026-09-14T00:00:00Z"
+            }]
+        }))
+        .expect("deserialize legacy commit response");
+
+        assert!(!response.commits[0].config_inspectable);
+    }
 
     #[test]
     fn policy_draft_dtos_preserve_the_exact_server_contract() {

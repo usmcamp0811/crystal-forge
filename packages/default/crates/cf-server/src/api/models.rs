@@ -2740,21 +2740,33 @@ pub struct ManualDeploymentResponse {
     pub message: String,
 }
 
-/// Response containing available commits for deployment.
+/// Contains tracked commits and the observational current revision.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemCommitsResponse {
+    /// Tracked commits in stable newest-first order.
     pub commits: Vec<CommitInfo>,
+    /// Full tracked SHA mapped to the current observation, when unambiguous.
+    ///
+    /// This field is observational and does not grant deployment or rollback authority.
     pub current_commit: Option<String>,
 }
 
-/// Information about a commit available for deployment.
+/// Describes one tracked commit and its Config observation prerequisite state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommitInfo {
+    /// Full immutable commit SHA.
     pub sha: String,
+    /// Display-only abbreviated SHA.
     pub short_sha: String,
+    /// Commit message.
     pub message: String,
+    /// Commit author.
     pub author: String,
+    /// RFC 3339 commit timestamp.
     pub timestamp: String,
+    /// Indicates that exact targeted Config observations can start for this commit.
+    #[serde(default)]
+    pub config_inspectable: bool,
 }
 
 /// Response containing available generations for rollback.

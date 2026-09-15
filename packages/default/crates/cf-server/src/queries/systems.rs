@@ -88,6 +88,145 @@ pub struct SystemCommitRow {
     pub message: Option<String>,
     pub author: Option<String>,
     pub timestamp: DateTime<Utc>,
+    /// Indicates whether the exact commit has the carrier required by Config observations.
+    pub config_inspectable: bool,
+}
+
+/// Resolves the full tracked commit for the latest observed system revision.
+///
+/// Resolution is observational only. The result does not establish retained
+/// lineage, rollback eligibility, deployment authorization, or policy evidence.
+/// The resolver prefers exact retained generation identity, then an exact
+/// server-issued deployment identity, then a unique legacy derivation mapping.
+/// Every tier fails closed for an empty store path, an explicit generation/store
+/// mismatch, a non-full commit SHA, or ambiguous identity.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot read the system identity.
+pub async fn resolve_observational_current_revision(
+    pool: &PgPool,
+    system_id: Uuid,
+) -> Result<Option<String>> {
+    // SECURITY: This query only labels an observed revision. Mutation paths must
+    // continue to prove their own retained or deployment authority.
+    let revision = sqlx::query_scalar::<_, Option<String>>(
+        r#"
+        WITH system_target AS (
+          SELECT system.id, system.hostname, system.flake_id,
+                 COALESCE(NULLIF(BTRIM(system.system_configuration_name), ''),
+                          system.hostname) AS configuration_name
+          FROM systems system
+          WHERE system.id = $1
+        ),
+        observation AS (
+          SELECT state.generation, NULLIF(BTRIM(state.store_path), '') AS store_path,
+                 state.generation_matches_current_store_path, state.timestamp
+          FROM system_target target
+          JOIN LATERAL (
+            SELECT state.generation, state.store_path,
+                   state.generation_matches_current_store_path, state.timestamp, state.id
+            FROM system_states state
+            WHERE state.hostname = target.hostname
+            ORDER BY state.timestamp DESC, state.id DESC
+            LIMIT 1
+          ) state ON TRUE
+        ),
+        retained AS (
+          SELECT commit.git_commit_hash AS revision
+          FROM system_target target
+          JOIN observation observed
+            ON observed.generation IS NOT NULL
+           AND observed.store_path IS NOT NULL
+           AND observed.generation_matches_current_store_path IS NOT FALSE
+          JOIN evaluation_generation_snapshots retained
+            ON retained.system_id = target.id
+           AND retained.generation = observed.generation
+           AND retained.lineage_verified
+           AND retained.source_store_path = observed.store_path
+           AND BTRIM(retained.configuration_name) = target.configuration_name
+          JOIN derivations derivation
+            ON derivation.id = retained.derivation_id
+           AND derivation.commit_id = retained.commit_id
+           AND BTRIM(derivation.derivation_name) = target.configuration_name
+           AND derivation.derivation_type = 'nixos'
+           AND COALESCE(derivation.store_path, derivation.expected_store_path) = observed.store_path
+          JOIN commits commit
+            ON commit.id = retained.commit_id
+           AND commit.flake_id = target.flake_id
+           AND commit.source_archived = FALSE
+          WHERE commit.git_commit_hash ~ '^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$'
+        ),
+        deployment_candidates AS (
+          SELECT DISTINCT deployment.requested_commit_id
+          FROM system_target target
+          JOIN observation observed
+            ON observed.store_path IS NOT NULL
+           AND observed.generation_matches_current_store_path IS NOT FALSE
+          JOIN pending_system_deployments deployment
+            ON deployment.system_id = target.id
+           AND deployment.status = 'succeeded'
+           AND deployment.target_store_path = observed.store_path
+           AND deployment.issued_at <= observed.timestamp
+           AND deployment.requested_commit_id IS NOT NULL
+           AND deployment.requested_derivation_id IS NOT NULL
+          JOIN system_events event
+            ON event.system_id = target.id
+           AND event.deployment_id = deployment.id
+           AND event.event_type = 'cf_deployment_succeeded'
+           AND event.new_store_path = observed.store_path
+           AND event.occurred_at <= observed.timestamp
+          JOIN commits commit
+           ON commit.id = deployment.requested_commit_id
+           AND commit.flake_id = target.flake_id
+           AND commit.source_archived = FALSE
+           AND commit.git_commit_hash ~ '^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$'
+          JOIN derivations derivation
+            ON derivation.id = deployment.requested_derivation_id
+           AND derivation.commit_id = deployment.requested_commit_id
+           AND derivation.derivation_type = 'nixos'
+           AND derivation.derivation_name = target.configuration_name
+           AND COALESCE(derivation.store_path, derivation.expected_store_path) = observed.store_path
+        ),
+        deployment AS (
+          SELECT MIN(commit.git_commit_hash) AS revision
+          FROM deployment_candidates candidate
+          JOIN commits commit ON commit.id = candidate.requested_commit_id
+          HAVING COUNT(*) = 1
+        ),
+        legacy_candidates AS (
+          SELECT DISTINCT commit.id, commit.git_commit_hash
+          FROM system_target target
+          JOIN observation observed
+            ON observed.store_path IS NOT NULL
+           AND observed.generation_matches_current_store_path IS NOT FALSE
+          JOIN commits commit
+            ON commit.flake_id = target.flake_id
+           AND commit.source_archived = FALSE
+           AND commit.git_commit_hash ~ '^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$'
+          JOIN derivations derivation
+            ON derivation.commit_id = commit.id
+           AND derivation.derivation_type = 'nixos'
+           AND BTRIM(derivation.derivation_name) = target.configuration_name
+           AND COALESCE(derivation.store_path, derivation.expected_store_path) = observed.store_path
+        ),
+        legacy AS (
+          SELECT MIN(git_commit_hash) AS revision
+          FROM legacy_candidates
+          HAVING COUNT(*) = 1
+        )
+        SELECT COALESCE(
+          (SELECT revision FROM retained),
+          (SELECT revision FROM deployment),
+          (SELECT revision FROM legacy)
+        )
+        "#,
+    )
+    .bind(system_id)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(revision)
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -1422,11 +1561,23 @@ pub async fn list_recent_commits_for_system(
         "SELECT c.git_commit_hash AS sha,
                 c.message,
                 c.author,
-                c.commit_timestamp AS timestamp
+                c.commit_timestamp AS timestamp,
+                c.git_commit_hash ~ '^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$'
+                AND COALESCE(c.evaluation_status = 'complete', FALSE)
+                AND EXISTS (
+                    SELECT 1
+                    FROM derivations derivation
+                    WHERE derivation.commit_id = c.id
+                      AND derivation.derivation_type = 'nixos'
+                      AND derivation.derivation_name =
+                          COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname)
+                      AND derivation.completed_at IS NOT NULL
+                      AND NULLIF(BTRIM(derivation.derivation_path), '') IS NOT NULL
+                ) AS config_inspectable
          FROM systems s
          JOIN commits c ON c.flake_id = s.flake_id
          WHERE s.id = $1 AND c.source_archived = false
-         ORDER BY c.commit_timestamp DESC
+         ORDER BY c.commit_timestamp DESC, c.id DESC
          LIMIT $2",
     )
     .bind(system_id)
@@ -2103,6 +2254,10 @@ mod tests {
     use super::*;
     use crate::models::public_key::PublicKey;
     use crate::models::systems::System;
+    use crate::queries::config_inspections::{
+        TargetedConfigInspectionOutcome, queue_or_reuse_targeted_config_inspection,
+    };
+    use crate::queries::flakes::insert_flake;
     use ed25519_dalek::SigningKey;
     use sqlx::Executor;
     use uuid::Uuid;
@@ -2138,6 +2293,582 @@ mod tests {
         PgPool::connect(&db_url)
             .await
             .expect("failed to connect to DATABASE_URL")
+    }
+
+    async fn current_revision_system(
+        pool: &PgPool,
+        suffix: &str,
+        flake_id: i32,
+        configuration_name: &str,
+        store_path: &str,
+        generation_matches: Option<bool>,
+    ) -> System {
+        let mut system = make_test_system(pool, &format!("revision-{suffix}")).await;
+        system.flake_id = Some(flake_id);
+        system.system_configuration_name = Some(configuration_name.to_string());
+        system = insert_system(pool, &system)
+            .await
+            .expect("attach current-revision system to flake");
+        sqlx::query(
+            "INSERT INTO system_states (
+                hostname, change_reason, store_path, generation,
+                generation_matches_current_store_path, timestamp
+             ) VALUES ($1, 'startup', $2, 7, $3, NOW())",
+        )
+        .bind(&system.hostname)
+        .bind(store_path)
+        .bind(generation_matches)
+        .execute(pool)
+        .await
+        .expect("insert current system observation");
+        system
+    }
+
+    async fn current_revision_derivation(
+        pool: &PgPool,
+        flake_id: i32,
+        revision: &str,
+        configuration_name: &str,
+        store_path: &str,
+        evaluation_status: &str,
+    ) -> (i32, i32) {
+        let commit_id: i32 = sqlx::query_scalar(
+            "INSERT INTO commits (
+                flake_id, git_commit_hash, commit_timestamp, evaluation_status
+             ) VALUES ($1, $2, NOW(), $3) RETURNING id",
+        )
+        .bind(flake_id)
+        .bind(revision)
+        .bind(evaluation_status)
+        .fetch_one(pool)
+        .await
+        .expect("insert current-revision commit");
+        let derivation_id: i32 = sqlx::query_scalar(
+            "INSERT INTO derivations (
+                commit_id, derivation_type, derivation_name, status_id,
+                store_path, derivation_path, completed_at
+             ) VALUES ($1, 'nixos', $2, 10, $3, $4, NOW()) RETURNING id",
+        )
+        .bind(commit_id)
+        .bind(configuration_name)
+        .bind(store_path)
+        .bind(format!("{store_path}-{revision}.drv"))
+        .fetch_one(pool)
+        .await
+        .expect("insert current-revision derivation");
+        (commit_id, derivation_id)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn observational_current_revision_fails_closed_and_retained_identity_wins() {
+        let pool = test_pool_from_env().await;
+        let suffix = Uuid::new_v4().simple().to_string();
+        let flake = insert_flake(
+            &pool,
+            &format!("revision-flake-{suffix}"),
+            &format!("https://example.com/revision-{suffix}.git"),
+            "main",
+            "cf_systems_only",
+        )
+        .await
+        .expect("insert system flake");
+        let foreign = insert_flake(
+            &pool,
+            &format!("foreign-flake-{suffix}"),
+            &format!("https://example.com/foreign-{suffix}.git"),
+            "main",
+            "cf_systems_only",
+        )
+        .await
+        .expect("insert foreign flake");
+
+        let unique_sha = format!("{:0>40}", &suffix[..32]);
+        let unique_store = format!("/nix/store/{suffix}-unique-system");
+        let unique = current_revision_system(
+            &pool,
+            &format!("unique-{suffix}"),
+            flake.id,
+            " exact-config ",
+            &unique_store,
+            None,
+        )
+        .await;
+        current_revision_derivation(
+            &pool,
+            flake.id,
+            &unique_sha,
+            "exact-config",
+            &unique_store,
+            "complete",
+        )
+        .await;
+        assert_eq!(
+            resolve_observational_current_revision(&pool, unique.id)
+                .await
+                .expect("resolve unique legacy mapping")
+                .as_deref(),
+            Some(unique_sha.as_str())
+        );
+
+        let foreign_store = format!("/nix/store/{suffix}-foreign-system");
+        let foreign_system = current_revision_system(
+            &pool,
+            &format!("foreign-{suffix}"),
+            flake.id,
+            "host",
+            &foreign_store,
+            None,
+        )
+        .await;
+        current_revision_derivation(
+            &pool,
+            foreign.id,
+            &format!("f{:0>39}", &suffix[..32]),
+            "host",
+            &foreign_store,
+            "complete",
+        )
+        .await;
+        assert!(
+            resolve_observational_current_revision(&pool, foreign_system.id)
+                .await
+                .expect("reject foreign flake")
+                .is_none()
+        );
+
+        let wrong_store = format!("/nix/store/{suffix}-wrong-config-system");
+        let wrong = current_revision_system(
+            &pool,
+            &format!("wrong-{suffix}"),
+            flake.id,
+            "expected-config",
+            &wrong_store,
+            None,
+        )
+        .await;
+        current_revision_derivation(
+            &pool,
+            flake.id,
+            &format!("e{:0>39}", &suffix[..32]),
+            "other-config",
+            &wrong_store,
+            "complete",
+        )
+        .await;
+        assert!(
+            resolve_observational_current_revision(&pool, wrong.id)
+                .await
+                .expect("reject wrong configuration")
+                .is_none()
+        );
+
+        let ambiguous_store = format!("/nix/store/{suffix}-ambiguous-system");
+        let ambiguous = current_revision_system(
+            &pool,
+            &format!("ambiguous-{suffix}"),
+            flake.id,
+            "ambiguous-config",
+            &ambiguous_store,
+            None,
+        )
+        .await;
+        for prefix in ['a', 'b'] {
+            current_revision_derivation(
+                &pool,
+                flake.id,
+                &format!("{prefix}{:0>39}", &suffix[..32]),
+                "ambiguous-config",
+                &ambiguous_store,
+                "complete",
+            )
+            .await;
+        }
+        assert!(
+            resolve_observational_current_revision(&pool, ambiguous.id)
+                .await
+                .expect("reject ambiguous commits")
+                .is_none()
+        );
+
+        let mismatch_store = format!("/nix/store/{suffix}-mismatch-system");
+        let mismatch = current_revision_system(
+            &pool,
+            &format!("mismatch-{suffix}"),
+            flake.id,
+            "mismatch-config",
+            &mismatch_store,
+            Some(false),
+        )
+        .await;
+        current_revision_derivation(
+            &pool,
+            flake.id,
+            &format!("d{:0>39}", &suffix[..32]),
+            "mismatch-config",
+            &mismatch_store,
+            "complete",
+        )
+        .await;
+        assert!(
+            resolve_observational_current_revision(&pool, mismatch.id)
+                .await
+                .expect("reject explicit generation/store mismatch")
+                .is_none()
+        );
+
+        let empty = current_revision_system(
+            &pool,
+            &format!("empty-{suffix}"),
+            flake.id,
+            "empty-config",
+            "",
+            Some(true),
+        )
+        .await;
+        assert!(
+            resolve_observational_current_revision(&pool, empty.id)
+                .await
+                .expect("reject empty observed store")
+                .is_none()
+        );
+
+        let invalid_store = format!("/nix/store/{suffix}-invalid-sha-system");
+        let invalid_sha = current_revision_system(
+            &pool,
+            &format!("invalid-sha-{suffix}"),
+            flake.id,
+            "invalid-sha-config",
+            &invalid_store,
+            Some(true),
+        )
+        .await;
+        current_revision_derivation(
+            &pool,
+            flake.id,
+            "abcdef0",
+            "invalid-sha-config",
+            &invalid_store,
+            "complete",
+        )
+        .await;
+        assert!(
+            resolve_observational_current_revision(&pool, invalid_sha.id)
+                .await
+                .expect("reject non-full commit SHA")
+                .is_none()
+        );
+
+        let observed_store = format!("/nix/store/{suffix}-observed-system");
+        let other_store = format!("/nix/store/{suffix}-other-system");
+        let wrong_store = current_revision_system(
+            &pool,
+            &format!("wrong-store-{suffix}"),
+            flake.id,
+            "wrong-store-config",
+            &observed_store,
+            Some(true),
+        )
+        .await;
+        current_revision_derivation(
+            &pool,
+            flake.id,
+            &format!("4{:0>39}", &suffix[..32]),
+            "wrong-store-config",
+            &other_store,
+            "complete",
+        )
+        .await;
+        assert!(
+            resolve_observational_current_revision(&pool, wrong_store.id)
+                .await
+                .expect("reject wrong store")
+                .is_none()
+        );
+
+        let late_store = format!("/nix/store/{suffix}-late-deployment-system");
+        let late_system = current_revision_system(
+            &pool,
+            &format!("late-deployment-{suffix}"),
+            flake.id,
+            "late-deployment-config",
+            &late_store,
+            Some(true),
+        )
+        .await;
+        let late_sha = format!("3{:0>39}", &suffix[..32]);
+        let (late_commit_id, late_derivation_id) = current_revision_derivation(
+            &pool,
+            flake.id,
+            &late_sha,
+            "late-deployment-config",
+            &late_store,
+            "complete",
+        )
+        .await;
+        current_revision_derivation(
+            &pool,
+            flake.id,
+            &format!("2{:0>39}", &suffix[..32]),
+            "late-deployment-config",
+            &late_store,
+            "complete",
+        )
+        .await;
+        let late_deployment_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO pending_system_deployments (
+                system_id, target_store_path, status, source, issued_at,
+                completed_at, requested_commit_id, requested_derivation_id
+             ) VALUES ($1, $2, 'succeeded', 'manual_continue', NOW() - INTERVAL '1 day',
+                       NOW(), $3, $4) RETURNING id",
+        )
+        .bind(late_system.id)
+        .bind(&late_store)
+        .bind(late_commit_id)
+        .bind(late_derivation_id)
+        .fetch_one(&pool)
+        .await
+        .expect("insert post-observation deployment");
+        sqlx::query(
+            "INSERT INTO system_events (
+                system_id, event_type, dedupe_key, occurred_at, new_store_path,
+                deployment_id, source
+             ) VALUES ($1, 'cf_deployment_succeeded', $2, NOW() + INTERVAL '1 second',
+                       $3, $4, 'agent_report')",
+        )
+        .bind(late_system.id)
+        .bind(format!("late-deployment-resolver-{suffix}"))
+        .bind(&late_store)
+        .bind(late_deployment_id)
+        .execute(&pool)
+        .await
+        .expect("insert post-observation deployment event");
+        assert!(
+            resolve_observational_current_revision(&pool, late_system.id)
+                .await
+                .expect("reject post-observation deployment identity")
+                .is_none()
+        );
+
+        let deployment_store = format!("/nix/store/{suffix}-deployment-system");
+        let deployment_system = current_revision_system(
+            &pool,
+            &format!("deployment-{suffix}"),
+            flake.id,
+            "deployment-config",
+            &deployment_store,
+            Some(true),
+        )
+        .await;
+        let deployment_sha = format!("6{:0>39}", &suffix[..32]);
+        let (deployment_commit_id, deployment_derivation_id) = current_revision_derivation(
+            &pool,
+            flake.id,
+            &deployment_sha,
+            "deployment-config",
+            &deployment_store,
+            "complete",
+        )
+        .await;
+        current_revision_derivation(
+            &pool,
+            flake.id,
+            &format!("5{:0>39}", &suffix[..32]),
+            "deployment-config",
+            &deployment_store,
+            "complete",
+        )
+        .await;
+        let deployment_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO pending_system_deployments (
+                system_id, target_store_path, status, source, issued_at,
+                completed_at, requested_commit_id, requested_derivation_id
+             ) VALUES ($1, $2, 'succeeded', 'manual_continue', NOW() - INTERVAL '2 seconds',
+                       NOW() - INTERVAL '1 second', $3, $4) RETURNING id",
+        )
+        .bind(deployment_system.id)
+        .bind(&deployment_store)
+        .bind(deployment_commit_id)
+        .bind(deployment_derivation_id)
+        .fetch_one(&pool)
+        .await
+        .expect("insert durable deployment identity");
+        sqlx::query(
+            "INSERT INTO system_events (
+                system_id, event_type, dedupe_key, occurred_at, new_store_path,
+                deployment_id, source
+             ) VALUES ($1, 'cf_deployment_succeeded', $2, NOW() - INTERVAL '1 second',
+                       $3, $4, 'agent_report')",
+        )
+        .bind(deployment_system.id)
+        .bind(format!("deployment-resolver-{suffix}"))
+        .bind(&deployment_store)
+        .bind(deployment_id)
+        .execute(&pool)
+        .await
+        .expect("insert durable deployment event");
+        assert_eq!(
+            resolve_observational_current_revision(&pool, deployment_system.id)
+                .await
+                .expect("resolve durable deployment identity")
+                .as_deref(),
+            Some(deployment_sha.as_str())
+        );
+
+        let retained_store = format!("/nix/store/{suffix}-retained-system");
+        let retained_system = current_revision_system(
+            &pool,
+            &format!("retained-{suffix}"),
+            flake.id,
+            "retained-config",
+            &retained_store,
+            Some(true),
+        )
+        .await;
+        let retained_sha = format!("c{:0>39}", &suffix[..32]);
+        let (retained_commit_id, retained_derivation_id) = current_revision_derivation(
+            &pool,
+            flake.id,
+            &retained_sha,
+            "retained-config",
+            &retained_store,
+            "complete",
+        )
+        .await;
+        current_revision_derivation(
+            &pool,
+            flake.id,
+            &format!("9{:0>39}", &suffix[..32]),
+            "retained-config",
+            &retained_store,
+            "complete",
+        )
+        .await;
+        let snapshot_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO evaluation_snapshots (
+                commit_id, configuration_name, schema_version, lifecycle,
+                option_count, module_count, content_bytes
+             ) VALUES ($1, $2, 1, 'available', 0, 0, 0) RETURNING id",
+        )
+        .bind(retained_commit_id)
+        .bind("retained-config")
+        .fetch_one(&pool)
+        .await
+        .expect("insert retained snapshot");
+        sqlx::query("UPDATE evaluation_snapshots SET integrity_version = 1 WHERE id = $1")
+            .bind(snapshot_id)
+            .execute(&pool)
+            .await
+            .expect("certify retained snapshot");
+        sqlx::query(
+            "INSERT INTO evaluation_generation_snapshots (
+                system_id, generation, snapshot_id, derivation_id, commit_id,
+                configuration_name, source_store_path, lineage_verified
+             ) VALUES ($1, 7, $2, $3, $4, 'retained-config', $5, TRUE)",
+        )
+        .bind(retained_system.id)
+        .bind(snapshot_id)
+        .bind(retained_derivation_id)
+        .bind(retained_commit_id)
+        .bind(&retained_store)
+        .execute(&pool)
+        .await
+        .expect("retain exact generation identity");
+        assert_eq!(
+            resolve_observational_current_revision(&pool, retained_system.id)
+                .await
+                .expect("retained identity wins")
+                .as_deref(),
+            Some(retained_sha.as_str())
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn recent_commits_are_stable_and_report_exact_config_prerequisites() {
+        let pool = test_pool_from_env().await;
+        let suffix = Uuid::new_v4().simple().to_string();
+        let flake = insert_flake(
+            &pool,
+            &format!("inspectable-flake-{suffix}"),
+            &format!("https://example.com/inspectable-{suffix}.git"),
+            "main",
+            "cf_systems_only",
+        )
+        .await
+        .expect("insert inspectable flake");
+        let system = current_revision_system(
+            &pool,
+            &format!("inspectable-{suffix}"),
+            flake.id,
+            "inspectable-config",
+            &format!("/nix/store/{suffix}-observed"),
+            None,
+        )
+        .await;
+        let inspectable_sha = format!("7{:0>39}", &suffix[..32]);
+        current_revision_derivation(
+            &pool,
+            flake.id,
+            &inspectable_sha,
+            "inspectable-config",
+            &format!("/nix/store/{suffix}-inspectable"),
+            "complete",
+        )
+        .await;
+        assert!(matches!(
+            queue_or_reuse_targeted_config_inspection(&pool, system.id, &inspectable_sha)
+                .await
+                .expect("resolve inspectable targeted carrier"),
+            TargetedConfigInspectionOutcome::Resolved(_)
+        ));
+        let whitespace_sha = format!("6{:0>39}", &suffix[..32]);
+        current_revision_derivation(
+            &pool,
+            flake.id,
+            &whitespace_sha,
+            " inspectable-config ",
+            &format!("/nix/store/{suffix}-whitespace"),
+            "complete",
+        )
+        .await;
+        assert_eq!(
+            queue_or_reuse_targeted_config_inspection(&pool, system.id, &whitespace_sha)
+                .await
+                .expect("reject whitespace-mismatched targeted carrier"),
+            TargetedConfigInspectionOutcome::PrerequisiteMissing
+        );
+        let pending_sha = format!("8{:0>39}", &suffix[..32]);
+        sqlx::query(
+            "INSERT INTO commits (
+                flake_id, git_commit_hash, commit_timestamp, evaluation_status
+             ) VALUES ($1, $2, (SELECT MAX(commit_timestamp) FROM commits WHERE flake_id = $1), 'in_progress')",
+        )
+        .bind(flake.id)
+        .bind(&pending_sha)
+        .execute(&pool)
+        .await
+        .expect("insert newer in-progress commit");
+
+        let commits = list_recent_commits_for_system(&pool, system.id, 50)
+            .await
+            .expect("list recent system commits");
+        assert_eq!(commits[0].sha, pending_sha);
+        assert!(!commits[0].config_inspectable);
+        assert!(
+            commits
+                .iter()
+                .find(|commit| commit.sha == inspectable_sha)
+                .expect("inspectable commit should remain listed")
+                .config_inspectable
+        );
+        assert!(
+            !commits
+                .iter()
+                .find(|commit| commit.sha == whitespace_sha)
+                .expect("whitespace-name commit should remain listed")
+                .config_inspectable
+        );
     }
 
     #[test]

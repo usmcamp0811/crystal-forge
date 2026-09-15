@@ -892,12 +892,14 @@ pub fn SystemDetailView(
         .clone()
         .flatten();
     let history_commit_history = map_history_entries_to_commit_history(&history_entries);
-    let deploy_commit_history = commits_resource
-        .read_unchecked()
-        .clone()
-        .flatten()
+    let commits_response = commits_resource.read_unchecked().clone().flatten();
+    let observational_current_commit = commits_response
+        .as_ref()
+        .and_then(|response| response.current_commit.clone());
+    let deploy_commit_history = commits_response
+        .as_ref()
         .map(|response| {
-            map_commit_infos_to_commit_history(&response.commits, response.current_commit)
+            map_commit_infos_to_commit_history(&response.commits, response.current_commit.clone())
         })
         .filter(|commits| !commits.is_empty())
         .unwrap_or_else(|| history_commit_history.clone());
@@ -906,11 +908,11 @@ pub fn SystemDetailView(
     } else {
         history_entries.clone()
     };
-    let overview_current_commit = deploy_commit_history
-        .iter()
-        .find(|commit| commit.is_current)
-        .cloned()
-        .or_else(|| deploy_commit_history.first().cloned());
+    let overview_current_commit = observational_current_timeline_commit(
+        &deploy_commit_history,
+        observational_current_commit.as_deref(),
+    )
+    .cloned();
     // Raw commit list for the Edit modal's pinned-commit picker. This comes from the
     // real `/systems/:id/commits` endpoint when available, so the pinned picker is wired
     // to authoritative data rather than mocked.
@@ -979,6 +981,7 @@ pub fn SystemDetailView(
 
     let auth_context = app_state.read().auth.clone();
     let can_mutate = auth::can_mutate_systems(&auth_context);
+    let can_start_config_observations = auth::is_admin(&auth_context);
     let cve_scan_eligible = scan_eligibility
         .as_ref()
         .map(|item| item.eligible)
@@ -1540,12 +1543,13 @@ pub fn SystemDetailView(
                     },
                     Tab::Config => rsx! {
                         ConfigTab {
-                            key: "{navigation_state.read().config_revision:?}-{deploy_commit_history.iter().find(|commit| commit.is_current).map(|commit| commit.hash.as_str()).unwrap_or_default()}-{generations_result.generations.len()}",
+                            key: "{navigation_state.read().config_revision:?}-{observational_current_commit.as_deref().unwrap_or_default()}-{generations_result.generations.len()}",
                             system: system.clone(),
                             commits: deploy_commit_history.clone(),
                             generations: generations_result.generations.clone(),
+                            current_commit: observational_current_commit.clone(),
                             revision: navigation_state.read().config_revision.clone(),
-                            allow_mutations: can_mutate,
+                            allow_config_observations: can_start_config_observations,
                             on_open_flake_commit: on_open_flake_commit,
                             on_revision_change: move |revision: ConfigRevision| {
                                 let mut next = navigation_state.read().clone();
@@ -2911,19 +2915,16 @@ fn OverviewTab(
         .as_ref()
         .map(|f| f.name.clone())
         .unwrap_or_else(|| "unknown".to_string());
-    let flake_commit = current_commit
-        .as_ref()
-        .map(|commit| commit.hash.clone())
-        .or_else(|| system.flake.as_ref().and_then(|f| f.latest_commit.clone()))
-        .unwrap_or_else(|| "unknown".to_string());
-    let flake_commit_short = if flake_commit == "unknown" {
-        flake_commit.clone()
-    } else {
-        flake_commit.chars().take(8).collect::<String>()
-    };
+    let flake_commit = overview_commit_identity(current_commit.as_ref()).map(str::to_string);
+    let flake_commit_short = flake_commit
+        .as_deref()
+        .map(|commit| commit.chars().take(8).collect::<String>())
+        .unwrap_or_else(|| "unmapped".to_string());
     let flake_commit_for_open = flake_commit.clone();
     let flake_commit_for_label = flake_commit_short.clone();
-    let flake_commit_for_title = flake_commit.clone();
+    let flake_commit_for_title = flake_commit
+        .clone()
+        .unwrap_or_else(|| "unmapped current commit".to_string());
     let flake_summary_for_commit = system.flake.clone();
     let nixos_version = system
         .nixos_version
@@ -2982,6 +2983,7 @@ fn OverviewTab(
         .as_ref()
         .map(|commit| commit.message.clone())
         .unwrap_or_else(|| "No commit message available".to_string());
+    let commit_message_for_open = commit_message_text.clone();
 
     let critical = system.cve_counts.critical;
     let high = system.cve_counts.high;
@@ -3035,17 +3037,21 @@ fn OverviewTab(
                 div {
                     class: "sd-card-head",
                     h2 { "Currently deployed" }
-                    span {
-                        class: "chip chip-healthy",
-                        svg {
-                            class: "w-3 h-3",
-                            fill: "none",
-                            stroke: "currentColor",
-                            stroke_width: "2",
-                            view_box: "0 0 24 24",
-                            path { d: "M5 12l5 5L20 7" }
+                    if current_commit.is_some() {
+                        span {
+                            class: "chip chip-healthy",
+                            svg {
+                                class: "w-3 h-3",
+                                fill: "none",
+                                stroke: "currentColor",
+                                stroke_width: "2",
+                                view_box: "0 0 24 24",
+                                path { d: "M5 12l5 5L20 7" }
+                            }
+                            "up-to-date"
                         }
-                        "up-to-date"
+                    } else {
+                        span { class: "chip chip-warning", "identity unavailable" }
                     }
                 }
                 dl {
@@ -3054,23 +3060,30 @@ fn OverviewTab(
                     dt { "Branch" } dd { class: "mono", "{branch_text}" }
                     dt { "Commit" }
                     dd { class: "mono",
-                        button {
-                            class: "tl-commit-link mono focus-ring",
-                            title: "Open this commit in Flakes",
-                            onclick: move |_| {
-                                if let (Some(flake), false) = (flake_summary_for_commit.clone(), flake_commit_for_open == "unknown") {
-                                    on_open_flake_commit.call(FlakeCommitPeekTarget {
-                                        flake,
-                                        sha: flake_commit_for_open.clone(),
-                                        meta: CommitFocusMeta {
-                                            msg: Some(commit_message_text.clone()),
-                                            author: current_commit.as_ref().map(|commit| commit.author.clone()),
-                                            at: current_commit.as_ref().map(|commit| commit.committed_at.format("%Y-%m-%d %H:%M UTC").to_string()),
-                                        },
-                                    });
-                                }
-                            },
-                            "{flake_commit_for_label}"
+                        if flake_commit_for_open.is_some() {
+                            button {
+                                class: "tl-commit-link mono focus-ring",
+                                title: "Open this commit in Flakes",
+                                onclick: move |_| {
+                                    if let (Some(flake), Some(sha)) = (flake_summary_for_commit.clone(), flake_commit_for_open.clone()) {
+                                        on_open_flake_commit.call(FlakeCommitPeekTarget {
+                                            flake,
+                                            sha,
+                                            meta: CommitFocusMeta {
+                                                msg: Some(commit_message_for_open.clone()),
+                                                author: current_commit.as_ref().map(|commit| commit.author.clone()),
+                                                at: current_commit.as_ref().map(|commit| commit.committed_at.format("%Y-%m-%d %H:%M UTC").to_string()),
+                                            },
+                                        });
+                                    }
+                                },
+                                "{flake_commit_for_label}"
+                            }
+                        } else {
+                            span {
+                                title: "The current deployed commit identity is unavailable",
+                                "{flake_commit_for_label}"
+                            }
                         }
                         span { style: "margin:0 6px; color:var(--cf-text-muted);", "build" }
                         button {
@@ -4942,15 +4955,60 @@ struct ConfigRefreshScope {
 
 fn config_selection_is_historical(
     selection: &ConfigRevision,
-    selected_revision: Option<&str>,
-    current_deployed_revision: Option<&str>,
     current_generation: Option<i32>,
 ) -> bool {
     match selection {
         ConfigRevision::Current => false,
-        ConfigRevision::Commit(_) => selected_revision != current_deployed_revision,
+        // An explicit commit selection is historical inspection context even
+        // when its SHA matches the observational current-revision mapping.
+        ConfigRevision::Commit(_) => true,
         ConfigRevision::Generation(generation) => Some(*generation) != current_generation,
     }
+}
+
+fn selected_config_revision(
+    selection: &ConfigRevision,
+    current_commit: Option<&str>,
+    generations: &[SystemGeneration],
+) -> Option<String> {
+    match selection {
+        ConfigRevision::Commit(sha) => Some(sha.clone()),
+        ConfigRevision::Generation(generation) => generations
+            .iter()
+            .find(|item| item.generation == *generation)
+            .and_then(|item| item.commit_hash.clone()),
+        ConfigRevision::Current => current_commit.map(str::to_string),
+    }
+}
+
+fn config_observation_request_allowed(
+    selection: &ConfigRevision,
+    selected_revision: Option<&str>,
+    selected_commit_inspectable: bool,
+    is_admin: bool,
+) -> bool {
+    is_admin
+        && selected_revision.is_some()
+        && selected_commit_inspectable
+        && !matches!(selection, ConfigRevision::Generation(_))
+}
+
+fn observational_current_timeline_commit<'a>(
+    commits: &'a [SystemCommitHistory],
+    current_commit: Option<&str>,
+) -> Option<&'a SystemCommitHistory> {
+    let current_commit = current_commit?;
+    commits.iter().find(|commit| commit.hash == current_commit)
+}
+
+fn overview_commit_identity(current_commit: Option<&SystemCommitHistory>) -> Option<&str> {
+    current_commit.map(|commit| commit.hash.as_str())
+}
+
+fn newest_config_inspectable_commit(
+    commits: &[SystemCommitHistory],
+) -> Option<&SystemCommitHistory> {
+    commits.iter().find(|commit| commit.config_inspectable)
 }
 
 fn unavailable_generation_commit(
@@ -5220,8 +5278,9 @@ fn ConfigTab(
     system: SystemDetail,
     commits: Vec<SystemCommitHistory>,
     generations: Vec<SystemGeneration>,
+    current_commit: Option<String>,
     revision: ConfigRevision,
-    allow_mutations: bool,
+    allow_config_observations: bool,
     on_revision_change: EventHandler<ConfigRevision>,
     on_open_flake_commit: EventHandler<FlakeCommitPeekTarget>,
 ) -> Element {
@@ -5300,23 +5359,8 @@ fn ConfigTab(
         ConfigRevision::Current => system.generation,
         ConfigRevision::Commit(_) => None,
     };
-    let selected_revision = match &revision {
-        ConfigRevision::Commit(sha) => Some(sha.clone()),
-        ConfigRevision::Generation(generation) => generations
-            .iter()
-            .find(|item| item.generation == *generation)
-            .and_then(|item| item.commit_hash.clone()),
-        ConfigRevision::Current => generations
-            .iter()
-            .find(|item| item.is_current || Some(item.generation) == system.generation)
-            .and_then(|item| item.commit_hash.clone())
-            .or_else(|| {
-                commits
-                    .iter()
-                    .find(|item| item.is_current)
-                    .map(|item| item.hash.clone())
-            }),
-    };
+    let selected_revision =
+        selected_config_revision(&revision, current_commit.as_deref(), &generations);
     let revision_known = match &revision {
         ConfigRevision::Current => selected_revision.is_some(),
         ConfigRevision::Generation(value) => {
@@ -5324,27 +5368,12 @@ fn ConfigTab(
         }
         ConfigRevision::Commit(sha) => commits.iter().any(|item| item.hash == *sha),
     };
-    let current_deployed_revision = generations
-        .iter()
-        .find(|item| item.is_current || Some(item.generation) == system.generation)
-        .and_then(|item| item.commit_hash.clone())
-        .or_else(|| {
-            commits
-                .iter()
-                .find(|item| item.is_current)
-                .map(|item| item.hash.clone())
-        });
     let current_generation = generations
         .iter()
         .find(|item| item.is_current || Some(item.generation) == system.generation)
         .map(|item| item.generation)
         .or(system.generation);
-    let is_historical = config_selection_is_historical(
-        &revision,
-        selected_revision.as_deref(),
-        current_deployed_revision.as_deref(),
-        current_generation,
-    );
+    let is_historical = config_selection_is_historical(&revision, current_generation);
     let deployed_here = selected_revision.as_ref().is_some_and(|sha| {
         generations
             .iter()
@@ -5356,6 +5385,17 @@ fn ConfigTab(
             .find(|commit| commit.hash == *sha)
             .map(|commit| commit.message.clone())
     });
+    let selected_commit_inspectable = selected_revision.as_ref().is_some_and(|sha| {
+        commits
+            .iter()
+            .any(|commit| commit.hash == *sha && commit.config_inspectable)
+    });
+    let config_observation_allowed = config_observation_request_allowed(
+        &revision,
+        selected_revision.as_deref(),
+        selected_commit_inspectable,
+        allow_config_observations,
+    );
     let selected_module_scope = selected_revision
         .clone()
         .map(|revision| ModuleSourcesScope {
@@ -6071,7 +6111,8 @@ fn ConfigTab(
             });
         }
     };
-    let commits_for_mode_switch = commits.clone();
+    let commit_for_mode_switch =
+        newest_config_inspectable_commit(&commits).map(|commit| commit.hash.clone());
     let selected_revision_for_inventory = selected_revision.clone();
     let inventory_selection = selected_module_scope.clone();
 
@@ -6083,7 +6124,7 @@ fn ConfigTab(
                     div { class: "cfgx-rev",
                         div { class: "seg xs",
                             button { class: if selected_mode == SnapshotRevisionMode::Generation { "active focus-ring" } else { "focus-ring" }, "aria-pressed": selected_mode == SnapshotRevisionMode::Generation, onclick: move |_| on_revision_change.call(ConfigRevision::Current), "Generations" }
-                            button { class: if selected_mode == SnapshotRevisionMode::Commit { "active focus-ring" } else { "focus-ring" }, "aria-pressed": selected_mode == SnapshotRevisionMode::Commit, onclick: move |_| { if let Some(commit) = commits_for_mode_switch.first() { on_revision_change.call(ConfigRevision::Commit(commit.hash.clone())); } }, "Commits" }
+                            button { class: if selected_mode == SnapshotRevisionMode::Commit { "active focus-ring" } else { "focus-ring" }, "aria-pressed": selected_mode == SnapshotRevisionMode::Commit, disabled: commit_for_mode_switch.is_none(), onclick: move |_| { if let Some(commit) = commit_for_mode_switch.clone() { on_revision_change.call(ConfigRevision::Commit(commit)); } }, "Commits" }
                         }
                         if selected_mode == SnapshotRevisionMode::Generation {
                             select { class: "cfgx-select focus-ring", value: selected_generation.map(|value| value.to_string()).unwrap_or_default(), onchange: move |event| { if let Ok(generation) = event.value().parse::<i32>() { on_revision_change.call(ConfigRevision::Generation(generation)); } },
@@ -6102,13 +6143,24 @@ fn ConfigTab(
                                     {
                                         let deployed = if commit.is_current { " (deployed)" } else { "" };
                                         let short = short_revision(&commit.hash);
-                                        rsx! { option { value: "{commit.hash}", "{short}{deployed} · {commit.message}" } }
+                                        rsx! { option { value: "{commit.hash}", disabled: !commit.config_inspectable, "{short}{deployed} · {commit.message}" } }
                                     }
                                 }
                             }
                         }
                     }
                     span { class: "cfgx-obs", title: "Observational only. Deployment gating uses the policy evaluator, which evaluates this configuration independently — an Explorer cache hit never substitutes for an authoritative policy evaluation.", "OBSERVATIONAL" }
+                }
+            }
+            if matches!(revision, ConfigRevision::Current) && selected_revision.is_none() {
+                div { class: "cfgx-hist", role: "status",
+                    Icon { name: IconName::Warn, size: 12 }
+                    div { "The current generation/store is not linked unambiguously to a tracked commit. Generation Config evidence remains available independently." }
+                    if let Some(commit) = commit_for_mode_switch.clone() {
+                        button { class: "cfgx-link focus-ring", onclick: move |_| on_revision_change.call(ConfigRevision::Commit(commit.clone())), "inspect newest eligible commit" }
+                    } else {
+                        span { " No tracked commit currently satisfies Config inspection prerequisites." }
+                    }
                 }
             }
             if is_historical {
@@ -6121,8 +6173,8 @@ fn ConfigTab(
                 key: "{explorer_scope_key}",
                 system_id: system.id,
                 revision: selected_revision.clone(),
-                scoped_enabled: selected_revision.is_some() && !matches!(revision, ConfigRevision::Generation(_)),
-                disabled_reason: if matches!(revision, ConfigRevision::Generation(_)) { "Lazy observations are commit-scoped. Certified retained-generation evidence remains selected so a new commit observation is not mislabeled as historical generation data.".to_string() } else { "An exact commit is required before lazy Config observations can start.".to_string() },
+                scoped_enabled: config_observation_allowed,
+                disabled_reason: if matches!(revision, ConfigRevision::Generation(_)) { "Lazy observations are commit-scoped. Certified retained-generation evidence remains selected so a new commit observation is not mislabeled as historical generation data.".to_string() } else if selected_revision.is_none() { "An unambiguous full tracked commit is required before lazy Config observations can start.".to_string() } else if !selected_commit_inspectable { "This commit does not have a completed NixOS derivation with a nonempty carrier for the system's exact flake and configuration.".to_string() } else { "Administrator eligibility is required to start a lazy Config observation.".to_string() },
                 target: format!("{}#nixosConfigurations.{}.config @ {}", flake_name, config_name, selected_revision.as_deref().unwrap_or("no commit")),
                 primary_lifecycle: lifecycle.unwrap_or(SnapshotLifecycle::Unavailable),
                 evaluation_time: evaluation_duration_label.clone(),
@@ -6131,7 +6183,7 @@ fn ConfigTab(
                 carrier: selected_store_path.as_deref().map(short_source_path).unwrap_or_else(|| "unavailable".to_string()),
                 inventory_label: match option_inventory_state { OptionInventoryState::Complete => format!("{} options", counts.all), OptionInventoryState::Partial => "partial".to_string(), OptionInventoryState::Unavailable => summary_lifecycle_short(lifecycle.unwrap_or(SnapshotLifecycle::Unavailable)).to_string() },
                 inventory_state: option_inventory_state,
-                inventory_request_allowed: selected_mode == SnapshotRevisionMode::Commit && allow_mutations && queueing_scope.read().is_none() && !loading_options() && matches!(lifecycle, Some(SnapshotLifecycle::Available | SnapshotLifecycle::Unavailable | SnapshotLifecycle::Failed)) && option_inventory_state != OptionInventoryState::Complete,
+                inventory_request_allowed: selected_mode == SnapshotRevisionMode::Commit && config_observation_allowed && queueing_scope.read().is_none() && !loading_options() && matches!(lifecycle, Some(SnapshotLifecycle::Available | SnapshotLifecycle::Unavailable | SnapshotLifecycle::Failed)) && option_inventory_state != OptionInventoryState::Complete,
                 inventory_request_error: inspection_prerequisite.read().clone(),
                 comparison_ready: lifecycle == Some(SnapshotLifecycle::Available) && option_inventory_state == OptionInventoryState::Complete && comparison_available,
                 search,
@@ -6157,7 +6209,7 @@ fn ConfigTab(
                 on_request_inventory: move |_| {
                     let Some(revision) = selected_revision_for_inventory.clone() else { return; };
                     let Some(selection) = inventory_selection.clone() else { return; };
-                    if !allow_mutations || queueing_scope.peek().is_some() { return; }
+                    if !config_observation_allowed || queueing_scope.peek().is_some() { return; }
                     let request_scope = ConfigRefreshScope {
                         selection,
                         generation: *refresh_generation.peek(),
@@ -10337,6 +10389,7 @@ fn map_history_entries_to_commit_history(
                 diff_summary: Some(status_fragments.join(" · ")),
                 flake_repo_url: entry.flake_repo_url.clone(),
                 config_identity,
+                config_inspectable: false,
             }
         })
         .collect()
@@ -10353,10 +10406,7 @@ fn map_commit_infos_to_commit_history(
             let committed_at = chrono::DateTime::parse_from_rfc3339(&commit.timestamp)
                 .map(|dt| dt.with_timezone(&Utc))
                 .unwrap_or_else(|_| Utc::now());
-            let is_current = current_commit
-                .as_ref()
-                .map(|current| current == &commit.sha || current == &commit.short_sha)
-                .unwrap_or(false);
+            let is_current = current_commit.as_ref() == Some(&commit.sha);
 
             SystemCommitHistory {
                 hash: commit.sha,
@@ -10371,6 +10421,7 @@ fn map_commit_infos_to_commit_history(
                 diff_summary: None,
                 flake_repo_url: None,
                 config_identity: None,
+                config_inspectable: commit.config_inspectable,
             }
         })
         .collect()
@@ -10456,18 +10507,138 @@ fn map_agent_events_to_logs(events: Vec<SystemAgentEvent>) -> Vec<DeploymentLogE
 #[cfg(test)]
 mod tests {
     use super::{
-        EvaluatedOptionsPage, HistoryEventKind, SafeOptionValue, SnapshotLifecycle,
+        ConfigRevision, EvaluatedOptionsPage, HistoryEventKind, SafeOptionValue, SnapshotLifecycle,
         SnapshotRevisionMode, Tab, build_history_events, classify_history_entry,
-        fitted_config_page_size, map_agent_events_to_logs, map_history_entries_to_commit_history,
-        natural_config_side_height, package_identities, query_value, query_with_parameter,
-        render_safe_option_value, snapshot_lifecycle_label, snapshot_lifecycle_message,
-        tab_from_query, tab_from_route, unavailable_generation_commit, visible_config_response,
+        config_observation_request_allowed, config_selection_is_historical,
+        fitted_config_page_size, map_agent_events_to_logs, map_commit_infos_to_commit_history,
+        map_history_entries_to_commit_history, natural_config_side_height,
+        newest_config_inspectable_commit, observational_current_timeline_commit,
+        overview_commit_identity, package_identities, query_value, query_with_parameter,
+        render_safe_option_value, selected_config_revision, snapshot_lifecycle_label,
+        snapshot_lifecycle_message, tab_from_query, tab_from_route, unavailable_generation_commit,
+        visible_config_response,
     };
     use crate::api::models::{
-        SafeEvaluationError, SafePackageValue, SystemAgentEvent, SystemGeneration,
-        SystemHistoryEntry,
+        AuthContext, AuthMode, AuthUser, CommitInfo, Role, SafeEvaluationError, SafePackageValue,
+        SystemAgentEvent, SystemCommitHistory, SystemGeneration, SystemHistoryEntry,
     };
     use chrono::{Duration, Utc};
+
+    fn config_commit(hash: char, inspectable: bool) -> SystemCommitHistory {
+        SystemCommitHistory {
+            hash: hash.to_string().repeat(40),
+            message: "test".into(),
+            author: "test".into(),
+            committed_at: Utc::now(),
+            was_deployed: false,
+            deployed_at: None,
+            is_current: false,
+            is_ready_to_deploy: false,
+            build_status: None,
+            diff_summary: None,
+            flake_repo_url: None,
+            config_identity: None,
+            config_inspectable: inspectable,
+        }
+    }
+
+    #[test]
+    fn commit_mode_selects_the_newest_inspectable_commit() {
+        let commits = vec![config_commit('a', false), config_commit('b', true)];
+        assert_eq!(
+            newest_config_inspectable_commit(&commits).map(|commit| commit.hash.as_str()),
+            Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+        );
+        assert!(newest_config_inspectable_commit(&[config_commit('a', false)]).is_none());
+    }
+
+    #[test]
+    fn current_mapping_requires_the_full_sha_and_explicit_commit_stays_historical() {
+        let full_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let commits = [CommitInfo {
+            sha: full_sha.into(),
+            short_sha: "aaaaaaa".into(),
+            message: "test".into(),
+            author: "test".into(),
+            timestamp: Utc::now().to_rfc3339(),
+            config_inspectable: true,
+        }];
+        assert!(
+            !map_commit_infos_to_commit_history(&commits, Some("aaaaaaa".into()))[0].is_current
+        );
+        assert!(map_commit_infos_to_commit_history(&commits, Some(full_sha.into()))[0].is_current);
+        assert!(config_selection_is_historical(
+            &ConfigRevision::Commit(full_sha.into()),
+            Some(4),
+        ));
+    }
+
+    #[test]
+    fn current_selection_does_not_fall_back_to_generation_or_timeline_identity() {
+        let generation_sha = "b".repeat(40);
+        let generations = [SystemGeneration {
+            generation: 4,
+            store_path: Some("/nix/store/current-system".into()),
+            commit_hash: Some(generation_sha.clone()),
+            timestamp: Utc::now(),
+            is_current: true,
+            generation_snapshot_id: None,
+            rollback_eligible: false,
+        }];
+        let timeline = [config_commit('a', true)];
+
+        assert!(selected_config_revision(&ConfigRevision::Current, None, &generations).is_none());
+        assert_eq!(
+            selected_config_revision(&ConfigRevision::Generation(4), None, &generations).as_deref(),
+            Some(generation_sha.as_str())
+        );
+        assert!(observational_current_timeline_commit(&timeline, None).is_none());
+        assert!(observational_current_timeline_commit(&timeline, Some(&"c".repeat(40))).is_none());
+        assert!(overview_commit_identity(None).is_none());
+        assert_eq!(
+            overview_commit_identity(Some(&timeline[0])),
+            Some(timeline[0].hash.as_str())
+        );
+        assert!(!config_observation_request_allowed(
+            &ConfigRevision::Current,
+            None,
+            true,
+            true,
+        ));
+    }
+
+    #[test]
+    fn config_observation_controls_require_admin_without_changing_operator_mutations() {
+        let context = |role| {
+            Some(AuthContext {
+                is_authenticated: true,
+                user: Some(AuthUser {
+                    id: "test-user".into(),
+                    email: "test@example.com".into(),
+                    display_name: None,
+                }),
+                roles: vec![role],
+                auth_mode: AuthMode::Local,
+            })
+        };
+        let revision = "a".repeat(40);
+        let admin = context(Role::Admin);
+        let operator = context(Role::Operator);
+
+        assert!(config_observation_request_allowed(
+            &ConfigRevision::Current,
+            Some(&revision),
+            true,
+            crate::state::auth::is_admin(&admin),
+        ));
+        assert!(!config_observation_request_allowed(
+            &ConfigRevision::Current,
+            Some(&revision),
+            true,
+            crate::state::auth::is_admin(&operator),
+        ));
+        assert!(crate::state::auth::can_mutate_systems(&operator));
+    }
 
     #[test]
     fn system_detail_tab_query_parsing_is_exact_and_covers_all_tabs() {

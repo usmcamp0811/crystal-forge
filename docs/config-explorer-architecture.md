@@ -205,6 +205,49 @@ available.
 
 ## Target identity and cache contract
 
+### Upgraded-fleet current revision recovery
+
+The server can recover an observational current commit when an upgraded agent
+reports only its current generation and store path. One shared read-only
+resolver applies this priority:
+
+1. Exact retained generation identity with verified store lineage.
+2. One server-issued successful deployment identity that binds the same
+   system, observed store path, requested commit and derivation, system flake,
+   and effective configuration. The deployment event must precede or coincide
+   with the observation.
+3. One legacy NixOS derivation whose exact effective configuration and
+   `COALESCE(store_path, expected_store_path)` match the nonempty observed store
+   path on the system's current flake.
+
+An explicit `generation_matches_current_store_path = false`, an empty current
+store path, a foreign flake, a different configuration, more than one distinct
+candidate commit, or a non-full commit SHA produces no mapping. The resolver
+MUST NOT infer identity from repository head, commit recency, host name alone,
+store-path basenames, or a foreign flake.
+
+The recovered identity is only a label for read-only Config navigation. It
+MUST NOT grant rollback eligibility, retained lineage, deployment authority,
+policy authority, or permission to start Config work. Those decisions retain
+their independent authorization and exact-evidence checks.
+
+`SystemCommitsResponse.current_commit` is the sole current-mode observational
+commit authority. The UI MUST NOT replace an absent value with a generation
+commit, repository head, or newest timeline commit. An explicit historical
+generation can continue to use its own full commit identity. Retained rollback
+evidence remains authoritative when its stored commit identifier is invalid,
+but the invalid identifier MUST NOT enter Config navigation.
+
+Commit mode can start a targeted Config observation only for a full commit SHA
+whose commit evaluation is complete and whose exact NixOS derivation has a
+exact configuration name, completion time, and nonempty derivation path. The
+UI selects the newest commit that satisfies these prerequisites. It does not
+assume that the first timeline row is inspectable. Only an authenticated Admin
+can start root, scoped, or configured-index observations. An Operator retains
+ordinary system mutation permissions but cannot start Config observations. An
+explicit commit selection remains historical observation context even if its
+SHA equals the recovered current label.
+
 Every observation is tied to an immutable identity containing, at minimum:
 
 - commit or revision;
