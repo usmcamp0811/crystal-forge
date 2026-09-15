@@ -1,8 +1,9 @@
 use crate::config::BuilderConfig;
 use crate::models::builders::{
-    BuildFailureClass, BuildFailurePhase, BuildProgressRequest, EstablishBuilderSessionRequest,
-    EstablishBuilderSessionResponse, NextJobRequest, NextJobResponse, RemoteBuildExecutionStrategy,
-    ReportMetricsRequest, ResolveBuilderIdRequest, ResolveBuilderIdResponse,
+    BuildFailureClass, BuildFailurePhase, BuildProgressRequest, BuilderCapabilities,
+    EstablishBuilderSessionRequest, EstablishBuilderSessionResponse, NextJobRequest,
+    NextJobResponse, RemoteBuildExecutionStrategy, ReportMetricsRequest, ResolveBuilderIdRequest,
+    ResolveBuilderIdResponse,
 };
 use anyhow::{Context, Result};
 use base64::Engine;
@@ -115,6 +116,11 @@ impl BuilderApiClient {
             .context("Failed to create HTTP client")?;
 
         let builder_session_id = Uuid::new_v4();
+        let capabilities = if config.cve_scanning_enabled {
+            BuilderCapabilities::current_cve_scanner()
+        } else {
+            BuilderCapabilities::default()
+        };
 
         let builder_id = match config.builder_id {
             Some(builder_id) => {
@@ -127,6 +133,7 @@ impl BuilderApiClient {
                     config.resolve_retry_interval,
                     config.resolve_retry_max_interval,
                     config.resolve_max_attempts,
+                    capabilities,
                 )
                 .await?;
                 builder_id
@@ -140,6 +147,7 @@ impl BuilderApiClient {
                     config.resolve_retry_interval,
                     config.resolve_retry_max_interval,
                     config.resolve_max_attempts,
+                    capabilities,
                 )
                 .await?
             }
@@ -170,6 +178,7 @@ impl BuilderApiClient {
         retry_interval: std::time::Duration,
         max_interval: std::time::Duration,
         max_attempts: u32,
+        capabilities: BuilderCapabilities,
     ) -> Result<Uuid> {
         let public_key = Self::public_key_base64_for(signing_key);
         let mut delay = retry_interval.max(std::time::Duration::from_secs(1));
@@ -177,8 +186,14 @@ impl BuilderApiClient {
 
         loop {
             attempt += 1;
-            match Self::resolve_builder_id(client, server_url, signing_key, builder_session_id)
-                .await
+            match Self::resolve_builder_id(
+                client,
+                server_url,
+                signing_key,
+                builder_session_id,
+                capabilities,
+            )
+            .await
             {
                 Ok(builder_id) => {
                     if attempt > 1 {
@@ -280,6 +295,7 @@ impl BuilderApiClient {
         retry_interval: std::time::Duration,
         max_interval: std::time::Duration,
         max_attempts: u32,
+        capabilities: BuilderCapabilities,
     ) -> Result<()> {
         let mut delay = retry_interval.max(std::time::Duration::from_secs(1));
         let mut attempt: u32 = 0;
@@ -292,6 +308,7 @@ impl BuilderApiClient {
                 signing_key,
                 builder_id,
                 builder_session_id,
+                capabilities,
             )
             .await
             {
@@ -323,11 +340,13 @@ impl BuilderApiClient {
         signing_key: &SigningKey,
         builder_id: Uuid,
         builder_session_id: Uuid,
+        capabilities: BuilderCapabilities,
     ) -> Result<()> {
         let path = format!("/api/v1/builders/{}/session", builder_id);
         let url = format!("{}{}", server_url, path);
         let body = serde_json::to_vec(&EstablishBuilderSessionRequest {
             session_id: builder_session_id,
+            capabilities,
         })?;
         let (signature, timestamp) =
             Self::sign_bootstrap_request(signing_key, "POST", &path, &body);
@@ -399,12 +418,14 @@ impl BuilderApiClient {
         server_url: &str,
         signing_key: &SigningKey,
         builder_session_id: Uuid,
+        capabilities: BuilderCapabilities,
     ) -> Result<Uuid> {
         let path = "/api/v1/builders/resolve-id";
         let url = format!("{}{}", server_url, path);
         let body = serde_json::to_vec(&ResolveBuilderIdRequest {
             public_key: Self::public_key_base64_for(signing_key),
             session_id: Some(builder_session_id),
+            capabilities,
         })?;
         let (signature, timestamp) = Self::sign_bootstrap_request(signing_key, "POST", path, &body);
 
@@ -1584,6 +1605,7 @@ mod tests {
         let body = serde_json::to_vec(&ResolveBuilderIdRequest {
             public_key,
             session_id: Some(Uuid::new_v4()),
+            capabilities: BuilderCapabilities::default(),
         })
         .unwrap();
 

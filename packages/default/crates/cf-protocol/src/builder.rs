@@ -6,8 +6,46 @@
 
 use crate::cache::CacheType;
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
+
+/// Maximum encoded CVE completion request size accepted by the protocol.
+pub const CVE_SCAN_MAX_BODY_BYTES: u64 = 8 * 1024 * 1024;
+/// Maximum package evidence entries accepted in one CVE result.
+pub const CVE_SCAN_MAX_ENTRIES: usize = 50_000;
+/// Maximum package-to-CVE observations accepted in one CVE result.
+pub const CVE_SCAN_MAX_OBSERVATIONS: usize = 250_000;
+/// Current structured CVE result schema advertised by capable builders.
+pub const CVE_SCAN_SCHEMA_VERSION: u32 = 1;
+
+/// Describes optional work that a builder can execute.
+///
+/// Missing capabilities deserialize to version `0`, which means incapable.
+/// This default lets old builder JSON remain valid during rolling upgrades.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BuilderCapabilities {
+    /// Whether this builder process accepts CVE scan leases.
+    pub cve_scanning: bool,
+    /// Structured CVE result schema supported by the builder, or `0` when CVE
+    /// scanning is disabled or unsupported.
+    pub cve_scan_schema_version: u32,
+}
+
+impl BuilderCapabilities {
+    /// Returns capabilities for a builder that supports the current CVE schema.
+    pub fn current_cve_scanner() -> Self {
+        Self {
+            cve_scanning: true,
+            cve_scan_schema_version: CVE_SCAN_SCHEMA_VERSION,
+        }
+    }
+
+    /// Returns whether the builder supports the current CVE schema.
+    pub fn supports_current_cve_schema(self) -> bool {
+        self.cve_scanning && self.cve_scan_schema_version == CVE_SCAN_SCHEMA_VERSION
+    }
+}
 
 // =============================================================================
 // EXECUTION STRATEGY TYPES
@@ -265,6 +303,9 @@ pub struct ResolveBuilderIdRequest {
     /// Per-process session UUID generated on builder startup.
     #[serde(default)]
     pub session_id: Option<Uuid>,
+    /// Optional work supported by this builder process.
+    #[serde(default)]
+    pub capabilities: BuilderCapabilities,
 }
 
 /// Response returned when a builder public key has been registered/approved.
@@ -279,6 +320,9 @@ pub struct ResolveBuilderIdResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EstablishBuilderSessionRequest {
     pub session_id: Uuid,
+    /// Optional work supported by this builder process.
+    #[serde(default)]
+    pub capabilities: BuilderCapabilities,
 }
 
 /// Response returned after establishing a builder process/session.
@@ -347,6 +391,9 @@ pub struct ReportMetricsRequest {
     pub system_cpu_usage_percent: Option<f64>,
     pub system_memory_total_mb: Option<i64>,
     pub system_memory_used_mb: Option<i64>,
+    /// Optional work supported by this builder process.
+    #[serde(default)]
+    pub capabilities: BuilderCapabilities,
 }
 
 /// Append build logs request.
@@ -406,27 +453,367 @@ pub struct CachePushFailRequest {
 // CVE SCAN REPORTING
 // =============================================================================
 
-/// A CVE scan target handed to an API builder, including the created scan id.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CveScanTarget {
-    pub scan_id: i32,
-    pub derivation_id: i32,
-    pub derivation_name: String,
+/// Identifies the only structured CVE result schema accepted by this version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "u32", into = "u32")]
+pub enum CveScanSchemaVersion {
+    /// Schema 1 carries exact derivation outputs and structured observations.
+    V1,
+}
+
+impl TryFrom<u32> for CveScanSchemaVersion {
+    type Error = String;
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        match value {
+            CVE_SCAN_SCHEMA_VERSION => Ok(Self::V1),
+            _ => Err(format!("unsupported CVE scan schema version {value}")),
+        }
+    }
+}
+
+impl From<CveScanSchemaVersion> for u32 {
+    fn from(value: CveScanSchemaVersion) -> Self {
+        match value {
+            CveScanSchemaVersion::V1 => CVE_SCAN_SCHEMA_VERSION,
+        }
+    }
+}
+
+/// Identifies the scanner implementation that produced structured evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CveScannerIdentity {
+    /// Stable scanner name, such as `vulnix`.
+    pub name: String,
+    /// Exact scanner version reported by the builder.
+    pub version: String,
+}
+
+/// Maps one derivation output name to its exact Nix store path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CveDerivationOutput {
+    /// Nix derivation output name, such as `out`.
+    pub name: String,
+    /// Exact output store path authorized by the server.
     pub store_path: String,
 }
 
-/// Raw vulnix output uploaded by an API builder for server-side parsing.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CveScanResultsRequest {
-    /// Raw vulnix JSON (stdout) for server-side parsing/persistence.
-    pub raw_output: String,
-    pub scan_duration_ms: Option<i32>,
+/// Identifies the derivation and outputs authorized for one scan execution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CveScanDerivation {
+    /// Server database identity for the derivation record.
+    pub derivation_id: i32,
+    /// Human-readable derivation name used for diagnostics.
+    pub derivation_name: String,
+    /// Exact `.drv` store path that produced the authorized outputs.
+    pub drv_path: String,
+    /// Exact output-name-to-store-path mappings for the derivation.
+    pub outputs: Vec<CveDerivationOutput>,
 }
 
-/// Failure report for a CVE scan.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Server-selected limits and scanner arguments for one CVE lease.
+///
+/// The server must not issue values above the protocol maxima. A later server
+/// route enforces these limits before evidence is persisted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CveScanPolicy {
+    /// Maximum encoded completion body size in bytes.
+    #[serde(deserialize_with = "deserialize_cve_max_body_bytes")]
+    pub max_body_bytes: u64,
+    /// Maximum number of package entries.
+    #[serde(deserialize_with = "deserialize_cve_max_entries")]
+    pub max_entries: usize,
+    /// Maximum number of package-to-CVE observations.
+    #[serde(deserialize_with = "deserialize_cve_max_observations")]
+    pub max_observations: usize,
+    /// Maximum scanner runtime in seconds.
+    pub timeout_seconds: u64,
+    /// Bounded scanner arguments selected by the server.
+    pub scanner_args: Vec<String>,
+}
+
+fn deserialize_cve_max_body_bytes<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = u64::deserialize(deserializer)?;
+    if value == 0 || value > CVE_SCAN_MAX_BODY_BYTES {
+        return Err(serde::de::Error::custom(format!(
+            "CVE result body limit must be between 1 and {CVE_SCAN_MAX_BODY_BYTES} bytes"
+        )));
+    }
+    Ok(value)
+}
+
+fn deserialize_cve_max_entries<'de, D>(deserializer: D) -> Result<usize, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = usize::deserialize(deserializer)?;
+    if value == 0 || value > CVE_SCAN_MAX_ENTRIES {
+        return Err(serde::de::Error::custom(format!(
+            "CVE entry limit must be between 1 and {CVE_SCAN_MAX_ENTRIES}"
+        )));
+    }
+    Ok(value)
+}
+
+fn deserialize_cve_max_observations<'de, D>(deserializer: D) -> Result<usize, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = usize::deserialize(deserializer)?;
+    if value == 0 || value > CVE_SCAN_MAX_OBSERVATIONS {
+        return Err(serde::de::Error::custom(format!(
+            "CVE observation limit must be between 1 and {CVE_SCAN_MAX_OBSERVATIONS}"
+        )));
+    }
+    Ok(value)
+}
+
+/// Supplies narrowly scoped cache access for materializing authorized outputs.
+///
+/// SECURITY: The builder must use this credential only for this lease. It must
+/// not log, persist, or forward the credential.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CveScanCacheSource {
+    /// Binary cache URL from which authorized outputs can be substituted.
+    pub url: String,
+    /// Optional Nix cache public key used to verify substituted paths.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_key: Option<String>,
+    /// Optional bearer credential scoped to cache reads for this work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bearer_token: Option<String>,
+}
+
+impl std::fmt::Debug for CveScanCacheSource {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CveScanCacheSource")
+            .field("url", &self.url)
+            .field("public_key", &self.public_key)
+            .field(
+                "bearer_token",
+                &self.bearer_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
+}
+
+/// Owns a CVE scan lease and fences stale builder processes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CveScanLease {
+    /// Stable scan identity shared by retries and executions.
+    pub scan_id: Uuid,
+    /// Unique identity for this lease attempt.
+    pub execution_id: Uuid,
+    /// Builder that owns this execution.
+    pub builder_id: Uuid,
+    /// Builder process session that owns this execution.
+    pub builder_session_id: Uuid,
+}
+
+/// Work returned to a scanner-capable API builder.
+///
+/// SECURITY: Every field is server-issued but remains untrusted at the server
+/// boundary when returned. Later route code must authenticate the builder,
+/// enforce lease/session ownership, compare exact derivation identity, validate
+/// all bounds, and canonicalize evidence before persistence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CveScanClaim {
+    /// Lease identity and ownership fence.
+    pub lease: CveScanLease,
+    /// Exact derivation and output identity authorized for scanning.
+    pub derivation: CveScanDerivation,
+    /// Structured result schema required for completion.
+    pub schema_version: CveScanSchemaVersion,
+    /// Scanner implementation required by server policy.
+    pub scanner: CveScannerIdentity,
+    /// Server-issued bounded execution policy.
+    pub policy: CveScanPolicy,
+    /// Optional cache source for materializing missing authorized outputs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_source: Option<CveScanCacheSource>,
+    /// Time at which the current lease expires without a heartbeat.
+    pub lease_expires_at: DateTime<Utc>,
+}
+
+/// Requests one CVE scan lease without granting the builder database access.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CveScanClaimRequest {
+    /// Current builder process session.
+    pub builder_session_id: Uuid,
+    /// Capabilities used by the server to select compatible work.
+    #[serde(default)]
+    pub capabilities: BuilderCapabilities,
+    /// Successful build job whose outputs remain local on this builder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_build_job_id: Option<Uuid>,
+}
+
+/// Returns an optional CVE lease to an API builder.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CveScanClaimResponse {
+    /// Claimed work, or `None` when build work has priority or no scan is ready.
+    pub claim: Option<CveScanClaim>,
+}
+
+/// Renews an owned CVE scan execution lease.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CveScanHeartbeatRequest {
+    /// Lease identity and builder-session ownership fence.
+    pub lease: CveScanLease,
+    /// Package entries collected so far.
+    pub entries_collected: usize,
+    /// Package-to-CVE observations collected so far.
+    pub observations_collected: usize,
+}
+
+/// Reports the server decision for a CVE lease heartbeat.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CveScanHeartbeatResponse {
+    /// Updated lease expiration when the lease remains active.
+    pub lease_expires_at: DateTime<Utc>,
+    /// Whether the builder must stop work and acknowledge revocation.
+    pub revocation_requested: bool,
+}
+
+/// Records one package discovered in the exact derivation closure.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CvePackageEvidence {
+    /// Stable zero-based identifier referenced by observations.
+    pub entry_id: u32,
+    /// Package name reported by the scanner.
+    pub package_name: String,
+    /// Package version reported by the scanner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_version: Option<String>,
+    /// Exact package `.drv` path.
+    pub drv_path: String,
+    /// Exact outputs produced by the package derivation.
+    pub outputs: Vec<CveDerivationOutput>,
+}
+
+/// Records one CVE observation for one package evidence entry.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CveObservation {
+    /// `entry_id` of the package affected by this observation.
+    pub entry_id: u32,
+    /// Canonical vulnerability identifier reported by the scanner.
+    pub cve_id: String,
+    /// Optional CVSS score reported by the scanner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cvss_score: Option<f32>,
+    /// Optional severity label reported by the scanner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub severity: Option<String>,
+    /// Optional fixed package version reported by the scanner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixed_version: Option<String>,
+}
+
+/// Contains bounded structured evidence produced by one scanner execution.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CveScanResult {
+    /// Result schema. Unknown, malformed, and legacy versions are rejected.
+    pub schema_version: CveScanSchemaVersion,
+    /// Exact scanner implementation that produced the result.
+    pub scanner: CveScannerIdentity,
+    /// Exact top-level derivation identity observed by the builder.
+    pub derivation: CveScanDerivation,
+    /// Package evidence, bounded to [`CVE_SCAN_MAX_ENTRIES`].
+    #[serde(deserialize_with = "deserialize_cve_entries")]
+    pub entries: Vec<CvePackageEvidence>,
+    /// Package-to-CVE observations, bounded to [`CVE_SCAN_MAX_OBSERVATIONS`].
+    #[serde(deserialize_with = "deserialize_cve_observations")]
+    pub observations: Vec<CveObservation>,
+}
+
+fn deserialize_cve_entries<'de, D>(deserializer: D) -> Result<Vec<CvePackageEvidence>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let values = Vec::deserialize(deserializer)?;
+    if values.len() > CVE_SCAN_MAX_ENTRIES {
+        return Err(serde::de::Error::custom(format!(
+            "CVE result has more than {CVE_SCAN_MAX_ENTRIES} entries"
+        )));
+    }
+    Ok(values)
+}
+
+fn deserialize_cve_observations<'de, D>(deserializer: D) -> Result<Vec<CveObservation>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let values = Vec::deserialize(deserializer)?;
+    if values.len() > CVE_SCAN_MAX_OBSERVATIONS {
+        return Err(serde::de::Error::custom(format!(
+            "CVE result has more than {CVE_SCAN_MAX_OBSERVATIONS} observations"
+        )));
+    }
+    Ok(values)
+}
+
+/// Completes an owned CVE scan execution with deterministic evidence.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CveScanCompleteRequest {
+    /// Lease identity and builder-session ownership fence.
+    pub lease: CveScanLease,
+    /// Structured evidence produced by the scanner.
+    pub result: CveScanResult,
+    /// Lowercase SHA-256 of the builder's deterministic result encoding.
+    ///
+    /// Builders must sort entries by `(drv_path, entry_id)`, outputs by
+    /// `(name, store_path)`, and observations by `(entry_id, cve_id)` before
+    /// serializing `result`. A later server commit canonicalizes and verifies
+    /// this digest before persistence. Repeated completion with the same digest
+    /// is an idempotent retry; a different digest is a conflict.
+    pub result_digest_sha256: String,
+    /// Scanner wall-clock duration in milliseconds.
+    pub scan_duration_ms: u64,
+}
+
+/// Reports whether a CVE completion was accepted or already recorded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CveScanCompleteResponse {
+    /// Digest sealed for this scan when completion succeeds.
+    pub result_digest_sha256: String,
+    /// Whether the same digest was already sealed by an earlier retry.
+    pub already_completed: bool,
+}
+
+/// Classifies why a builder could not complete a CVE scan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CveScanFailureClass {
+    /// The scanner or cache source failed in a way that can be retried.
+    Transient,
+    /// The same authorized inputs will deterministically fail again.
+    Deterministic,
+    /// The builder could not use server-issued authorization.
+    Authorization,
+    /// The server revoked the lease or the builder stopped it.
+    Cancelled,
+}
+
+/// Fails an owned CVE scan execution without changing build outcome.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CveScanFailRequest {
+    /// Lease identity and builder-session ownership fence.
+    pub lease: CveScanLease,
+    /// Retry classification used by server scheduling policy.
+    pub failure_class: CveScanFailureClass,
+    /// Bounded diagnostic text that must not contain credentials.
     pub error_message: String,
+}
+
+/// Confirms the server outcome for a CVE scan failure report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CveScanFailResponse {
+    /// Whether this execution was requeued for another scanner or fallback.
+    pub requeued: bool,
 }
 
 #[cfg(test)]
@@ -511,5 +898,185 @@ mod tests {
         let failure: Failure = serde_json::from_str(r#"{"error_message":"failed"}"#)
             .expect("older payload should parse");
         assert_eq!(failure.failure_class, None);
+    }
+
+    #[test]
+    fn old_builder_wire_payloads_default_to_cve_incapable() {
+        let resolve: ResolveBuilderIdRequest =
+            serde_json::from_str(r#"{"public_key":"key","session_id":null}"#)
+                .expect("old registration should parse");
+        let session: EstablishBuilderSessionRequest =
+            serde_json::from_str(r#"{"session_id":"40000000-0000-0000-0000-000000000004"}"#)
+                .expect("old session request should parse");
+        let heartbeat: ReportMetricsRequest = serde_json::from_str(
+            r#"{
+                "cpu_usage_percent":0.0,
+                "memory_usage_mb":0,
+                "system_cpu_usage_percent":null,
+                "system_memory_total_mb":null,
+                "system_memory_used_mb":null
+            }"#,
+        )
+        .expect("old heartbeat should parse");
+
+        assert_eq!(resolve.capabilities, BuilderCapabilities::default());
+        assert!(!resolve.capabilities.cve_scanning);
+        assert!(!resolve.capabilities.supports_current_cve_schema());
+        assert_eq!(session.capabilities, BuilderCapabilities::default());
+        assert_eq!(heartbeat.capabilities, BuilderCapabilities::default());
+        assert!(!heartbeat.capabilities.cve_scanning);
+        assert!(!heartbeat.capabilities.supports_current_cve_schema());
+    }
+
+    #[test]
+    fn current_builder_parses_legacy_registration_responses() {
+        let resolve: ResolveBuilderIdResponse = serde_json::from_str(
+            r#"{
+                "builder_id":"30000000-0000-0000-0000-000000000003",
+                "session_id":"40000000-0000-0000-0000-000000000004"
+            }"#,
+        )
+        .expect("old resolve response should parse");
+        let established: EstablishBuilderSessionResponse = serde_json::from_str(
+            r#"{
+                "builder_id":"30000000-0000-0000-0000-000000000003",
+                "session_id":"40000000-0000-0000-0000-000000000004",
+                "recovered_jobs":0
+            }"#,
+        )
+        .expect("old session response should parse");
+
+        assert_eq!(resolve.builder_id, established.builder_id);
+        assert_eq!(resolve.session_id, Some(established.session_id));
+    }
+
+    #[test]
+    fn cve_claim_roundtrip_preserves_uuid_identity_outputs_and_cache_token() {
+        let claim = CveScanClaim {
+            lease: CveScanLease {
+                scan_id: Uuid::parse_str("10000000-0000-0000-0000-000000000001").unwrap(),
+                execution_id: Uuid::parse_str("20000000-0000-0000-0000-000000000002").unwrap(),
+                builder_id: Uuid::parse_str("30000000-0000-0000-0000-000000000003").unwrap(),
+                builder_session_id: Uuid::parse_str("40000000-0000-0000-0000-000000000004")
+                    .unwrap(),
+            },
+            derivation: CveScanDerivation {
+                derivation_id: 42,
+                derivation_name: "host-a".to_string(),
+                drv_path: "/nix/store/host-a.drv".to_string(),
+                outputs: vec![CveDerivationOutput {
+                    name: "out".to_string(),
+                    store_path: "/nix/store/host-a".to_string(),
+                }],
+            },
+            schema_version: CveScanSchemaVersion::V1,
+            scanner: CveScannerIdentity {
+                name: "vulnix".to_string(),
+                version: "1.12.0".to_string(),
+            },
+            policy: CveScanPolicy {
+                max_body_bytes: CVE_SCAN_MAX_BODY_BYTES,
+                max_entries: CVE_SCAN_MAX_ENTRIES,
+                max_observations: CVE_SCAN_MAX_OBSERVATIONS,
+                timeout_seconds: 300,
+                scanner_args: vec!["--json".to_string()],
+            },
+            cache_source: Some(CveScanCacheSource {
+                url: "https://cache.example.test".to_string(),
+                public_key: Some("cache.example.test:key".to_string()),
+                bearer_token: Some("lease-token".to_string()),
+            }),
+            lease_expires_at: Utc::now(),
+        };
+
+        let json = serde_json::to_vec(&claim).expect("claim should serialize");
+        let decoded: CveScanClaim =
+            serde_json::from_slice(&json).expect("claim should deserialize");
+
+        assert_eq!(decoded, claim);
+        assert!(!format!("{claim:?}").contains("lease-token"));
+    }
+
+    #[test]
+    fn cve_completion_roundtrip_preserves_uuid_result_identity() {
+        let lease = CveScanLease {
+            scan_id: Uuid::parse_str("10000000-0000-0000-0000-000000000001").unwrap(),
+            execution_id: Uuid::parse_str("20000000-0000-0000-0000-000000000002").unwrap(),
+            builder_id: Uuid::parse_str("30000000-0000-0000-0000-000000000003").unwrap(),
+            builder_session_id: Uuid::parse_str("40000000-0000-0000-0000-000000000004").unwrap(),
+        };
+        let derivation = CveScanDerivation {
+            derivation_id: 42,
+            derivation_name: "host-a".to_string(),
+            drv_path: "/nix/store/host-a.drv".to_string(),
+            outputs: vec![CveDerivationOutput {
+                name: "out".to_string(),
+                store_path: "/nix/store/host-a".to_string(),
+            }],
+        };
+        let request = CveScanCompleteRequest {
+            lease,
+            result: CveScanResult {
+                schema_version: CveScanSchemaVersion::V1,
+                scanner: CveScannerIdentity {
+                    name: "vulnix".to_string(),
+                    version: "1.12.0".to_string(),
+                },
+                derivation,
+                entries: vec![CvePackageEvidence {
+                    entry_id: 0,
+                    package_name: "openssl".to_string(),
+                    package_version: Some("3.0.0".to_string()),
+                    drv_path: "/nix/store/openssl.drv".to_string(),
+                    outputs: vec![CveDerivationOutput {
+                        name: "out".to_string(),
+                        store_path: "/nix/store/openssl".to_string(),
+                    }],
+                }],
+                observations: vec![CveObservation {
+                    entry_id: 0,
+                    cve_id: "CVE-2026-0001".to_string(),
+                    cvss_score: Some(9.8),
+                    severity: Some("critical".to_string()),
+                    fixed_version: Some("3.0.1".to_string()),
+                }],
+            },
+            result_digest_sha256:
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
+            scan_duration_ms: 1234,
+        };
+
+        let json = serde_json::to_vec(&request).expect("completion should serialize");
+        let decoded: CveScanCompleteRequest =
+            serde_json::from_slice(&json).expect("completion should deserialize");
+
+        assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn malformed_or_unknown_cve_schema_version_is_rejected() {
+        for value in [
+            serde_json::json!(0),
+            serde_json::json!(2),
+            serde_json::json!("1"),
+        ] {
+            assert!(
+                serde_json::from_value::<CveScanSchemaVersion>(value).is_err(),
+                "invalid schema version must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn server_issued_cve_policy_rejects_unbounded_limits() {
+        let policy = serde_json::json!({
+            "max_body_bytes": CVE_SCAN_MAX_BODY_BYTES + 1,
+            "max_entries": CVE_SCAN_MAX_ENTRIES,
+            "max_observations": CVE_SCAN_MAX_OBSERVATIONS,
+            "timeout_seconds": 300,
+            "scanner_args": []
+        });
+
+        assert!(serde_json::from_value::<CveScanPolicy>(policy).is_err());
     }
 }

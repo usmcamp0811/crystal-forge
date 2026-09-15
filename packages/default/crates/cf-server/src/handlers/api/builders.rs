@@ -4319,6 +4319,7 @@ mod tests {
         let body = serde_json::to_vec(&ResolveBuilderIdRequest {
             public_key: public_key_base64.clone(),
             session_id: Some(Uuid::new_v4()),
+            capabilities: Default::default(),
         })
         .expect("resolve request should serialize");
         let payload =
@@ -4657,6 +4658,7 @@ mod tests {
         let body = serde_json::to_vec(&ResolveBuilderIdRequest {
             public_key: public_key_base64.clone(),
             session_id: Some(Uuid::new_v4()),
+            capabilities: Default::default(),
         })
         .expect("resolve request should serialize");
 

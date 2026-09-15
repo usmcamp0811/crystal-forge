@@ -66,6 +66,13 @@ pub struct BuilderConfig {
     /// re-evaluation. Defaults to false so verified source builds do not run
     /// evaluation-time builds unless the operator explicitly opts in.
     pub allow_import_from_derivation: bool,
+
+    /// Advertise support for structured CVE scan schema 1.
+    ///
+    /// The build service enables this capability by default. Operators can opt
+    /// out without disabling builds. Runtime scan execution is introduced by a
+    /// later commit and uses one fixed scan slot per builder.
+    pub cve_scanning_enabled: bool,
 }
 
 impl Default for BuilderConfig {
@@ -85,6 +92,7 @@ impl Default for BuilderConfig {
             source_worktree_root: PathBuf::from("/var/lib/crystal-forge/flake-worktrees"),
             cleanup_source_worktrees: true,
             allow_import_from_derivation: false,
+            cve_scanning_enabled: true,
         }
     }
 }
@@ -145,10 +153,26 @@ mod tests {
 
         assert!(config.supports_execution_strategy(RemoteBuildExecutionStrategy::ServerDerivation));
         assert!(!config.allow_import_from_derivation);
+        assert!(config.cve_scanning_enabled);
         assert!(
             !config.supports_execution_strategy(
                 RemoteBuildExecutionStrategy::SourceReEvaluateVerified
             )
         );
+    }
+
+    #[test]
+    fn old_builder_config_uses_enabled_service_default() {
+        let config: BuilderConfig = serde_json::from_str("{}").expect("old config should parse");
+
+        assert!(config.cve_scanning_enabled);
+    }
+
+    #[test]
+    fn builder_config_supports_explicit_cve_scan_opt_out() {
+        let config: BuilderConfig = serde_json::from_str(r#"{"cve_scanning_enabled":false}"#)
+            .expect("opt-out config should parse");
+
+        assert!(!config.cve_scanning_enabled);
     }
 }

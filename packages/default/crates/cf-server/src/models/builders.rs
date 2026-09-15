@@ -35,11 +35,15 @@ use crate::models::public_key::PublicKey;
 // building NextJobResponse.
 pub use cf_protocol::builder::{
     AppendLogsRequest, BuildFailureClass, BuildFailurePhase, BuildJobDerivation,
-    BuildProgressRequest, BuilderCachePushConfig, CachePushCompleteRequest, CachePushFailRequest,
-    CachePushJobPayload, CveScanFailRequest, CveScanResultsRequest, CveScanTarget,
-    DerivationArchiveRequest, DerivationManifestResponse, EstablishBuilderSessionRequest,
-    EstablishBuilderSessionResponse, EvaluatorFingerprint, NextJobRequest,
-    RemoteBuildExecutionStrategy, ReportMetricsRequest, ResolveBuilderIdRequest,
+    BuildProgressRequest, BuilderCachePushConfig, BuilderCapabilities, CachePushCompleteRequest,
+    CachePushFailRequest, CachePushJobPayload, CveDerivationOutput, CveObservation,
+    CvePackageEvidence, CveScanCacheSource, CveScanClaim, CveScanClaimRequest,
+    CveScanClaimResponse, CveScanCompleteRequest, CveScanCompleteResponse, CveScanDerivation,
+    CveScanFailRequest, CveScanFailResponse, CveScanFailureClass, CveScanHeartbeatRequest,
+    CveScanHeartbeatResponse, CveScanLease, CveScanPolicy, CveScanResult, CveScanSchemaVersion,
+    CveScannerIdentity, DerivationArchiveRequest, DerivationManifestResponse,
+    EstablishBuilderSessionRequest, EstablishBuilderSessionResponse, EvaluatorFingerprint,
+    NextJobRequest, RemoteBuildExecutionStrategy, ReportMetricsRequest, ResolveBuilderIdRequest,
     ResolveBuilderIdResponse, SourceInputDeliveryMode, VerifiedSourceIdentity,
 };
 

@@ -66,6 +66,9 @@ pub struct BuilderConfig {
     /// re-evaluation. Defaults to false so verified source builds do not run
     /// evaluation-time builds unless the operator explicitly opts in.
     pub allow_import_from_derivation: bool,
+
+    /// Advertise support for structured CVE scan schema 1.
+    pub cve_scanning_enabled: bool,
 }
 
 impl Default for BuilderConfig {
@@ -85,6 +88,7 @@ impl Default for BuilderConfig {
             source_worktree_root: PathBuf::from("/var/lib/crystal-forge/flake-worktrees"),
             cleanup_source_worktrees: true,
             allow_import_from_derivation: false,
+            cve_scanning_enabled: true,
         }
     }
 }

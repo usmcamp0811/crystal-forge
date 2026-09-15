@@ -8,8 +8,8 @@ use cf_builder::derivations;
 use cf_config::config::{CacheConfig, CacheType, CrystalForgeConfig};
 use cf_protocol::builder::{
     BuildFailureClass, BuildFailurePhase, BuildJobDerivation, BuilderCachePushConfig,
-    NextJobResponse, RemoteBuildExecutionStrategy, ReportMetricsRequest, SourceInputDeliveryMode,
-    VerifiedSourceIdentity,
+    BuilderCapabilities, NextJobResponse, RemoteBuildExecutionStrategy, ReportMetricsRequest,
+    SourceInputDeliveryMode, VerifiedSourceIdentity,
 };
 #[allow(deprecated)]
 use nix::fcntl::{FlockArg, flock};
@@ -173,8 +173,13 @@ async fn run_api_mode(cfg: &CrystalForgeConfig) -> anyhow::Result<()> {
     // Spawn heartbeat task
     let heartbeat_client = api_client.clone();
     let heartbeat_interval = builder_config.heartbeat_interval;
+    let capabilities = if builder_config.cve_scanning_enabled {
+        BuilderCapabilities::current_cve_scanner()
+    } else {
+        BuilderCapabilities::default()
+    };
     tokio::spawn(async move {
-        run_heartbeat_loop(heartbeat_client, heartbeat_interval).await;
+        run_heartbeat_loop(heartbeat_client, heartbeat_interval, capabilities).await;
     });
 
     // Remote API builders must push successful outputs from the builder host,
@@ -237,7 +242,11 @@ struct RemoteBuildRuntime {
 }
 
 /// Heartbeat loop - sends metrics to server periodically
-async fn run_heartbeat_loop(client: BuilderApiClient, interval: std::time::Duration) {
+async fn run_heartbeat_loop(
+    client: BuilderApiClient,
+    interval: std::time::Duration,
+    capabilities: BuilderCapabilities,
+) {
     let mut ticker = tokio::time::interval(interval);
 
     loop {
@@ -255,6 +264,7 @@ async fn run_heartbeat_loop(client: BuilderApiClient, interval: std::time::Durat
             system_cpu_usage_percent: system_metrics.cpu_usage_percent,
             system_memory_total_mb: memory_total_mb,
             system_memory_used_mb: memory_used_mb,
+            capabilities,
         };
 
         if let Err(e) = client.send_heartbeat(&metrics).await {

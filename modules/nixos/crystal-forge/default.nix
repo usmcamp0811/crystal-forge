@@ -165,6 +165,7 @@
           source_worktree_root = toString cfg.build.source_worktree_root;
           cleanup_source_worktrees = cfg.build.cleanup_source_worktrees;
           allow_import_from_derivation = cfg.build.allow_import_from_derivation;
+          cve_scanning_enabled = cfg.build.cve_scanning_enabled;
         }
         // lib.optionalAttrs cfg.build.api_mode {
           private_key_path =
@@ -1246,6 +1247,25 @@ in {
           evaluation-time builds unless the operator explicitly opts in. Set to
           `true` only for flakes whose NixOS configurations require IFD during
           evaluation, such as generated package metadata or domain lists.
+        '';
+      };
+
+      cve_scanning_enabled = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = lib.mdDoc ''
+          Advertise structured CVE scan support from the existing Crystal Forge
+          builder service.
+
+          The option defaults to `true` when `build.enable` starts the builder.
+          Set it to `false` to keep build execution enabled while making the
+          builder ineligible for CVE scan leases. Scans use one fixed concurrent
+          slot. A post-build scan and cache push can run concurrently, but the
+          builder does not claim another build until both outcomes settle. Scan
+          failure does not change a successful build outcome.
+
+          This option does not create a second service. The existing builder
+          service keeps `vulnix` in its `PATH`.
         '';
       };
     };
@@ -2518,6 +2538,8 @@ in {
             then toString cfg.build.api_key_file
             else "/var/lib/crystal-forge/builder-api.key";
           CRYSTAL_FORGE__BUILDER__SERVER_URL = cfg.build.server_url;
+          CRYSTAL_FORGE__BUILDER__CVE_SCANNING_ENABLED =
+            lib.boolToString cfg.build.cve_scanning_enabled;
         })
         # Add Attic-specific environment variables if using Attic cache
         (lib.mkIf (cfg.cache.cache_type == "Attic") {
