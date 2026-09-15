@@ -448,6 +448,39 @@ fn parse_nix_eval_jobs_identity(output: &str) -> Option<NixEvaluatorIdentity> {
     })
 }
 
+fn parse_nix_version(output: &str) -> Option<String> {
+    output
+        .trim()
+        .strip_prefix("nix (Nix) ")
+        .filter(|version| !version.is_empty())
+        .map(str::to_string)
+}
+
+async fn probe_nix_version(program: &std::path::Path) -> anyhow::Result<String> {
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::process::Command::new(program)
+            .kill_on_drop(true)
+            .arg("--version")
+            .output(),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("nix --version probe timed out"))??;
+    if !output.status.success() {
+        anyhow::bail!("nix --version probe failed");
+    }
+    parse_nix_version(String::from_utf8_lossy(&output.stdout).as_ref())
+        .ok_or_else(|| anyhow::anyhow!("nix --version returned an invalid version"))
+}
+
+async fn executing_nix_version() -> anyhow::Result<String> {
+    static VERSION: tokio::sync::OnceCell<String> = tokio::sync::OnceCell::const_new();
+    VERSION
+        .get_or_try_init(|| probe_nix_version(std::path::Path::new("nix")))
+        .await
+        .cloned()
+}
+
 async fn executing_nix_evaluator_identity() -> anyhow::Result<NixEvaluatorIdentity> {
     static IDENTITY: tokio::sync::OnceCell<NixEvaluatorIdentity> =
         tokio::sync::OnceCell::const_new();
@@ -486,8 +519,18 @@ async fn executing_nix_evaluator_identity() -> anyhow::Result<NixEvaluatorIdenti
         .cloned()
 }
 
-async fn current_evaluator_fingerprint() -> anyhow::Result<EvaluatorFingerprint> {
-    let identity = executing_nix_evaluator_identity().await?;
+fn evaluator_fingerprint(
+    executing_nix_version: &str,
+    identity: NixEvaluatorIdentity,
+) -> anyhow::Result<EvaluatorFingerprint> {
+    // INVARIANT: The fingerprint describes the Nix library linked into the
+    // authoritative evaluator, but only when the server's Nix CLI matches it.
+    if executing_nix_version != identity.nix_version {
+        anyhow::bail!(
+            "executing Nix version {executing_nix_version} does not match nix-eval-jobs linked Nix version {}",
+            identity.nix_version
+        );
+    }
     Ok(EvaluatorFingerprint {
         contract_version: VERIFIED_SOURCE_EVALUATOR_CONTRACT_VERSION,
         nix_version: identity.nix_version,
@@ -497,6 +540,12 @@ async fn current_evaluator_fingerprint() -> anyhow::Result<EvaluatorFingerprint>
         allow_import_from_derivation: true,
         source_materialization_schema_version: VERIFIED_SOURCE_MATERIALIZATION_SCHEMA_VERSION,
     })
+}
+
+async fn current_evaluator_fingerprint() -> anyhow::Result<EvaluatorFingerprint> {
+    let (nix_version, identity) =
+        tokio::try_join!(executing_nix_version(), executing_nix_evaluator_identity())?;
+    evaluator_fingerprint(&nix_version, identity)
 }
 
 fn source_flake_target_for_derivation(derivation: &crate::derivations::Derivation) -> String {
@@ -5114,31 +5163,30 @@ mod tests {
 
     #[tokio::test]
     async fn evaluator_fingerprint_reports_executing_nix_and_pure_contract() {
-        let fingerprint = super::current_evaluator_fingerprint()
-            .await
-            .expect("installed Nix version should be probeable");
-        let output = tokio::process::Command::new("nix-eval-jobs")
-            .args([
-                "--expr",
-                "{ probe = builtins.derivation { name = \"crystal-forge-evaluator-probe\"; system = builtins.currentSystem; builder = \"/bin/sh\"; }; }",
-                "--workers",
-                "1",
-                "--meta",
-                "--apply",
-                "_: { nixVersion = builtins.nixVersion; evaluatorSystem = builtins.currentSystem; }",
-                "--option",
-                "pure-eval",
-                "false",
-            ])
-            .output()
-            .await
-            .expect("nix-eval-jobs should run");
-        let actual =
-            super::parse_nix_eval_jobs_identity(String::from_utf8_lossy(&output.stdout).trim())
-                .expect("nix-eval-jobs output should contain its evaluator identity");
+        let tempdir = tempfile::tempdir().expect("Nix probe test tempdir should create");
+        let nix = tempdir.path().join("nix");
+        std::fs::write(&nix, "#!/bin/sh\nprintf 'nix (Nix) 2.34.5\\n'\n")
+            .expect("fake Nix executable should write");
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&nix)
+            .expect("fake Nix executable should stat")
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&nix, permissions)
+            .expect("fake Nix executable should be executable");
 
-        assert_eq!(fingerprint.nix_version, actual.nix_version);
-        assert_eq!(fingerprint.evaluator_system, actual.evaluator_system);
+        let nix_version = super::probe_nix_version(&nix)
+            .await
+            .expect("controlled Nix version should be probeable");
+        let identity = super::parse_nix_eval_jobs_identity(
+            r#"{"attr":"probe","extraValue":{"nixVersion":"2.34.5","evaluatorSystem":"x86_64-linux"}}"#,
+        )
+        .expect("controlled evaluator output should contain its identity");
+        let fingerprint = super::evaluator_fingerprint(&nix_version, identity)
+            .expect("matching Nix identities should produce a fingerprint");
+
+        assert_eq!(fingerprint.nix_version, "2.34.5");
+        assert_eq!(fingerprint.evaluator_system, "x86_64-linux");
         assert!(fingerprint.pure_eval);
         assert!(!fingerprint.lockfile_mutation_allowed);
         assert!(fingerprint.allow_import_from_derivation);
@@ -5150,5 +5198,11 @@ mod tests {
             fingerprint.source_materialization_schema_version,
             super::VERIFIED_SOURCE_MATERIALIZATION_SCHEMA_VERSION
         );
+
+        let mismatched_identity = super::NixEvaluatorIdentity {
+            nix_version: "2.34.4".to_string(),
+            evaluator_system: "x86_64-linux".to_string(),
+        };
+        assert!(super::evaluator_fingerprint(&nix_version, mismatched_identity).is_err());
     }
 }
