@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-15 04:18'
+updated_date: '2026-09-15 19:20'
 labels:
   - design-parity
   - web-ui
@@ -222,6 +222,8 @@ Updated recovery order: (1) exact all-builder verified-source mismatch reproduct
 
 <!-- SECTION:NOTES:BEGIN -->
 Distributed scanner commit 1 pushed as `a3e4fac7` (`TASK-440: Define distributed CVE scan contract`). It adds UUID-based claim/heartbeat/complete/fail protocol types, structured bounded schema-1 evidence, deterministic digest semantics, backward-compatible scanner capabilities, default-enabled builder config with explicit opt-out, and NixOS module evaluation coverage. It does not add routes, migrations, database access, or runtime scan execution. Focused `cf-protocol`/`cf-config` tests, SQLx-offline builder/server checks, Nix module evaluation, flake no-build evaluation, rustfmt, rustdoc, and diff checks passed.
+
+2026-09-15 bounded System CVE paging server/API slice implemented in dedicated TASK-440 worktree. Replaced the typed inventory endpoint's 1,000-row whole-result rejection with C-collated keyset pages (default 100, maximum 500), source/system/filter-bound versioned cursors, SQL-side search/severity/fix-status filtering, full filtered totals, stable canonical CVE/package identities, and page-local exact remediation context. Preserved exact-clean precedence, legacy/no-scan distinctions, hidden-as-absent cursor non-disclosure, and the separate bare-array exact route's existing bound. Added a production-shaped 1,315-finding PostgreSQL traversal regression plus exact/legacy duplicate collapse, clean/no-scan, stale/filter/cross-system/malformed cursor, authorization, serialization, parameter, and remediation-key coverage. Updated `docs/evaluation-flake-snapshots.md` and `docs/specs/02-backend-api.md`. Verification passed in `nix develop`: three ignored PostgreSQL inventory regressions explicitly enabled (3 passed); three focused unit/API tests (1 passed each); `SQLX_OFFLINE=true cargo check --manifest-path packages/default/Cargo.toml -p cf-server --all-targets`; `cargo fmt --manifest-path packages/default/Cargo.toml --all -- --check`; `SQLX_OFFLINE=true cargo doc --manifest-path packages/default/Cargo.toml -p cf-server --no-deps`; and `git diff --check`. Rustdoc and compile emitted existing repository warnings only. No migration or SQLx metadata changed. No Web UI, preview tooling, commit, push, deployment, or MR operation was performed. The isolated PostgreSQL server on port 55440 was stopped after testing. TASK-440 remains In Progress because broader UI/deployment recovery work and AC #24/#27 remain outstanding.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
