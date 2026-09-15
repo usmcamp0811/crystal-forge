@@ -19915,8 +19915,14 @@ function runStaticHarnessContracts() {
     "Exact-CVE creation must submit opaque observation context instead of deriving scan identity",
   );
   assertContract(
-    cveComponent.includes("if allow_mutations { button {") &&
-      cveComponent.includes("if allow_mutations") &&
+    cveComponent.includes(
+      "inventory_allows_exact_remediation(inventory_authority, allow_mutations)",
+    ) &&
+      cveComponent.includes(
+        "inventory_allows_ordinary_justification(inventory_authority, allow_mutations)",
+      ) &&
+      cveComponent.includes("if exact_remediation_allowed {") &&
+      cveComponent.includes("if ordinary_justification_allowed { button {") &&
       cveComponent.includes('title: if has_justification { "Edit justification" } else { "Justify" }'),
     "System CVE mutation controls must remain authorization-gated",
   );

@@ -1792,6 +1792,15 @@ pub async fn fetch_cve_inventory_systems(
     let sql = format!(
         "{FLEET_INVENTORY_LIST_CTE}{}",
         r#"
+        -- Deduplicate package occurrences before the overflow probe so the
+        -- bound measures affected systems rather than inventory rows.
+        , selected_subjects AS (
+          SELECT DISTINCT ON (subject.system_id) subject.*
+          FROM inventory_subjects subject
+          WHERE subject.cve_id=$2 AND ($3::text IS NULL OR subject.package_name=$3)
+          ORDER BY subject.system_id,subject.package_name COLLATE "C",
+                   subject.installed_version COLLATE "C"
+        )
         SELECT
             subject.system_id,system.hostname,system.environment_id,
             environment.name AS environment,state.primary_ip_address,
@@ -1799,7 +1808,7 @@ pub async fn fetch_cve_inventory_systems(
             system.deployment_policy,
             subject.installed_version AS current_package_version,
             subject.authority AS inventory_authority
-        FROM inventory_subjects subject
+        FROM selected_subjects subject
         JOIN systems system ON system.id=subject.system_id
         LEFT JOIN environments environment ON environment.id=system.environment_id
         LEFT JOIN flakes flake ON flake.id=system.flake_id
@@ -1808,7 +1817,6 @@ pub async fn fetch_cve_inventory_systems(
           WHERE candidate.hostname=system.hostname
           ORDER BY candidate.timestamp DESC,candidate.id DESC LIMIT 1
         ) state ON true
-        WHERE subject.cve_id=$2 AND ($3::text IS NULL OR subject.package_name=$3)
         ORDER BY environment.name NULLS LAST,system.hostname
         LIMIT $4
         "#

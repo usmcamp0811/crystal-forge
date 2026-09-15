@@ -4848,6 +4848,9 @@ async fn exact_system_vulnerability_rows_exclude_newer_undeployed_scan(pool: PgP
 #[sqlx::test(migrations = "./migrations")]
 async fn exact_system_vulnerability_rows_hydrate_overlong_version_context(pool: PgPool) {
     let fixture = assessment_fixture(&pool).await;
+    sync_user_role(&pool, fixture.user_id, AuthRole::Admin)
+        .await
+        .unwrap();
     let actor = admin_actor(fixture.user_id);
     let clock = FixedClock(Utc::now());
     let cve_id = "CVE-2098-44003";
