@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-16 16:49'
+updated_date: '2026-09-16 18:28'
 labels:
   - design-parity
   - web-ui
@@ -167,7 +167,7 @@ The `modifiedFiles` metadata is anticipated and non-exhaustive. The implementati
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-2026-09-16 active work order from exact remote/deployed base `481ae958`: (1) keep the verified task-owned preview running against its isolated mock database; (2) finish, review, test, commit, and push the narrow failed-build retry repair first—immutable replacement attempts, truthful created/reused/error feedback, queue visibility, environment authorization, and normal claim eligibility—without changing the known-working evaluator or remote-build execution strategy; (3) preserve and then resume the existing distributed-scanner implementation from protocol commit `a3e4fac7` plus the preserved local scanner work, without creating a competing architecture: server-owned/session-fenced leases and validation, authenticated DB-free builder claims, local vulnix execution, post-build same-builder preference, bounded evidence submission, separate build/scan outcomes, conservative concurrency/opt-out, fallback/recovery, and shared manual/periodic/post-build lifecycle; (4) coordinate Scanning design parity with truthful runtime executor/mode/status/failure data and bounded existing lifecycle actions; (5) complete Fleet CVE/detail/per-environment triage presentation while preserving exact/legacy/mixed authority; (6) use focused Rust/PostgreSQL/WASM/browser increments and keep preview CSS/backend current, but do not run the full authoritative Web UI Nix check during implementation; run it at most once only after all TASK-440 outcomes are finished; (7) independently review and push separate commits, update task notes, and leave deployment/live Webb correlation to the maintainer. No deployment, merge, rebase, force-push, live database reset, mass requeue, scanner redesign, or weakening of source/policy/evidence security.
+2026-09-16 Scanning design-parity slice in the existing dedicated TASK-440 worktree: (1) align `packages/web-ui/src/views/scanning.rs` with the authoritative ScanningView design using the truthful existing stats, deployed, queue, systems, per-system scans, environment, and schedule APIs; (2) use exact Deployed, All scans, and By system tabs with count badges, one shared filter/sort/table presentation, robust loading/empty/error states, and at most one expanded system; (3) remove the non-design activity side panel and preserve schedule editing; (4) keep fleet/per-row rescan, build-and-scan, scan-log, and cancellation controls visibly disabled because no supported frontend mutation/log contract exists, and omit scanner version/database age because APIs do not provide them; (5) add focused pure Rust tests for status/freshness normalization plus filtering and sorting; (6) add scoped responsive/accessibility CSS in `packages/web-ui/assets/app.css`; (7) run web-ui formatting, targeted unit tests/check, static contracts if applicable, and diff checks, but do not run the authoritative web-ui Nix check.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
