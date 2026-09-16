@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-16 19:02'
+updated_date: '2026-09-16 19:12'
 labels:
   - design-parity
   - web-ui
@@ -168,6 +168,8 @@ The `modifiedFiles` metadata is anticipated and non-exhaustive. The implementati
 
 <!-- SECTION:PLAN:BEGIN -->
 2026-09-16 Scanning design-parity slice in the existing dedicated TASK-440 worktree: (1) align `packages/web-ui/src/views/scanning.rs` with the authoritative ScanningView design using the truthful existing stats, deployed, queue, systems, per-system scans, environment, and schedule APIs; (2) use exact Deployed, All scans, and By system tabs with count badges, one shared filter/sort/table presentation, robust loading/empty/error states, and at most one expanded system; (3) remove the non-design activity side panel and preserve schedule editing; (4) keep fleet/per-row rescan, build-and-scan, scan-log, and cancellation controls visibly disabled because no supported frontend mutation/log contract exists, and omit scanner version/database age because APIs do not provide them; (5) add focused pure Rust tests for status/freshness normalization plus filtering and sorting; (6) add scoped responsive/accessibility CSS in `packages/web-ui/assets/app.css`; (7) run web-ui formatting, targeted unit tests/check, static contracts if applicable, and diff checks, but do not run the authoritative web-ui Nix check.
+
+2026-09-16 distributed CVE scanner completion after applying preserved stash: (1) retain server-owned signed/session-fenced lease APIs and renumber the additive migration to 0263 after the committed retry migration; (2) add builder HTTP client methods and a bounded local vulnix executor that advertises capability only when enabled, executes the exact claimed output without database access, heartbeats during execution, preserves affected and whitelisted evidence, canonicalizes the schema-1 payload, and reports completion/failure independently from build outcome; (3) prefer an immediate claim by the builder that completed the build and leave delayed fallback to the server-local worker unless a truthful cache materialization source exists; (4) harden claim/write paths for enabled/current builders, environment authorization, stale-recovery separation, durable post-build enqueue, trigger provenance, and closure-bound package evidence; (5) add focused protocol, builder, handler, migration-backed lease, concurrency, and recovery tests; (6) package vulnix in the production/development builder runtime; (7) run targeted Nix-environment checks and isolated PostgreSQL regressions, while leaving the authoritative Web UI and broad flake checks to CI per maintainer instruction.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
