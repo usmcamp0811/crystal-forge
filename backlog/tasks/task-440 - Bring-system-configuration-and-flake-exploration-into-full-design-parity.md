@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-16 22:09'
+updated_date: '2026-09-16 22:27'
 labels:
   - design-parity
   - web-ui
@@ -178,6 +178,8 @@ The `modifiedFiles` metadata is anticipated and non-exhaustive. The implementati
 2026-09-16 final distributed scanner audit remediation: (1) fix `BuilderCapabilities` ownership by cloning at task/message boundaries and retain spawned build/scan tasks in a shutdown-aborting `JoinSet`; (2) permit remote scan claims only for schema-1 post-build work whose successful producing build belongs to the same builder and exact session, remove cache-push-as-materialization proof, and retain the delayed server-local fallback for post-build plus all manual/fleet scans; (3) place every distributed-scanner `nix`, `nix-store`, and `vulnix` child in a dedicated Unix process group, synchronously kill the group and reap the direct child on timeout, revocation, cancellation/future drop, and shutdown, with descendant regressions; (4) centralize canonical direct-child `/nix/store/<basename>` syntax and canonical result bytes/digest in `cf-protocol`, enforce paths on builder and server, verify each locally available package output's deriver against its submitted package `.drv`, and persist `server_local_verified` versus `unverified_remote` closure provenance; (5) pass the locally probed scanner identity into execution and reject any exact claim name/version mismatch; (6) update focused backend docs/tests without touching Web UI; (7) run scoped rustfmt, `cf-protocol`/`cf-builder`/`cf-server` compile and tests, the isolated CVE database helper, and a bounded path-flake builder package build. Do not run broad flake or Web UI checks.
 
 2026-09-16 three remaining distributed-scanner P1 findings: (1) preserve stale-heartbeat recovery by allowing capability persistence for only authenticated current enabled/registered sessions in active or offline state, while retaining disabled, unregistered, and stale-session fences, with a migrated database regression; (2) when expired, superseded, or retryable typed remote work returns to pending, move remote execution identity into audit metadata and clear typed execution, lease, sealed claim-input, outcome, and failure ownership fields before a server-local claim, with a remote-recovery/local-claim/remote-recovery race regression; (3) separate locally provable package-output deriver validation from top-level target closure membership, so an unavailable target yields unverified_remote only after every locally present submitted package output is checked against its submitted drv, with matching/mismatch/unavailable tests; (4) run scoped rustfmt, cf-server check and focused unit tests in the Nix environment, then the isolated migrated CVE database suite. Do not edit or run Web UI or broad flake checks.
+
+2026-09-16 migration immutability correction: restore migration 0263 byte-for-byte to the version already applied by the isolated preview database, move later scanner identity/evidence constraint additions into additive migration 0264, rerun migrations/CVE regressions as applicable, and restart the preview without resetting or directly mutating preview data.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
