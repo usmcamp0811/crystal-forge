@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-16 03:25'
+updated_date: '2026-09-16 03:35'
 labels:
   - design-parity
   - web-ui
@@ -52,6 +52,7 @@ references:
   - git commit 7e1f0846
   - git commit 27cd67aa0705a011a3b67f8727dfc27d62dac4da
   - git commit 31819e2f
+  - git commit 7f923d5535ffde3ded45649fb42ee0b75b7d453a
 documentation:
   - docs/design/CrystalForge/app.jsx
   - docs/design/CrystalForge/components/SystemDetail.jsx
@@ -232,6 +233,8 @@ Updated recovery order: (1) exact all-builder verified-source mismatch reproduct
 2026-09-15 follow-up service evidence: campground uses unauthenticated HTTPS (`auth_type=none`), so the PAT helper conflict is not this incident's cause. The live service PATH contains Nix 2.35.2, Git 2.55.0, OpenSSH, and `nix-eval-jobs` 2.35.2; `NIX_REMOTE=daemon` and flakes are enabled. The expected bare mirror `repo-d587fee8cb868adf02a2f32d.git` exists, is owned by `crystal-forge`, is a valid bare repository, and already contains both failing commits. Hardened unauthenticated `git ls-remote` succeeds. Read-only `git archive` succeeds for both commits in 7-9 ms, each artifact is 1,628,160 bytes, both contain readable `flake.lock`, and the only symlink is safe (`AGENTS.md -> CLAUDE.md`). Neither commit has a published artifact or identity. The remaining likely boundary is therefore extraction, `nix store add-path`, NAR hashing, or publication; the 16 ms duration most strongly favors an immediate extractor or Nix invocation/daemon failure. The next diagnostic must run the exact materialization sequence as `crystal-forge`; current SSH cannot become that user without the maintainer's sudo password.
 
 2026-09-15 service-user reproduction result supplied by maintainer: `nix store ping` succeeds as `crystal-forge` with `NIX_REMOTE=daemon` and reports daemon 2.34.5 (the service CLI/evaluator PATH is 2.35.2). The exact campground commit archives, extracts with GNU tar, and ingests through `nix store add-path --name crystal-forge-source-v1-169fa07f128d235bef0aeae239783c4a02abb013`, producing `/nix/store/8957pjsnf0mk4kfw4sj6yzb50p5cz39b-crystal-forge-source-v1-169fa07f128d235bef0aeae239783c4a02abb013`. This does not mutate application state; the store object is GC-eligible. External Git, filesystem, flake.lock, Nix daemon, and add-path stages are therefore operational. Remaining code-specific suspects are the bounded Rust extractor and artifact/identity publication; the CLI/daemon version difference should be recorded but does not explain add-path failure by itself. No further broad host probing is needed before a focused stage-preserving diagnostic/fixture change.
+
+2026-09-15 authoritative-source hotfix committed and pushed as `7f923d55` (`TASK-440: Accept Git archive metadata`). Root cause: `git archive --format=tar` emits a global PAX metadata member before tracked entries, while the contract-v1 Rust extractor rejected every non-file/directory/symlink member. The fix ignores only tar global PAX extension metadata before path extraction; hard links, devices, FIFOs, unsafe paths, duplicate paths, and limits remain fail-closed. A regression reproduces Git's `pax_global_header`, verifies `flake.lock` extraction, and verifies metadata is not materialized. Verification passed: cf-protocol source-artifact tests (8 passed), cf-server verified-source tests with `SQLX_OFFLINE=true --offline` (5 passed), cf-protocol rustfmt check, and scoped `git diff --check`. An initial cf-server test invocation without SQLX_OFFLINE failed at compile time because no local PostgreSQL was listening; the corrected offline invocation passed. Local HEAD, upstream, and remote all equal `7f923d5535ffde3ded45649fb42ee0b75b7d453a`. The generated untracked Tailwind file and scanner stash remain untouched. Awaiting maintainer redeploy and one controlled campground retry; do not merge MR !323.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
