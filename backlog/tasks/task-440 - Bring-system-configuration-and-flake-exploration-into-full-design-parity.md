@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-16 18:28'
+updated_date: '2026-09-16 19:02'
 labels:
   - design-parity
   - web-ui
@@ -188,6 +188,8 @@ The `modifiedFiles` metadata is anticipated and non-exhaustive. The implementati
 2026-09-15 evaluation-scope performance correction committed and pushed as `481ae958` (`TASK-440: Bound scoped flake evaluation`). The generated Tailwind asset remains untracked and untouched. No SSH, deployment, database mutation, merge, or scanner work was performed.
 
 2026-09-16 maintainer runtime update: upgraded Webb is actively claiming and executing builds. Remote pickup and build execution are working. This pass MUST preserve the current evaluator and remote-build execution strategy and MUST NOT reopen builder compatibility diagnosis without new specific failure evidence. Remaining Builds scope is the failed-build retry/requeue action through API response, immutable replacement attempt, queue visibility, and normal claim eligibility.
+
+2026-09-16 Scanning design-parity slice implemented in the existing TASK-440 worktree. `packages/web-ui/src/views/scanning.rs` now matches the authoritative Deployed, All scans, and By system structure with count badges, five stat cards, shared search/status/revision/latest filters, sortable scan columns, normalized status/freshness treatments, relative scan times, findings and trigger presentation, cursor continuation for deployed rows, and one expanded system at a time. The non-design activity panel was removed. Schedule editing remains server-backed and now has explicit load/save errors and pending state. Fleet, row, log, build-and-scan, and cancellation behavior remains visibly unavailable because no supporting API contract exists; scanner version and database age are omitted for the same reason. Added focused normalization/filter/sort Rust tests and responsive/accessibility CSS. Updated scanning screenshot/browser mocks to the current API and exact tab contract. Verification passed: focused scanning Rust tests (3 passed), web-ui `cargo check`, scoped rustfmt check, Node syntax checks for both changed JavaScript files, and scoped `git diff --check`. Existing package warnings remain. The authoritative web-ui Nix check was intentionally not run per maintainer instruction. `packages/web-ui/assets/tailwind.css` remains untracked and untouched. Remaining visual parity gaps require backend contracts for scan logs/failure details, cancellation, fleet/per-row rescan and build-and-scan mutations, trigger provenance, scanner version, vulnerability database age, and a flake name in grouped system summaries.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
