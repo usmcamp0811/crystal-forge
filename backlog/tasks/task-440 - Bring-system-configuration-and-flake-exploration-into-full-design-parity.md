@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-16 20:16'
+updated_date: '2026-09-16 20:45'
 labels:
   - design-parity
   - web-ui
@@ -302,6 +302,12 @@ author: @openai-agent
 created: 2026-09-14 20:21
 ---
 Takeover on 2026-09-14: read the complete prior session and verified the dedicated worktree is clean at `d2ca1c180d0a9e7c9b1a72439709fc98469ede5f`, equal to `origin/TASK-440-system-config-flake-parity` and MR !323. Continuing the recorded plan: isolate the three critical Web UI failures with the impure targeted CI job before another full authoritative run. GitLab API credentials are currently unavailable locally; public API access remains read-only.
+---
+
+author: @openai-agent
+created: 2026-09-16 20:45
+---
+2026-09-16 distributed CVE server hardening follow-up: audited remote failure, requeue, completion, and legacy recovery transitions against migration 0263. Remote requeue and failure clear typed lease ownership; completion retains immutable provenance. Tightened nullable PostgreSQL CHECK branches so scanner identity/version and completed result evidence cannot pass through SQL NULL semantics. Disabled or inactive builders now receive `410 Gone` on claim, and capability persistence during session establishment fails closed if the session is replaced or the builder becomes inactive. Added disabled-claim regression coverage and corrected helper/API contract documentation. Verification passed in the Nix environment: SQLX_OFFLINE offline cargo check for cf-protocol/cf-builder/cf-server libraries; cf-protocol builder tests (14); cf-builder CVE scanner tests (5); cf-server builder handler tests (55); CVE lease module tests compiled and its two non-DB tests passed; cargo fmt check; git diff check. The DB-backed remote lease test returned early because `CRYSTAL_FORGE_TEST_DATABASE_URL` is unset, so migration and live transition behavior remain unverified. Existing repository warnings and ignored Nix eval-cache busy warnings remain. Task stays In Progress; no commit, push, MR update, broad flake check, or authoritative Web UI check was performed.
 ---
 <!-- COMMENTS:END -->
 
