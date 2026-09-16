@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-16 22:37'
+updated_date: '2026-09-16 22:42'
 labels:
   - design-parity
   - web-ui
@@ -54,6 +54,7 @@ references:
   - git commit 31819e2f
   - git commit 7f923d5535ffde3ded45649fb42ee0b75b7d453a
   - git commit 481ae958
+  - git commit 3a5f207c249c4c272f4b2ab32e11bacefcb9ba45
 documentation:
   - docs/design/CrystalForge/app.jsx
   - docs/design/CrystalForge/components/SystemDetail.jsx
@@ -212,6 +213,8 @@ The `modifiedFiles` metadata is anticipated and non-exhaustive. The implementati
 2026-09-16 final three distributed-scanner P1 findings resolved and verified without Web UI changes. Capability persistence now accepts only current enabled/registered sessions in active or offline state, allowing a stale-heartbeat-marked offline builder to report capability before its heartbeat restores active state; migrated coverage also proves disabled, unregistered, and stale sessions remain fenced. Expired/superseded and retryable remote requeues now preserve prior remote IDs/scanner identity in `scan_metadata.last_remote_execution` while clearing typed execution ID, lease owner/times, scanner policy/version, target drv/outputs, outcome, failure class, and legacy execution keys; the regression proves the delayed server-local worker can claim and heartbeat the row and a subsequent typed recovery pass does not cancel it. Closure validation now always checks each locally present submitted package output's actual Nix deriver, even when target closure membership is unavailable and provenance remains `unverified_remote`; focused tests cover matching and locally disproved mappings in both available and unavailable target cases. Updated `docs/multi-builder-api.md` for these contracts. Verification passed: scoped `cargo fmt --check`; `SQLX_OFFLINE=true cargo test -p cf-server --lib queries::cve_scan_leases::tests::local_closure_verification_binds_package_output_to_exact_deriver` (1 passed); `SQLX_OFFLINE=true cargo check -p cf-server --all-targets`; full `nix run .#devScripts.runCveProcessingTest` against a fresh disposable PostgreSQL cluster on port 55479 with migrations through 263 (29 positive test invocations passed, no failures), including `remote_lease_claim_heartbeat_validation_and_clean_completion`; and scoped `git diff --check`. Existing compiler warnings remain. Two setup attempts before the successful isolated suite ran no tests: port 55441 failed to start PostgreSQL, and the next attempt used the nonexistent dev-shell command `run-cve-processing-test`; the corrected flake target passed. No broad flake, Web UI, browser, commit, push, or task-status transition was performed.
 
 2026-09-16 migration immutability and preview recovery: the isolated preview database proved migration 263 had already been applied with SHA-384 `49e825cc4470aa1a82dbc986f34785be4a6cc70e6afb2536d158927f93513e41cc3014da62b4799e8bbb6288614f273b`, matching the preserved initial scanner migration. Restored 0263 byte-for-byte and moved later scanner identity, affected-evidence, closure-provenance, and strengthened coherence constraints into additive migration `0264_harden_distributed_cve_scan_evidence.sql`. Migration 264 disables pre-identity capability advertisements so builders must re-advertise exact scanner identity, and marks prior signed remote results `unverified_remote`. The existing preview database upgraded through 264 without reset or direct database mutation; `/status`, local `/scanning`, and LAN `/scanning` are reachable. `runUiDev` rebuilt the full server package successfully, including 1519 server tests. Focused process-group tests pass (2/2) with SQLX offline. The full targeted CVE processing suite passed against a fresh disposable PostgreSQL cluster on port 55482 and the cluster was stopped/removed by the command trap. `git diff --check` and `git diff --cached --check` pass. The authoritative Web UI and broad flake checks were not run per maintainer instruction. The preserved scanner stash remains, and untracked generated `packages/web-ui/assets/tailwind.css` remains untouched.
+
+2026-09-16 distributed CVE scanner and Scanning parity work committed and pushed as `3a5f207c249c4c272f4b2ab32e11bacefcb9ba45` (`TASK-440: Add distributed CVE scanning`) to `origin/TASK-440-system-config-flake-parity` for MR !323. Local HEAD and upstream tracking ref match. The preview is healthy and LAN `/scanning` is reachable. Only generated untracked `packages/web-ui/assets/tailwind.css` remains; it was intentionally not committed. Preserved `stash@{0}` remains. TASK-440 stays In Progress because authoritative visual and broad CI acceptance criteria remain delegated to CI.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
