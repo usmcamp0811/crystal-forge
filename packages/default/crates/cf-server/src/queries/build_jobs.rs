@@ -13,6 +13,26 @@ use crate::models::builders::SERVER_FAILURE_CODE_EVALUATOR_CONTRACT_OBSOLETE;
 /// Advisory lock serializing all build-queue-position allocations.
 /// Using the ASCII encoding of 'CFBQ' as a 64-bit integer (0x43464251).
 pub const BUILD_QUEUE_ORDER_LOCK_KEY: i64 = 0x4346_4251;
+const BUILD_DERIVATION_LOCK_NAMESPACE: i32 = 0x4346_4244;
+
+/// Serializes all attempt creation and terminal retry transitions for a derivation.
+///
+/// Callers MUST acquire this lock before a build-job row lock and before
+/// [`lock_build_queue_order`]. This order prevents manual retry, automatic retry,
+/// and authoritative obsolete replacement from deadlocking or creating two
+/// active attempts for one derivation.
+pub async fn lock_build_derivation(
+    tx: &mut Transaction<'_, Postgres>,
+    derivation_id: i32,
+) -> Result<()> {
+    sqlx::query("SELECT pg_advisory_xact_lock($1, $2)")
+        .bind(BUILD_DERIVATION_LOCK_NAMESPACE)
+        .bind(derivation_id)
+        .execute(&mut **tx)
+        .await
+        .context("Failed to lock build derivation attempt lineage")?;
+    Ok(())
+}
 
 /// Acquire the transaction-level advisory lock before reading MAX(queue_position).
 ///
@@ -111,6 +131,8 @@ pub async fn create_build_jobs_for_commit(pool: &PgPool, commit_id: i32) -> Resu
                 SELECT 1 FROM build_jobs bj
                 WHERE bj.derivation_id = d.id
             )
+        ON CONFLICT (derivation_id)
+            WHERE status IN ('queued', 'building', 'cancelling') DO NOTHING
         "#,
     )
     .bind(commit_id)
@@ -187,6 +209,8 @@ pub async fn create_build_jobs_for_commit_tx(
                 SELECT 1 FROM build_jobs bj
                 WHERE bj.derivation_id = d.id
             )
+        ON CONFLICT (derivation_id)
+            WHERE status IN ('queued', 'building', 'cancelling') DO NOTHING
         RETURNING id AS build_job_id, derivation_id, (
             SELECT derivation_name FROM derivations WHERE derivations.id = build_jobs.derivation_id
         ) AS system_name
@@ -201,15 +225,13 @@ pub async fn create_build_jobs_for_commit_tx(
     Ok(rows)
 }
 
-/// Creates an eligible derivation's queue row or revives its obsolete row.
+/// Creates an eligible derivation's initial or authoritative replacement attempt.
 ///
 /// The derivation must be in `DryRunComplete` and satisfy the agent and policy
-/// gates. An existing row is revived only when it is failed with the exact
-/// server-owned [`SERVER_FAILURE_CODE_EVALUATOR_CONTRACT_OBSOLETE`] code. The
-/// authoritative evaluation transaction calls this function only after it has
-/// republished and evaluated the matching contract-v1 source. The conflict
-/// update atomically consumes the code while returning the row to `queued`.
-/// All other existing rows remain unchanged and produce
+/// gates. When the latest attempt failed with the exact server-owned
+/// [`SERVER_FAILURE_CODE_EVALUATOR_CONTRACT_OBSOLETE`] code, authoritative
+/// same-revision evaluation creates a new queued child. The failed source row
+/// remains immutable. All other existing terminal rows remain unchanged and produce
 /// [`BuildJobInsertOutcome::AlreadyExists`].
 ///
 /// # Errors
@@ -219,6 +241,30 @@ pub async fn create_build_job_for_derivation_tx(
     tx: &mut Transaction<'_, Postgres>,
     derivation_id: i32,
 ) -> Result<Option<BuildJobInsertOutcome>> {
+    lock_build_derivation(tx, derivation_id).await?;
+
+    let obsolete_source: Option<(Uuid, Uuid)> = sqlx::query_as(
+        r#"
+        WITH latest AS (
+            SELECT id, root_job_id, status, server_failure_code
+            FROM build_jobs
+            WHERE derivation_id = $1
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+            FOR UPDATE
+        )
+        SELECT id, COALESCE(root_job_id, id)
+        FROM latest
+        WHERE status = 'failed'
+          AND server_failure_code = $2
+        "#,
+    )
+    .bind(derivation_id)
+    .bind(SERVER_FAILURE_CODE_EVALUATOR_CONTRACT_OBSOLETE)
+    .fetch_optional(&mut **tx)
+    .await
+    .context("Failed to lock obsolete-contract source attempt")?;
+
     lock_build_queue_order(tx).await?;
 
     let next_pos: i64 = sqlx::query_scalar(
@@ -230,12 +276,21 @@ pub async fn create_build_job_for_derivation_tx(
 
     let inserted: Option<(Uuid,)> = sqlx::query_as(
         r#"
+        WITH history AS (
+            SELECT COALESCE(MAX(attempt_number), 0)::integer AS max_attempt_number
+            FROM build_jobs
+            WHERE derivation_id = $1
+        )
         INSERT INTO build_jobs (
             derivation_id,
             environment_id,
             priority_weight,
             queue_position,
-            status
+            status,
+            parent_job_id,
+            root_job_id,
+            attempt_number,
+            available_at
         )
         SELECT
             d.id AS derivation_id,
@@ -250,9 +305,14 @@ pub async fn create_build_job_for_derivation_tx(
                 ELSE 1.0
             END AS priority_weight,
             $2 AS queue_position,
-            'queued' AS status
+            'queued' AS status,
+            $3,
+            $4,
+            history.max_attempt_number + 1,
+            NOW()
         FROM derivations d
         INNER JOIN commits c ON d.commit_id = c.id
+        CROSS JOIN history
         LEFT JOIN systems s ON (
             d.derivation_target = s.hostname
             AND s.flake_id = c.flake_id
@@ -261,28 +321,21 @@ pub async fn create_build_job_for_derivation_tx(
             AND d.status_id = 5
             AND d.cf_agent_enabled = TRUE
             AND d.policy_requirements_met = TRUE
-        ON CONFLICT (derivation_id) DO UPDATE
-        SET environment_id = EXCLUDED.environment_id,
-            priority_weight = EXCLUDED.priority_weight,
-            queue_position = EXCLUDED.queue_position,
-            status = 'queued',
-            builder_id = NULL,
-            builder_session_id = NULL,
-            started_at = NULL,
-            completed_at = NULL,
-            available_at = NOW(),
-            updated_at = NOW(),
-            server_failure_code = NULL,
-            logs = COALESCE(build_jobs.logs, '') ||
-                E'\n\nRecovery: authoritative evaluator contract was republished'
-        WHERE build_jobs.status = 'failed'
-          AND build_jobs.server_failure_code = $3
+            AND (history.max_attempt_number = 0 OR $3::uuid IS NOT NULL)
+            AND NOT EXISTS (
+                SELECT 1 FROM build_jobs active
+                WHERE active.derivation_id = d.id
+                  AND active.status IN ('queued', 'building', 'cancelling')
+            )
+        ON CONFLICT (derivation_id)
+            WHERE status IN ('queued', 'building', 'cancelling') DO NOTHING
         RETURNING id
         "#,
     )
     .bind(derivation_id)
     .bind(next_pos)
-    .bind(SERVER_FAILURE_CODE_EVALUATOR_CONTRACT_OBSOLETE)
+    .bind(obsolete_source.map(|source| source.0))
+    .bind(obsolete_source.map(|source| source.1))
     .fetch_optional(&mut **tx)
     .await
     .context("Failed to create build job for derivation")?;
@@ -296,7 +349,10 @@ pub async fn create_build_job_for_derivation_tx(
         SELECT id, status
         FROM build_jobs
         WHERE derivation_id = $1
-        ORDER BY created_at ASC
+        ORDER BY
+            status IN ('queued', 'building', 'cancelling') DESC,
+            created_at DESC,
+            id DESC
         LIMIT 1
         "#,
     )
@@ -318,10 +374,8 @@ pub async fn create_build_job_for_derivation_tx(
 /// Called immediately after a derivation reaches `DryRunComplete` during evaluation,
 /// so builders can start work without waiting for the full commit to finish evaluating.
 ///
-/// Idempotency: uses `ON CONFLICT (derivation_id) DO NOTHING` to guarantee at most
-/// one `build_jobs` row per derivation. Concurrent callers are safe — the constraint
-/// absorbs races without returning an error, unlike a `NOT EXISTS` subquery which
-/// is non-atomic between the check and the insert.
+/// Idempotency: existing history prevents scheduler-created attempts, and the
+/// active-attempt index absorbs concurrent initial enqueue races.
 ///
 /// Returns `true` if a new job was created, `false` if one already existed.
 pub async fn enqueue_build_job_for_derivation(pool: &PgPool, derivation_id: i32) -> Result<bool> {
@@ -371,7 +425,12 @@ pub async fn enqueue_build_job_for_derivation(pool: &PgPool, derivation_id: i32)
           AND d.status_id = 5  -- DryRunComplete
           AND d.cf_agent_enabled = TRUE
           AND d.policy_requirements_met = TRUE
-        ON CONFLICT (derivation_id) DO NOTHING
+          AND NOT EXISTS (
+              SELECT 1 FROM build_jobs existing
+              WHERE existing.derivation_id = d.id
+          )
+        ON CONFLICT (derivation_id)
+            WHERE status IN ('queued', 'building', 'cancelling') DO NOTHING
         "#,
     )
     .bind(derivation_id)
@@ -556,7 +615,8 @@ async fn record_recovery_failure(
 /// 3. Inserts the build job under the advisory lock (only after rooting).
 /// 4. Sets `build_preparation_state = 'queued'` on success or `'failed'` on error.
 ///
-/// Idempotent: `ON CONFLICT (derivation_id) DO NOTHING` prevents duplicate jobs.
+/// Idempotent: existing history excludes stale recovery candidates, and the
+/// partial active-attempt conflict target absorbs concurrent recovery races.
 ///
 /// Returns the number of build jobs successfully created.
 pub async fn recover_orphaned_derivation_build_jobs(pool: &PgPool) -> Result<usize> {
@@ -832,7 +892,12 @@ pub async fn recover_orphaned_derivation_build_jobs(pool: &PgPool) -> Result<usi
               AND d.status_id = 5
               AND d.cf_agent_enabled = TRUE
               AND d.policy_requirements_met = TRUE
-            ON CONFLICT (derivation_id) DO NOTHING
+              AND NOT EXISTS (
+                  SELECT 1 FROM build_jobs existing
+                  WHERE existing.derivation_id = d.id
+              )
+            ON CONFLICT (derivation_id)
+                WHERE status IN ('queued', 'building', 'cancelling') DO NOTHING
             RETURNING TRUE
             "#,
         )
@@ -1054,8 +1119,9 @@ mod tests {
         );
     }
 
-    /// The per-derivation SQL uses `ON CONFLICT (derivation_id)` for idempotent
-    /// insertion or controlled obsolete-row revival. It shares status_id = 5
+    /// The per-derivation SQL uses the active-attempt conflict target for
+    /// idempotent insertion. A guarded source lookup controls immutable
+    /// obsolete-row replacement. Both paths share status_id = 5
     /// (DryRunComplete) as the eligibility gate with the bulk
     /// `create_build_jobs_for_commit` function.
     ///

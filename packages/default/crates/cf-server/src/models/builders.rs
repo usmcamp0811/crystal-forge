@@ -199,7 +199,7 @@ fn default_attempt_number() -> i32 {
 /// Internal alias for backward compatibility with query code.
 pub type BuildJobRow = BuildJob;
 
-/// Authorizes revival after evaluator contract version 1 is republished.
+/// Identifies failures that require authoritative evaluator republication.
 pub const SERVER_FAILURE_CODE_EVALUATOR_CONTRACT_OBSOLETE: &str = "evaluator_contract_obsolete";
 
 // ─────────────────────────────────────────────────────────────────────────────

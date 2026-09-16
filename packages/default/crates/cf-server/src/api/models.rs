@@ -1172,6 +1172,12 @@ pub struct BuildQueueItem {
     pub parent_job_id: Option<uuid::Uuid>,
     #[serde(default)]
     pub root_job_id: Option<uuid::Uuid>,
+    /// Database commit identity used for same-revision recovery actions.
+    #[serde(default)]
+    pub commit_id: Option<i32>,
+    /// Server-owned terminal failure code, when an operator action depends on it.
+    #[serde(default)]
+    pub server_failure_code: Option<String>,
     #[serde(default)]
     pub available_at: Option<DateTime<Utc>>,
     /// When the build started (None if still queued).

@@ -26,7 +26,9 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::handlers::agent_request::CFState;
+use crate::handlers::api::auth_session::require_csrf;
 use crate::handlers::api::rbac::{
+    authenticated_user_roles, has_admin_role, has_operator_or_admin_role, has_viewer_or_above_role,
     require_admin, require_operator_or_admin, require_viewer_or_above,
 };
 use crate::handlers::builder_request::{
@@ -1473,30 +1475,114 @@ pub async fn cancel_build_job(
         })
 }
 
-/// POST /api/v1/build-jobs/:id/requeue - Requeue a terminal build job (operator/admin)
+/// Reports the active attempt selected by a manual requeue request.
+#[derive(Debug, Serialize)]
+pub struct RequeueBuildJobResponse {
+    /// Active build attempt identity.
+    pub attempt_id: Uuid,
+    /// Immutable lineage attempt number.
+    pub attempt_number: i32,
+    /// Active attempt status.
+    pub status: String,
+    /// `created` when this request inserted the attempt, otherwise `reused`.
+    pub outcome: &'static str,
+}
+
+/// POST /api/v1/build-jobs/:id/requeue - Requeues a terminal build job.
+///
+/// The endpoint requires operator or administrator authorization and a valid
+/// CSRF token. It returns the new or existing active attempt so retries are
+/// idempotent from the caller's perspective.
 pub async fn requeue_build_job(
     State(state): State<CFState>,
     Path(job_id): Path<Uuid>,
     headers: axum::http::HeaderMap,
-) -> Result<Json<BuildJob>, (StatusCode, String)> {
-    let Some(_operator_or_admin) = require_operator_or_admin(&state.pool, &headers).await else {
-        return Err((
+) -> Response {
+    let Some((user_id, roles)) = authenticated_user_roles(&state.pool, &headers).await else {
+        return (
             StatusCode::FORBIDDEN,
-            "Operator or admin access required".to_string(),
-        ));
+            Json(serde_json::json!({
+                "error": "forbidden",
+                "message": "Operator or admin access required"
+            })),
+        )
+            .into_response();
     };
+    if !has_operator_or_admin_role(&roles) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "forbidden",
+                "message": "Operator or admin access required"
+            })),
+        )
+            .into_response();
+    }
 
-    builders::requeue_build_job_as_new_attempt(&state.pool, &job_id)
-        .await
-        .map(Json)
-        .map_err(|e| {
-            let message = e.to_string();
-            if message.to_lowercase().contains("not found") {
-                (StatusCode::NOT_FOUND, message)
-            } else {
-                (StatusCode::BAD_REQUEST, message)
-            }
-        })
+    if let Err(response) = require_csrf(&headers) {
+        return response;
+    }
+
+    match builders::requeue_build_job_as_new_attempt(
+        &state.pool,
+        &job_id,
+        user_id,
+        has_admin_role(&roles),
+    )
+    .await
+    {
+        Ok(result) => {
+            let outcome = match result.disposition {
+                builders::RequeueBuildJobDisposition::Created => "created",
+                builders::RequeueBuildJobDisposition::Reused => "reused",
+            };
+            Json(RequeueBuildJobResponse {
+                attempt_id: result.attempt.id,
+                attempt_number: result.attempt.attempt_number,
+                status: result.attempt.status,
+                outcome,
+            })
+            .into_response()
+        }
+        Err(builders::RequeueBuildJobError::NotFoundOrHidden) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "not_found",
+                "message": "Build job not found"
+            })),
+        )
+            .into_response(),
+        Err(builders::RequeueBuildJobError::LifecycleConflict { status }) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "build_job_not_terminal",
+                "message": "Build job is not in a terminal state",
+                "status": status
+            })),
+        )
+            .into_response(),
+        Err(builders::RequeueBuildJobError::EvaluatorContractObsolete { commit_id }) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "evaluator_contract_obsolete",
+                "message": "Re-evaluate this exact revision before retrying the build",
+                "commit_id": commit_id,
+                "action": "re_evaluate_commit"
+            })),
+        )
+            .into_response(),
+        Err(builders::RequeueBuildJobError::Internal(error)) => {
+            tracing::error!(job_id = %job_id, error = %error, "failed to requeue build attempt");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": "requeue_failed",
+                    "message": "Failed to create or reuse a build attempt"
+                })),
+            )
+                .into_response()
+        }
+    }
 }
 
 /// POST /api/v1/build-jobs/:id/force-cancel - Force-cancel a stuck build job (admin-only)
@@ -1610,9 +1696,13 @@ pub async fn list_build_queue(
     headers: HeaderMap,
     Query(mut params): Query<crate::api::models::BuildQueueParams>,
 ) -> Result<Json<crate::api::models::BuildQueuePageResponse>, StatusCode> {
-    let Some(_viewer) = require_viewer_or_above(&state.pool, &headers).await else {
+    let Some((user_id, roles)) = authenticated_user_roles(&state.pool, &headers).await else {
         return Err(StatusCode::FORBIDDEN);
     };
+    if !has_viewer_or_above_role(&roles) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let visibility_user_id = (!has_admin_role(&roles)).then_some(user_id);
 
     // Clamp per-request limit to prevent unbounded result sets and overflow.
     params.limit = params.limit.max(1).min(crate::api::models::LIMIT_MAX);
@@ -1621,12 +1711,16 @@ pub async fn list_build_queue(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    let result = crate::queries::dashboard::list_build_queue_paginated(&state.pool, &params)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to list build queue: {e:#}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let result = crate::queries::dashboard::list_build_queue_paginated(
+        &state.pool,
+        &params,
+        visibility_user_id,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to list build queue: {e:#}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     Ok(Json(result))
 }
@@ -1637,9 +1731,13 @@ pub async fn list_recent_build_jobs(
     headers: HeaderMap,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<crate::api::models::BuildQueuePageResponse>, StatusCode> {
-    let Some(_viewer) = require_viewer_or_above(&state.pool, &headers).await else {
+    let Some((user_id, roles)) = authenticated_user_roles(&state.pool, &headers).await else {
         return Err(StatusCode::FORBIDDEN);
     };
+    if !has_viewer_or_above_role(&roles) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let visibility_user_id = (!has_admin_role(&roles)).then_some(user_id);
 
     let limit: i64 = params
         .get("limit")
@@ -1671,9 +1769,13 @@ pub async fn list_recent_build_jobs(
             .unwrap_or(false),
     };
 
-    let items = crate::queries::dashboard::fetch_recent_build_history(&state.pool, &query)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let items = crate::queries::dashboard::fetch_recent_build_history(
+        &state.pool,
+        &query,
+        visibility_user_id,
+    )
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(items))
 }

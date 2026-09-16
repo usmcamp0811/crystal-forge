@@ -18,6 +18,7 @@ use crate::api::models::{
     EvalQueueItem, EvalQueueParams, EvalQueueSummary, ReorderEvalQueueRequest,
 };
 use crate::handlers::agent_request::CFState;
+use crate::handlers::api::auth_session::require_csrf;
 use crate::handlers::api::rbac::{
     require_admin, require_operator_or_admin, require_viewer_or_above,
 };
@@ -721,6 +722,9 @@ pub async fn re_evaluate_commit(
     // Environment-scoped operators must not trigger work for hidden systems.
     if require_admin(&state.pool, &headers).await.is_none() {
         return StatusCode::FORBIDDEN.into_response();
+    }
+    if let Err(response) = require_csrf(&headers) {
+        return response;
     }
 
     match crate::queries::commits::reset_commit_evaluation(&state.pool, commit_id).await {

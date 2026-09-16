@@ -1252,9 +1252,11 @@ pub async fn cancel_commit_evaluation(commit_id: i32) -> Result<(), ApiClientErr
 }
 
 /// Trigger manual re-evaluation for a commit (resets attempt count and re-queues).
-pub async fn re_evaluate_commit(commit_id: i32) -> Result<(), ApiClientError> {
+pub async fn re_evaluate_commit(
+    commit_id: i32,
+) -> Result<ReEvaluateCommitResponse, ApiClientError> {
     let url = format!("{}/commits/{}/re-evaluate", base_url(), commit_id);
-    send_empty_with_csrf("POST", &url, None::<&()>).await
+    send_json_with_csrf("POST", &url, None::<&()>).await
 }
 
 /// Force-cancel an evaluation stuck in 'cancelling' state.
@@ -1455,9 +1457,38 @@ pub async fn cancel_build_job(job_id: &uuid::Uuid) -> Result<(), ApiClientError>
 ///
 /// Creates a new queued build attempt row for the same derivation/context while
 /// preserving immutable history on prior attempts.
-pub async fn requeue_build_job(job_id: &uuid::Uuid) -> Result<(), ApiClientError> {
+pub async fn requeue_build_job(
+    job_id: &uuid::Uuid,
+) -> Result<RequeueBuildJobResponse, RequeueBuildJobError> {
     let url = format!("{}/build-jobs/{}/requeue", base_url(), job_id);
-    send_empty_with_csrf("POST", &url, None::<&()>).await
+    let (status, body) = send_request_with_csrf("POST", &url, None)
+        .await
+        .map_err(RequeueBuildJobError::Request)?;
+    if (200..300).contains(&status) {
+        return serde_json::from_str(&body).map_err(|error| {
+            RequeueBuildJobError::Request(ApiClientError::Deserialize(error.to_string()))
+        });
+    }
+
+    if status == 409
+        && let Ok(error) = serde_json::from_str::<RequeueBuildJobErrorResponse>(&body)
+    {
+        if error.error == "evaluator_contract_obsolete"
+            && let Some(commit_id) = error.commit_id
+        {
+            return Err(RequeueBuildJobError::EvaluatorContractObsolete { commit_id });
+        }
+        if error.error == "build_job_not_terminal" {
+            return Err(RequeueBuildJobError::LifecycleConflict {
+                status: error.status.unwrap_or_else(|| "unknown".to_string()),
+            });
+        }
+    }
+
+    Err(RequeueBuildJobError::Request(ApiClientError::Status {
+        code: status,
+        body: decode_api_error_message(&body),
+    }))
 }
 
 /// Force-cancel a build job stuck in 'cancelling' state (admin-only).
@@ -2644,6 +2675,32 @@ pub enum QueueConfigInspectionError {
     Prerequisite(String),
     /// The mutation failed for another API, transport, or decoding reason.
     Request(ApiClientError),
+}
+
+/// Classifies actionable build requeue failures.
+#[derive(Debug, Clone)]
+pub enum RequeueBuildJobError {
+    /// The exact source revision requires administrator-triggered evaluation.
+    EvaluatorContractObsolete { commit_id: i32 },
+    /// The visible source changed to a non-terminal lifecycle state.
+    LifecycleConflict { status: String },
+    /// The request failed for another HTTP, transport, or decoding reason.
+    Request(ApiClientError),
+}
+
+impl std::fmt::Display for RequeueBuildJobError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EvaluatorContractObsolete { commit_id } => write!(
+                formatter,
+                "commit {commit_id} requires authoritative re-evaluation"
+            ),
+            Self::LifecycleConflict { status } => {
+                write!(formatter, "build is no longer terminal (status: {status})")
+            }
+            Self::Request(error) => write!(formatter, "{error}"),
+        }
+    }
 }
 
 impl std::fmt::Display for ApiClientError {

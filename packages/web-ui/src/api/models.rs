@@ -3858,6 +3858,12 @@ pub struct BuildQueueSummary {
 pub struct BuildQueueItem {
     #[serde(default)]
     pub job_id: Option<Uuid>,
+    /// Database commit identity for exact-revision recovery.
+    #[serde(default)]
+    pub commit_id: Option<i32>,
+    /// Server-owned terminal failure code used by operator recovery actions.
+    #[serde(default)]
+    pub server_failure_code: Option<String>,
     #[serde(default)]
     pub system_id: Option<Uuid>,
     #[serde(default)]
@@ -3901,6 +3907,45 @@ pub struct BuildQueueItem {
     /// Derivations pushed to cache.
     #[serde(default)]
     pub cached_derivs: i64,
+}
+
+/// Result of idempotently requeueing a terminal build attempt.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RequeueBuildJobResponse {
+    /// New or existing active attempt identity.
+    pub attempt_id: Uuid,
+    /// Immutable lineage attempt number.
+    pub attempt_number: i32,
+    /// Current active attempt status.
+    pub status: String,
+    /// `created` or `reused`.
+    pub outcome: String,
+}
+
+/// Structured error returned by the build requeue endpoint.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RequeueBuildJobErrorResponse {
+    /// Stable machine-readable error code.
+    pub error: String,
+    /// Human-readable error summary.
+    pub message: String,
+    /// Exact commit that requires authoritative re-evaluation.
+    #[serde(default)]
+    pub commit_id: Option<i32>,
+    /// Current lifecycle status for a visible non-terminal conflict.
+    #[serde(default)]
+    pub status: Option<String>,
+}
+
+/// Result of requesting authoritative commit re-evaluation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReEvaluateCommitResponse {
+    /// Stable success marker.
+    pub status: String,
+    /// True when this request created queued evaluation work.
+    pub queued: bool,
+    /// Human-readable server outcome.
+    pub message: String,
 }
 
 fn default_attempt_number() -> i32 {

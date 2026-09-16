@@ -39,15 +39,12 @@ pub fn BuildQueuePane(
     /// When true, failed rows receive the attention-flash CSS class (one-shot).
     flash_failed: bool,
     can_requeue: bool,
+    rerun_pending: bool,
     allow_reorder: bool,
     on_build_action: EventHandler<(uuid::Uuid, BuildAction)>,
     on_log: EventHandler<uuid::Uuid>,
     /// Bulk re-queue selected builds (Completed tab).
     on_bulk_rerun: EventHandler<Vec<uuid::Uuid>>,
-    /// Bulk download logs archive (Completed tab).
-    on_bulk_download_logs: EventHandler<Vec<uuid::Uuid>>,
-    /// Bulk delete build records (Completed tab).
-    on_bulk_delete: EventHandler<Vec<uuid::Uuid>>,
 ) -> Element {
     // Multi-select state: set of selected build IDs (only operator-cancellable ones).
     let mut selected_ids: Signal<Vec<uuid::Uuid>> = use_signal(Vec::new);
@@ -88,10 +85,7 @@ pub fn BuildQueuePane(
         .filter(|id| visible_ids.contains(id))
         .collect::<Vec<_>>();
     let bulk_count = selected_visible_ids.len();
-    let cancel_ids = selected_visible_ids.clone();
     let rerun_ids = selected_visible_ids.clone();
-    let download_ids = selected_visible_ids.clone();
-    let delete_ids = selected_visible_ids.clone();
     let active_cancel_ids = selected_visible_ids;
 
     let selection_builds = builds.clone();
@@ -133,6 +127,7 @@ pub fn BuildQueuePane(
                 "data-testid": "build-queue-table",
                 thead {
                     tr {
+                        if is_completed { th { style: "width: 44px;", "aria-label": "Select" } }
                         if reorderable { th { style: "width: 48px;", "#" } }
                         th { "System configuration" }
                         th { "Status" }
@@ -155,7 +150,12 @@ pub fn BuildQueuePane(
                             let is_checked = build
                                 .job_id
                                 .is_some_and(|id| selected_ids.read().contains(&id));
-                            let can_cancel = can_requeue && is_cancellable(build.status);
+                            let can_select = can_requeue
+                                && if is_completed {
+                                    is_terminal(build.status)
+                                } else {
+                                    is_cancellable(build.status)
+                                };
                             let queued_pos = build
                                 .job_id
                                 .and_then(|id| queued_ids.iter().position(|queued_id| *queued_id == id));
@@ -163,7 +163,7 @@ pub fn BuildQueuePane(
                             let mut row_class = "q-row".to_string();
                             if is_selected { row_class.push_str(" selected"); }
                             if is_checked  { row_class.push_str(" row-checked"); }
-                            if can_cancel  { row_class.push_str(" selectable"); }
+                            if can_select  { row_class.push_str(" selectable"); }
                             let is_failed = build.status == BuildStatus::Failed;
                             // Use the stable job_id (not the synthetic row
                             // index, since completed-history rows are
@@ -282,7 +282,7 @@ pub fn BuildQueuePane(
                                     },
                                     onclick: move |evt| {
                                         // Shift-click: toggle multi-select on operator-cancellable rows
-                                        if evt.modifiers().shift() && can_cancel {
+                                        if evt.modifiers().shift() && can_select {
                                             let mut ids = selected_ids.read().clone();
                                             if let Some(job_id) = build.job_id {
                                                 if is_checked {
@@ -311,6 +311,30 @@ pub fn BuildQueuePane(
                                             selected_id.set(Some(job_id));
                                         }
                                     },
+
+                                    if is_completed {
+                                        td {
+                                            onclick: move |event| event.stop_propagation(),
+                                            input {
+                                                r#type: "checkbox",
+                                                checked: is_checked,
+                                                disabled: !can_select || rerun_pending,
+                                                aria_label: "Select build {build.hostname} attempt #{build.attempts} {row_key}",
+                                                onchange: move |_| {
+                                                    let Some(job_id) = build.job_id else {
+                                                        return;
+                                                    };
+                                                    let mut ids = selected_ids.read().clone();
+                                                    if is_checked {
+                                                        ids.retain(|id| *id != job_id);
+                                                    } else {
+                                                        ids.push(job_id);
+                                                    }
+                                                    selected_ids.set(ids);
+                                                },
+                                            }
+                                        }
+                                    }
 
                                     if reorderable {
                                         td { onclick: move |evt| evt.stop_propagation(),
@@ -574,11 +598,12 @@ pub fn BuildQueuePane(
                                                 }
                                             }
 
-                                            // Retry for failed
-                                            if can_requeue && build.status == BuildStatus::Failed {
+                                            // Retry creates or reveals one active attempt for any terminal row.
+                                            if can_requeue && is_terminal(build.status) {
                                                 button {
                                                     class: "btn-icon focus-ring",
                                                     title: "Retry build",
+                                                    disabled: rerun_pending,
                                                     onclick: move |_| {
                                                         if let Some(job_id) = build.job_id {
                                                             on_build_action.call((job_id, BuildAction::Restart));
@@ -610,19 +635,15 @@ pub fn BuildQueuePane(
         // Bulk action bar — appears when multi-select has items and caller may mutate queue
         if can_requeue && bulk_count > 0 {
             if is_completed {
-                // Completed tab: Re-run, Download logs, Delete
-                BulkBar {
-                    count: bulk_count,
-                    on_cancel: move |_| {
-                        let ids = cancel_ids.clone();
-                        for id in &ids {
-                            on_build_action.call((*id, BuildAction::Stop));
-                        }
-                        selected_ids.set(Vec::new());
-                    },
-                    on_clear: move |_| selected_ids.set(Vec::new()),
+                div {
+                    class: "bulk-bar",
+                    role: "toolbar",
+                    aria_label: "Completed build actions",
+                    span { class: "bulk-count", strong { "{bulk_count}" } " selected" }
+                    span { class: "bulk-sep" }
                     button {
                         class: "btn btn-primary xs focus-ring",
+                        disabled: rerun_pending,
                         onclick: {
                             let ids = rerun_ids.clone();
                             let rerun = on_bulk_rerun;
@@ -640,48 +661,13 @@ pub fn BuildQueuePane(
                             path { d: "M21 3v9h-9" }
                             path { d: "M21 12A9 9 0 0 0 3.26 9.26" }
                         }
-                        "Re-run"
+                        if rerun_pending { "Re-running..." } else { "Re-run" }
                     }
                     button {
                         class: "btn btn-ghost xs focus-ring",
-                        onclick: {
-                            let ids = download_ids.clone();
-                            let dl = on_bulk_download_logs;
-                            move |_| {
-                                dl.call(ids.clone());
-                            }
-                        },
-                        svg {
-                            width: "12", height: "12",
-                            view_box: "0 0 24 24",
-                            fill: "none", stroke: "currentColor",
-                            stroke_width: "2",
-                            style: "margin-right: 4px;",
-                            path { d: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" }
-                            polyline { points: "7 10 12 15 17 10" }
-                            line { x1: "12", y1: "15", x2: "12", y2: "3" }
-                        }
-                        "Download logs"
-                    }
-                    button {
-                        class: "btn btn-ghost xs focus-ring",
-                        onclick: {
-                            let ids = delete_ids.clone();
-                            let del = on_bulk_delete;
-                            move |_| {
-                                del.call(ids.clone());
-                            }
-                        },
-                        svg {
-                            width: "12", height: "12",
-                            view_box: "0 0 24 24",
-                            fill: "none", stroke: "currentColor",
-                            stroke_width: "2",
-                            style: "margin-right: 4px;",
-                            polyline { points: "3 6 5 6 21 6" }
-                            path { d: "M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" }
-                        }
-                        "Delete"
+                        disabled: rerun_pending,
+                        onclick: move |_| selected_ids.set(Vec::new()),
+                        "Clear"
                     }
                 }
             } else {
@@ -761,6 +747,13 @@ fn is_cancellable(status: BuildStatus) -> bool {
     )
 }
 
+fn is_terminal(status: BuildStatus) -> bool {
+    matches!(
+        status,
+        BuildStatus::Failed | BuildStatus::Complete | BuildStatus::Cancelled
+    )
+}
+
 fn status_color(status: BuildStatus) -> &'static str {
     match status {
         BuildStatus::Queued => "#a78bfa",
@@ -810,5 +803,14 @@ mod tests {
         let actions = queue_drag_reorder_actions(&[id(40), id(10), id(30)], id(99), id(10));
 
         assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn completed_statuses_are_selectable_for_bulk_recovery() {
+        assert!(is_terminal(BuildStatus::Failed));
+        assert!(is_terminal(BuildStatus::Complete));
+        assert!(is_terminal(BuildStatus::Cancelled));
+        assert!(!is_terminal(BuildStatus::Queued));
+        assert!(!is_terminal(BuildStatus::Building));
     }
 }

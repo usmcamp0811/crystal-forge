@@ -199,6 +199,8 @@ pub fn build_queue_item_fixtures() -> Vec<BuildQueueItem> {
         // Building state
         BuildQueueItem {
             job_id: None,
+            commit_id: None,
+            server_failure_code: None,
             system_id: None,
             attempt_number: 1,
             flake_id: Some(1),
@@ -221,6 +223,8 @@ pub fn build_queue_item_fixtures() -> Vec<BuildQueueItem> {
         // Queued state (next in queue)
         BuildQueueItem {
             job_id: None,
+            commit_id: None,
+            server_failure_code: None,
             system_id: None,
             attempt_number: 1,
             flake_id: Some(1),
@@ -243,6 +247,8 @@ pub fn build_queue_item_fixtures() -> Vec<BuildQueueItem> {
         // Queued state (second in queue)
         BuildQueueItem {
             job_id: None,
+            commit_id: None,
+            server_failure_code: None,
             system_id: None,
             attempt_number: 1,
             flake_id: Some(2),
@@ -265,6 +271,8 @@ pub fn build_queue_item_fixtures() -> Vec<BuildQueueItem> {
         // Building state with long commit message (overflow test)
         BuildQueueItem {
             job_id: None,
+            commit_id: None,
+            server_failure_code: None,
             system_id: None,
             attempt_number: 1,
             flake_id: Some(3),
@@ -287,6 +295,8 @@ pub fn build_queue_item_fixtures() -> Vec<BuildQueueItem> {
         // Queued state with no commit message (empty content test)
         BuildQueueItem {
             job_id: None,
+            commit_id: None,
+            server_failure_code: None,
             system_id: None,
             attempt_number: 1,
             flake_id: Some(4),

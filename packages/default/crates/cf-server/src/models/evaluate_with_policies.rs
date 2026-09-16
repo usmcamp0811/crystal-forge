@@ -1620,7 +1620,7 @@ fn system_not_queued_reason(
 /// if the evaluation was cancelled/superseded.
 /// An existing failed build with the server-owned obsolete-contract code
 /// returns [`SystemPersistenceOutcome::NeedsBuildPreparation`]. The later
-/// activation transaction consumes the code and revives the same queue row.
+/// activation transaction preserves that row and creates a replacement attempt.
 /// Other existing build jobs return [`SystemPersistenceOutcome::ExistingBuildJob`].
 ///
 /// # Errors
@@ -1900,7 +1900,7 @@ pub async fn persist_evaluated_system(
         SELECT id, status, server_failure_code
         FROM build_jobs
         WHERE derivation_id = $1
-        ORDER BY created_at ASC
+        ORDER BY created_at DESC, id DESC
         LIMIT 1
         "#,
     )
@@ -1908,9 +1908,9 @@ pub async fn persist_evaluated_system(
     .fetch_optional(&mut *tx)
     .await?;
 
-    // SECURITY: Only the server-owned obsolete-contract code lets successful
-    // authoritative evaluation proceed to build preparation and consume that
-    // code during activation. All other existing jobs remain terminal.
+    // SECURITY: Only a latest attempt with the server-owned obsolete-contract
+    // code lets successful authoritative evaluation create a replacement.
+    // Older immutable markers cannot reactivate a completed retry lineage.
     if let Some((build_job_id, build_job_status, server_failure_code)) = existing
         && server_failure_code.as_deref()
             != Some(crate::models::builders::SERVER_FAILURE_CODE_EVALUATOR_CONTRACT_OBSOLETE)
@@ -7752,11 +7752,9 @@ mod tests {
             .await;
     }
 
-    #[tokio::test]
-    #[ignore = "requires live database connection"]
-    async fn authoritative_re_evaluation_revives_obsolete_job_during_activation() {
-        let pool = test_pool().await;
-        cleanup_throwaway_flakes(&pool).await;
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires test database creation privileges"]
+    async fn authoritative_re_evaluation_replaces_obsolete_job_during_activation(pool: PgPool) {
         let flake_id = insert_throwaway_flake(&pool).await;
         let commit_id = insert_throwaway_commit(&pool, flake_id).await;
         let attempt = start_eval(&pool, commit_id).await;
@@ -7804,20 +7802,38 @@ mod tests {
             "obsolete job should require controlled reactivation, got {republished:?}"
         );
 
-        let revived = activate_evaluated_system_build(&pool, commit_id, attempt, derivation_id)
+        let replacement = activate_evaluated_system_build(&pool, commit_id, attempt, derivation_id)
             .await
             .expect("controlled reactivation should succeed");
-        assert_eq!(
-            revived,
-            SystemBuildActivationOutcome::Queued { build_job_id }
-        );
-        let state: (String, Option<String>) =
+        let replacement_id = match replacement {
+            SystemBuildActivationOutcome::Queued { build_job_id } => build_job_id,
+            other => panic!("controlled reactivation should queue a replacement, got {other:?}"),
+        };
+        assert_ne!(replacement_id, build_job_id);
+        let source_state: (String, Option<String>) =
             sqlx::query_as("SELECT status, server_failure_code FROM build_jobs WHERE id = $1")
                 .bind(build_job_id)
                 .fetch_one(&pool)
                 .await
-                .expect("revived job should load");
-        assert_eq!(state, ("queued".to_string(), None));
+                .expect("obsolete source should load");
+        assert_eq!(
+            source_state,
+            (
+                "failed".to_string(),
+                Some("evaluator_contract_obsolete".to_string())
+            )
+        );
+        let replacement_state: (String, Option<String>, Option<uuid::Uuid>) = sqlx::query_as(
+            "SELECT status, server_failure_code, parent_job_id FROM build_jobs WHERE id = $1",
+        )
+        .bind(replacement_id)
+        .fetch_one(&pool)
+        .await
+        .expect("replacement job should load");
+        assert_eq!(
+            replacement_state,
+            ("queued".to_string(), None, Some(build_job_id))
+        );
 
         let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
             .bind(flake_id)

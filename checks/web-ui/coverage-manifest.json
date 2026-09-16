@@ -1457,6 +1457,48 @@
       "baseline": "advisory"
     },
     {
+      "name": "15h2-builds-obsolete-contract-re-evaluation",
+      "description": "Obsolete build recovery queues authoritative evaluation for the exact commit",
+      "route": "/builds",
+      "designRef": "docs/design/CrystalForge/components/BuildsView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "15h3-builds-operator-obsolete-contract-guidance",
+      "description": "Operators receive administrator guidance without starting authoritative recovery",
+      "route": "/builds",
+      "designRef": "docs/design/CrystalForge/components/BuildsView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
+      "name": "15h4-builds-completed-bulk-retry",
+      "description": "Completed bulk retry exposes accessible selection and reports partial stale results",
+      "route": "/builds",
+      "designRef": "docs/design/CrystalForge/components/BuildsView.jsx",
+      "profiles": [
+        "ci_fast",
+        "full"
+      ],
+      "semanticAssertions": true,
+      "interactions": true,
+      "mockedData": true,
+      "baseline": "advisory"
+    },
+    {
       "name": "15i-builds-non-operator",
       "description": "Builds view hides retry and mutating controls for non-operators",
       "route": "/builds",

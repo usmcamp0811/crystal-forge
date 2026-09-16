@@ -5,7 +5,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::{DateTime, Utc};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use rand::rngs::OsRng;
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 use tracing::info;
 use uuid::Uuid;
 
@@ -31,7 +31,7 @@ use crate::models::retry_policy::{
     automatic_retry_eligible,
 };
 use crate::queries::attention;
-use crate::queries::build_jobs::{BUILD_QUEUE_ORDER_LOCK_KEY, lock_build_queue_order};
+use crate::queries::build_jobs::{lock_build_derivation, lock_build_queue_order};
 
 const CLAIM_NEXT_JOB_SERVER_DERIVATION_WILDCARD_SQL: &str = r#"
     UPDATE build_jobs
@@ -1144,7 +1144,7 @@ pub async fn peek_next_verified_source_job(
 ///
 /// The transition is conditional on `queued` state. A concurrent claim wins
 /// without being overwritten. A later authoritative evaluation can recognize
-/// the structured server failure code and revive this unique per-derivation row
+/// the structured server failure code and create an immutable replacement child
 /// after source publication and authoritative evaluation succeed.
 ///
 /// # Errors
@@ -1819,6 +1819,27 @@ pub async fn mark_job_failed_with_retry(
         .await
         .context("Failed to begin fail transaction")?;
 
+    let derivation_id: i32 = sqlx::query_scalar(
+        r#"
+        SELECT derivation_id FROM build_jobs
+        WHERE id = $1
+          AND builder_id = $2
+          AND (builder_session_id IS NULL OR builder_session_id = $3)
+          AND status = 'building'
+        "#,
+    )
+    .bind(job_id)
+    .bind(builder_id)
+    .bind(builder_session_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .context("Failed to identify owned building job for fail transition")?
+    .ok_or_else(|| {
+        anyhow::anyhow!("Build job not found or no longer owned by this builder in building status")
+    })?;
+
+    lock_build_derivation(&mut tx, derivation_id).await?;
+
     let job = sqlx::query_as::<_, BuildJobRow>(
         r#"
         SELECT *
@@ -2093,38 +2114,253 @@ pub async fn finalize_cancelled_job(
     Ok(job)
 }
 
-/// Create a new queued build attempt from a terminal job.
+/// Describes whether manual requeue created or reused the active attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequeueBuildJobDisposition {
+    /// The transaction inserted a new queued child attempt.
+    Created,
+    /// The transaction returned the derivation's existing active attempt.
+    Reused,
+}
+
+/// Contains the active attempt produced by a manual requeue request.
+#[derive(Debug, Clone)]
+pub struct RequeueBuildJobOutcome {
+    /// The new or existing active attempt.
+    pub attempt: BuildJob,
+    /// Whether this request created the attempt.
+    pub disposition: RequeueBuildJobDisposition,
+}
+
+/// Identifies a truthful manual requeue failure category.
+#[derive(Debug)]
+pub enum RequeueBuildJobError {
+    /// The source does not exist or is outside the caller's environment scope.
+    NotFoundOrHidden,
+    /// The visible source is not terminal and cannot be requeued.
+    LifecycleConflict { status: String },
+    /// The source requires authoritative evaluation of its exact commit.
+    EvaluatorContractObsolete { commit_id: i32 },
+    /// Persistence or constraint processing failed.
+    Internal(anyhow::Error),
+}
+
+impl std::fmt::Display for RequeueBuildJobError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFoundOrHidden => formatter.write_str("Build job not found"),
+            Self::LifecycleConflict { status } => {
+                write!(
+                    formatter,
+                    "Build job is not terminal (current status: {status})"
+                )
+            }
+            Self::EvaluatorContractObsolete { commit_id } => write!(
+                formatter,
+                "Build job uses an obsolete evaluator contract; re-evaluate commit {commit_id} before retrying",
+            ),
+            Self::Internal(error) => write!(formatter, "{error:#}"),
+        }
+    }
+}
+
+impl std::error::Error for RequeueBuildJobError {}
+
+impl From<anyhow::Error> for RequeueBuildJobError {
+    fn from(error: anyhow::Error) -> Self {
+        Self::Internal(error)
+    }
+}
+
+// SECURITY: Locks the membership that authorizes a scoped build mutation until
+// the transaction commits. A concurrent membership revocation must complete
+// before authorization or wait until the already-authorized transaction ends.
+async fn lock_requeue_environment_access(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+    is_admin: bool,
+    environment_id: Option<Uuid>,
+) -> Result<bool> {
+    if is_admin {
+        return Ok(true);
+    }
+    let Some(environment_id) = environment_id else {
+        return Ok(false);
+    };
+    let visible: Option<Uuid> = sqlx::query_scalar(
+        r#"
+        SELECT environment_id
+        FROM user_environment_memberships
+        WHERE user_id = $1 AND environment_id = $2
+        FOR SHARE
+        "#,
+    )
+    .bind(user_id)
+    .bind(environment_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .context("Failed to lock build requeue environment membership")?;
+    Ok(visible.is_some())
+}
+
+/// Returns one active attempt for a terminal build without mutating history.
 ///
-/// This preserves immutable build history by keeping the original row intact
-/// and inserting a brand-new `build_jobs` row for the same derivation/context.
+/// Concurrent requests for any terminal attempt of the same derivation are
+/// serialized. The first request creates a queued child and later requests
+/// return that child with [`RequeueBuildJobDisposition::Reused`].
 ///
-/// Requeue-eligible terminal statuses: `cancelled`, `failed`, `success`.
-/// New attempts are appended to the queue tail by assigning a weight lower than
-/// the current minimum queued weight.
-pub async fn requeue_build_job_as_new_attempt(pool: &PgPool, job_id: &Uuid) -> Result<BuildJob> {
+/// # Errors
+///
+/// Returns [`RequeueBuildJobError::NotFoundOrHidden`] when the source is missing
+/// or outside the caller's environment scope. Returns
+/// [`RequeueBuildJobError::LifecycleConflict`] when the visible source is not
+/// terminal. Returns
+/// [`RequeueBuildJobError::EvaluatorContractObsolete`] when the exact source
+/// revision requires authoritative re-evaluation. Persistence failures return
+/// [`RequeueBuildJobError::Internal`].
+pub async fn requeue_build_job_as_new_attempt(
+    pool: &PgPool,
+    job_id: &Uuid,
+    user_id: Uuid,
+    is_admin: bool,
+) -> std::result::Result<RequeueBuildJobOutcome, RequeueBuildJobError> {
     let mut tx = pool
         .begin()
         .await
-        .context("Failed to begin requeue_build_job_as_new_attempt transaction")?;
+        .context("Failed to begin requeue_build_job_as_new_attempt transaction")
+        .map_err(RequeueBuildJobError::Internal)?;
 
-    lock_build_queue_order(&mut tx).await?;
+    let derivation_id: i32 = sqlx::query_scalar(
+        r#"
+        SELECT derivation_id
+        FROM build_jobs
+        WHERE id = $1
+          AND ($3 OR (
+              environment_id IS NOT NULL
+              AND EXISTS (
+                  SELECT 1 FROM user_environment_memberships membership
+                  WHERE membership.user_id = $2
+                    AND membership.environment_id = build_jobs.environment_id
+              )
+          ))
+        "#,
+    )
+    .bind(job_id)
+    .bind(user_id)
+    .bind(is_admin)
+    .fetch_optional(&mut *tx)
+    .await
+    .context("Failed to identify build derivation for requeue")
+    .map_err(RequeueBuildJobError::Internal)?
+    .ok_or(RequeueBuildJobError::NotFoundOrHidden)?;
+
+    lock_build_derivation(&mut tx, derivation_id)
+        .await
+        .map_err(RequeueBuildJobError::Internal)?;
+
+    #[derive(sqlx::FromRow)]
+    struct RequeueSource {
+        derivation_id: i32,
+        environment_id: Option<Uuid>,
+        root_job_id: Option<Uuid>,
+        server_failure_code: Option<String>,
+        commit_id: i32,
+        status: String,
+    }
+
+    let source = sqlx::query_as::<_, RequeueSource>(
+        r#"
+        SELECT bj.derivation_id, bj.environment_id, bj.root_job_id,
+               bj.server_failure_code, d.commit_id, bj.status
+        FROM build_jobs bj
+        JOIN derivations d ON d.id = bj.derivation_id
+        WHERE bj.id = $1
+        FOR UPDATE OF bj
+        "#,
+    )
+    .bind(job_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .context("Failed to load terminal build attempt for requeue")
+    .map_err(RequeueBuildJobError::Internal)?
+    .ok_or(RequeueBuildJobError::NotFoundOrHidden)?;
+
+    if !lock_requeue_environment_access(&mut tx, user_id, is_admin, source.environment_id)
+        .await
+        .map_err(RequeueBuildJobError::Internal)?
+    {
+        return Err(RequeueBuildJobError::NotFoundOrHidden);
+    }
+
+    if !matches!(source.status.as_str(), "cancelled" | "failed" | "success") {
+        return Err(RequeueBuildJobError::LifecycleConflict {
+            status: source.status,
+        });
+    }
+
+    let active = sqlx::query_as::<_, BuildJobRow>(
+        r#"
+        SELECT * FROM build_jobs
+        WHERE derivation_id = $1
+          AND status IN ('queued', 'building', 'cancelling')
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(source.derivation_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .context("Failed to find an existing active build attempt")
+    .map_err(RequeueBuildJobError::Internal)?;
+
+    if let Some(attempt) = active {
+        if !lock_requeue_environment_access(&mut tx, user_id, is_admin, attempt.environment_id)
+            .await
+            .map_err(RequeueBuildJobError::Internal)?
+        {
+            return Err(RequeueBuildJobError::NotFoundOrHidden);
+        }
+        tx.commit()
+            .await
+            .context("Failed to commit reused build attempt")
+            .map_err(RequeueBuildJobError::Internal)?;
+        return Ok(RequeueBuildJobOutcome {
+            attempt,
+            disposition: RequeueBuildJobDisposition::Reused,
+        });
+    }
+
+    if source.server_failure_code.as_deref()
+        == Some(SERVER_FAILURE_CODE_EVALUATOR_CONTRACT_OBSOLETE)
+    {
+        return Err(RequeueBuildJobError::EvaluatorContractObsolete {
+            commit_id: source.commit_id,
+        });
+    }
+
+    lock_build_queue_order(&mut tx)
+        .await
+        .map_err(RequeueBuildJobError::Internal)?;
 
     let next_pos: i64 = sqlx::query_scalar(
         "SELECT COALESCE(MAX(queue_position), 0) + 1 FROM build_jobs WHERE status = 'queued' OR status = 'building'",
     )
     .fetch_one(&mut *tx)
     .await
-    .context("Failed to read max queue_position for requeue")?;
+    .context("Failed to read max queue_position for requeue")
+    .map_err(RequeueBuildJobError::Internal)?;
+
+    let attempt_number: i32 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(attempt_number), 0) + 1 FROM build_jobs WHERE derivation_id = $1",
+    )
+    .bind(source.derivation_id)
+    .fetch_one(&mut *tx)
+    .await
+    .context("Failed to allocate the next build attempt number")
+    .map_err(RequeueBuildJobError::Internal)?;
 
     let inserted = sqlx::query_as::<_, BuildJobRow>(
         r#"
-        WITH source_job AS (
-            SELECT derivation_id, environment_id, id,
-                   COALESCE(root_job_id, id) AS root_job_id, attempt_number
-            FROM build_jobs
-            WHERE id = $1
-              AND status IN ('cancelled', 'failed', 'success')
-        )
         INSERT INTO build_jobs (
             derivation_id,
             environment_id,
@@ -2138,38 +2374,69 @@ pub async fn requeue_build_job_as_new_attempt(pool: &PgPool, job_id: &Uuid) -> R
             attempt_number,
             available_at
         )
-        SELECT
-            s.derivation_id,
-            s.environment_id,
+        VALUES (
+            $1,
+            $2,
             'queued',
             0,
             COALESCE((SELECT max_build_retries FROM automatic_retry_policy WHERE id = 1), 2),
             1.0,
-            $2,
-            s.id,
-            s.root_job_id,
-            s.attempt_number + 1,
+            $3,
+            $4,
+            $5,
+            $6,
             NOW()
-        FROM source_job s
+        )
+        ON CONFLICT (derivation_id)
+            WHERE status IN ('queued', 'building', 'cancelling') DO NOTHING
         RETURNING *
         "#,
     )
-    .bind(job_id)
+    .bind(source.derivation_id)
+    .bind(source.environment_id)
     .bind(next_pos)
+    .bind(job_id)
+    .bind(source.root_job_id.unwrap_or(*job_id))
+    .bind(attempt_number)
     .fetch_optional(&mut *tx)
     .await
-    .context("Failed to requeue build job as new attempt")?
-    .ok_or_else(|| {
-        anyhow::anyhow!(
-            "Build job not found or not in a requeue-eligible status (cancelled/failed/success)"
+    .context("Failed to requeue build job as new attempt")
+    .map_err(RequeueBuildJobError::Internal)?;
+
+    let (attempt, disposition) = if let Some(attempt) = inserted {
+        (attempt, RequeueBuildJobDisposition::Created)
+    } else {
+        let attempt = sqlx::query_as::<_, BuildJobRow>(
+            "SELECT * FROM build_jobs WHERE derivation_id = $1 AND status IN ('queued', 'building', 'cancelling') ORDER BY created_at DESC, id DESC LIMIT 1",
         )
-    })?;
+        .bind(source.derivation_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .context("Failed to load active build attempt after uniqueness conflict")
+        .map_err(RequeueBuildJobError::Internal)?
+        .ok_or_else(|| {
+            RequeueBuildJobError::Internal(anyhow::anyhow!(
+                "Active build uniqueness conflict did not identify an active attempt"
+            ))
+        })?;
+        if !lock_requeue_environment_access(&mut tx, user_id, is_admin, attempt.environment_id)
+            .await
+            .map_err(RequeueBuildJobError::Internal)?
+        {
+            return Err(RequeueBuildJobError::NotFoundOrHidden);
+        }
+        (attempt, RequeueBuildJobDisposition::Reused)
+    };
 
     tx.commit()
         .await
-        .context("Failed to commit requeue_build_job_as_new_attempt")?;
+        .context("Failed to commit requeue_build_job_as_new_attempt")
+        .map_err(RequeueBuildJobError::Internal)?;
 
-    Ok(inserted)
+    Ok(RequeueBuildJobOutcome {
+        attempt,
+        disposition,
+    })
 }
 
 #[cfg(test)]
@@ -2496,9 +2763,10 @@ mod tests {
                 .expect("original job exists");
             assert_eq!(original.status, *terminal_status);
 
-            let requeued = requeue_build_job_as_new_attempt(&pool, &job_id)
+            let requeued = requeue_build_job_as_new_attempt(&pool, &job_id, Uuid::nil(), true)
                 .await
-                .expect("requeue should create new attempt");
+                .expect("requeue should create new attempt")
+                .attempt;
 
             assert_ne!(requeued.id, original.id, "new attempt must have new id");
             assert_eq!(requeued.status, "queued");
@@ -2536,15 +2804,573 @@ mod tests {
         // Make queue empty by taking source job out of queued state.
         set_build_job_status(&pool, job_id, "success").await;
 
-        let requeued = requeue_build_job_as_new_attempt(&pool, &job_id)
+        let requeued = requeue_build_job_as_new_attempt(&pool, &job_id, Uuid::nil(), true)
             .await
-            .expect("requeue should succeed on empty queue");
+            .expect("requeue should succeed on empty queue")
+            .attempt;
 
         assert_eq!(requeued.status, "queued");
         assert!(
             requeued.priority_weight > 0.0,
             "priority_weight must satisfy DB CHECK (priority_weight > 0)"
         );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires test database creation privileges"]
+    async fn manual_requeue_creates_once_then_reuses_active_attempt(pool: PgPool) {
+        let now = Utc::now();
+        let source_id = create_queued_job(
+            &pool,
+            &format!("https://example.com/manual-requeue-{}.git", Uuid::new_v4()),
+            &format!("manual-requeue-{}", Uuid::new_v4()),
+            &Uuid::new_v4().simple().to_string(),
+            now,
+            "manual-requeue-system",
+            5.0,
+            now,
+        )
+        .await;
+        set_build_job_status(&pool, source_id, "failed").await;
+
+        let created = requeue_build_job_as_new_attempt(&pool, &source_id, Uuid::nil(), true)
+            .await
+            .expect("first request should create an attempt");
+        let reused = requeue_build_job_as_new_attempt(&pool, &source_id, Uuid::nil(), true)
+            .await
+            .expect("second request should reuse the active attempt");
+
+        assert_eq!(created.disposition, RequeueBuildJobDisposition::Created);
+        assert_eq!(reused.disposition, RequeueBuildJobDisposition::Reused);
+        assert_eq!(created.attempt.id, reused.attempt.id);
+        assert_eq!(created.attempt.attempt_number, 2);
+        let source = get_build_job_by_id(&pool, &source_id)
+            .await
+            .expect("source query should succeed")
+            .expect("source should remain present");
+        assert_eq!(source.status, "failed");
+        assert!(source.completed_at.is_some());
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires test database creation privileges"]
+    async fn concurrent_manual_requeue_requests_share_one_active_attempt(pool: PgPool) {
+        let now = Utc::now();
+        let source_id = create_queued_job(
+            &pool,
+            &format!(
+                "https://example.com/concurrent-requeue-{}.git",
+                Uuid::new_v4()
+            ),
+            &format!("concurrent-requeue-{}", Uuid::new_v4()),
+            &Uuid::new_v4().simple().to_string(),
+            now,
+            "concurrent-requeue-system",
+            5.0,
+            now,
+        )
+        .await;
+        set_build_job_status(&pool, source_id, "cancelled").await;
+
+        let (first, second) = tokio::join!(
+            requeue_build_job_as_new_attempt(&pool, &source_id, Uuid::nil(), true),
+            requeue_build_job_as_new_attempt(&pool, &source_id, Uuid::nil(), true)
+        );
+        let first = first.expect("first concurrent request should succeed");
+        let second = second.expect("second concurrent request should succeed");
+
+        assert_eq!(first.attempt.id, second.attempt.id);
+        assert_ne!(first.disposition, second.disposition);
+        let active_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM build_jobs WHERE derivation_id = $1 AND status IN ('queued', 'building', 'cancelling')",
+        )
+        .bind(first.attempt.derivation_id)
+        .fetch_one(&pool)
+        .await
+        .expect("active attempt count should load");
+        assert_eq!(active_count, 1);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires test database creation privileges"]
+    async fn manual_requeue_enforces_operator_environment_scope(pool: PgPool) {
+        let now = Utc::now();
+        let source_id = create_queued_job(
+            &pool,
+            &format!("https://example.com/scoped-requeue-{}.git", Uuid::new_v4()),
+            &format!("scoped-requeue-{}", Uuid::new_v4()),
+            &Uuid::new_v4().simple().to_string(),
+            now,
+            "scoped-requeue-system",
+            5.0,
+            now,
+        )
+        .await;
+        set_build_job_status(&pool, source_id, "failed").await;
+
+        let operator_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (username, first_name, last_name, email) VALUES ($1, 'Test', 'Operator', $2) RETURNING id",
+        )
+        .bind(format!("operator-{}", Uuid::new_v4()))
+        .bind(format!("operator-{}@example.com", Uuid::new_v4()))
+        .fetch_one(&pool)
+        .await
+        .expect("operator user should be inserted");
+
+        let hidden = requeue_build_job_as_new_attempt(&pool, &source_id, operator_id, false)
+            .await
+            .expect_err("an unassigned build must be hidden from an operator");
+        assert!(matches!(hidden, RequeueBuildJobError::NotFoundOrHidden));
+
+        let environment_id: Uuid =
+            sqlx::query_scalar("INSERT INTO environments (name) VALUES ($1) RETURNING id")
+                .bind(format!("scoped-requeue-{}", Uuid::new_v4().simple()))
+                .fetch_one(&pool)
+                .await
+                .expect("environment should be inserted");
+        sqlx::query("UPDATE build_jobs SET environment_id = $2 WHERE id = $1")
+            .bind(source_id)
+            .bind(environment_id)
+            .execute(&pool)
+            .await
+            .expect("source should be assigned to the environment");
+        sqlx::query(
+            "INSERT INTO user_environment_memberships (user_id, environment_id) VALUES ($1, $2)",
+        )
+        .bind(operator_id)
+        .bind(environment_id)
+        .execute(&pool)
+        .await
+        .expect("operator membership should be inserted");
+
+        let allowed = requeue_build_job_as_new_attempt(&pool, &source_id, operator_id, false)
+            .await
+            .expect("an operator may requeue a build in their environment");
+        assert_eq!(allowed.disposition, RequeueBuildJobDisposition::Created);
+        assert_eq!(allowed.attempt.environment_id, Some(environment_id));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires test database creation privileges"]
+    async fn visible_non_terminal_requeue_is_a_lifecycle_conflict(pool: PgPool) {
+        let now = Utc::now();
+        let source_id = create_queued_job(
+            &pool,
+            &format!(
+                "https://example.com/nonterminal-requeue-{}.git",
+                Uuid::new_v4()
+            ),
+            &format!("nonterminal-requeue-{}", Uuid::new_v4()),
+            &Uuid::new_v4().simple().to_string(),
+            now,
+            "nonterminal-requeue-system",
+            5.0,
+            now,
+        )
+        .await;
+
+        let error = requeue_build_job_as_new_attempt(&pool, &source_id, Uuid::nil(), true)
+            .await
+            .expect_err("a visible queued source must conflict rather than appear absent");
+        assert!(matches!(
+            error,
+            RequeueBuildJobError::LifecycleConflict { status } if status == "queued"
+        ));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires test database creation privileges"]
+    async fn migration_0262_upgrades_populated_global_derivation_uniqueness(pool: PgPool) {
+        let now = Utc::now();
+        let source_id = create_queued_job(
+            &pool,
+            &format!("https://example.com/migration-0262-{}.git", Uuid::new_v4()),
+            &format!("migration-0262-{}", Uuid::new_v4()),
+            &Uuid::new_v4().simple().to_string(),
+            now,
+            "migration-0262-system",
+            5.0,
+            now,
+        )
+        .await;
+        set_build_job_status(&pool, source_id, "success").await;
+        sqlx::query("DROP INDEX build_jobs_one_active_execution_per_derivation")
+            .execute(&pool)
+            .await
+            .expect("new active index should be removed for the upgrade fixture");
+        sqlx::query(
+            "CREATE UNIQUE INDEX idx_build_jobs_derivation_unique ON build_jobs (derivation_id)",
+        )
+        .execute(&pool)
+        .await
+        .expect("legacy global index should be restored");
+
+        sqlx::raw_sql(include_str!(
+            "../../migrations/0262_active_build_job_derivation.sql"
+        ))
+        .execute(&pool)
+        .await
+        .expect("migration 0262 should upgrade populated build history");
+
+        let replacement = requeue_build_job_as_new_attempt(&pool, &source_id, Uuid::nil(), true)
+            .await
+            .expect("upgraded schema should permit an immutable child");
+        assert_ne!(replacement.attempt.id, source_id);
+        assert_eq!(replacement.attempt.attempt_number, 2);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires test database creation privileges"]
+    async fn obsolete_contract_requeue_requires_exact_commit_reevaluation(pool: PgPool) {
+        let now = Utc::now();
+        let source_id = create_queued_job(
+            &pool,
+            &format!(
+                "https://example.com/obsolete-requeue-{}.git",
+                Uuid::new_v4()
+            ),
+            &format!("obsolete-requeue-{}", Uuid::new_v4()),
+            &Uuid::new_v4().simple().to_string(),
+            now,
+            "obsolete-requeue-system",
+            5.0,
+            now,
+        )
+        .await;
+        sqlx::query(
+            "UPDATE build_jobs SET status = 'failed', completed_at = NOW(), server_failure_code = $2 WHERE id = $1",
+        )
+        .bind(source_id)
+        .bind(SERVER_FAILURE_CODE_EVALUATOR_CONTRACT_OBSOLETE)
+        .execute(&pool)
+        .await
+        .expect("source should become an authoritative obsolete failure");
+        let expected_commit_id: i32 = sqlx::query_scalar(
+            "SELECT d.commit_id FROM derivations d JOIN build_jobs bj ON bj.derivation_id = d.id WHERE bj.id = $1",
+        )
+        .bind(source_id)
+        .fetch_one(&pool)
+        .await
+        .expect("source commit should load");
+
+        let error = requeue_build_job_as_new_attempt(&pool, &source_id, Uuid::nil(), true)
+            .await
+            .expect_err("obsolete source must not create an unusable child");
+        assert!(matches!(
+            error,
+            RequeueBuildJobError::EvaluatorContractObsolete { commit_id }
+                if commit_id == expected_commit_id
+        ));
+        let child_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM build_jobs WHERE parent_job_id = $1")
+                .bind(source_id)
+                .fetch_one(&pool)
+                .await
+                .expect("child count should load");
+        assert_eq!(child_count, 0);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires test database creation privileges"]
+    async fn obsolete_source_reuses_authoritative_active_child(pool: PgPool) {
+        let now = Utc::now();
+        let source_id = create_queued_job(
+            &pool,
+            &format!("https://example.com/obsolete-active-{}.git", Uuid::new_v4()),
+            &format!("obsolete-active-{}", Uuid::new_v4()),
+            &Uuid::new_v4().simple().to_string(),
+            now,
+            "obsolete-active-system",
+            5.0,
+            now,
+        )
+        .await;
+        let derivation_id: i32 = sqlx::query_scalar(
+            "UPDATE build_jobs SET status = 'failed', completed_at = NOW(), server_failure_code = $2 WHERE id = $1 RETURNING derivation_id",
+        )
+        .bind(source_id)
+        .bind(SERVER_FAILURE_CODE_EVALUATOR_CONTRACT_OBSOLETE)
+        .fetch_one(&pool)
+        .await
+        .expect("source should become obsolete");
+        sqlx::query("UPDATE derivations SET status_id = 5 WHERE id = $1")
+            .bind(derivation_id)
+            .execute(&pool)
+            .await
+            .expect("authoritative evaluation should make the derivation eligible");
+
+        let mut tx = pool.begin().await.expect("transaction should begin");
+        let inserted =
+            crate::queries::build_jobs::create_build_job_for_derivation_tx(&mut tx, derivation_id)
+                .await
+                .expect("authoritative replacement should execute")
+                .expect("authoritative replacement should exist");
+        tx.commit().await.expect("transaction should commit");
+        let replacement_id = match inserted {
+            crate::queries::build_jobs::BuildJobInsertOutcome::Inserted { build_job_id } => {
+                build_job_id
+            }
+            other => panic!("expected an inserted replacement, got {other:?}"),
+        };
+
+        let reused = requeue_build_job_as_new_attempt(&pool, &source_id, Uuid::nil(), true)
+            .await
+            .expect("manual recovery should reuse the authoritative child");
+        assert_eq!(reused.disposition, RequeueBuildJobDisposition::Reused);
+        assert_eq!(reused.attempt.id, replacement_id);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires test database creation privileges"]
+    async fn stale_obsolete_marker_does_not_replace_later_terminal_attempt(pool: PgPool) {
+        let now = Utc::now();
+        let source_id = create_queued_job(
+            &pool,
+            &format!("https://example.com/obsolete-stale-{}.git", Uuid::new_v4()),
+            &format!("obsolete-stale-{}", Uuid::new_v4()),
+            &Uuid::new_v4().simple().to_string(),
+            now,
+            "obsolete-stale-system",
+            5.0,
+            now,
+        )
+        .await;
+        let derivation_id: i32 = sqlx::query_scalar(
+            "UPDATE build_jobs SET status = 'failed', completed_at = NOW(), server_failure_code = $2 WHERE id = $1 RETURNING derivation_id",
+        )
+        .bind(source_id)
+        .bind(SERVER_FAILURE_CODE_EVALUATOR_CONTRACT_OBSOLETE)
+        .fetch_one(&pool)
+        .await
+        .expect("source should become obsolete");
+        sqlx::query("UPDATE derivations SET status_id = 5 WHERE id = $1")
+            .bind(derivation_id)
+            .execute(&pool)
+            .await
+            .expect("derivation should be eligible");
+
+        let mut first_tx = pool.begin().await.expect("first transaction should begin");
+        let first = crate::queries::build_jobs::create_build_job_for_derivation_tx(
+            &mut first_tx,
+            derivation_id,
+        )
+        .await
+        .expect("first replacement should execute")
+        .expect("first replacement should exist");
+        first_tx
+            .commit()
+            .await
+            .expect("first transaction should commit");
+        let replacement_id = match first {
+            crate::queries::build_jobs::BuildJobInsertOutcome::Inserted { build_job_id } => {
+                build_job_id
+            }
+            other => panic!("expected an inserted replacement, got {other:?}"),
+        };
+        set_build_job_status(&pool, replacement_id, "success").await;
+
+        let mut second_tx = pool.begin().await.expect("second transaction should begin");
+        let second = crate::queries::build_jobs::create_build_job_for_derivation_tx(
+            &mut second_tx,
+            derivation_id,
+        )
+        .await
+        .expect("repeat activation should execute")
+        .expect("terminal replacement should be reported");
+        second_tx
+            .commit()
+            .await
+            .expect("second transaction should commit");
+        assert!(matches!(
+            second,
+            crate::queries::build_jobs::BuildJobInsertOutcome::AlreadyExists {
+                build_job_id,
+                ref status,
+            } if build_job_id == replacement_id && status == "success"
+        ));
+        let attempt_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM build_jobs WHERE derivation_id = $1")
+                .bind(derivation_id)
+                .fetch_one(&pool)
+                .await
+                .expect("attempt count should load");
+        assert_eq!(attempt_count, 2);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires test database creation privileges"]
+    async fn manual_and_authoritative_obsolete_recovery_create_one_active_child(pool: PgPool) {
+        let now = Utc::now();
+        let source_id = create_queued_job(
+            &pool,
+            &format!(
+                "https://example.com/authoritative-race-{}.git",
+                Uuid::new_v4()
+            ),
+            &format!("authoritative-race-{}", Uuid::new_v4()),
+            &Uuid::new_v4().simple().to_string(),
+            now,
+            "authoritative-race-system",
+            5.0,
+            now,
+        )
+        .await;
+        let derivation_id: i32 = sqlx::query_scalar(
+            "UPDATE build_jobs SET status = 'failed', completed_at = NOW(), server_failure_code = $2 WHERE id = $1 RETURNING derivation_id",
+        )
+        .bind(source_id)
+        .bind(SERVER_FAILURE_CODE_EVALUATOR_CONTRACT_OBSOLETE)
+        .fetch_one(&pool)
+        .await
+        .expect("source should become obsolete");
+        sqlx::query("UPDATE derivations SET status_id = 5 WHERE id = $1")
+            .bind(derivation_id)
+            .execute(&pool)
+            .await
+            .expect("authoritative evaluation should make the derivation eligible");
+
+        let authoritative = async {
+            let mut tx = pool
+                .begin()
+                .await
+                .expect("authoritative transaction should begin");
+            let outcome = crate::queries::build_jobs::create_build_job_for_derivation_tx(
+                &mut tx,
+                derivation_id,
+            )
+            .await;
+            tx.commit()
+                .await
+                .expect("authoritative transaction should commit");
+            outcome
+        };
+        let (manual, authoritative) = tokio::join!(
+            requeue_build_job_as_new_attempt(&pool, &source_id, Uuid::nil(), true),
+            authoritative
+        );
+
+        assert!(matches!(
+            manual,
+            Err(RequeueBuildJobError::EvaluatorContractObsolete { .. })
+                | Ok(RequeueBuildJobOutcome {
+                    disposition: RequeueBuildJobDisposition::Reused,
+                    ..
+                })
+        ));
+        let authoritative = authoritative
+            .expect("authoritative replacement should execute")
+            .expect("authoritative replacement should exist");
+        assert!(matches!(
+            authoritative,
+            crate::queries::build_jobs::BuildJobInsertOutcome::Inserted { .. }
+        ));
+        let active_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM build_jobs WHERE derivation_id = $1 AND status IN ('queued', 'building', 'cancelling')",
+        )
+        .bind(derivation_id)
+        .fetch_one(&pool)
+        .await
+        .expect("active count should load");
+        assert_eq!(active_count, 1);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires test database creation privileges"]
+    async fn manual_and_automatic_retry_serialize_to_one_active_child(pool: PgPool) {
+        let now = Utc::now();
+        let source_id = create_queued_job(
+            &pool,
+            &format!("https://example.com/automatic-race-{}.git", Uuid::new_v4()),
+            &format!("automatic-race-{}", Uuid::new_v4()),
+            &Uuid::new_v4().simple().to_string(),
+            now,
+            "automatic-race-system",
+            5.0,
+            now,
+        )
+        .await;
+        let builder = create_active_test_builder(&pool, "automatic-race-builder").await;
+        sqlx::query(
+            "UPDATE build_jobs SET status = 'building', builder_id = $2, started_at = NOW() WHERE id = $1",
+        )
+        .bind(source_id)
+        .bind(builder.id)
+        .execute(&pool)
+        .await
+        .expect("builder should own the source");
+
+        let (manual, automatic) = tokio::join!(
+            requeue_build_job_as_new_attempt(&pool, &source_id, Uuid::nil(), true),
+            mark_job_failed_with_retry(
+                &pool,
+                &source_id,
+                &builder.id,
+                None,
+                Some("transient race failure"),
+                RetryFailureClass::Transient,
+            )
+        );
+        automatic.expect("automatic failure transition should succeed");
+        assert!(matches!(
+            manual,
+            Ok(RequeueBuildJobOutcome {
+                disposition: RequeueBuildJobDisposition::Reused,
+                ..
+            }) | Err(RequeueBuildJobError::LifecycleConflict { .. })
+        ));
+
+        let derivation_id: i32 =
+            sqlx::query_scalar("SELECT derivation_id FROM build_jobs WHERE id = $1")
+                .bind(source_id)
+                .fetch_one(&pool)
+                .await
+                .expect("source derivation should load");
+        let active_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM build_jobs WHERE derivation_id = $1 AND status IN ('queued', 'building', 'cancelling')",
+        )
+        .bind(derivation_id)
+        .fetch_one(&pool)
+        .await
+        .expect("active count should load");
+        assert_eq!(active_count, 1);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires test database creation privileges"]
+    async fn manually_requeued_attempt_claims_through_production_path(pool: PgPool) {
+        let now = Utc::now();
+        let source_id = create_queued_job(
+            &pool,
+            &format!("https://example.com/claim-requeue-{}.git", Uuid::new_v4()),
+            &format!("claim-requeue-{}", Uuid::new_v4()),
+            &Uuid::new_v4().simple().to_string(),
+            now,
+            "claim-requeue-system",
+            5.0,
+            now,
+        )
+        .await;
+        set_build_job_status(&pool, source_id, "success").await;
+        let requeued = requeue_build_job_as_new_attempt(&pool, &source_id, Uuid::nil(), true)
+            .await
+            .expect("terminal source should create an active attempt");
+        let builder = create_active_test_builder(&pool, "manual-requeue-claim-builder").await;
+
+        let claimed = claim_next_job_atomic(
+            &pool,
+            &builder.id,
+            1,
+            &[],
+            RemoteBuildExecutionStrategy::ServerDerivation,
+            None,
+            None,
+        )
+        .await
+        .expect("production claim should succeed")
+        .expect("requeued attempt should be claimable");
+
+        assert_eq!(claimed.id, requeued.attempt.id);
+        assert_eq!(claimed.status, "building");
     }
 
     #[sqlx::test(migrations = "./migrations")]
@@ -2969,8 +3795,8 @@ mod tests {
             Some(SERVER_FAILURE_CODE_EVALUATOR_CONTRACT_OBSOLETE)
         );
 
-        // The same-row recovery remains closed until authoritative evaluation
-        // republishes the matching source and returns this derivation to
+        // Replacement remains closed until authoritative evaluation republishes
+        // the matching source and returns this derivation to
         // DryRunComplete in its persistence transaction.
         let mut premature_tx = pool
             .begin()
@@ -3001,8 +3827,14 @@ mod tests {
             .expect("new job should remain claimable");
         assert_eq!(next.job_id, new_job);
 
+        let obsolete_status = retired.status.clone();
+        let obsolete_code = retired.server_failure_code.clone();
+        let obsolete_logs = retired.logs.clone();
+        let obsolete_started_at = retired.started_at;
+        let obsolete_completed_at = retired.completed_at;
+
         // Authoritative re-evaluation republishes the derivation as
-        // DryRunComplete before queue activation attempts to revive its row.
+        // DryRunComplete before queue activation creates a replacement child.
         sqlx::query("UPDATE derivations SET status_id = 5 WHERE id = $1")
             .bind(retired.derivation_id)
             .execute(&pool)
@@ -3012,28 +3844,43 @@ mod tests {
         let mut tx = pool
             .begin()
             .await
-            .expect("revival transaction should begin");
-        let revived = crate::queries::build_jobs::create_build_job_for_derivation_tx(
+            .expect("replacement transaction should begin");
+        let replacement = crate::queries::build_jobs::create_build_job_for_derivation_tx(
             &mut tx,
             retired.derivation_id,
         )
         .await
-        .expect("republished authority should revive obsolete row")
-        .expect("revived row should be reported");
-        tx.commit().await.expect("revival should commit");
-        assert_eq!(
-            revived,
-            crate::queries::build_jobs::BuildJobInsertOutcome::Inserted {
-                build_job_id: old_job,
-            }
-        );
-        let revived_job = get_build_job_by_id(&pool, &old_job)
+        .expect("republished authority should create a replacement attempt")
+        .expect("replacement attempt should be reported");
+        tx.commit().await.expect("replacement should commit");
+        let crate::queries::build_jobs::BuildJobInsertOutcome::Inserted {
+            build_job_id: replacement_id,
+        } = replacement
+        else {
+            panic!("authoritative replacement should be inserted");
+        };
+        assert_ne!(replacement_id, old_job);
+
+        let unchanged = get_build_job_by_id(&pool, &old_job)
             .await
-            .expect("revived job should load")
-            .expect("revived job should exist");
-        assert_eq!(revived_job.status, "queued");
-        assert!(revived_job.server_failure_code.is_none());
-        assert!(revived_job.completed_at.is_none());
+            .expect("obsolete source should load")
+            .expect("obsolete source should remain present");
+        assert_eq!(unchanged.status, obsolete_status);
+        assert_eq!(unchanged.server_failure_code, obsolete_code);
+        assert_eq!(unchanged.logs, obsolete_logs);
+        assert_eq!(unchanged.started_at, obsolete_started_at);
+        assert_eq!(unchanged.completed_at, obsolete_completed_at);
+
+        let replacement = get_build_job_by_id(&pool, &replacement_id)
+            .await
+            .expect("replacement should load")
+            .expect("replacement should exist");
+        assert_eq!(replacement.status, "queued");
+        assert_eq!(replacement.parent_job_id, Some(old_job));
+        assert_eq!(replacement.root_job_id, Some(old_job));
+        assert_eq!(replacement.attempt_number, retired.attempt_number + 1);
+        assert_eq!(replacement.environment_id, retired.environment_id);
+        assert!(replacement.server_failure_code.is_none());
     }
 
     #[sqlx::test(migrations = "./migrations")]

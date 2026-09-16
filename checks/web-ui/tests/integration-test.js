@@ -1995,6 +1995,22 @@ function mockRecentBuilds(limit) {
       elapsed_secs: 15,
       logs: null,
     },
+    {
+      job_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      commit_id: 440,
+      server_failure_code: "evaluator_contract_obsolete",
+      system_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      hostname: "obsolete-contract-system",
+      flake_name: "platform-core",
+      commit_hash: "4400440044004400440044004400440044004400",
+      commit_message: "Build requires authoritative same-revision evaluation",
+      status: "failed",
+      builder_name: "builder-primary",
+      queued_at: timestamp,
+      started_at: timestamp,
+      elapsed_secs: 8,
+      logs: null,
+    },
   ];
   return { total: items.length, domain_total: items.length, page: 1, limit: limit || 100, items };
 }
@@ -10804,14 +10820,43 @@ const steps = [
       });
 
       let requeueCalls = 0;
+      let requeueCreated = false;
+      let releaseRequeue;
+      const requeueGate = new Promise((resolve) => {
+        releaseRequeue = resolve;
+      });
+      const activeAttempt = {
+        ...mockRecentBuildsWithCancelled().items[0],
+        job_id: "88888888-8888-4888-8888-888888888888",
+        status: "queued",
+        attempt_number: 2,
+        parent_job_id: "99999999-9999-4999-8999-999999999999",
+        root_job_id: "99999999-9999-4999-8999-999999999999",
+      };
+      await page.route("**/api/v1/build-jobs?*", async (route) => {
+        const queue = mockBuildsDashboardSummaryWithCancelStates().build_queue.items;
+        const items = requeueCreated ? [activeAttempt, ...queue] : queue;
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ total: items.length, domain_total: items.length, page: 1, limit: 50, items }),
+        });
+      });
       await page.route("**/api/v1/build-jobs/*/requeue", async (route) => {
         if (route.request().method() === "POST") {
           requeueCalls += 1;
         }
+        await requeueGate;
+        requeueCreated = true;
         await route.fulfill({
           status: 200,
           contentType: "application/json",
-          body: "{}",
+          body: JSON.stringify({
+            attempt_id: "88888888-8888-4888-8888-888888888888",
+            attempt_number: 2,
+            status: "queued",
+            outcome: "created",
+          }),
         });
       });
 
@@ -10834,10 +10879,15 @@ const steps = [
       const modalConfirm = page.locator(".cf-modal-panel-30 button:has-text('Restart')");
       await assertVisible(modalConfirm, "Restart confirmation button should be visible in modal");
       await modalConfirm.click();
-      await page.waitForTimeout(600);
+      await assertAttribute(modalConfirm, "disabled", "", "Restart confirmation should disable synchronously");
+      await modalConfirm.dispatchEvent("click");
+      releaseRequeue();
+      await page.getByRole("status").filter({ hasText: "attempt #2" }).waitFor({ timeout: 3000 });
+      await page.getByRole("button", { name: /Active/ }).waitFor({ state: "visible" });
+      await page.getByText("cancelled-history-system").first().waitFor({ state: "visible", timeout: 3000 });
 
-      if (requeueCalls < 1) {
-        throw new Error("Expected Restart from Completed tab to call requeue endpoint");
+      if (requeueCalls !== 1) {
+        throw new Error(`Expected one requeue request after rapid confirmation, got ${requeueCalls}`);
       }
 
       const missingRowError = page.getByText(/Build row #.* not found/i);
@@ -10845,6 +10895,167 @@ const steps = [
         missingRowError,
         "Restart from Completed tab should not show 'Build row not found' error",
       );
+
+      await page.unroute("**/api/v1/build-jobs/recent*");
+      await page.unroute("**/api/v1/build-jobs?*");
+      await page.unroute("**/api/v1/build-jobs/*/requeue");
+      await unrouteBuildsDataWithCancelStates(page);
+    },
+  },
+  {
+    name: "15h2-builds-obsolete-contract-re-evaluation",
+    description: "Obsolete build recovery queues authoritative evaluation for the exact commit",
+    action: async (page) => {
+      await routeBuildsDataWithCancelStates(page);
+      let reevaluateCalls = 0;
+      let requeueCalls = 0;
+      await page.route("**/api/v1/commits/440/re-evaluate", async (route) => {
+        reevaluateCalls += 1;
+        const headers = await route.request().allHeaders();
+        const csrfCookie = (headers.cookie || "").split(";").map((cookie) => cookie.trim()).find((cookie) => cookie.startsWith("__Host-cf-csrf="))?.slice("__Host-cf-csrf=".length);
+        if (!csrfCookie || headers["x-csrf-token"] !== csrfCookie) {
+          await route.fulfill({ status: 403, contentType: "application/json", body: JSON.stringify({ error: "csrf_validation_failed", message: "CSRF validation failed" }) });
+          return;
+        }
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            status: "ok",
+            queued: true,
+            message: "Commit 440 queued for re-evaluation",
+          }),
+        });
+      });
+      await page.route("**/api/v1/build-jobs/*/requeue", async (route) => {
+        requeueCalls += 1;
+        await route.fulfill({
+          status: 409,
+          contentType: "application/json",
+          body: JSON.stringify({
+            error: "evaluator_contract_obsolete",
+            message: "Re-evaluate this exact revision before retrying the build",
+            commit_id: 440,
+            action: "re_evaluate_commit",
+          }),
+        });
+      });
+
+      await page.goto(`${baseUrl}/builds`, { timeout: LOAD_TIMEOUT });
+      await page.getByRole("button", { name: /Completed \(/ }).click();
+      const obsoleteRow = page.locator("tr", { hasText: "obsolete-contract-system" });
+      await assertVisible(obsoleteRow, "Obsolete build should appear in completed history");
+      await obsoleteRow.locator("button[title='Retry build']").click();
+      await page.getByRole("heading", { name: /Restart build\?/i }).waitFor({ timeout: 3000 });
+      await page.locator(".cf-modal-panel-30 button:has-text('Restart')").click();
+      await page.getByRole("status").filter({ hasText: /replacement build attempt is queued automatically/i }).waitFor({ timeout: 3000 });
+
+      if (reevaluateCalls !== 1) throw new Error(`Expected one exact-commit re-evaluation, got ${reevaluateCalls}`);
+      if (requeueCalls !== 1) throw new Error("Structured requeue conflict must authorize obsolete recovery");
+
+      await page.unroute("**/api/v1/commits/440/re-evaluate");
+      await page.unroute("**/api/v1/build-jobs/*/requeue");
+      await unrouteBuildsDataWithCancelStates(page);
+    },
+  },
+  {
+    name: "15h3-builds-operator-obsolete-contract-guidance",
+    description: "Operators receive administrator guidance without starting authoritative recovery",
+    action: async (page) => {
+      await routeBuildsDataWithCancelStates(page);
+      let requeueCalls = 0;
+      let reevaluateCalls = 0;
+      await page.route("**/api/v1/build-jobs/*/requeue", async (route) => {
+        requeueCalls += 1;
+        await route.fulfill({
+          status: 409,
+          contentType: "application/json",
+          body: JSON.stringify({
+            error: "evaluator_contract_obsolete",
+            message: "Re-evaluate this exact revision before retrying the build",
+            commit_id: 440,
+            action: "re_evaluate_commit",
+          }),
+        });
+      });
+      await page.route("**/api/v1/commits/*/re-evaluate", async (route) => {
+        reevaluateCalls += 1;
+        await route.fulfill({ status: 500, body: "unexpected operator re-evaluation" });
+      });
+
+      await page.goto(`${baseUrl}/builds?ui_check_auth=1&ui_check_role=operator`, { timeout: LOAD_TIMEOUT });
+      await page.getByRole("button", { name: /Completed \(/ }).click();
+      const obsoleteRow = page.locator("tr", { hasText: "obsolete-contract-system" });
+      await obsoleteRow.locator("button[title='Retry build']").click();
+      await page.getByRole("heading", { name: /Restart build\?/i }).waitFor({ timeout: 3000 });
+      await page.locator(".cf-modal-panel-30 button:has-text('Restart')").click();
+      await page.getByRole("alert").filter({ hasText: /administrator must re-evaluate commit 440/i }).waitFor({ timeout: 3000 });
+
+      if (requeueCalls !== 1) throw new Error("Operator recovery must ask the server whether an active attempt can be reused");
+      if (reevaluateCalls !== 0) throw new Error("Operator obsolete guidance must not start authoritative re-evaluation");
+
+      await page.unroute("**/api/v1/build-jobs/*/requeue");
+      await page.unroute("**/api/v1/commits/*/re-evaluate");
+      await unrouteBuildsDataWithCancelStates(page);
+    },
+  },
+  {
+    name: "15h4-builds-completed-bulk-retry",
+    description: "Completed bulk retry exposes accessible selection and reports partial stale results",
+    action: async (page) => {
+      await routeBuildsDataWithCancelStates(page);
+      await page.route("**/api/v1/build-jobs/recent*", async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify(mockRecentBuildsWithCancelled()),
+        });
+      });
+      await page.route("**/api/v1/build-jobs/*/requeue", async (route) => {
+        const jobId = new URL(route.request().url()).pathname.split("/").at(-2);
+        if (jobId === "99999999-9999-4999-8999-999999999999") {
+          await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify({
+              attempt_id: "88888888-8888-4888-8888-888888888888",
+              attempt_number: 2,
+              status: "queued",
+              outcome: "created",
+            }),
+          });
+          return;
+        }
+        await route.fulfill({
+          status: 409,
+          contentType: "application/json",
+          body: JSON.stringify({
+            error: "build_job_not_terminal",
+            message: "Only terminal build jobs can be requeued",
+            status: "building",
+          }),
+        });
+      });
+
+      await page.goto(`${baseUrl}/builds`, { timeout: LOAD_TIMEOUT });
+      await page.getByRole("button", { name: /Completed \(/ }).click();
+      const cancelledSelection = page.getByRole("checkbox", { name: "Select build cancelled-history-system" });
+      const completedSelection = page.getByRole("checkbox", { name: "Select build history-system-1" });
+      await assertVisible(cancelledSelection, "Cancelled history row should expose an accessible selection control");
+      await assertVisible(completedSelection, "Completed history row should expose an accessible selection control");
+      await cancelledSelection.check();
+      await completedSelection.check();
+
+      const toolbar = page.getByRole("toolbar", { name: "Completed build actions" });
+      await assertVisible(toolbar, "Completed selection should expose its bulk toolbar");
+      await assertVisible(toolbar.getByRole("button", { name: "Re-run" }), "Completed bulk toolbar should expose Re-run");
+      await assertVisible(toolbar.getByRole("button", { name: "Clear" }), "Completed bulk toolbar should expose Clear");
+      await assertHidden(toolbar.getByRole("button", { name: /Cancel|Delete|Download/i }), "Completed bulk toolbar must not expose unsupported actions");
+      await toolbar.getByRole("button", { name: "Re-run" }).click();
+
+      await page.getByRole("status").filter({ hasText: /Build recovery: 1 created, 0 reused, 0 re-evaluations queued, 0 already active, 1 skipped, 0 failed/ }).waitFor({ timeout: 3000 });
+      await page.getByRole("status").filter({ hasText: /no longer terminal \(status: building\)/ }).waitFor({ timeout: 3000 });
+      await page.getByRole("button", { name: /Active/ }).waitFor({ state: "visible" });
 
       await page.unroute("**/api/v1/build-jobs/recent*");
       await page.unroute("**/api/v1/build-jobs/*/requeue");

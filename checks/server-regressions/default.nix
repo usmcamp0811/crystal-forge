@@ -622,6 +622,27 @@ SQL
       concurrent_explicit_request_conflicts_before_policy_conversion \
       -- --ignored --test-threads=1
 
+    echo "=== TASK-440 immutable build retry contracts ==="
+    for testName in \
+      manual_requeue_creates_once_then_reuses_active_attempt \
+      concurrent_manual_requeue_requests_share_one_active_attempt \
+      manual_requeue_enforces_operator_environment_scope \
+      visible_non_terminal_requeue_is_a_lifecycle_conflict \
+      migration_0262_upgrades_populated_global_derivation_uniqueness \
+      obsolete_contract_requeue_requires_exact_commit_reevaluation \
+      obsolete_source_reuses_authoritative_active_child \
+      stale_obsolete_marker_does_not_replace_later_terminal_attempt \
+      manual_and_authoritative_obsolete_recovery_create_one_active_child \
+      manual_and_automatic_retry_serialize_to_one_active_child \
+      automatic_retry_creates_one_delayed_linked_child_and_keeps_source_terminal \
+      manually_requeued_attempt_claims_through_production_path \
+      authoritative_re_evaluation_replaces_obsolete_job_during_activation \
+      visibility_scope_handles_ambiguous_systems_cache_pushes_and_eval_attempts
+    do
+      cargo test --offline --package cf-server --lib "$testName" \
+        -- --ignored --test-threads=1
+    done
+
     runHook postCheck
   '';
 
