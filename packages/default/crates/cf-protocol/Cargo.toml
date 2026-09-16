@@ -8,6 +8,7 @@ description = "Crystal Forge wire protocol types shared between server, builder,
 chrono = { version = "0.4.41", features = ["serde"] }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10.9"
 tar = "0.4"
 uuid = { version = "1.17.0", features = ["v4", "serde"] }
 

@@ -7,6 +7,7 @@
 //! - `error`: Error types
 
 pub mod api_client;
+pub mod cve_scanner;
 pub mod error;
 pub mod metrics;
 pub mod status;

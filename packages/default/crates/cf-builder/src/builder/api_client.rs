@@ -3,9 +3,11 @@ use base64::Engine;
 use cf_config::config::BuilderConfig;
 use cf_protocol::builder::{
     BuildFailureClass, BuildFailurePhase, BuildProgressRequest, BuilderCapabilities,
-    EstablishBuilderSessionRequest, EstablishBuilderSessionResponse, EvaluatorFingerprint,
-    NextJobRequest, NextJobResponse, RemoteBuildExecutionStrategy, ReportMetricsRequest,
-    ResolveBuilderIdRequest, ResolveBuilderIdResponse,
+    CveScanClaimRequest, CveScanClaimResponse, CveScanCompleteRequest, CveScanCompleteResponse,
+    CveScanFailRequest, CveScanFailResponse, CveScanFailureClass, CveScanHeartbeatRequest,
+    CveScanHeartbeatResponse, EstablishBuilderSessionRequest, EstablishBuilderSessionResponse,
+    EvaluatorFingerprint, NextJobRequest, NextJobResponse, RemoteBuildExecutionStrategy,
+    ReportMetricsRequest, ResolveBuilderIdRequest, ResolveBuilderIdResponse,
 };
 use chrono::Utc;
 use ed25519_dalek::{Signature, Signer, SigningKey};
@@ -28,6 +30,44 @@ pub enum AppendLogsOutcome {
     Rejected,
     TerminalJob,
 }
+
+/// Classifies a signed CVE lease API failure without retaining response data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CveApiError {
+    /// The server revoked the lease or superseded the builder session.
+    Revoked,
+    /// Authentication or authorization failed.
+    Authorization,
+    /// The server rejected the request as malformed or conflicting.
+    Rejected,
+    /// Transport failure, overload, or server failure can be retried.
+    Transient,
+}
+
+impl CveApiError {
+    /// Maps the API failure to the scan failure class reported by the builder.
+    pub fn failure_class(self) -> CveScanFailureClass {
+        match self {
+            Self::Revoked => CveScanFailureClass::Cancelled,
+            Self::Authorization => CveScanFailureClass::Authorization,
+            Self::Rejected => CveScanFailureClass::Deterministic,
+            Self::Transient => CveScanFailureClass::Transient,
+        }
+    }
+}
+
+impl std::fmt::Display for CveApiError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Revoked => "CVE lease was revoked",
+            Self::Authorization => "CVE lease authorization failed",
+            Self::Rejected => "CVE lease request was rejected",
+            Self::Transient => "CVE lease request failed transiently",
+        })
+    }
+}
+
+impl std::error::Error for CveApiError {}
 
 /// Classifies canonical source download failures before extraction.
 #[derive(Debug)]
@@ -79,6 +119,20 @@ fn append_logs_outcome_for_status(
 const DEFAULT_API_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const DERIVATION_ARCHIVE_DOWNLOAD_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(30 * 60);
+
+pub(crate) fn cve_api_error_for_status(status: reqwest::StatusCode) -> CveApiError {
+    match status {
+        reqwest::StatusCode::GONE => CveApiError::Revoked,
+        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN => {
+            CveApiError::Authorization
+        }
+        reqwest::StatusCode::BAD_REQUEST
+        | reqwest::StatusCode::NOT_FOUND
+        | reqwest::StatusCode::CONFLICT
+        | reqwest::StatusCode::UNPROCESSABLE_ENTITY => CveApiError::Rejected,
+        _ => CveApiError::Transient,
+    }
+}
 
 /// Error type for the delta derivation-transport endpoints that lets callers
 /// distinguish "server doesn't support this yet" (fallback to full archive is
@@ -159,7 +213,8 @@ impl BuilderApiClient {
     /// not crash the service or block a NixOS switch. Each failed attempt is
     /// logged with the builder's public key so an admin can register/enable it.
     /// The caller supplies the evaluator capability probed before polling, or
-    /// `None` when this process cannot execute verified-source jobs.
+    /// `None` when this process cannot execute verified-source jobs. The caller
+    /// also supplies capabilities after probing optional local executables.
     ///
     /// # Errors
     ///
@@ -168,6 +223,7 @@ impl BuilderApiClient {
     pub async fn new(
         config: &BuilderConfig,
         evaluator: Option<EvaluatorFingerprint>,
+        capabilities: BuilderCapabilities,
     ) -> Result<Self> {
         let key_path = config.require_private_key_path()?;
         let server_url = config.require_server_url()?;
@@ -182,12 +238,6 @@ impl BuilderApiClient {
             .context("Failed to create HTTP client")?;
 
         let builder_session_id = Uuid::new_v4();
-        let capabilities = if config.cve_scanning_enabled {
-            BuilderCapabilities::current_cve_scanner()
-        } else {
-            BuilderCapabilities::default()
-        };
-
         let builder_id = match config.builder_id {
             Some(builder_id) => {
                 Self::establish_builder_session_with_retry(
@@ -234,6 +284,98 @@ impl BuilderApiClient {
         })
     }
 
+    async fn send_cve_request<TRequest, TResponse>(
+        &self,
+        operation: &str,
+        request: &TRequest,
+    ) -> std::result::Result<TResponse, CveApiError>
+    where
+        TRequest: Serialize + ?Sized,
+        TResponse: for<'de> Deserialize<'de>,
+    {
+        let path = format!("/api/v1/builders/{}/cve-scans/{operation}", self.builder_id);
+        let body = serde_json::to_vec(request).map_err(|_| CveApiError::Rejected)?;
+        let (builder_id, signature, timestamp) = self.sign_request("POST", &path, &body);
+        let response = self
+            .client
+            .post(format!("{}{}", self.server_url, path))
+            .header("Content-Type", "application/json")
+            .header("X-Builder-ID", builder_id)
+            .header("X-Builder-Session-ID", self.builder_session_id.to_string())
+            .header("X-Signature", signature)
+            .header("X-Timestamp", timestamp)
+            .body(body)
+            .send()
+            .await
+            .map_err(|_| CveApiError::Transient)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(cve_api_error_for_status(status));
+        }
+        response.json().await.map_err(|_| CveApiError::Rejected)
+    }
+
+    /// Claims one server-authorized CVE lease.
+    ///
+    /// # Errors
+    ///
+    /// Returns a classified error for transport, authorization, revocation,
+    /// malformed response, or rejected request failures.
+    pub async fn claim_cve_scan(
+        &self,
+        capabilities: BuilderCapabilities,
+        completed_build_job_id: Option<Uuid>,
+    ) -> std::result::Result<CveScanClaimResponse, CveApiError> {
+        self.send_cve_request(
+            "claim",
+            &CveScanClaimRequest {
+                builder_session_id: self.builder_session_id,
+                capabilities,
+                completed_build_job_id,
+            },
+        )
+        .await
+    }
+
+    /// Renews one exact CVE execution lease.
+    ///
+    /// # Errors
+    ///
+    /// Returns a classified error for transport, authorization, revocation,
+    /// malformed response, or rejected request failures.
+    pub async fn heartbeat_cve_scan(
+        &self,
+        request: &CveScanHeartbeatRequest,
+    ) -> std::result::Result<CveScanHeartbeatResponse, CveApiError> {
+        self.send_cve_request("heartbeat", request).await
+    }
+
+    /// Completes one exact CVE execution lease with canonical evidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns a classified error for transport, authorization, revocation,
+    /// malformed response, or rejected evidence failures.
+    pub async fn complete_cve_scan(
+        &self,
+        request: &CveScanCompleteRequest,
+    ) -> std::result::Result<CveScanCompleteResponse, CveApiError> {
+        self.send_cve_request("complete", request).await
+    }
+
+    /// Reports a scanner failure independently from its producing build.
+    ///
+    /// # Errors
+    ///
+    /// Returns a classified error for transport, authorization, revocation,
+    /// malformed response, or rejected request failures.
+    pub async fn fail_cve_scan(
+        &self,
+        request: &CveScanFailRequest,
+    ) -> std::result::Result<CveScanFailResponse, CveApiError> {
+        self.send_cve_request("fail", request).await
+    }
+
     /// Resolve the builder ID, retrying with exponential backoff on failure.
     ///
     /// A failure here typically means the builder's public key is not yet
@@ -262,7 +404,7 @@ impl BuilderApiClient {
                 server_url,
                 signing_key,
                 builder_session_id,
-                capabilities,
+                capabilities.clone(),
             )
             .await
             {
@@ -379,7 +521,7 @@ impl BuilderApiClient {
                 signing_key,
                 builder_id,
                 builder_session_id,
-                capabilities,
+                capabilities.clone(),
             )
             .await
             {

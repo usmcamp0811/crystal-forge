@@ -855,6 +855,22 @@ pub async fn establish_builder_session(
             END,
             last_heartbeat_at = now(),
             status = 'active',
+            cve_scanning_enabled = CASE
+                WHEN current_session_id IS DISTINCT FROM $2 THEN false
+                ELSE cve_scanning_enabled
+            END,
+            cve_scan_schema_version = CASE
+                WHEN current_session_id IS DISTINCT FROM $2 THEN 0
+                ELSE cve_scan_schema_version
+            END,
+            cve_scanner_name = CASE
+                WHEN current_session_id IS DISTINCT FROM $2 THEN NULL
+                ELSE cve_scanner_name
+            END,
+            cve_scanner_version = CASE
+                WHEN current_session_id IS DISTINCT FROM $2 THEN NULL
+                ELSE cve_scanner_version
+            END,
             updated_at = now()
         WHERE id = $1
         "#,
@@ -1273,6 +1289,8 @@ pub async fn mark_job_complete(
 /// (`building → success`). The caller should only queue best-effort cache-push side
 /// effects when `true`; idempotent retries reuse the originally persisted store path
 /// and must not accept a newly supplied request path.
+/// Policy-enabled post-build CVE enqueue commits in the same transaction. An
+/// idempotent retry repairs a previously missing scan before returning success.
 pub async fn complete_job_atomic(
     pool: &PgPool,
     job_id: &Uuid,
@@ -1316,7 +1334,11 @@ pub async fn complete_job_atomic(
 
     if status == "success" {
         // Idempotent: already completed by this exact builder+session.
-        // Return false so the caller knows not to queue a new cache push.
+        // Repair post-build scan enqueue before returning success. This closes
+        // the crash window from deployments that completed before migration 0263.
+        crate::queries::cve_scan_leases::enqueue_post_build_scan_tx(&mut tx, *job_id)
+            .await
+            .context("Failed to recover post-build CVE enqueue")?;
         tx.commit()
             .await
             .context("Failed to commit idempotent completion transaction")?;
@@ -1370,6 +1392,10 @@ pub async fn complete_job_atomic(
         .await
         .context("Failed to mark derivation complete")?;
     }
+
+    crate::queries::cve_scan_leases::enqueue_post_build_scan_tx(&mut tx, *job_id)
+        .await
+        .context("Failed to enqueue post-build CVE scan")?;
 
     tx.commit()
         .await

@@ -831,7 +831,19 @@ pub async fn save_scan_results(
     vulnix_results: &VulnixScanOutput,
     scan_duration_ms: Option<i32>,
 ) -> Result<()> {
-    save_scan_results_for_owner(pool, scan_id, vulnix_results, scan_duration_ms, None, None).await
+    save_scan_results_for_owner(
+        pool,
+        scan_id,
+        vulnix_results,
+        scan_duration_ms,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
 }
 
 /// Persists findings only while `execution_id` owns the active scan.
@@ -858,7 +870,11 @@ pub async fn save_scan_results_for_execution(
         vulnix_results,
         scan_duration_ms,
         None,
+        None,
         Some(execution_id),
+        None,
+        None,
+        None,
     )
     .await
 }
@@ -877,7 +893,49 @@ pub(crate) async fn save_scan_results_with_store_path_override(
         vulnix_results,
         scan_duration_ms,
         store_path_override,
+        None,
         Some(execution_id),
+        None,
+        None,
+        None,
+    )
+    .await
+}
+
+/// Persists canonical remote evidence through the shared schema-1 transaction.
+///
+/// `store_paths` maps each package `.drv` identity to the exact output selected
+/// from its validated result entry. The result digest is sealed by the same
+/// update that transitions the scan to immutable evidence schema 1.
+/// `closure_provenance` records whether the server verified the package closure
+/// locally or retained the producing builder/session as an explicit unverified
+/// remote boundary.
+///
+/// # Errors
+///
+/// Returns an error when ownership is stale, a package output is missing, or
+/// canonical persistence fails.
+pub async fn save_remote_scan_results_for_execution(
+    pool: &PgPool,
+    scan_id: Uuid,
+    vulnix_results: &VulnixScanOutput,
+    scan_duration_ms: Option<i32>,
+    store_paths: &std::collections::HashMap<String, String>,
+    lease: cf_protocol::builder::CveScanLease,
+    result_digest_sha256: &str,
+    closure_provenance: &str,
+) -> Result<()> {
+    save_scan_results_for_owner(
+        pool,
+        scan_id,
+        vulnix_results,
+        scan_duration_ms,
+        None,
+        Some(store_paths),
+        Some(lease.execution_id),
+        Some(result_digest_sha256),
+        Some(lease),
+        Some(closure_provenance),
     )
     .await
 }
@@ -888,7 +946,11 @@ async fn save_scan_results_for_owner(
     vulnix_results: &VulnixScanOutput,
     scan_duration_ms: Option<i32>,
     store_path_override: Option<&str>,
+    store_paths: Option<&std::collections::HashMap<String, String>>,
     execution_id: Option<Uuid>,
+    result_digest_sha256: Option<&str>,
+    remote_lease: Option<cf_protocol::builder::CveScanLease>,
+    closure_provenance: Option<&str>,
 ) -> Result<()> {
     // Calculate statistics from vulnix results
     let stats = VulnixParser::calculate_stats(vulnix_results);
@@ -906,9 +968,15 @@ async fn save_scan_results_for_owner(
         if entry.derivation.trim().is_empty() {
             anyhow::bail!("vulnix returned an empty package derivation path");
         }
-        let store_path = match store_path_override {
-            Some(path) => path.to_string(),
-            None => get_store_path_from_drv(&entry.derivation).await?,
+        let store_path = if let Some(paths) = store_paths {
+            paths
+                .get(&entry.derivation)
+                .cloned()
+                .with_context(|| format!("missing validated output for {}", entry.derivation))?
+        } else if let Some(path) = store_path_override {
+            path.to_string()
+        } else {
+            get_store_path_from_drv(&entry.derivation).await?
         };
         debug!(
             "CVE Scan Entry - name: '{}', pname: {:?}, version: {:?}, derivation: '{}', affected_by: {:?}",
@@ -966,6 +1034,7 @@ async fn save_scan_results_for_owner(
         observed_package_name: String,
         observed_package_version: String,
         observed_derivation_path: String,
+        is_affected: bool,
         is_whitelisted: bool,
         whitelist_reason: Option<String>,
     }
@@ -1017,6 +1086,7 @@ async fn save_scan_results_for_owner(
                         observed_package_name: entry.name.clone(),
                         observed_package_version: entry.version.clone(),
                         observed_derivation_path: entry.derivation.clone(),
+                        is_affected: true,
                         is_whitelisted: false,
                         whitelist_reason: None,
                     },
@@ -1073,6 +1143,7 @@ async fn save_scan_results_for_owner(
                         observed_package_name: entry.name.clone(),
                         observed_package_version: entry.version.clone(),
                         observed_derivation_path: entry.derivation.clone(),
+                        is_affected: false,
                         is_whitelisted: true,
                         whitelist_reason: Some("vulnix whitelist".to_string()),
                     },
@@ -1248,6 +1319,7 @@ async fn save_scan_results_for_owner(
         let mut observation_names = Vec::with_capacity(observations.len());
         let mut observation_versions = Vec::with_capacity(observations.len());
         let mut observation_drv_paths = Vec::with_capacity(observations.len());
+        let mut observation_affected = Vec::with_capacity(observations.len());
         let mut observation_whitelisted = Vec::with_capacity(observations.len());
         let mut observation_reasons = Vec::with_capacity(observations.len());
 
@@ -1257,6 +1329,7 @@ async fn save_scan_results_for_owner(
             observation_names.push(observation.observed_package_name.clone());
             observation_versions.push(observation.observed_package_version.clone());
             observation_drv_paths.push(observation.observed_derivation_path.clone());
+            observation_affected.push(observation.is_affected);
             observation_whitelisted.push(observation.is_whitelisted);
             observation_reasons.push(observation.whitelist_reason.clone());
         }
@@ -1270,12 +1343,13 @@ async fn save_scan_results_for_owner(
                 observed_package_name,
                 observed_package_version,
                 observed_derivation_path,
+                is_affected,
                 is_whitelisted,
                 whitelist_reason,
                 detection_method
             )
             SELECT $1, cve_id, pname, package_name,
-                   package_version, derivation_path, is_whitelisted,
+                   package_version, derivation_path, is_affected, is_whitelisted,
                    whitelist_reason, 'vulnix'
             FROM UNNEST(
                 $2::text[],
@@ -1284,13 +1358,15 @@ async fn save_scan_results_for_owner(
                 $5::text[],
                 $6::text[],
                 $7::bool[],
-                $8::text[]
+                $8::bool[],
+                $9::text[]
             ) AS observation(
                 cve_id,
                 pname,
                 package_name,
                 package_version,
                 derivation_path,
+                is_affected,
                 is_whitelisted,
                 whitelist_reason
             )
@@ -1302,6 +1378,7 @@ async fn save_scan_results_for_owner(
         .bind(&observation_names)
         .bind(&observation_versions)
         .bind(&observation_drv_paths)
+        .bind(&observation_affected)
         .bind(&observation_whitelisted)
         .bind(&observation_reasons)
         .execute(&mut *tx)
@@ -1372,13 +1449,30 @@ async fn save_scan_results_for_owner(
             medium_count = $6,
             low_count = $7,
             scan_duration_ms = $8,
-            evidence_schema_version = 1
+            evidence_schema_version = 1,
+            result_digest_sha256 = COALESCE($10, result_digest_sha256),
+            closure_provenance = COALESCE($13, closure_provenance),
+            execution_outcome = CASE WHEN $10::text IS NULL THEN execution_outcome ELSE 'completed' END
         WHERE id = $1
           AND status = 'in_progress'
           AND NOT (COALESCE(scan_metadata, '{}'::jsonb) ? 'execution_revoked_at')
           AND (
               ($9::uuid IS NULL AND NOT (COALESCE(scan_metadata, '{}'::jsonb) ? 'execution_id'))
               OR scan_metadata ->> 'execution_id' = $9::uuid::text
+              OR (execution_id = $9::uuid
+                  AND $10::text IS NOT NULL
+                  AND lease_builder_id = $11::uuid
+                  AND lease_builder_session_id = $12::uuid
+                  AND lease_expires_at > NOW()
+                  AND EXISTS (
+                      SELECT 1 FROM builders
+                      WHERE builders.id = lease_builder_id
+                        AND builders.current_session_id = lease_builder_session_id
+                        AND builders.enabled AND builders.registered
+                        AND builders.status = 'active'
+                        AND builders.cve_scanning_enabled
+                        AND builders.cve_scan_schema_version = 1
+                  ))
           )
         "#,
     )
@@ -1391,6 +1485,10 @@ async fn save_scan_results_for_owner(
     .bind(stats.low_count as i32)
     .bind(scan_duration_ms)
     .bind(execution_id)
+    .bind(result_digest_sha256)
+    .bind(remote_lease.map(|lease| lease.builder_id))
+    .bind(remote_lease.map(|lease| lease.builder_session_id))
+    .bind(closure_provenance)
     .execute(&mut *tx)
     .await?;
     require_owned_transition(completion.rows_affected(), scan_id, "persist results")?;
@@ -1837,13 +1935,13 @@ pub async fn enqueue_fleet_cve_scans(
                 id, derivation_id, scanner_name, scanner_version,
                 status, total_packages, total_vulnerabilities,
                 critical_count, high_count, medium_count, low_count,
-                attempts
+                attempts, source_trigger
             )
             SELECT
                 gen_random_uuid(), t.derivation_id, $1, $2,
                 'pending', 0, 0,
                 0, 0, 0, 0,
-                0
+                0, 'fleet'
             FROM targets t
             ON CONFLICT (derivation_id) WHERE status IN ('pending', 'in_progress')
             DO NOTHING
@@ -2083,6 +2181,8 @@ pub async fn claim_queued_cve_scans(
         SELECT id, derivation_id
         FROM cve_scans
         WHERE status = 'pending'
+          AND (source_trigger <> 'post_build'
+               OR created_at < NOW() - INTERVAL '60 seconds')
         ORDER BY created_at ASC, id ASC
         LIMIT $1
         "#,
@@ -2407,6 +2507,7 @@ async fn recover_stale_scans_with_options(
         SELECT id, scan_metadata ->> 'execution_id' AS execution_id
         FROM cve_scans
         WHERE status = 'in_progress'
+          AND execution_id IS NULL
           AND NOT (COALESCE(scan_metadata, '{}'::jsonb) ? 'execution_revoked_at')
           AND COALESCE(
                   (scan_metadata ->> 'execution_heartbeat_at')::timestamptz,
@@ -2507,6 +2608,7 @@ async fn recover_stale_scans_with_options(
         SELECT id, derivation_id, scan_metadata ->> 'execution_id' AS execution_id
         FROM cve_scans
         WHERE status = 'in_progress'
+          AND execution_id IS NULL
           AND (
               (
                   NOT (COALESCE(scan_metadata, '{}'::jsonb) ? 'execution_id')
@@ -4347,7 +4449,11 @@ mod tests {
                 &entries,
                 Some(1),
                 Some(&format!("/nix/store/{suffix}-{package_name}")),
+                None,
                 Some(claim.execution_id),
+                None,
+                None,
+                None,
             )
             .await
             .is_err(),

@@ -539,7 +539,10 @@ Report builder heartbeat with resource metrics.
 
 **Side Effects**:
 - Updates `last_heartbeat_at` timestamp
-- Marks builder as "active" if previously inactive
+- Marks a current-session builder as "active" if previously inactive or offline
+- Persists scanner capability for a current enabled and registered session. An
+  offline builder can persist capability before this heartbeat restores active
+  state. Disabled, unregistered, and stale-session builders cannot persist it.
 - Stores metrics in `builder_metrics` table
 
 #### GET /api/v1/builders/:id/next-job
@@ -702,6 +705,94 @@ Mark job as successfully completed.
 **Side Effects**:
 - Status → "success"
 - `completed_at` → now
+- If post-build scanning is enabled, enqueue or reuse one CVE scan for the exact
+  successful derivation in the build-completion transaction. A completion retry
+  repairs a missing enqueue idempotently. Reusing active manual or fleet work
+  does not replace its trigger provenance. Scan failure does not change build or
+  cache status.
+
+#### POST /api/v1/builders/:id/cve-scans/claim
+
+Claim one schema-1 CVE scan through the authenticated builder session. Builders
+that omit the scanner capability remain compatible and receive no scan work.
+The server permits one active scan per enabled, registered, active builder and
+requires the current process session for every lease mutation. Candidate
+selection applies the same wildcard-or-assigned environment rule as build work;
+unauthorized work is omitted rather than disclosed. Background claims return no
+work while build work is queued or while the builder owns an active build. A
+request that names the builder's successful `completed_build_job_id` can claim
+only that job's post-build scan.
+
+Remote claims require the exact builder and process session that produced the
+successful build. This affinity is the only remote-output locality fact that
+the coordinator knows. A completed cache push does not prove that an arbitrary
+builder can read the cache or has materialized the output. Manual and fleet
+scans therefore remain server-local. Post-build work that the producing session
+does not claim remains for the delayed server-local fallback.
+
+The claim contains the exact target `.drv`, output mapping, the builder-reported
+scanner identity and version,
+bounded scan policy, execution UUID, session UUID, and lease expiration. The
+builder must treat all lease fields as opaque server-issued authorization. The
+builder passes its startup scanner probe into execution and rejects the lease if
+the local name or complete version string differs from the claim.
+
+Every builder-side and server-local `nix`, `nix-store`, and `vulnix` scanner
+command runs as the leader of an isolated Unix process group. Timeout, lease
+revocation, worker cancellation, future drop, and shutdown signal the complete
+group and reap the direct child. Unix init or the configured subreaper reaps
+terminated descendants because they are not direct Crystal Forge children.
+
+#### POST /api/v1/builders/:id/cve-scans/heartbeat
+
+Renew the exact active CVE execution. The server returns `410 Gone` when the
+lease expired or a new builder session superseded it. Entry and observation
+progress above the claim limits also prevents renewal.
+
+#### POST /api/v1/builders/:id/cve-scans/complete
+
+Submit structured schema-1 package and CVE observations. The request body is
+limited to 8 MiB, 50,000 package entries, and 250,000 observations. The server
+validates the exact claim identity and submitted output mappings, canonicalizes
+ordering and CVE identifiers, recomputes SHA-256, and seals the result through
+the same immutable persistence transaction used by local scanning.
+
+All submitted paths must be canonical direct children of `/nix/store`; nested
+paths, traversal components, and extra separators are rejected by both builder
+and server. When every authorized target output exists in the server's Nix
+store, the server requires each submitted package output to be a member of the
+server-computed target closure and requires Nix to report the submitted package
+`.drv` as that output's exact deriver. The persisted provenance is
+`server_local_verified`.
+
+When any target output exists only on the producing builder, the server cannot
+reconstruct the closure without materializing it. The server persists
+`unverified_remote` in that case. The server still queries the actual deriver
+for every submitted package output that exists locally and rejects any mapping
+that does not match the submitted package `.drv`. Only unavailable closure
+membership and unavailable package-output mappings remain unverified. This
+marker is not equivalent to server-local verification; the authenticated
+producing builder/session and exact target/output claim remain the explicit
+package-list trust boundary. The server does not infer package evidence from
+names or grant builders database access.
+Affected and whitelisted markers are persisted as independent exact-observation
+fields. Builder and server digest the bytes produced by the shared protocol
+canonical-result encoder.
+
+Invalid evidence returns `422 Unprocessable Entity` and leaves the lease active.
+An expired or superseded execution returns `410 Gone`. A same-digest retry is
+idempotent; a different digest for the same completed execution returns
+`409 Conflict`.
+
+#### POST /api/v1/builders/:id/cve-scans/fail
+
+Report a transient, deterministic, authorization, or cancelled scanner failure.
+Transient, authorization, and cancelled failures requeue the scan for the same
+producing session or the server-local fallback. Requeue clears typed remote
+ownership and sealed claim-input fields before a local worker can claim the row;
+the prior remote execution identity remains in audit metadata. Deterministic
+failures terminate only the scan. No scan failure changes the successful build
+or cache outcome.
 
 #### POST /api/v1/builders/:id/jobs/:job_id/fail
 

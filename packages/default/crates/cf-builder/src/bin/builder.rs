@@ -1,6 +1,7 @@
 use anyhow::Context;
 use cf_builder::build::{BuildCancelledError, Derivation, LogSink};
 use cf_builder::builder::api_client::{AppendLogsOutcome, job_status_requests_cancellation};
+use cf_builder::builder::cve_scanner::{claim_and_execute, detect_cve_capabilities};
 use cf_builder::builder::{ApiBuildReporter, BuilderApiClient, SystemMetrics};
 use cf_builder::cache::builder_cache_to_config;
 // Bring in the build execution and cache methods on Derivation
@@ -165,8 +166,10 @@ async fn run_api_mode(cfg: &CrystalForgeConfig) -> anyhow::Result<()> {
         None
     };
 
+    let capabilities = detect_cve_capabilities(builder_config.cve_scanning_enabled).await;
     info!("Initializing API client...");
-    let api_client = BuilderApiClient::new(builder_config, evaluator.clone()).await?;
+    let api_client =
+        BuilderApiClient::new(builder_config, evaluator.clone(), capabilities.clone()).await?;
 
     let builder_id = api_client.builder_id();
     info!("✅ Builder ID: {}", builder_id);
@@ -184,19 +187,18 @@ async fn run_api_mode(cfg: &CrystalForgeConfig) -> anyhow::Result<()> {
     // Spawn heartbeat task
     let heartbeat_client = api_client.clone();
     let heartbeat_interval = builder_config.heartbeat_interval;
-    let capabilities = if builder_config.cve_scanning_enabled {
-        BuilderCapabilities::current_cve_scanner()
-    } else {
-        BuilderCapabilities::default()
-    };
+    let heartbeat_capabilities = capabilities.clone();
     tokio::spawn(async move {
-        run_heartbeat_loop(heartbeat_client, heartbeat_interval, capabilities).await;
+        run_heartbeat_loop(heartbeat_client, heartbeat_interval, heartbeat_capabilities).await;
     });
 
     // Remote API builders must push successful outputs from the builder host,
     // because the built closure may not exist in the server's local store.
     info!("📤 Cache push performed builder-side after successful builds");
-    info!("🔍 CVE scanning handled server-side (no builder DB pool)");
+    info!(
+        "🔍 Remote CVE scanning capability: {}",
+        capabilities.supports_current_cve_schema()
+    );
 
     // Spawn job polling loop
     let poll_client = api_client.clone();
@@ -220,6 +222,7 @@ async fn run_api_mode(cfg: &CrystalForgeConfig) -> anyhow::Result<()> {
             build_config.clone(),
             cache_config.clone(),
             cfg.server.execution_mode,
+            capabilities.clone(),
             RemoteBuildRuntime {
                 supported_execution_strategies: builder_config
                     .supported_execution_strategies
@@ -329,7 +332,7 @@ async fn run_heartbeat_loop(
             system_cpu_usage_percent: system_metrics.cpu_usage_percent,
             system_memory_total_mb: memory_total_mb,
             system_memory_used_mb: memory_used_mb,
-            capabilities,
+            capabilities: capabilities.clone(),
         };
 
         if let Err(e) = client.send_heartbeat(&metrics).await {
@@ -346,12 +349,19 @@ async fn run_api_job_loop(
     build_config: cf_config::config::BuildConfig,
     cache_config: cf_config::config::CacheConfig,
     execution_mode: cf_config::config::ExecutionMode,
+    capabilities: BuilderCapabilities,
     remote_runtime: RemoteBuildRuntime,
 ) -> anyhow::Result<()> {
     let mut ticker = tokio::time::interval(poll_interval);
 
     // Limit concurrent builds to builder.max_concurrent_jobs
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(max_concurrent));
+    // One scanner slot keeps leases serialized without consuming build slots.
+    let scan_semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+    // CONCURRENCY: JoinSet aborts all build and scan tasks when the polling
+    // future is dropped during shutdown. Scanner process guards then kill their
+    // isolated process groups before the scanner slot can be released.
+    let mut tasks = tokio::task::JoinSet::new();
     info!(
         "🔨 Starting job polling loop (max concurrent: {})...",
         max_concurrent
@@ -359,6 +369,11 @@ async fn run_api_job_loop(
 
     loop {
         ticker.tick().await;
+        while let Some(result) = tasks.try_join_next() {
+            if let Err(error) = result {
+                warn!(%error, "builder worker task exited unexpectedly");
+            }
+        }
 
         // Check if we have capacity for another build
         if semaphore.available_permits() == 0 {
@@ -412,9 +427,11 @@ async fn run_api_job_loop(
                 let job_build_config = build_config.clone();
                 let job_cache_config = cache_config.clone();
                 let job_remote_runtime = remote_runtime.clone();
+                let job_scan_semaphore = Arc::clone(&scan_semaphore);
+                let job_capabilities = capabilities.clone();
                 let job_id = job.id;
 
-                tokio::spawn(async move {
+                tasks.spawn(async move {
                     execute_build_job(
                         job_id,
                         derivation,
@@ -422,6 +439,8 @@ async fn run_api_job_loop(
                         job_build_config,
                         job_cache_config,
                         execution_mode,
+                        job_capabilities,
+                        job_scan_semaphore,
                         job_remote_runtime,
                     )
                     .await;
@@ -429,7 +448,19 @@ async fn run_api_job_loop(
                 });
             }
             Ok(None) => {
-                // No jobs available, continue polling
+                // The server grants background scans only when build work has
+                // priority clearance. A later build can still start while this
+                // independent scanner slot remains occupied.
+                if semaphore.available_permits() == max_concurrent
+                    && let Ok(scan_permit) = Arc::clone(&scan_semaphore).try_acquire_owned()
+                {
+                    let scan_client = client.clone();
+                    let scan_capabilities = capabilities.clone();
+                    tasks.spawn(async move {
+                        claim_and_execute(&scan_client, scan_capabilities, None).await;
+                        drop(scan_permit);
+                    });
+                }
             }
             Err(e) => {
                 error!("❌ Failed to get next job: {}", e);
@@ -1642,6 +1673,8 @@ async fn execute_build_job(
     build_config: cf_config::config::BuildConfig,
     local_cache_config: cf_config::config::CacheConfig,
     execution_mode: cf_config::config::ExecutionMode,
+    capabilities: BuilderCapabilities,
+    scan_semaphore: Arc<tokio::sync::Semaphore>,
     remote_runtime: RemoteBuildRuntime,
 ) {
     info!(
@@ -2171,6 +2204,22 @@ async fn execute_build_job(
                 .await
             {
                 error!("❌ Failed to report job #{} completion: {}", job_id, e);
+            } else if capabilities.supports_current_cve_schema() {
+                // Build completion is already durable. Scanner claim or
+                // execution failure cannot alter build or cache outcome.
+                match scan_semaphore.try_acquire_owned() {
+                    Ok(scan_permit) => {
+                        let scan_client = client.clone();
+                        tokio::spawn(async move {
+                            claim_and_execute(&scan_client, capabilities.clone(), Some(job_id))
+                                .await;
+                            drop(scan_permit);
+                        });
+                    }
+                    Err(_) => {
+                        info!("CVE scanner slot busy; server fallback will retain post-build work");
+                    }
+                }
             }
         }
 

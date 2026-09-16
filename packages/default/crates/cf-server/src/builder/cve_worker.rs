@@ -44,6 +44,7 @@ use crate::queries::cve_scans::{
 use crate::queries::derivations::get_derivation_by_id;
 use crate::queries::scanning::get_scan_schedule_policy;
 use crate::server::jobs::BackgroundJobHandle;
+use crate::vulnix::process_group::{ScannerProcessGroup, isolate};
 use crate::vulnix::vulnix_runner::VulnixRunner;
 use anyhow::{Context, Result};
 use axum::async_trait;
@@ -208,6 +209,14 @@ pub async fn run_cve_scan_loop(
     let mut enabled_changed_rx = job.state.enabled_changed_tx.subscribe();
 
     loop {
+        // Remote lease recovery is server coordination. It must continue when
+        // the optional server-local vulnix executor is disabled or unavailable.
+        match crate::queries::cve_scan_leases::requeue_expired_remote_cve_scans(&pool, 32).await {
+            Ok(n) if n > 0 => warn!("Recovered {n} expired remote CVE scan lease(s)"),
+            Ok(_) => {}
+            Err(e) => error!("Failed to recover remote CVE scan leases: {e}"),
+        }
+
         // Honour the enabled flag — sleep the full interval and skip work when disabled.
         let enabled = *enabled_rx.read().await;
         if !enabled {
@@ -1281,12 +1290,12 @@ async fn copy_path_from_cache_with_program(
         command.env("NIX_CONFIG", source.nix_config_lines.join("\n") + "\n");
     }
 
-    // `kill_on_drop` prevents a timed-out cache copy from outliving the worker.
-    let mut child = command
-        .arg(store_path)
-        .kill_on_drop(true)
+    command.arg(store_path);
+    isolate(&mut command);
+    let child = command
         .spawn()
         .with_context(|| format!("Failed to spawn nix copy from {}", source.from_url))?;
+    let mut child = ScannerProcessGroup::new(child, "CVE nix copy")?;
 
     let wait_result = match timeout(copy_timeout, child.wait()).await {
         Ok(result) => result?,
@@ -1297,11 +1306,11 @@ async fn copy_path_from_cache_with_program(
                 copy_timeout.as_secs(),
                 store_path
             );
-            let _ = child.kill().await;
-            let _ = child.wait().await;
+            child.terminate().await;
             return Ok(false);
         }
     };
+    child.disarm();
 
     if !wait_result.success() {
         warn!(

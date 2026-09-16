@@ -359,8 +359,13 @@ let
       cp ${builderWorkspaceManifest} Cargo.toml
     '';
 
-    nativeBuildInputs = commonNativeBuildInputs;
+    nativeBuildInputs = commonNativeBuildInputs ++ [ pkgs.makeWrapper ];
     buildInputs = commonBuildInputs;
+
+    postFixup = ''
+      wrapProgram "$out/bin/builder" \
+        --prefix PATH : ${lib.makeBinPath [ pkgs.nix pkgs.vulnix ]}
+    '';
 
     # SRC_HASH intentionally not set: cf-builder does not use option_env!("SRC_HASH").
 
@@ -488,6 +493,7 @@ let
 
   builder = pkgs.writeShellApplication {
     name = "builder";
+    runtimeInputs = [ pkgs.nix pkgs.vulnix ];
     text = ''${cf-builder-drv}/bin/builder "$@"'';
   };
 

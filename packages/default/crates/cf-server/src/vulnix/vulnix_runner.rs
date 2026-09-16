@@ -1,9 +1,12 @@
 use crate::config::VulnixConfig;
+use crate::vulnix::process_group::{ScannerProcessGroup, isolate};
 use crate::vulnix::vulnix_parser::VulnixEntry;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use sqlx::PgPool;
-use std::process::Command;
+use std::process::{Output, Stdio};
+use std::time::Duration;
+use tokio::io::AsyncReadExt;
 use tokio::process::Command as AsyncCommand;
 use tracing::{error, info};
 
@@ -88,18 +91,14 @@ impl VulnixRunner {
 
     /// Check if vulnix is available on the system
     pub async fn check_vulnix_available() -> bool {
-        match Command::new("vulnix").arg("--version").output() {
-            Ok(output) => output.status.success(),
-            Err(_) => false,
-        }
+        Self::get_vulnix_version().await.is_ok()
     }
 
     /// Get vulnix version string
     pub async fn get_vulnix_version() -> Result<String> {
-        let output = AsyncCommand::new("vulnix")
-            .arg("--version")
-            .output()
-            .await?;
+        let mut command = AsyncCommand::new("vulnix");
+        command.arg("--version");
+        let output = run_scanner_command(command, Duration::from_secs(5)).await?;
 
         if output.status.success() {
             let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -116,6 +115,18 @@ impl VulnixRunner {
         derivation_id: i32,
         vulnix_version: Option<String>,
     ) -> Result<VulnixScanOutput> {
+        let expected_version = vulnix_version.context("CVE scan has no probed vulnix identity")?;
+        let actual_version = Self::get_vulnix_version()
+            .await
+            .context("Failed to verify vulnix identity before execution")?;
+        if actual_version != expected_version {
+            return Err(anyhow!(
+                "Vulnix identity changed after scheduling: expected {:?}, found {:?}",
+                expected_version,
+                actual_version
+            ));
+        }
+
         // Fetch store path in a separate scope so connection is released
         let store_path = {
             let derivation =
@@ -140,10 +151,6 @@ impl VulnixRunner {
 
         // Build vulnix command
         let mut cmd = AsyncCommand::new("vulnix");
-        // Ownership heartbeats may cancel a scan if its lease is lost. Ensure
-        // dropping the command future terminates the child instead of leaving
-        // an unowned vulnix process running in the background.
-        cmd.kill_on_drop(true);
         cmd.arg("--json").arg(&store_path);
 
         if self.config.enable_whitelist {
@@ -164,8 +171,8 @@ impl VulnixRunner {
             .collect();
         info!("🔧 Executing command: {:?} {}", program, args_str.join(" "));
 
-        match tokio::time::timeout(self.config.timeout, cmd.output()).await {
-            Ok(Ok(output)) => {
+        match run_scanner_command(cmd, self.config.timeout).await {
+            Ok(output) => {
                 let stdout_msg = String::from_utf8_lossy(&output.stdout);
                 let stderr_msg = String::from_utf8_lossy(&output.stderr);
 
@@ -209,7 +216,7 @@ impl VulnixRunner {
                     parse_successful_vulnix_output(output.status.code(), &stdout_msg, &stderr_msg)
                 }
             }
-            Ok(Err(e)) => {
+            Err(e) if !e.to_string().contains("timed out") => {
                 error!("❌ Failed to execute vulnix command: {}", e);
                 Err(anyhow!("Failed to execute vulnix: {}", e))
             }
@@ -236,6 +243,74 @@ impl VulnixRunner {
         self.scan_derivation(pool, derivation_id, vulnix_version)
             .await
     }
+}
+
+/// Runs one vulnix command in an isolated process group.
+///
+/// Timeout and future cancellation terminate the complete group. The function
+/// drains stdout and stderr only after the direct child is reaped, then disarms
+/// the guard so a reused process-group ID cannot be signalled later.
+async fn run_scanner_command(mut command: AsyncCommand, timeout: Duration) -> Result<Output> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    isolate(&mut command);
+    let child = command.spawn().context("Failed to spawn vulnix")?;
+    let mut group = ScannerProcessGroup::new(child, "vulnix")?;
+    let mut stdout = group
+        .child_mut()
+        .stdout
+        .take()
+        .context("vulnix stdout was not piped")?;
+    let mut stderr = group
+        .child_mut()
+        .stderr
+        .take()
+        .context("vulnix stderr was not piped")?;
+    let mut stdout_task = tokio::spawn(async move {
+        let mut bytes = Vec::new();
+        stdout.read_to_end(&mut bytes).await.map(|_| bytes)
+    });
+    let mut stderr_task = tokio::spawn(async move {
+        let mut bytes = Vec::new();
+        stderr.read_to_end(&mut bytes).await.map(|_| bytes)
+    });
+
+    let deadline = tokio::time::sleep(timeout);
+    tokio::pin!(deadline);
+    let status = tokio::select! {
+        status = group.wait() => status.context("Failed to wait for vulnix")?,
+        _ = &mut deadline => {
+            group.terminate().await;
+            stdout_task.abort();
+            stderr_task.abort();
+            anyhow::bail!("vulnix timed out after {} seconds", timeout.as_secs());
+        }
+    };
+    let stdout = tokio::select! {
+        result = &mut stdout_task => result.context("vulnix stdout reader task failed")??,
+        _ = &mut deadline => {
+            group.terminate().await;
+            stdout_task.abort();
+            stderr_task.abort();
+            anyhow::bail!("vulnix output drain timed out after {} seconds", timeout.as_secs());
+        }
+    };
+    let stderr = tokio::select! {
+        result = &mut stderr_task => result.context("vulnix stderr reader task failed")??,
+        _ = &mut deadline => {
+            group.terminate().await;
+            stderr_task.abort();
+            anyhow::bail!("vulnix output drain timed out after {} seconds", timeout.as_secs());
+        }
+    };
+    group.disarm();
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 impl Default for VulnixRunner {

@@ -952,6 +952,24 @@ async fn main() -> anyhow::Result<()> {
             get(builders::get_next_job).post(builders::get_next_job),
         )
         .route(
+            "/api/v1/builders/:id/cve-scans/claim",
+            post(builders::claim_cve_scan),
+        )
+        .route(
+            "/api/v1/builders/:id/cve-scans/heartbeat",
+            post(builders::heartbeat_cve_scan),
+        )
+        .route(
+            "/api/v1/builders/:id/cve-scans/complete",
+            post(builders::complete_cve_scan).layer(DefaultBodyLimit::max(
+                cf_protocol::builder::CVE_SCAN_MAX_BODY_BYTES as usize,
+            )),
+        )
+        .route(
+            "/api/v1/builders/:id/cve-scans/fail",
+            post(builders::fail_cve_scan),
+        )
+        .route(
             "/api/v1/builders/:id/jobs/:job_id/start",
             post(builders::start_job),
         )

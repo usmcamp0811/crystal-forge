@@ -7,6 +7,7 @@
 use crate::cache::CacheType;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 /// Maximum encoded CVE completion request size accepted by the protocol.
@@ -22,11 +23,28 @@ pub const VERIFIED_SOURCE_EVALUATOR_CONTRACT_VERSION: u32 = 1;
 /// Current canonical Git-tree-to-Nix-store materialization schema.
 pub const VERIFIED_SOURCE_MATERIALIZATION_SCHEMA_VERSION: u32 = 1;
 
+/// Returns whether `value` is one canonical direct child of `/nix/store`.
+///
+/// Canonical paths contain exactly one non-empty basename after
+/// `/nix/store/`. They do not contain traversal components, repeated
+/// separators, or a trailing separator. When `derivation` is true, the
+/// basename must end in `.drv`.
+pub fn is_canonical_nix_store_path(value: &str, derivation: bool) -> bool {
+    let Some(basename) = value.strip_prefix("/nix/store/") else {
+        return false;
+    };
+    !basename.is_empty()
+        && basename != "."
+        && basename != ".."
+        && !basename.contains(['/', '\\', '\0'])
+        && (!derivation || basename.ends_with(".drv"))
+}
+
 /// Describes optional work that a builder can execute.
 ///
 /// Missing capabilities deserialize to version `0`, which means incapable.
 /// This default lets old builder JSON remain valid during rolling upgrades.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BuilderCapabilities {
     /// Whether this builder process accepts CVE scan leases.
@@ -34,20 +52,33 @@ pub struct BuilderCapabilities {
     /// Structured CVE result schema supported by the builder, or `0` when CVE
     /// scanning is disabled or unsupported.
     pub cve_scan_schema_version: u32,
+    /// Scanner implementation advertised by this builder process.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cve_scanner: Option<CveScannerIdentity>,
 }
 
 impl BuilderCapabilities {
     /// Returns capabilities for a builder that supports the current CVE schema.
-    pub fn current_cve_scanner() -> Self {
+    pub fn current_cve_scanner(version: String) -> Self {
         Self {
             cve_scanning: true,
             cve_scan_schema_version: CVE_SCAN_SCHEMA_VERSION,
+            cve_scanner: Some(CveScannerIdentity {
+                name: "vulnix".to_string(),
+                version,
+            }),
         }
     }
 
     /// Returns whether the builder supports the current CVE schema.
-    pub fn supports_current_cve_schema(self) -> bool {
-        self.cve_scanning && self.cve_scan_schema_version == CVE_SCAN_SCHEMA_VERSION
+    pub fn supports_current_cve_schema(&self) -> bool {
+        self.cve_scanning
+            && self.cve_scan_schema_version == CVE_SCAN_SCHEMA_VERSION
+            && self.cve_scanner.as_ref().is_some_and(|scanner| {
+                scanner.name == "vulnix"
+                    && !scanner.version.trim().is_empty()
+                    && scanner.version.chars().count() <= 50
+            })
     }
 }
 
@@ -809,6 +840,28 @@ pub struct CveObservation {
     /// Optional fixed package version reported by the scanner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fixed_version: Option<String>,
+    /// Whether vulnix reported the package as affected by this CVE.
+    ///
+    /// Missing values from existing schema-1 builders mean `true`.
+    #[serde(
+        default = "cve_observation_affected",
+        skip_serializing_if = "cve_observation_is_affected"
+    )]
+    pub affected: bool,
+    /// Whether vulnix classified this observation as allowed by its whitelist.
+    ///
+    /// Missing values from schema-1 builders mean `false`. This additive marker
+    /// preserves whitelist evidence without changing the CVE identity.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub whitelisted: bool,
+}
+
+fn cve_observation_affected() -> bool {
+    true
+}
+
+fn cve_observation_is_affected(value: &bool) -> bool {
+    *value
 }
 
 /// Contains bounded structured evidence produced by one scanner execution.
@@ -826,6 +879,34 @@ pub struct CveScanResult {
     /// Package-to-CVE observations, bounded to [`CVE_SCAN_MAX_OBSERVATIONS`].
     #[serde(deserialize_with = "deserialize_cve_observations")]
     pub observations: Vec<CveObservation>,
+}
+
+/// Serializes canonical schema-1 CVE evidence to the wire bytes hashed by both
+/// builders and the server.
+///
+/// Callers MUST canonicalize entry, output, observation, and CVE ordering before
+/// calling this function. The function intentionally does not reorder evidence,
+/// because the server must reject a builder digest that was computed over a
+/// different semantic representation.
+///
+/// # Errors
+///
+/// Returns an error if JSON serialization fails.
+pub fn canonical_cve_result_bytes(result: &CveScanResult) -> serde_json::Result<Vec<u8>> {
+    serde_json::to_vec(result)
+}
+
+/// Returns the lowercase SHA-256 digest of canonical schema-1 CVE result bytes.
+///
+/// # Errors
+///
+/// Returns an error if canonical JSON serialization fails.
+pub fn canonical_cve_result_digest(result: &CveScanResult) -> serde_json::Result<String> {
+    let bytes = canonical_cve_result_bytes(result)?;
+    Ok(Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
 }
 
 fn deserialize_cve_entries<'de, D>(deserializer: D) -> Result<Vec<CvePackageEvidence>, D::Error>
@@ -1185,6 +1266,8 @@ mod tests {
                     cvss_score: Some(9.8),
                     severity: Some("critical".to_string()),
                     fixed_version: Some("3.0.1".to_string()),
+                    affected: true,
+                    whitelisted: false,
                 }],
             },
             result_digest_sha256:
@@ -1197,6 +1280,79 @@ mod tests {
             serde_json::from_slice(&json).expect("completion should deserialize");
 
         assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn canonical_cve_result_contract_has_exact_bytes_and_digest() {
+        let result = CveScanResult {
+            schema_version: CveScanSchemaVersion::V1,
+            scanner: CveScannerIdentity {
+                name: "vulnix".to_string(),
+                version: "vulnix 1.12.4".to_string(),
+            },
+            derivation: CveScanDerivation {
+                derivation_id: 42,
+                derivation_name: "host-a".to_string(),
+                drv_path: "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-host-a.drv".to_string(),
+                outputs: vec![CveDerivationOutput {
+                    name: "out".to_string(),
+                    store_path: "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-host-a".to_string(),
+                }],
+            },
+            entries: vec![CvePackageEvidence {
+                entry_id: 0,
+                package_name: "openssl".to_string(),
+                package_version: Some("3.0.0".to_string()),
+                drv_path: "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-openssl.drv".to_string(),
+                outputs: vec![CveDerivationOutput {
+                    name: "out".to_string(),
+                    store_path: "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-openssl".to_string(),
+                }],
+            }],
+            observations: vec![CveObservation {
+                entry_id: 0,
+                cve_id: "CVE-2026-0001".to_string(),
+                cvss_score: Some(9.8),
+                severity: Some("critical".to_string()),
+                fixed_version: None,
+                affected: true,
+                whitelisted: false,
+            }],
+        };
+        let bytes = canonical_cve_result_bytes(&result).expect("canonical bytes");
+        assert_eq!(
+            String::from_utf8(bytes).expect("canonical JSON is UTF-8"),
+            r#"{"schema_version":1,"scanner":{"name":"vulnix","version":"vulnix 1.12.4"},"derivation":{"derivation_id":42,"derivation_name":"host-a","drv_path":"/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-host-a.drv","outputs":[{"name":"out","store_path":"/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-host-a"}]},"entries":[{"entry_id":0,"package_name":"openssl","package_version":"3.0.0","drv_path":"/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-openssl.drv","outputs":[{"name":"out","store_path":"/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-openssl"}]}],"observations":[{"entry_id":0,"cve_id":"CVE-2026-0001","cvss_score":9.8,"severity":"critical"}]}"#
+        );
+        assert_eq!(
+            canonical_cve_result_digest(&result).expect("canonical digest"),
+            "82424715e2a743c705a06ff2a771b486e77b958f9af3d388c9aa96914d56c71d"
+        );
+    }
+
+    #[test]
+    fn canonical_store_paths_reject_nested_traversal_and_extra_separators() {
+        assert!(is_canonical_nix_store_path(
+            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-package",
+            false
+        ));
+        assert!(is_canonical_nix_store_path(
+            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-package.drv",
+            true
+        ));
+        for invalid in [
+            "/nix/store/../secret",
+            "/nix/store/package/child",
+            "/nix/store//package",
+            "/nix/store/package/",
+            "/nix/store/",
+        ] {
+            assert!(!is_canonical_nix_store_path(invalid, false), "{invalid}");
+        }
+        assert!(!is_canonical_nix_store_path(
+            "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-package",
+            true
+        ));
     }
 
     #[test]
@@ -1224,5 +1380,23 @@ mod tests {
         });
 
         assert!(serde_json::from_value::<CveScanPolicy>(policy).is_err());
+    }
+
+    #[test]
+    fn legacy_observation_defaults_to_affected_and_not_whitelisted() {
+        let observation: CveObservation = serde_json::from_value(serde_json::json!({
+            "entry_id": 0,
+            "cve_id": "CVE-2026-0001",
+            "cvss_score": 7.5,
+            "severity": "high",
+            "fixed_version": null
+        }))
+        .expect("legacy schema-1 observation should remain valid");
+
+        assert!(observation.affected);
+        assert!(!observation.whitelisted);
+        let encoded = serde_json::to_value(observation).expect("serialize observation");
+        assert!(encoded.get("affected").is_none());
+        assert!(encoded.get("whitelisted").is_none());
     }
 }

@@ -890,6 +890,28 @@ pub async fn resolve_builder_id(
         )
     })?;
 
+    let capabilities_recorded =
+        crate::queries::cve_scan_leases::record_session_cve_capabilities(
+        &state.pool,
+        builder_id,
+        session_id,
+        request.capabilities,
+    )
+    .await
+    .map_err(|error| {
+        tracing::error!(builder_id = %builder_id, %error, "failed to persist builder CVE capabilities");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to establish builder capabilities".to_string(),
+        )
+    })?;
+    if !capabilities_recorded {
+        return Err((
+            StatusCode::GONE,
+            "Builder session is no longer active".to_string(),
+        ));
+    }
+
     if !recovered_jobs.is_empty() {
         tracing::warn!(
             builder_id = %builder_id,
@@ -960,6 +982,28 @@ pub async fn establish_builder_session(
             )
         }
     })?;
+
+    let capabilities_recorded =
+        crate::queries::cve_scan_leases::record_session_cve_capabilities(
+        &state.pool,
+        builder_id,
+        request.session_id,
+        request.capabilities,
+    )
+    .await
+    .map_err(|error| {
+        tracing::error!(builder_id = %builder_id, %error, "failed to persist builder CVE capabilities");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to establish builder capabilities".to_string(),
+        )
+    })?;
+    if !capabilities_recorded {
+        return Err((
+            StatusCode::GONE,
+            "Builder session is no longer active".to_string(),
+        ));
+    }
 
     Ok(Json(EstablishBuilderSessionResponse {
         builder_id,
@@ -1856,6 +1900,19 @@ pub async fn builder_heartbeat(
     let metrics: ReportMetricsRequest =
         serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
 
+    if let Some(session_id) = verified.builder_session_id
+        && !crate::queries::cve_scan_leases::record_session_cve_capabilities(
+            &state.pool,
+            builder_id,
+            session_id,
+            metrics.capabilities.clone(),
+        )
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    {
+        return Err(StatusCode::GONE);
+    }
+
     // Update heartbeat timestamp (marks builder as active)
     builders::update_builder_heartbeat(
         &state.pool,
@@ -1873,6 +1930,205 @@ pub async fn builder_heartbeat(
     Ok(Json(HeartbeatResponse {
         status: "ok".to_string(),
         message: "Heartbeat recorded".to_string(),
+    }))
+}
+
+/// Claims one server-authorized CVE scan lease for an API builder.
+///
+/// A direct post-build request can claim only the successful build named in the
+/// request. Background claims yield no work while build work is queued or while
+/// this builder owns an active build. Incapable builders also receive no work.
+///
+/// # Errors
+///
+/// Returns an HTTP error for invalid authentication, builder/session mismatch,
+/// malformed input, or persistence failure.
+pub async fn claim_cve_scan(
+    State(state): State<CFState>,
+    Path(builder_id): Path<Uuid>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<crate::models::builders::CveScanClaimResponse>, StatusCode> {
+    let path = format!("/api/v1/builders/{builder_id}/cve-scans/claim");
+    let verified =
+        authenticate_builder_request(&headers, body.clone(), "POST", &path, &state.pool).await?;
+    if verified.builder_id != builder_id {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let request: crate::models::builders::CveScanClaimRequest =
+        serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
+    if verified.builder_session_id != Some(request.builder_session_id) {
+        return Err(StatusCode::GONE);
+    }
+    if !request.capabilities.supports_current_cve_schema() {
+        return Ok(Json(crate::models::builders::CveScanClaimResponse {
+            claim: None,
+        }));
+    }
+    let claim = crate::queries::cve_scan_leases::claim_remote_cve_scan(
+        &state.pool,
+        builder_id,
+        request.builder_session_id,
+        request.completed_build_job_id,
+    )
+    .await
+    .map_err(|error| {
+        if error.to_string().contains("session_mismatch")
+            || error.to_string().contains("builder_inactive")
+        {
+            StatusCode::GONE
+        } else {
+            tracing::error!(builder_id = %builder_id, %error, "remote CVE claim failed");
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    })?;
+    Ok(Json(crate::models::builders::CveScanClaimResponse {
+        claim,
+    }))
+}
+
+/// Renews one exact remote CVE scan execution lease.
+///
+/// # Errors
+///
+/// Returns `403 Forbidden` for mismatched lease ownership, `410 Gone` for an
+/// expired or superseded lease, or another HTTP error for invalid
+/// authentication, malformed input, or persistence failure.
+pub async fn heartbeat_cve_scan(
+    State(state): State<CFState>,
+    Path(builder_id): Path<Uuid>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<crate::models::builders::CveScanHeartbeatResponse>, StatusCode> {
+    let path = format!("/api/v1/builders/{builder_id}/cve-scans/heartbeat");
+    let verified =
+        authenticate_builder_request(&headers, body.clone(), "POST", &path, &state.pool).await?;
+    if verified.builder_id != builder_id {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let request: crate::models::builders::CveScanHeartbeatRequest =
+        serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
+    if request.lease.builder_id != builder_id
+        || verified.builder_session_id != Some(request.lease.builder_session_id)
+    {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let Some(lease_expires_at) = crate::queries::cve_scan_leases::heartbeat_remote_cve_scan(
+        &state.pool,
+        request.lease,
+        request.entries_collected,
+        request.observations_collected,
+    )
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    else {
+        return Err(StatusCode::GONE);
+    };
+    Ok(Json(crate::models::builders::CveScanHeartbeatResponse {
+        lease_expires_at,
+        revocation_requested: false,
+    }))
+}
+
+/// Completes one remote CVE lease after server-side canonical validation.
+///
+/// The server returns `422 Unprocessable Entity` without changing the lease for
+/// invalid evidence. A same-digest retry succeeds idempotently. A different
+/// digest for the same completed execution returns `409 Conflict`.
+///
+/// # Errors
+///
+/// Returns an HTTP error for invalid authentication, mismatched ownership,
+/// malformed or semantically invalid evidence, stale execution, digest
+/// conflict, or persistence failure.
+pub async fn complete_cve_scan(
+    State(state): State<CFState>,
+    Path(builder_id): Path<Uuid>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<crate::models::builders::CveScanCompleteResponse>, StatusCode> {
+    let path = format!("/api/v1/builders/{builder_id}/cve-scans/complete");
+    let verified =
+        authenticate_builder_request(&headers, body.clone(), "POST", &path, &state.pool).await?;
+    if verified.builder_id != builder_id {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let request: crate::models::builders::CveScanCompleteRequest =
+        serde_json::from_slice(&body).map_err(|_| StatusCode::UNPROCESSABLE_ENTITY)?;
+    if request.lease.builder_id != builder_id
+        || verified.builder_session_id != Some(request.lease.builder_session_id)
+    {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    use crate::queries::cve_scan_leases::RemoteCompletion;
+    match crate::queries::cve_scan_leases::complete_remote_cve_scan(&state.pool, request)
+        .await
+        .map_err(|error| {
+            tracing::error!(builder_id = %builder_id, %error, "remote CVE completion failed");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })? {
+        RemoteCompletion::Completed(digest) => {
+            Ok(Json(crate::models::builders::CveScanCompleteResponse {
+                result_digest_sha256: digest,
+                already_completed: false,
+            }))
+        }
+        RemoteCompletion::AlreadyCompleted(digest) => {
+            Ok(Json(crate::models::builders::CveScanCompleteResponse {
+                result_digest_sha256: digest,
+                already_completed: true,
+            }))
+        }
+        RemoteCompletion::Invalid(_) | RemoteCompletion::DigestMismatch => {
+            Err(StatusCode::UNPROCESSABLE_ENTITY)
+        }
+        RemoteCompletion::DigestConflict => Err(StatusCode::CONFLICT),
+        RemoteCompletion::Stale => Err(StatusCode::GONE),
+    }
+}
+
+/// Reports a remote scanner failure without changing build or cache outcome.
+///
+/// # Errors
+///
+/// Returns `410 Gone` for a stale execution or another HTTP error for invalid
+/// authentication, mismatched ownership, malformed input, or persistence
+/// failure.
+pub async fn fail_cve_scan(
+    State(state): State<CFState>,
+    Path(builder_id): Path<Uuid>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<crate::models::builders::CveScanFailResponse>, StatusCode> {
+    let path = format!("/api/v1/builders/{builder_id}/cve-scans/fail");
+    let verified =
+        authenticate_builder_request(&headers, body.clone(), "POST", &path, &state.pool).await?;
+    if verified.builder_id != builder_id {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let request: crate::models::builders::CveScanFailRequest =
+        serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
+    if request.lease.builder_id != builder_id
+        || verified.builder_session_id != Some(request.lease.builder_session_id)
+    {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let requeued = crate::queries::cve_scan_leases::fail_remote_cve_scan(
+        &state.pool,
+        request.lease,
+        request.failure_class,
+        &request.error_message,
+    )
+    .await
+    .map_err(|error| {
+        if error.to_string().contains("stale_cve_scan_execution") {
+            StatusCode::GONE
+        } else {
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    })?;
+    Ok(Json(crate::models::builders::CveScanFailResponse {
+        requeued,
     }))
 }
 /// GET/POST /api/v1/builders/:id/next-job - Get next job for builder

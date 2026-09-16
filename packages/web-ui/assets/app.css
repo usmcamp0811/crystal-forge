@@ -7224,6 +7224,93 @@ tr.attention-flash {
 .stat-strip.stat-strip-flush .stat { border: none; border-radius: 0; background: transparent; padding: 0; }
 .stat-strip.stat-strip-flush .stat:first-child { padding-left: 0; }
 .stat-strip.stat-strip-flush .stat-accent { display: none; }
+
+/* Scanning uses the shared page, card, chip, and table language from the
+   reference design. These rules provide its layout and responsive treatment. */
+.scanning-view { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.scanning-head { margin-bottom: 0; }
+.scanning-head-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.scanning-alert { margin: 0; justify-content: space-between; align-items: center; }
+.scanning-stats { margin-bottom: 0; }
+.scanning-card { overflow: hidden; min-width: 0; }
+.scanning-tabs { padding: 0 16px; border-bottom: 1px solid var(--cf-card-border); display: flex; align-items: center; overflow-x: auto; }
+.scan-toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 10px 16px; border-bottom: 1px solid var(--cf-divider); }
+.scanning-search { width: 250px; max-width: 250px; margin: 0; flex: 0 1 250px; }
+.scanning-search .q-search-input { min-width: 0; }
+.scan-toolbar .filter-select { width: auto; flex: 0 0 auto; }
+.scan-toolbar .btn { white-space: nowrap; }
+.scanning-table-wrap { width: 100%; overflow-x: auto; }
+.scanning-table { min-width: 820px; }
+.scanning-table tbody tr { cursor: default; }
+.scanning-table th .th-sort { all: unset; display: inline-flex; align-items: center; gap: 4px; cursor: pointer; color: inherit; font: inherit; letter-spacing: inherit; text-transform: inherit; border-radius: 4px; }
+.scanning-table th .th-sort:hover, .scanning-table th .th-sort.on { color: var(--cf-text-primary); }
+.scanning-table th .th-sort svg { opacity: .9; }
+.scanning-table th .th-sort:not(.on) svg { opacity: .25; }
+.scanning-config-name { font-weight: 600; font-size: 13px; color: var(--cf-text-primary); }
+.scanning-config-revision { margin-top: 2px; font-size: 11px; color: var(--cf-text-muted); display: flex; align-items: center; gap: 3px; }
+.scanning-config-revision .latest-star, .scanning-history-commit .latest-star { display: inline-flex; color: #fbbf24; }
+.scanning-running { display: flex; align-items: center; gap: 5px; margin-top: 3px; font-size: 10px; color: var(--cf-text-muted); }
+.scan-pulse { width: 5px; height: 5px; border-radius: 50%; background: #60a5fa; animation: scanPulse 1.4s ease-in-out infinite; }
+@keyframes scanPulse { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
+.scanning-findings { display: flex; gap: 4px; align-items: center; white-space: nowrap; }
+.scanning-findings .chip, .scanning-freshness-chip, .scanning-trigger { font-size: 10px; }
+.scanning-last-scan, .scanning-unavailable { color: var(--cf-text-muted); font-size: 12px; white-space: nowrap; }
+.scanning-row-actions { justify-content: flex-end; min-width: 68px; }
+.scanning-head-actions button:disabled, .scanning-row-actions button:disabled, .scan-sys-expand-head button:disabled { cursor: not-allowed; opacity: .45; }
+.scanning-actions-heading { text-align: right !important; }
+.scanning-pagination { padding: 10px 16px; border-top: 1px solid var(--cf-card-border); display: flex; align-items: center; gap: 12px; color: var(--cf-text-muted); font-size: 12px; }
+.scanning-inline-alert { margin: 10px 16px; }
+.scanning-system-toggle { all: unset; display: flex; align-items: center; gap: 8px; border-radius: 5px; cursor: pointer; }
+.scanning-system-toggle > svg { flex-shrink: 0; color: var(--cf-text-muted); }
+.scanning-system-row.expanded { background: color-mix(in oklab, var(--cf-brand-purple) 4%, var(--cf-card-bg)); }
+.scanning-freshness { display: flex; align-items: center; gap: 8px; min-width: 150px; }
+.scanning-freshness-bar { flex: 1; height: 5px; background: var(--cf-subtle-bg); border-radius: 99px; overflow: hidden; display: flex; }
+.scanning-freshness-legend { margin-top: 3px; display: flex; gap: 8px; flex-wrap: wrap; color: var(--cf-text-muted); font-size: 10px; }
+.scanning-freshness-legend .fresh { color: #34d399; }
+.scanning-freshness-legend .stale { color: #fbbf24; }
+.scanning-freshness-legend .needs { color: #f59e0b; }
+.scan-sys-expand-row td { padding: 0 !important; background: var(--cf-subtle-bg); }
+.scan-sys-expand { padding: 10px 16px 12px 40px; border-top: 1px solid var(--cf-divider); border-bottom: 1px solid var(--cf-divider); }
+.scan-sys-expand-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 2px 8px 8px; font-size: 11px; color: var(--cf-text-muted); }
+.scan-sys-expand-table-wrap { max-height: 300px; overflow: auto; border: 1px solid var(--cf-card-border); border-radius: 8px; background: var(--cf-card-bg); }
+.scanning-history-table { width: 100%; min-width: 690px; border-collapse: collapse; font-size: 12px; }
+.scanning-history-table thead { position: sticky; top: 0; z-index: 1; }
+.scanning-history-table th { text-align: left; padding: 6px 8px; color: var(--cf-text-muted); background: var(--cf-card-bg); font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; }
+.scanning-history-table td { padding: 7px 8px !important; border-top: 1px solid var(--cf-divider); }
+.scanning-history-commit { display: flex; align-items: center; gap: 4px; font-weight: 600; }
+.scanning-current { margin-left: 4px; font-size: 9px; }
+.scanning-history-flake { margin-top: 2px; font-size: 10px; color: var(--cf-text-muted); }
+.scanning-system-state { min-height: 96px; padding: 24px 16px; border: 1px solid var(--cf-card-border); border-radius: 8px; background: var(--cf-card-bg); }
+.scanning-schedule-modal { width: min(620px, 96vw); }
+.scanning-modal-state { padding: 24px 0; color: var(--cf-text-muted); }
+.scanning-schedule-rows { display: flex; flex-direction: column; }
+.scanning-schedule-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 12px 0; border-bottom: 1px solid var(--cf-divider); }
+.scanning-schedule-title { font-size: 13px; font-weight: 600; }
+.scanning-schedule-description { margin-top: 2px; color: var(--cf-text-muted); font-size: 11px; line-height: 1.5; }
+.scanning-schedule-control { flex-shrink: 0; }
+.scanning-schedule-control .input { width: 120px; }
+.scanning-toggle, .scanning-archive-control { display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer; }
+.scanning-toggle input, .scanning-archive-control input { accent-color: var(--cf-brand-purple); }
+.scanning-load-note { margin-top: 12px; font-size: 11px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .scan-pulse { animation: none; }
+}
+
+@media (max-width: 640px) {
+  .scanning-head { align-items: flex-start; gap: 12px; }
+  .scanning-head-actions { width: 100%; }
+  .scanning-head-actions .btn { flex: 1; justify-content: center; }
+  .scanning-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .scanning-stats > .stat:first-child { grid-column: 1 / -1; }
+  .scan-toolbar { align-items: stretch; }
+  .scanning-search { max-width: none; width: 100%; flex: 1 0 100%; }
+  .scanning-search .q-search-input { width: 100%; }
+  .scan-toolbar .filter-select { flex: 1; min-width: 145px; }
+  .scan-sys-expand { padding-left: 12px; padding-right: 12px; }
+  .scanning-schedule-row { flex-direction: column; }
+  .scanning-schedule-control { width: 100%; }
+}
 .sys-table-fixed { table-layout: fixed; }
 .sys-table-dense { table-layout: fixed; }
 .sys-table-dense tbody td, .sys-table-dense thead th { padding-top: 8px; padding-bottom: 8px; }

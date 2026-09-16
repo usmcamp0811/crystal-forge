@@ -15477,8 +15477,25 @@ security.audit.enable = true;</fixtext>
               critical_count: 1,
               high_count: 2,
               medium_count: 0,
+              freshness: "deployed",
+              is_current: true,
+              is_latest_per_flake: true,
+              trigger: null,
             },
           ]),
+        });
+      });
+
+      await page.route("**/api/v1/scanning/deployed*", async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            items: [],
+            total: 0,
+            has_more: false,
+            next_cursor: null,
+          }),
         });
       });
 
@@ -15498,6 +15515,31 @@ security.audit.enable = true;</fixtext>
               unscanned: 1,
               current_crit: 1,
               current_high: 2,
+            },
+          ]),
+        });
+      });
+
+      await page.route("**/api/v1/scanning/systems/*/scans*", async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify([
+            {
+              scan_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+              hostname: "prod-server-01",
+              flake_name: "core-fleet",
+              commit_hash: "abc1234",
+              status: "completed",
+              completed_at: new Date().toISOString(),
+              scheduled_at: new Date().toISOString(),
+              critical_count: 1,
+              high_count: 2,
+              medium_count: 0,
+              freshness: "deployed",
+              is_current: true,
+              is_latest_per_flake: true,
+              trigger: null,
             },
           ]),
         });
@@ -15558,18 +15600,15 @@ security.audit.enable = true;</fixtext>
 
       await assertVisible(page.locator("main h1:has-text('Scanning')"), "Expected Scanning heading");
       await assertVisible(page.getByText("Scanning now").first(), "Expected Scanning stat cards");
+      await assertVisible(page.getByRole("tab", { name: /Deployed/ }), "Expected Deployed tab");
+      await assertVisible(page.getByRole("tab", { name: /All scans/ }), "Expected All scans tab");
+      await assertVisible(page.getByRole("tab", { name: /By system/ }), "Expected By system tab");
 
-      await page.locator("button:has-text('All configs')").first().click({ force: true });
+      await page.getByRole("tab", { name: /By system/ }).click();
       await page.waitForTimeout(500);
 
-      await assertVisible(page.getByText("prod-server-01").first(), "Expected system row in All configs table");
-
-      await page.evaluate(() => {
-        const expandButton = document.querySelector("table.sys-table tbody tr button.btn-icon");
-        if (expandButton instanceof HTMLElement) {
-          expandButton.click();
-        }
-      });
+      await assertVisible(page.getByText("prod-server-01").first(), "Expected system row in By system table");
+      await page.locator("button.scanning-system-toggle").first().click();
       await page.waitForTimeout(400);
 
       await assertVisible(page.getByText("abc1234").first(), "Expected nested per-commit scan row after expand");
@@ -15581,7 +15620,9 @@ security.audit.enable = true;</fixtext>
 
       await page.unroute("**/api/v1/scanning/stats*");
       await page.unroute("**/api/v1/scanning/queue*");
+      await page.unroute("**/api/v1/scanning/deployed*");
       await page.unroute("**/api/v1/scanning/systems*");
+      await page.unroute("**/api/v1/scanning/systems/*/scans*");
       await page.unroute("**/api/v1/scanning/activity*");
       await page.unroute("**/api/v1/scanning/schedule*");
     },

@@ -119,7 +119,7 @@ impl BuilderApiClient {
 
         let builder_session_id = Uuid::new_v4();
         let capabilities = if config.cve_scanning_enabled {
-            BuilderCapabilities::current_cve_scanner()
+            BuilderCapabilities::current_cve_scanner("vulnix test".to_string())
         } else {
             BuilderCapabilities::default()
         };
@@ -196,7 +196,7 @@ impl BuilderApiClient {
                 server_url,
                 signing_key,
                 builder_session_id,
-                capabilities,
+                capabilities.clone(),
             )
             .await
             {
@@ -313,7 +313,7 @@ impl BuilderApiClient {
                 signing_key,
                 builder_id,
                 builder_session_id,
-                capabilities,
+                capabilities.clone(),
             )
             .await
             {
