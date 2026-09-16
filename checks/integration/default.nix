@@ -268,6 +268,10 @@ in pkgs.testers.runNixOSTest {
     server.succeed(
       "test \"$(systemctl show crystal-forge-server.service -p Slice --value)\" = crystal-forge.slice"
     )
+    server.succeed(
+      "systemctl show crystal-forge-server.service -p Environment --value"
+      " | grep -F 'PATH=${pkgs.nix-eval-jobs.nix}/bin:'"
+    )
     server.wait_for_unit("crystal-forge-hardening.service")
     server.succeed(
       "test \"$(systemctl show crystal-forge-hardening.service -p Slice --value)\" = crystal-forge-hardening.slice"
@@ -321,6 +325,10 @@ in pkgs.testers.runNixOSTest {
     )
     server.succeed(
       "test \"$(systemctl show crystal-forge-config-inspector.service -p Restart --value)\" = on-failure"
+    )
+    server.succeed(
+      "systemctl show crystal-forge-config-inspector.service -p Environment --value"
+      " | grep -F 'PATH=${pkgs.nix-eval-jobs.nix}/bin:'"
     )
     server.succeed(
       "systemctl show crystal-forge-config-inspector.service -p ExecStart --value"

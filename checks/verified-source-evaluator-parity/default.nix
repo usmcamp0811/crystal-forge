@@ -33,13 +33,24 @@ let
   '';
 in
 pkgs.runCommand "crystal-forge-verified-source-evaluator-parity" {
-  nativeBuildInputs = [ pkgs.jq pkgs.nix pkgs.nix-eval-jobs ];
+  nativeBuildInputs = [ pkgs.jq pkgs.nix-eval-jobs.nix pkgs.nix-eval-jobs ];
 } ''
   export HOME="$TMPDIR/home"
   export XDG_CACHE_HOME="$TMPDIR/cache"
   export NIX_CONFIG='experimental-features = nix-command flakes
   pure-eval = false'
   mkdir -p "$HOME"
+  evaluator_version="$(
+    nix-eval-jobs \
+      --expr '{ probe = builtins.derivation { name = "crystal-forge-evaluator-probe"; system = builtins.currentSystem; builder = "/bin/sh"; }; }' \
+      --workers 1 \
+      --meta \
+      --apply '_: { nixVersion = builtins.nixVersion; }' \
+      --option pure-eval false \
+      --option allow-import-from-derivation true \
+      | jq -er '.extraValue.nixVersion'
+  )"
+  test "$(nix --version)" = "nix (Nix) $evaluator_version"
   source_a=${canonicalSource}
   source_b=${canonicalSource}
   test "$source_a" = "$source_b"

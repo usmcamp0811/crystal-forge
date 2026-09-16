@@ -7,6 +7,10 @@
   cfg = config.services.crystal-forge;
   tomlFormat = pkgs.formats.toml {};
   postgres_pkg = config.services.postgresql.package;
+  # INVARIANT: The Nix CLI and nix-eval-jobs must use the same Nix library
+  # version. The evaluator package exposes its matching CLI through this
+  # passthru attribute.
+  evaluatorNix = pkgs.nix-eval-jobs.nix;
 
   # Recursively remove any null values so TOML generation won’t choke.
   stripNulls = v:
@@ -2499,7 +2503,7 @@ in {
 
       path = with pkgs;
         [
-          nix
+          evaluatorNix
           git
           gnutar
           gzip
@@ -2712,7 +2716,7 @@ in {
       startLimitIntervalSec = 300;
       startLimitBurst = 2;
 
-      path = with pkgs; [nix nix-eval-jobs git openssh coreutils];
+      path = with pkgs; [evaluatorNix nix-eval-jobs git openssh coreutils];
       environment = {
         RUST_LOG = cfg.log_level;
         TZDIR = "${pkgs.tzdata}/share/zoneinfo";
@@ -2768,7 +2772,7 @@ in {
       wants = lib.optional cfg.local-database "postgresql.service";
 
       path = with pkgs; [
-        nix
+        evaluatorNix
         git
         openssh
         nix-fast-build

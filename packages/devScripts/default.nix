@@ -13,6 +13,9 @@ let
   oidc_client_secret = "dev-only-secret";
   grafana_port = 3446;
   pgweb_port = 12084;
+  # Keep development evaluator behavior equal to the packaged services. The
+  # nix-eval-jobs passthru provides the Nix CLI built from the same libraries.
+  evaluatorNix = pkgs.nix-eval-jobs.nix;
 
   # Internal (local) issuer for health checks
   oidc_issuer_internal =
@@ -261,7 +264,7 @@ let
 
   runServer = pkgs.writeShellApplication {
     name = "run-server";
-    runtimeInputs = [ pkgs.nix pkgs.git pkgs.vulnix pkgs.coreutils ];
+    runtimeInputs = [ evaluatorNix pkgs.git pkgs.vulnix pkgs.coreutils ];
     text = ''
       CRYSTAL_FORGE_CONFIG="$(${generateConfig}/bin/generate-config)"
       export CRYSTAL_FORGE_CONFIG
@@ -343,7 +346,7 @@ let
 
   runBuilder = pkgs.writeShellApplication {
     name = "run-builder";
-    runtimeInputs = [ pkgs.nix pkgs.coreutils ];
+    runtimeInputs = [ evaluatorNix pkgs.coreutils ];
     text = ''
       CRYSTAL_FORGE_CONFIG="$(${generateConfig}/bin/generate-config)"
       export CRYSTAL_FORGE_CONFIG
@@ -365,7 +368,7 @@ let
   # Mock variants that use pre-populated config template
   runServerMock = pkgs.writeShellApplication {
     name = "run-server-mock";
-    runtimeInputs = [ pkgs.nix pkgs.git pkgs.vulnix pkgs.coreutils ];
+    runtimeInputs = [ evaluatorNix pkgs.git pkgs.vulnix pkgs.coreutils ];
     text = ''
       CRYSTAL_FORGE_CONFIG="$(${generateConfigMock}/bin/generate-config)"
       export CRYSTAL_FORGE_CONFIG

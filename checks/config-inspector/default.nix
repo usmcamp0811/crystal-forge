@@ -421,7 +421,7 @@ let
   diagnosticStressDefinitionValuesFile = pkgs.writeText "crystal-forge-config-definition-values-diagnostic-stress.nix" diagnosticStressDefinitionValuesExpression;
 in
 pkgs.runCommand "crystal-forge-config-inspector-check" {
-  nativeBuildInputs = [ pkgs.jq pkgs.nix pkgs.nix-eval-jobs ];
+  nativeBuildInputs = [ pkgs.jq pkgs.nix-eval-jobs.nix pkgs.nix-eval-jobs ];
 } ''
   export HOME="$TMPDIR"
   export XDG_CACHE_HOME="$TMPDIR/cache"

@@ -62,7 +62,7 @@ let
   '';
 in
 pkgs.runCommand "crystal-forge-primary-evaluator-isolation-check" {
-  nativeBuildInputs = [ pkgs.jq pkgs.nix pkgs.nix-eval-jobs ];
+  nativeBuildInputs = [ pkgs.jq pkgs.nix-eval-jobs.nix pkgs.nix-eval-jobs ];
 } ''
   export HOME="$TMPDIR"
   export XDG_CACHE_HOME="$TMPDIR/cache"
