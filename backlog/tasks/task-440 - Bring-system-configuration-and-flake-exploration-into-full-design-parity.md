@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-16 20:45'
+updated_date: '2026-09-16 20:59'
 labels:
   - design-parity
   - web-ui
@@ -308,6 +308,12 @@ author: @openai-agent
 created: 2026-09-16 20:45
 ---
 2026-09-16 distributed CVE server hardening follow-up: audited remote failure, requeue, completion, and legacy recovery transitions against migration 0263. Remote requeue and failure clear typed lease ownership; completion retains immutable provenance. Tightened nullable PostgreSQL CHECK branches so scanner identity/version and completed result evidence cannot pass through SQL NULL semantics. Disabled or inactive builders now receive `410 Gone` on claim, and capability persistence during session establishment fails closed if the session is replaced or the builder becomes inactive. Added disabled-claim regression coverage and corrected helper/API contract documentation. Verification passed in the Nix environment: SQLX_OFFLINE offline cargo check for cf-protocol/cf-builder/cf-server libraries; cf-protocol builder tests (14); cf-builder CVE scanner tests (5); cf-server builder handler tests (55); CVE lease module tests compiled and its two non-DB tests passed; cargo fmt check; git diff check. The DB-backed remote lease test returned early because `CRYSTAL_FORGE_TEST_DATABASE_URL` is unset, so migration and live transition behavior remain unverified. Existing repository warnings and ignored Nix eval-cache busy warnings remain. Task stays In Progress; no commit, push, MR update, broad flake check, or authoritative Web UI check was performed.
+---
+
+author: @openai-agent
+created: 2026-09-16 20:59
+---
+Correction to comment #18: live migration and transition behavior is now verified. I initialized a fresh disposable PostgreSQL cluster at `/tmp/opencode/task440-cve-pg-35440`, applied the repository migrations through `nix run .#devScripts.runCveProcessingTest`, and ran every enrolled CVE processing regression. All invocations passed with no `FAILED` or `error: test failed`, including remote claim/session fencing, environment authorization, build-priority and cache-gated fallback, atomic post-build enqueue, digest idempotency/conflict, failure/requeue/recovery transitions, affected/whitelisted persistence, concurrent claims, and POA&M/composite lock-order tests. Final verification also passed: `nix develop --command cargo fmt --manifest-path packages/default/Cargo.toml --all -- --check`; offline `cargo check` for `cf-protocol`, `cf-builder`, and `cf-server` libraries with `SQLX_OFFLINE=true`; offline no-dependency rustdoc for those three libraries; and `git diff HEAD --check`. Existing repository compile/rustdoc warnings remain outside this slice. The disposable PostgreSQL server was stopped and confirmed inactive. No commit, push, MR update, broad flake check, or authoritative Web UI check was performed. TASK-440 remains In Progress because acceptance criteria #24 and #27 are still open.
 ---
 <!-- COMMENTS:END -->
 
