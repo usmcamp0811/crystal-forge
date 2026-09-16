@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-16 03:35'
+updated_date: '2026-09-16 04:31'
 labels:
   - design-parity
   - web-ui
@@ -67,19 +67,11 @@ documentation:
   - docs/design/CrystalForge/data-flakes.js
   - docs/design/CrystalForge/styles.css
 modified_files:
-  - packages/web-ui/src/views/system_detail.rs
-  - packages/web-ui/src/views/flakes_list.rs
-  - packages/web-ui/src/views/environments_list.rs
-  - packages/web-ui/src/views/compliance.rs
-  - packages/web-ui/src/components/layout/topbar.rs
-  - packages/web-ui/src/state/navigation_focus.rs
-  - packages/web-ui/src/api/models.rs
-  - packages/web-ui/src/api/client.rs
-  - packages/web-ui/assets/app.css
-  - packages/default/crates/cf-server/src/
-  - packages/default/crates/cf-builder/src/
-  - packages/default/crates/cf-protocol/src/
-  - checks/web-ui/
+  - checks/evaluator-snapshot-isolation/default.nix
+  - packages/default/crates/cf-protocol/src/source_artifact.rs
+  - packages/default/crates/cf-server/src/models/deployment_policies.rs
+  - packages/default/crates/cf-server/src/models/evaluate_with_policies.rs
+  - packages/default/crates/cf-server/src/models/primary_evaluation.nix
 priority: high
 type: feature
 ordinal: 1000
@@ -235,6 +227,8 @@ Updated recovery order: (1) exact all-builder verified-source mismatch reproduct
 2026-09-15 service-user reproduction result supplied by maintainer: `nix store ping` succeeds as `crystal-forge` with `NIX_REMOTE=daemon` and reports daemon 2.34.5 (the service CLI/evaluator PATH is 2.35.2). The exact campground commit archives, extracts with GNU tar, and ingests through `nix store add-path --name crystal-forge-source-v1-169fa07f128d235bef0aeae239783c4a02abb013`, producing `/nix/store/8957pjsnf0mk4kfw4sj6yzb50p5cz39b-crystal-forge-source-v1-169fa07f128d235bef0aeae239783c4a02abb013`. This does not mutate application state; the store object is GC-eligible. External Git, filesystem, flake.lock, Nix daemon, and add-path stages are therefore operational. Remaining code-specific suspects are the bounded Rust extractor and artifact/identity publication; the CLI/daemon version difference should be recorded but does not explain add-path failure by itself. No further broad host probing is needed before a focused stage-preserving diagnostic/fixture change.
 
 2026-09-15 authoritative-source hotfix committed and pushed as `7f923d55` (`TASK-440: Accept Git archive metadata`). Root cause: `git archive --format=tar` emits a global PAX metadata member before tracked entries, while the contract-v1 Rust extractor rejected every non-file/directory/symlink member. The fix ignores only tar global PAX extension metadata before path extraction; hard links, devices, FIFOs, unsafe paths, duplicate paths, and limits remain fail-closed. A regression reproduces Git's `pax_global_header`, verifies `flake.lock` extraction, and verifies metadata is not materialized. Verification passed: cf-protocol source-artifact tests (8 passed), cf-server verified-source tests with `SQLX_OFFLINE=true --offline` (5 passed), cf-protocol rustfmt check, and scoped `git diff --check`. An initial cf-server test invocation without SQLX_OFFLINE failed at compile time because no local PostgreSQL was listening; the corrected offline invocation passed. Local HEAD, upstream, and remote all equal `7f923d5535ffde3ded45649fb42ee0b75b7d453a`. The generated untracked Tailwind file and scanner stash remain untouched. Awaiting maintainer redeploy and one controlled campground retry; do not merge MR !323.
+
+2026-09-15 local-only evaluation performance diagnosis and correction: no SSH or remote commands were used. The saved deployed journal shows commit 3252 starting nix-eval-jobs at 22:47:09 for 39 declared configurations with two workers; the first successful result arrived at 22:58:42. The flake uses build_scope=cf_systems_only and has policy assignments for 10 managed configurations, but the primary evaluator still forced all 39 declarations and treated unmanaged declarations as expected results. This exhausted both workers on configurations that could never create build jobs. The correction adds an optional configurationNames boundary to primary_evaluation.nix, passes active registered configuration names for cf_systems_only, and applies the identical scope to missing-system detection so excluded declarations cannot trigger fallback evaluation. all_configs and unscoped callers retain full-flake behavior; the complete declared-system inventory remains in commit_artifacts_cache for Flake Explorer reconciliation. Verification passed: focused Rust expression test; focused expected-system boundary test including scoped, empty, and unscoped cases; evaluator-snapshot-isolation Nix check with an excluded aborting configuration; verified-source-evaluator-parity Nix check; cargo fmt check; git diff check. A broad offline cf-server lib run reached 1504 passing tests but failed eight existing CVE database tests because no DATABASE_URL service was available (PoolTimedOut); the failures do not execute the changed evaluator code. Local reproduction against the preserved older campground checkout was not comparable because its locked dotfiles input now reports a NAR hash mismatch. Runtime before/after must be confirmed after maintainer-controlled deployment; based on the observed workload the primary evaluator input falls from 39 configurations to the 10 active managed configurations (29 excluded, about 74% less configuration work).
 <!-- SECTION:NOTES:END -->
 
 ## Comments
