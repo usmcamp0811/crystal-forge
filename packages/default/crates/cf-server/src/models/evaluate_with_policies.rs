@@ -427,8 +427,8 @@ use crate::flake::verified_source::materialize_immutable_source;
 use crate::models::commits::Commit;
 use crate::models::deployment_policies::{
     AssignedPolicy, EvaluationTerminalOutcome, PoliciesByConfiguration, PolicyCheckResult,
-    build_nix_eval_expression_for_source, policies_for_config, policy_requirements_met,
-    policy_results_json,
+    build_nix_eval_expression_for_source, build_nix_eval_expression_for_source_configurations,
+    policies_for_config, policy_requirements_met, policy_results_json,
 };
 use crate::models::evaluation_snapshots::{
     EvaluatedOption, OptionDefinitionProvenance, SafeOptionValue,
@@ -3081,8 +3081,21 @@ async fn evaluate_with_nix_eval_jobs_inner(
     );
 
     // Build ONE Nix expression with per-configuration policy checkers.
-    let nix_expr =
-        build_nix_eval_expression_for_source(&flake_ref, commit_hash, policies_by_configuration);
+    // PERFORMANCE: `cf_systems_only` is an evaluation boundary, not only a
+    // build-queue filter. Evaluating every unmanaged declaration consumed all
+    // workers before managed systems became claimable on large flakes. The
+    // artifact cache still retains the complete declared-system inventory.
+    let nix_expr = match allowed_systems.as_deref() {
+        Some(configuration_names) => build_nix_eval_expression_for_source_configurations(
+            &flake_ref,
+            commit_hash,
+            configuration_names,
+            policies_by_configuration,
+        ),
+        None => {
+            build_nix_eval_expression_for_source(&flake_ref, commit_hash, policies_by_configuration)
+        }
+    };
 
     // Compute summary counts for logging.
     let unique_policy_count: std::collections::BTreeSet<_> = policies_by_configuration
@@ -3374,7 +3387,7 @@ async fn evaluate_with_nix_eval_jobs_inner(
                                 };
                                 if !build_eligible {
                                     debug!(
-                                        "System {} is not eligible for build jobs under flake build_scope={} (will be recorded but not queued)",
+                                        "System {} is not eligible for build jobs under flake build_scope={}",
                                         system_name,
                                         flake.build_scope,
                                     );
@@ -4260,13 +4273,10 @@ async fn evaluate_with_nix_eval_jobs_inner(
     // evaluator crash still creates persisted failure records for all
     // expected-but-unseen systems.
     let expected_systems: Vec<String> = if has_known_systems {
-        // Include every discovered system as "expected" regardless of
-        // build_scope filtering.  Systems excluded by cf_systems_only
-        // must still be accounted for in expected/missing/fallback logic
-        // so the total count is accurate and silent drops are detected.
-        // Build-eligibility filtering now happens at finalization time
-        // (see build_eligible in SuccessfulSystemResult).
-        known_systems.clone()
+        // INVARIANT: This set must match the attributes selected by the primary
+        // expression. Otherwise intentionally excluded configurations look
+        // like silent evaluator drops and trigger expensive fallback work.
+        systems_selected_for_evaluation(&known_systems, &allowed_systems)
     } else {
         Vec::new()
     };
@@ -5322,6 +5332,17 @@ fn should_skip_system(allowed_systems: &Option<Vec<String>>, system_name: &str) 
     }
 }
 
+fn systems_selected_for_evaluation(
+    known_systems: &[String],
+    allowed_systems: &Option<Vec<String>>,
+) -> Vec<String> {
+    known_systems
+        .iter()
+        .filter(|system| !should_skip_system(allowed_systems, system))
+        .cloned()
+        .collect()
+}
+
 fn resolve_mock_systems(
     flake_name: &str,
     target_system: &str,
@@ -5494,9 +5515,28 @@ fn summarize_commit_metadata(
 mod tests {
     use super::{
         authoritative_evaluator_args, classify_evaluation_failure,
-        isolate_authoritative_evaluator_credentials,
+        isolate_authoritative_evaluator_credentials, systems_selected_for_evaluation,
     };
     use crate::models::retry_policy::RetryFailureClass;
+
+    #[test]
+    fn scoped_expected_systems_match_the_primary_expression_boundary() {
+        let known = vec![
+            "managed-b".to_string(),
+            "unmanaged".to_string(),
+            "managed-a".to_string(),
+        ];
+
+        assert_eq!(
+            systems_selected_for_evaluation(
+                &known,
+                &Some(vec!["managed-a".to_string(), "managed-b".to_string()]),
+            ),
+            vec!["managed-b".to_string(), "managed-a".to_string()]
+        );
+        assert!(systems_selected_for_evaluation(&known, &Some(Vec::new())).is_empty());
+        assert_eq!(systems_selected_for_evaluation(&known, &None), known);
+    }
 
     #[tokio::test]
     async fn authoritative_evaluator_removes_inherited_source_credentials() {

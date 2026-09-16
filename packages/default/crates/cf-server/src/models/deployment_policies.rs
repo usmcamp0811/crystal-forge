@@ -2926,6 +2926,7 @@ pub fn build_nix_eval_expression(
         flake_ref,
         requested_revision,
         None,
+        None,
         policies_by_configuration,
     )
 }
@@ -2944,6 +2945,28 @@ pub fn build_nix_eval_expression_for_source(
         flake_ref,
         requested_revision,
         Some(requested_revision),
+        None,
+        policies_by_configuration,
+    )
+}
+
+/// Builds the primary expression for a bounded set of configurations.
+///
+/// The caller uses this variant when the flake build scope limits evaluation
+/// to registered Crystal Forge systems. The filter is applied before
+/// `nix-eval-jobs` enumerates attributes, so excluded configurations do not
+/// consume evaluator workers or delay claimable build jobs.
+pub fn build_nix_eval_expression_for_source_configurations(
+    flake_ref: &str,
+    requested_revision: &str,
+    configuration_names: &[String],
+    policies_by_configuration: &PoliciesByConfiguration,
+) -> String {
+    build_nix_eval_expression_inner(
+        flake_ref,
+        requested_revision,
+        Some(requested_revision),
+        Some(configuration_names),
         policies_by_configuration,
     )
 }
@@ -2952,6 +2975,7 @@ fn build_nix_eval_expression_inner(
     flake_ref: &str,
     requested_revision: &str,
     resolved_revision_override: Option<&str>,
+    configuration_names: Option<&[String]>,
     policies_by_configuration: &PoliciesByConfiguration,
 ) -> String {
     // Build per-configuration checker blocks.
@@ -2978,13 +3002,26 @@ fn build_nix_eval_expression_inner(
     let resolved_revision_override = resolved_revision_override
         .map(nix_string)
         .unwrap_or_else(|| "null".to_string());
+    let configuration_names = configuration_names
+        .map(|names| {
+            format!(
+                "[ {} ]",
+                names
+                    .iter()
+                    .map(|name| nix_string(name))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )
+        })
+        .unwrap_or_else(|| "null".to_string());
     format!(
-        "({}) {{ flakeRef = {}; policyCheckers = {}; requestedRevision = {}; resolvedRevisionOverride = {}; }}",
+        "({}) {{ flakeRef = {}; policyCheckers = {}; requestedRevision = {}; resolvedRevisionOverride = {}; configurationNames = {}; }}",
         include_str!("primary_evaluation.nix"),
         nix_string(flake_ref),
         checkers_block,
         requested_revision,
         resolved_revision_override,
+        configuration_names,
     )
 }
 
@@ -4217,6 +4254,36 @@ in {{ {fields} }}"#
 
         assert!(expr.contains(&format!("resolvedRevisionOverride = \"{revision}\"")));
         assert!(expr.contains("flake.sourceInfo.rev or null"));
+    }
+
+    #[test]
+    fn scoped_primary_expression_filters_before_attribute_evaluation() {
+        let revision = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let expr = build_nix_eval_expression_for_source_configurations(
+            "path:/nix/store/source?narHash=sha256-example",
+            revision,
+            &["managed-b".to_string(), "managed-a".to_string()],
+            &PoliciesByConfiguration::new(),
+        );
+
+        assert!(expr.contains("configurationNames = [ \"managed-b\" \"managed-a\" ];"));
+        assert!(expr.contains("builtins.intersectAttrs"));
+        assert!(expr.contains("selectedConfigurations"));
+
+        let empty = build_nix_eval_expression_for_source_configurations(
+            "path:/nix/store/source?narHash=sha256-example",
+            revision,
+            &[],
+            &PoliciesByConfiguration::new(),
+        );
+        assert!(empty.contains("configurationNames = [  ];"));
+
+        let unscoped = build_nix_eval_expression_for_source(
+            "path:/nix/store/source?narHash=sha256-example",
+            revision,
+            &PoliciesByConfiguration::new(),
+        );
+        assert!(unscoped.contains("configurationNames = null;"));
     }
 
     #[test]

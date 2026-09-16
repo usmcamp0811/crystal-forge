@@ -1,4 +1,9 @@
-{ flakeRef, policyCheckers, requestedRevision, resolvedRevisionOverride ? null }:
+{ flakeRef
+, policyCheckers
+, requestedRevision
+, resolvedRevisionOverride ? null
+, configurationNames ? null
+}:
 
 let
   flake = builtins.getFlake flakeRef;
@@ -6,6 +11,15 @@ let
     (config.systemd.services.crystal-forge-agent.enable or false)
     || ((config.services.crystal-forge.enable or false)
       && (config.services.crystal-forge.client.enable or false));
+  selectedConfigurations =
+    if configurationNames == null then
+      flake.nixosConfigurations
+    else
+      builtins.intersectAttrs
+        (builtins.listToAttrs (builtins.map
+          (name: { inherit name; value = null; })
+          configurationNames))
+        flake.nixosConfigurations;
 in
 builtins.mapAttrs
   (name: cfg:
@@ -25,4 +39,4 @@ builtins.mapAttrs
         };
       };
     })
-  flake.nixosConfigurations
+  selectedConfigurations

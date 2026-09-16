@@ -36,6 +36,11 @@ let
             _module.graph = builtins.abort "module graph must remain lazy";
           };
 
+          # The scoped primary evaluator must filter this declaration before
+          # nix-eval-jobs forces the configuration value.
+          nixosConfigurations.unmanaged =
+            builtins.abort "unmanaged configuration must not be evaluated";
+
           nixosModules.broken = { lib, ... }:
             with lib.namespace-change-me;
             { namespace-change-me.enable = true; };
@@ -55,6 +60,7 @@ let
     (${builtins.readFile primaryExpression}) {
       flakeRef = "__LOCKED_FIXTURE_REF__";
       requestedRevision = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+      configurationNames = [ "chesty" ];
       policyCheckers.chesty = config: {
         architectureGate = config.crystalForgePolicyMarker;
       };
