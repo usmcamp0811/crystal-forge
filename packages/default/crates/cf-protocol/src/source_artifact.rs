@@ -127,10 +127,11 @@ fn validate_extraction_limits(
 
 /// Extracts one version-1 canonical source artifact into an empty directory.
 ///
-/// The extractor accepts directories, regular files, executable files, and
-/// relative symlinks that remain inside the source root. It rejects absolute or
-/// non-normal entry paths, duplicate entries, hard links, devices, FIFOs,
-/// escaping symlinks, symlink ancestors, and configured size-limit violations.
+/// The extractor accepts Git's global PAX metadata header, directories, regular
+/// files, executable files, and relative symlinks that remain inside the source
+/// root. It rejects absolute or non-normal entry paths, duplicate entries, hard
+/// links, devices, FIFOs, escaping symlinks, symlink ancestors, and configured
+/// size-limit violations.
 /// The destination MUST exist and MUST be empty.
 ///
 /// # Errors
@@ -167,6 +168,14 @@ pub fn extract_verified_source_artifact(
         entry_count = entry_count.saturating_add(1);
         validate_extraction_limits(entry_count, expanded_bytes)?;
 
+        let entry_type = entry.header().entry_type();
+        // COMPATIBILITY: `git archive --format=tar` emits a global PAX header
+        // that records the source commit. The tar crate returns this metadata
+        // as an entry but does not apply it to later paths or file contents.
+        if entry_type.is_pax_global_extensions() {
+            continue;
+        }
+
         let path = validated_path(&entry.path()?)?;
         if !paths.insert(path.clone()) {
             return Err(SourceArtifactError::Invalid(format!(
@@ -175,7 +184,6 @@ pub fn extract_verified_source_artifact(
             )));
         }
         let output_path = destination.join(&path);
-        let entry_type = entry.header().entry_type();
 
         if entry_type.is_dir() {
             fs::create_dir_all(&output_path)?;
@@ -273,6 +281,40 @@ mod tests {
         builder
             .append_data(&mut header, path, Cursor::new(bytes))
             .expect("test entry should append");
+    }
+
+    #[test]
+    fn extraction_accepts_git_global_pax_metadata() {
+        let commit = b"52 comment=169fa07f128d235bef0aeae239783c4a02abb013\n";
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_ustar();
+        header.set_size(commit.len() as u64);
+        header.set_mode(0o666);
+        header.set_entry_type(tar::EntryType::XGlobalHeader);
+        header.set_cksum();
+        builder
+            .append_data(
+                &mut header,
+                "pax_global_header",
+                Cursor::new(commit.as_slice()),
+            )
+            .expect("Git PAX metadata should append");
+        append_file(&mut builder, "flake.lock", 0o644, b"{}\n");
+        let bytes = builder.into_inner().expect("test archive should finish");
+
+        let temporary = tempfile::tempdir().expect("temporary directory should exist");
+        let artifact = temporary.path().join("source.tar");
+        fs::write(&artifact, bytes).expect("test archive should write");
+        let output = temporary.path().join("tree");
+        fs::create_dir(&output).expect("output should exist");
+
+        extract_verified_source_artifact(&artifact, &output)
+            .expect("Git archive metadata should be ignored safely");
+        assert_eq!(
+            fs::read(output.join("flake.lock")).expect("flake.lock should extract"),
+            b"{}\n"
+        );
+        assert!(!output.join("pax_global_header").exists());
     }
 
     #[cfg(unix)]
