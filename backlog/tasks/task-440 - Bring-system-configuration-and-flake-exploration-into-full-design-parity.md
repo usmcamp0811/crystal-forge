@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-16 15:48'
+updated_date: '2026-09-16 16:11'
 labels:
   - design-parity
   - web-ui
@@ -188,6 +188,8 @@ The `modifiedFiles` metadata is anticipated and non-exhaustive. The implementati
 2026-09-15 local-only evaluation performance diagnosis and correction: no SSH or remote commands were used. The saved deployed journal shows commit 3252 starting nix-eval-jobs at 22:47:09 for 39 declared configurations with two workers; the first successful result arrived at 22:58:42. The flake uses build_scope=cf_systems_only and has policy assignments for 10 managed configurations, but the primary evaluator still forced all 39 declarations and treated unmanaged declarations as expected results. This exhausted both workers on configurations that could never create build jobs. The correction adds an optional configurationNames boundary to primary_evaluation.nix, passes active registered configuration names for cf_systems_only, and applies the identical scope to missing-system detection so excluded declarations cannot trigger fallback evaluation. all_configs and unscoped callers retain full-flake behavior; the complete declared-system inventory remains in commit_artifacts_cache for Flake Explorer reconciliation. Verification passed: focused Rust expression test; focused expected-system boundary test including scoped, empty, and unscoped cases; evaluator-snapshot-isolation Nix check with an excluded aborting configuration; verified-source-evaluator-parity Nix check; cargo fmt check; git diff check. A broad offline cf-server lib run reached 1504 passing tests but failed eight existing CVE database tests because no DATABASE_URL service was available (PoolTimedOut); the failures do not execute the changed evaluator code. Local reproduction against the preserved older campground checkout was not comparable because its locked dotfiles input now reports a NAR hash mismatch. Runtime before/after must be confirmed after maintainer-controlled deployment; based on the observed workload the primary evaluator input falls from 39 configurations to the 10 active managed configurations (29 excluded, about 74% less configuration work).
 
 2026-09-15 evaluation-scope performance correction committed and pushed as `481ae958` (`TASK-440: Bound scoped flake evaluation`). The generated Tailwind asset remains untracked and untouched. No SSH, deployment, database mutation, merge, or scanner work was performed.
+
+2026-09-16 maintainer runtime update: upgraded Webb is actively claiming and executing builds. Remote pickup and build execution are working. This pass MUST preserve the current evaluator and remote-build execution strategy and MUST NOT reopen builder compatibility diagnosis without new specific failure evidence. Remaining Builds scope is the failed-build retry/requeue action through API response, immutable replacement attempt, queue visibility, and normal claim eligibility.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
