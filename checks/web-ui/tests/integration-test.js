@@ -15793,6 +15793,34 @@ security.audit.enable = true;</fixtext>
       await assertVisible(page.getByText("Only the first 500 diagnostic events are shown."), "Expected response truncation notice");
       await assertVisible(page.getByText("Output truncated at the capture boundary."), "Expected event truncation notice");
 
+      await page.setViewportSize({ width: 900, height: 900 });
+      const narrowDrawer = page.getByRole("dialog", { name: "Scan diagnostics" });
+      await assertVisible(narrowDrawer, "Expected diagnostics drawer at the narrow viewport");
+      const narrowGeometry = await narrowDrawer.evaluate((element) => {
+        const rect = element.getBoundingClientRect();
+        return {
+          left: rect.left,
+          right: rect.right,
+          top: rect.top,
+          bottom: rect.bottom,
+          viewportWidth: window.innerWidth,
+          viewportHeight: window.innerHeight,
+          documentWidth: document.documentElement.scrollWidth,
+        };
+      });
+      if (
+        narrowGeometry.left < 0
+        || narrowGeometry.right > narrowGeometry.viewportWidth
+        || narrowGeometry.top < 0
+        || narrowGeometry.bottom > narrowGeometry.viewportHeight
+        || narrowGeometry.documentWidth > narrowGeometry.viewportWidth
+      ) {
+        throw new Error(`Diagnostics drawer clips or causes horizontal overflow at 900x900: ${JSON.stringify(narrowGeometry)}`);
+      }
+      await assertVisible(page.getByRole("button", { name: "Refresh scan diagnostics" }), "Expected narrow refresh control");
+      await assertVisible(page.getByRole("button", { name: "Close scan diagnostics" }), "Expected narrow close control");
+      await page.setViewportSize({ width: 1920, height: 1080 });
+
       let releaseStaleRefresh;
       let markStaleRefreshStarted;
       let markStaleRefreshFinished;

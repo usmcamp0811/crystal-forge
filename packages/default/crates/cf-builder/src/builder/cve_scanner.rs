@@ -1372,22 +1372,20 @@ mod tests {
     async fn heartbeat_revocation_kills_descendant_process_group() {
         use nix::sys::signal::kill;
         use nix::unistd::Pid;
-        use std::os::unix::fs::PermissionsExt;
 
         let directory = tempfile::tempdir().expect("revocation fixture directory");
-        let script = directory.path().join("spawn-descendant");
         let pid_file = directory.path().join("descendant.pid");
-        std::fs::write(&script, "#!/bin/sh\nsleep 60 &\necho $! > \"$1\"\nwait\n")
-            .expect("fixture script");
-        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
-        permissions.set_mode(0o700);
-        std::fs::set_permissions(&script, permissions).unwrap();
 
         let error = run_leased_command(
             &DelayedRevokingApi,
             &claim(),
-            script.to_str().unwrap(),
-            &[pid_file.to_string_lossy().into_owned()],
+            "sh",
+            &[
+                "-c".to_string(),
+                "sleep 60 & echo $! > \"$1\"; wait".to_string(),
+                "spawn-descendant".to_string(),
+                pid_file.to_string_lossy().into_owned(),
+            ],
             Duration::from_secs(2),
             64,
             Arc::new(AtomicUsize::new(0)),

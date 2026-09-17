@@ -7293,7 +7293,7 @@ tr.attention-flash {
 .scanning-toggle input, .scanning-archive-control input { accent-color: var(--cf-brand-purple); }
 .scanning-load-note { margin-top: 12px; font-size: 11px; }
 .scanning-log-backdrop { z-index: 86; }
-.scanning-log-drawer { width: min(760px, 96vw); padding: 0; overflow: hidden; display: flex; flex-direction: column; }
+.scanning-log-drawer { width: min(760px, 96vw); max-width: 100vw; box-sizing: border-box; padding: 0; overflow: hidden; display: flex; flex-direction: column; }
 .scanning-log-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 18px 20px; border-bottom: 1px solid var(--cf-divider); }
 .scanning-log-head h2 { margin: 0; font-size: 17px; }
 .scanning-log-head p { margin: 4px 0; color: var(--cf-text-secondary); font-size: 12px; }
@@ -7312,6 +7312,10 @@ tr.attention-flash {
   .scan-pulse { animation: none; }
 }
 
+@media (max-width: 1000px) {
+  .scanning-log-drawer { right: 16px; width: min(760px, calc(100vw - 16px)); }
+}
+
 @media (max-width: 640px) {
   .scanning-head { align-items: flex-start; gap: 12px; }
   .scanning-head-actions { width: 100%; }
@@ -7325,7 +7329,7 @@ tr.attention-flash {
   .scan-sys-expand { padding-left: 12px; padding-right: 12px; }
   .scanning-schedule-row { flex-direction: column; }
   .scanning-schedule-control { width: 100%; }
-  .scanning-log-drawer { width: 100vw; }
+  .scanning-log-drawer { width: calc(100vw - 16px); }
 }
 .sys-table-fixed { table-layout: fixed; }
 .sys-table-dense { table-layout: fixed; }
