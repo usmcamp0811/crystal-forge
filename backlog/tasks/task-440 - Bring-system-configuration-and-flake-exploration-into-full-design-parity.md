@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-17 17:33'
+updated_date: '2026-09-17 17:35'
 labels:
   - design-parity
   - web-ui
@@ -57,6 +57,8 @@ references:
   - git commit 3a5f207c249c4c272f4b2ab32e11bacefcb9ba45
   - git commit 7f49d8bb41ae0b86c5fa1ac8e6d375e7f134dfd7
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2857537294'
+  - git commit 9562fe09e94de3c790cd512ce7c77cc819bc0779
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2859062860'
 documentation:
   - docs/design/CrystalForge/app.jsx
   - docs/design/CrystalForge/components/SystemDetail.jsx
@@ -202,7 +204,7 @@ The `modifiedFiles` metadata is anticipated and non-exhaustive. The implementati
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-2026-09-17 shallow Config root completion: added the shared bounded `config_shallow_observer.nix`; primary evaluation now emits optional per-system root metadata without evaluating `system.build.toplevel` for observation work; exact derivation persistence atomically queues a durable root fallback before detached publication; commit catch-up repairs missing roots; legacy global path conflicts do not queue an invalid observation FK. Shallow root/prefix/option/provenance requests now evaluate immutable materialized source directly with separate interactive advisory-lock/semaphore capacity, credential isolation, bounded output/deadlines, and process-group cleanup. Configured-index work retains heavy-Nix capacity. Schema-v2 observation/request migrations domain-separate content digests. The Web UI polls immediately and then adaptively. Architecture documentation and real-Nix extractor coverage were updated. Final verification passed: backend workspace rustfmt; scoped frontend rustfmt; `git diff --check`; offline cf-server lib/config-inspector-worker check; focused evaluator contract tests; server package Nix build with 1534 passing tests and 0 failures; web-ui package Nix build; config-inspector, evaluator-snapshot-isolation, and verified-source-evaluator-parity checks; isolated PostgreSQL root-publication and interactive-lock regressions from the implementation pass; authoritative focused Web UI VM check for workflows 12l, 12la, 12m, 12n, 12p, and 12q with 6/6 workflows, 12 dark/light screenshots, and 4/4 design-parity captures. The host 12la workflow passed; host 12l could not isolate a completed mock carrier because the persistent preview has no build worker, while the authoritative VM 12l workflow passed. The real timing probe remains unavailable because this host cannot read the recorded immutable source store path. `nix flake check --keep-going -L` was started and then intentionally stopped at maintainer request; exact-head CI owns the broad gate. Preview was rebuilt and is healthy at UI 8080/API 3445. Generated untracked `packages/web-ui/assets/tailwind.css` and stash `stash@{0}` remain untouched.
+2026-09-17 shallow Config root slice committed and pushed as `9562fe09` (`TASK-440: Publish shallow Config roots`) to `origin/TASK-440-system-config-flake-parity`; local and remote heads match exactly. MR !323 remains open. Exact-head pipeline 2859062860 is running and owns the maintainer-requested broad flake gate. TASK-440 remains In Progress until CI and review complete. The only worktree residue is the preserved generated untracked `packages/web-ui/assets/tailwind.css`; the preserved scanner stash remains unchanged.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
