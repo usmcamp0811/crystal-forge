@@ -878,13 +878,28 @@ fn config_observation_payload_identity(
     }
 }
 
+fn config_observation_poll_delay_ms(
+    lifecycle: ConfigObservationLifecycle,
+    first_poll: bool,
+) -> Option<u32> {
+    match lifecycle {
+        ConfigObservationLifecycle::Queued | ConfigObservationLifecycle::WaitingForCapacity => {
+            Some(if first_poll { 250 } else { 1_000 })
+        }
+        ConfigObservationLifecycle::Running => Some(if first_poll { 250 } else { 500 }),
+        ConfigObservationLifecycle::Succeeded | ConfigObservationLifecycle::Failed => None,
+    }
+}
+
 /// Posts once, polls only the durable request, and fetches its immutable result.
 ///
 /// `on_lifecycle` receives the initial POST response and each later lifecycle
-/// response. Queued and capacity-waiting requests poll every five seconds.
-/// Running requests poll every 2.5 seconds. The loader does not synthesize a
-/// percentage or re-POST while it waits. `should_continue` stops obsolete
-/// polling without changing or cancelling the durable server request.
+/// response. The first nonterminal response polls after 250 ms so a short
+/// interactive evaluation does not incur a fixed multi-second UI delay. Later
+/// queued or capacity-waiting responses poll every second. Running requests
+/// poll every 500 ms. The loader does not synthesize a percentage or re-POST
+/// while it waits. `should_continue` stops obsolete polling without changing or
+/// cancelling the durable server request.
 ///
 /// # Errors
 ///
@@ -911,6 +926,7 @@ where
     validate_config_observation_request_identity(&lifecycle, None, revision, &request)?;
     let request_id = lifecycle.request_id;
     on_lifecycle(&lifecycle);
+    let mut first_poll = true;
 
     loop {
         match lifecycle.lifecycle {
@@ -954,13 +970,17 @@ where
                         .unwrap_or_else(|| "Config observation failed".to_string()),
                 });
             }
-            ConfigObservationLifecycle::Queued | ConfigObservationLifecycle::WaitingForCapacity => {
-                gloo_timers::future::TimeoutFuture::new(5_000).await;
-            }
-            ConfigObservationLifecycle::Running => {
-                gloo_timers::future::TimeoutFuture::new(2_500).await;
+            ConfigObservationLifecycle::Queued
+            | ConfigObservationLifecycle::WaitingForCapacity
+            | ConfigObservationLifecycle::Running => {
+                if let Some(delay) =
+                    config_observation_poll_delay_ms(lifecycle.lifecycle, first_poll)
+                {
+                    gloo_timers::future::TimeoutFuture::new(delay).await;
+                }
             }
         }
+        first_poll = false;
 
         if !should_continue() {
             return Ok(None);
@@ -3399,5 +3419,25 @@ mod config_observation_tests {
         assert_eq!(kind, ConfigObservationKind::Option);
         assert_eq!(path, ["services", "openssh", "enable"]);
         assert_eq!(child_offset, 0);
+    }
+
+    #[test]
+    fn observation_polling_has_no_fixed_multi_second_initial_delay() {
+        assert_eq!(
+            config_observation_poll_delay_ms(ConfigObservationLifecycle::Queued, true),
+            Some(250)
+        );
+        assert_eq!(
+            config_observation_poll_delay_ms(ConfigObservationLifecycle::WaitingForCapacity, false),
+            Some(1_000)
+        );
+        assert_eq!(
+            config_observation_poll_delay_ms(ConfigObservationLifecycle::Running, false),
+            Some(500)
+        );
+        assert_eq!(
+            config_observation_poll_delay_ms(ConfigObservationLifecycle::Succeeded, true),
+            None
+        );
     }
 }

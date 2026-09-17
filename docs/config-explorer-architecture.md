@@ -122,6 +122,16 @@ Establish a trustworthy top-level hierarchy and basic metadata. This phase MAY
 inspect the root structure and bounded diagnostics. It SHOULD avoid evaluating
 all option values and all provenance records.
 
+The primary evaluator includes this bounded root payload with each successful
+configuration result. The derivation transaction also creates a root-only
+fallback for the exact active system. This fallback makes the handoff durable
+before the evaluator continues. An asynchronous worker replaces the fallback
+with a valid in-band payload, so payload persistence does not delay evaluator
+output consumption or build dispatch. If the payload is absent, invalid,
+cannot be published, or cannot enter the bounded publication channel, the
+fallback remains queued. The worker also runs a per-commit catch-up after it
+drains the channel.
+
 ### Phase 2: scoped prefix expansion
 
 Inspect only the requested path prefix and bounded descendants. Expanding a
@@ -239,14 +249,16 @@ evidence remains authoritative when its stored commit identifier is invalid,
 but the invalid identifier MUST NOT enter Config navigation.
 
 Commit mode can start a targeted Config observation only for a full commit SHA
-whose commit evaluation is complete and whose exact NixOS derivation has a
-exact configuration name, completion time, and nonempty derivation path. The
-UI selects the newest commit that satisfies these prerequisites. It does not
-assume that the first timeline row is inspectable. Only an authenticated Admin
-can start root, scoped, or configured-index observations. An Operator retains
-ordinary system mutation permissions but cannot start Config observations. An
-explicit commit selection remains historical observation context even if its
-SHA equals the recovered current label.
+whose exact NixOS derivation has an exact configuration name, completion time,
+and nonempty derivation path. The whole commit can remain `in_progress`: one
+configuration becomes inspectable as soon as its derivation and root are
+persisted. The UI selects the newest commit that satisfies these per-system
+prerequisites. It does not assume that the first timeline row is inspectable.
+Only an authenticated Admin can start root, scoped, or configured-index
+observations. An Operator retains ordinary system mutation permissions but
+cannot start Config observations. An explicit commit selection remains
+historical observation context even if its SHA equals the recovered current
+label.
 
 Every observation is tied to an immutable identity containing, at minimum:
 
@@ -266,6 +278,9 @@ The cache contract is:
 - A cache hit starts zero Nix subprocesses.
 - Identical active requests coalesce.
 - Different targets run independently.
+- An uncached shallow request evaluates the exact materialized immutable source
+  for its commit. It does not reconstruct the source from a mutable branch or
+  evaluate `system.build.toplevel`.
 - A complete V2 snapshot MAY satisfy Explorer reads immediately when its
   authority and completeness contract match the request.
 
@@ -362,9 +377,12 @@ queued/waiting_for_capacity
 The system MUST NOT hold a long-lived database transaction merely to wait for
 evaluator capacity. This rule applies to scoped observations and optional
 complete-V2 enrichment. A capacity miss does not increment the durable attempt
-count. A complete-V2 worker holds the acquired capacity across both Nix stages
-and refreshes its execution heartbeat every 10 seconds while either stage runs.
-It releases global and local heavy-Nix capacity before it acquires the snapshot
+count. Root, prefix, option, and provenance requests use a dedicated
+cross-process advisory lock and a one-per-process semaphore. The configured
+index and other full-inventory work retain separate heavy-Nix capacity. A
+complete-V2 worker holds the acquired capacity across both Nix stages and
+refreshes its execution heartbeat every 10 seconds while either stage runs. It
+releases global and local heavy-Nix capacity before it acquires the snapshot
 writer lock for persistence. Its execution-session lock remains held through
 persistence or terminalization so stale recovery cannot replace the owner.
 
@@ -396,16 +414,22 @@ Config inspection follows these security rules:
 - POST mutations require CSRF protection.
 - Credentials remain server-side.
 - Exact revision inspection is read-only.
-- Config inspection MUST NOT mutate `flake.lock`. `nix-eval-jobs` has no
-  `--no-write-lock-file` option. The worker evaluates an immutable revision
-  reference, and the real-Nix regression uses a read-only store fixture without
-  a lock file and verifies that no lock file appears.
+- Config inspection MUST NOT mutate `flake.lock`. Shallow requests use
+  `nix eval --json --no-write-lock-file` against the NAR-qualified immutable
+  store source. Configured-index work uses `nix-eval-jobs` against the same
+  immutable source contract. The real-Nix regression uses a read-only store
+  fixture without a lock file and verifies that no lock file appears.
+- Repository credentials exist only during immutable source materialization.
+  Evaluator subprocesses do not receive `NETRC` or `GIT_SSH_COMMAND`.
 - Secret values and traces MUST follow the existing redaction rules before
   persistence, indexing, comparison, logging, or API serialization.
 
 ## Process and timeout model
 
 Every evaluator subprocess MUST be bounded by a timeout and an output limit.
+Immutable source Git and Nix helpers run in dedicated process groups under the
+same cleanup rule. Timeout, cancellation, or future drop terminates descendants
+before evaluation capacity and repository locks are released.
 Each complete Config Inspector stage has a 300-second default deadline. An
 operator MAY set
 `CRYSTAL_FORGE_CONFIG_INSPECTION_STAGE_DEADLINE_SECONDS` to an integer from 1
@@ -514,7 +538,7 @@ requirements:
 - richer comparison after complete V2 artifacts exist;
 - more precise progress reporting;
 - cache retention and garbage-collection policies; and
-- separate bounded interactive Nix concurrency if measurements prove it safe.
+- multi-slot interactive Nix concurrency if measurements prove it safe.
 
 Any change that weakens the authority boundaries in this document requires an
 architecture decision update before implementation.
@@ -529,6 +553,7 @@ The current TASK-440 implementation is distributed across these boundaries:
   `packages/default/crates/cf-server/src/models/config_inspector.rs`.
 - Trusted inspector expressions:
   `packages/default/crates/cf-server/src/models/config_inspector.nix`,
+  `packages/default/crates/cf-server/src/models/config_shallow_observer.nix`,
   `packages/default/crates/cf-server/src/models/config_observer.nix`, and
   `packages/default/crates/cf-server/src/models/config_value_encoding.nix`.
 - Explorer queries and persistence:
@@ -548,8 +573,10 @@ The current TASK-440 implementation is distributed across these boundaries:
   `0252_config_inspection_jobs.sql`,
   `0253_config_inspection_execution_ownership.sql`,
   `0254_partial_config_option_inventories.sql`, and
-  `0255_scoped_config_observations.sql`, and
-  `0256_config_observation_child_pages.sql`.
+  `0255_scoped_config_observations.sql`,
+  `0256_config_observation_child_pages.sql`,
+  `0266_version_source_bound_config_observations.sql`, and
+  `0267_version_source_bound_config_observation_requests.sql`.
 - API handlers and models: the Config inspection handlers and API models under
   `packages/default/crates/cf-server/src/handlers/api/` and
   `packages/default/crates/cf-server/src/api/models.rs`.
@@ -580,6 +607,12 @@ offset range without accepting Nix source from the browser. If evaluation of an
 option value or nested encoded value fails, the
 option observation retains readable metadata and returns a bounded
 `value_unavailable` value state without a raw Nix trace.
+
+Uncached shallow observations materialize the commit's verified source archive
+and evaluate only the requested bounded root, prefix, option, or provenance
+shape. Schema version 2 separates these immutable-source results from legacy
+carrier evaluation. Content digests include the schema domain so identical JSON
+from different interpretation contracts cannot share one digest identity.
 
 ## Decision record
 

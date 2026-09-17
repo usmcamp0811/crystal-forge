@@ -127,7 +127,7 @@ where
     }
 }
 
-/// Complete bounded output from one external Nix helper.
+/// Complete bounded output from one external evaluation or source helper.
 #[derive(Debug)]
 pub(crate) struct BoundedProcessOutput {
     /// Child exit status.
@@ -138,7 +138,8 @@ pub(crate) struct BoundedProcessOutput {
     pub(crate) stderr: CappedOutput,
 }
 
-/// Runs an expensive Nix child under one deadline and bounded output buffers.
+/// Runs an external evaluation or source child under one deadline and bounded
+/// output buffers.
 ///
 /// The function starts a new process group, drains both pipes concurrently, and
 /// keeps draining after each retention ceiling so a verbose child cannot block.
@@ -531,18 +532,96 @@ pub struct NixEvalJobResult {
     pub meta: Option<serde_json::Value>,
 }
 
+#[derive(Debug)]
+struct PrimaryConfigRootPublication {
+    commit_id: i32,
+    derivation_id: i32,
+    configuration_name: String,
+    carrier_drv_path: String,
+    payload: Option<serde_json::Value>,
+}
+
+fn spawn_primary_config_root_publisher(
+    pool: PgPool,
+) -> tokio::sync::mpsc::Sender<PrimaryConfigRootPublication> {
+    // CONCURRENCY: The bounded channel prevents optional observation writes
+    // from creating one task per configuration. The evaluator never waits for
+    // in-band payload persistence and does not join this enrichment worker
+    // during primary finalization. Derivation persistence creates a durable
+    // fallback before any publication enters this channel.
+    let (sender, mut receiver) = tokio::sync::mpsc::channel::<PrimaryConfigRootPublication>(256);
+    tokio::spawn(async move {
+        let mut commit_ids = HashSet::new();
+        while let Some(publication) = receiver.recv().await {
+            commit_ids.insert(publication.commit_id);
+            if let Err(error) =
+                crate::queries::config_observations::publish_or_queue_primary_config_root(
+                    &pool,
+                    publication.commit_id,
+                    publication.derivation_id,
+                    &publication.configuration_name,
+                    &publication.carrier_drv_path,
+                    publication.payload.as_ref(),
+                )
+                .await
+            {
+                warn!(
+                    commit_id = publication.commit_id,
+                    derivation_id = publication.derivation_id,
+                    system = %publication.configuration_name,
+                    %error,
+                    "primary_config_root_publication_failed"
+                );
+            }
+        }
+        for commit_id in commit_ids {
+            if let Err(error) =
+                crate::queries::config_observations::queue_missing_primary_config_roots(
+                    &pool, commit_id,
+                )
+                .await
+            {
+                warn!(
+                    commit_id,
+                    %error,
+                    "primary_config_root_fallback_catchup_failed"
+                );
+            }
+        }
+    });
+    sender
+}
+
 fn normalize_policy_metadata(result: &mut NixEvalJobResult) {
     // COMPATIBILITY: Current nix-eval-jobs versions emit the explicit apply
     // result as `extraValue`. Older evaluator output that already contains
     // `meta.policies` remains accepted.
-    if let Some(policies) = result.extra_value.take() {
+    if let Some(extra_value) = result.extra_value.take() {
         let meta = result.meta.get_or_insert_with(|| serde_json::json!({}));
         if let Some(fields) = meta.as_object_mut() {
-            fields.insert("policies".to_string(), policies);
+            if let Some(extra) = extra_value.as_object()
+                && let Some(policies) = extra.get("policies")
+            {
+                fields.insert("policies".to_string(), policies.clone());
+                if let Some(root) = extra.get("configObservationRoot") {
+                    fields.insert("configObservationRoot".to_string(), root.clone());
+                }
+            } else {
+                // COMPATIBILITY: Older evaluator expressions return the policy
+                // object directly as `extraValue`.
+                fields.insert("policies".to_string(), extra_value);
+            }
         } else {
-            result.meta = Some(serde_json::json!({ "policies": policies }));
+            result.meta = Some(serde_json::json!({ "policies": extra_value }));
         }
     }
+}
+
+fn captured_config_root(result: &NixEvalJobResult) -> Option<serde_json::Value> {
+    let capture = result.meta.as_ref()?.get("configObservationRoot")?;
+    (capture.get("status").and_then(serde_json::Value::as_str) == Some("available"))
+        .then(|| capture.get("payload").cloned())
+        .flatten()
 }
 
 fn parse_expected_store_path_from_outputs(outputs: &serde_json::Value) -> Option<String> {
@@ -831,7 +910,7 @@ fn authoritative_evaluator_args(
         "true".to_string(),
         "--meta".to_string(),
         "--apply".to_string(),
-        "derivation: derivation.meta.policies".to_string(),
+        "derivation: { policies = derivation.meta.policies; configObservationRoot = derivation.meta.crystalForgeConfigRoot or { status = \"failed\"; code = \"root_capture_missing\"; }; }".to_string(),
         "--workers".to_string(),
         workers.to_string(),
         "--max-memory-size".to_string(),
@@ -1741,6 +1820,24 @@ pub async fn persist_evaluated_system(
         | SuccessfulEvalWrite::PreservedBuildState { derivation_id, .. }
         | SuccessfulEvalWrite::LegacyPathConflict { derivation_id } => *derivation_id,
     };
+    let has_exact_config_carrier =
+        !matches!(&write, SuccessfulEvalWrite::LegacyPathConflict { .. });
+    if system_id.is_some() && has_exact_config_carrier {
+        // FAILURE ISOLATION: Queue the cheap root fallback in the same
+        // transaction as its exact derivation. Optional in-band publication
+        // can upgrade this row asynchronously, but a restart or full channel
+        // cannot leave the configuration without durable root work. A legacy
+        // global path conflict has no commit-owned carrier and cannot satisfy
+        // the observation foreign-key identity.
+        crate::queries::config_observations::queue_primary_config_root_fallback_tx(
+            &mut tx,
+            commit_id,
+            assessment_derivation_id,
+            &result.system_name,
+            &result.drv_path,
+        )
+        .await?;
+    }
     if let Some((system_id, resolved)) = resolved_policies.as_ref() {
         crate::services::composite_enforcement::persist_eval_passed_for_system_in_tx(
             &mut tx,
@@ -3285,6 +3382,7 @@ async fn evaluate_with_nix_eval_jobs_inner(
     const STDERR_LOG_BATCH_SIZE: usize = 100;
     let mut stdout_done = false;
     let mut stderr_done = false;
+    let root_publication_tx = spawn_primary_config_root_publisher(pool.clone());
 
     // Collect successful system results during streaming; all durable DB
     // writes are deferred until the attempt is fully validated (child exit +
@@ -3394,6 +3492,7 @@ async fn evaluate_with_nix_eval_jobs_inner(
                                 }
                                 let has_error = result.error.is_some();
                                 let drv_path = result.drv_path.clone();
+                                let config_root = captured_config_root(&result);
                                 // Resolve the expected store path from nix-eval-jobs
                                 // JSON outputs (fast, no subprocess).  This avoids
                                 // blocking the stdout reader on a nix-store query
@@ -3791,6 +3890,39 @@ async fn evaluate_with_nix_eval_jobs_inner(
                                         )
                                         .await?;
 
+                                        let observation_derivation_id = match &persisted {
+                                            SystemPersistenceOutcome::NeedsBuildPreparation { derivation_id, .. }
+                                            | SystemPersistenceOutcome::ExistingBuildJob { derivation_id, .. }
+                                            | SystemPersistenceOutcome::RecordedWithoutBuild { derivation_id, .. } => Some(*derivation_id),
+                                            SystemPersistenceOutcome::Cancelled
+                                            | SystemPersistenceOutcome::Superseded => None,
+                                        };
+                                        if let Some(derivation_id) = observation_derivation_id
+                                            && let Err(error) = root_publication_tx.try_send(
+                                                PrimaryConfigRootPublication {
+                                                    commit_id: commit.id,
+                                                    derivation_id,
+                                                    configuration_name: system_name.clone(),
+                                                    carrier_drv_path: successful.drv_path.clone(),
+                                                    payload: config_root.clone(),
+                                                },
+                                            )
+                                        {
+                                            // FAILURE ISOLATION: Optional Config data cannot
+                                            // roll back a valid derivation or delay build
+                                            // preparation for this configuration. A full
+                                            // bounded channel is reported instead of creating
+                                            // unbounded publication tasks.
+                                            warn!(
+                                                commit_id = commit.id,
+                                                expected_attempt,
+                                                derivation_id,
+                                                system = %system_name,
+                                                %error,
+                                                "primary_config_root_publication_queue_full"
+                                            );
+                                        }
+
                                         match persisted {
                                             SystemPersistenceOutcome::NeedsBuildPreparation {
                                                 derivation_id,
@@ -4079,7 +4211,7 @@ async fn evaluate_with_nix_eval_jobs_inner(
                                                 cf_agent_enabled: None,
                                                 build_eligible: false,
                                             };
-                                            match persist_evaluated_system(
+                                            let persisted = persist_evaluated_system(
                                                 pool,
                                                 commit.id,
                                                 expected_attempt,
@@ -4087,8 +4219,33 @@ async fn evaluate_with_nix_eval_jobs_inner(
                                                 &error_check,
                                                 assigned_policies,
                                             )
-                                            .await?
+                                            .await?;
+                                            let observation_derivation_id = match &persisted {
+                                                SystemPersistenceOutcome::RecordedWithoutBuild { derivation_id, .. }
+                                                | SystemPersistenceOutcome::ExistingBuildJob { derivation_id, .. } => Some(*derivation_id),
+                                                _ => None,
+                                            };
+                                            if let Some(derivation_id) = observation_derivation_id
+                                                && let Err(error) = root_publication_tx.try_send(
+                                                    PrimaryConfigRootPublication {
+                                                        commit_id: commit.id,
+                                                        derivation_id,
+                                                        configuration_name: system_name.clone(),
+                                                        carrier_drv_path: failed.drv_path.clone(),
+                                                        payload: config_root.clone(),
+                                                    },
+                                                )
                                             {
+                                                warn!(
+                                                    commit_id = commit.id,
+                                                    expected_attempt,
+                                                    derivation_id,
+                                                    system = %system_name,
+                                                    %error,
+                                                    "policy_failed_config_root_publication_queue_full"
+                                                );
+                                            }
+                                            match persisted {
                                                 SystemPersistenceOutcome::RecordedWithoutBuild { .. }
                                                 | SystemPersistenceOutcome::ExistingBuildJob { .. } => {}
                                                 SystemPersistenceOutcome::Cancelled => {
@@ -5583,7 +5740,7 @@ mod tests {
                 "true",
                 "--meta",
                 "--apply",
-                "derivation: derivation.meta.policies",
+                "derivation: { policies = derivation.meta.policies; configObservationRoot = derivation.meta.crystalForgeConfigRoot or { status = \"failed\"; code = \"root_capture_missing\"; }; }",
                 "--workers",
                 "2",
                 "--max-memory-size",
@@ -5627,11 +5784,11 @@ mod tests {
         CappedOutput, ConfirmedSystemFailure, EvaluationFinalizeOutcome, EvaluationPlan,
         NixEvalJobResult, NixEvalProcessGuard, SuccessfulSystemResult,
         SystemBuildActivationOutcome, SystemFinalizeOutcome, SystemNotQueuedReason,
-        SystemPersistenceOutcome, activate_evaluated_system_build, finalize_evaluated_system,
-        finalize_evaluation_attempt, mock_eval_stage_delay, normalize_policy_metadata,
-        persist_evaluated_system, read_capped, record_missing_snapshot_captures,
-        resolve_mock_systems, run_nix_command_bounded, should_mock_policy_fail,
-        summarize_commit_metadata,
+        SystemPersistenceOutcome, activate_evaluated_system_build, captured_config_root,
+        finalize_evaluated_system, finalize_evaluation_attempt, mock_eval_stage_delay,
+        normalize_policy_metadata, persist_evaluated_system, read_capped,
+        record_missing_snapshot_captures, resolve_mock_systems, run_nix_command_bounded,
+        should_mock_policy_fail, summarize_commit_metadata,
     };
     use crate::api::models::CancelEvalOutcome;
     use crate::models::deployment_policies::{
@@ -5673,6 +5830,41 @@ mod tests {
                 "policies": { "architectureGate": true }
             }))
         );
+    }
+
+    #[test]
+    fn apply_result_keeps_policy_and_optional_root_metadata_separate() {
+        let root = serde_json::json!({
+            "kind": "root",
+            "path_components": [],
+            "child_offset": 0,
+            "children": [],
+            "children_truncated": false,
+            "total_children": 0
+        });
+        let mut result: NixEvalJobResult = serde_json::from_value(serde_json::json!({
+            "attr": "chesty",
+            "attrPath": ["chesty"],
+            "name": "chesty",
+            "drvPath": "/nix/store/example.drv",
+            "error": null,
+            "cacheStatus": null,
+            "outputs": null,
+            "extraValue": {
+                "policies": { "architectureGate": true },
+                "configObservationRoot": { "status": "available", "payload": root }
+            },
+            "meta": null
+        }))
+        .expect("nix-eval-jobs output should deserialize");
+
+        normalize_policy_metadata(&mut result);
+
+        assert_eq!(
+            result.meta.as_ref().unwrap()["policies"]["architectureGate"],
+            true
+        );
+        assert_eq!(captured_config_root(&result), Some(root));
     }
 
     // ── NixEvalProcessGuard regression tests ────────────────────────────

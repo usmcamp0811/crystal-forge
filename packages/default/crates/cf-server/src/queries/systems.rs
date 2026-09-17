@@ -1563,7 +1563,6 @@ pub async fn list_recent_commits_for_system(
                 c.author,
                 c.commit_timestamp AS timestamp,
                 c.git_commit_hash ~ '^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$'
-                AND COALESCE(c.evaluation_status = 'complete', FALSE)
                 AND EXISTS (
                     SELECT 1
                     FROM derivations derivation

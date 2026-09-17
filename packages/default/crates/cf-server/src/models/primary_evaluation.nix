@@ -3,6 +3,7 @@
 , requestedRevision
 , resolvedRevisionOverride ? null
 , configurationNames ? null
+, shallowObserver ? null
 }:
 
 let
@@ -26,6 +27,17 @@ builtins.mapAttrs
     let
       system = cfg.config.system.build.toplevel;
       checker = policyCheckers.${name} or (_: { });
+      rootAttempt =
+        if shallowObserver == null then { success = false; }
+        else builtins.tryEval (
+          let root = shallowObserver {
+            configuration = cfg;
+            operation = "root";
+            path = [ ];
+            childOffset = 0;
+          };
+          in builtins.deepSeq root root
+        );
     in
     system // {
       meta = {
@@ -36,6 +48,13 @@ builtins.mapAttrs
             if resolvedRevisionOverride != null
             then resolvedRevisionOverride
             else flake.sourceInfo.rev or null;
+        };
+        crystalForgeConfigRoot = if rootAttempt.success then {
+          status = "available";
+          payload = rootAttempt.value;
+        } else {
+          status = "failed";
+          code = "root_capture_failed";
         };
       };
     })

@@ -6,6 +6,7 @@ let
   provenanceSource = builtins.readFile ../../packages/default/crates/cf-server/src/models/config_provenance.nix;
   provenanceLibSource = builtins.readFile ../../packages/default/crates/cf-server/src/models/config_provenance_lib.nix;
   valueEncodingSource = builtins.readFile ../../packages/default/crates/cf-server/src/models/config_value_encoding.nix;
+  shallowObserverSource = builtins.readFile ../../packages/default/crates/cf-server/src/models/config_shallow_observer.nix;
   legacyNixpkgs = builtins.fetchTree
     (builtins.fromJSON
       (builtins.readFile ../../lib/test-flake/test-flake/flake.lock)).nodes.nixpkgs.locked;
@@ -409,8 +410,37 @@ let
   fullCountExpression = ''
     builtins.toString (builtins.length (builtins.attrNames (${expression})))
   '';
+  shallowExpression = ''
+    let
+      flake = builtins.getFlake "path:${fixture}";
+      configuration = flake.nixosConfigurations.good;
+      observer = (${shallowObserverSource});
+      encodeValue = (${valueEncodingSource}) configuration.pkgs.lib;
+    in {
+      root = observer {
+        inherit configuration encodeValue;
+        operation = "root";
+      };
+      prefix = observer {
+        inherit configuration encodeValue;
+        operation = "prefix";
+        path = [ "crystalForgeProbe" ];
+      };
+      option = observer {
+        inherit configuration encodeValue;
+        operation = "option";
+        path = [ "crystalForgeProbe" "healthyBefore" ];
+      };
+      provenance = observer {
+        inherit configuration encodeValue;
+        operation = "provenance";
+        path = [ "crystalForgeProbe" "healthyBefore" ];
+      };
+    }
+  '';
   subsetFile = pkgs.writeText "crystal-forge-config-inspector-subset.nix" subsetExpression;
   fullCountFile = pkgs.writeText "crystal-forge-config-inspector-count.nix" fullCountExpression;
+  shallowFile = pkgs.writeText "crystal-forge-config-shallow-observer.nix" shallowExpression;
   unsupportedCapabilityFile = pkgs.writeText "crystal-forge-config-inspector-unsupported.nix" unsupportedCapabilityExpression;
   definitionValuesFile = pkgs.writeText "crystal-forge-config-definition-values.nix" definitionValuesExpression;
   legacyDefinitionValuesFile = pkgs.writeText "crystal-forge-config-definition-values-legacy.nix" legacyDefinitionValuesExpression;
@@ -436,6 +466,21 @@ pkgs.runCommand "crystal-forge-config-inspector-check" {
   grep -F 'builtins.hasAttr option.option_key allowedOptionKeySet' ${../../packages/default/crates/cf-server/src/models/config_definition_values.nix} >/dev/null
   ! grep -F 'lib.unique optionKeys' ${../../packages/default/crates/cf-server/src/models/config_inspector.nix}
   ! grep -F "builtins.foldl'" ${../../packages/default/crates/cf-server/src/models/config_inspector.nix}
+
+  nix eval "''${nix_args[@]}" --json --expr "import ${shallowFile}" > shallow.json
+  jq -e '
+    .root.kind == "root"
+    and .root.path_components == []
+    and ([.root.children[] | select(.path_components == ["crystalForgeProbe"] and .kind == "prefix")] | length == 1)
+    and .prefix.kind == "prefix"
+    and ([.prefix.children[] | select(.path_components == ["crystalForgeProbe", "healthyBefore"] and .kind == "option")] | length == 1)
+    and .option.kind == "option"
+    and .option.path_components == ["crystalForgeProbe", "healthyBefore"]
+    and .option.value == {"kind":"scalar","value":"before"}
+    and .provenance.kind == "provenance"
+    and .provenance.path_components == ["crystalForgeProbe", "healthyBefore"]
+    and .provenance.total_definitions >= 1
+  ' shallow.json >/dev/null
 
   nix-eval-jobs \
     --expr "import ${partialFile}" \

@@ -172,16 +172,24 @@ fn lock_path(source_root: &Path, mirror_id: &str) -> PathBuf {
     source_root.join("locks").join(format!("{mirror_id}.lock"))
 }
 
-async fn command_output(command: &mut Command, operation: &str) -> Result<std::process::Output> {
-    let output = tokio::time::timeout(std::time::Duration::from_secs(120), command.output())
-        .await
-        .with_context(|| format!("{operation} timed out"))?
-        .with_context(|| format!("failed to start {operation}"))?;
+async fn command_output(
+    command: &mut Command,
+    operation: &str,
+) -> Result<crate::models::evaluate_with_policies::BoundedProcessOutput> {
+    let output = crate::models::evaluate_with_policies::run_nix_command_bounded(
+        command,
+        operation,
+        std::time::Duration::from_secs(120),
+        1024 * 1024,
+        256 * 1024,
+    )
+    .await?;
     if !output.status.success() {
-        let stderr = crate::security::snapshot_redaction::redact_text(
-            String::from_utf8_lossy(&output.stderr).trim(),
-        );
+        let stderr = output.stderr.diagnostic_excerpt(16 * 1024);
         anyhow::bail!("{operation} failed: {stderr}");
+    }
+    if output.stdout.is_truncated() {
+        anyhow::bail!("{operation} produced more than 1048576 stdout bytes");
     }
     Ok(output)
 }
@@ -272,10 +280,9 @@ async fn ensure_mirror_has_commit(
         "-e",
         &format!("{commit_hash}^{{commit}}"),
     ]);
-    if verify
-        .output()
+    if command_output(&mut verify, "authorized Git commit lookup")
         .await
-        .is_ok_and(|output| output.status.success())
+        .is_ok()
     {
         return Ok(());
     }
@@ -316,7 +323,7 @@ async fn path_nar_hash(path: &Path) -> Result<String> {
         .args(["hash", "path", "--type", "sha256", "--sri"])
         .arg(path);
     let output = command_output(&mut command, "Nix source NAR hash").await?;
-    Ok(String::from_utf8(output.stdout)?.trim().to_string())
+    Ok(String::from_utf8(output.stdout.bytes)?.trim().to_string())
 }
 
 async fn lock_hash(path: &Path) -> Result<String, MaterializationError> {
@@ -523,7 +530,7 @@ pub async fn materialize_immutable_source(
         .await
         .map_err(MaterializationError::transient)?;
     ensure_materialization_not_cancelled(pool, commit_id).await?;
-    let store_path = String::from_utf8(output.stdout)
+    let store_path = String::from_utf8(output.stdout.bytes)
         .map_err(|error| MaterializationError::transient(anyhow!(error)))?
         .trim()
         .to_string();

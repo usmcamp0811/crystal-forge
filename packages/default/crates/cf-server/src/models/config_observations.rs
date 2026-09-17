@@ -12,7 +12,11 @@ use uuid::Uuid;
 use crate::models::config_inspector::option_key;
 
 /// Current scoped observation schema version.
-pub const CONFIG_OBSERVATION_SCHEMA_VERSION: i32 = 1;
+///
+/// Version 2 identifies observations evaluated against the server-published,
+/// NAR-qualified immutable source without using a system derivation as an
+/// evaluator carrier. Version 1 observations remain readable for compatibility.
+pub const CONFIG_OBSERVATION_SCHEMA_VERSION: i32 = 2;
 /// Maximum structured option path depth.
 pub const MAX_CONFIG_OBSERVATION_PATH_DEPTH: usize = 16;
 /// Maximum Unicode scalar count in one path component.

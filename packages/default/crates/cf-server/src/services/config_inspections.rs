@@ -217,7 +217,7 @@ async fn execute_claimed_config_inspection(
 /// Recovery and claiming remain owned by the query/lifecycle layer. This loop
 /// awaits one exact executor call before it claims another job, so a worker
 /// process never creates per-job Tokio tasks or an in-memory work queue.
-pub async fn run_config_inspection_queue(pool: PgPool) {
+pub async fn run_config_inspection_queue(pool: PgPool, source_archive_root: std::path::PathBuf) {
     info!("Starting serial Config Inspector queue worker");
     recover_config_inspection_jobs(&pool).await;
 
@@ -226,13 +226,18 @@ pub async fn run_config_inspection_queue(pool: PgPool) {
 
     loop {
         ticker.tick().await;
-        run_config_inspection_worker_cycle(&pool).await;
+        run_config_inspection_worker_cycle(&pool, &source_archive_root).await;
     }
 }
 
-async fn run_config_inspection_worker_cycle(pool: &PgPool) {
+async fn run_config_inspection_worker_cycle(pool: &PgPool, source_archive_root: &Path) {
     recover_config_inspection_jobs(pool).await;
-    if crate::services::config_observations::process_one_config_observation(pool).await {
+    if crate::services::config_observations::process_one_config_observation(
+        pool,
+        source_archive_root,
+    )
+    .await
+    {
         return;
     }
     process_one_config_inspection_job_with_capacity(pool).await;

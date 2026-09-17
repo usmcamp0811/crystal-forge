@@ -1,4 +1,4 @@
-{ flake, configuration, targetKey, operation, path, childOffset ? 0, encodeValue }:
+{ flake, configuration, targetKey, operation, path, childOffset ? 0, encodeValue, shallowObserver }:
 
 let
   lib = configuration.pkgs.lib;
@@ -8,80 +8,6 @@ let
   withPayload = payload: carrier // { meta.crystalForgeConfigObservation = payload; };
   resolve = builtins.foldl' (node: component: builtins.getAttr component node) options path;
   maxItems = 512;
-
-  childrenFor = prefix: node:
-    let
-      names = builtins.attrNames node;
-      remaining = lib.max 0 (builtins.length names - childOffset);
-      retained = lib.sublist childOffset (lib.min maxItems remaining) names;
-      childFor = name:
-        let
-          childPath = prefix ++ [ name ];
-          childAttempt = builtins.tryEval
-            (let child = builtins.getAttr name node; in builtins.seq child child);
-          child = childAttempt.value or null;
-          typeAttempt = if childAttempt.success && builtins.isAttrs child
-            then builtins.tryEval (child._type or null)
-            else { success = false; value = null; };
-        in if !childAttempt.success || !builtins.isAttrs child || !typeAttempt.success then {
-          path_components = childPath;
-          key = optionKey childPath;
-          kind = "unavailable";
-        } else {
-          path_components = childPath;
-          key = optionKey childPath;
-          kind = if typeAttempt.value == "option" then "option" else "prefix";
-        };
-    in {
-      kind = operation;
-      path_components = prefix;
-      child_offset = childOffset;
-      children = map childFor retained;
-      children_truncated = builtins.length names > childOffset + builtins.length retained;
-      total_children = builtins.length names;
-    };
-
-  detailFor = option:
-    let
-      typeAttempt = builtins.tryEval (option.type.name or null);
-      declaredType = if typeAttempt.success then typeAttempt.value else null;
-      valueAttempt = builtins.tryEval (
-        let encoded = encodeValue 0
-          (if declaredType != null then declaredType else "unknown")
-          option.value;
-        in builtins.deepSeq encoded encoded
-      );
-    in {
-      kind = "option";
-      path_components = path;
-      key = optionKey path;
-      declared_type = declaredType;
-      is_defined = option.isDefined or false;
-      highest_prio = option.highestPrio or null;
-      value = if valueAttempt.success then valueAttempt.value else {
-        kind = "failed";
-        value = {
-          code = "value_unavailable";
-          message = "Option value is unavailable";
-        };
-      };
-    };
-
-  provenanceFor = option:
-    let
-      definitions = option.definitionsWithLocations or [ ];
-      retained = lib.sublist 0 (lib.min maxItems (builtins.length definitions)) definitions;
-    in {
-      kind = "provenance";
-      path_components = path;
-      key = optionKey path;
-      definitions = map (definition: {
-        source_path = definition.file or null;
-        priority = definition.priority or null;
-      }) retained;
-      definitions_truncated = builtins.length definitions > builtins.length retained;
-      total_definitions = builtins.length definitions;
-    };
 
   emptyTraversal = { entries = [ ]; diagnostics = [ ]; };
   mergeTraversal = left: right: {
@@ -158,16 +84,16 @@ let
 
   jobs = if operation == "root" then [ {
     name = "observation";
-    value = withPayload (childrenFor [ ] options);
+    value = withPayload (shallowObserver { inherit configuration operation path childOffset encodeValue; });
   } ] else if operation == "prefix" then [ {
     name = "observation";
-    value = withPayload (childrenFor path resolve);
+    value = withPayload (shallowObserver { inherit configuration operation path childOffset encodeValue; });
   } ] else if operation == "option" then [ {
     name = "observation";
-    value = withPayload (detailFor resolve);
+    value = withPayload (shallowObserver { inherit configuration operation path childOffset encodeValue; });
   } ] else if operation == "provenance" then [ {
     name = "observation";
-    value = withPayload (provenanceFor resolve);
+    value = withPayload (shallowObserver { inherit configuration operation path childOffset encodeValue; });
   } ] else if operation == "configured_index" then configuredJobs
   else throw "Unsupported Config observation operation";
 in

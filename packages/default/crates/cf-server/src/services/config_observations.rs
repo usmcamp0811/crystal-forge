@@ -1,12 +1,15 @@
 //! Executes non-authoritative scoped Config Explorer observations.
 //!
 //! Capacity acquisition is nonblocking. A request becomes `running` only after
-//! both the cross-process heavy-Nix lock and in-process permit are held.
+//! its cross-process advisory lock and in-process permit are held. Root, prefix,
+//! option, and provenance requests use dedicated interactive capacity. The
+//! complete configured-option inventory continues to use heavy-Nix capacity.
 
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::time::Duration;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use chrono::Duration as ChronoDuration;
@@ -15,12 +18,13 @@ use serde_json::{Value, json};
 use sqlx::{PgConnection, PgPool};
 use tempfile::NamedTempFile;
 use tokio::process::Command;
+use tokio::sync::Semaphore;
 use tokio::time::MissedTickBehavior;
 use tracing::{debug, warn};
 use uuid::Uuid;
 
-use crate::derivations::utils::build_flake_reference;
 use crate::flake::credentials::FlakeCredentialEnv;
+use crate::flake::verified_source::materialize_immutable_source;
 use crate::models::config_observations::{
     ConfigObservationKind, MAX_CONFIGURED_OBSERVATION_ITEMS, validate_config_observation_payload,
 };
@@ -37,12 +41,22 @@ use crate::queries::config_observations::{
 };
 
 const NIX_EVAL_JOBS_PROGRAM: &str = "nix-eval-jobs";
+const NIX_PROGRAM: &str = "nix";
+// CONCURRENCY: Every Config Inspector worker process uses this PostgreSQL key
+// for shallow requests. It bounds interactive work across processes without
+// making short operations wait behind full inventory or primary evaluation.
+const INTERACTIVE_CONFIG_ADVISORY_LOCK: i64 = 0x4346_4346_4753;
 const OBSERVATION_DEADLINE: Duration = Duration::from_secs(5 * 60);
 const OBSERVATION_STDOUT_LIMIT: usize = 64 * 1024 * 1024;
 const OBSERVATION_STDERR_LIMIT: usize = 256 * 1024;
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 const CONFIGURED_DIAGNOSTIC_LIMIT: usize = 128;
 const STALE_EXECUTION_THRESHOLD: ChronoDuration = ChronoDuration::minutes(10);
+
+fn interactive_config_limiter() -> Arc<Semaphore> {
+    static LIMITER: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    LIMITER.get_or_init(|| Arc::new(Semaphore::new(1))).clone()
+}
 
 #[derive(Serialize)]
 struct ObserverSelection<'a> {
@@ -89,7 +103,10 @@ impl ObserverSelectionFile {
 ///
 /// Returns `true` when a scoped candidate existed, including a capacity miss.
 /// The caller can use this result to preserve scoped queue priority.
-pub(crate) async fn process_one_config_observation(pool: &PgPool) -> bool {
+pub(crate) async fn process_one_config_observation(
+    pool: &PgPool,
+    source_archive_root: &Path,
+) -> bool {
     if let Err(error) = recover_stale_config_observations(pool, STALE_EXECUTION_THRESHOLD).await {
         warn!(%error, "config_observation_stale_recovery_failed");
     }
@@ -101,7 +118,8 @@ pub(crate) async fn process_one_config_observation(pool: &PgPool) -> bool {
             return true;
         }
     };
-    if let Err(error) = execute_reserved_config_observation(pool, target).await {
+    if let Err(error) = execute_reserved_config_observation(pool, source_archive_root, target).await
+    {
         warn!(%error, "config_observation_execution_failed");
     }
     true
@@ -109,25 +127,35 @@ pub(crate) async fn process_one_config_observation(pool: &PgPool) -> bool {
 
 async fn execute_reserved_config_observation(
     pool: &PgPool,
+    source_archive_root: &Path,
     target: ConfigObservationExecutionTarget,
 ) -> Result<()> {
     let mut lock_conn = pool
         .acquire()
         .await
         .context("acquire Config observation lock session")?;
-    let heavy_locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
-        .bind(HEAVY_NIX_ADVISORY_LOCK)
+    let capacity_lock = if target.kind == ConfigObservationKind::ConfiguredIndex {
+        HEAVY_NIX_ADVISORY_LOCK
+    } else {
+        INTERACTIVE_CONFIG_ADVISORY_LOCK
+    };
+    let capacity_locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
+        .bind(capacity_lock)
         .fetch_one(&mut *lock_conn)
         .await
         .context("try Config observation heavy-Nix lock")?;
-    if !heavy_locked {
+    if !capacity_locked {
         defer_config_observation_capacity(pool, target.request_id).await?;
         return Ok(());
     }
-    let permit = match heavy_nix_limiter().try_acquire_owned() {
+    let permit = match if target.kind == ConfigObservationKind::ConfiguredIndex {
+        heavy_nix_limiter().try_acquire_owned()
+    } else {
+        interactive_config_limiter().try_acquire_owned()
+    } {
         Ok(permit) => permit,
         Err(_) => {
-            release_heavy_lock(&mut lock_conn).await;
+            release_capacity_lock(&mut lock_conn, capacity_lock).await;
             defer_config_observation_capacity(pool, target.request_id).await?;
             return Ok(());
         }
@@ -136,31 +164,40 @@ async fn execute_reserved_config_observation(
     if let Err(error) =
         crate::queries::cve_scans::acquire_execution_lock(&mut lock_conn, execution_id).await
     {
-        release_heavy_lock(&mut lock_conn).await;
+        release_capacity_lock(&mut lock_conn, capacity_lock).await;
         let _ = lock_conn.close().await;
         return Err(error.context("acquire Config observation execution lock"));
     }
     let execution = match start_config_observation_execution(pool, target, execution_id).await {
         Ok(Some(execution)) => execution,
         Ok(None) => {
-            release_heavy_lock(&mut lock_conn).await;
+            release_capacity_lock(&mut lock_conn, capacity_lock).await;
             crate::queries::cve_scans::release_execution_lock_or_close(lock_conn, execution_id)
                 .await;
             drop(permit);
             return Ok(());
         }
         Err(error) => {
-            release_heavy_lock(&mut lock_conn).await;
+            release_capacity_lock(&mut lock_conn, capacity_lock).await;
             let _ = lock_conn.close().await;
             drop(permit);
             return Err(error);
         }
     };
 
-    let completion = match run_observation(pool, &execution).await {
-        Ok(payload) => complete_config_observation_success(pool, &execution, &payload)
-            .await
-            .map(|_| ()),
+    let completion = match run_observation(pool, source_archive_root, &execution).await {
+        Ok(payload) => {
+            let persistence_started_at = Instant::now();
+            let result = complete_config_observation_success(pool, &execution, &payload)
+                .await
+                .map(|_| ());
+            debug!(
+                request_id = %execution.target.request_id,
+                elapsed_ms = persistence_started_at.elapsed().as_millis(),
+                "config_observation_persistence_finished"
+            );
+            result
+        }
         Err(error) => {
             // Persist a stable category. Evaluator-controlled stderr remains
             // bounded and redacted in logs but is not a public cache contract.
@@ -174,38 +211,76 @@ async fn execute_reserved_config_observation(
             .map(|_| ())
         }
     };
-    release_heavy_lock(&mut lock_conn).await;
+    release_capacity_lock(&mut lock_conn, capacity_lock).await;
     crate::queries::cve_scans::release_execution_lock_or_close(lock_conn, execution_id).await;
     drop(permit);
     completion
 }
 
-async fn release_heavy_lock(conn: &mut PgConnection) {
+async fn release_capacity_lock(conn: &mut PgConnection, lock: i64) {
     if !matches!(
         sqlx::query_scalar::<_, bool>("SELECT pg_advisory_unlock($1)")
-            .bind(HEAVY_NIX_ADVISORY_LOCK)
+            .bind(lock)
             .fetch_one(&mut *conn)
             .await,
         Ok(true)
     ) {
-        warn!("Config observation heavy-Nix lock release was not confirmed");
+        warn!(
+            lock,
+            "Config observation capacity lock release was not confirmed"
+        );
     }
 }
 
-async fn run_observation(pool: &PgPool, execution: &ConfigObservationExecution) -> Result<Value> {
-    let selection = ObserverSelectionFile::create(&execution.target)?;
-    let flake_ref = build_flake_reference(&execution.target.repo_url, &execution.target.revision);
-    let expression = build_observer_expression(
-        &flake_ref,
-        &execution.target.configuration_name,
-        selection.path()?,
-    );
+async fn run_observation(
+    pool: &PgPool,
+    source_archive_root: &Path,
+    execution: &ConfigObservationExecution,
+) -> Result<Value> {
+    let source_started_at = Instant::now();
     let credentials = FlakeCredentialEnv::load(pool, execution.target.flake_id).await?;
-    let mut command = build_observer_command(
-        Path::new(NIX_EVAL_JOBS_PROGRAM),
-        &expression,
+    let immutable_source = materialize_immutable_source(
+        pool,
+        execution.target.commit_id,
+        source_archive_root,
+        &execution.target.repo_url,
+        &execution.target.revision,
         credentials.as_ref(),
+    )
+    .await
+    .context("materialize Config observation immutable source")?;
+    debug!(
+        request_id = %execution.target.request_id,
+        elapsed_ms = source_started_at.elapsed().as_millis(),
+        "config_observation_source_ready"
     );
+    let flake_ref = cf_protocol::builder::nar_qualified_store_flake_ref(
+        &immutable_source.server_store_path,
+        &immutable_source.nar_hash,
+    );
+    let command = if execution.target.kind == ConfigObservationKind::ConfiguredIndex {
+        let selection = ObserverSelectionFile::create(&execution.target)?;
+        let expression = build_observer_expression(
+            &flake_ref,
+            &execution.target.configuration_name,
+            selection.path()?,
+        );
+        let command = build_observer_command(Path::new(NIX_EVAL_JOBS_PROGRAM), &expression);
+        // The command must retain the owner-only selection file until exit.
+        return run_observation_command(pool, execution, command, Some(selection)).await;
+    } else {
+        build_shallow_observer_command(Path::new(NIX_PROGRAM), &flake_ref, &execution.target)
+    };
+    run_observation_command(pool, execution, command, None).await
+}
+
+async fn run_observation_command(
+    pool: &PgPool,
+    execution: &ConfigObservationExecution,
+    mut command: Command,
+    _selection: Option<ObserverSelectionFile>,
+) -> Result<Value> {
+    let evaluation_started_at = Instant::now();
     let mut run = Box::pin(run_nix_command_bounded(
         &mut command,
         "scoped Config observer",
@@ -230,7 +305,17 @@ async fn run_observation(pool: &PgPool, execution: &ConfigObservationExecution) 
             }
         }
     };
-    reconcile_observer_output(output, execution)
+    debug!(
+        request_id = %execution.target.request_id,
+        kind = execution.target.kind.as_str(),
+        elapsed_ms = evaluation_started_at.elapsed().as_millis(),
+        "config_observation_nix_finished"
+    );
+    if execution.target.kind == ConfigObservationKind::ConfiguredIndex {
+        reconcile_observer_output(output, execution)
+    } else {
+        reconcile_shallow_observer_output(output, execution)
+    }
 }
 
 fn build_observer_expression(
@@ -239,25 +324,25 @@ fn build_observer_expression(
     selection_path: &str,
 ) -> String {
     let observer = include_str!("../models/config_observer.nix");
+    let shallow_observer = include_str!("../models/config_shallow_observer.nix");
     let encoder = include_str!("../models/config_value_encoding.nix");
     format!(
-        "let\n  selection = builtins.fromJSON (builtins.readFile {selection});\n  flake = builtins.getFlake {flake_ref};\n  configuration = builtins.getAttr {configuration} flake.nixosConfigurations;\n  encodeValue = ({encoder}) configuration.pkgs.lib;\nin ({observer}) {{ inherit flake configuration encodeValue; targetKey = builtins.hashString \"sha256\" (builtins.toJSON [ {flake_ref} {configuration} configuration.config.system.build.toplevel.drvPath ]); operation = selection.operation; path = selection.path; childOffset = selection.child_offset; }}",
+        "let\n  selection = builtins.fromJSON (builtins.readFile {selection});\n  flake = builtins.getFlake {flake_ref};\n  configuration = builtins.getAttr {configuration} flake.nixosConfigurations;\n  encodeValue = ({encoder}) configuration.pkgs.lib;\nin ({observer}) {{ inherit flake configuration encodeValue; targetKey = builtins.hashString \"sha256\" (builtins.toJSON [ {flake_ref} {configuration} configuration.config.system.build.toplevel.drvPath ]); operation = selection.operation; path = selection.path; childOffset = selection.child_offset; shallowObserver = ({shallow_observer}); }}",
         selection = nix_string_pub(selection_path),
         flake_ref = nix_string_pub(flake_ref),
         configuration = nix_string_pub(configuration_name),
+        shallow_observer = shallow_observer,
     )
 }
 
-fn build_observer_command(
-    program: &Path,
-    expression: &str,
-    credentials: Option<&FlakeCredentialEnv>,
-) -> Command {
+fn build_observer_command(program: &Path, expression: &str) -> Command {
     let mut command = Command::new(program);
     command.args([
         "--expr",
         expression,
-        "--impure",
+        "--option",
+        "pure-eval",
+        "true",
         "--meta",
         "--apply",
         "derivation: derivation.meta.crystalForgeConfigObservation",
@@ -267,10 +352,90 @@ fn build_observer_command(
         "--workers",
         "2",
     ]);
-    if let Some(credentials) = credentials {
-        credentials.apply_to_nix_command(&mut command);
-    }
+    command.env_remove("NETRC");
+    command.env_remove("GIT_SSH_COMMAND");
     command
+}
+
+fn build_shallow_observer_command(
+    program: &Path,
+    flake_ref: &str,
+    target: &ConfigObservationExecutionTarget,
+) -> Command {
+    let observer = include_str!("../models/config_shallow_observer.nix");
+    let encoder = include_str!("../models/config_value_encoding.nix");
+    let expression = format!(
+        "{{ flakeRef, configurationName, operation, path, childOffset }}:\nlet\n  flake = builtins.getFlake flakeRef;\n  configuration = builtins.getAttr configurationName flake.nixosConfigurations;\n  encodeValue = ({encoder}) configuration.pkgs.lib;\nin ({observer}) {{ inherit configuration operation path childOffset encodeValue; }}"
+    );
+    let path = target
+        .path_components
+        .iter()
+        .map(|component| nix_string_pub(component))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let application = format!(
+        "observer: observer {{ flakeRef = {}; configurationName = {}; operation = {}; path = [ {} ]; childOffset = {}; }}",
+        nix_string_pub(flake_ref),
+        nix_string_pub(&target.configuration_name),
+        nix_string_pub(target.kind.as_str()),
+        path,
+        target.child_offset,
+    );
+    let mut command = Command::new(program);
+    command.args([
+        "eval",
+        "--extra-experimental-features",
+        "nix-command flakes",
+        "--option",
+        "pure-eval",
+        "true",
+        "--option",
+        "allow-import-from-derivation",
+        "true",
+        "--option",
+        "eval-cache",
+        "false",
+        "--no-update-lock-file",
+        "--no-write-lock-file",
+        "--json",
+        "--expr",
+        &expression,
+        "--apply",
+        &application,
+    ]);
+    command.env_remove("NETRC");
+    command.env_remove("GIT_SSH_COMMAND");
+    command
+}
+
+fn reconcile_shallow_observer_output(
+    output: BoundedProcessOutput,
+    execution: &ConfigObservationExecution,
+) -> Result<Value> {
+    if output.stdout.is_truncated() {
+        bail!("Config observer output exceeded its bound");
+    }
+    if !output.status.success() {
+        bail!("Config observer process failed");
+    }
+    let payload: Value = serde_json::from_slice(&output.stdout.bytes)
+        .context("parse direct shallow Config observation")?;
+    let mut redacted = crate::security::snapshot_redaction::redact_json(&payload);
+    if execution.target.kind == ConfigObservationKind::Option {
+        if let Some(value) = redacted.get_mut("value") {
+            *value = crate::security::snapshot_redaction::redact_option_value(
+                &execution.target.path_components.join("."),
+                value,
+            );
+        }
+    }
+    validate_config_observation_payload(
+        execution.target.kind,
+        &execution.target.path_components,
+        execution.target.child_offset,
+        &redacted,
+    )?;
+    Ok(redacted)
 }
 
 fn reconcile_observer_output(
@@ -554,9 +719,32 @@ mod tests {
         );
         assert!(expression.contains("builtins.fromJSON (builtins.readFile"));
         assert!(expression.contains("childOffset = selection.child_offset"));
-        assert!(expression.contains("lib.sublist childOffset"));
+        assert!(expression.contains("slice childOffset"));
         assert!(expression.contains("child_offset = childOffset"));
         assert!(!expression.contains("builtins.abort injection"));
+    }
+
+    #[test]
+    fn shallow_command_uses_direct_nix_eval_without_a_derivation_carrier() {
+        let target = execution(ConfigObservationKind::Prefix, vec!["services".to_string()]);
+        let command = build_shallow_observer_command(
+            Path::new("nix"),
+            "path:/nix/store/source?narHash=sha256-test",
+            &target.target,
+        );
+        let args = command
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy())
+            .collect::<Vec<_>>();
+        assert_eq!(args.first().map(|arg| arg.as_ref()), Some("eval"));
+        assert!(args.iter().any(|arg| arg == "--json"));
+        assert!(args.iter().any(|arg| arg.contains("configuration.options")));
+        assert!(
+            args.iter()
+                .any(|arg| arg.contains("operation = \"prefix\""))
+        );
+        assert!(!args.iter().any(|arg| arg.contains("system.build.toplevel")));
     }
 
     #[test]
@@ -589,7 +777,7 @@ mod tests {
 
     #[test]
     fn observer_command_uses_only_closed_server_owned_arguments() {
-        let command = build_observer_command(Path::new("nix-eval-jobs"), "{}", None);
+        let command = build_observer_command(Path::new("nix-eval-jobs"), "{}");
         let args = command
             .as_std()
             .get_args()
@@ -599,20 +787,9 @@ mod tests {
         assert!(!args.iter().any(|arg| arg.contains("path_components")));
     }
 
-    #[tokio::test]
-    #[ignore = "requires an isolated migrated database"]
-    async fn heavy_nix_try_lock_miss_waits_without_consuming_an_attempt() {
-        let pool = PgPool::connect(
-            &std::env::var("DATABASE_URL")
-                .expect("DATABASE_URL must identify an isolated migrated test database"),
-        )
-        .await
-        .unwrap();
-        sqlx::query("DELETE FROM config_observation_requests")
-            .execute(&pool)
-            .await
-            .unwrap();
-
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn interactive_try_lock_miss_waits_without_consuming_an_attempt(pool: PgPool) {
         let suffix = Uuid::new_v4().simple().to_string();
         let flake_id: i32 = sqlx::query_scalar(
             "INSERT INTO flakes (name, repo_url, branch) VALUES ($1, $2, 'main') RETURNING id",
@@ -666,11 +843,11 @@ mod tests {
 
         let mut blocker = pool.acquire().await.unwrap();
         sqlx::query("SELECT pg_advisory_lock($1)")
-            .bind(HEAVY_NIX_ADVISORY_LOCK)
+            .bind(INTERACTIVE_CONFIG_ADVISORY_LOCK)
             .execute(&mut *blocker)
             .await
             .unwrap();
-        assert!(process_one_config_observation(&pool).await);
+        assert!(process_one_config_observation(&pool, Path::new("/tmp")).await);
         let state: (String, i32, Option<Uuid>, Option<chrono::DateTime<chrono::Utc>>) =
             sqlx::query_as(
                 "SELECT status, attempts, execution_id, execution_heartbeat_at FROM config_observation_requests WHERE id = $1",
@@ -682,7 +859,7 @@ mod tests {
         assert_eq!(state, ("waiting_for_capacity".to_string(), 0, None, None));
         assert!(
             sqlx::query_scalar::<_, bool>("SELECT pg_advisory_unlock($1)")
-                .bind(HEAVY_NIX_ADVISORY_LOCK)
+                .bind(INTERACTIVE_CONFIG_ADVISORY_LOCK)
                 .fetch_one(&mut *blocker)
                 .await
                 .unwrap()

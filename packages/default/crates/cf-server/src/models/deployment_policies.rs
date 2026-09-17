@@ -2899,11 +2899,11 @@ pub(crate) const SNAPSHOT_EXTRACTION_PRELUDE: &str = r#"
 /// Configurations that are unregistered or have no assigned policies receive
 /// only the unconditional `cfAgentEnabled` metadata.
 ///
-/// INVARIANT: This primary evaluator must not inspect configuration options,
-/// module graphs, or exported modules. Those observability concerns have a
-/// different failure boundary. Expanding this expression's search space can
-/// turn a lazy metadata defect into a failed system evaluation and prevent an
-/// otherwise valid derivation from being built.
+/// INVARIANT: This primary evaluator must not build a complete option inventory,
+/// read option values, inspect module graphs, or reconstruct provenance. It may
+/// attach the bounded immediate root produced by the shared shallow extractor.
+/// Root capture is optional observational metadata and cannot affect policy or
+/// build authority.
 ///
 /// The expression structure:
 /// ```nix
@@ -3015,13 +3015,14 @@ fn build_nix_eval_expression_inner(
         })
         .unwrap_or_else(|| "null".to_string());
     format!(
-        "({}) {{ flakeRef = {}; policyCheckers = {}; requestedRevision = {}; resolvedRevisionOverride = {}; configurationNames = {}; }}",
+        "({}) {{ flakeRef = {}; policyCheckers = {}; requestedRevision = {}; resolvedRevisionOverride = {}; configurationNames = {}; shallowObserver = ({}); }}",
         include_str!("primary_evaluation.nix"),
         nix_string(flake_ref),
         checkers_block,
         requested_revision,
         resolved_revision_override,
         configuration_names,
+        include_str!("config_shallow_observer.nix"),
     )
 }
 
@@ -4222,10 +4223,16 @@ in {{ {fields} }}"#
         assert!(expr.contains("cfg.config.system.build.toplevel"));
         assert!(expr.contains("resolvedRevisionOverride = null"));
         assert!(expr.contains("flake.sourceInfo.rev or null"));
+        assert!(expr.contains("shallowObserver = ("));
+        assert_eq!(
+            expr.matches("configuration.options").count(),
+            1,
+            "the primary evaluator may expose the options tree only to the bounded shallow observer"
+        );
+        assert!(expr.contains("names = builtins.attrNames node;"));
 
         for forbidden in [
             "cfg.options",
-            "configuration.options",
             "_module.graph",
             "lib.evalModules",
             "carrierConfigurationSources",

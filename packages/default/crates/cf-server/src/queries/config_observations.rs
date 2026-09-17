@@ -2,7 +2,7 @@
 //!
 //! This module reads a certified V2 selector only to adapt existing evidence.
 //! It never writes evaluation snapshot selectors. Request creation resolves an
-//! exact completed NixOS carrier before cache lookup or V2 adaptation.
+//! exact per-configuration NixOS carrier before cache lookup or V2 adaptation.
 
 use std::collections::BTreeMap;
 
@@ -24,6 +24,17 @@ use crate::models::config_snapshot_artifact::{
 };
 
 const MAX_CONFIG_OBSERVATION_ERROR_CHARS: usize = 4096;
+const CONFIG_OBSERVATION_V2_DIGEST_DOMAIN: &[u8] = b"crystal-forge-config-observation-v2\0";
+
+fn config_observation_content_digest(payload_bytes: &[u8]) -> Vec<u8> {
+    // COMPATIBILITY: Version 1 used SHA-256(payload) while the content table has
+    // a digest-only primary key. Domain-separate version 2 so an unchanged JSON
+    // payload cannot collide with a version 1 row that has different semantics.
+    let mut hasher = Sha256::new();
+    hasher.update(CONFIG_OBSERVATION_V2_DIGEST_DOMAIN);
+    hasher.update(payload_bytes);
+    hasher.finalize().to_vec()
+}
 
 fn normalize_legacy_tree_payload(
     kind: ConfigObservationKind,
@@ -92,7 +103,7 @@ pub(crate) struct ConfigObservationExecution {
 pub(crate) enum CreateConfigObservationOutcome {
     /// The system or revision is outside the exact target scope.
     NotFound,
-    /// The primary evaluator has not completed the exact NixOS carrier.
+    /// The primary evaluator has not published the exact NixOS carrier.
     PrerequisiteMissing,
     /// A cache entry or active request was returned.
     Resolved(ConfigObservationRequestResponse),
@@ -100,7 +111,7 @@ pub(crate) enum CreateConfigObservationOutcome {
 
 /// Creates or reuses one exact scoped request.
 ///
-/// The transaction resolves the system configuration, full revision, completed
+/// The transaction resolves the system configuration, full revision, published
 /// NixOS derivation, and carrier before it checks immutable cache identity. A
 /// certified selected V2 artifact can satisfy truthful scoped operations before
 /// queue insertion. Active identical requests coalesce through a partial unique
@@ -153,9 +164,6 @@ pub(crate) async fn create_or_reuse_config_observation_request(
         r#"
         SELECT derivation.id, derivation.derivation_path
         FROM derivations derivation
-        JOIN commits commit
-          ON commit.id = derivation.commit_id
-         AND commit.evaluation_status = 'complete'
         WHERE derivation.commit_id = $1
           AND derivation.derivation_type = 'nixos'
           AND derivation.derivation_name = $2
@@ -168,7 +176,7 @@ pub(crate) async fn create_or_reuse_config_observation_request(
     .bind(&configuration_name)
     .fetch_optional(&mut *tx)
     .await
-    .context("resolve exact completed Config observation carrier")?;
+    .context("resolve exact per-configuration Config observation carrier")?;
     let Some((derivation_id, carrier_drv_path)) = derivation else {
         tx.rollback().await.ok();
         return Ok(CreateConfigObservationOutcome::PrerequisiteMissing);
@@ -560,7 +568,7 @@ async fn persist_adapted_v2_observation_tx(
     if payload_bytes.len() > 8 * 1024 * 1024 {
         bail!("adapted Config observation payload exceeds its persistence contract");
     }
-    let digest = Sha256::digest(&payload_bytes).to_vec();
+    let digest = config_observation_content_digest(&payload_bytes);
     sqlx::query(
         "INSERT INTO config_observation_contents (digest, schema_version, payload) VALUES ($1, $2, $3) ON CONFLICT (digest) DO NOTHING",
     )
@@ -629,6 +637,281 @@ async fn persist_adapted_v2_observation_tx(
     .fetch_one(&mut **tx)
     .await
     .context("persist adapted V2 succeeded request")
+}
+
+/// Publishes an in-band root or queues its per-configuration fallback.
+///
+/// The caller invokes this only after the exact derivation row exists. A valid
+/// root becomes an immutable observational cache entry. Missing or invalid
+/// optional metadata queues one root-only request without changing primary
+/// evaluation, policy, build, deployment, or rollback authority.
+///
+/// # Errors
+///
+/// Returns an error when the exact derivation identity does not exist or
+/// PostgreSQL cannot serialize and persist the root identity.
+pub(crate) async fn publish_or_queue_primary_config_root(
+    pool: &PgPool,
+    commit_id: i32,
+    derivation_id: i32,
+    configuration_name: &str,
+    carrier_drv_path: &str,
+    payload: Option<&Value>,
+) -> Result<()> {
+    let kind = ConfigObservationKind::Root;
+    let path_components: Vec<String> = Vec::new();
+    let child_offset = 0u32;
+    let payload = payload
+        .map(crate::security::snapshot_redaction::redact_json)
+        .filter(|payload| {
+            validate_config_observation_payload(kind, &path_components, child_offset, payload)
+                .is_ok()
+        });
+    let mut tx = pool
+        .begin()
+        .await
+        .context("begin primary Config root publication")?;
+    let derivation_exists: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1 FROM derivations
+            WHERE id = $1 AND commit_id = $2 AND derivation_name = $3
+              AND derivation_path = $4 AND completed_at IS NOT NULL
+        )
+        "#,
+    )
+    .bind(derivation_id)
+    .bind(commit_id)
+    .bind(configuration_name)
+    .bind(carrier_drv_path)
+    .fetch_one(&mut *tx)
+    .await
+    .context("verify primary Config root derivation identity")?;
+    if !derivation_exists {
+        bail!("primary Config root derivation identity is unavailable");
+    }
+    let path = serde_json::to_value(&path_components)?;
+    let lock_identity = serde_json::to_string(&(
+        commit_id,
+        configuration_name,
+        derivation_id,
+        carrier_drv_path,
+        CONFIG_OBSERVATION_SCHEMA_VERSION,
+        &path_components,
+        kind.as_str(),
+        child_offset,
+    ))?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('config_observation'), hashtext($1))")
+        .bind(lock_identity)
+        .execute(&mut *tx)
+        .await
+        .context("lock primary Config root identity")?;
+
+    let existing = sqlx::query_as::<_, (Uuid, String, Option<Uuid>)>(
+        r#"
+        SELECT id, status, observation_id
+        FROM config_observation_requests
+        WHERE commit_id = $1 AND derivation_id = $2
+          AND configuration_name = $3 AND carrier_drv_path = $4
+          AND schema_version = $5 AND path_components = $6
+          AND kind = 'root' AND child_offset = 0
+          AND status IN ('queued', 'waiting_for_capacity', 'running', 'succeeded')
+        ORDER BY (status = 'succeeded') DESC, created_at DESC, id DESC
+        LIMIT 1
+        FOR UPDATE
+        "#,
+    )
+    .bind(commit_id)
+    .bind(derivation_id)
+    .bind(configuration_name)
+    .bind(carrier_drv_path)
+    .bind(CONFIG_OBSERVATION_SCHEMA_VERSION)
+    .bind(&path)
+    .fetch_optional(&mut *tx)
+    .await
+    .context("find primary Config root request")?;
+
+    if matches!(existing.as_ref(), Some((_, status, Some(_))) if status == "succeeded") {
+        tx.commit()
+            .await
+            .context("commit reused primary Config root")?;
+        return Ok(());
+    }
+
+    if let Some(payload) = payload.as_ref() {
+        let row = persist_adapted_v2_observation_tx(
+            &mut tx,
+            commit_id,
+            derivation_id,
+            configuration_name,
+            carrier_drv_path,
+            kind,
+            &path_components,
+            child_offset,
+            payload,
+        )
+        .await?;
+        let new_request_id: Uuid = row.try_get("id")?;
+        if let Some((existing_id, _, _)) = existing {
+            let observation_id: Uuid = row.try_get("observation_id")?;
+            sqlx::query(
+                "UPDATE config_observation_requests SET status = 'succeeded', observation_id = $2, error = NULL, completed_at = now(), updated_at = now() WHERE id = $1 AND status IN ('queued', 'waiting_for_capacity', 'running')",
+            )
+            .bind(existing_id)
+            .bind(observation_id)
+            .execute(&mut *tx)
+            .await
+            .context("complete existing primary Config root request")?;
+            sqlx::query("DELETE FROM config_observation_requests WHERE id = $1")
+                .bind(new_request_id)
+                .execute(&mut *tx)
+                .await
+                .context("remove redundant primary Config root request")?;
+        }
+    } else if existing.is_none() {
+        sqlx::query(
+            r#"
+            INSERT INTO config_observation_requests (
+                commit_id, derivation_id, configuration_name, carrier_drv_path,
+                schema_version, path_components, kind, child_offset, priority, status
+            ) VALUES ($1, $2, $3, $4, $5, $6, 'root', 0, 10, 'queued')
+            "#,
+        )
+        .bind(commit_id)
+        .bind(derivation_id)
+        .bind(configuration_name)
+        .bind(carrier_drv_path)
+        .bind(CONFIG_OBSERVATION_SCHEMA_VERSION)
+        .bind(&path)
+        .execute(&mut *tx)
+        .await
+        .context("queue primary Config root fallback")?;
+    }
+    tx.commit()
+        .await
+        .context("commit primary Config root publication")?;
+    Ok(())
+}
+
+/// Creates the durable root fallback in the derivation persistence transaction.
+///
+/// The fallback makes root publication crash-safe. The asynchronous publisher
+/// can replace the active request with an in-band root, but process exit or
+/// channel saturation leaves valid queued work for the Config Inspector.
+/// Existing active or succeeded work remains unchanged.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot queue the fallback.
+pub(crate) async fn queue_primary_config_root_fallback_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    commit_id: i32,
+    derivation_id: i32,
+    configuration_name: &str,
+    carrier_drv_path: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO config_observation_requests (
+            commit_id, derivation_id, configuration_name, carrier_drv_path,
+            schema_version, path_components, kind, child_offset, priority, status
+        )
+        SELECT $1, $2, $3, $4, $5, '[]'::jsonb, 'root', 0, 10, 'queued'
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM config_observation_requests request
+            WHERE request.commit_id = $1
+              AND request.derivation_id = $2
+              AND request.configuration_name = $3
+              AND request.carrier_drv_path = $4
+              AND request.schema_version = $5
+              AND request.path_components = '[]'::jsonb
+              AND request.kind = 'root'
+              AND request.child_offset = 0
+              AND request.status = 'succeeded'
+        )
+        ON CONFLICT (
+            commit_id, configuration_name, derivation_id, carrier_drv_path,
+            schema_version, path_components, kind, child_offset
+        ) WHERE status IN ('queued', 'waiting_for_capacity', 'running')
+        DO NOTHING
+        "#,
+    )
+    .bind(commit_id)
+    .bind(derivation_id)
+    .bind(configuration_name)
+    .bind(carrier_drv_path)
+    .bind(CONFIG_OBSERVATION_SCHEMA_VERSION)
+    .execute(&mut **tx)
+    .await
+    .context("queue durable primary Config root fallback")?;
+    Ok(())
+}
+
+/// Queues root fallbacks for completed derivations without version 2 root work.
+///
+/// The primary publication worker calls this after it drains all in-band root
+/// messages for a commit. The insert repairs bounded-channel overflow and
+/// per-root publication failures without waiting in the evaluator output loop.
+/// Existing active or succeeded root identities remain unchanged.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot enqueue the missing roots.
+pub(crate) async fn queue_missing_primary_config_roots(
+    pool: &PgPool,
+    commit_id: i32,
+) -> Result<u64> {
+    Ok(sqlx::query(
+        r#"
+        INSERT INTO config_observation_requests (
+            commit_id, derivation_id, configuration_name, carrier_drv_path,
+            schema_version, path_components, kind, child_offset, priority, status
+        )
+        SELECT derivation.commit_id, derivation.id, derivation.derivation_name,
+               derivation.derivation_path, $2, '[]'::jsonb, 'root', 0, 10, 'queued'
+        FROM derivations derivation
+        JOIN commits commit ON commit.id = derivation.commit_id
+        WHERE derivation.commit_id = $1
+          AND derivation.derivation_type = 'nixos'
+          AND derivation.completed_at IS NOT NULL
+          AND NULLIF(BTRIM(derivation.derivation_path), '') IS NOT NULL
+          AND EXISTS (
+              SELECT 1
+              FROM systems system
+              WHERE system.flake_id = commit.flake_id
+                AND system.is_active = TRUE
+                AND COALESCE(
+                    NULLIF(BTRIM(system.system_configuration_name), ''),
+                    system.hostname
+                ) = derivation.derivation_name
+          )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM config_observation_requests request
+              WHERE request.commit_id = derivation.commit_id
+                AND request.derivation_id = derivation.id
+                AND request.configuration_name = derivation.derivation_name
+                AND request.carrier_drv_path = derivation.derivation_path
+                AND request.schema_version = $2
+                AND request.path_components = '[]'::jsonb
+                AND request.kind = 'root'
+                AND request.child_offset = 0
+                AND request.status IN ('queued', 'waiting_for_capacity', 'running', 'succeeded')
+          )
+        ON CONFLICT (
+            commit_id, configuration_name, derivation_id, carrier_drv_path,
+            schema_version, path_components, kind, child_offset
+        ) WHERE status IN ('queued', 'waiting_for_capacity', 'running')
+        DO NOTHING
+        "#,
+    )
+    .bind(commit_id)
+    .bind(CONFIG_OBSERVATION_SCHEMA_VERSION)
+    .execute(pool)
+    .await
+    .context("queue missing primary Config root fallbacks")?
+    .rows_affected())
 }
 
 fn request_response_from_row(
@@ -776,11 +1059,14 @@ pub(crate) async fn reserve_next_config_observation(
     let row = sqlx::query(
         r#"
         WITH candidate AS (
-            SELECT id
-            FROM config_observation_requests
-            WHERE status IN ('queued', 'waiting_for_capacity')
-            ORDER BY priority, (status = 'waiting_for_capacity') ASC,
-                     scheduled_at, created_at, id
+            SELECT request.id
+            FROM config_observation_requests request
+            JOIN commits commit ON commit.id = request.commit_id
+            WHERE request.status IN ('queued', 'waiting_for_capacity')
+            ORDER BY request.priority,
+                     commit.commit_timestamp DESC, commit.id DESC,
+                     (request.status = 'waiting_for_capacity') ASC,
+                     request.scheduled_at, request.created_at, request.id
             LIMIT 1
             FOR UPDATE SKIP LOCKED
         )
@@ -894,8 +1180,9 @@ pub(crate) async fn heartbeat_config_observation_execution(
 
 /// Persists content and an immutable observation before completing its request.
 ///
-/// Content is redacted before this function. The SHA-256 digest deduplicates
-/// identical payloads, while observation uniqueness preserves exact target identity.
+/// Content is redacted before this function. A version-domain-separated SHA-256
+/// digest deduplicates identical payloads, while observation uniqueness preserves
+/// exact target identity.
 ///
 /// # Errors
 ///
@@ -915,7 +1202,7 @@ pub(crate) async fn complete_config_observation_success(
     if !payload.is_object() || payload_bytes.len() > 8 * 1024 * 1024 {
         bail!("Config observation payload exceeds its persistence contract");
     }
-    let digest = Sha256::digest(&payload_bytes).to_vec();
+    let digest = config_observation_content_digest(&payload_bytes);
     let canonical_payload: Value = serde_json::from_slice(&payload_bytes)?;
     let mut tx = pool
         .begin()
@@ -1886,6 +2173,145 @@ mod tests {
             .execute(&pool)
             .await
             .is_err()
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn primary_root_is_readable_while_commit_is_in_progress_and_failure_queues_fallback(
+        pool: PgPool,
+    ) {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let flake_id: i32 = sqlx::query_scalar(
+            "INSERT INTO flakes (name, repo_url, branch) VALUES ($1, $2, 'main') RETURNING id",
+        )
+        .bind(format!("primary-root-{suffix}"))
+        .bind(format!("https://example.test/primary-root-{suffix}.git"))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let revision = format!("{:0>40}", &suffix[..32]);
+        let commit_id: i32 = sqlx::query_scalar(
+            "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp, evaluation_status) VALUES ($1, $2, now(), 'in_progress') RETURNING id",
+        )
+        .bind(flake_id)
+        .bind(&revision)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        let mut identities = Vec::new();
+        for label in ["published", "fallback", "catchup", "durable"] {
+            let configuration_name = format!("{label}-{suffix}");
+            let system_id: Uuid = sqlx::query_scalar(
+                "INSERT INTO systems (hostname, public_key, flake_id, derivation, system_configuration_name) VALUES ($1, $2, $3, '', $4) RETURNING id",
+            )
+            .bind(format!("host-{label}-{suffix}"))
+            .bind(format!("test-key-{label}-{suffix}"))
+            .bind(flake_id)
+            .bind(&configuration_name)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            let carrier = format!("/nix/store/{suffix}-{configuration_name}.drv");
+            let derivation_id: i32 = sqlx::query_scalar(
+                "INSERT INTO derivations (commit_id, derivation_type, derivation_name, derivation_path, status_id, completed_at) VALUES ($1, 'nixos', $2, $3, 5, now()) RETURNING id",
+            )
+            .bind(commit_id)
+            .bind(&configuration_name)
+            .bind(&carrier)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            identities.push((system_id, configuration_name, carrier, derivation_id));
+        }
+
+        let (system_id, configuration_name, carrier, derivation_id) = &identities[0];
+        let root = serde_json::json!({
+            "kind": "root",
+            "path_components": [],
+            "child_offset": 0,
+            "children": [],
+            "children_truncated": false,
+            "total_children": 0
+        });
+        publish_or_queue_primary_config_root(
+            &pool,
+            commit_id,
+            *derivation_id,
+            configuration_name,
+            carrier,
+            Some(&root),
+        )
+        .await
+        .unwrap();
+        let cached = create_or_reuse_config_observation_request(
+            &pool,
+            *system_id,
+            &revision,
+            ConfigObservationKind::Root,
+            &[],
+            0,
+        )
+        .await
+        .unwrap();
+        let CreateConfigObservationOutcome::Resolved(cached) = cached else {
+            panic!("published in-progress root should resolve");
+        };
+        assert_eq!(cached.lifecycle, ConfigObservationLifecycle::Succeeded);
+        assert_eq!(cached.attempts, 0);
+        assert!(cached.reused);
+
+        let (_, fallback_name, fallback_carrier, fallback_derivation_id) = &identities[1];
+        publish_or_queue_primary_config_root(
+            &pool,
+            commit_id,
+            *fallback_derivation_id,
+            fallback_name,
+            fallback_carrier,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            sqlx::query_as::<_, (String, i32)>(
+                "SELECT status, attempts FROM config_observation_requests WHERE derivation_id = $1 AND kind = 'root'",
+            )
+            .bind(fallback_derivation_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            ("queued".to_string(), 0)
+        );
+
+        let (_, durable_name, durable_carrier, durable_derivation_id) = &identities[3];
+        let mut tx = pool.begin().await.unwrap();
+        queue_primary_config_root_fallback_tx(
+            &mut tx,
+            commit_id,
+            *durable_derivation_id,
+            durable_name,
+            durable_carrier,
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+
+        assert_eq!(
+            queue_missing_primary_config_roots(&pool, commit_id)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM config_observation_requests WHERE commit_id = $1 AND kind = 'root' AND status = 'queued'",
+            )
+            .bind(commit_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            3
         );
     }
 }

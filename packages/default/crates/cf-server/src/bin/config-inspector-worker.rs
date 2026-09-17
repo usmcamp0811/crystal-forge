@@ -23,6 +23,6 @@ async fn main() -> anyhow::Result<()> {
     sqlx::migrate!("./migrations").run(&pool).await?;
 
     info!("Starting Crystal Forge Config Inspector worker");
-    run_config_inspection_queue(pool).await;
+    run_config_inspection_queue(pool, cfg.server.source_archive_root).await;
     Ok(())
 }
