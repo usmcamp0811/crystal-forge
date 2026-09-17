@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-17 18:24'
+updated_date: '2026-09-17 18:30'
 labels:
   - design-parity
   - web-ui
@@ -201,6 +201,8 @@ The `modifiedFiles` metadata is anticipated and non-exhaustive. The implementati
 2026-09-17 measured shallow Config interaction pass authorized at starting HEAD `7f49d8bb41ae0b86c5fa1ac8e6d375e7f134dfd7`: (1) reproduce root/prefix/option measurements with the packaged evaluator and service-shaped immutable-source environment, recording executable/version differences; (2) reuse the task-owned isolated preview and keep it current; (3) extract one shared bounded direct `nix eval --json` shallow implementation for root, prefix, exact option, and selected definition locations, with exact immutable-source identity, dedicated cross-process capacity, deadlines, bounded output, process-group cleanup, execution fencing, and newest-first catch-up; (4) attach optional bounded root data to each production-style primary configuration result or launch a root-only per-configuration fallback immediately, persist it independently, and make observational reads depend on per-configuration readiness rather than whole-commit completion while leaving policy/build/deployment authority unchanged; (5) preserve lazy full inventory, configured index, provenance, incremental build dispatch, cache coalescing, authorization, redaction, and compatibility; (6) make the Dioxus Explorer render cached roots immediately, poll once before delay, retain loaded rows during localized requests, and fence revision changes; (7) add focused real-Nix, isolated PostgreSQL streaming/cache/security/capacity/ordering tests plus browser coverage and timings; (8) update Config architecture documentation, perform independent review, commit reviewable slices, and push normally without merge, deploy, live DB mutation, rebase, or force-push.
 
 2026-09-17 Config Explorer presentation-parity pass from exact local/remote HEAD `9562fe09e94de3c790cd512ce7c77cc819bc0779`: (1) preserve the shallow observation request/cache contract and make branch and option lifecycle state render in the affected row and selected inspector without new observation kinds or eager requests; (2) use structured `path_components` for tree leaf labels, scoped flat ancestry/leaf presentation, cache identity, and selection, while retaining certified full-path identity where the API supplies only a qualified string; (3) add persistent selected-row styling, fixed tree/inspector scrolling, reference-aligned geometry, type-derived value presentation, and a truthful Option/Provenance inspector hierarchy; (4) extend only existing isolated browser fixtures and focused Config workflows for delayed branch/option states, local failure/retry, empty and failed values, long paths, request counts, keyboard selection, and wide/light/dark/narrow screenshots; (5) keep generated CSS current, verify the task-owned isolated preview and intended assets, run scoped rustfmt/unit tests, WebAssembly/web-ui package checks, browser syntax and focused authoritative workflows, then review, commit, and push normally to MR !323. No evaluator, policy, scheduler, source-identity, database, baseline, deployment, or stash changes.
+
+Maintainer verification adjustment: do not run the authoritative `checks.x86_64-linux.web-ui` VM locally and do not monitor the post-push pipeline. Run focused frontend tests, formatting, browser fixture syntax, and the WebAssembly/web-ui package check only; commit and push the reviewed slice, then leave broad browser/CI verification to the maintainer and CI.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -209,6 +211,8 @@ The `modifiedFiles` metadata is anticipated and non-exhaustive. The implementati
 2026-09-17 shallow Config root slice committed and pushed as `9562fe09` (`TASK-440: Publish shallow Config roots`) to `origin/TASK-440-system-config-flake-parity`; local and remote heads match exactly. MR !323 remains open. Exact-head pipeline 2859062860 is running and owns the maintainer-requested broad flake gate. TASK-440 remains In Progress until CI and review complete. The only worktree residue is the preserved generated untracked `packages/web-ui/assets/tailwind.css`; the preserved scanner stash remains unchanged.
 
 Presentation-parity preflight recorded exact local HEAD and `origin/TASK-440-system-config-flake-parity` at `9562fe09e94de3c790cd512ce7c77cc819bc0779`. Dedicated worktree is `/home/mcamp/code/crystal-forge/TASK-440-system-config-flake-parity`; recognized generated `packages/web-ui/assets/tailwind.css` and scanner stash remain untouched. The `dev` worktree has unrelated untracked `session-ses_f927.md`; no `main` worktree is registered. Existing task preview session `task440-preview` is alive from this task worktree. This pass is restricted to Config Explorer frontend presentation, directly related CSS, fixtures, and tests.
+
+Maintainer explicitly requested no local full Web UI check and no CI monitoring for this presentation pass. The maintainer will watch CI and deploy.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
