@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-17 03:16'
+updated_date: '2026-09-17 03:46'
 labels:
   - design-parity
   - web-ui
@@ -221,6 +221,8 @@ The `modifiedFiles` metadata is anticipated and non-exhaustive. The implementati
 2026-09-16 distributed CVE scanner and Scanning parity work committed and pushed as `3a5f207c249c4c272f4b2ab32e11bacefcb9ba45` (`TASK-440: Add distributed CVE scanning`) to `origin/TASK-440-system-config-flake-parity` for MR !323. Local HEAD and upstream tracking ref match. The preview is healthy and LAN `/scanning` is reachable. Only generated untracked `packages/web-ui/assets/tailwind.css` remains; it was intentionally not committed. Preserved `stash@{0}` remains. TASK-440 stays In Progress because authoritative visual and broad CI acceptance criteria remain delegated to CI.
 
 2026-09-17 resumed at local/upstream `3a5f207c249c4c272f4b2ab32e11bacefcb9ba45`. TASK-440 worktree has only preserved untracked generated `packages/web-ui/assets/tailwind.css`; `stash@{0}` remains. The dev integration worktree has unrelated untracked `session-ses_f927.md`, which will remain untouched. Preview server and UI run from the TASK-440 worktree; PostgreSQL PID 11334 listens on 3042 with cwd `/home/mcamp/code/crystal-forge/TASK-440-system-config-flake-parity/data/db`; server config targets 127.0.0.1:3042. Pipeline 2856140274 is failed: only `flake-check: [web-ui]` failed because the final TASK-440 semantic gate expected 16 successful contracts but received 12; the missing four are Config wide/narrow in light/dark. Early host reproduction `web-ui-test 12l-task440-config-lifecycle` failed before scoped Root execution because targeted inspection setup had `derivationId=null`, `carrierPath=null`, and removed zero automatic jobs. This is current CI/reproduction truth, not acceptance evidence.
+
+2026-09-17 rescan-actions slice implemented and locally verified in the existing TASK-440 worktree without migration, staging, commit, or push work. Added admin+CSRF exact-derivation enqueue with durable pending/manual lifecycle and active-scan ID reuse; fleet eligible/enqueued/reused counts; derivation and persisted source-trigger scanning DTOs; latest-store-path current identity; flake/configuration-scoped system history; fleet, row, current, and history UI actions with pending, success, partial-failure, retry-safe, identity, and refresh feedback; focused route, database, Rust UI, and browser-fixture coverage. Verification passed: cf-server all-target check; cf-server rustdoc build (existing unrelated warnings only); five focused migrated PostgreSQL scanning query tests; exact route authorization/CSRF/idempotency/scope test; four web-ui scanning unit tests; web-ui cargo check; scoped rustfmt check; Node syntax check; and git diff check. Host `web-ui-test 16c-scanning-view` did not execute because the repository marks that workflow VM-only, and this slice explicitly prohibits the full VM harness. The pre-existing untracked generated Tailwind asset remains untouched.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
