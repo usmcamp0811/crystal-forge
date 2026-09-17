@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-17 18:30'
+updated_date: '2026-09-17 19:01'
 labels:
   - design-parity
   - web-ui
@@ -59,6 +59,7 @@ references:
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2857537294'
   - git commit 9562fe09e94de3c790cd512ce7c77cc819bc0779
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2859062860'
+  - git commit bf27c03d03f15355a967960c5cc666b880b01064
 documentation:
   - docs/design/CrystalForge/app.jsx
   - docs/design/CrystalForge/components/SystemDetail.jsx
@@ -213,6 +214,10 @@ Maintainer verification adjustment: do not run the authoritative `checks.x86_64-
 Presentation-parity preflight recorded exact local HEAD and `origin/TASK-440-system-config-flake-parity` at `9562fe09e94de3c790cd512ce7c77cc819bc0779`. Dedicated worktree is `/home/mcamp/code/crystal-forge/TASK-440-system-config-flake-parity`; recognized generated `packages/web-ui/assets/tailwind.css` and scanner stash remain untouched. The `dev` worktree has unrelated untracked `session-ses_f927.md`; no `main` worktree is registered. Existing task preview session `task440-preview` is alive from this task worktree. This pass is restricted to Config Explorer frontend presentation, directly related CSS, fixtures, and tests.
 
 Maintainer explicitly requested no local full Web UI check and no CI monitoring for this presentation pass. The maintainer will watch CI and deploy.
+
+2026-09-17 Config Explorer presentation-parity slice committed and pushed as `bf27c03d` (`TASK-440: Align Config tree and inspector presentation`) on MR !323; local and remote heads match. Branch loading now renders in the affected branch row's value cell, selected-option loading renders in that option's value cell and the persistent inspector, and no generic status block is inserted during expansion. Collapsing a loading branch no longer duplicates its request, and option detail state became path-local so a second selection cannot discard the first result. Browse rows show the final structured path component with the full qualified path in the title, while Configured, observed-search, and certified rows keep the qualified path with muted ancestry and an emphasized leaf. Selection identity is passed into every row list, with persistent accent styling for scoped and certified rows. The tree and inspector use the reference's bounded 58vh scrolling, fixed row height, depth-independent grid columns, and 1000px stacking breakpoint. Values are classed from the typed payload rather than string heuristics, so known false, zero, null, empty string, and empty list stay distinct from not-inspected, unavailable, and failed states. The inspector uses the reference Type/Value/metadata/Provenance/footer hierarchy while preserving is_defined and highest_prio as secondary metadata, and it reports definition totals only from the current response. Accessibility correction from real browser evidence: status text nested in a row button is dropped from the accessibility tree, so row indicators are now visual and one shared polite live region announces the current scoped operation.
+
+Verification against the task-owned isolated preview at http://127.0.0.1:8080 (API 127.0.0.1:3445, PostgreSQL 127.0.0.1:3042): `12m-task440-config-explorer-keyboard-wide` 1/1, `12n-task440-config-narrow-keyboard` 1/1, `12la-task440-partial-config-inventory` 1/1, `13j-task440-flake-states-panes-navigation` 1/1, `14d-task440-cross-surface-auth-navigation` 1/1, with 10 dark/light state captures including branch-loading-in-row, selected-option-loading, selected-option-populated-tree, branch-continuation-failure-retry, and narrow-selected-option. Also passed: `cargo test --manifest-path packages/web-ui/Cargo.toml` (431 passed, 1 ignored), scoped rustfmt on the changed component, `node --check` on the browser suite, and `git diff --check`. Request-count assertions prove rendering fetches no option value or provenance that was not explicitly selected. Per maintainer instruction the authoritative Web UI VM check was not run locally and CI was not monitored; pre-existing rustfmt differences in `flake_timeline.rs` and `coach_panel.rs` and the untracked generated `tailwind.css` remain untouched.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
