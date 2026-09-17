@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-17 19:44'
+updated_date: '2026-09-17 20:13'
 labels:
   - design-parity
   - web-ui
@@ -345,6 +345,12 @@ Correction to comment #18: live migration and transition behavior is now verifie
 created: 2026-09-17 08:13
 ---
 2026-09-17 CVE diagnostics P1 follow-up: resolved timeout/failure stderr capture for remote and local scanners, including bounded post-termination draining and parse-failure stderr; added generation fencing for overlapping same-scan refreshes and close/reopen requests; made diagnostic event rows append-only while preserving parent-scan cascade cleanup; and documented builder compatibility, bounds, redaction, digest independence, and the admin scan-detail API. Verification passed: focused cf-builder timeout test; cf-server vulnix runner and diagnostic preparation tests; Web UI scanning unit tests and cargo check; offline cf-builder/cf-server all-target checks; default and Web UI fmt checks; JavaScript syntax check; cf-protocol/cf-builder/cf-server rustdoc; full `nix run .#devScripts.runCveProcessingTest` against a fresh disposable PostgreSQL cluster with migrations through 0265, including direct UPDATE/DELETE rejection and cascade cleanup; and the authoritative `16c-scanning-view` NixOS browser workflow via an explicit `path:` flake reference, with release WASM, deterministic overlap and close/reopen race assertions, and dark/light screenshots (1/1 passed). The first Git-backed Web UI build did not reach the VM because Nix excluded the intentionally untracked diagnostic module; rerunning via `path:` included worktree files without staging. Existing compiler/rustdoc warnings remain. The disposable PostgreSQL server was stopped and port 55439 confirmed inactive. No files were staged, committed, or pushed; migrations 0263/0264 and generated `packages/web-ui/assets/tailwind.css` were not modified.
+---
+
+author: OpenCode
+created: 2026-09-17 20:13
+---
+Committed and pushed `55cc0dc6` (`TASK-440: Add Config previews and notification dismissal`) to MR !323. Verification completed: `cargo fmt --manifest-path packages/default/Cargo.toml --all`; `cargo fmt --manifest-path packages/web-ui/Cargo.toml --all`; `cargo check --manifest-path packages/default/Cargo.toml -p cf-server --lib --bin server`; `cargo check --manifest-path packages/web-ui/Cargo.toml`; `git diff --check`. Per maintainer instruction, the authoritative full Web UI VM check was not run. The pre-existing untracked `packages/web-ui/assets/tailwind.css` was preserved and not committed.
 ---
 <!-- COMMENTS:END -->
 
