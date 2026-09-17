@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-17 21:18'
+updated_date: '2026-09-17 21:29'
 labels:
   - design-parity
   - web-ui
@@ -226,6 +226,8 @@ Maintainer explicitly requested no local full Web UI check and no CI monitoring 
 Verification against the task-owned isolated preview at http://127.0.0.1:8080 (API 127.0.0.1:3445, PostgreSQL 127.0.0.1:3042): `12m-task440-config-explorer-keyboard-wide` 1/1, `12n-task440-config-narrow-keyboard` 1/1, `12la-task440-partial-config-inventory` 1/1, `13j-task440-flake-states-panes-navigation` 1/1, `14d-task440-cross-surface-auth-navigation` 1/1, with 10 dark/light state captures including branch-loading-in-row, selected-option-loading, selected-option-populated-tree, branch-continuation-failure-retry, and narrow-selected-option. Also passed: `cargo test --manifest-path packages/web-ui/Cargo.toml` (431 passed, 1 ignored), scoped rustfmt on the changed component, `node --check` on the browser suite, and `git diff --check`. Request-count assertions prove rendering fetches no option value or provenance that was not explicitly selected. Per maintainer instruction the authoritative Web UI VM check was not run locally and CI was not monitored; pre-existing rustfmt differences in `flake_timeline.rs` and `coach_panel.rs` and the untracked generated `tailwind.css` remain untouched.
 
 Session-2 preflight: worktree/branch/HEAD verified unchanged since the prior push (`bf27c03d`, origin matches). Preview session `task440-preview` (tmux) is alive from this same worktree serving http://127.0.0.1:8080 against API 127.0.0.1:3445 and the task's own PostgreSQL on 127.0.0.1:3042, currently at migration 267 (matches HEAD). No other agent activity detected on this worktree/branch during this preflight. Next free additive migration number is 0268. This pass reuses the existing isolated task database (not disposable) and existing fixture-backed mock preview flows; no persistent-database cleanup or live notification mutation will be performed against the user's own account data.
+
+2026-09-17 follow-up diagnosis: the task-local preview is reachable at `http://127.0.0.1:8080` (also `https://10.8.0.177:8090/`) but does not contain `sledge`, `campground`, or revision `2506846`; it has no ConfiguredIndex request/observation/job, no active Config Inspector or Nix process, and no heavy/interactive advisory-lock holder. The demonstrated code defect is unbounded ConfiguredIndex contention: reservation sets `waiting_for_capacity` before capacity acquisition, then retries the shared global `HEAVY_NIX_ADVISORY_LOCK` every five seconds with zero attempts, no owner/wait-duration API state, and no waiting-state recovery. The fixture preview runs mock mode, where the Config Inspector worker intentionally exits, so it cannot reproduce the maintainer target. A read-only diagnostic from the target runtime is required: the request row (status/attempts/scheduled/started/completed/execution/heartbeat/error), matching observation identity, active `pg_locks` heavy-lock holder with `pg_stat_activity`, and relevant worker process state.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
