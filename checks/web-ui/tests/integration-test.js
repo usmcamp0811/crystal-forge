@@ -3972,10 +3972,11 @@ async function routeTask440SystemData(page, overrides = {}) {
     if (kind === "root") return {
       kind, path_components: [], child_offset: childOffset, children: [
         child([`${revision.slice(0, 7)}-root`], "prefix"),
+        child(["fmf"], "prefix"),
         child(["networking"], "prefix"),
         child(["poison"], "unavailable"),
         child(["services"], "prefix"),
-      ].slice(childOffset, childOffset + 512), children_truncated: false, total_children: 4,
+      ].slice(childOffset, childOffset + 512), children_truncated: false, total_children: 5,
     };
     if (kind === "prefix") {
       const dotted = pathComponents.join(".");
@@ -3994,6 +3995,19 @@ async function routeTask440SystemData(page, overrides = {}) {
             ]
         : dotted === "services.openssh"
           ? [child(["services", "openssh", "enable"], "option")]
+          : dotted === "fmf"
+            ? [
+                child(["fmf", "cache"], "prefix"),
+                child(["fmf", "cli"], "prefix"),
+              ]
+            : dotted === "fmf.cache"
+              ? [child(["fmf", "cache", "campground"], "option")]
+              : dotted === "fmf.cli"
+                ? [child(["fmf", "cli", "zsh"], "prefix")]
+                : dotted === "fmf.cli.zsh"
+                  ? [child(["fmf", "cli", "zsh", "root"], "prefix")]
+                  : dotted === "fmf.cli.zsh.root"
+                    ? [child(["fmf", "cli", "zsh", "root", "extraSource"], "option")]
           : dotted === "networking"
             ? [child(["networking", "hostName"], "option")]
             : [child([...pathComponents, "enabled"], "option")];
@@ -4015,6 +4029,10 @@ async function routeTask440SystemData(page, overrides = {}) {
       kind, path_components: pathComponents, key: key(pathComponents), declared_type: pathComponents.at(-1) === "enable" ? "boolean" : "string",
       is_defined: true, highest_prio: 100, value: pathComponents.includes("broken")
         ? { kind: "failed", value: { code: "not_evaluated", message: "fixture dependency failed" } }
+        : pathComponents.at(-1) === "campground"
+          ? { kind: "list", value: [] }
+          : pathComponents.at(-1) === "extraSource"
+            ? { kind: "scalar", value: "a deliberately long source value that remains bounded inside the selected option inspector" }
         : { kind: "scalar", value: pathComponents.at(-1) === "enable" ? true : "atlas-01" },
     };
     return {
@@ -4666,6 +4684,7 @@ async function assertTask440ConfigGeometry(page, viewportName) {
     };
     return {
       viewportWidth: innerWidth,
+      viewportHeight: innerHeight,
       documentWidth: document.documentElement.scrollWidth,
       bodyWidth: document.body.scrollWidth,
       explorer: rect(explorer),
@@ -4674,6 +4693,9 @@ async function assertTask440ConfigGeometry(page, viewportName) {
       side: rect(side),
       scrollClientWidth: scroll.clientWidth,
       scrollScrollWidth: scroll.scrollWidth,
+      scrollClientHeight: scroll.clientHeight,
+      scrollOverflowY: getComputedStyle(scroll).overflowY,
+      sideOverflowY: getComputedStyle(side).overflowY,
       headers: [...tree.querySelectorAll(".cfgx-colhead > span")].map((header) => header.textContent.replace(/\s+/g, " ").trim()),
     };
   });
@@ -4683,6 +4705,10 @@ async function assertTask440ConfigGeometry(page, viewportName) {
   if (viewportName === "wide") {
     if (Math.abs(geometry.tree.top - geometry.side.top) > 1 || geometry.tree.right > geometry.side.left + 1) throw new Error(`Wide Config Explorer columns overlap: ${JSON.stringify(geometry)}`);
     if (Math.abs(geometry.side.right - geometry.body.right) > 1) throw new Error(`Wide Config inspector is clipped: ${JSON.stringify(geometry)}`);
+    // The reference keeps the tree and inspector independently scrollable so a
+    // deeply expanded tree cannot turn the page into an unbounded list.
+    if (geometry.scrollOverflowY === "visible" || geometry.sideOverflowY === "visible") throw new Error(`Wide Config panes are not independently scrollable: ${JSON.stringify(geometry)}`);
+    if (geometry.scrollClientHeight > geometry.viewportHeight) throw new Error(`Wide Config tree exceeds the bounded pane height: ${JSON.stringify(geometry)}`);
   } else {
     if (geometry.side.top < geometry.tree.bottom - 1 || Math.abs(geometry.tree.width - geometry.side.width) > 1) throw new Error(`Narrow Config Explorer did not stack without overlap: ${JSON.stringify(geometry)}`);
     if (Math.abs(geometry.side.bottom - geometry.body.bottom) > 2) throw new Error(`Narrow Config Explorer is clipped: ${JSON.stringify(geometry)}`);
@@ -19487,7 +19513,7 @@ security.audit.enable = true;</fixtext>
       await page.getByRole("button", { name: "Search", exact: true }).click();
       await assertVisible(page.getByText("Partial search over options observed in this Explorer session only. No match does not mean the option is absent.", { exact: true }), "Expected truthful partial search scope");
       await assertVisible(page.getByText("No match in options observed during this Explorer session. Unobserved paths were not searched.", { exact: true }), "Expected truthful partial empty search");
-      await page.getByRole("button", { name: "Sources", exact: true }).click();
+      await page.getByRole("button", { name: /^Sources\b/ }).click();
       await assertVisible(page.getByText("Partial list: only source paths from provenance inspected in this Explorer target and session. This is not a complete module registry.", { exact: true }), "Expected truthful partial Sources scope");
       if (state.inspectionRequests.length) throw new Error("Opening a partial inventory queued a complete inspection");
       if (state.optionRequests.some((request) => request.filter === "changed")) throw new Error("Partial inventory UI requested unavailable comparison data");
@@ -19497,6 +19523,7 @@ security.audit.enable = true;</fixtext>
     name: "12m-task440-config-explorer-keyboard-wide",
     description: "TASK-440 comprehensive mocked Config Explorer: lazy observations, bounded continuation, local failures, persistent detail, explicit provenance, certified search, and revision fencing",
     action: async (page) => {
+      const stepName = "12m-task440-config-explorer-keyboard-wide";
       await page.setViewportSize({ width: 1920, height: 1080 });
       await suppressOnboardingCoach(page);
       await routeSystemsWarningData(page);
@@ -19513,6 +19540,60 @@ security.audit.enable = true;</fixtext>
       state.releaseHeldObservation("root");
       let servicesPrefix = page.getByRole("button", { name: "Expand services" });
       await assertVisible(servicesPrefix, "Root observation did not render", 15000);
+      await assertVisible(page.getByRole("status", { name: "Unavailable child poison" }), "Expected unavailable root child to remain explicit");
+
+      state.holdObservationKinds.add("prefix");
+      // The expand control's accessible name flips to Collapse while loading,
+      // so the row is located by its stable qualified-path title instead.
+      const fmfRow = page.locator(".cfg-explorer-tree-row").filter({ has: page.locator('[title="config.fmf"]') });
+      await page.getByRole("button", { name: "Expand fmf" }).click();
+      await state.waitForObservationPosts(["prefix"]);
+      await assertVisible(fmfRow.locator(".cfgx-val .cfgx-insp"), "Delayed branch loading did not stay in the affected value cell");
+      if (await page.locator(".cfg-explorer-status").count()) throw new Error("Expanding a branch inserted a generic status block instead of a row indicator");
+      await assertVisible(page.locator(".cfgx-live").filter({ hasText: "Inspecting fmf" }), "Branch loading did not produce one accessible announcement");
+      await assertVisible(page.getByRole("button", { name: "Expand networking" }), "Delayed branch loading hid a loaded sibling");
+      await captureWorkflowState(page, stepName, "branch-loading-in-row");
+      await page.getByRole("button", { name: "Collapse fmf" }).click();
+      await page.getByRole("button", { name: "Expand fmf" }).click();
+      const pendingFmfRequests = state.observationPosts.filter((request) => request.kind === "prefix" && isDeepStrictEqual(request.path_components, ["fmf"]));
+      if (pendingFmfRequests.length !== 1) throw new Error(`Collapsing and reopening a loading branch duplicated work: ${JSON.stringify(pendingFmfRequests)}`);
+      state.releaseHeldObservation("prefix");
+      const fmfCache = page.getByRole("button", { name: "Expand fmf.cache" });
+      const fmfCli = page.getByRole("button", { name: "Expand fmf.cli" });
+      await assertVisible(fmfCache, "Expected populated fmf cache branch", 15000);
+      await assertVisible(fmfCli, "Expected populated fmf cli branch");
+      if ((await fmfCache.locator(".cfg-explorer-path").textContent()).trim() !== "cache") throw new Error("Browse repeated the qualified path instead of showing the final component");
+
+      await fmfCache.click();
+      const campgroundOption = page.getByRole("button", { name: "Inspect option fmf.cache.campground" });
+      await assertVisible(campgroundOption, "Expected fmf.cache.campground option", 15000);
+      state.holdObservationKinds.add("option");
+      await campgroundOption.click();
+      await state.waitForHeldObservationCount("option", 1);
+      await assertVisible(campgroundOption.locator(".cfgx-val .cfgx-insp"), "Option loading did not stay in its value cell");
+      if (!(await campgroundOption.getAttribute("class")).includes("sel")) throw new Error("Selected option did not retain its row accent while loading");
+      await assertVisible(page.getByRole("complementary", { name: "Configuration inspector" }).locator(".cfgx-insp-state").filter({ hasText: /queued option/i }), "Selected-option loading did not render in the detail pane");
+      await assertVisible(page.locator(".cfgx-live").filter({ hasText: "Inspecting option fmf.cache.campground" }), "Option loading did not produce one accessible announcement");
+      await assertVisible(fmfCli, "Selecting a delayed option hid a loaded sibling");
+      await captureWorkflowState(page, stepName, "selected-option-loading");
+      state.releaseHeldObservation("option");
+      await assertVisible(campgroundOption.locator(".cfgx-val .v-list").getByText("[]", { exact: true }), "Known empty list was rendered as an unknown value", 15000);
+      await assertVisible(page.getByRole("complementary", { name: "Configuration inspector" }).locator(".cfgx-pre.v-list").getByText("[]", { exact: true }), "Inspector did not preserve the known empty list");
+
+      await fmfCli.click();
+      await page.getByRole("button", { name: "Expand fmf.cli.zsh" }).click();
+      await page.getByRole("button", { name: "Expand fmf.cli.zsh.root" }).click();
+      const extraSource = page.getByRole("button", { name: "Inspect option fmf.cli.zsh.root.extraSource" });
+      await assertVisible(extraSource, "Expected long nested option path", 15000);
+      await extraSource.click();
+      await assertVisible(page.locator(".cfgx-insp-path").filter({ hasText: "fmf.cli.zsh.root.extraSource" }), "Long selected path did not render in the persistent inspector", 15000);
+      await captureWorkflowState(page, stepName, "selected-option-populated-tree");
+      const explicitlySelected = [["fmf", "cache", "campground"], ["fmf", "cli", "zsh", "root", "extraSource"]];
+      const optionPosts = state.observationPosts.filter((request) => request.kind === "option");
+      if (optionPosts.length !== explicitlySelected.length || !optionPosts.every((request) => explicitlySelected.some((path) => isDeepStrictEqual(request.path_components, path)))) {
+        throw new Error(`Rendering rows fetched option values that were never selected: ${JSON.stringify(optionPosts.map((request) => request.path_components))}`);
+      }
+      if (state.observationPosts.some((request) => request.kind === "provenance")) throw new Error("Rendering the tree eagerly requested provenance");
 
       state.holdObservationKinds.add("configured_index");
       const configuredMode = page.getByRole("button", { name: "Configured", exact: true });
@@ -19533,20 +19614,21 @@ security.audit.enable = true;</fixtext>
       if (await page.getByRole("button", { name: "Expand services.openssh" }).count()) throw new Error("Browse eagerly exposed child 513 before continuation");
       const retainedFirst = page.getByRole("button", { name: "Expand services.healthy" });
       await assertVisible(retainedFirst, "Expected first prefix row before continuation");
-      await assertVisible(retainedFirst.locator(".cfgx-val").getByText("—", { exact: true }), "Browse prefix row eagerly exposed a value");
+      if ((await retainedFirst.locator(".cfgx-val").innerText()).trim() !== "") throw new Error("Collapsed Browse prefix row exposed a value it never inspected");
       const loadMoreServices = page.getByRole("button", { name: "Load more children under services" });
       await loadMoreServices.click();
       const continuationFailure = page.getByRole("alert").filter({ hasText: "Unable to inspect services" });
       await assertVisible(continuationFailure, "Expected continuation failure to remain local", 15000);
       await assertVisible(retainedFirst, "Continuation failure discarded loaded prefix rows");
       await assertVisible(page.getByRole("button", { name: "Expand networking" }), "Continuation failure removed a healthy root sibling");
+      await captureWorkflowState(page, stepName, "branch-continuation-failure-retry");
       await loadMoreServices.click();
       const offsetRequests = state.observationPosts.filter((request) => request.kind === "prefix" && isDeepStrictEqual(request.path_components, ["services"]) && request.child_offset === 512);
       if (offsetRequests.length !== 2) throw new Error(`Expected failed and retried offset 512 requests: ${JSON.stringify(offsetRequests)}`);
-      const servicesRows = page.locator(".cfg-explorer-tree [title^='services.']");
+      const servicesRows = page.locator(".cfg-explorer-tree [title^='config.services.']");
       await assertVisible(page.getByRole("button", { name: "Expand services.openssh" }), "Child 513 was not reachable after continuation retry", 15000);
       const serviceTitles = await servicesRows.evaluateAll((elements) => elements.map((element) => element.getAttribute("title")));
-      if (serviceTitles.length !== 514 || new Set(serviceTitles).size !== 514 || serviceTitles[0] !== "services.healthy" || serviceTitles[512] !== "services.openssh" || serviceTitles[513] !== "services.tail") {
+      if (serviceTitles.length !== 514 || new Set(serviceTitles).size !== 514 || serviceTitles[0] !== "config.services.healthy" || serviceTitles[512] !== "config.services.openssh" || serviceTitles[513] !== "config.services.tail") {
         throw new Error(`Prefix continuation lost, duplicated, or reordered rows: ${JSON.stringify({ count: serviceTitles.length, first: serviceTitles[0], child513: serviceTitles[512], last: serviceTitles[513] })}`);
       }
       await page.getByRole("button", { name: "Expand services.openssh" }).click();
@@ -19555,7 +19637,7 @@ security.audit.enable = true;</fixtext>
       await treeOption.click();
       await assertVisible(page.locator(".cfgx-insp-path").filter({ hasText: "services.openssh.enable" }), "Tree option did not render lazy detail", 15000);
       const treeOperation = state.observationPosts.filter((request) => request.kind === "option").at(-1);
-      await page.getByRole("button", { name: "Sources", exact: true }).click();
+      await page.getByRole("button", { name: /^Sources\b/ }).click();
       await page.getByRole("button", { name: "Option", exact: true }).click();
       await assertVisible(page.locator(".cfgx-insp-path").filter({ hasText: "services.openssh.enable" }), "Option detail did not persist across inspector panes");
       await page.getByRole("button", { name: "Configured", exact: true }).click();
@@ -19568,7 +19650,7 @@ security.audit.enable = true;</fixtext>
       const provenanceBefore = state.observationPosts.filter((request) => request.kind === "provenance").length;
       if (provenanceBefore !== 0) throw new Error("Option selection eagerly requested provenance");
       await page.getByRole("button", { name: "Inspect provenance for services.openssh.enable" }).click();
-      await assertVisible(page.locator(".cfg-explorer-provenance .cfg-def-file").getByText("nixos/hosts/atlas-01.nix", { exact: true }), "Separate provenance did not render", 15000);
+      await assertVisible(page.locator(".cfgx-defs .cfgx-def-f").getByText("nixos/hosts/atlas-01.nix", { exact: true }), "Separate provenance did not render", 15000);
       if (state.observationPosts.filter((request) => request.kind === "provenance").length !== provenanceBefore + 1) {
         throw new Error("Option detail did not start exactly one separate provenance request");
       }
@@ -19581,7 +19663,7 @@ security.audit.enable = true;</fixtext>
       const certifiedSearch = page.getByPlaceholder("Search all certified options…");
       await certifiedSearch.fill("openssh");
       await assertVisible(page.getByRole("button", { name: "Inspect certified option services.openssh.enable" }), "Certified search did not return the matching option", 15000);
-      await page.getByRole("button", { name: "Sources", exact: true }).click();
+      await page.getByRole("button", { name: /^Sources\b/ }).click();
       await assertVisible(page.getByText("Partial list: only source paths from provenance inspected in this Explorer target and session. This is not a complete module registry.", { exact: true }), "Incomplete source pagination was mislabeled as complete coverage");
       await page.getByRole("button", { name: "Browse", exact: true }).click();
       state.holdObservationKinds.add("root");
@@ -19639,6 +19721,10 @@ security.audit.enable = true;</fixtext>
       await option.focus();
       await page.keyboard.press("Enter");
       await assertVisible(page.locator(".cfgx-insp-path").filter({ hasText: "services.openssh.enable" }), "Keyboard option selection did not populate the persistent pane");
+      if ((await option.getAttribute("aria-pressed")) !== "true" || !(await option.getAttribute("class")).includes("sel")) {
+        throw new Error("Keyboard selection did not persist a visible selected row");
+      }
+      await captureWorkflowState(page, "12n-task440-config-narrow-keyboard", "narrow-selected-option");
       await assertTask440ConfigGeometry(page, "narrow");
     },
   },

@@ -103,6 +103,33 @@ fn display_path_parts(path: &[String]) -> (String, String) {
     }
 }
 
+fn tree_leaf_label(path: &[String]) -> String {
+    path.last()
+        .map(|component| display_path_component(component))
+        .unwrap_or_default()
+}
+
+fn display_qualified_path_parts(path: &str) -> (&str, &str) {
+    let mut quoted = false;
+    let mut escaped = false;
+    let mut separator = None;
+    for (index, character) in path.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match character {
+            '\\' if quoted => escaped = true,
+            '"' => quoted = !quoted,
+            '.' if !quoted => separator = Some(index),
+            _ => {}
+        }
+    }
+    separator
+        .map(|index| (&path[..=index], &path[index + 1..]))
+        .unwrap_or(("", path))
+}
+
 fn observation_error(error: &ApiClientError) -> String {
     match error {
         ApiClientError::Status {
@@ -159,6 +186,43 @@ fn render_safe_option_value(value: &SafeOptionValue) -> String {
         }
         SafeOptionValue::Opaque { type_name } => format!("<{type_name}: opaque>"),
         SafeOptionValue::Failed(error) => format!("not evaluated: {}", error.message),
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ValuePresentation {
+    text: String,
+    class: &'static str,
+}
+
+fn present_safe_option_value(value: &SafeOptionValue) -> ValuePresentation {
+    let class = match value {
+        SafeOptionValue::Scalar(JsonValue::Bool(_)) => "v-bool",
+        SafeOptionValue::Scalar(JsonValue::Number(_)) => "v-num",
+        SafeOptionValue::Scalar(JsonValue::String(value)) if value.starts_with("/nix/store/") => {
+            "v-store"
+        }
+        SafeOptionValue::Scalar(JsonValue::String(_)) => "v-str",
+        SafeOptionValue::Scalar(JsonValue::Null) => "v-null",
+        SafeOptionValue::Scalar(JsonValue::Array(_)) | SafeOptionValue::List(_) => "v-list",
+        SafeOptionValue::Scalar(JsonValue::Object(_))
+        | SafeOptionValue::AttributeSet(_)
+        | SafeOptionValue::Submodule(_) => "v-attrs",
+        SafeOptionValue::Package(_) => "v-store",
+        SafeOptionValue::Opaque { .. } => "v-fn",
+        SafeOptionValue::Failed(_) => "cfg-val-err",
+    };
+    ValuePresentation {
+        text: render_safe_option_value(value),
+        class,
+    }
+}
+
+fn scoped_option_presentation(state: Option<&ObservationState>) -> Option<ValuePresentation> {
+    let observation = scoped_option(state)?;
+    match &observation.payload {
+        ConfigObservationPayload::Option { value, .. } => Some(present_safe_option_value(value)),
+        _ => None,
     }
 }
 
@@ -453,6 +517,7 @@ fn ExplorerChildren(
     provenance: Signal<HashMap<Vec<String>, ConfigObservationResponse>>,
     more_loading: Signal<HashSet<Vec<String>>>,
     more_errors: Signal<HashMap<Vec<String>, String>>,
+    selected_path: Vec<String>,
     on_prefix: EventHandler<(Vec<String>, u32)>,
     on_option: EventHandler<Vec<String>>,
 ) -> Element {
@@ -462,19 +527,19 @@ fn ExplorerChildren(
                 {
                     let path = child.path_components.clone();
                     let display = dotted_path(&path);
+                    let leaf = tree_leaf_label(&path);
                     let is_expanded = expanded.read().contains(&path);
                     let branch_state = branches.read().get(&path).cloned().unwrap_or(ObservationState::Idle);
-                    let value = scoped_option_value(details.read().get(&path));
+                    let detail_state = details.read().get(&path).cloned();
+                    let value = scoped_option_presentation(detail_state.as_ref());
                     let source = scoped_option_source(&path, &provenance.read());
-                    let value_label = value.as_deref().unwrap_or("—");
-                    let source_label = source.as_deref().unwrap_or("—");
-                    let row_style = format!("padding-left:{}px", 10 + depth * 15);
+                    let row_style = format!("--cfgx-depth:{}px", depth * 15);
                     rsx! {
                         li { key: "{child.key}", class: "cfg-explorer-node",
                             match child.kind {
                                 ConfigObservationChildKind::Prefix => rsx! {
                                     button {
-                                        class: "cfg-explorer-tree-row focus-ring",
+                                        class: if matches!(&branch_state, ObservationState::Error(_)) { "cfg-explorer-tree-row branch failed focus-ring" } else { "cfg-explorer-tree-row branch focus-ring" },
                                         style: "{row_style}",
                                         "aria-label": if is_expanded { format!("Collapse {display}") } else { format!("Expand {display}") },
                                         "aria-expanded": is_expanded,
@@ -482,9 +547,17 @@ fn ExplorerChildren(
                                             let path = path.clone();
                                             move |_| on_prefix.call((path.clone(), 0))
                                         },
-                                        span { class: "mono cfg-explorer-path", title: "{display}", span { class: if is_expanded { "cfg-caret open" } else { "cfg-caret" }, Icon { name: IconName::ChevronRight, size: 12 } } "{display}" }
-                                        span { class: "cfgx-val mono", "—" }
-                                        span { class: "cfgx-by mono", "—" }
+                                        span { class: "mono cfg-explorer-path", title: "config.{display}", span { class: if is_expanded { "cfg-caret open" } else { "cfg-caret" }, Icon { name: IconName::ChevronRight, size: 12 } } "{leaf}" }
+                                        span { class: "cfgx-val sub",
+                                            if is_expanded {
+                                                if let ObservationState::Lifecycle(lifecycle) = &branch_state {
+                                                    span { class: "cfgx-insp", title: "{lifecycle_copy(lifecycle.clone())}", i {} "{lifecycle_copy(lifecycle.clone()).to_ascii_lowercase()}" }
+                                                } else if matches!(&branch_state, ObservationState::Error(_)) {
+                                                    span { class: "err", "unavailable" }
+                                                }
+                                            }
+                                        }
+                                        span { class: "cfgx-by mono", "aria-label": "Not applicable to a namespace" }
                                     }
                                     if is_expanded {
                                         match branch_state.clone() {
@@ -499,6 +572,7 @@ fn ExplorerChildren(
                                                         provenance,
                                                         more_loading,
                                                         more_errors,
+                                                        selected_path: selected_path.clone(),
                                                         on_prefix,
                                                         on_option,
                                                     }
@@ -534,29 +608,36 @@ fn ExplorerChildren(
                                                     }
                                                 }
                                             },
-                                            state => rsx! { ExplorerStatus { state, surface: "Prefix" } },
+                                            ObservationState::Idle | ObservationState::Lifecycle(_) => rsx! {},
                                         }
                                     }
                                 },
                                 ConfigObservationChildKind::Option => rsx! {
                                     button {
-                                        class: "cfg-explorer-tree-row cfg-explorer-option focus-ring",
+                                        class: if selected_path == path { "cfg-explorer-tree-row cfg-explorer-option sel focus-ring" } else { "cfg-explorer-tree-row cfg-explorer-option focus-ring" },
                                         style: "{row_style}",
+                                        "aria-pressed": selected_path == path,
                                         "aria-label": "Inspect option {display}",
                                         onclick: {
                                             let path = path.clone();
                                             move |_| on_option.call(path.clone())
                                         },
-                                        span { class: "mono cfg-explorer-path", title: "{display}", span { class: "cfg-explorer-leaf", Icon { name: IconName::File, size: 12 } } "{display}" }
-                                        span { class: "cfgx-val mono", "{value_label}" }
-                                        span { class: "cfgx-by mono", "{source_label}" }
+                                        span { class: "mono cfg-explorer-path", title: "config.{display}", span { class: "cfg-explorer-leaf cfgx-bullet" } "{leaf}" }
+                                        span { class: "cfgx-val mono",
+                                            match detail_state {
+                                                Some(ObservationState::Lifecycle(lifecycle)) => rsx! { span { class: "cfgx-insp", title: "{lifecycle_copy(lifecycle)} option value", i {} } },
+                                                Some(ObservationState::Error(_)) => rsx! { span { class: "cfg-val-err", title: "Option value is unavailable", "unavailable" } },
+                                                _ => if let Some(value) = value { rsx! { span { class: "{value.class}", title: "{value.text}", "{value.text}" } } } else { rsx! { span { class: "cfgx-uninspected", title: "Value not inspected", "aria-label": "Value not inspected" } } },
+                                            }
+                                        }
+                                        span { class: "cfgx-by mono", if let Some(source) = source { span { title: "{source}", "{source}" } } else { span { class: "cfgx-uninspected", title: "Provenance not inspected", "aria-label": "Provenance not inspected" } } }
                                     }
                                 },
                                 ConfigObservationChildKind::Unavailable => rsx! {
                                     div { class: "cfg-explorer-tree-row cfg-explorer-unavailable", style: "{row_style}", role: "status", "aria-label": "Unavailable child {display}",
-                                        span { class: "mono cfg-explorer-path", title: "{display}", span { class: "cfg-explorer-leaf", Icon { name: IconName::Warn, size: 12 } } "{display}" }
+                                        span { class: "mono cfg-explorer-path", title: "config.{display}", span { class: "cfg-explorer-leaf", Icon { name: IconName::Warn, size: 12 } } "{leaf}" }
                                         span { class: "cfgx-val mono cfg-val-err", "unavailable" }
-                                        span { class: "cfgx-by mono", "—" }
+                                        span { class: "cfgx-by mono", "aria-label": "Source unavailable" }
                                     }
                                 },
                             }
@@ -627,14 +708,18 @@ pub(crate) fn ConfigExplorer(
     let mut expanded = use_signal(HashSet::<Vec<String>>::new);
     let mut root_more_loading = use_signal(|| false);
     let mut root_more_error = use_signal(|| None::<String>);
-    let mut detail = use_signal(|| ObservationState::Idle);
     let mut detail_cache = use_signal(HashMap::<Vec<String>, ObservationState>::new);
+    let mut detail_sequences = use_signal(HashMap::<Vec<String>, u64>::new);
     let mut detail_path = use_signal(Vec::<String>::new);
     let mut certified_detail = use_signal(|| None::<EvaluatedOptionRow>);
     let mut provenance = use_signal(|| ObservationState::Idle);
     let mut provenance_cache = use_signal(HashMap::<Vec<String>, ConfigObservationResponse>::new);
     let mut mode = use_signal(|| ExplorerMode::Browse);
     let mut inspector_pane = use_signal(|| InspectorPane::Sources);
+    // One shared polite live region reports the most recent scoped operation.
+    // Row-level indicators stay visual because assistive technology ignores
+    // nested status content inside a row button.
+    let mut announcement = use_signal(String::new);
     let component_active = use_hook(|| Rc::new(Cell::new(true)));
     {
         let component_active = component_active.clone();
@@ -664,14 +749,15 @@ pub(crate) fn ConfigExplorer(
                 configured.set(ObservationState::Idle);
                 root_more_loading.set(false);
                 root_more_error.set(None);
-                detail.set(ObservationState::Idle);
                 detail_cache.set(HashMap::new());
+                detail_sequences.set(HashMap::new());
                 detail_path.set(Vec::new());
                 certified_detail.set(None);
                 provenance.set(ObservationState::Idle);
                 provenance_cache.set(HashMap::new());
                 mode.set(ExplorerMode::Browse);
                 inspector_pane.set(InspectorPane::Sources);
+                announcement.set(String::new());
                 let operations =
                     initial_scoped_operations(requested_revision.as_deref(), scoped_enabled);
                 let Some(revision) = requested_revision else {
@@ -763,15 +849,16 @@ pub(crate) fn ConfigExplorer(
         let component_active = component_active.clone();
         move |(path, child_offset): (Vec<String>, u32)| {
             let currently_expanded = expanded.peek().contains(&path);
-            let loaded = matches!(
-                branches.peek().get(&path),
-                Some(ObservationState::Loaded(_))
-            );
-            if child_offset == 0 && currently_expanded && loaded {
+            let branch_state = branches.peek().get(&path).cloned();
+            let loaded = matches!(branch_state, Some(ObservationState::Loaded(_)));
+            if child_offset == 0 && currently_expanded {
                 expanded.write().remove(&path);
                 return;
             }
             expanded.write().insert(path.clone());
+            if child_offset == 0 && matches!(branch_state, Some(ObservationState::Lifecycle(_))) {
+                return;
+            }
             if !should_request_prefix(child_offset, loaded) {
                 return;
             }
@@ -783,6 +870,7 @@ pub(crate) fn ConfigExplorer(
             let scope = *scope_sequence.peek();
             branch_sequences.write().insert(path.clone(), sequence);
             if child_offset == 0 {
+                announcement.set(format!("Inspecting {}", dotted_path(&path)));
                 branches.write().insert(
                     path.clone(),
                     ObservationState::Lifecycle(ConfigObservationLifecycle::Queued),
@@ -857,6 +945,14 @@ pub(crate) fn ConfigExplorer(
                         Err(error) => ObservationState::Error(observation_error(&error)),
                     };
                     branch_more_loading.write().remove(&path);
+                    if child_offset == 0 {
+                        announcement.set(match &next_state {
+                            ObservationState::Error(_) => {
+                                format!("{} inspection failed", dotted_path(&path))
+                            }
+                            _ => format!("Loaded {}", dotted_path(&path)),
+                        });
+                    }
                     branches.write().insert(path, next_state);
                 }
             });
@@ -879,8 +975,9 @@ pub(crate) fn ConfigExplorer(
                     .unwrap_or(ObservationState::Idle),
             );
             if let Some(cached) = detail_cache.peek().get(&path).cloned() {
-                detail.set(cached);
-                return;
+                if !matches!(cached, ObservationState::Error(_)) {
+                    return;
+                }
             }
             let Some(revision) = revision.clone().filter(|_| scoped_enabled) else {
                 return;
@@ -888,9 +985,12 @@ pub(crate) fn ConfigExplorer(
             let sequence = detail_sequence.peek().saturating_add(1);
             detail_sequence.set(sequence);
             let scope = *scope_sequence.peek();
-            detail.set(ObservationState::Lifecycle(
-                ConfigObservationLifecycle::Queued,
-            ));
+            detail_sequences.write().insert(path.clone(), sequence);
+            announcement.set(format!("Inspecting option {}", dotted_path(&path)));
+            detail_cache.write().insert(
+                path.clone(),
+                ObservationState::Lifecycle(ConfigObservationLifecycle::Queued),
+            );
             let component_active = component_active.clone();
             spawn(async move {
                 let is_current = || {
@@ -899,9 +999,12 @@ pub(crate) fn ConfigExplorer(
                             scope,
                             *scope_sequence.peek(),
                             sequence,
-                            *detail_sequence.peek(),
+                            detail_sequences
+                                .peek()
+                                .get(&path)
+                                .copied()
+                                .unwrap_or_default(),
                         )
-                        && detail_path.peek().as_slice() == path.as_slice()
                 };
                 let result = load_system_config_observation(
                     &system_id,
@@ -913,22 +1016,28 @@ pub(crate) fn ConfigExplorer(
                     },
                     |request| {
                         if is_current() {
-                            detail.set(ObservationState::Lifecycle(request.lifecycle));
+                            detail_cache.write().insert(
+                                path.clone(),
+                                ObservationState::Lifecycle(request.lifecycle),
+                            );
                         }
                     },
                     is_current,
                 )
                 .await;
                 if is_current() {
-                    detail.set(match result {
-                        Ok(Some(observation)) => {
-                            let loaded = ObservationState::Loaded(observation);
-                            detail_cache.write().insert(path.clone(), loaded.clone());
-                            loaded
-                        }
+                    let next_state = match result {
+                        Ok(Some(observation)) => ObservationState::Loaded(observation),
                         Ok(None) => return,
                         Err(error) => ObservationState::Error(observation_error(&error)),
+                    };
+                    announcement.set(match &next_state {
+                        ObservationState::Error(_) => {
+                            format!("Option {} inspection failed", dotted_path(&path))
+                        }
+                        _ => format!("Loaded option {}", dotted_path(&path)),
                     });
+                    detail_cache.write().insert(path, next_state);
                 }
             });
         }
@@ -1064,7 +1173,6 @@ pub(crate) fn ConfigExplorer(
         detail_sequence.set(next_detail);
         provenance_sequence.set(next_provenance);
         detail_path.set(Vec::new());
-        detail.set(ObservationState::Idle);
         provenance.set(ObservationState::Idle);
         certified_detail.set(Some(row));
         inspector_pane.set(InspectorPane::Option);
@@ -1072,9 +1180,14 @@ pub(crate) fn ConfigExplorer(
 
     let root_state = root.read().clone();
     let configured_state = configured.read().clone();
-    let detail_state = detail.read().clone();
+    let selected_scoped_path = detail_path.read().clone();
+    let detail_state = detail_cache.read().get(&selected_scoped_path).cloned();
     let provenance_state = provenance.read().clone();
     let certified_detail_state = certified_detail.read().clone();
+    let selected_certified_path = certified_detail_state
+        .as_ref()
+        .and_then(|row| row.option.as_ref().or(row.before.as_ref()))
+        .map(|option| option.path.clone());
     let selected_mode = *mode.read();
     let selected_pane = *inspector_pane.read();
     let inventory_complete = inventory_state == OptionInventoryState::Complete;
@@ -1099,6 +1212,16 @@ pub(crate) fn ConfigExplorer(
             *sources.entry(path).or_default() += 1;
             sources
         });
+    let source_count = certified_sources.len().saturating_add(
+        observed_sources
+            .keys()
+            .filter(|path| {
+                !certified_sources
+                    .iter()
+                    .any(|source| source.source_path.as_deref() == Some(path.as_str()))
+            })
+            .count(),
+    );
     let primary_label = match primary_lifecycle {
         SnapshotLifecycle::Available => "complete",
         SnapshotLifecycle::Queued => "queued",
@@ -1115,6 +1238,7 @@ pub(crate) fn ConfigExplorer(
         .unwrap_or_else(|| "unavailable".into());
     rsx! {
         div { class: "cfgx-explorer",
+            div { class: "cfgx-live sr-only", role: "status", "aria-live": "polite", "aria-atomic": "true", "{announcement}" }
             div { class: "cfgx-meta",
                 div { class: "cfgx-meta-i", title: "Whether the primary evaluator has produced a result for this exact target. Explorer observations never replace primary evaluation.", span { "primary eval" } b { class: if primary_lifecycle == SnapshotLifecycle::Available { "ok" } else { "warn" }, "{primary_label}" } }
                 div { class: "cfgx-meta-i", span { "eval time" } b { class: "mono", "{evaluation_time}" } }
@@ -1168,7 +1292,7 @@ pub(crate) fn ConfigExplorer(
                         } else { match root_state.clone() {
                             ObservationState::Loaded(observation) => match observation.payload {
                                 ConfigObservationPayload::Root { children, children_truncated, total_children, .. } => rsx! {
-                                        ExplorerChildren { entries: children.clone(), depth: 0, expanded, branches, details: detail_cache, provenance: provenance_cache, more_loading: branch_more_loading, more_errors: branch_more_errors, on_prefix: load_prefix, on_option: select_option }
+                                        ExplorerChildren { entries: children.clone(), depth: 0, expanded, branches, details: detail_cache, provenance: provenance_cache, more_loading: branch_more_loading, more_errors: branch_more_errors, selected_path: selected_scoped_path.clone(), on_prefix: load_prefix, on_option: select_option }
                                     if children_truncated {
                                         div { class: "cfgx-more", span { role: "status", "Showing {children.len()} of {total_children}" } button { class: "cfgx-link focus-ring", disabled: *root_more_loading.read(), onclick: load_more_root, if *root_more_loading.read() { "loading…" } else { "load more" } } }
                                     }
@@ -1207,7 +1331,7 @@ pub(crate) fn ConfigExplorer(
                                 } => rsx! {
                                     div { class: "cfg-explorer-configured-meta", role: "status", "{total_configured} configured from {total_traversed} traversed; declaration-only defaults excluded" }
                                     if options.is_empty() { div { class: "cfg-explorer-status", "No surviving non-default assignments were observed." } }
-                                    else { ConfiguredOptions { options, details: detail_cache, provenance: provenance_cache, on_option: select_option } }
+                                    else { ConfiguredOptions { options, details: detail_cache, provenance: provenance_cache, selected_path: selected_scoped_path.clone(), on_option: select_option } }
                                     if configured_truncated { div { class: "cfg-explorer-local-note", "The configured list is bounded; {total_configured} identities exist." } }
                                     if !diagnostics.is_empty() || !classifier_diagnostics.is_empty() || diagnostics_truncated || classifier_diagnostics_truncated {
                                         div { class: "cfg-explorer-diagnostics", role: "status", "Inspection retained {diagnostics.len()} traversal and {classifier_diagnostics.len()} classifier diagnostics. Some identities may be unavailable." }
@@ -1241,10 +1365,13 @@ pub(crate) fn ConfigExplorer(
                                         if let Some(option) = row.option.as_ref().or(row.before.as_ref()) {
                                             {
                                                 let path = option.path.clone();
-                                                let value = row.option.as_ref().map(|selected| render_safe_option_value(&selected.value)).unwrap_or_else(|| "removed".into());
-                                                let source = row.option.as_ref().or(row.before.as_ref()).and_then(evaluated_option_source).unwrap_or_else(|| "—".into());
-                                                let selected = row.clone();
-                                                rsx! { li { key: "{path}", button { class: "cfgx-row hit focus-ring", "aria-label": "Inspect certified option {path}", onclick: move |_| select_certified.call(selected.clone()), span { class: "cfgx-name mono", title: "{path}", "{path}" } span { class: "cfgx-val mono", title: "{value}", "{value}" } span { class: "cfgx-by mono", title: "{source}", "{source}" } } } }
+                                                 let value = row.option.as_ref().map(|selected| render_safe_option_value(&selected.value)).unwrap_or_else(|| "removed".into());
+                                                 let value_class = row.option.as_ref().map(|selected| present_safe_option_value(&selected.value).class).unwrap_or("cfg-val-err");
+                                                 let source = row.option.as_ref().or(row.before.as_ref()).and_then(evaluated_option_source).unwrap_or_else(|| "—".into());
+                                                 let selected = row.clone();
+                                                 let (parent, leaf) = display_qualified_path_parts(&path);
+                                                 let row_class = if selected_certified_path.as_deref() == Some(path.as_str()) { "cfgx-row hit sel focus-ring" } else { "cfgx-row hit focus-ring" };
+                                                 rsx! { li { key: "{path}", button { class: "{row_class}", "aria-pressed": selected_certified_path.as_deref() == Some(path.as_str()), "aria-label": "Inspect certified option {path}", onclick: move |_| select_certified.call(selected.clone()), span { class: "cfgx-name mono", title: "{path}", span { class: "dim", "{parent}" } "{leaf}" } span { class: "cfgx-val mono {value_class}", title: "{value}", "{value}" } span { class: "cfgx-by mono", title: "{source}", "{source}" } } } }
                                             }
                                         }
                                     }
@@ -1261,10 +1388,13 @@ pub(crate) fn ConfigExplorer(
                             ul { class: "cfg-explorer-configured",
                                 for path in local_search_paths {
                                     {
-                                        let display = dotted_path(&path);
-                                        let value = scoped_option_value(detail_cache.read().get(&path)).unwrap_or_else(|| "—".into());
-                                        let source = scoped_option_source(&path, &provenance_cache.read()).unwrap_or_else(|| "—".into());
-                                        rsx! { li { key: "{display}", button { class: "cfgx-row hit focus-ring", "aria-label": "Inspect observed option {display}", onclick: { let path = path.clone(); move |_| select_option.call(path.clone()) }, span { class: "cfgx-name mono", title: "{display}", "{display}" } span { class: "cfgx-val mono", title: "{value}", "{value}" } span { class: "cfgx-by mono", title: "{source}", "{source}" } } } }
+                                         let display = dotted_path(&path);
+                                         let detail_state = detail_cache.read().get(&path).cloned();
+                                         let value = scoped_option_presentation(detail_state.as_ref());
+                                         let source = scoped_option_source(&path, &provenance_cache.read());
+                                         let (parent, leaf) = display_path_parts(&path);
+                                         let row_class = if selected_scoped_path == path { "cfgx-row hit sel focus-ring" } else { "cfgx-row hit focus-ring" };
+                                         rsx! { li { key: "{display}", button { class: "{row_class}", "aria-pressed": selected_scoped_path == path, "aria-label": "Inspect observed option {display}", onclick: { let path = path.clone(); move |_| select_option.call(path.clone()) }, span { class: "cfgx-name mono", title: "{display}", span { class: "dim", "{parent}" } "{leaf}" } span { class: "cfgx-val mono", if let Some(value) = value { span { class: "{value.class}", title: "{value.text}", "{value.text}" } } else { span { class: "cfgx-uninspected", title: "Value not inspected", "aria-label": "Value not inspected" } } } span { class: "cfgx-by mono", if let Some(source) = source { span { title: "{source}", "{source}" } } else { span { class: "cfgx-uninspected", title: "Provenance not inspected", "aria-label": "Provenance not inspected" } } } } } }
                                     }
                                 }
                             }
@@ -1272,63 +1402,80 @@ pub(crate) fn ConfigExplorer(
                         }
                     }
                     aside { class: "cfgx-side", "aria-label": "Configuration inspector",
-                        div { class: "cfgx-side-tabs seg xs",
-                            button { class: if selected_pane == InspectorPane::Option { "active focus-ring" } else { "focus-ring" }, "aria-pressed": selected_pane == InspectorPane::Option, disabled: detail_path.read().is_empty() && certified_detail.read().is_none(), onclick: move |_| inspector_pane.set(InspectorPane::Option), "Option" }
-                            button { class: if selected_pane == InspectorPane::Sources { "active focus-ring" } else { "focus-ring" }, "aria-pressed": selected_pane == InspectorPane::Sources, onclick: move |_| inspector_pane.set(InspectorPane::Sources), "Sources" }
+                        div { class: "cfgx-side-tabs",
+                            div { class: "seg xs",
+                                button { class: if selected_pane == InspectorPane::Option { "active focus-ring" } else { "focus-ring" }, "aria-pressed": selected_pane == InspectorPane::Option, disabled: detail_path.read().is_empty() && certified_detail.read().is_none(), onclick: move |_| inspector_pane.set(InspectorPane::Option), "Option" }
+                                // The count is part of the accessible name so the
+                                // observed-source total is announced with the tab.
+                                button { class: if selected_pane == InspectorPane::Sources { "active focus-ring" } else { "focus-ring" }, "aria-pressed": selected_pane == InspectorPane::Sources, onclick: move |_| inspector_pane.set(InspectorPane::Sources), "Sources" if source_count > 0 { span { class: "mono", "{source_count}" } } }
+                            }
                         }
                     if selected_pane == InspectorPane::Option {
                     if let Some(row) = certified_detail_state {
                         CertifiedOptionDetail { row, comparison_baseline: comparison_baseline.clone(), on_open_definition }
-                    } else { match detail_state {
-                        ObservationState::Idle => rsx! { div { class: "cfg-explorer-detail-empty", "Select an option from either pane to inspect the same lazy detail." } },
-                        ObservationState::Loaded(observation) => match observation.payload {
+                    } else if selected_scoped_path.is_empty() {
+                        div { class: "cfg-explorer-detail-empty", "Select an option to inspect its value and request provenance." }
+                    } else {
+                        { let (parent, leaf) = display_path_parts(&selected_scoped_path); rsx! { div { class: "cfgx-insp-head", div { class: "mono cfgx-insp-path", span { class: "dim", "config.{parent}" } "{leaf}" } } } }
+                        match detail_state {
+                        Some(ObservationState::Loaded(observation)) => match observation.payload {
                             ConfigObservationPayload::Option { path_components, declared_type, is_defined, highest_prio, value, .. } => {
                                 let path = dotted_path(&path_components);
-                                let value_text = render_safe_option_value(&value);
-                                let declared_type_label = declared_type.as_deref().unwrap_or("Unavailable");
+                                let value = present_safe_option_value(&value);
+                                let declared_type_label = declared_type.as_deref().unwrap_or("Not reported");
                                 let defined_label = if is_defined { "yes" } else { "no" };
-                                let priority_label = highest_prio.map(|value| value.to_string()).unwrap_or_else(|| "Unavailable".into());
+                                let priority_label = highest_prio.map(|value| value.to_string()).unwrap_or_else(|| "Not reported".into());
                                 rsx! {
-                                    { let (parent, leaf) = display_path_parts(&path_components); rsx! { div { class: "cfgx-insp-head", div { class: "mono cfgx-insp-path", span { class: "dim", "config.{parent}" } "{leaf}" } } } }
-                                    dl { class: "cfg-explorer-facts",
-                                        div { dt { "Declared type" } dd { class: "mono", "{declared_type_label}" } }
-                                        div { dt { "Safe value" } dd { class: if matches!(value, SafeOptionValue::Failed(_)) { "mono cfg-val-err" } else { "mono" }, "{value_text}" } }
-                                        div { dt { "Defined" } dd { "{defined_label}" } }
-                                        div { dt { "Highest priority" } dd { class: "mono", "{priority_label}" } }
-                                    }
-                                    p { class: "cfg-explorer-copy", "Basic detail does not imply complete provenance." }
-                                    if matches!(provenance_state, ObservationState::Idle | ObservationState::Error(_)) {
-                                        button { class: "cfgx-btn focus-ring", "aria-label": "Inspect provenance for {path}", onclick: load_provenance, "Inspect provenance" }
-                                    }
-                                    match provenance_state {
-                                        ObservationState::Loaded(observation) => match observation.payload {
-                                            ConfigObservationPayload::Provenance { definitions, definitions_truncated, total_definitions, .. } => rsx! {
-                                                div { class: "cfg-explorer-provenance",
-                                                    h4 { "Observed definitions" }
-                                                    if definitions.is_empty() { p { "No definitions were observed." } }
-                                                    for definition in definitions {
-                                                        {
-                                                            let source_label = definition.source_path.as_deref().unwrap_or("Source unavailable");
-                                                            let priority_label = definition.priority.map(|value| value.to_string()).unwrap_or_else(|| "unknown".into());
-                                                            rsx! { div { class: "cfg-def", span { class: "mono cfg-def-file", "{source_label}" } span { class: "cfg-def-note mono", "priority {priority_label}" } } }
-                                                        }
-                                                    }
-                                                    if definitions_truncated { p { class: "cfg-explorer-local-note", "Showing bounded definitions; {total_definitions} exist." } }
-                                                }
-                                            },
-                                            _ => rsx! { div { class: "cfg-explorer-local-error", role: "alert", "Unexpected provenance payload." } },
-                                        },
-                                        ObservationState::Error(error) => rsx! { div { class: "cfg-explorer-local-error", role: "alert", "Provenance: {error}" } },
-                                        state if state != ObservationState::Idle => rsx! { ExplorerStatus { state, surface: "Provenance" } },
-                                        _ => rsx! {},
-                                    }
-                                }
-                            },
-                            _ => rsx! { div { class: "cfg-explorer-local-error", role: "alert", "Unexpected option observation payload." } },
-                        },
-                        ObservationState::Error(error) => rsx! { div { class: "cfg-explorer-local-error", role: "alert", "Option detail: {error}" } },
-                        state => rsx! { ExplorerStatus { state, surface: "Option detail" } },
-                    } }
+                                    div { class: "cfgx-insp-body",
+                                        div { class: "cfgx-kv", span { "Type" } b { class: "mono cfgx-type", "{declared_type_label}" } }
+                                        div { class: "cfgx-block",
+                                            div { class: "cfgx-block-h", "Value" }
+                                            pre { class: "cfgx-pre {value.class}", "{value.text}" }
+                                        }
+                                        div { class: "cfgx-secondary-meta", "aria-label": "Option metadata",
+                                            div { span { "Defined" } b { "{defined_label}" } }
+                                            div { span { "Highest priority" } b { class: "mono", "{priority_label}" } }
+                                        }
+                                        div { class: "cfgx-block",
+                                            div { class: "cfgx-block-h", "Provenance" span { class: "cfgx-block-note", "requested separately" } }
+                                            p { class: "cfgx-block-copy", "Option detail does not establish complete source provenance." }
+                                            if matches!(provenance_state, ObservationState::Idle | ObservationState::Error(_)) {
+                                                button { class: "cfgx-btn focus-ring", "aria-label": "Inspect provenance for {path}", onclick: load_provenance, if matches!(provenance_state, ObservationState::Error(_)) { "Retry provenance" } else { "Inspect provenance" } }
+                                            }
+                                            match provenance_state {
+                                                ObservationState::Loaded(observation) => match observation.payload {
+                                             ConfigObservationPayload::Provenance { definitions, definitions_truncated, total_definitions, .. } => rsx! {
+                                                 div { class: "cfgx-defs",
+                                                     div { class: "cfgx-kv", span { "Observed definitions" } b { class: "mono", "{total_definitions}" } }
+                                                     if definitions.is_empty() { p { class: "cfgx-block-copy", "No definitions were observed for this option." } }
+                                                     for (index, definition) in definitions.into_iter().enumerate() {
+                                                         {
+                                                             let source_label = definition.source_path.as_deref().unwrap_or("Source unavailable");
+                                                             let priority_label = definition.priority.map(|value| value.to_string()).unwrap_or_else(|| "unknown".into());
+                                                             rsx! { div { class: "cfgx-def", span { class: "cfgx-def-i mono", "{index + 1}" } div { class: "cfgx-def-b", div { class: "mono cfgx-def-f", title: "{source_label}", "{source_label}" } div { class: "cfgx-def-m", "priority " span { class: "mono", "{priority_label}" } } } } }
+                                                         }
+                                                     }
+                                                     if definitions_truncated { p { class: "cfg-explorer-local-note", "Showing bounded definitions; {total_definitions} exist." } }
+                                                 }
+                                             },
+                                             _ => rsx! { div { class: "cfg-explorer-local-error", role: "alert", "Unexpected provenance payload." } },
+                                                },
+                                                ObservationState::Error(error) => rsx! { div { class: "cfg-explorer-local-error", role: "alert", "Provenance: {error}" } },
+                                                ObservationState::Lifecycle(lifecycle) => rsx! { div { class: "cfgx-inline-status", role: "status", "aria-live": "polite", i {} "Provenance: {lifecycle_copy(lifecycle)}" } },
+                                                ObservationState::Idle => rsx! {},
+                                            }
+                                        }
+                                        div { class: "cfgx-insp-foot mono", "observation cached · schema v1 · provenance may be partial" }
+                                     }
+                                 }
+                             },
+                             _ => rsx! { div { class: "cfg-explorer-local-error", role: "alert", "Unexpected option observation payload." } },
+                         },
+                         Some(ObservationState::Error(error)) => rsx! { div { class: "cfgx-insp-state", role: "alert", p { "Option detail: {error}" } button { class: "cfgx-btn focus-ring", onclick: { let path = selected_scoped_path.clone(); move |_| select_option.call(path.clone()) }, "Retry option" } } },
+                         Some(ObservationState::Lifecycle(lifecycle)) => rsx! { div { class: "cfgx-insp-state", role: "status", "aria-live": "polite", span { class: "cfgx-insp", i {} "{lifecycle_copy(lifecycle)} option…" } } },
+                         Some(ObservationState::Idle) | None => rsx! { div { class: "cfgx-insp-state", role: "status", "Option has not been inspected." } },
+                    }
+                    }
                     } else {
                         div { class: "cfgx-side-hint",
                             if certified_sources_complete { "Complete certified source paths for this target. Explorer-observed paths are included in the same target view." }
@@ -1379,13 +1526,16 @@ fn CertifiedOptionDetail(
     let value = row
         .option
         .as_ref()
-        .map(|selected| render_safe_option_value(&selected.value))
-        .unwrap_or_else(|| "removed".into());
-    let declared_type = option.declared_type.as_deref().unwrap_or("Unavailable");
+        .map(|selected| present_safe_option_value(&selected.value))
+        .unwrap_or_else(|| ValuePresentation {
+            text: "removed".into(),
+            class: "cfg-val-err",
+        });
+    let declared_type = option.declared_type.as_deref().unwrap_or("Not reported");
     let overridden = option
         .overridden
         .map(|value| if value { "yes" } else { "no" })
-        .unwrap_or("Unavailable");
+        .unwrap_or("Not reported");
     let before = row
         .before
         .as_ref()
@@ -1398,43 +1548,48 @@ fn CertifiedOptionDetail(
         crate::api::models::OptionChangeKind::Unchanged => "unchanged",
     });
     let change_kind_label = change_kind.unwrap_or("changed");
+    let (parent, leaf) = display_qualified_path_parts(&option.path);
     rsx! {
-        div { class: "cfgx-insp-head", div { class: "mono cfgx-insp-path", "config.{option.path}" } }
-        dl { class: "cfg-explorer-facts",
-            div { dt { "Declared type" } dd { class: "mono", "{declared_type}" } }
-            div { dt { "Safe value" } dd { class: "mono", "{value}" } }
-            div { dt { "Overridden" } dd { "{overridden}" } }
-            div { dt { "Comparison" } dd { if let Some(changed) = row.changed { if changed { "changed" } else { "unchanged" } } else { "Unavailable" } } }
-            div { dt { "Baseline" } dd { class: "mono", "{baseline_label}" } }
-            if let Some(before) = before { div { dt { "Before" } dd { class: "mono", "{before}" } } }
-            div { dt { "After" } dd { class: "mono", "{value}" } }
-        }
-        if let Some(diff) = row.diff.as_ref() {
-            div { class: "cfg-diff",
-                h4 { "Typed change" }
-                p { class: "mono", "{change_kind_label} · {diff.value_kind}" }
-                if !diff.added.is_empty() {
-                    div { class: "cfg-diff-add", strong { "Added" } for value in &diff.added { span { class: "mono", "+ {render_typed_diff_value(value)}" } } }
-                }
-                if !diff.removed.is_empty() {
-                    div { class: "cfg-diff-rem", strong { "Removed" } for value in &diff.removed { span { class: "mono", "− {render_typed_diff_value(value)}" } } }
-                }
+        div { class: "cfgx-insp-head", div { class: "mono cfgx-insp-path", span { class: "dim", "config.{parent}" } "{leaf}" } }
+        div { class: "cfgx-insp-body",
+            div { class: "cfgx-kv", span { "Type" } b { class: "mono cfgx-type", "{declared_type}" } }
+            div { class: "cfgx-block", div { class: "cfgx-block-h", "Value" } pre { class: "cfgx-pre {value.class}", "{value.text}" } }
+            div { class: "cfgx-secondary-meta", "aria-label": "Certified option metadata",
+                div { span { "Definitions" } b { class: "mono", "{option.definitions.len()}" } }
+                div { span { "Overridden" } b { "{overridden}" } }
+                div { span { "Comparison" } b { if let Some(changed) = row.changed { if changed { "changed" } else { "unchanged" } } else { "Not available" } } }
+                div { span { "Baseline" } b { class: "mono", "{baseline_label}" } }
             }
-        }
-        p { class: "cfg-explorer-copy", "Certified snapshot detail and provenance for this exact target." }
-        div { class: "cfg-explorer-provenance",
-            h4 { "Certified definitions" }
-            if option.definitions.is_empty() {
-                p { "Definition provenance is unavailable." }
-            }
-            for definition in &option.definitions {
-                {
-                    let source = definition.source_path.as_deref().or(definition.source_input.as_deref()).unwrap_or("Source unavailable");
-                    let status = definition.status.as_deref().unwrap_or(if definition.winning { "winning" } else { "overridden" });
-                    let definition = definition.clone();
-                    rsx! { button { class: if definition.winning { "cfg-def win focus-ring" } else { "cfg-def focus-ring" }, "aria-label": "Inspect definition source {source}", onclick: move |_| on_open_definition.call(definition.clone()), span { class: "mono cfg-def-file", "{source}" } span { class: "cfg-def-note mono", "{status}" } } }
+            if let Some(diff) = row.diff.as_ref() {
+                div { class: "cfgx-block cfg-diff",
+                    div { class: "cfgx-block-h", "Typed change" span { class: "cfgx-block-note mono", "{change_kind_label} · {diff.value_kind}" } }
+                    if let Some(before) = before.as_ref() { div { class: "cfg-diff-line cfg-diff-from mono", "− {before}" } }
+                    div { class: "cfg-diff-line cfg-diff-to mono", "+ {value.text}" }
+                    if !diff.added.is_empty() {
+                        div { class: "cfg-diff-add", strong { "Added" } for value in &diff.added { span { class: "mono", "+ {render_typed_diff_value(value)}" } } }
+                    }
+                    if !diff.removed.is_empty() {
+                        div { class: "cfg-diff-rem", strong { "Removed" } for value in &diff.removed { span { class: "mono", "− {render_typed_diff_value(value)}" } } }
+                    }
                 }
             }
+            div { class: "cfgx-block",
+                div { class: "cfgx-block-h", "Provenance" span { class: "cfgx-block-note", "certified snapshot" } }
+                if option.definitions.is_empty() {
+                    p { class: "cfgx-block-copy", "Definition provenance is unavailable in this response." }
+                }
+                div { class: "cfgx-defs",
+                    for (index, definition) in option.definitions.iter().enumerate() {
+                        {
+                            let source = definition.source_path.as_deref().or(definition.source_input.as_deref()).unwrap_or("Source unavailable");
+                            let status = definition.status.as_deref().unwrap_or(if definition.winning { "winning" } else { "overridden" });
+                            let definition = definition.clone();
+                            rsx! { button { class: if definition.winning { "cfgx-def win focus-ring" } else { "cfgx-def focus-ring" }, "aria-label": "Inspect definition source {source}", onclick: move |_| on_open_definition.call(definition.clone()), span { class: "cfgx-def-i mono", "{index + 1}" } div { class: "cfgx-def-b", div { class: "mono cfgx-def-f", title: "{source}", "{source}" } div { class: "cfgx-def-m", "{status}" } } } }
+                        }
+                    }
+                }
+            }
+            div { class: "cfgx-insp-foot mono", "certified snapshot · exact target" }
         }
     }
 }
@@ -1444,6 +1599,7 @@ fn ConfiguredOptions(
     options: Vec<ConfiguredOptionIdentity>,
     details: Signal<HashMap<Vec<String>, ObservationState>>,
     provenance: Signal<HashMap<Vec<String>, ConfigObservationResponse>>,
+    selected_path: Vec<String>,
     on_option: EventHandler<Vec<String>>,
 ) -> Element {
     rsx! {
@@ -1452,9 +1608,18 @@ fn ConfiguredOptions(
                 {
                     let path = option.path_components.clone();
                     let display = dotted_path(&path);
-                    let value = scoped_option_value(details.read().get(&path)).unwrap_or_else(|| "—".into());
-                    let source = scoped_option_source(&path, &provenance.read()).unwrap_or_else(|| "—".into());
-                    rsx! { li { key: "{option.key}", button { class: "cfgx-row focus-ring", "aria-label": "Inspect configured option {display}", onclick: move |_| on_option.call(path.clone()), span { class: "cfgx-name mono", title: "{display}", "{display}" } span { class: "cfgx-val mono", title: "{value}", "{value}" } span { class: "cfgx-by mono", title: "{source}", "{source}" } } } }
+                    let detail_state = details.read().get(&path).cloned();
+                    let value = scoped_option_presentation(detail_state.as_ref());
+                    let source = scoped_option_source(&path, &provenance.read());
+                    let (parent, leaf) = display_path_parts(&path);
+                    let selected = selected_path == path;
+                    rsx! { li { key: "{option.key}", button { class: if selected { "cfgx-row sel focus-ring" } else { "cfgx-row focus-ring" }, "aria-pressed": selected, "aria-label": "Inspect configured option {display}", onclick: move |_| on_option.call(path.clone()), span { class: "cfgx-name mono", title: "{display}", span { class: "dim", "{parent}" } "{leaf}" } span { class: "cfgx-val mono",
+                        match detail_state {
+                            Some(ObservationState::Lifecycle(lifecycle)) => rsx! { span { class: "cfgx-insp", title: "{lifecycle_copy(lifecycle)} option value", i {} } },
+                            Some(ObservationState::Error(_)) => rsx! { span { class: "cfg-val-err", title: "Option value is unavailable", "unavailable" } },
+                            _ => if let Some(value) = value { rsx! { span { class: "{value.class}", title: "{value.text}", "{value.text}" } } } else { rsx! { span { class: "cfgx-uninspected", title: "Value not inspected", "aria-label": "Value not inspected" } } },
+                        }
+                    } span { class: "cfgx-by mono", if let Some(source) = source { span { title: "{source}", "{source}" } } else { span { class: "cfgx-uninspected", title: "Provenance not inspected", "aria-label": "Provenance not inspected" } } } } } }
                 }
             }
         }
@@ -1464,15 +1629,15 @@ fn ConfiguredOptions(
 #[cfg(test)]
 mod tests {
     use super::{
-        ExplorerMode, ObservationState, display_path_parts, dotted_path, initial_scoped_operations,
-        merge_tree_observation, next_operation_sequence, observation_error,
-        observation_task_is_current, observed_option_paths, should_request_prefix,
-        should_start_configured,
+        ExplorerMode, ObservationState, display_path_parts, display_qualified_path_parts,
+        dotted_path, initial_scoped_operations, merge_tree_observation, next_operation_sequence,
+        observation_error, observation_task_is_current, observed_option_paths,
+        present_safe_option_value, should_request_prefix, should_start_configured, tree_leaf_label,
     };
     use crate::api::client::ApiClientError;
     use crate::api::models::{
         ConfigObservationChild, ConfigObservationChildKind, ConfigObservationKind,
-        ConfigObservationPayload, ConfigObservationResponse,
+        ConfigObservationPayload, ConfigObservationResponse, SafeEvaluationError, SafeOptionValue,
     };
 
     fn tree_page(offset: u32, names: &[&str], truncated: bool) -> ConfigObservationResponse {
@@ -1610,6 +1775,13 @@ text-align: left;"
         assert!(!css.contains(
             ".cfgx-by { color: var(--cf-text-muted); font-size: 10px; text-align: right;"
         ));
+        assert!(
+            css.contains(".cfgx-scroll { min-height: 300px; max-height: 58vh; overflow: auto; }")
+        );
+        assert!(css.contains(".cfgx-row.sel, .cfgx .cfg-explorer-tree-row.sel { background:"));
+        assert!(css.contains(
+            ".cfgx .cfg-explorer-tree-row .cfg-explorer-path { padding-left: var(--cfgx-depth, 0); }"
+        ));
     }
 
     #[test]
@@ -1628,6 +1800,39 @@ text-align: left;"
             display_path_parts(&flat),
             ("\"services.api\".".into(), "port".into())
         );
+        assert_eq!(tree_leaf_label(&nested), "\"api.port\"");
+        assert_eq!(
+            display_qualified_path_parts("services.\"api.port\".enable"),
+            ("services.\"api.port\".", "enable")
+        );
+    }
+
+    #[test]
+    fn typed_value_presentation_does_not_conflate_known_empty_and_failure_states() {
+        let cases = [
+            (SafeOptionValue::Scalar(false.into()), "false", "v-bool"),
+            (SafeOptionValue::Scalar(0.into()), "0", "v-num"),
+            (
+                SafeOptionValue::Scalar(serde_json::Value::Null),
+                "null",
+                "v-null",
+            ),
+            (SafeOptionValue::Scalar("".into()), "\"\"", "v-str"),
+            (SafeOptionValue::List(Vec::new()), "[]", "v-list"),
+            (
+                SafeOptionValue::Failed(SafeEvaluationError {
+                    code: "not_evaluated".into(),
+                    message: "dependency failed".into(),
+                }),
+                "not evaluated: dependency failed",
+                "cfg-val-err",
+            ),
+        ];
+        for (value, text, class) in cases {
+            let presentation = present_safe_option_value(&value);
+            assert_eq!(presentation.text, text);
+            assert_eq!(presentation.class, class);
+        }
     }
 
     #[test]
