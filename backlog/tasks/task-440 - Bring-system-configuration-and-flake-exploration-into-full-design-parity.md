@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-17 07:33'
+updated_date: '2026-09-17 08:13'
 labels:
   - design-parity
   - web-ui
@@ -351,6 +351,11 @@ author: @openai-agent
 created: 2026-09-16 20:59
 ---
 Correction to comment #18: live migration and transition behavior is now verified. I initialized a fresh disposable PostgreSQL cluster at `/tmp/opencode/task440-cve-pg-35440`, applied the repository migrations through `nix run .#devScripts.runCveProcessingTest`, and ran every enrolled CVE processing regression. All invocations passed with no `FAILED` or `error: test failed`, including remote claim/session fencing, environment authorization, build-priority and cache-gated fallback, atomic post-build enqueue, digest idempotency/conflict, failure/requeue/recovery transitions, affected/whitelisted persistence, concurrent claims, and POA&M/composite lock-order tests. Final verification also passed: `nix develop --command cargo fmt --manifest-path packages/default/Cargo.toml --all -- --check`; offline `cargo check` for `cf-protocol`, `cf-builder`, and `cf-server` libraries with `SQLX_OFFLINE=true`; offline no-dependency rustdoc for those three libraries; and `git diff HEAD --check`. Existing repository compile/rustdoc warnings remain outside this slice. The disposable PostgreSQL server was stopped and confirmed inactive. No commit, push, MR update, broad flake check, or authoritative Web UI check was performed. TASK-440 remains In Progress because acceptance criteria #24 and #27 are still open.
+---
+
+created: 2026-09-17 08:13
+---
+2026-09-17 CVE diagnostics P1 follow-up: resolved timeout/failure stderr capture for remote and local scanners, including bounded post-termination draining and parse-failure stderr; added generation fencing for overlapping same-scan refreshes and close/reopen requests; made diagnostic event rows append-only while preserving parent-scan cascade cleanup; and documented builder compatibility, bounds, redaction, digest independence, and the admin scan-detail API. Verification passed: focused cf-builder timeout test; cf-server vulnix runner and diagnostic preparation tests; Web UI scanning unit tests and cargo check; offline cf-builder/cf-server all-target checks; default and Web UI fmt checks; JavaScript syntax check; cf-protocol/cf-builder/cf-server rustdoc; full `nix run .#devScripts.runCveProcessingTest` against a fresh disposable PostgreSQL cluster with migrations through 0265, including direct UPDATE/DELETE rejection and cascade cleanup; and the authoritative `16c-scanning-view` NixOS browser workflow via an explicit `path:` flake reference, with release WASM, deterministic overlap and close/reopen race assertions, and dark/light screenshots (1/1 passed). The first Git-backed Web UI build did not reach the VM because Nix excluded the intentionally untracked diagnostic module; rerunning via `path:` included worktree files without staging. Existing compiler/rustdoc warnings remain. The disposable PostgreSQL server was stopped and port 55439 confirmed inactive. No files were staged, committed, or pushed; migrations 0263/0264 and generated `packages/web-ui/assets/tailwind.css` were not modified.
 ---
 <!-- COMMENTS:END -->
 
