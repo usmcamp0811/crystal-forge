@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-17 03:13'
+updated_date: '2026-09-17 03:16'
 labels:
   - design-parity
   - web-ui
@@ -183,6 +183,8 @@ The `modifiedFiles` metadata is anticipated and non-exhaustive. The implementati
 2026-09-16 migration immutability correction: restore migration 0263 byte-for-byte to the version already applied by the isolated preview database, move later scanner identity/evidence constraint additions into additive migration 0264, rerun migrations/CVE regressions as applicable, and restart the preview without resetting or directly mutating preview data.
 
 2026-09-17 maintainer-authorized workflow completion in the existing TASK-440 worktree/branch: (1) keep the verified isolated preview on ports 8080/3445/3042 current; (2) wire fleet rescan first, then exact derivation and distinct current/history actions through the canonical pending scan lifecycle with idempotent scan IDs and admin/CSRF checks; (3) reproduce scoped Config Root early and classify the exact request/worker/carrier/rendering failure before changing its source contract; (4) add only the next free additive migration for bounded immutable per-execution diagnostics if required, preserving migrations 263/264 and optional compatibility for deployed builders; (5) expose bounded redacted scan detail/attempt data and implement the real drawer; (6) correct scoped observations to use the exact published immutable source when proven, retain carrier verification and legacy compatibility, and preserve shallow/lazy behavior; (7) use isolated PostgreSQL and focused host/browser/real-Nix verification, then combined focused VM workflows at stable candidate; (8) review and push independently reviewable scanning and Config commits without merging or deploying.
+
+2026-09-17 rescan-actions slice in the existing TASK-440 worktree: (1) extend scanning read DTOs with the durable derivation ID and persisted source_trigger; derive system-current from the latest reported store path and constrain system history to the exact system flake/configuration; (2) add one admin+CSRF exact-derivation POST contract that atomically inserts a canonical pending/manual cve_scans row or returns the active scan identity without executing vulnix; (3) expose fleet eligible/enqueued/reused counts while retaining its canonical pending/fleet lifecycle; (4) wire Scanning page fleet, row, exact system-current, and exact system-history actions with pending state, queued/reused success feedback, returned identities, actionable errors, and read refreshes; (5) add focused database/route/UI tests for auth, CSRF, idempotency, exact scope, response shape, source trigger, and UI pending/success/error behavior; (6) run scoped rustfmt, checks and targeted tests through nix develop plus git diff --check, with no full VM, migration, Config observation, scan log/diagnostic, stash, staging, commit, or push work.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
