@@ -14,6 +14,7 @@ pub mod compliance_interchange;
 pub mod config_health;
 pub mod config_inspections;
 pub mod config_observations;
+pub mod cve_scan_diagnostics;
 pub mod cve_scan_leases;
 pub mod cve_scans;
 pub mod cves;

@@ -6,18 +6,20 @@
 //! scanning, and package-output resolution.
 
 use super::api_client::{BuilderApiClient, CveApiError};
+use super::redaction::redact_builder_error;
 use async_trait::async_trait;
 use cf_protocol::builder::{
     BuilderCapabilities, CveDerivationOutput, CveObservation, CvePackageEvidence, CveScanClaim,
-    CveScanCompleteRequest, CveScanFailRequest, CveScanFailureClass, CveScanHeartbeatRequest,
-    CveScanResult, CveScannerIdentity, canonical_cve_result_bytes, canonical_cve_result_digest,
-    is_canonical_nix_store_path,
+    CveScanCompleteRequest, CveScanDiagnostic, CveScanFailRequest, CveScanFailureClass,
+    CveScanHeartbeatRequest, CveScanResult, CveScannerIdentity, canonical_cve_result_bytes,
+    canonical_cve_result_digest, is_canonical_nix_store_path,
 };
+use chrono::Utc;
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::process::Stdio;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
@@ -28,6 +30,7 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const MATERIALIZATION_TIMEOUT: Duration = Duration::from_secs(300);
 const NIX_QUERY_TIMEOUT: Duration = Duration::from_secs(120);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+const OUTPUT_DRAIN_GRACE: Duration = Duration::from_secs(1);
 const STDERR_LIMIT: usize = 64 * 1024;
 const COMMAND_OUTPUT_LIMIT: usize = 8 * 1024 * 1024;
 const DRV_QUERY_CHUNK: usize = 64;
@@ -39,6 +42,8 @@ pub struct CveScanExecutionError {
     pub class: CveScanFailureClass,
     /// Bounded credential-free diagnostic.
     pub message: String,
+    /// Bounded command diagnostics collected before the failure.
+    pub diagnostics: Vec<CveScanDiagnostic>,
 }
 
 impl CveScanExecutionError {
@@ -46,7 +51,20 @@ impl CveScanExecutionError {
         Self {
             class,
             message: message.into().chars().take(2048).collect(),
+            diagnostics: Vec::new(),
         }
+    }
+
+    fn with_diagnostic(mut self, diagnostic: CveScanDiagnostic) -> Self {
+        self.diagnostics.push(diagnostic);
+        self
+    }
+
+    fn with_diagnostics(mut self, diagnostics: Vec<CveScanDiagnostic>) -> Self {
+        let mut combined = diagnostics;
+        combined.append(&mut self.diagnostics);
+        self.diagnostics = combined;
+        self
     }
 }
 
@@ -120,7 +138,14 @@ pub async fn execute_claim<A: CveLeaseApi>(
 ) {
     let started = Instant::now();
     match execute_claim_inner(api, &claim, &local_scanner).await {
-        Ok(result) => {
+        Ok((result, mut diagnostics)) => {
+            diagnostics.push(scan_diagnostic(
+                "info",
+                "builder",
+                "attempt_completed",
+                "Remote CVE scan attempt completed.",
+                false,
+            ));
             let encoded = match canonical_cve_result_bytes(&result) {
                 Ok(encoded) => encoded,
                 Err(_) => {
@@ -168,6 +193,7 @@ pub async fn execute_claim<A: CveLeaseApi>(
                 result,
                 result_digest_sha256,
                 scan_duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                diagnostics,
             };
             let request_size = serde_json::to_vec(&request)
                 .map(|body| body.len() as u64)
@@ -212,6 +238,7 @@ async fn report_failure<A: CveLeaseApi>(
         lease: claim.lease,
         failure_class: error.class,
         error_message: error.message,
+        diagnostics: error.diagnostics,
     };
     if let Err(report_error) = api.fail(&request).await
         && report_error != CveApiError::Revoked
@@ -228,7 +255,7 @@ async fn execute_claim_inner<A: CveLeaseApi>(
     api: &A,
     claim: &CveScanClaim,
     local_scanner: &CveScannerIdentity,
-) -> Result<CveScanResult, CveScanExecutionError> {
+) -> Result<(CveScanResult, Vec<CveScanDiagnostic>), CveScanExecutionError> {
     if claim.scanner != *local_scanner {
         return Err(CveScanExecutionError::new(
             CveScanFailureClass::Deterministic,
@@ -243,6 +270,13 @@ async fn execute_claim_inner<A: CveLeaseApi>(
     }
     let entries = Arc::new(AtomicUsize::new(0));
     let observations = Arc::new(AtomicUsize::new(0));
+    let mut diagnostics = vec![scan_diagnostic(
+        "info",
+        "builder",
+        "attempt_started",
+        "Remote CVE scan attempt started.",
+        false,
+    )];
 
     for output in &claim.derivation.outputs {
         validate_store_path(&output.store_path, false)?;
@@ -261,16 +295,28 @@ async fn execute_claim_inner<A: CveLeaseApi>(
                 Arc::clone(&entries),
                 Arc::clone(&observations),
             )
-            .await?;
+            .await
+            .map_err(|error| error.with_diagnostics(diagnostics.clone()))?;
             if result.status_code != Some(0)
                 || !tokio::fs::try_exists(&output.store_path)
                     .await
                     .unwrap_or(false)
             {
-                return Err(CveScanExecutionError::new(
+                let mut error = CveScanExecutionError::new(
                     CveScanFailureClass::Transient,
                     "failed to materialize an authorized scan output",
-                ));
+                )
+                .with_diagnostics(diagnostics.clone());
+                if !result.stderr.is_empty() {
+                    error = error.with_diagnostic(scan_diagnostic(
+                        "error",
+                        "nix",
+                        "output",
+                        &String::from_utf8_lossy(&result.stderr),
+                        result.stderr_overflow,
+                    ));
+                }
+                return Err(error);
             }
         }
     }
@@ -294,8 +340,23 @@ async fn execute_claim_inner<A: CveLeaseApi>(
         Arc::clone(&entries),
         Arc::clone(&observations),
     )
-    .await?;
-    let parsed = parse_vulnix_output(scan.status_code, &scan.stdout, scan.stdout_overflow)?;
+    .await
+    .map_err(|error| error.with_diagnostics(diagnostics.clone()))?;
+    if !scan.stderr.is_empty() {
+        diagnostics.push(scan_diagnostic(
+            if matches!(scan.status_code, Some(0 | 2)) {
+                "warning"
+            } else {
+                "error"
+            },
+            "vulnix",
+            "output",
+            &String::from_utf8_lossy(&scan.stderr),
+            scan.stderr_overflow,
+        ));
+    }
+    let parsed = parse_vulnix_output(scan.status_code, &scan.stdout, scan.stdout_overflow)
+        .map_err(|error| error.with_diagnostics(diagnostics.clone()))?;
     if parsed.len() > claim.policy.max_entries {
         return Err(CveScanExecutionError::new(
             CveScanFailureClass::Deterministic,
@@ -304,22 +365,26 @@ async fn execute_claim_inner<A: CveLeaseApi>(
     }
 
     entries.store(parsed.len(), Ordering::Relaxed);
-    let result = canonical_result(api, claim, parsed, entries, observations).await?;
+    let result = canonical_result(api, claim, parsed, entries, observations)
+        .await
+        .map_err(|error| error.with_diagnostics(diagnostics.clone()))?;
     let heartbeat = CveScanHeartbeatRequest {
         lease: claim.lease,
         entries_collected: result.entries.len(),
         observations_collected: result.observations.len(),
     };
     match api.heartbeat(&heartbeat).await {
-        Ok(true) => Ok(result),
+        Ok(true) => Ok((result, diagnostics)),
         Ok(false) | Err(CveApiError::Revoked) => Err(CveScanExecutionError::new(
             CveScanFailureClass::Cancelled,
             "CVE scan lease was revoked",
-        )),
+        )
+        .with_diagnostics(diagnostics)),
         Err(error) => Err(CveScanExecutionError::new(
             error.failure_class(),
             "CVE scan heartbeat failed",
-        )),
+        )
+        .with_diagnostics(diagnostics)),
     }
 }
 
@@ -614,6 +679,67 @@ struct CommandResult {
     status_code: Option<i32>,
     stdout: Vec<u8>,
     stdout_overflow: bool,
+    stderr: Vec<u8>,
+    stderr_overflow: bool,
+}
+
+#[derive(Debug, Default)]
+struct BoundedOutput {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
+type SharedBoundedOutput = Arc<Mutex<BoundedOutput>>;
+
+fn bounded_output_snapshot(output: &SharedBoundedOutput) -> (Vec<u8>, bool) {
+    let output = output
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    (output.bytes.clone(), output.truncated)
+}
+
+async fn finish_output_reader(
+    task: &mut tokio::task::JoinHandle<Result<(), CveScanExecutionError>>,
+    output: &SharedBoundedOutput,
+) -> Result<(Vec<u8>, bool), CveScanExecutionError> {
+    task.await.map_err(|_| {
+        CveScanExecutionError::new(
+            CveScanFailureClass::Transient,
+            "failed to collect bounded CVE scan output",
+        )
+    })??;
+    Ok(bounded_output_snapshot(output))
+}
+
+async fn capture_terminated_output(
+    task: &mut tokio::task::JoinHandle<Result<(), CveScanExecutionError>>,
+    output: &SharedBoundedOutput,
+) -> (Vec<u8>, bool) {
+    if tokio::time::timeout(OUTPUT_DRAIN_GRACE, &mut *task)
+        .await
+        .is_err()
+    {
+        task.abort();
+    }
+    bounded_output_snapshot(output)
+}
+
+fn scan_diagnostic(
+    level: &str,
+    source: &str,
+    event_type: &str,
+    message: &str,
+    truncated: bool,
+) -> CveScanDiagnostic {
+    let message = redact_builder_error(message);
+    CveScanDiagnostic {
+        occurred_at: Utc::now(),
+        level: level.to_string(),
+        source: source.to_string(),
+        event_type: event_type.to_string(),
+        message: message.chars().take(STDERR_LIMIT).collect(),
+        truncated: truncated || message.chars().count() > STDERR_LIMIT,
+    }
 }
 
 /// Owns one isolated Unix process group and its direct child.
@@ -803,8 +929,18 @@ where
             "failed to capture CVE scan stderr",
         )
     })?;
-    let mut stdout_task = tokio::spawn(read_bounded(stdout, stdout_limit));
-    let mut stderr_task = tokio::spawn(read_bounded(stderr, STDERR_LIMIT));
+    let stdout_output = Arc::new(Mutex::new(BoundedOutput::default()));
+    let stderr_output = Arc::new(Mutex::new(BoundedOutput::default()));
+    let mut stdout_task = tokio::spawn(read_bounded(
+        stdout,
+        stdout_limit,
+        Arc::clone(&stdout_output),
+    ));
+    let mut stderr_task = tokio::spawn(read_bounded(
+        stderr,
+        STDERR_LIMIT,
+        Arc::clone(&stderr_output),
+    ));
     let deadline = tokio::time::sleep(timeout);
     tokio::pin!(deadline);
     let mut ticker = tokio::time::interval(HEARTBEAT_INTERVAL);
@@ -821,11 +957,28 @@ where
             _ = &mut deadline => {
                 child.terminate().await;
                 stdout_task.abort();
-                stderr_task.abort();
-                return Err(CveScanExecutionError::new(
+                let (stderr, stderr_overflow) =
+                    capture_terminated_output(&mut stderr_task, &stderr_output).await;
+                let mut error = CveScanExecutionError::new(
                     CveScanFailureClass::Transient,
                     "CVE scan child process timed out",
-                ));
+                );
+                if !stderr.is_empty() {
+                    error = error.with_diagnostic(scan_diagnostic(
+                        "error",
+                        "builder",
+                        "output",
+                        &String::from_utf8_lossy(&stderr),
+                        stderr_overflow,
+                    ));
+                }
+                return Err(error.with_diagnostic(scan_diagnostic(
+                    "error",
+                    "builder",
+                    "attempt_failed",
+                    "CVE scan child process timed out and its process group was terminated.",
+                    false,
+                )));
             }
             _ = ticker.tick() => {
                 if let Err(error) = heartbeat().await {
@@ -838,12 +991,7 @@ where
         }
     };
     let (stdout, stdout_overflow) = tokio::select! {
-        result = &mut stdout_task => result.map_err(|_| {
-            CveScanExecutionError::new(
-                CveScanFailureClass::Transient,
-                "failed to collect bounded CVE scan stdout",
-            )
-        })??,
+        result = finish_output_reader(&mut stdout_task, &stdout_output) => result?,
         _ = &mut deadline => {
             child.terminate().await;
             stdout_task.abort();
@@ -854,8 +1002,8 @@ where
             ));
         }
     };
-    tokio::select! {
-        _ = &mut stderr_task => {}
+    let (stderr, stderr_overflow) = tokio::select! {
+        result = finish_output_reader(&mut stderr_task, &stderr_output) => result?,
         _ = &mut deadline => {
             child.terminate().await;
             stderr_task.abort();
@@ -864,22 +1012,23 @@ where
                 "CVE scan output drain timed out",
             ));
         }
-    }
+    };
     child.disarm();
     Ok(CommandResult {
         status_code: status.code(),
         stdout,
         stdout_overflow,
+        stderr,
+        stderr_overflow,
     })
 }
 
 async fn read_bounded<R: tokio::io::AsyncRead + Unpin>(
     mut reader: R,
     limit: usize,
-) -> Result<(Vec<u8>, bool), CveScanExecutionError> {
-    let mut retained = Vec::with_capacity(limit.min(64 * 1024));
+    output: SharedBoundedOutput,
+) -> Result<(), CveScanExecutionError> {
     let mut buffer = [0_u8; 8192];
-    let mut overflow = false;
     loop {
         let count = reader.read(&mut buffer).await.map_err(|_| {
             CveScanExecutionError::new(
@@ -890,11 +1039,16 @@ async fn read_bounded<R: tokio::io::AsyncRead + Unpin>(
         if count == 0 {
             break;
         }
-        let available = limit.saturating_sub(retained.len());
-        retained.extend_from_slice(&buffer[..count.min(available)]);
-        overflow |= count > available;
+        let mut output = output
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let available = limit.saturating_sub(output.bytes.len());
+        output
+            .bytes
+            .extend_from_slice(&buffer[..count.min(available)]);
+        output.truncated |= count > available;
     }
-    Ok((retained, overflow))
+    Ok(())
 }
 
 /// Attempts one affinity or background claim when scanner capability is active.
@@ -1079,6 +1233,52 @@ mod tests {
         );
     }
 
+    #[test]
+    fn serialized_scan_reports_never_contain_diagnostic_credentials() {
+        let diagnostic = scan_diagnostic(
+            "error",
+            "vulnix",
+            "output",
+            "Authorization: Bearer remote-secret\nhttps://user:pass@example.test/repo?token=query-secret password=hunter2 safe-context",
+            false,
+        );
+        let claim = claim();
+        let result = CveScanResult {
+            schema_version: CveScanSchemaVersion::V1,
+            scanner: claim.scanner.clone(),
+            derivation: claim.derivation.clone(),
+            entries: Vec::new(),
+            observations: Vec::new(),
+        };
+        let complete = CveScanCompleteRequest {
+            lease: claim.lease,
+            result,
+            result_digest_sha256: "0".repeat(64),
+            scan_duration_ms: 1,
+            diagnostics: vec![diagnostic.clone()],
+        };
+        let failed = CveScanFailRequest {
+            lease: claim.lease,
+            failure_class: CveScanFailureClass::Transient,
+            error_message: "credential-free summary".to_string(),
+            diagnostics: vec![diagnostic],
+        };
+
+        for encoded in [
+            serde_json::to_string(&complete).expect("completion request should serialize"),
+            serde_json::to_string(&failed).expect("failure request should serialize"),
+        ] {
+            assert!(encoded.contains("[REDACTED]"));
+            assert!(encoded.contains("safe-context"));
+            for secret in ["remote-secret", "user:pass", "query-secret", "hunter2"] {
+                assert!(
+                    !encoded.contains(secret),
+                    "serialized request leaked {secret}"
+                );
+            }
+        }
+    }
+
     struct RevokingApi;
 
     #[async_trait]
@@ -1116,10 +1316,25 @@ mod tests {
 
     #[tokio::test]
     async fn timeout_and_revocation_are_classified_and_stop_children() {
-        let timeout = run_probe("sleep", &["1".to_string()], Duration::from_millis(10), 64)
-            .await
-            .expect_err("sleep must time out");
+        let timeout = run_probe(
+            "sh",
+            &[
+                "-c".to_string(),
+                "printf 'timeout-secret' >&2; sleep 1".to_string(),
+            ],
+            Duration::from_millis(50),
+            64,
+        )
+        .await
+        .expect_err("sleep must time out");
         assert_eq!(timeout.class, CveScanFailureClass::Transient);
+        assert!(
+            timeout
+                .diagnostics
+                .iter()
+                .any(|event| event.message.contains("timeout-secret")),
+            "timeout diagnostics must retain stderr emitted before termination"
+        );
 
         let revoked = run_leased_command(
             &RevokingApi,

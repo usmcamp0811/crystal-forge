@@ -436,6 +436,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/scanning/stats", get(scanning::get_scanning_stats))
         .route("/api/v1/scanning/queue", get(scanning::get_scanning_queue))
         .route(
+            "/api/v1/scanning/scans/:scan_id",
+            get(scanning::get_scanning_scan_detail),
+        )
+        .route(
             "/api/v1/scanning/systems",
             get(scanning::get_scanning_systems),
         )

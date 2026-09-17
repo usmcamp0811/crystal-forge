@@ -387,6 +387,48 @@ pub struct ScanningActivityItemResponse {
     pub status: String,
 }
 
+/// Returns bounded operational diagnostics for one exact CVE scan.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScanningScanDetailResponse {
+    /// Exact scan identity requested by the administrator.
+    pub scan_id: Uuid,
+    /// Current scan lifecycle status.
+    pub status: String,
+    /// Scanner implementation name recorded on the scan.
+    pub scanner_name: String,
+    /// Scanner version recorded for the execution, when available.
+    pub scanner_version: Option<String>,
+    /// Durable trigger provenance for the scan.
+    pub source_trigger: String,
+    /// Chronologically ordered diagnostic events, bounded by the API limit.
+    pub events: Vec<ScanningScanDiagnosticEventResponse>,
+    /// Is `true` when more persisted events exist than this fixed response.
+    pub truncated: bool,
+}
+
+/// Describes one immutable execution-attempt diagnostic event.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScanningScanDiagnosticEventResponse {
+    /// Immutable database identity used for stable client row identity.
+    pub id: i64,
+    /// Immutable execution token for the attempt that produced the event.
+    pub execution_id: Uuid,
+    /// One-based attempt number recorded when the event was persisted.
+    pub attempt_number: i32,
+    /// Time at which the worker observed the event.
+    pub occurred_at: DateTime<Utc>,
+    /// Normalized event severity.
+    pub level: String,
+    /// Normalized component that produced the event.
+    pub source: String,
+    /// Lifecycle or output event kind.
+    pub event_type: String,
+    /// Redacted bounded diagnostic text.
+    pub message: String,
+    /// Is `true` when output was omitted at a capture or persistence bound.
+    pub truncated: bool,
+}
+
 /// A single CVE row for dashboard drill-down views.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CveDashboardVulnerability {

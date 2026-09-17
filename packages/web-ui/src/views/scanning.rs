@@ -1,18 +1,27 @@
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
+#[cfg(target_arch = "wasm32")]
+use std::rc::Rc;
 
 use dioxus::prelude::*;
 use uuid::Uuid;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::{JsCast, closure::Closure};
 
 use crate::api::client::{
-    fetch_environments, fetch_scanning_deployed, fetch_scanning_queue, fetch_scanning_schedule,
-    fetch_scanning_stats, fetch_scanning_system_scans, fetch_scanning_systems,
-    trigger_cve_derivation_rescan, trigger_cve_fleet_rescan, update_scanning_schedule,
+    fetch_environments, fetch_scanning_deployed, fetch_scanning_queue, fetch_scanning_scan_detail,
+    fetch_scanning_schedule, fetch_scanning_stats, fetch_scanning_system_scans,
+    fetch_scanning_systems, trigger_cve_derivation_rescan, trigger_cve_fleet_rescan,
+    update_scanning_schedule,
 };
 use crate::api::models::{
-    ScanSchedulePolicyResponse, ScanningQueueItemResponse, UpdateScanSchedulePolicyRequest,
+    ScanSchedulePolicyResponse, ScanningQueueItemResponse, ScanningScanDetailResponse,
+    UpdateScanSchedulePolicyRequest,
 };
 use crate::components::chips::EnvBadge;
+use crate::components::dialog_focus::{
+    DialogFocusBoundary, DialogFocusRestore, DialogFocusSentinel,
+};
 use crate::components::icon::{Icon, IconName};
 use crate::routes::Route;
 
@@ -46,6 +55,73 @@ struct StatusMeta {
 struct ScanActionFeedback {
     message: String,
     success: bool,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct ScanDetailSelection {
+    scan_id: Uuid,
+    label: String,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ScanDetailRequest {
+    scan_id: Uuid,
+    generation: u64,
+}
+
+#[derive(Clone, PartialEq)]
+enum ScanDetailState {
+    Loading,
+    Loaded(ScanningScanDetailResponse),
+    Error(String),
+}
+
+fn load_scan_detail(
+    selection: ScanDetailSelection,
+    mut selected: Signal<Option<ScanDetailSelection>>,
+    mut state: Signal<ScanDetailState>,
+    mut generation: Signal<u64>,
+) {
+    let request = ScanDetailRequest {
+        scan_id: selection.scan_id,
+        generation: generation().wrapping_add(1),
+    };
+    generation.set(request.generation);
+    selected.set(Some(selection.clone()));
+    state.set(ScanDetailState::Loading);
+    spawn(async move {
+        let result = fetch_scanning_scan_detail(&selection.scan_id).await;
+        if !scan_detail_request_is_current(request, selected.peek().as_ref(), generation()) {
+            return;
+        }
+        state.set(match result {
+            Ok(detail) => ScanDetailState::Loaded(detail),
+            Err(error) => ScanDetailState::Error(error.to_string()),
+        });
+    });
+}
+
+fn scan_detail_request_is_current(
+    request: ScanDetailRequest,
+    selected: Option<&ScanDetailSelection>,
+    generation: u64,
+) -> bool {
+    request.generation == generation
+        && selected.map(|selection| selection.scan_id) == Some(request.scan_id)
+}
+
+fn scan_diagnostic_event_key(
+    event: &crate::api::models::ScanningScanDiagnosticEventResponse,
+) -> i64 {
+    event.id
+}
+
+fn close_scan_detail(
+    mut selected: Signal<Option<ScanDetailSelection>>,
+    mut generation: Signal<u64>,
+) {
+    generation.set(generation().wrapping_add(1));
+    selected.set(None);
 }
 
 fn request_derivation_rescans(
@@ -330,6 +406,36 @@ pub fn ScanningView() -> Element {
     let mut exact_rescan_pending = use_signal(HashSet::<i32>::new);
     let mut action_feedback = use_signal(|| Option::<ScanActionFeedback>::None);
     let mut scan_refresh = use_signal(|| 0_u64);
+    let mut selected_scan = use_signal(|| Option::<ScanDetailSelection>::None);
+    let mut scan_detail_state = use_signal(|| ScanDetailState::Loading);
+    let mut scan_detail_generation = use_signal(|| 0_u64);
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        let keydown_listener = use_hook(move || {
+            let callback = Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(
+                move |event: web_sys::KeyboardEvent| {
+                    if event.key() == "Escape" && selected_scan.peek().is_some() {
+                        close_scan_detail(selected_scan, scan_detail_generation);
+                    }
+                },
+            );
+            if let Some(window) = web_sys::window() {
+                let _ = window
+                    .add_event_listener_with_callback("keydown", callback.as_ref().unchecked_ref());
+            }
+            Rc::new(callback)
+        });
+        let listener_for_drop = keydown_listener.clone();
+        use_drop(move || {
+            if let Some(window) = web_sys::window() {
+                let _ = window.remove_event_listener_with_callback(
+                    "keydown",
+                    listener_for_drop.as_ref().as_ref().unchecked_ref(),
+                );
+            }
+        });
+    }
 
     let mut policy_on_build = use_signal(|| true);
     let mut policy_deployed_interval = use_signal(|| "24h".to_string());
@@ -564,6 +670,9 @@ pub fn ScanningView() -> Element {
                                 exact_rescan_pending,
                                 action_feedback,
                                 scan_refresh,
+                                selected_scan,
+                                scan_detail_state,
+                                scan_detail_generation,
                                 move || deployed.restart(),
                             ) }
                             if let Some(error) = deployed_load_more_error() {
@@ -624,6 +733,9 @@ pub fn ScanningView() -> Element {
                                 exact_rescan_pending,
                                 action_feedback,
                                 scan_refresh,
+                                selected_scan,
+                                scan_detail_state,
+                                scan_detail_generation,
                                 move || queue.restart(),
                             ) }
                         }
@@ -649,6 +761,9 @@ pub fn ScanningView() -> Element {
                                 exact_rescan_pending,
                                 action_feedback,
                                 scan_refresh,
+                                selected_scan,
+                                scan_detail_state,
+                                scan_detail_generation,
                                 move || systems.restart(),
                             ) }
                         }
@@ -733,6 +848,9 @@ pub fn ScanningView() -> Element {
                     }
                 }
             }
+            if let Some(selection) = selected_scan() {
+                { scan_detail_drawer(selection, selected_scan, scan_detail_state, scan_detail_generation) }
+            }
         }
     }
 }
@@ -756,6 +874,116 @@ fn scan_tab_button(
     }
 }
 
+fn scan_detail_drawer(
+    selection: ScanDetailSelection,
+    mut selected: Signal<Option<ScanDetailSelection>>,
+    state: Signal<ScanDetailState>,
+    generation: Signal<u64>,
+) -> Element {
+    let refresh_selection = selection.clone();
+    rsx! {
+        div {
+            class: "side-panel-backdrop scanning-log-backdrop",
+            tabindex: "-1",
+            onkeydown: move |event| if event.key() == Key::Escape { close_scan_detail(selected, generation) },
+            onclick: move |_| close_scan_detail(selected, generation),
+            aside {
+                id: "scan-diagnostics-dialog",
+                class: "side-panel scanning-log-drawer",
+                role: "dialog",
+                aria_modal: "true",
+                aria_labelledby: "scan-log-title",
+                tabindex: "-1",
+                onkeydown: move |event| if event.key() == Key::Escape { close_scan_detail(selected, generation) },
+                onclick: move |event| event.stop_propagation(),
+                DialogFocusRestore {}
+                DialogFocusSentinel {
+                    dialog_id: "scan-diagnostics-dialog".to_string(),
+                    boundary: DialogFocusBoundary::Last,
+                }
+                div { class: "scanning-log-head",
+                    div {
+                        h2 { id: "scan-log-title", "Scan diagnostics" }
+                        p { "{selection.label}" }
+                        code { "{selection.scan_id}" }
+                    }
+                    div { class: "row-actions",
+                        button {
+                            class: "btn-icon focus-ring",
+                            aria_label: "Refresh scan diagnostics",
+                            title: "Refresh scan diagnostics",
+                            onclick: move |_| load_scan_detail(refresh_selection.clone(), selected, state, generation),
+                            Icon { name: IconName::Sync, size: 14 }
+                        }
+                        button {
+                            class: "btn-icon focus-ring",
+                            autofocus: true,
+                            aria_label: "Close scan diagnostics",
+                            onclick: move |_| close_scan_detail(selected, generation),
+                            Icon { name: IconName::X, size: 15 }
+                        }
+                    }
+                }
+                div { class: "scanning-log-body",
+                    match &*state.read() {
+                        ScanDetailState::Loading => rsx! {
+                            div { class: "q-empty", role: "status", "Loading scan diagnostics…" }
+                        },
+                        ScanDetailState::Error(error) => rsx! {
+                            div { class: "q-empty", role: "alert",
+                                Icon { name: IconName::Warn, size: 20 }
+                                h3 { "Diagnostics could not be loaded" }
+                                p { "{error}" }
+                                button {
+                                    class: "btn btn-ghost xs focus-ring",
+                                    onclick: move |_| load_scan_detail(selection.clone(), selected, state, generation),
+                                    "Retry"
+                                }
+                            }
+                        },
+                        ScanDetailState::Loaded(detail) if detail.events.is_empty() => rsx! {
+                            div { class: "q-empty",
+                                h3 { "No diagnostic events" }
+                                p { "This scan has no persisted execution diagnostics. Older scanner versions can complete without them." }
+                            }
+                        },
+                        ScanDetailState::Loaded(detail) => rsx! {
+                            div { class: "scanning-log-summary",
+                                span { class: "chip {status_meta(&detail.status).class}", "{status_meta(&detail.status).label}" }
+                                span { "{detail.scanner_name}" }
+                                if let Some(version) = detail.scanner_version.as_deref() { code { "{version}" } }
+                                span { "trigger: {detail.source_trigger}" }
+                            }
+                            if detail.truncated {
+                                div { class: "sd-callout sd-callout-warning", role: "status", "Only the first 500 diagnostic events are shown." }
+                            }
+                            ol { class: "scanning-log-events",
+                                for event in &detail.events {
+                                    li { key: "{scan_diagnostic_event_key(event)}", class: "scanning-log-event level-{event.level}",
+                                        div { class: "scanning-log-event-meta",
+                                            time { datetime: "{event.occurred_at.to_rfc3339()}", "{event.occurred_at.to_rfc3339()}" }
+                                            span { class: "chip chip-unknown", "attempt {event.attempt_number}" }
+                                            span { "{event.level}" }
+                                            span { "{event.source}" }
+                                            code { title: "{event.execution_id}", "{event.execution_id.to_string().chars().take(8).collect::<String>()}" }
+                                        }
+                                        pre { "{event.message}" }
+                                        if event.truncated { div { class: "scanning-log-truncated", "Output truncated at the capture boundary." } }
+                                    }
+                                }
+                            }
+                        },
+                    }
+                }
+                DialogFocusSentinel {
+                    dialog_id: "scan-diagnostics-dialog".to_string(),
+                    boundary: DialogFocusBoundary::First,
+                }
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn scan_queue_panel(
     rows: Vec<ScanningQueueItemResponse>,
@@ -772,6 +1000,9 @@ fn scan_queue_panel(
     exact_rescan_pending: Signal<HashSet<i32>>,
     action_feedback: Signal<Option<ScanActionFeedback>>,
     scan_refresh: Signal<u64>,
+    selected_scan: Signal<Option<ScanDetailSelection>>,
+    scan_detail_state: Signal<ScanDetailState>,
+    scan_detail_generation: Signal<u64>,
     retry: impl FnMut() + 'static,
 ) -> Element {
     let mut retry = retry;
@@ -892,7 +1123,7 @@ fn scan_queue_panel(
                     } }
                     tbody {
                         for (index, row) in sorted.iter().enumerate() {
-                            { scan_row(row, index, show_freshness, exact_rescan_pending, action_feedback, scan_refresh) }
+                            { scan_row(row, index, show_freshness, exact_rescan_pending, action_feedback, scan_refresh, selected_scan, scan_detail_state, scan_detail_generation) }
                         }
                     }
                 }
@@ -941,6 +1172,9 @@ fn scan_row(
     exact_rescan_pending: Signal<HashSet<i32>>,
     action_feedback: Signal<Option<ScanActionFeedback>>,
     scan_refresh: Signal<u64>,
+    selected_scan: Signal<Option<ScanDetailSelection>>,
+    scan_detail_state: Signal<ScanDetailState>,
+    scan_detail_generation: Signal<u64>,
 ) -> Element {
     let nav = navigator();
     let meta = status_meta(&row.status);
@@ -980,7 +1214,22 @@ fn scan_row(
             }
             td {
                 div { class: "row-actions scanning-row-actions",
-                    button { class: "btn-icon focus-ring", disabled: true, title: "Scan logs are not available from the server", aria_label: "Scan log unavailable", Icon { name: IconName::Terminal, size: 14 } }
+                    button {
+                        class: "btn-icon focus-ring",
+                        disabled: row.scan_id.is_none(),
+                        title: if row.scan_id.is_some() { "View scan diagnostics" } else { "This configuration has no persisted scan" },
+                        aria_label: "View scan diagnostics",
+                        onclick: {
+                            let selection = row.scan_id.map(|scan_id| ScanDetailSelection {
+                                scan_id,
+                                label: format!("{} · {}", row.hostname, commit_label(&row.commit_hash)),
+                            });
+                            move |_| if let Some(selection) = selection.clone() {
+                                load_scan_detail(selection, selected_scan, scan_detail_state, scan_detail_generation);
+                            }
+                        },
+                        Icon { name: IconName::Terminal, size: 14 }
+                    }
                     button {
                         class: "btn-icon focus-ring",
                         disabled: !row.rescan_eligible
@@ -1024,6 +1273,9 @@ fn systems_panel(
     exact_rescan_pending: Signal<HashSet<i32>>,
     action_feedback: Signal<Option<ScanActionFeedback>>,
     scan_refresh: Signal<u64>,
+    selected_scan: Signal<Option<ScanDetailSelection>>,
+    scan_detail_state: Signal<ScanDetailState>,
+    scan_detail_generation: Signal<u64>,
     retry: impl FnMut() + 'static,
 ) -> Element {
     let mut retry = retry;
@@ -1195,7 +1447,7 @@ fn systems_panel(
                                                 } else {
                                                     div { class: "scan-sys-expand-table-wrap",
                                                         table { class: "scanning-history-table", thead { tr { th { "Commit" } th { "Freshness" } th { "Status" } th { "Findings" } th { "Last scan" } th { span { class: "sr-only", "Actions" } } } }
-                                                            tbody { for (index, row) in system_rows.iter().enumerate() { { system_scan_row(row, index, exact_rescan_pending, action_feedback, scan_refresh) } } }
+                                                            tbody { for (index, row) in system_rows.iter().enumerate() { { system_scan_row(row, index, exact_rescan_pending, action_feedback, scan_refresh, selected_scan, scan_detail_state, scan_detail_generation) } } }
                                                         }
                                                     }
                                                 }
@@ -1268,6 +1520,9 @@ fn system_scan_row(
     exact_rescan_pending: Signal<HashSet<i32>>,
     action_feedback: Signal<Option<ScanActionFeedback>>,
     scan_refresh: Signal<u64>,
+    selected_scan: Signal<Option<ScanDetailSelection>>,
+    scan_detail_state: Signal<ScanDetailState>,
+    scan_detail_generation: Signal<u64>,
 ) -> Element {
     let nav = navigator();
     let meta = status_meta(&row.status);
@@ -1286,7 +1541,22 @@ fn system_scan_row(
             td { class: "scanning-last-scan", "{last_scan(row)}" }
             td { div { class: "row-actions scanning-row-actions",
                 if needs_build { button { class: "btn btn-ghost xs focus-ring", disabled: true, title: "Build and scan is not available from the server", Icon { name: IconName::Cpu, size: 11 } " Build & scan" } }
-                else { button { class: "btn-icon focus-ring", disabled: true, title: "Scan logs are not available from the server", aria_label: "Scan log unavailable", Icon { name: IconName::Terminal, size: 13 } } }
+                else { button {
+                    class: "btn-icon focus-ring",
+                    disabled: row.scan_id.is_none(),
+                    title: if row.scan_id.is_some() { "View scan diagnostics" } else { "This configuration has no persisted scan" },
+                    aria_label: "View scan diagnostics",
+                    onclick: {
+                        let selection = row.scan_id.map(|scan_id| ScanDetailSelection {
+                            scan_id,
+                            label: format!("{} · {}", row.hostname, commit_label(&row.commit_hash)),
+                        });
+                        move |_| if let Some(selection) = selection.clone() {
+                            load_scan_detail(selection, selected_scan, scan_detail_state, scan_detail_generation);
+                        }
+                    },
+                    Icon { name: IconName::Terminal, size: 13 }
+                } }
                 button {
                     class: "btn-icon focus-ring",
                     disabled: !row.rescan_eligible
@@ -1455,6 +1725,51 @@ mod tests {
         assert_eq!(bounded_count_label(500), "500+");
         assert_eq!(loaded_count_label(12, 499), "12 of 499");
         assert_eq!(loaded_count_label(12, 500), "12 of 500+ loaded");
+    }
+
+    #[test]
+    fn scan_detail_requests_require_the_current_generation() {
+        let scan_id = Uuid::new_v4();
+        let selection = ScanDetailSelection {
+            scan_id,
+            label: "scan".to_string(),
+        };
+        let first = ScanDetailRequest {
+            scan_id,
+            generation: 1,
+        };
+        let refresh = ScanDetailRequest {
+            scan_id,
+            generation: 2,
+        };
+
+        assert!(!scan_detail_request_is_current(first, Some(&selection), 2));
+        assert!(scan_detail_request_is_current(refresh, Some(&selection), 2));
+        assert!(!scan_detail_request_is_current(refresh, None, 3));
+    }
+
+    #[test]
+    fn diagnostic_event_keys_use_immutable_row_identity() {
+        let execution_id = Uuid::new_v4();
+        let occurred_at = Utc::now();
+        let event = |id, message: &str| crate::api::models::ScanningScanDiagnosticEventResponse {
+            id,
+            execution_id,
+            attempt_number: 1,
+            occurred_at,
+            level: "error".to_string(),
+            source: "vulnix".to_string(),
+            event_type: "output".to_string(),
+            message: message.to_string(),
+            truncated: false,
+        };
+
+        let first = event(41, "first line");
+        let second = event(42, "second line");
+        assert_ne!(
+            scan_diagnostic_event_key(&first),
+            scan_diagnostic_event_key(&second)
+        );
     }
 
     #[test]

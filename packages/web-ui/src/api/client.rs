@@ -122,6 +122,13 @@ pub async fn fetch_scanning_queue(
     fetch_json(&url).await
 }
 
+pub async fn fetch_scanning_scan_detail(
+    scan_id: &Uuid,
+) -> Result<ScanningScanDetailResponse, ApiClientError> {
+    let url = format!("{}/scanning/scans/{}", base_url(), scan_id);
+    fetch_json(&url).await
+}
+
 pub async fn fetch_scanning_systems(
     limit: Option<i64>,
 ) -> Result<Vec<ScanningSystemsItemResponse>, ApiClientError> {

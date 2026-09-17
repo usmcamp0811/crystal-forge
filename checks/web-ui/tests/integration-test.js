@@ -15458,6 +15458,13 @@ security.audit.enable = true;</fixtext>
     action: async (page) => {
       const exactRescanRequests = [];
       const exactRescanRoute = /\/api\/v1\/cves\/rescan\/\d+(?:\?.*)?$/;
+      let diagnosticMode = "loaded";
+      let diagnosticRequests = 0;
+      const diagnosticResponses = [];
+      let releaseInitialDiagnosticRequest;
+      const initialDiagnosticGate = new Promise((resolve) => {
+        releaseInitialDiagnosticRequest = resolve;
+      });
       await page.route("**/api/v1/cves/rescan-fleet", async (route) => {
         await new Promise((resolve) => setTimeout(resolve, 120));
         await route.fulfill({
@@ -15552,6 +15559,53 @@ security.audit.enable = true;</fixtext>
             },
           ]),
         });
+      });
+
+      await page.route("**/api/v1/scanning/scans/*", async (route) => {
+        diagnosticRequests += 1;
+        const response = diagnosticResponses.shift();
+        response?.started?.();
+        if (diagnosticRequests === 1) {
+          await initialDiagnosticGate;
+        }
+        if (response?.gate) {
+          await response.gate;
+        }
+        const responseMode = response?.mode ?? diagnosticMode;
+        if (responseMode === "error") {
+          await route.fulfill({
+            status: 503,
+            contentType: "application/json",
+            body: JSON.stringify({ error: "diagnostics temporarily unavailable" }),
+          });
+          return;
+        }
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            scan_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+            status: "completed",
+            scanner_name: "vulnix",
+            scanner_version: "1.12.4",
+            source_trigger: "manual",
+            events: responseMode === "empty" ? [] : [
+              {
+                id: diagnosticRequests,
+                execution_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+                attempt_number: 1,
+                occurred_at: new Date().toISOString(),
+                level: "warning",
+                source: "vulnix",
+                event_type: "output",
+                message: response?.message ?? "Authorization: Bearer [REDACTED]",
+                truncated: true,
+              },
+            ],
+            truncated: responseMode === "loaded",
+          }),
+        });
+        response?.finished?.();
       });
 
       await page.route("**/api/v1/scanning/deployed*", async (route) => {
@@ -15724,6 +15778,99 @@ security.audit.enable = true;</fixtext>
 
       await page.getByRole("tab", { name: /All scans/ }).click();
       await assertVisible(page.getByText("manual").first(), "Expected persisted source_trigger in scan DTO");
+      const scanDiagnostics = page.getByRole("button", { name: "View scan diagnostics" }).first();
+      await scanDiagnostics.click();
+      await assertVisible(
+        page.getByRole("status").filter({ hasText: "Loading scan diagnostics" }),
+        "Expected scan diagnostics loading state",
+      );
+      releaseInitialDiagnosticRequest();
+      await assertVisible(
+        page.getByRole("heading", { name: "Scan diagnostics" }),
+        "Expected loaded scan diagnostics drawer",
+      );
+      await assertVisible(page.getByText("Authorization: Bearer [REDACTED]"), "Expected redacted diagnostic output");
+      await assertVisible(page.getByText("Only the first 500 diagnostic events are shown."), "Expected response truncation notice");
+      await assertVisible(page.getByText("Output truncated at the capture boundary."), "Expected event truncation notice");
+
+      let releaseStaleRefresh;
+      let markStaleRefreshStarted;
+      let markStaleRefreshFinished;
+      const staleRefreshGate = new Promise((resolve) => {
+        releaseStaleRefresh = resolve;
+      });
+      const staleRefreshStarted = new Promise((resolve) => {
+        markStaleRefreshStarted = resolve;
+      });
+      const staleRefreshFinished = new Promise((resolve) => {
+        markStaleRefreshFinished = resolve;
+      });
+      diagnosticResponses.push(
+        {
+          mode: "loaded",
+          message: "stale overlapping refresh",
+          gate: staleRefreshGate,
+          started: markStaleRefreshStarted,
+          finished: markStaleRefreshFinished,
+        },
+        { mode: "loaded", message: "newest overlapping refresh" },
+      );
+      await page.getByRole("button", { name: "Refresh scan diagnostics" }).click();
+      await staleRefreshStarted;
+      await page.getByRole("button", { name: "Refresh scan diagnostics" }).click();
+      await assertVisible(page.getByText("newest overlapping refresh"), "Expected newest overlapping refresh response");
+      releaseStaleRefresh();
+      await staleRefreshFinished;
+      await assertHidden(page.getByText("stale overlapping refresh"), "Expected stale overlapping refresh to be ignored");
+
+      let releaseClosedRequest;
+      let markClosedRequestStarted;
+      let markClosedRequestFinished;
+      const closedRequestGate = new Promise((resolve) => {
+        releaseClosedRequest = resolve;
+      });
+      const closedRequestStarted = new Promise((resolve) => {
+        markClosedRequestStarted = resolve;
+      });
+      const closedRequestFinished = new Promise((resolve) => {
+        markClosedRequestFinished = resolve;
+      });
+      diagnosticResponses.push({
+        mode: "loaded",
+        message: "response from closed drawer",
+        gate: closedRequestGate,
+        started: markClosedRequestStarted,
+        finished: markClosedRequestFinished,
+      });
+      await page.getByRole("button", { name: "Refresh scan diagnostics" }).click();
+      await closedRequestStarted;
+      await page.keyboard.press("Escape");
+      diagnosticResponses.push({ mode: "loaded", message: "response after drawer reopened" });
+      await scanDiagnostics.click();
+      await assertVisible(page.getByText("response after drawer reopened"), "Expected reopened drawer response");
+      releaseClosedRequest();
+      await closedRequestFinished;
+      await assertHidden(page.getByText("response from closed drawer"), "Expected pre-close response to be ignored");
+
+      diagnosticMode = "error";
+      await page.getByRole("button", { name: "Refresh scan diagnostics" }).click();
+      await assertVisible(
+        page.getByRole("heading", { name: "Diagnostics could not be loaded" }),
+        "Expected refresh error state",
+      );
+      diagnosticMode = "empty";
+      await page.getByRole("button", { name: "Retry" }).click();
+      await assertVisible(page.getByRole("heading", { name: "No diagnostic events" }), "Expected retry empty state");
+      await page.keyboard.press("Escape");
+      await assertHidden(
+        page.getByRole("heading", { name: "Scan diagnostics" }),
+        "Expected Escape to close scan diagnostics",
+      );
+      const restoredLabel = await page.evaluate(() => document.activeElement?.getAttribute("aria-label"));
+      if (restoredLabel !== "View scan diagnostics") {
+        throw new Error(`Expected scan diagnostics to restore opener focus, got ${restoredLabel}`);
+      }
+
       const rowRescan = page.getByRole("button", { name: "Rescan exact derivation" }).first();
       await rowRescan.click();
       await assertDisabled(rowRescan, "Expected exact row rescan to stay disabled while pending");
@@ -15781,6 +15928,7 @@ security.audit.enable = true;</fixtext>
 
       await page.unroute("**/api/v1/scanning/stats*");
       await page.unroute("**/api/v1/scanning/queue*");
+      await page.unroute("**/api/v1/scanning/scans/*");
       await page.unroute("**/api/v1/scanning/deployed*");
       await page.unroute("**/api/v1/scanning/systems*");
       await page.unroute("**/api/v1/scanning/systems/*/scans*");

@@ -2118,6 +2118,7 @@ pub async fn fail_cve_scan(
         request.lease,
         request.failure_class,
         &request.error_message,
+        &request.diagnostics,
     )
     .await
     .map_err(|error| {

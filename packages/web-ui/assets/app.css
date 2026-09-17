@@ -7292,6 +7292,21 @@ tr.attention-flash {
 .scanning-toggle, .scanning-archive-control { display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer; }
 .scanning-toggle input, .scanning-archive-control input { accent-color: var(--cf-brand-purple); }
 .scanning-load-note { margin-top: 12px; font-size: 11px; }
+.scanning-log-backdrop { z-index: 86; }
+.scanning-log-drawer { width: min(760px, 96vw); padding: 0; overflow: hidden; display: flex; flex-direction: column; }
+.scanning-log-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 18px 20px; border-bottom: 1px solid var(--cf-divider); }
+.scanning-log-head h2 { margin: 0; font-size: 17px; }
+.scanning-log-head p { margin: 4px 0; color: var(--cf-text-secondary); font-size: 12px; }
+.scanning-log-head code { color: var(--cf-text-muted); font-size: 10px; overflow-wrap: anywhere; }
+.scanning-log-body { flex: 1; min-height: 0; overflow: auto; padding: 16px 20px 24px; }
+.scanning-log-summary { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; color: var(--cf-text-muted); font-size: 11px; }
+.scanning-log-events { display: flex; flex-direction: column; gap: 10px; margin: 0; padding: 0; list-style: none; }
+.scanning-log-event { border: 1px solid var(--cf-card-border); border-left: 3px solid #60a5fa; border-radius: 7px; background: var(--cf-subtle-bg); overflow: hidden; }
+.scanning-log-event.level-warning { border-left-color: #fbbf24; }
+.scanning-log-event.level-error { border-left-color: #f87171; }
+.scanning-log-event-meta { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 7px 10px; border-bottom: 1px solid var(--cf-divider); color: var(--cf-text-muted); font-size: 10px; text-transform: uppercase; letter-spacing: .04em; }
+.scanning-log-event pre { margin: 0; padding: 10px; color: var(--cf-text-primary); font: 11px/1.55 var(--cf-font-mono, monospace); white-space: pre-wrap; overflow-wrap: anywhere; }
+.scanning-log-truncated { padding: 0 10px 9px; color: #fbbf24; font-size: 10px; }
 
 @media (prefers-reduced-motion: reduce) {
   .scan-pulse { animation: none; }
@@ -7310,6 +7325,7 @@ tr.attention-flash {
   .scan-sys-expand { padding-left: 12px; padding-right: 12px; }
   .scanning-schedule-row { flex-direction: column; }
   .scanning-schedule-control { width: 100%; }
+  .scanning-log-drawer { width: 100vw; }
 }
 .sys-table-fixed { table-layout: fixed; }
 .sys-table-dense { table-layout: fixed; }

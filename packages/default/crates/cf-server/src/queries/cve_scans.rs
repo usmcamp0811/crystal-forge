@@ -660,7 +660,7 @@ pub async fn mark_cve_scan_failed(
     target: &Derivation,
     error_message: &str,
 ) -> Result<()> {
-    mark_cve_scan_failed_for_owner(pool, scan_id, target, error_message, None).await
+    mark_cve_scan_failed_for_owner(pool, scan_id, target, error_message, None, None).await
 }
 
 /// Marks a token-owned CVE scan failed and recomputes composite enforcement.
@@ -676,7 +676,39 @@ pub async fn mark_cve_scan_failed_for_execution(
     error_message: &str,
     execution_id: Uuid,
 ) -> Result<()> {
-    mark_cve_scan_failed_for_owner(pool, scan_id, target, error_message, Some(execution_id)).await
+    mark_cve_scan_failed_for_owner(
+        pool,
+        scan_id,
+        target,
+        error_message,
+        Some(execution_id),
+        None,
+    )
+    .await
+}
+
+/// Marks a local execution failed and stores its redacted diagnostics atomically.
+///
+/// # Errors
+///
+/// Returns an error when execution ownership is stale or persistence fails.
+pub(crate) async fn mark_cve_scan_failed_with_diagnostics_for_execution(
+    pool: &PgPool,
+    scan_id: Uuid,
+    target: &Derivation,
+    error_message: &str,
+    execution_id: Uuid,
+    diagnostics: &[crate::queries::cve_scan_diagnostics::PreparedScanDiagnostic],
+) -> Result<()> {
+    mark_cve_scan_failed_for_owner(
+        pool,
+        scan_id,
+        target,
+        error_message,
+        Some(execution_id),
+        Some(diagnostics),
+    )
+    .await
 }
 
 async fn mark_cve_scan_failed_for_owner(
@@ -685,7 +717,9 @@ async fn mark_cve_scan_failed_for_owner(
     target: &Derivation,
     error_message: &str,
     execution_id: Option<Uuid>,
+    diagnostics: Option<&[crate::queries::cve_scan_diagnostics::PreparedScanDiagnostic]>,
 ) -> Result<()> {
+    let error_message = crate::security::snapshot_redaction::redact_text(error_message);
     // Create metadata with error details
     let metadata = serde_json::json!({
         "error": error_message,
@@ -700,13 +734,21 @@ async fn mark_cve_scan_failed_for_owner(
         &[],
     )
     .await?;
+    if let (Some(execution_id), Some(diagnostics)) = (execution_id, diagnostics) {
+        crate::queries::cve_scan_diagnostics::append_local_diagnostics_tx(
+            &mut tx,
+            scan_id,
+            execution_id,
+            diagnostics,
+        )
+        .await?;
+    }
     let result = sqlx::query(
         r#"
         UPDATE cve_scans
         SET
             status = 'failed',
             completed_at = NOW(),
-            attempts = attempts + 1,
             scan_metadata = COALESCE(scan_metadata, '{}'::jsonb) || $2
         WHERE id = $1
           AND status = 'in_progress'
@@ -775,6 +817,7 @@ async fn mark_cve_scan_failed_by_id_for_owner(
     error_message: &str,
     execution_id: Option<Uuid>,
 ) -> Result<()> {
+    let error_message = crate::security::snapshot_redaction::redact_text(error_message);
     let metadata = serde_json::json!({
         "error": error_message,
         "derivation_id": derivation_id,
@@ -853,6 +896,7 @@ pub async fn save_scan_results(
         None,
         None,
         None,
+        None,
     )
     .await
 }
@@ -886,6 +930,36 @@ pub async fn save_scan_results_for_execution(
         None,
         None,
         None,
+        None,
+    )
+    .await
+}
+
+/// Persists local scan evidence and redacted diagnostics in one transaction.
+///
+/// # Errors
+///
+/// Returns an error when execution ownership is stale or persistence fails.
+pub(crate) async fn save_scan_results_with_diagnostics_for_execution(
+    pool: &PgPool,
+    scan_id: Uuid,
+    vulnix_results: &VulnixScanOutput,
+    scan_duration_ms: Option<i32>,
+    execution_id: Uuid,
+    diagnostics: &[crate::queries::cve_scan_diagnostics::PreparedScanDiagnostic],
+) -> Result<()> {
+    save_scan_results_for_owner(
+        pool,
+        scan_id,
+        vulnix_results,
+        scan_duration_ms,
+        None,
+        None,
+        Some(execution_id),
+        None,
+        None,
+        None,
+        Some(diagnostics),
     )
     .await
 }
@@ -909,6 +983,7 @@ pub(crate) async fn save_scan_results_with_store_path_override(
         None,
         None,
         None,
+        None,
     )
     .await
 }
@@ -926,7 +1001,7 @@ pub(crate) async fn save_scan_results_with_store_path_override(
 ///
 /// Returns an error when ownership is stale, a package output is missing, or
 /// canonical persistence fails.
-pub async fn save_remote_scan_results_for_execution(
+pub(crate) async fn save_remote_scan_results_for_execution(
     pool: &PgPool,
     scan_id: Uuid,
     vulnix_results: &VulnixScanOutput,
@@ -935,6 +1010,7 @@ pub async fn save_remote_scan_results_for_execution(
     lease: cf_protocol::builder::CveScanLease,
     result_digest_sha256: &str,
     closure_provenance: &str,
+    diagnostics: &[crate::queries::cve_scan_diagnostics::PreparedScanDiagnostic],
 ) -> Result<()> {
     save_scan_results_for_owner(
         pool,
@@ -947,6 +1023,7 @@ pub async fn save_remote_scan_results_for_execution(
         Some(result_digest_sha256),
         Some(lease),
         Some(closure_provenance),
+        Some(diagnostics),
     )
     .await
 }
@@ -962,6 +1039,7 @@ async fn save_scan_results_for_owner(
     result_digest_sha256: Option<&str>,
     remote_lease: Option<cf_protocol::builder::CveScanLease>,
     closure_provenance: Option<&str>,
+    diagnostics: Option<&[crate::queries::cve_scan_diagnostics::PreparedScanDiagnostic]>,
 ) -> Result<()> {
     // Calculate statistics from vulnix results
     let stats = VulnixParser::calculate_stats(vulnix_results);
@@ -1440,6 +1518,25 @@ async fn save_scan_results_for_owner(
             .bind(&pv_whitelisted as &[bool])
             .bind(&pv_reasons as &[Option<String>])
             .execute(&mut *tx)
+            .await?;
+        }
+    }
+
+    if let (Some(diagnostics), Some(execution_id)) = (diagnostics, execution_id) {
+        if let Some(lease) = remote_lease {
+            crate::queries::cve_scan_diagnostics::append_remote_diagnostics_tx(
+                &mut tx,
+                lease,
+                diagnostics,
+            )
+            .await?;
+        } else {
+            crate::queries::cve_scan_diagnostics::append_local_diagnostics_tx(
+                &mut tx,
+                scan_id,
+                execution_id,
+                diagnostics,
+            )
             .await?;
         }
     }
@@ -2450,7 +2547,6 @@ pub async fn acknowledge_revoked_cve_scan_execution(
         UPDATE cve_scans
         SET status = 'failed',
             completed_at = NOW(),
-            attempts = attempts + 1,
             scan_metadata = COALESCE(scan_metadata, '{}'::jsonb)
                 || jsonb_build_object(
                     'stale_recovered_at', NOW(),
@@ -2804,7 +2900,6 @@ async fn recover_stale_scans_with_options(
             UPDATE cve_scans
             SET status = 'failed',
                 completed_at = NOW(),
-                attempts = attempts + 1,
                 scan_metadata = COALESCE(scan_metadata, '{}'::jsonb)
                     || jsonb_build_object(
                         'stale_recovered_at', NOW(),
@@ -4495,6 +4590,16 @@ mod tests {
         );
 
         let wrong_execution_id = Uuid::new_v4();
+        let stale_diagnostics = vec![
+            crate::queries::cve_scan_diagnostics::PreparedScanDiagnostic {
+                occurred_at: Utc::now(),
+                level: "error".to_string(),
+                source: "server".to_string(),
+                event_type: "attempt_failed".to_string(),
+                message: "stale owner diagnostic".to_string(),
+                truncated: false,
+            },
+        ];
         assert!(
             !heartbeat_cve_scan_execution(&pool, scan_id, wrong_execution_id)
                 .await
@@ -4525,6 +4630,7 @@ mod tests {
                 &derivation,
                 "wrong owner",
                 Some(wrong_execution_id),
+                Some(&stale_diagnostics),
             )
             .await
             .is_err(),
@@ -4648,6 +4754,7 @@ mod tests {
                 None,
                 None,
                 None,
+                Some(&stale_diagnostics),
             )
             .await
             .is_err(),
@@ -4660,6 +4767,7 @@ mod tests {
                 &derivation,
                 "obsolete owner",
                 Some(claim.execution_id),
+                Some(&stale_diagnostics),
             )
             .await
             .is_err(),
@@ -4696,8 +4804,19 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("CVE side effects should be countable");
+        let diagnostic_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM cve_scan_diagnostic_events WHERE scan_id = $1",
+        )
+        .bind(scan_id)
+        .fetch_one(&pool)
+        .await
+        .expect("diagnostic side effects should be countable");
         assert_eq!(package_count, 0, "lost-owner package writes must roll back");
         assert_eq!(cve_count, 0, "lost-owner CVE writes must roll back");
+        assert_eq!(
+            diagnostic_count, 0,
+            "lost-owner diagnostic writes must roll back"
+        );
 
         sqlx::query("DELETE FROM cve_scans WHERE id = $1")
             .bind(scan_id)

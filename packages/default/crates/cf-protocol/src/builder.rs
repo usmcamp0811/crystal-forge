@@ -881,6 +881,28 @@ pub struct CveScanResult {
     pub observations: Vec<CveObservation>,
 }
 
+/// Carries one bounded diagnostic event produced during a remote scan attempt.
+///
+/// The server treats this text as untrusted, applies its canonical redaction
+/// policy, and enforces persistence bounds before storing it. Diagnostics are
+/// operational detail and never participate in the evidence digest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CveScanDiagnostic {
+    /// Time at which the builder observed the event.
+    pub occurred_at: DateTime<Utc>,
+    /// Severity: `info`, `warning`, or `error`.
+    pub level: String,
+    /// Producer: `builder`, `vulnix`, or `nix`.
+    pub source: String,
+    /// Lifecycle or output event kind.
+    pub event_type: String,
+    /// Bounded diagnostic text. The server redacts this field before storage.
+    pub message: String,
+    /// Is `true` when the builder omitted output beyond its local bound.
+    #[serde(default)]
+    pub truncated: bool,
+}
+
 /// Serializes canonical schema-1 CVE evidence to the wire bytes hashed by both
 /// builders and the server.
 ///
@@ -952,6 +974,9 @@ pub struct CveScanCompleteRequest {
     pub result_digest_sha256: String,
     /// Scanner wall-clock duration in milliseconds.
     pub scan_duration_ms: u64,
+    /// Optional attempt diagnostics. Older builders omit this field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<CveScanDiagnostic>,
 }
 
 /// Reports whether a CVE completion was accepted or already recorded.
@@ -986,6 +1011,9 @@ pub struct CveScanFailRequest {
     pub failure_class: CveScanFailureClass,
     /// Bounded diagnostic text that must not contain credentials.
     pub error_message: String,
+    /// Optional attempt diagnostics. Older builders omit this field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<CveScanDiagnostic>,
 }
 
 /// Confirms the server outcome for a CVE scan failure report.
@@ -1273,6 +1301,7 @@ mod tests {
             result_digest_sha256:
                 "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
             scan_duration_ms: 1234,
+            diagnostics: Vec::new(),
         };
 
         let json = serde_json::to_vec(&request).expect("completion should serialize");
@@ -1280,6 +1309,23 @@ mod tests {
             serde_json::from_slice(&json).expect("completion should deserialize");
 
         assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn older_cve_reports_without_diagnostics_remain_accepted() {
+        let value = serde_json::json!({
+            "lease": {
+                "scan_id": Uuid::nil(),
+                "execution_id": Uuid::nil(),
+                "builder_id": Uuid::nil(),
+                "builder_session_id": Uuid::nil()
+            },
+            "failure_class": "transient",
+            "error_message": "legacy builder failure"
+        });
+        let decoded: CveScanFailRequest =
+            serde_json::from_value(value).expect("legacy failure payload should deserialize");
+        assert!(decoded.diagnostics.is_empty());
     }
 
     #[test]

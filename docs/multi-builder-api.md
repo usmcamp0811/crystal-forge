@@ -779,6 +779,22 @@ Affected and whitelisted markers are persisted as independent exact-observation
 fields. Builder and server digest the bytes produced by the shared protocol
 canonical-result encoder.
 
+Upgraded builders may include a `diagnostics` array in completion and failure
+requests. Older builders may omit the field; the server treats an omitted field
+as an empty array. The builder applies its shared credential-redaction policy
+before it serializes either request. The server applies canonical snapshot
+redaction again before persistence as defense in depth. Diagnostics are
+operational detail and are excluded from the
+canonical schema-1 evidence bytes and SHA-256 digest. A terminal report accepts
+at most 256 prepared diagnostic events. Each persisted event contains at most
+2,048 Unicode scalar values. The server splits multiline output, normalizes
+level, source, and event type, removes control characters, and applies the
+canonical snapshot-redaction policy before persistence. Builder-side capture is
+also bounded to 64 KiB of stderr and marks truncated output. Diagnostic rows are
+append-only and are fenced by the same execution, lease, builder, and current
+session checks as the terminal scan transition. A diagnostic failure does not
+change build or cache outcomes and diagnostic content never changes CVE evidence.
+
 Invalid evidence returns `422 Unprocessable Entity` and leaves the lease active.
 An expired or superseded execution returns `410 Gone`. A same-digest retry is
 idempotent; a different digest for the same completed execution returns
@@ -792,7 +808,9 @@ producing session or the server-local fallback. Requeue clears typed remote
 ownership and sealed claim-input fields before a local worker can claim the row;
 the prior remote execution identity remains in audit metadata. Deterministic
 failures terminate only the scan. No scan failure changes the successful build
-or cache outcome.
+or cache outcome. Failure requests use the same optional, backward-compatible
+`diagnostics` array, redaction boundary, event limits, and execution fencing as
+completion requests.
 
 #### POST /api/v1/builders/:id/jobs/:job_id/fail
 

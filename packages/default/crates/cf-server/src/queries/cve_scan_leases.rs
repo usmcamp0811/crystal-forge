@@ -527,6 +527,8 @@ pub async fn complete_remote_cve_scan(
     request: CveScanCompleteRequest,
 ) -> Result<RemoteCompletion> {
     let lease = request.lease;
+    let diagnostics =
+        crate::queries::cve_scan_diagnostics::prepare_diagnostics(&request.diagnostics);
     let existing: Option<String> = sqlx::query_scalar(
         r#"
         SELECT result_digest_sha256
@@ -590,6 +592,7 @@ pub async fn complete_remote_cve_scan(
         lease,
         &digest,
         closure_provenance.as_str(),
+        &diagnostics,
     )
     .await
     {
@@ -811,15 +814,37 @@ pub async fn fail_remote_cve_scan(
     lease: CveScanLease,
     class: CveScanFailureClass,
     message: &str,
+    diagnostics: &[cf_protocol::builder::CveScanDiagnostic],
 ) -> Result<bool> {
+    let requeue = !matches!(class, CveScanFailureClass::Deterministic);
     let sanitized = sanitize_failure(message);
+    let mut diagnostics = crate::queries::cve_scan_diagnostics::prepare_diagnostics(diagnostics);
+    let diagnostics_were_capped =
+        diagnostics.len() >= crate::queries::cve_scan_diagnostics::MAX_DIAGNOSTIC_EVENTS;
+    if diagnostics_were_capped {
+        diagnostics.truncate(crate::queries::cve_scan_diagnostics::MAX_DIAGNOSTIC_EVENTS - 1);
+    }
+    diagnostics.push(
+        crate::queries::cve_scan_diagnostics::PreparedScanDiagnostic {
+            occurred_at: Utc::now(),
+            level: "error".to_string(),
+            source: "server".to_string(),
+            event_type: if requeue {
+                "attempt_requeued"
+            } else {
+                "attempt_failed"
+            }
+            .to_string(),
+            message: sanitized.clone(),
+            truncated: diagnostics_were_capped || message.chars().count() > MAX_FAILURE_CHARS,
+        },
+    );
     let class_name = match class {
         CveScanFailureClass::Transient => "transient",
         CveScanFailureClass::Deterministic => "deterministic",
         CveScanFailureClass::Authorization => "authorization",
         CveScanFailureClass::Cancelled => "cancelled",
     };
-    let requeue = !matches!(class, CveScanFailureClass::Deterministic);
     let status = if requeue { "pending" } else { "failed" };
     let outcome = if requeue { "requeued" } else { "failed" };
     let completed = if requeue { None } else { Some(Utc::now()) };
@@ -838,6 +863,12 @@ pub async fn fail_remote_cve_scan(
         &mut tx,
         derivation_id,
         &[],
+    )
+    .await?;
+    crate::queries::cve_scan_diagnostics::append_remote_diagnostics_tx(
+        &mut tx,
+        lease,
+        &diagnostics,
     )
     .await?;
     let result = sqlx::query(
@@ -1133,7 +1164,7 @@ fn validate_text(value: &str, max: usize, allow_empty: bool) -> Result<()> {
 }
 
 fn sanitize_failure(value: &str) -> String {
-    value
+    crate::security::snapshot_redaction::redact_text(value)
         .chars()
         .filter(|character| !character.is_control() || *character == '\n')
         .take(MAX_FAILURE_CHARS)
@@ -1697,6 +1728,7 @@ mod tests {
                 claim.lease,
                 CveScanFailureClass::Transient,
                 "disabled builder",
+                &[],
             )
             .await
             .is_err(),
@@ -1793,6 +1825,7 @@ mod tests {
             },
             result_digest_sha256: "0".repeat(64),
             scan_duration_ms: 1,
+            diagnostics: Vec::new(),
         };
         assert!(matches!(
             complete_remote_cve_scan(&pool, invalid)
@@ -1817,6 +1850,14 @@ mod tests {
             result: result.clone(),
             result_digest_sha256: digest,
             scan_duration_ms: 1,
+            diagnostics: vec![cf_protocol::builder::CveScanDiagnostic {
+                occurred_at: Utc::now(),
+                level: "error".to_string(),
+                source: "builder".to_string(),
+                event_type: "output".to_string(),
+                message: "stale remote diagnostic".to_string(),
+                truncated: false,
+            }],
         };
         sqlx::query(
             "UPDATE cve_scans SET lease_expires_at = NOW() - INTERVAL '1 second' WHERE id = $1",
@@ -1830,6 +1871,17 @@ mod tests {
                 .await
                 .expect("expired completion should be classified"),
             RemoteCompletion::Stale
+        );
+        let diagnostic_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM cve_scan_diagnostic_events WHERE scan_id = $1",
+        )
+        .bind(scan_id)
+        .fetch_one(&pool)
+        .await
+        .expect("stale remote diagnostics should be countable");
+        assert_eq!(
+            diagnostic_count, 0,
+            "an expired remote lease must not append diagnostics"
         );
         assert_eq!(
             requeue_expired_remote_cve_scans(&pool, 10)
@@ -1907,6 +1959,14 @@ mod tests {
             result,
             result_digest_sha256: digest.clone(),
             scan_duration_ms: 1,
+            diagnostics: vec![cf_protocol::builder::CveScanDiagnostic {
+                occurred_at: Utc::now(),
+                level: "warning".to_string(),
+                source: "vulnix".to_string(),
+                event_type: "output".to_string(),
+                message: "immutable completion diagnostic".to_string(),
+                truncated: false,
+            }],
         };
         assert_eq!(
             complete_remote_cve_scan(&pool, completion.clone())
@@ -1937,6 +1997,29 @@ mod tests {
         .expect("completed scan should be queryable");
         assert_eq!((status.as_str(), schema, total), ("completed", 1, 1));
         assert_eq!(closure_provenance, "unverified_remote");
+        let diagnostic_id: i64 = sqlx::query_scalar(
+            "SELECT id FROM cve_scan_diagnostic_events WHERE scan_id = $1 LIMIT 1",
+        )
+        .bind(scan_id)
+        .fetch_one(&pool)
+        .await
+        .expect("completion diagnostic should persist");
+        assert!(
+            sqlx::query("UPDATE cve_scan_diagnostic_events SET message = 'mutated' WHERE id = $1")
+                .bind(diagnostic_id)
+                .execute(&pool)
+                .await
+                .is_err(),
+            "persisted diagnostics must reject direct updates"
+        );
+        assert!(
+            sqlx::query("DELETE FROM cve_scan_diagnostic_events WHERE id = $1")
+                .bind(diagnostic_id)
+                .execute(&pool)
+                .await
+                .is_err(),
+            "persisted diagnostics must reject direct deletes"
+        );
         let dispositions: Vec<(String, bool, bool)> = sqlx::query_as(
             r#"
             SELECT canonical_cve_id, is_affected, is_whitelisted
@@ -2090,28 +2173,34 @@ mod tests {
                 failed_claim.lease,
                 CveScanFailureClass::Transient,
                 "temporary scanner failure\0credential",
+                &[],
             )
             .await
             .expect("transient failure should be recorded")
         );
-        let (failed_status, build_status, error): (String, String, String) = sqlx::query_as(
-            r#"
-            SELECT scan.status, job.status, scan.scan_metadata ->> 'error'
+        let (failed_status, build_status, error, attempts): (String, String, String, i32) =
+            sqlx::query_as(
+                r#"
+            SELECT scan.status, job.status, scan.scan_metadata ->> 'error', scan.attempts
             FROM cve_scans scan
             CROSS JOIN build_jobs job
             WHERE scan.id = $1 AND job.id = $2
             "#,
-        )
-        .bind(failed_scan_id)
-        .bind(completed_build_job_id)
-        .fetch_one(&pool)
-        .await
-        .expect("independent scan and build outcomes should be queryable");
+            )
+            .bind(failed_scan_id)
+            .bind(completed_build_job_id)
+            .fetch_one(&pool)
+            .await
+            .expect("independent scan and build outcomes should be queryable");
         assert_eq!(
             (failed_status.as_str(), build_status.as_str()),
             ("pending", "success")
         );
         assert_eq!(error, "temporary scanner failurecredential");
+        assert_eq!(
+            attempts, 1,
+            "remote terminal reporting must not add an attempt"
+        );
 
         let orphaned_claim = claim_remote_cve_scan(&pool, builder.id, session_id, None)
             .await

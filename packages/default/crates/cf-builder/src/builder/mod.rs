@@ -10,6 +10,7 @@ pub mod api_client;
 pub mod cve_scanner;
 pub mod error;
 pub mod metrics;
+pub mod redaction;
 pub mod status;
 
 pub use api_client::{ApiBuildReporter, BuilderApiClient};

@@ -839,6 +839,37 @@ GET /api/v1/admin/audit?start_date=2024-01-01&end_date=2024-01-31&actor=john
 
 ---
 
+## CVE Scan Operations
+
+### Scan Diagnostics
+
+| Method | Endpoint | Role | Description |
+|--------|----------|------|-------------|
+| GET | `/scanning/scans/:scan_id` | Admin | Return bounded diagnostics for one exact CVE scan |
+
+The endpoint returns `scan_id`, current `status`, `scanner_name`, optional
+`scanner_version`, `source_trigger`, an `events` array, and `truncated`. Each
+event contains an immutable row `id`, immutable `execution_id`, and one-based
+`attempt_number` identity, `occurred_at`, normalized `level`, `source`,
+`event_type`, redacted `message`, and an event-level `truncated` flag.
+
+The response uses a fixed chronological limit of 500 events. `truncated=true`
+means later persisted events exist. This endpoint does not provide cursor or
+offset pagination. Clients must not infer that a truncated response contains the
+complete attempt history. Unknown scan IDs return `404`. Non-admin callers
+receive the standard admin authorization failure.
+
+Diagnostic messages are untrusted operational data. Builders can omit the
+optional diagnostics field for backward compatibility. The server accepts at
+most 256 prepared events per terminal report, persists at most 2,048 Unicode
+scalar values per event, removes control characters, and applies canonical
+secret redaction before the first database write. Upgraded builders also apply
+their shared credential-redaction policy before request serialization.
+Diagnostics are independent
+from canonical CVE evidence and are not included in the schema-1 evidence digest.
+
+---
+
 ## Fleet CVE Triage
 
 Fleet triage uses exact deployed evidence. The identity is a canonical CVE ID

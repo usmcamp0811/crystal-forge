@@ -2,6 +2,7 @@ use anyhow::Context;
 use cf_builder::build::{BuildCancelledError, Derivation, LogSink};
 use cf_builder::builder::api_client::{AppendLogsOutcome, job_status_requests_cancellation};
 use cf_builder::builder::cve_scanner::{claim_and_execute, detect_cve_capabilities};
+use cf_builder::builder::redaction::redact_builder_error;
 use cf_builder::builder::{ApiBuildReporter, BuilderApiClient, SystemMetrics};
 use cf_builder::cache::builder_cache_to_config;
 // Bring in the build execution and cache methods on Derivation
@@ -1295,29 +1296,6 @@ fn evaluator_incompatible(message: impl Into<String>) -> PreBuildFailure {
         class: BuildFailureClass::Transient,
         message: message.into(),
     }
-}
-
-fn redact_builder_error(input: &str) -> String {
-    input
-        .split_whitespace()
-        .map(|token| {
-            let lower = token.to_ascii_lowercase();
-            if lower.contains("authorization")
-                || lower.contains("password=")
-                || lower.contains("token=")
-                || lower.contains("netrc")
-            {
-                return "[REDACTED]".to_string();
-            }
-            if let Some((scheme, remainder)) = token.split_once("://")
-                && (remainder.contains('@') || remainder.contains('?'))
-            {
-                return format!("{scheme}://[REDACTED]");
-            }
-            token.to_string()
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 fn validate_evaluator_contract(

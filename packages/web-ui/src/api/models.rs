@@ -678,6 +678,48 @@ pub struct ScanningActivityItemResponse {
     pub status: String,
 }
 
+/// Contains bounded operational diagnostics for one exact CVE scan.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScanningScanDetailResponse {
+    /// Exact scan identity.
+    pub scan_id: Uuid,
+    /// Current scan lifecycle status.
+    pub status: String,
+    /// Scanner implementation name.
+    pub scanner_name: String,
+    /// Scanner version, when recorded.
+    pub scanner_version: Option<String>,
+    /// Durable trigger provenance.
+    pub source_trigger: String,
+    /// Chronologically ordered diagnostic events.
+    pub events: Vec<ScanningScanDiagnosticEventResponse>,
+    /// Is `true` when the fixed API response omitted later events.
+    pub truncated: bool,
+}
+
+/// Describes one immutable execution-attempt diagnostic event.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScanningScanDiagnosticEventResponse {
+    /// Immutable server identity for this diagnostic row.
+    pub id: i64,
+    /// Immutable execution token for the attempt.
+    pub execution_id: Uuid,
+    /// One-based attempt number.
+    pub attempt_number: i32,
+    /// Time at which the worker observed the event.
+    pub occurred_at: DateTime<Utc>,
+    /// Normalized event severity.
+    pub level: String,
+    /// Normalized event producer.
+    pub source: String,
+    /// Lifecycle or output event kind.
+    pub event_type: String,
+    /// Redacted bounded diagnostic text.
+    pub message: String,
+    /// Is `true` when output was omitted at a capture or persistence bound.
+    pub truncated: bool,
+}
+
 /// A single recent deployment event.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RecentDeployment {
