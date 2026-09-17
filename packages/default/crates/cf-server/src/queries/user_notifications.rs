@@ -821,6 +821,44 @@ pub async fn dismiss_notification(
     Ok(result.rows_affected() > 0)
 }
 
+/// Dismisses every notification currently visible to one user.
+///
+/// The statement records its cutoff with `clock_timestamp()` before it updates
+/// rows. Notifications created after that cutoff remain in the inbox, even if
+/// a concurrent materializer commits before the statement completes. The
+/// visibility predicate intentionally matches [`list_notifications`] and
+/// [`unread_notification_count`], so a bulk action cannot reveal or mutate a
+/// notification that the user cannot currently see.
+///
+/// The operation changes only `dismissed_at`. It preserves source events,
+/// read state, and every other user's notification rows.
+///
+/// # Errors
+///
+/// Returns a database error when PostgreSQL cannot complete the atomic update.
+pub async fn dismiss_all_notifications(pool: &PgPool, user_id: Uuid) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "WITH cutoff AS (SELECT clock_timestamp() AS created_before)
+         UPDATE user_notifications notification
+         SET dismissed_at = COALESCE(notification.dismissed_at, NOW())
+         FROM cutoff
+         WHERE notification.user_id = $1
+           AND notification.in_app_visible
+           AND notification.dismissed_at IS NULL
+           AND notification.created_at <= cutoff.created_before
+           AND notification_visible_to_user_snapshot(
+                 $1, notification.source_type, notification.source_id,
+                 notification.authorization_scope,
+                 notification.authorization_environment_ids
+           )",
+    )
+    .bind(user_id)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

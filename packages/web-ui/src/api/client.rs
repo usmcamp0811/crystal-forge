@@ -2213,6 +2213,15 @@ pub async fn mark_all_user_notifications_read() -> Result<(), ApiClientError> {
     send_json_with_csrf("POST", &url, None::<&()>).await
 }
 
+/// Dismisses all notifications visible to the current authenticated user.
+///
+/// The server applies the visibility policy and an execution-time cutoff, so
+/// notifications that arrive after the action starts remain in the feed.
+pub async fn dismiss_all_user_notifications() -> Result<(), ApiClientError> {
+    let url = format!("{}/user/notifications/dismiss-all", base_url());
+    send_json_with_csrf("POST", &url, None::<&()>).await
+}
+
 pub async fn dismiss_user_notification(notification_id: Uuid) -> Result<(), ApiClientError> {
     let url = format!("{}/user/notifications/{}", base_url(), notification_id);
     send_empty_with_csrf("DELETE", &url, None::<&()>).await
@@ -3348,6 +3357,7 @@ mod config_observation_tests {
             kind,
             path_components,
             child_offset: 0,
+            automatic: false,
         }
     }
 

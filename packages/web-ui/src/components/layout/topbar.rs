@@ -1,8 +1,8 @@
 //! Top bar layout component.
 
 use crate::api::client::{
-    dismiss_user_notification, fetch_user_notifications, mark_all_user_notifications_read,
-    mark_user_notification_read,
+    dismiss_all_user_notifications, dismiss_user_notification, fetch_user_notifications,
+    mark_all_user_notifications_read, mark_user_notification_read,
 };
 use crate::api::models::{NotificationCategory, UpdateUserPreferences, UserNotificationDto};
 use crate::components::layout::sidebar::{PreferencesContext, SidebarContext};
@@ -68,6 +68,7 @@ enum NotificationMutation {
     Read(uuid::Uuid),
     Dismiss(uuid::Uuid),
     MarkAll,
+    DismissAll,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -512,6 +513,21 @@ impl NotificationFeed {
             item.read_at.get_or_insert_with(Utc::now);
         }
         self.unread_count = 0;
+        self.clear_mutation_failure(&attempt.operation);
+        self.mutation_succeeded(&attempt.owner)
+    }
+
+    fn dismiss_all_succeeded(
+        &mut self,
+        attempt: &NotificationMutationAttempt,
+    ) -> Option<NotificationRequest> {
+        if !self.mutation_is_current(attempt) {
+            return None;
+        }
+        self.finish_mutation(attempt);
+        self.items.clear();
+        self.unread_count = 0;
+        self.next_cursor = None;
         self.clear_mutation_failure(&attempt.operation);
         self.mutation_succeeded(&attempt.owner)
     }
@@ -1050,6 +1066,30 @@ fn mark_all_notifications_read(mut ctx: AccountNotificationsContext, owner: Noti
     });
 }
 
+fn dismiss_all_notifications(mut ctx: AccountNotificationsContext, owner: NotificationOwner) {
+    let Some(attempt) = ctx
+        .feed
+        .write()
+        .start_mutation(&owner, NotificationMutation::DismissAll)
+    else {
+        return;
+    };
+    spawn(async move {
+        match dismiss_all_user_notifications().await {
+            Ok(()) => {
+                let request = ctx.feed.write().dismiss_all_succeeded(&attempt);
+                if let Some(request) = request {
+                    run_notification_request(ctx, request);
+                }
+            }
+            Err(err) => ctx
+                .feed
+                .write()
+                .mutation_failed(&attempt, format!("Could not dismiss notifications: {err}")),
+        }
+    });
+}
+
 fn retry_notification_action(
     ctx: AccountNotificationsContext,
     owner: NotificationOwner,
@@ -1062,6 +1102,7 @@ fn retry_notification_action(
             dismiss_notification(ctx, owner, id, notifications_open)
         }
         NotificationMutation::MarkAll => mark_all_notifications_read(ctx, owner),
+        NotificationMutation::DismissAll => dismiss_all_notifications(ctx, owner),
     }
 }
 
@@ -1147,6 +1188,7 @@ pub fn TopBar(title: String) -> Element {
 
     let open_owner = notification_owner.clone();
     let mark_all_owner = notification_owner.clone();
+    let dismiss_all_owner = notification_owner.clone();
     let load_retry_owner = notification_owner.clone();
     let mutation_retry_owner = notification_owner.clone();
     let more_owner = notification_owner.clone();
@@ -1308,6 +1350,20 @@ pub fn TopBar(title: String) -> Element {
                         div {
                             class: "notif-head",
                             strong { "Notifications" }
+                            button {
+                                "data-testid": "topbar-notifications-dismiss-all",
+                                class: "btn btn-ghost focus-ring xs",
+                                aria_label: "Dismiss all notifications",
+                                "aria-busy": notification_ctx.feed.read().mutation_pending(&NotificationMutation::DismissAll),
+                                disabled: notification_ctx.feed.read().mutation_pending(&NotificationMutation::DismissAll),
+                                title: "Dismiss all",
+                                onclick: move |_| {
+                                    if let Some(owner) = dismiss_all_owner.clone() {
+                                        dismiss_all_notifications(notification_ctx, owner);
+                                    }
+                                },
+                                if notification_ctx.feed.read().mutation_pending(&NotificationMutation::DismissAll) { "Dismissing…" } else { "Dismiss all" }
+                            }
                             button {
                                 "data-testid": "topbar-notifications-mark-read",
                                 class: "btn-icon focus-ring",

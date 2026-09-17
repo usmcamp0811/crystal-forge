@@ -85,6 +85,12 @@ pub(crate) struct ConfigObservationExecutionTarget {
     pub path_components: Vec<String>,
     /// Zero-based immediate-child offset.
     pub child_offset: u32,
+    /// True when this execution was reserved from an automatic-owned row.
+    ///
+    /// Only observed at the moment the row transitioned to `running`; a later
+    /// promotion from explicit interest does not change an already-running
+    /// execution's already-fixed deadline.
+    pub is_automatic: bool,
 }
 
 /// Contains a running scoped execution after capacity is held.
@@ -128,6 +134,7 @@ pub(crate) async fn create_or_reuse_config_observation_request(
     kind: ConfigObservationKind,
     path_components: &[String],
     child_offset: u32,
+    automatic: bool,
 ) -> Result<CreateConfigObservationOutcome> {
     validate_config_observation_identity(kind, path_components, child_offset)?;
     let mut tx = pool
@@ -202,7 +209,7 @@ pub(crate) async fn create_or_reuse_config_observation_request(
 
     let existing = sqlx::query(
         r#"
-        SELECT request.id, request.status, request.attempts,
+        SELECT request.id, request.status, request.attempts, request.is_automatic,
                request.execution_heartbeat_at, request.observation_id, request.error,
                content.payload AS observation_payload
         FROM config_observation_requests request
@@ -236,11 +243,29 @@ pub(crate) async fn create_or_reuse_config_observation_request(
 
     let mut reused = existing.is_some();
     let row = if let Some(existing) = existing {
-        if existing.try_get::<String, _>("status")? == "succeeded" {
+        let existing_status: String = existing.try_get("status")?;
+        if existing_status == "succeeded" {
             let mut payload: Value = existing.try_get("observation_payload")?;
             normalize_legacy_tree_payload(kind, child_offset, &mut payload);
             validate_config_observation_payload(kind, path_components, child_offset, &payload)
                 .context("validate reusable Config observation payload")?;
+        } else if !automatic
+            && existing.try_get::<bool, _>("is_automatic")?
+            && matches!(existing_status.as_str(), "queued" | "waiting_for_capacity")
+        {
+            // CONCURRENCY: An explicit click sharing a still-queued automatic
+            // preview must be reserved ahead of any remaining automatic work
+            // at the same priority tier. The advisory xact lock above already
+            // serializes every writer for this exact identity, so this update
+            // cannot race a concurrent reservation for the same row.
+            let existing_id: Uuid = existing.try_get("id")?;
+            sqlx::query(
+                "UPDATE config_observation_requests SET is_automatic = false, updated_at = now() WHERE id = $1",
+            )
+            .bind(existing_id)
+            .execute(&mut *tx)
+            .await
+            .context("promote Config observation request to explicit priority")?;
         }
         existing
     } else if let Some(row) = adapt_selected_v2_observation_tx(
@@ -264,13 +289,18 @@ pub(crate) async fn create_or_reuse_config_observation_request(
             r#"
             INSERT INTO config_observation_requests (
                 commit_id, derivation_id, configuration_name, carrier_drv_path,
-                schema_version, path_components, kind, child_offset, priority, status
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'queued')
+                schema_version, path_components, kind, child_offset, priority, is_automatic, status
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'queued')
             ON CONFLICT (
                 commit_id, configuration_name, derivation_id, carrier_drv_path,
                 schema_version, path_components, kind, child_offset
             ) WHERE status IN ('queued', 'waiting_for_capacity', 'running')
-            DO UPDATE SET updated_at = config_observation_requests.updated_at
+            -- CONCURRENCY: If a concurrent insert already created this exact
+            -- identity, an explicit caller on either side promotes the shared
+            -- row: it stays automatic only when every writer was automatic.
+            DO UPDATE SET
+                updated_at = config_observation_requests.updated_at,
+                is_automatic = config_observation_requests.is_automatic AND EXCLUDED.is_automatic
             RETURNING id, status, attempts, execution_heartbeat_at, observation_id, error
             "#,
         )
@@ -283,6 +313,7 @@ pub(crate) async fn create_or_reuse_config_observation_request(
         .bind(kind.as_str())
         .bind(i32::try_from(child_offset)?)
         .bind(kind.priority())
+        .bind(automatic)
         .fetch_one(&mut *tx)
         .await
         .context("insert or coalesce Config observation request")?
@@ -1063,7 +1094,10 @@ pub(crate) async fn reserve_next_config_observation(
             FROM config_observation_requests request
             JOIN commits commit ON commit.id = request.commit_id
             WHERE request.status IN ('queued', 'waiting_for_capacity')
-            ORDER BY request.priority,
+            -- INVARIANT: An explicit request (is_automatic = false) always
+            -- sorts ahead of a pending automatic preview at the same
+            -- priority tier, regardless of relative queue age.
+            ORDER BY request.priority, request.is_automatic,
                      commit.commit_timestamp DESC, commit.id DESC,
                      (request.status = 'waiting_for_capacity') ASC,
                      request.scheduled_at, request.created_at, request.id
@@ -1079,8 +1113,8 @@ pub(crate) async fn reserve_next_config_observation(
         RETURNING request.id, request.commit_id, request.derivation_id,
                   request.configuration_name, request.carrier_drv_path,
                   commit.git_commit_hash AS revision, flake.repo_url, flake.id AS flake_id,
-                  request.kind, request.path_components
-                  , request.child_offset
+                  request.kind, request.path_components,
+                  request.child_offset, request.is_automatic
         "#,
     )
     .fetch_optional(pool)
@@ -1104,6 +1138,7 @@ fn execution_target_from_row(
         kind: ConfigObservationKind::parse(row.try_get::<String, _>("kind")?.as_str())?,
         path_components: serde_json::from_value(row.try_get("path_components")?)?,
         child_offset: u32::try_from(row.try_get::<i32, _>("child_offset")?)?,
+        is_automatic: row.try_get("is_automatic")?,
     })
 }
 
@@ -1761,6 +1796,7 @@ mod tests {
                 kind,
                 path,
                 child_offset,
+                false,
             )
             .await
             .unwrap()
@@ -1929,6 +1965,7 @@ mod tests {
                 ConfigObservationKind::Root,
                 &[],
                 0,
+                false,
             )
             .await
             .unwrap(),
@@ -1988,6 +2025,7 @@ mod tests {
             ConfigObservationKind::Prefix,
             &path,
             0,
+            false,
         )
         .await
         .unwrap();
@@ -2003,6 +2041,7 @@ mod tests {
             ConfigObservationKind::Prefix,
             &path,
             0,
+            false,
         )
         .await
         .unwrap();
@@ -2084,6 +2123,7 @@ mod tests {
             ConfigObservationKind::Prefix,
             &["services".to_string()],
             0,
+            false,
         )
         .await
         .unwrap();
@@ -2101,6 +2141,7 @@ mod tests {
             ConfigObservationKind::Prefix,
             &["networking".to_string()],
             0,
+            false,
         )
         .await
         .unwrap();
@@ -2252,6 +2293,7 @@ mod tests {
             ConfigObservationKind::Root,
             &[],
             0,
+            false,
         )
         .await
         .unwrap();

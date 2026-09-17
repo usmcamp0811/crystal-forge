@@ -28,7 +28,50 @@ enum ObservationState {
     Lifecycle(ConfigObservationLifecycle),
     Loaded(ConfigObservationResponse),
     Error(String),
+    /// A bounded automatic preview did not complete (budget exhaustion,
+    /// authorization, or any other outcome) before the request became
+    /// terminal. This is deliberately not [`ObservationState::Error`]: the
+    /// option is not known to be absent or broken, only not-yet-loaded by
+    /// the automatic path. A fresh explicit selection always retries with
+    /// the full inspection deadline.
+    Deferred,
 }
+
+/// Distinguishes a bounded speculative value preview from an explicit click.
+///
+/// Only [`RequestIntent::Explicit`] can retry a terminal
+/// [`ObservationState::Error`] or [`ObservationState::Deferred`] outcome.
+/// [`RequestIntent::Automatic`] never starts on top of any existing cache
+/// entry, so a failed or deferred automatic preview is never retried
+/// automatically.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RequestIntent {
+    Explicit,
+    Automatic,
+}
+
+impl RequestIntent {
+    fn is_automatic(self) -> bool {
+        matches!(self, Self::Automatic)
+    }
+}
+
+/// Maximum visible-and-uncached option paths considered per automatic
+/// scheduling pass.
+///
+/// The Explorer always starts the single topmost (lexicographically
+/// smallest path) candidate from this bounded window, so this constant
+/// limits how much of a very tall viewport is scanned, not how many
+/// requests run at once. Conservative starting bound; see
+/// `docs/config-explorer-architecture.md`.
+const MAX_AUTOMATIC_PENDING_CANDIDATES: usize = 16;
+
+/// Debounce window after the visible-row set changes before the automatic
+/// scheduler recomputes its candidate window.
+///
+/// Prevents rapid expansion or scrolling from enqueueing a fetch for every
+/// intermediate frame. Conservative starting bound, not a measured optimum.
+const AUTOMATIC_PREVIEW_DEBOUNCE_MS: u32 = 200;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ExplorerMode {
@@ -450,6 +493,169 @@ fn merge_tree_observation(
     Ok(page)
 }
 
+// ---------------------------------------------------------------------------
+// Bounded automatic value preview: visibility tracking
+// ---------------------------------------------------------------------------
+//
+// Mirrors the existing `hooks::infinite_scroll` convention: rows carry a
+// stable server-issued key in a `data-*` attribute, register themselves via
+// `onmounted`, and one shared `IntersectionObserver` per Explorer instance
+// maintains the visible set. This avoids a parallel per-row DOM-element
+// registry; only the CSS selector lookup at registration time needs the key.
+
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    static VISIBLE_OPTION_OBSERVERS: std::cell::RefCell<
+        HashMap<u32, (web_sys::IntersectionObserver, wasm_bindgen::prelude::Closure<dyn Fn(js_sys::Array)>)>
+    > = std::cell::RefCell::new(HashMap::new());
+}
+
+static VISIBLE_OPTION_HOOK_COUNTER: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
+
+/// Renders the structured path as the value of a `data-cfgx-path` attribute.
+///
+/// The visibility observer reads this attribute directly from the
+/// intersecting element; no side table of DOM node identities is kept.
+fn visible_row_path_attr(path: &[String]) -> String {
+    serde_json::to_string(path).unwrap_or_default()
+}
+
+/// Tracks Option rows currently intersecting the `.cfgx-scroll` viewport.
+///
+/// Returns the live visible-path set and a hook identity used to register
+/// individual rows. "Visible" means genuinely inside the scrollable tree
+/// viewport, not merely present somewhere in an expanded page of rows.
+fn use_visible_option_paths() -> (Signal<HashSet<Vec<String>>>, u32) {
+    let hook_id = use_signal(|| {
+        VISIBLE_OPTION_HOOK_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    });
+    let id = *hook_id.read();
+    let visible = use_signal(HashSet::<Vec<String>>::new);
+
+    use_effect(move || {
+        #[cfg(target_arch = "wasm32")]
+        {
+            use wasm_bindgen::JsCast;
+            use wasm_bindgen::prelude::*;
+            let mut visible = visible;
+            let Some(window) = web_sys::window() else {
+                return;
+            };
+            let Some(document) = window.document() else {
+                return;
+            };
+            let callback = Closure::<dyn Fn(js_sys::Array)>::new(move |entries: js_sys::Array| {
+                for entry in entries.iter() {
+                    let entry: web_sys::IntersectionObserverEntry = entry.unchecked_into();
+                    let Some(raw_path) = entry.target().get_attribute("data-cfgx-path") else {
+                        continue;
+                    };
+                    let Ok(path) = serde_json::from_str::<Vec<String>>(&raw_path) else {
+                        continue;
+                    };
+                    if entry.is_intersecting() {
+                        visible.with_mut(|set| {
+                            set.insert(path);
+                        });
+                    } else {
+                        visible.with_mut(|set| {
+                            set.remove(&path);
+                        });
+                    }
+                }
+            });
+            let mut options = web_sys::IntersectionObserverInit::new();
+            options.root_margin("0px");
+            if let Some(root) = document.query_selector(".cfgx-scroll").ok().flatten() {
+                options.root(Some(&root));
+            }
+            if let Ok(observer) = web_sys::IntersectionObserver::new_with_options(
+                callback.as_ref().unchecked_ref(),
+                &options,
+            ) {
+                VISIBLE_OPTION_OBSERVERS.with(|registry| {
+                    if let Some((old, _)) = registry.borrow_mut().insert(id, (observer, callback)) {
+                        old.disconnect();
+                    }
+                });
+            }
+        }
+    });
+
+    use_drop(move || {
+        #[cfg(target_arch = "wasm32")]
+        VISIBLE_OPTION_OBSERVERS.with(|registry| {
+            if let Some((observer, _)) = registry.borrow_mut().remove(&id) {
+                observer.disconnect();
+            }
+        });
+    });
+
+    (visible, id)
+}
+
+/// Registers one rendered Option row for visibility tracking.
+///
+/// Call from that row's `onmounted`. Dioxus fires `onmounted` once for a DOM
+/// node it does not remount, so this is safe to call unconditionally.
+fn observe_visible_option_row(hook_id: u32, key: &str) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        // SAFETY(selector): `key` is a server-issued hex content digest
+        // (`option_key`), so it cannot contain characters that require CSS
+        // attribute-selector escaping.
+        let selector = format!("[data-cfgx-auto-key='{key}']");
+        let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+            return;
+        };
+        let Some(element) = document.query_selector(&selector).ok().flatten() else {
+            return;
+        };
+        VISIBLE_OPTION_OBSERVERS.with(|registry| {
+            if let Some((observer, _)) = registry.borrow().get(&hook_id) {
+                observer.observe(&element);
+            }
+        });
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = (hook_id, key);
+}
+
+/// Removes every visible-row entry at or below a collapsed prefix.
+///
+/// Loaded branch content is cached and not cleared on collapse, so the
+/// visible set must be pruned explicitly here rather than relying on the
+/// browser to report collapsed (but still-cached) rows as non-intersecting.
+fn prune_collapsed_branch(visible: &mut HashSet<Vec<String>>, collapsed_prefix: &[String]) {
+    visible.retain(|path| {
+        path.len() <= collapsed_prefix.len() || &path[..collapsed_prefix.len()] != collapsed_prefix
+    });
+}
+
+/// Chooses the next automatic preview candidate, if any.
+///
+/// Only visible paths with no existing cache entry qualify: a value that is
+/// already loading, loaded, failed, or deferred is never re-enqueued
+/// automatically. The bounded window is applied before selection, but
+/// selection always picks the lexicographically smallest (topmost-rendered)
+/// candidate, so the window size does not change which candidate is chosen
+/// among a smaller visible set — it only bounds how much of a very tall
+/// viewport is considered per pass.
+fn next_automatic_candidate(
+    visible: &HashSet<Vec<String>>,
+    cached: &HashMap<Vec<String>, ObservationState>,
+    window: usize,
+) -> Option<Vec<String>> {
+    let mut candidates: Vec<&Vec<String>> = visible
+        .iter()
+        .filter(|path| !cached.contains_key(*path))
+        .collect();
+    candidates.sort();
+    candidates.truncate(window.max(1));
+    candidates.into_iter().next().cloned()
+}
+
 fn start_top_level_observation(
     system_id: Uuid,
     revision: String,
@@ -471,6 +677,7 @@ fn start_top_level_observation(
                 kind,
                 path_components: Vec::new(),
                 child_offset: 0,
+                automatic: false,
             },
             |request| {
                 if is_current() {
@@ -491,6 +698,176 @@ fn start_top_level_observation(
     });
 }
 
+/// Bundles the signals and identity needed to load or preview one option's
+/// detail, shared between explicit selection and the automatic scheduler.
+///
+/// Cloning is cheap: every field is a `Signal` (`Copy`) except `revision`
+/// (a small owned `Option<String>` snapshot of the currently selected exact
+/// target) and `component_active` (a shared drop flag).
+#[derive(Clone)]
+struct OptionLoadContext {
+    system_id: Uuid,
+    revision: Option<String>,
+    scoped_enabled: bool,
+    component_active: Rc<Cell<bool>>,
+    scope_sequence: Signal<u64>,
+    detail_sequence: Signal<u64>,
+    detail_sequences: Signal<HashMap<Vec<String>, u64>>,
+    detail_cache: Signal<HashMap<Vec<String>, ObservationState>>,
+    announcement: Signal<String>,
+    visible_paths: Signal<HashSet<Vec<String>>>,
+    automatic_active_path: Signal<Option<Vec<String>>>,
+}
+
+/// Ensures one option's detail is loading or loaded, regardless of caller.
+///
+/// Both explicit selection and the automatic scheduler share this path.
+///
+/// * An explicit click sharing an in-flight or already-loaded entry never
+///   starts a duplicate fetch; only a terminal [`ObservationState::Error`] or
+///   [`ObservationState::Deferred`] entry is retried explicitly.
+/// * An automatic preview never starts on top of any existing entry
+///   (loaded, in-flight, failed, or deferred): no automatic retry, and no
+///   duplicate of a request another caller already claimed.
+///
+/// When the fetch was automatic, completion (success, failure, staleness, or
+/// a tombstoned response) always clears the single-flight marker and
+/// advances the automatic queue, but only while the caller's exact scope is
+/// still current; a stale automatic completion after a revision or system
+/// change must not continue scheduling work for the old target.
+///
+/// Returns `true` when a new fetch started.
+fn ensure_option_detail(ctx: OptionLoadContext, intent: RequestIntent, path: Vec<String>) -> bool {
+    let existing = ctx.detail_cache.peek().get(&path).cloned();
+    let should_start = match (&existing, intent) {
+        (Some(_), RequestIntent::Automatic) => false,
+        (None, _) => true,
+        (
+            Some(ObservationState::Error(_) | ObservationState::Deferred),
+            RequestIntent::Explicit,
+        ) => true,
+        (Some(_), RequestIntent::Explicit) => false,
+    };
+    if !should_start {
+        return false;
+    }
+    let Some(revision) = ctx.revision.clone().filter(|_| ctx.scoped_enabled) else {
+        return false;
+    };
+    let OptionLoadContext {
+        system_id,
+        component_active,
+        scope_sequence,
+        mut detail_sequence,
+        mut detail_sequences,
+        mut detail_cache,
+        mut announcement,
+        mut automatic_active_path,
+        ..
+    } = ctx.clone();
+    let sequence = detail_sequence.peek().saturating_add(1);
+    detail_sequence.set(sequence);
+    let scope = *scope_sequence.peek();
+    detail_sequences.write().insert(path.clone(), sequence);
+    if intent == RequestIntent::Explicit {
+        announcement.set(format!("Inspecting option {}", dotted_path(&path)));
+    }
+    detail_cache.write().insert(
+        path.clone(),
+        ObservationState::Lifecycle(ConfigObservationLifecycle::Queued),
+    );
+    let continuation_ctx = ctx;
+    spawn(async move {
+        let is_current = || {
+            component_active.get()
+                && observation_task_is_current(
+                    scope,
+                    *scope_sequence.peek(),
+                    sequence,
+                    detail_sequences
+                        .peek()
+                        .get(&path)
+                        .copied()
+                        .unwrap_or_default(),
+                )
+        };
+        let result = load_system_config_observation(
+            &system_id,
+            &revision,
+            CreateConfigObservationRequest {
+                kind: ConfigObservationKind::Option,
+                path_components: path.clone(),
+                child_offset: 0,
+                automatic: intent.is_automatic(),
+            },
+            |request| {
+                if is_current() {
+                    detail_cache
+                        .write()
+                        .insert(path.clone(), ObservationState::Lifecycle(request.lifecycle));
+                }
+            },
+            is_current,
+        )
+        .await;
+        if is_current() {
+            let next_state = match result {
+                Ok(Some(observation)) => Some(ObservationState::Loaded(observation)),
+                Ok(None) => None,
+                Err(error) => Some(match intent {
+                    RequestIntent::Explicit => ObservationState::Error(observation_error(&error)),
+                    RequestIntent::Automatic => ObservationState::Deferred,
+                }),
+            };
+            if let Some(next_state) = next_state {
+                if intent == RequestIntent::Explicit {
+                    announcement.set(match &next_state {
+                        ObservationState::Error(_) => {
+                            format!("Option {} inspection failed", dotted_path(&path))
+                        }
+                        _ => format!("Loaded option {}", dotted_path(&path)),
+                    });
+                }
+                detail_cache.write().insert(path.clone(), next_state);
+            }
+        }
+        // CONCURRENCY: Only continue the automatic pipeline while this
+        // execution's exact scope (system/revision target) is still current.
+        // A stale completion after a revision or system change must not
+        // schedule further automatic work against the old target.
+        if intent.is_automatic() && component_active.get() && *scope_sequence.peek() == scope {
+            if automatic_active_path.peek().as_deref() == Some(path.as_slice()) {
+                automatic_active_path.set(None);
+            }
+            advance_automatic_queue(continuation_ctx);
+        }
+    });
+    true
+}
+
+/// Starts the next bounded automatic option preview, if any is eligible.
+///
+/// A no-op when automatic previews are disabled for the current target, one
+/// is already in flight, or no visible row is both uncached and eligible.
+fn advance_automatic_queue(ctx: OptionLoadContext) {
+    if !ctx.scoped_enabled || ctx.revision.is_none() {
+        return;
+    }
+    if ctx.automatic_active_path.peek().is_some() {
+        return;
+    }
+    let Some(path) = next_automatic_candidate(
+        &ctx.visible_paths.peek(),
+        &ctx.detail_cache.peek(),
+        MAX_AUTOMATIC_PENDING_CANDIDATES,
+    ) else {
+        return;
+    };
+    let mut automatic_active_path = ctx.automatic_active_path;
+    automatic_active_path.set(Some(path.clone()));
+    ensure_option_detail(ctx, RequestIntent::Automatic, path);
+}
+
 #[component]
 fn ExplorerStatus(state: ObservationState, surface: &'static str) -> Element {
     match state {
@@ -502,6 +879,9 @@ fn ExplorerStatus(state: ObservationState, surface: &'static str) -> Element {
         },
         ObservationState::Error(error) => rsx! {
             div { class: "cfg-explorer-status cfg-explorer-error", role: "alert", "{surface}: {error}" }
+        },
+        ObservationState::Deferred => rsx! {
+            div { class: "cfg-explorer-status", role: "status", "{surface} was not loaded automatically." }
         },
         ObservationState::Loaded(_) => rsx! {},
     }
@@ -518,6 +898,7 @@ fn ExplorerChildren(
     more_loading: Signal<HashSet<Vec<String>>>,
     more_errors: Signal<HashMap<Vec<String>, String>>,
     selected_path: Vec<String>,
+    visible_hook_id: u32,
     on_prefix: EventHandler<(Vec<String>, u32)>,
     on_option: EventHandler<Vec<String>>,
 ) -> Element {
@@ -573,6 +954,7 @@ fn ExplorerChildren(
                                                         more_loading,
                                                         more_errors,
                                                         selected_path: selected_path.clone(),
+                                                        visible_hook_id,
                                                         on_prefix,
                                                         on_option,
                                                     }
@@ -608,7 +990,7 @@ fn ExplorerChildren(
                                                     }
                                                 }
                                             },
-                                            ObservationState::Idle | ObservationState::Lifecycle(_) => rsx! {},
+                                            ObservationState::Idle | ObservationState::Lifecycle(_) | ObservationState::Deferred => rsx! {},
                                         }
                                     }
                                 },
@@ -618,6 +1000,12 @@ fn ExplorerChildren(
                                         style: "{row_style}",
                                         "aria-pressed": selected_path == path,
                                         "aria-label": "Inspect option {display}",
+                                        "data-cfgx-auto-key": "{child.key}",
+                                        "data-cfgx-path": "{visible_row_path_attr(&path)}",
+                                        onmounted: {
+                                            let key = child.key.clone();
+                                            move |_| observe_visible_option_row(visible_hook_id, &key)
+                                        },
                                         onclick: {
                                             let path = path.clone();
                                             move |_| on_option.call(path.clone())
@@ -627,6 +1015,7 @@ fn ExplorerChildren(
                                             match detail_state {
                                                 Some(ObservationState::Lifecycle(lifecycle)) => rsx! { span { class: "cfgx-insp", title: "{lifecycle_copy(lifecycle)} option value", i {} } },
                                                 Some(ObservationState::Error(_)) => rsx! { span { class: "cfg-val-err", title: "Option value is unavailable", "unavailable" } },
+                                                Some(ObservationState::Deferred) => rsx! { span { class: "cfgx-deferred", title: "Not loaded automatically — select to inspect.", "not loaded" } },
                                                 _ => if let Some(value) = value { rsx! { span { class: "{value.class}", title: "{value.text}", "{value.text}" } } } else { rsx! { span { class: "cfgx-uninspected", title: "Value not inspected", "aria-label": "Value not inspected" } } },
                                             }
                                         }
@@ -710,6 +1099,13 @@ pub(crate) fn ConfigExplorer(
     let mut root_more_error = use_signal(|| None::<String>);
     let mut detail_cache = use_signal(HashMap::<Vec<String>, ObservationState>::new);
     let mut detail_sequences = use_signal(HashMap::<Vec<String>, u64>::new);
+    let (mut visible_option_paths, visible_option_hook_id) = use_visible_option_paths();
+    // CONCURRENCY: This marker is claimed before an automatic request starts
+    // and released only by that request's completion path. It enforces one
+    // automatic evaluation at a time even when several observer callbacks or
+    // debounced effects arrive in the same render cycle.
+    let mut automatic_active_path = use_signal(|| None::<Vec<String>>);
+    let mut automatic_schedule_generation = use_signal(|| 0_u64);
     let mut detail_path = use_signal(Vec::<String>::new);
     let mut certified_detail = use_signal(|| None::<EvaluatedOptionRow>);
     let mut provenance = use_signal(|| ObservationState::Idle);
@@ -751,6 +1147,10 @@ pub(crate) fn ConfigExplorer(
                 root_more_error.set(None);
                 detail_cache.set(HashMap::new());
                 detail_sequences.set(HashMap::new());
+                visible_option_paths.set(HashSet::new());
+                automatic_active_path.set(None);
+                let generation = next_operation_sequence(*automatic_schedule_generation.peek());
+                automatic_schedule_generation.set(generation);
                 detail_path.set(Vec::new());
                 certified_detail.set(None);
                 provenance.set(ObservationState::Idle);
@@ -853,6 +1253,7 @@ pub(crate) fn ConfigExplorer(
             let loaded = matches!(branch_state, Some(ObservationState::Loaded(_)));
             if child_offset == 0 && currently_expanded {
                 expanded.write().remove(&path);
+                visible_option_paths.with_mut(|visible| prune_collapsed_branch(visible, &path));
                 return;
             }
             expanded.write().insert(path.clone());
@@ -901,6 +1302,7 @@ pub(crate) fn ConfigExplorer(
                         kind: ConfigObservationKind::Prefix,
                         path_components: path.clone(),
                         child_offset,
+                        automatic: false,
                     },
                     |request| {
                         if is_current() && child_offset == 0 {
@@ -959,9 +1361,21 @@ pub(crate) fn ConfigExplorer(
         }
     });
 
+    let option_load_context = OptionLoadContext {
+        system_id,
+        revision: revision.clone(),
+        scoped_enabled,
+        component_active: component_active.clone(),
+        scope_sequence,
+        detail_sequence,
+        detail_sequences,
+        detail_cache,
+        announcement,
+        visible_paths: visible_option_paths,
+        automatic_active_path,
+    };
     let select_option = EventHandler::new({
-        let revision = revision.clone();
-        let component_active = component_active.clone();
+        let option_load_context = option_load_context.clone();
         move |path: Vec<String>| {
             certified_detail.set(None);
             detail_path.set(path.clone());
@@ -974,74 +1388,29 @@ pub(crate) fn ConfigExplorer(
                     .map(ObservationState::Loaded)
                     .unwrap_or(ObservationState::Idle),
             );
-            if let Some(cached) = detail_cache.peek().get(&path).cloned() {
-                if !matches!(cached, ObservationState::Error(_)) {
-                    return;
-                }
-            }
-            let Some(revision) = revision.clone().filter(|_| scoped_enabled) else {
-                return;
-            };
-            let sequence = detail_sequence.peek().saturating_add(1);
-            detail_sequence.set(sequence);
-            let scope = *scope_sequence.peek();
-            detail_sequences.write().insert(path.clone(), sequence);
-            announcement.set(format!("Inspecting option {}", dotted_path(&path)));
-            detail_cache.write().insert(
-                path.clone(),
-                ObservationState::Lifecycle(ConfigObservationLifecycle::Queued),
-            );
-            let component_active = component_active.clone();
-            spawn(async move {
-                let is_current = || {
-                    component_active.get()
-                        && observation_task_is_current(
-                            scope,
-                            *scope_sequence.peek(),
-                            sequence,
-                            detail_sequences
-                                .peek()
-                                .get(&path)
-                                .copied()
-                                .unwrap_or_default(),
-                        )
-                };
-                let result = load_system_config_observation(
-                    &system_id,
-                    &revision,
-                    CreateConfigObservationRequest {
-                        kind: ConfigObservationKind::Option,
-                        path_components: path.clone(),
-                        child_offset: 0,
-                    },
-                    |request| {
-                        if is_current() {
-                            detail_cache.write().insert(
-                                path.clone(),
-                                ObservationState::Lifecycle(request.lifecycle),
-                            );
-                        }
-                    },
-                    is_current,
-                )
-                .await;
-                if is_current() {
-                    let next_state = match result {
-                        Ok(Some(observation)) => ObservationState::Loaded(observation),
-                        Ok(None) => return,
-                        Err(error) => ObservationState::Error(observation_error(&error)),
-                    };
-                    announcement.set(match &next_state {
-                        ObservationState::Error(_) => {
-                            format!("Option {} inspection failed", dotted_path(&path))
-                        }
-                        _ => format!("Loaded option {}", dotted_path(&path)),
-                    });
-                    detail_cache.write().insert(path, next_state);
-                }
-            });
+            ensure_option_detail(option_load_context.clone(), RequestIntent::Explicit, path);
         }
     });
+
+    {
+        let option_load_context = option_load_context.clone();
+        use_effect(move || {
+            // Subscribe to both inputs. The delayed continuation below checks
+            // the generation, so a scroll/expand/render burst collapses to a
+            // single scheduling pass after the debounce window.
+            let _ = visible_option_paths.read();
+            let _ = detail_cache.read();
+            let generation = next_operation_sequence(*automatic_schedule_generation.peek());
+            automatic_schedule_generation.set(generation);
+            let option_load_context = option_load_context.clone();
+            spawn(async move {
+                gloo_timers::future::TimeoutFuture::new(AUTOMATIC_PREVIEW_DEBOUNCE_MS).await;
+                if *automatic_schedule_generation.peek() == generation {
+                    advance_automatic_queue(option_load_context);
+                }
+            });
+        });
+    }
 
     let load_provenance = {
         let revision = revision.clone();
@@ -1079,6 +1448,7 @@ pub(crate) fn ConfigExplorer(
                         kind: ConfigObservationKind::Provenance,
                         path_components: path.clone(),
                         child_offset: 0,
+                        automatic: false,
                     },
                     |request| {
                         if is_current() {
@@ -1146,6 +1516,7 @@ pub(crate) fn ConfigExplorer(
                         kind: ConfigObservationKind::Root,
                         path_components: Vec::new(),
                         child_offset,
+                        automatic: false,
                     },
                     |_| {},
                     is_current,
@@ -1292,7 +1663,7 @@ pub(crate) fn ConfigExplorer(
                         } else { match root_state.clone() {
                             ObservationState::Loaded(observation) => match observation.payload {
                                 ConfigObservationPayload::Root { children, children_truncated, total_children, .. } => rsx! {
-                                        ExplorerChildren { entries: children.clone(), depth: 0, expanded, branches, details: detail_cache, provenance: provenance_cache, more_loading: branch_more_loading, more_errors: branch_more_errors, selected_path: selected_scoped_path.clone(), on_prefix: load_prefix, on_option: select_option }
+                                        ExplorerChildren { entries: children.clone(), depth: 0, expanded, branches, details: detail_cache, provenance: provenance_cache, more_loading: branch_more_loading, more_errors: branch_more_errors, selected_path: selected_scoped_path.clone(), visible_hook_id: visible_option_hook_id, on_prefix: load_prefix, on_option: select_option }
                                     if children_truncated {
                                         div { class: "cfgx-more", span { role: "status", "Showing {children.len()} of {total_children}" } button { class: "cfgx-link focus-ring", disabled: *root_more_loading.read(), onclick: load_more_root, if *root_more_loading.read() { "loading…" } else { "load more" } } }
                                     }
@@ -1460,9 +1831,9 @@ pub(crate) fn ConfigExplorer(
                                              },
                                              _ => rsx! { div { class: "cfg-explorer-local-error", role: "alert", "Unexpected provenance payload." } },
                                                 },
-                                                ObservationState::Error(error) => rsx! { div { class: "cfg-explorer-local-error", role: "alert", "Provenance: {error}" } },
-                                                ObservationState::Lifecycle(lifecycle) => rsx! { div { class: "cfgx-inline-status", role: "status", "aria-live": "polite", i {} "Provenance: {lifecycle_copy(lifecycle)}" } },
-                                                ObservationState::Idle => rsx! {},
+                                                 ObservationState::Error(error) => rsx! { div { class: "cfg-explorer-local-error", role: "alert", "Provenance: {error}" } },
+                                                 ObservationState::Lifecycle(lifecycle) => rsx! { div { class: "cfgx-inline-status", role: "status", "aria-live": "polite", i {} "Provenance: {lifecycle_copy(lifecycle)}" } },
+                                                 ObservationState::Idle | ObservationState::Deferred => rsx! {},
                                             }
                                         }
                                         div { class: "cfgx-insp-foot mono", "observation cached · schema v1 · provenance may be partial" }
@@ -1471,8 +1842,9 @@ pub(crate) fn ConfigExplorer(
                              },
                              _ => rsx! { div { class: "cfg-explorer-local-error", role: "alert", "Unexpected option observation payload." } },
                          },
-                         Some(ObservationState::Error(error)) => rsx! { div { class: "cfgx-insp-state", role: "alert", p { "Option detail: {error}" } button { class: "cfgx-btn focus-ring", onclick: { let path = selected_scoped_path.clone(); move |_| select_option.call(path.clone()) }, "Retry option" } } },
-                         Some(ObservationState::Lifecycle(lifecycle)) => rsx! { div { class: "cfgx-insp-state", role: "status", "aria-live": "polite", span { class: "cfgx-insp", i {} "{lifecycle_copy(lifecycle)} option…" } } },
+                          Some(ObservationState::Error(error)) => rsx! { div { class: "cfgx-insp-state", role: "alert", p { "Option detail: {error}" } button { class: "cfgx-btn focus-ring", onclick: { let path = selected_scoped_path.clone(); move |_| select_option.call(path.clone()) }, "Retry option" } } },
+                          Some(ObservationState::Deferred) => rsx! { div { class: "cfgx-insp-state", role: "status", p { "This value was not loaded automatically." } button { class: "cfgx-btn focus-ring", onclick: { let path = selected_scoped_path.clone(); move |_| select_option.call(path.clone()) }, "Inspect option" } } },
+                          Some(ObservationState::Lifecycle(lifecycle)) => rsx! { div { class: "cfgx-insp-state", role: "status", "aria-live": "polite", span { class: "cfgx-insp", i {} "{lifecycle_copy(lifecycle)} option…" } } },
                          Some(ObservationState::Idle) | None => rsx! { div { class: "cfgx-insp-state", role: "status", "Option has not been inspected." } },
                     }
                     }

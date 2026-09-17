@@ -47,6 +47,13 @@ const NIX_PROGRAM: &str = "nix";
 // making short operations wait behind full inventory or primary evaluation.
 const INTERACTIVE_CONFIG_ADVISORY_LOCK: i64 = 0x4346_4346_4753;
 const OBSERVATION_DEADLINE: Duration = Duration::from_secs(5 * 60);
+// PERFORMANCE: A bounded automatic value preview must not compete with
+// explicit inspection for the single interactive execution slot for long.
+// Ten seconds is a conservative starting budget, not a measured optimum;
+// see docs/config-explorer-architecture.md for the supporting probe data.
+// A preview that exceeds this budget fails without consuming a retry: the
+// option remains explicitly inspectable at the full deadline afterward.
+const AUTOMATIC_OBSERVATION_DEADLINE: Duration = Duration::from_secs(10);
 const OBSERVATION_STDOUT_LIMIT: usize = 64 * 1024 * 1024;
 const OBSERVATION_STDERR_LIMIT: usize = 256 * 1024;
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
@@ -281,10 +288,18 @@ async fn run_observation_command(
     _selection: Option<ObserverSelectionFile>,
 ) -> Result<Value> {
     let evaluation_started_at = Instant::now();
+    // PERFORMANCE: Only a bounded automatic value preview uses the short
+    // deadline. Explicit inspection, provenance, tree pages, and the
+    // complete configured index keep the existing generous deadline.
+    let deadline = if execution.target.is_automatic {
+        AUTOMATIC_OBSERVATION_DEADLINE
+    } else {
+        OBSERVATION_DEADLINE
+    };
     let mut run = Box::pin(run_nix_command_bounded(
         &mut command,
         "scoped Config observer",
-        OBSERVATION_DEADLINE,
+        deadline,
         OBSERVATION_STDOUT_LIMIT,
         OBSERVATION_STDERR_LIMIT,
     ));
@@ -592,6 +607,7 @@ mod tests {
                 kind,
                 path_components,
                 child_offset: 0,
+                is_automatic: false,
             },
             execution_id: Uuid::new_v4(),
             attempts: 1,
@@ -834,6 +850,7 @@ mod tests {
             ConfigObservationKind::Root,
             &[],
             0,
+            false,
         )
         .await
         .unwrap();

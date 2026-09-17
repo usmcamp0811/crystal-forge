@@ -497,6 +497,12 @@ pub struct CreateConfigObservationRequest {
     /// Zero-based immediate-child offset. Only root and prefix use this field.
     #[serde(default)]
     pub child_offset: u32,
+    /// True for a bounded automatic preview started without an explicit
+    /// click. Only [`ConfigObservationKind::Option`] may set this; the
+    /// handler rejects any other kind. Automatic previews use a short
+    /// server-enforced execution budget and are never retried automatically.
+    #[serde(default)]
+    pub automatic: bool,
 }
 
 /// Describes the durable scoped request lifecycle.

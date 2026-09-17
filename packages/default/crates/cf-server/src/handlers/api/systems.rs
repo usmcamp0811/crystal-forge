@@ -1223,6 +1223,11 @@ pub async fn create_system_config_observation(
     {
         return bad_request("Config observation path or child offset is invalid");
     }
+    if request.automatic
+        && request.kind != crate::models::config_observations::ConfigObservationKind::Option
+    {
+        return bad_request("Only an exact option request may be marked automatic");
+    }
 
     match crate::queries::config_observations::create_or_reuse_config_observation_request(
         &state.pool,
@@ -1231,6 +1236,7 @@ pub async fn create_system_config_observation(
         request.kind,
         &request.path_components,
         request.child_offset,
+        request.automatic,
     )
     .await
     {
@@ -5555,6 +5561,7 @@ mod tests {
                 kind: crate::models::config_observations::ConfigObservationKind::Root,
                 path_components: vec!["invalid-for-root".to_string()],
                 child_offset: 0,
+                automatic: false,
             }),
         )
         .await

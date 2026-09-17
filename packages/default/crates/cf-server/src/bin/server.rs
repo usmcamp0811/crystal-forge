@@ -392,6 +392,10 @@ async fn main() -> anyhow::Result<()> {
             post(user_notifications::read_all_notifications),
         )
         .route(
+            "/api/v1/user/notifications/dismiss-all",
+            post(user_notifications::dismiss_all_notifications_handler),
+        )
+        .route(
             "/api/v1/user/notifications/:notification_id/read",
             post(user_notifications::read_notification),
         )
