@@ -319,6 +319,10 @@ pub struct ScanningStatsResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanningQueueItemResponse {
+    /// Identifies the exact derivation represented by the row.
+    pub derivation_id: i32,
+    /// Is `true` when the derivation has a built store path that can be scanned.
+    pub rescan_eligible: bool,
     /// `None` when the system is deployed but has never been scanned.
     pub scan_id: Option<Uuid>,
     pub hostname: String,
@@ -337,9 +341,8 @@ pub struct ScanningQueueItemResponse {
     /// True when this derivation's commit is the latest known commit for its flake.
     #[serde(default)]
     pub is_latest_per_flake: bool,
-    /// What triggered the scan. Not yet tracked in the schema; always `None`
-    /// until a trigger source column is added (tracked as follow-up).
-    pub trigger: Option<String>,
+    /// Identifies the persisted source that created the latest scan lifecycle.
+    pub source_trigger: Option<String>,
 }
 
 /// Paginated deployed configurations response (AC #37).
@@ -371,6 +374,8 @@ pub struct ScanningSystemsItemResponse {
     pub unscanned: i64,
     pub current_crit: i64,
     pub current_high: i64,
+    /// Identifies the derivation in the system's latest reported store path.
+    pub current_derivation_id: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -30,6 +30,10 @@ pub struct ScanStatsRow {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanQueueRow {
+    /// Identifies the exact derivation represented by this row.
+    pub derivation_id: i32,
+    /// Is `true` when the derivation has a built store path that can be scanned.
+    pub rescan_eligible: bool,
     /// `None` when the system has been deployed but never scanned.
     pub scan_id: Option<Uuid>,
     pub hostname: String,
@@ -49,6 +53,8 @@ pub struct ScanQueueRow {
     pub is_current: bool,
     /// True when this derivation's commit is the latest known commit for its flake.
     pub is_latest_per_flake: bool,
+    /// Identifies the persisted source that created the latest scan lifecycle.
+    pub source_trigger: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,6 +69,8 @@ pub struct ScanSystemRow {
     pub unscanned: i64,
     pub current_crit: i64,
     pub current_high: i64,
+    /// Identifies the derivation in the system's latest reported store path.
+    pub current_derivation_id: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -237,6 +245,13 @@ async fn get_waiting_scan_count(pool: &PgPool) -> Result<i64> {
     Ok(waiting.len() as i64)
 }
 
+/// Returns the latest scan lifecycle for each NixOS derivation.
+///
+/// Standalone derivations remain visible with no flake or commit display data.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot load the queue.
 pub async fn get_scan_queue(pool: &PgPool, limit: i64) -> Result<Vec<ScanQueueRow>> {
     let rows = sqlx::query(
         r#"
@@ -248,6 +263,8 @@ pub async fn get_scan_queue(pool: &PgPool, limit: i64) -> Result<Vec<ScanQueueRo
         latest_per_derivation AS (
             SELECT DISTINCT ON (d.id)
                 cs.id AS scan_id,
+                d.id AS derivation_id,
+                (d.store_path IS NOT NULL AND BTRIM(d.store_path) <> '') AS rescan_eligible,
                 d.derivation_name AS hostname,
                 f.name AS flake_name,
                 c.git_commit_hash AS commit_hash,
@@ -260,15 +277,18 @@ pub async fn get_scan_queue(pool: &PgPool, limit: i64) -> Result<Vec<ScanQueueRo
                 COALESCE(cs.high_count, 0)::int AS high_count,
                 COALESCE(cs.medium_count, 0)::int AS medium_count,
                 COALESCE(cs.completed_at, cs.scheduled_at, cs.created_at) AS lifecycle_at
+                , cs.source_trigger
             FROM derivations d
-            LEFT JOIN cve_scans cs ON cs.derivation_id = d.id
             LEFT JOIN commits c ON c.id = d.commit_id
+            LEFT JOIN cve_scans cs ON cs.derivation_id = d.id
             LEFT JOIN flakes f ON f.id = c.flake_id
             WHERE d.derivation_type = 'nixos'
             ORDER BY d.id, COALESCE(cs.completed_at, cs.scheduled_at, cs.created_at) DESC NULLS LAST
         )
         SELECT
             scan_id,
+            derivation_id,
+            rescan_eligible,
             hostname,
             flake_name,
             commit_hash,
@@ -286,6 +306,7 @@ pub async fn get_scan_queue(pool: &PgPool, limit: i64) -> Result<Vec<ScanQueueRo
             END AS freshness,
             TRUE AS is_current,
             (lc.commit_id IS NOT NULL AND lpd.commit_db_id = lc.commit_id) AS is_latest_per_flake
+            , source_trigger
         FROM latest_per_derivation lpd
         LEFT JOIN latest_commit_per_flake lc ON lc.flake_id = lpd.flake_id
         ORDER BY
@@ -301,6 +322,8 @@ pub async fn get_scan_queue(pool: &PgPool, limit: i64) -> Result<Vec<ScanQueueRo
     Ok(rows
         .into_iter()
         .map(|row| ScanQueueRow {
+            derivation_id: row.get("derivation_id"),
+            rescan_eligible: row.get("rescan_eligible"),
             scan_id: row.get("scan_id"),
             hostname: row.get("hostname"),
             flake_name: row.get("flake_name"),
@@ -314,6 +337,7 @@ pub async fn get_scan_queue(pool: &PgPool, limit: i64) -> Result<Vec<ScanQueueRo
             freshness: row.get("freshness"),
             is_current: row.get("is_current"),
             is_latest_per_flake: row.get("is_latest_per_flake"),
+            source_trigger: row.get("source_trigger"),
         })
         .collect())
 }
@@ -329,15 +353,6 @@ pub struct ScanDeployedResult {
     pub next_cursor: Option<String>,
 }
 
-/// Returns all derivations currently deployed on at least one active system,
-/// with complete flake history used to derive `is_latest_per_flake`.
-///
-/// Uses the same normalized configuration-name expression as the evaluation
-/// path (`COALESCE(NULLIF(BTRIM(system_configuration_name), ''), hostname)`)
-/// so systems whose NixOS config name differs from their hostname are included.
-///
-/// Nullable scan columns are COALESCE'd to safe defaults so systems that have
-/// never been scanned are included without NULL-decode panics.
 /// Marker for a malformed deployed-scan cursor.
 #[derive(Debug)]
 pub struct InvalidCursorError;
@@ -373,10 +388,19 @@ pub fn encode_deployed_cursor(hostname: &str, derivation_id: i32) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw.as_bytes())
 }
 
-/// Cursor-based pagination for the deployed scan list.
+/// Returns cursor-paginated derivations deployed on active systems.
 ///
 /// The cursor is a base64url-encoded `{hostname}\x00{derivation_id}` payload so
 /// that the cursor is opaque, unambiguous, and handles config names with `:`.
+/// The latest reported store path determines each system's current derivation.
+/// The normalized configuration name permits a NixOS configuration name to
+/// differ from its system hostname. Systems without a scan remain present with
+/// safe default counts.
+///
+/// # Errors
+///
+/// Returns an error when the cursor is malformed or PostgreSQL cannot load the
+/// deployed configurations.
 pub async fn get_scan_deployed(
     pool: &PgPool,
     limit: i64,
@@ -408,6 +432,7 @@ pub async fn get_scan_deployed(
             SELECT DISTINCT ON (d.id)
                 cs.id                      AS scan_id,
                 d.id                       AS derivation_id,
+                (BTRIM(d.store_path) <> '') AS rescan_eligible,
                 COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname) AS hostname,
                 f.name                     AS flake_name,
                 c.git_commit_hash          AS commit_hash,
@@ -420,15 +445,17 @@ pub async fn get_scan_deployed(
                 COALESCE(cs.high_count, 0)::int        AS high_count,
                 COALESCE(cs.medium_count, 0)::int      AS medium_count,
                 COALESCE(cs.completed_at, cs.scheduled_at, cs.created_at) AS lifecycle_at
+                , cs.source_trigger
             FROM systems s
             LEFT JOIN latest_system_state lss ON lss.system_id = s.id
             JOIN derivations d
               ON d.derivation_name =
                      COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname)
               AND d.store_path IS NOT NULL
+              AND BTRIM(d.store_path) <> ''
               AND d.store_path = lss.current_store_path
             LEFT JOIN cve_scans cs ON cs.derivation_id = d.id
-            LEFT JOIN commits c ON c.id = d.commit_id
+            JOIN commits c ON c.id = d.commit_id AND c.flake_id = s.flake_id
             LEFT JOIN flakes f ON f.id = c.flake_id
             WHERE s.is_active = TRUE
               AND d.derivation_type = 'nixos'
@@ -438,6 +465,7 @@ pub async fn get_scan_deployed(
         SELECT
             scan_id,
             derivation_id,
+            rescan_eligible,
             hostname,
             flake_name,
             commit_hash,
@@ -456,6 +484,7 @@ pub async fn get_scan_deployed(
             TRUE AS is_current,
             (lc.commit_id IS NOT NULL
              AND dd.commit_db_id = lc.commit_id) AS is_latest_per_flake
+            , source_trigger
         FROM deployed_derivations dd
         LEFT JOIN latest_commit_per_flake lc ON lc.flake_id = dd.flake_id
         -- Composite keyset cursor: (hostname, derivation_id).
@@ -477,6 +506,8 @@ pub async fn get_scan_deployed(
         .map(|row| {
             (
                 ScanQueueRow {
+                    derivation_id: row.get("derivation_id"),
+                    rescan_eligible: row.get("rescan_eligible"),
                     scan_id: row.get("scan_id"),
                     hostname: row.get("hostname"),
                     flake_name: row.get("flake_name"),
@@ -490,6 +521,7 @@ pub async fn get_scan_deployed(
                     freshness: row.get("freshness"),
                     is_current: row.get("is_current"),
                     is_latest_per_flake: row.get("is_latest_per_flake"),
+                    source_trigger: row.get("source_trigger"),
                 },
                 row.get::<i32, _>("derivation_id"),
             )
@@ -528,7 +560,9 @@ pub async fn get_scan_deployed(
           ON d.derivation_name =
                  COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname)
           AND d.store_path IS NOT NULL
+          AND BTRIM(d.store_path) <> ''
           AND d.store_path = lss.current_store_path
+        JOIN commits c ON c.id = d.commit_id AND c.flake_id = s.flake_id
         WHERE s.is_active = TRUE
           AND d.derivation_type = 'nixos'
         "#,
@@ -544,6 +578,14 @@ pub async fn get_scan_deployed(
     })
 }
 
+/// Returns scan history for one active system's exact flake and configuration.
+///
+/// The latest reported `system_states.store_path` determines `is_current`.
+/// A newer derivation from another flake cannot enter this history.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot load the system or its scan history.
 pub async fn get_scan_queue_for_system(
     pool: &PgPool,
     system_id: Uuid,
@@ -556,10 +598,29 @@ pub async fn get_scan_queue_for_system(
             FROM commits
             ORDER BY flake_id, commit_timestamp DESC NULLS LAST, id DESC
         ),
+        selected_system AS (
+            SELECT
+                s.id,
+                s.flake_id,
+                s.hostname,
+                COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname) AS config_name,
+                (
+                    SELECT ss.store_path
+                    FROM system_states ss
+                    WHERE ss.hostname = s.hostname
+                    ORDER BY ss.timestamp DESC NULLS LAST, ss.id DESC
+                    LIMIT 1
+                ) AS current_store_path
+            FROM systems s
+            WHERE s.id = $1
+              AND s.is_active = TRUE
+        ),
         latest_per_derivation AS (
             SELECT DISTINCT ON (d.id)
                 cs.id AS scan_id,
-                d.derivation_name AS hostname,
+                d.id AS derivation_id,
+                (d.store_path IS NOT NULL AND BTRIM(d.store_path) <> '') AS rescan_eligible,
+                ss.hostname,
                 f.name AS flake_name,
                 c.git_commit_hash AS commit_hash,
                 c.flake_id,
@@ -570,21 +631,21 @@ pub async fn get_scan_queue_for_system(
                 COALESCE(cs.critical_count, 0)::int AS critical_count,
                 COALESCE(cs.high_count, 0)::int AS high_count,
                 COALESCE(cs.medium_count, 0)::int AS medium_count,
-                COALESCE(cs.completed_at, cs.scheduled_at, cs.created_at) AS lifecycle_at
+                COALESCE(cs.completed_at, cs.scheduled_at, cs.created_at) AS lifecycle_at,
+                COALESCE(d.store_path = ss.current_store_path, FALSE) AS is_current,
+                cs.source_trigger
             FROM derivations d
-            JOIN systems s
-              ON d.derivation_name =
-                     COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname)
+            JOIN selected_system ss ON d.derivation_name = ss.config_name
+            JOIN commits c ON c.id = d.commit_id AND c.flake_id = ss.flake_id
             LEFT JOIN cve_scans cs ON cs.derivation_id = d.id
-            LEFT JOIN commits c ON c.id = d.commit_id
             LEFT JOIN flakes f ON f.id = c.flake_id
             WHERE d.derivation_type = 'nixos'
-              AND s.id = $1
-              AND s.is_active = TRUE
             ORDER BY d.id, COALESCE(cs.completed_at, cs.scheduled_at, cs.created_at) DESC NULLS LAST
         )
         SELECT
             scan_id,
+            derivation_id,
+            rescan_eligible,
             hostname,
             flake_name,
             commit_hash,
@@ -600,10 +661,9 @@ pub async fn get_scan_queue_for_system(
                 WHEN completed_at >= NOW() - INTERVAL '30 days' THEN 'recent'
                 ELSE 'archived'
             END AS freshness,
-            (ROW_NUMBER() OVER (
-                ORDER BY lifecycle_at DESC NULLS LAST
-            ) = 1) AS is_current,
+            is_current,
             (lc.commit_id IS NOT NULL AND lpd.commit_db_id = lc.commit_id) AS is_latest_per_flake
+            , source_trigger
         FROM latest_per_derivation lpd
         LEFT JOIN latest_commit_per_flake lc ON lc.flake_id = lpd.flake_id
         ORDER BY
@@ -620,6 +680,8 @@ pub async fn get_scan_queue_for_system(
     Ok(rows
         .into_iter()
         .map(|row| ScanQueueRow {
+            derivation_id: row.get("derivation_id"),
+            rescan_eligible: row.get("rescan_eligible"),
             scan_id: row.get("scan_id"),
             hostname: row.get("hostname"),
             flake_name: row.get("flake_name"),
@@ -633,10 +695,20 @@ pub async fn get_scan_queue_for_system(
             freshness: row.get("freshness"),
             is_current: row.get("is_current"),
             is_latest_per_flake: row.get("is_latest_per_flake"),
+            source_trigger: row.get("source_trigger"),
         })
         .collect())
 }
 
+/// Returns aggregate scan state for active systems with exact current identities.
+///
+/// Each aggregate includes only derivations from the system's flake and
+/// configuration. `current_derivation_id` matches the latest reported store
+/// path when that path resolves to an eligible derivation.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot load the system aggregates.
 pub async fn get_scan_systems(pool: &PgPool, limit: i64) -> Result<Vec<ScanSystemRow>> {
     let rows = sqlx::query(
         r#"
@@ -650,18 +722,28 @@ pub async fn get_scan_systems(pool: &PgPool, limit: i64) -> Result<Vec<ScanSyste
             WHERE id = 1
         ),
         latest_lifecycle_per_derivation AS (
-            SELECT DISTINCT ON (d.id)
+            SELECT DISTINCT ON (s.id, d.id)
+                s.id AS system_id,
                 d.id AS derivation_id,
-                d.derivation_name AS hostname,
+                s.hostname,
                 d.store_path,
                 cs.status,
                 cs.scheduled_at,
                 cs.created_at,
                 cs.completed_at
-            FROM derivations d
+            FROM systems s
+            JOIN commits c ON c.flake_id = s.flake_id
+            JOIN derivations d
+              ON d.commit_id = c.id
+             AND d.derivation_name = COALESCE(
+                    NULLIF(BTRIM(s.system_configuration_name), ''),
+                    s.hostname
+                 )
+             AND d.derivation_type = 'nixos'
             LEFT JOIN cve_scans cs ON cs.derivation_id = d.id
-            WHERE d.derivation_type = 'nixos'
-            ORDER BY d.id, COALESCE(cs.completed_at, cs.scheduled_at, cs.created_at) DESC NULLS LAST
+            WHERE s.is_active = TRUE
+            ORDER BY s.id, d.id,
+                     COALESCE(cs.completed_at, cs.scheduled_at, cs.created_at) DESC NULLS LAST
         ),
         latest_completed_per_derivation AS (
             SELECT DISTINCT ON (d.id)
@@ -674,6 +756,29 @@ pub async fn get_scan_systems(pool: &PgPool, limit: i64) -> Result<Vec<ScanSyste
             WHERE d.derivation_type = 'nixos'
               AND cs.completed_at IS NOT NULL
             ORDER BY d.id, cs.completed_at DESC
+        ),
+        current_derivation AS (
+            SELECT DISTINCT ON (s.id)
+                s.id AS system_id,
+                d.id AS derivation_id
+            FROM systems s
+            JOIN LATERAL (
+                SELECT ss.store_path
+                FROM system_states ss
+                WHERE ss.hostname = s.hostname
+                ORDER BY ss.timestamp DESC NULLS LAST, ss.id DESC
+                LIMIT 1
+            ) state ON TRUE
+            JOIN derivations d
+              ON d.store_path = state.store_path
+             AND d.derivation_name = COALESCE(
+                    NULLIF(BTRIM(s.system_configuration_name), ''),
+                    s.hostname
+                 )
+             AND d.derivation_type = 'nixos'
+            JOIN commits c ON c.id = d.commit_id AND c.flake_id = s.flake_id
+            WHERE s.is_active = TRUE
+            ORDER BY s.id, d.completed_at DESC NULLS LAST, d.id DESC
         )
         SELECT
             s.id AS system_id,
@@ -690,14 +795,20 @@ pub async fn get_scan_systems(pool: &PgPool, limit: i64) -> Result<Vec<ScanSyste
             )::BIGINT AS stale,
             COUNT(*) FILTER (WHERE ll.store_path IS NULL)::BIGINT AS needs_build,
             COUNT(*) FILTER (WHERE lc.completed_at IS NULL)::BIGINT AS unscanned,
-            COALESCE(MAX(lc.critical_count), 0)::BIGINT AS current_crit,
-            COALESCE(MAX(lc.high_count), 0)::BIGINT AS current_high
+            COALESCE(MAX(lc.critical_count) FILTER (
+                WHERE ll.derivation_id = cd.derivation_id
+            ), 0)::BIGINT AS current_crit,
+            COALESCE(MAX(lc.high_count) FILTER (
+                WHERE ll.derivation_id = cd.derivation_id
+            ), 0)::BIGINT AS current_high
+            , cd.derivation_id AS current_derivation_id
         FROM latest_lifecycle_per_derivation ll
         LEFT JOIN latest_completed_per_derivation lc ON lc.derivation_id = ll.derivation_id
-        JOIN systems s ON s.hostname = ll.hostname
+        JOIN systems s ON s.id = ll.system_id
         LEFT JOIN environments e ON e.id = s.environment_id
+        LEFT JOIN current_derivation cd ON cd.system_id = s.id
         WHERE s.is_active = TRUE
-        GROUP BY s.id, ll.hostname
+        GROUP BY s.id, ll.hostname, cd.derivation_id
         ORDER BY total_configs DESC, ll.hostname ASC
         LIMIT $1
         "#,
@@ -719,6 +830,7 @@ pub async fn get_scan_systems(pool: &PgPool, limit: i64) -> Result<Vec<ScanSyste
             unscanned: row.get("unscanned"),
             current_crit: row.get("current_crit"),
             current_high: row.get("current_high"),
+            current_derivation_id: row.get("current_derivation_id"),
         })
         .collect())
 }

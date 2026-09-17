@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use dioxus::prelude::*;
 use uuid::Uuid;
@@ -7,7 +7,7 @@ use uuid::Uuid;
 use crate::api::client::{
     fetch_environments, fetch_scanning_deployed, fetch_scanning_queue, fetch_scanning_schedule,
     fetch_scanning_stats, fetch_scanning_system_scans, fetch_scanning_systems,
-    update_scanning_schedule,
+    trigger_cve_derivation_rescan, trigger_cve_fleet_rescan, update_scanning_schedule,
 };
 use crate::api::models::{
     ScanSchedulePolicyResponse, ScanningQueueItemResponse, UpdateScanSchedulePolicyRequest,
@@ -40,6 +40,88 @@ struct StatusMeta {
     class: &'static str,
     color: &'static str,
     label: &'static str,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct ScanActionFeedback {
+    message: String,
+    success: bool,
+}
+
+fn request_derivation_rescans(
+    mut derivation_ids: Vec<i32>,
+    scope: String,
+    mut pending: Signal<HashSet<i32>>,
+    mut feedback: Signal<Option<ScanActionFeedback>>,
+    mut refresh: Signal<u64>,
+) {
+    derivation_ids.sort_unstable();
+    derivation_ids.dedup();
+    if derivation_ids.is_empty() {
+        feedback.set(Some(ScanActionFeedback {
+            message: format!("{scope} has no built derivation available to rescan."),
+            success: false,
+        }));
+        return;
+    }
+    if derivation_ids
+        .iter()
+        .any(|derivation_id| pending.read().contains(derivation_id))
+    {
+        return;
+    }
+
+    pending.write().extend(derivation_ids.iter().copied());
+    feedback.set(None);
+    spawn(async move {
+        let mut enqueued = 0_usize;
+        let mut reused = 0_usize;
+        let mut scan_ids = Vec::new();
+        let mut errors = Vec::new();
+        for derivation_id in derivation_ids {
+            match trigger_cve_derivation_rescan(derivation_id).await {
+                Ok(response) => {
+                    if response.enqueued {
+                        enqueued += 1;
+                    } else {
+                        reused += 1;
+                    }
+                    scan_ids.push(response.scan_id.to_string());
+                }
+                Err(error) => errors.push(format!("derivation {derivation_id}: {error}")),
+            }
+            pending.write().remove(&derivation_id);
+        }
+
+        if enqueued + reused > 0 {
+            refresh.set(refresh().wrapping_add(1));
+        }
+        if errors.is_empty() {
+            feedback.set(Some(ScanActionFeedback {
+                message: format!(
+                    "{scope}: queued {enqueued}, reused {reused}. Scan IDs: {}.",
+                    scan_ids.join(", ")
+                ),
+                success: true,
+            }));
+        } else {
+            feedback.set(Some(ScanActionFeedback {
+                message: format!(
+                    "{scope}: queued {enqueued}, reused {reused}; {} request(s) failed: {}. Retrying is safe.",
+                    errors.len(),
+                    errors.join("; ")
+                ),
+                success: false,
+            }));
+        }
+    });
+}
+
+fn eligible_derivation_ids(rows: &[ScanningQueueItemResponse]) -> Vec<i32> {
+    rows.iter()
+        .filter(|row| row.rescan_eligible)
+        .map(|row| row.derivation_id)
+        .collect()
 }
 
 fn status_meta(status: &str) -> StatusMeta {
@@ -244,6 +326,10 @@ pub fn ScanningView() -> Element {
     let mut system_scan_errors = use_signal(HashMap::<Uuid, String>::new);
     let mut loading_system = use_signal(|| Option::<Uuid>::None);
     let mut schedule_open = use_signal(|| false);
+    let mut fleet_rescan_pending = use_signal(|| false);
+    let mut exact_rescan_pending = use_signal(HashSet::<i32>::new);
+    let mut action_feedback = use_signal(|| Option::<ScanActionFeedback>::None);
+    let mut scan_refresh = use_signal(|| 0_u64);
 
     let mut policy_on_build = use_signal(|| true);
     let mut policy_deployed_interval = use_signal(|| "24h".to_string());
@@ -254,10 +340,22 @@ pub fn ScanningView() -> Element {
     let mut schedule_save_error = use_signal(|| Option::<String>::None);
     let mut schedule_saving = use_signal(|| false);
 
-    let mut stats = use_resource(|| async { fetch_scanning_stats().await });
-    let mut queue = use_resource(|| async { fetch_scanning_queue(Some(500)).await });
-    let mut deployed = use_resource(|| async { fetch_scanning_deployed(Some(500), None).await });
-    let mut systems = use_resource(|| async { fetch_scanning_systems(Some(500)).await });
+    let mut stats = use_resource(move || {
+        let _ = scan_refresh();
+        async { fetch_scanning_stats().await }
+    });
+    let mut queue = use_resource(move || {
+        let _ = scan_refresh();
+        async { fetch_scanning_queue(Some(500)).await }
+    });
+    let mut deployed = use_resource(move || {
+        let _ = scan_refresh();
+        async { fetch_scanning_deployed(Some(500), None).await }
+    });
+    let mut systems = use_resource(move || {
+        let _ = scan_refresh();
+        async { fetch_scanning_systems(Some(500)).await }
+    });
     let environments = use_resource(|| async { fetch_environments().await });
     let mut schedule = use_resource(|| async { fetch_scanning_schedule().await });
 
@@ -266,6 +364,18 @@ pub fn ScanningView() -> Element {
     let mut deployed_total = use_signal(|| 0_i64);
     let mut deployed_loading_more = use_signal(|| false);
     let mut deployed_load_more_error = use_signal(|| Option::<String>::None);
+
+    use_effect(move || {
+        let _ = scan_refresh();
+        if let Some(system_id) = *expanded_system.peek() {
+            load_system_scans(
+                system_id,
+                system_scan_rows,
+                system_scan_errors,
+                loading_system,
+            );
+        }
+    });
 
     use_effect(move || {
         if let Some(Ok(result)) = deployed.read().clone() {
@@ -352,11 +462,52 @@ pub fn ScanningView() -> Element {
                     }
                     button {
                         class: "btn btn-primary focus-ring",
-                        disabled: true,
-                        title: "Fleet rescan is unavailable because the server does not expose this action",
+                        disabled: fleet_rescan_pending(),
+                        title: "Queue scans for exact configurations currently running across the fleet",
+                        aria_label: "Rescan all",
+                        onclick: move |_| {
+                            if fleet_rescan_pending() {
+                                return;
+                            }
+                            fleet_rescan_pending.set(true);
+                            action_feedback.set(None);
+                            spawn(async move {
+                                match trigger_cve_fleet_rescan().await {
+                                    Ok(response) => {
+                                        action_feedback.set(Some(ScanActionFeedback {
+                                            message: format!(
+                                                "{} {} eligible, {} queued, {} reused.",
+                                                response.message,
+                                                response.eligible_count,
+                                                response.enqueued_count,
+                                                response.reused_count
+                                            ),
+                                            success: true,
+                                        }));
+                                        scan_refresh.set(scan_refresh().wrapping_add(1));
+                                    }
+                                    Err(error) => action_feedback.set(Some(ScanActionFeedback {
+                                        message: format!(
+                                            "Fleet rescan could not be queued: {error}. Check your admin session and retry."
+                                        ),
+                                        success: false,
+                                    })),
+                                }
+                                fleet_rescan_pending.set(false);
+                            });
+                        },
                         Icon { name: IconName::Sync, size: 14 }
-                        " Rescan all"
+                        if fleet_rescan_pending() { " Rescanning…" } else { " Rescan all" }
                     }
+                }
+            }
+
+            if let Some(feedback) = action_feedback() {
+                div {
+                    role: if feedback.success { "status" } else { "alert" },
+                    class: if feedback.success { "sd-callout sd-callout-success scanning-alert" } else { "sd-callout sd-callout-danger scanning-alert" },
+                    div { "{feedback.message}" }
+                    button { class: "btn btn-ghost xs focus-ring", onclick: move |_| action_feedback.set(None), "Dismiss" }
                 }
             }
 
@@ -410,6 +561,9 @@ pub fn ScanningView() -> Element {
                                 latest_only,
                                 sort,
                                 sort_descending,
+                                exact_rescan_pending,
+                                action_feedback,
+                                scan_refresh,
                                 move || deployed.restart(),
                             ) }
                             if let Some(error) = deployed_load_more_error() {
@@ -467,6 +621,9 @@ pub fn ScanningView() -> Element {
                                 latest_only,
                                 sort,
                                 sort_descending,
+                                exact_rescan_pending,
+                                action_feedback,
+                                scan_refresh,
                                 move || queue.restart(),
                             ) }
                         }
@@ -489,6 +646,9 @@ pub fn ScanningView() -> Element {
                                 system_scan_rows,
                                 system_scan_errors,
                                 loading_system,
+                                exact_rescan_pending,
+                                action_feedback,
+                                scan_refresh,
                                 move || systems.restart(),
                             ) }
                         }
@@ -609,6 +769,9 @@ fn scan_queue_panel(
     mut latest_only: Signal<bool>,
     mut sort: Signal<ScanSort>,
     mut sort_descending: Signal<bool>,
+    exact_rescan_pending: Signal<HashSet<i32>>,
+    action_feedback: Signal<Option<ScanActionFeedback>>,
+    scan_refresh: Signal<u64>,
     retry: impl FnMut() + 'static,
 ) -> Element {
     let mut retry = retry;
@@ -729,7 +892,7 @@ fn scan_queue_panel(
                     } }
                     tbody {
                         for (index, row) in sorted.iter().enumerate() {
-                            { scan_row(row, index, show_freshness) }
+                            { scan_row(row, index, show_freshness, exact_rescan_pending, action_feedback, scan_refresh) }
                         }
                     }
                 }
@@ -771,7 +934,14 @@ fn sortable_header(
     }
 }
 
-fn scan_row(row: &ScanningQueueItemResponse, index: usize, show_freshness: bool) -> Element {
+fn scan_row(
+    row: &ScanningQueueItemResponse,
+    index: usize,
+    show_freshness: bool,
+    exact_rescan_pending: Signal<HashSet<i32>>,
+    action_feedback: Signal<Option<ScanActionFeedback>>,
+    scan_refresh: Signal<u64>,
+) -> Element {
     let nav = navigator();
     let meta = status_meta(&row.status);
     let has_important_findings = row.critical_count > 0 || row.high_count > 0;
@@ -802,7 +972,7 @@ fn scan_row(row: &ScanningQueueItemResponse, index: usize, show_freshness: bool)
             td { { findings_cell(row) } }
             td { class: "scanning-last-scan", "{last_scan(row)}" }
             td {
-                if let Some(trigger) = row.trigger.as_deref().filter(|trigger| !trigger.is_empty()) {
+                if let Some(trigger) = row.source_trigger.as_deref().filter(|trigger| !trigger.is_empty()) {
                     span { class: "chip chip-unknown scanning-trigger", "{trigger}" }
                 } else {
                     span { class: "scanning-unavailable", title: "Trigger provenance is not recorded by the server", "—" }
@@ -811,7 +981,25 @@ fn scan_row(row: &ScanningQueueItemResponse, index: usize, show_freshness: bool)
             td {
                 div { class: "row-actions scanning-row-actions",
                     button { class: "btn-icon focus-ring", disabled: true, title: "Scan logs are not available from the server", aria_label: "Scan log unavailable", Icon { name: IconName::Terminal, size: 14 } }
-                    button { class: "btn-icon focus-ring", disabled: true, title: "Rescan is not available from the server", aria_label: "Rescan unavailable", Icon { name: IconName::Sync, size: 14 } }
+                    button {
+                        class: "btn-icon focus-ring",
+                        disabled: !row.rescan_eligible
+                            || exact_rescan_pending.read().contains(&row.derivation_id),
+                        title: if row.rescan_eligible { "Queue a rescan for this exact derivation" } else { "This derivation has no built store path to scan" },
+                        aria_label: "Rescan exact derivation",
+                        onclick: {
+                            let derivation_id = row.derivation_id;
+                            let scope = format!("{} {}", row.hostname, commit_label(&row.commit_hash));
+                            move |_| request_derivation_rescans(
+                                vec![derivation_id],
+                                scope.clone(),
+                                exact_rescan_pending,
+                                action_feedback,
+                                scan_refresh,
+                            )
+                        },
+                        Icon { name: IconName::Sync, size: 14 }
+                    }
                     if has_important_findings {
                         button { class: "btn-icon focus-ring", title: "View CVEs", aria_label: "View CVEs", onclick: move |_| { let _ = nav.push(Route::CvesView { query: String::new() }); }, Icon { name: IconName::ArrowRight, size: 14 } }
                     }
@@ -833,6 +1021,9 @@ fn systems_panel(
     mut scans: Signal<HashMap<Uuid, Vec<ScanningQueueItemResponse>>>,
     mut scan_errors: Signal<HashMap<Uuid, String>>,
     mut loading_system: Signal<Option<Uuid>>,
+    exact_rescan_pending: Signal<HashSet<i32>>,
+    action_feedback: Signal<Option<ScanActionFeedback>>,
+    scan_refresh: Signal<u64>,
     retry: impl FnMut() + 'static,
 ) -> Element {
     let mut retry = retry;
@@ -945,12 +1136,56 @@ fn systems_panel(
                                             div { class: "scanning-freshness-legend", span { class: "fresh", "{system.scanned} fresh" } if system.stale > 0 { span { class: "stale", "{system.stale} stale" } } if system.needs_build > 0 { span { class: "needs", "{system.needs_build} need build" } } if system.unscanned > 0 { span { "{system.unscanned} never" } } }
                                         }
                                         td { { aggregate_findings(system.current_crit, system.current_high) } }
-                                        td { div { class: "row-actions scanning-row-actions", button { class: "btn-icon focus-ring", disabled: true, title: "Rescan is not available from the server", aria_label: "Rescan current configuration unavailable", Icon { name: IconName::Sync, size: 14 } } } }
+                                        td { div { class: "row-actions scanning-row-actions",
+                                            button {
+                                                class: "btn-icon focus-ring",
+                                                disabled: system.current_derivation_id.is_none()
+                                                    || system.current_derivation_id.is_some_and(|id| exact_rescan_pending.read().contains(&id)),
+                                                title: if system.current_derivation_id.is_some() { "Rescan the exact currently deployed derivation" } else { "No currently deployed derivation is available" },
+                                                aria_label: "Rescan current deployed derivation",
+                                                onclick: {
+                                                    let current_derivation_id = system.current_derivation_id;
+                                                    let scope = format!("{} current deployment", system.hostname);
+                                                    move |_| {
+                                                        if let Some(derivation_id) = current_derivation_id {
+                                                            request_derivation_rescans(
+                                                                vec![derivation_id],
+                                                                scope.clone(),
+                                                                exact_rescan_pending,
+                                                                action_feedback,
+                                                                scan_refresh,
+                                                            );
+                                                        }
+                                                    }
+                                                },
+                                                Icon { name: IconName::Sync, size: 14 }
+                                            }
+                                        } }
                                     }
                                     if is_open {
                                         tr { class: "scan-sys-expand-row", td { colspan: 6,
                                             div { class: "scan-sys-expand",
-                                                div { class: "scan-sys-expand-head", span { "{history_count} · newest first" } button { class: "btn btn-ghost xs focus-ring", disabled: true, title: "Rescan is not available from the server", Icon { name: IconName::Sync, size: 10 } " Rescan all" } }
+                                                div { class: "scan-sys-expand-head", span { "{history_count} · newest first" }
+                                                    button {
+                                                        class: "btn btn-ghost xs focus-ring",
+                                                        disabled: !system_rows.iter().any(|row| row.rescan_eligible)
+                                                            || system_rows.iter().filter(|row| row.rescan_eligible).any(|row| exact_rescan_pending.read().contains(&row.derivation_id)),
+                                                        title: "Queue rescans for every exact derivation in this system history",
+                                                        onclick: {
+                                                            let derivation_ids = eligible_derivation_ids(&system_rows);
+                                                            let scope = format!("{} history", system.hostname);
+                                                            move |_| request_derivation_rescans(
+                                                                derivation_ids.clone(),
+                                                                scope.clone(),
+                                                                exact_rescan_pending,
+                                                                action_feedback,
+                                                                scan_refresh,
+                                                            )
+                                                        },
+                                                        Icon { name: IconName::Sync, size: 10 }
+                                                        " Rescan history"
+                                                    }
+                                                }
                                                 if let Some(error) = system_error {
                                                     div { class: "q-empty scanning-system-state", role: "alert", div { "Scan history could not be loaded: {error}" } button { class: "btn btn-ghost xs focus-ring", onclick: move |_| toggle_system_reload(system_id, scans, scan_errors, loading_system), "Retry" } }
                                                 } else if is_loading {
@@ -960,7 +1195,7 @@ fn systems_panel(
                                                 } else {
                                                     div { class: "scan-sys-expand-table-wrap",
                                                         table { class: "scanning-history-table", thead { tr { th { "Commit" } th { "Freshness" } th { "Status" } th { "Findings" } th { "Last scan" } th { span { class: "sr-only", "Actions" } } } }
-                                                            tbody { for (index, row) in system_rows.iter().enumerate() { { system_scan_row(row, index) } } }
+                                                            tbody { for (index, row) in system_rows.iter().enumerate() { { system_scan_row(row, index, exact_rescan_pending, action_feedback, scan_refresh) } } }
                                                         }
                                                     }
                                                 }
@@ -1027,7 +1262,13 @@ fn load_system_scans(
     });
 }
 
-fn system_scan_row(row: &ScanningQueueItemResponse, index: usize) -> Element {
+fn system_scan_row(
+    row: &ScanningQueueItemResponse,
+    index: usize,
+    exact_rescan_pending: Signal<HashSet<i32>>,
+    action_feedback: Signal<Option<ScanActionFeedback>>,
+    scan_refresh: Signal<u64>,
+) -> Element {
     let nav = navigator();
     let meta = status_meta(&row.status);
     let needs_build = meta.key == "needs-build";
@@ -1046,6 +1287,25 @@ fn system_scan_row(row: &ScanningQueueItemResponse, index: usize) -> Element {
             td { div { class: "row-actions scanning-row-actions",
                 if needs_build { button { class: "btn btn-ghost xs focus-ring", disabled: true, title: "Build and scan is not available from the server", Icon { name: IconName::Cpu, size: 11 } " Build & scan" } }
                 else { button { class: "btn-icon focus-ring", disabled: true, title: "Scan logs are not available from the server", aria_label: "Scan log unavailable", Icon { name: IconName::Terminal, size: 13 } } }
+                button {
+                    class: "btn-icon focus-ring",
+                    disabled: !row.rescan_eligible
+                        || exact_rescan_pending.read().contains(&row.derivation_id),
+                    title: if row.rescan_eligible { "Queue a rescan for this exact historical derivation" } else { "This historical derivation has no built store path to scan" },
+                    aria_label: "Rescan exact historical derivation",
+                    onclick: {
+                        let derivation_id = row.derivation_id;
+                        let scope = format!("{} history {}", row.hostname, commit_label(&row.commit_hash));
+                        move |_| request_derivation_rescans(
+                            vec![derivation_id],
+                            scope.clone(),
+                            exact_rescan_pending,
+                            action_feedback,
+                            scan_refresh,
+                        )
+                    },
+                    Icon { name: IconName::Sync, size: 13 }
+                }
                 if has_important_findings { button { class: "btn-icon focus-ring", title: "View CVEs", aria_label: "View CVEs", onclick: move |_| { let _ = nav.push(Route::CvesView { query: String::new() }); }, Icon { name: IconName::ArrowRight, size: 13 } } }
             } }
         }
@@ -1160,6 +1420,8 @@ mod tests {
         latest: bool,
     ) -> ScanningQueueItemResponse {
         ScanningQueueItemResponse {
+            derivation_id: critical + 1,
+            rescan_eligible: true,
             scan_id: None,
             hostname: hostname.to_string(),
             flake_name: Some("infra".to_string()),
@@ -1173,7 +1435,7 @@ mod tests {
             freshness: freshness.to_string(),
             is_current: false,
             is_latest_per_flake: latest,
-            trigger: None,
+            source_trigger: Some("manual".to_string()),
         }
     }
 
@@ -1193,6 +1455,15 @@ mod tests {
         assert_eq!(bounded_count_label(500), "500+");
         assert_eq!(loaded_count_label(12, 499), "12 of 499");
         assert_eq!(loaded_count_label(12, 500), "12 of 500+ loaded");
+    }
+
+    #[test]
+    fn history_rescan_ids_exclude_unbuilt_derivations() {
+        let built = row("built", "completed", "deployed", 1, true);
+        let mut unbuilt = row("unbuilt", "unscanned", "archived", 2, false);
+        unbuilt.rescan_eligible = false;
+
+        assert_eq!(eligible_derivation_ids(&[built, unbuilt]), vec![2]);
     }
 
     #[test]

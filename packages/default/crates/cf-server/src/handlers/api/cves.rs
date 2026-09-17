@@ -15,7 +15,9 @@ use crate::api::models::{
 use crate::auth::extractors::{RequireAdmin, RequireAuth};
 use crate::handlers::agent_request::CFState;
 use crate::handlers::api::auth_session::RequireCsrf;
-use crate::queries::cve_scans::{FleetEnqueueOutcome, enqueue_fleet_cve_scans};
+use crate::queries::cve_scans::{
+    EnqueueCveScanOutcome, FleetEnqueueOutcome, enqueue_exact_cve_scan, enqueue_fleet_cve_scans,
+};
 use crate::queries::cves;
 
 /// GET /api/v1/cves
@@ -278,6 +280,64 @@ pub async fn trigger_fleet_rescan(
     Ok((StatusCode::ACCEPTED, Json(fleet_rescan_response(outcome))))
 }
 
+/// Enqueues a CVE rescan for one exact derivation.
+///
+/// The route requires an administrator session and matching double-submit CSRF
+/// values. It creates a canonical `pending` scan with the `manual` trigger, or
+/// returns the active scan identity when the derivation is already pending or
+/// in progress. It does not execute vulnix or schedule other work.
+///
+/// # Errors
+///
+/// Returns `404 Not Found` when the identifier does not select a built NixOS
+/// derivation. Returns `500 Internal Server Error` when the enqueue fails.
+pub async fn trigger_derivation_rescan(
+    State(state): State<CFState>,
+    Path(derivation_id): Path<i32>,
+    _user: RequireAdmin,
+    _csrf: RequireCsrf,
+) -> Result<(StatusCode, Json<DerivationRescanResponse>), (StatusCode, String)> {
+    let outcome = enqueue_exact_cve_scan(&state.pool, derivation_id, "vulnix", None)
+        .await
+        .map_err(|err| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to enqueue CVE scan for derivation {derivation_id}: {err:#}"),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                "Built NixOS derivation not found".to_string(),
+            )
+        })?;
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(derivation_rescan_response(outcome)),
+    ))
+}
+
+fn derivation_rescan_response(outcome: EnqueueCveScanOutcome) -> DerivationRescanResponse {
+    let message = if outcome.created {
+        format!(
+            "Queued CVE scan {} for derivation {}.",
+            outcome.scan_id, outcome.derivation_id
+        )
+    } else {
+        format!(
+            "Derivation {} already has active CVE scan {}.",
+            outcome.derivation_id, outcome.scan_id
+        )
+    };
+    DerivationRescanResponse {
+        derivation_id: outcome.derivation_id,
+        scan_id: outcome.scan_id,
+        enqueued: outcome.created,
+        message,
+    }
+}
+
 fn fleet_rescan_response(outcome: FleetEnqueueOutcome) -> FleetRescanResponse {
     let reused = outcome.reused();
     let message = if outcome.eligible == 0 {
@@ -297,14 +357,36 @@ fn fleet_rescan_response(outcome: FleetEnqueueOutcome) -> FleetRescanResponse {
     };
 
     FleetRescanResponse {
+        eligible_count: outcome.eligible,
         enqueued_count: outcome.created,
+        reused_count: reused,
         message,
     }
 }
 
+/// Reports fleet enqueue counts for newly queued and reused active scans.
 #[derive(Debug, Serialize)]
 pub struct FleetRescanResponse {
+    /// Counts distinct currently deployed derivations considered by the request.
+    pub eligible_count: i64,
+    /// Counts new `pending` scans inserted by the request.
     pub enqueued_count: i64,
+    /// Counts eligible derivations that already had active work.
+    pub reused_count: i64,
+    /// Summarizes the enqueue result for presentation.
+    pub message: String,
+}
+
+/// Response from an exact-derivation CVE rescan request.
+#[derive(Debug, Serialize)]
+pub struct DerivationRescanResponse {
+    /// Identifies the exact derivation requested by the caller.
+    pub derivation_id: i32,
+    /// Identifies the new or reused active scan.
+    pub scan_id: uuid::Uuid,
+    /// Is `true` when this request created the pending scan.
+    pub enqueued: bool,
+    /// Summarizes whether the endpoint queued or reused work.
     pub message: String,
 }
 
@@ -548,6 +630,8 @@ mod tests {
             created: 3,
         });
         assert_eq!(queued.enqueued_count, 3);
+        assert_eq!(queued.eligible_count, 3);
+        assert_eq!(queued.reused_count, 0);
         assert_eq!(queued.message, "Queued 3 CVE scan(s).");
 
         // Partially deduplicated against already-active scans.
@@ -556,6 +640,7 @@ mod tests {
             created: 2,
         });
         assert_eq!(partial.enqueued_count, 2);
+        assert_eq!(partial.reused_count, 3);
         assert_eq!(
             partial.message,
             "Queued 2 CVE scan(s); 3 already had an active scan."
@@ -595,6 +680,27 @@ mod tests {
         };
         assert_eq!(outcome.reused(), 0);
     }
+
+    #[test]
+    fn exact_rescan_response_returns_derivation_and_scan_identity() {
+        let scan_id = uuid::Uuid::new_v4();
+        let created = derivation_rescan_response(EnqueueCveScanOutcome {
+            scan_id,
+            derivation_id: 42,
+            created: true,
+        });
+        let reused = derivation_rescan_response(EnqueueCveScanOutcome {
+            scan_id,
+            derivation_id: 42,
+            created: false,
+        });
+
+        assert_eq!(created.derivation_id, 42);
+        assert_eq!(created.scan_id, scan_id);
+        assert!(created.enqueued);
+        assert!(!reused.enqueued);
+        assert!(reused.message.contains(&scan_id.to_string()));
+    }
 }
 
 #[cfg(test)]
@@ -605,7 +711,7 @@ mod fleet_rescan_authorization_tests {
     //! executes. Asserting on `AuthenticatedUser` helper methods alone would
     //! not prove that the endpoint rejects unauthorized callers.
 
-    use super::trigger_fleet_rescan;
+    use super::{trigger_derivation_rescan, trigger_fleet_rescan};
     use crate::auth::session::{
         CSRF_COOKIE_NAME, CSRF_HEADER_NAME, SESSION_COOKIE_NAME, hash_token,
     };
@@ -639,6 +745,10 @@ mod fleet_rescan_authorization_tests {
         );
         let app = Router::new()
             .route("/api/v1/cves/rescan-fleet", post(trigger_fleet_rescan))
+            .route(
+                "/api/v1/cves/rescan/:derivation_id",
+                post(trigger_derivation_rescan),
+            )
             .with_state(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -841,6 +951,34 @@ mod fleet_rescan_authorization_tests {
         (status, body)
     }
 
+    async fn post_derivation_rescan(
+        base: &str,
+        derivation_id: i32,
+        token: Option<&str>,
+        csrf_cookie: Option<&str>,
+        csrf_header: Option<&str>,
+    ) -> (u16, serde_json::Value) {
+        let mut request =
+            reqwest::Client::new().post(format!("{base}/api/v1/cves/rescan/{derivation_id}"));
+        let mut cookies = Vec::new();
+        if let Some(token) = token {
+            cookies.push(format!("{SESSION_COOKIE_NAME}={token}"));
+        }
+        if let Some(csrf) = csrf_cookie {
+            cookies.push(format!("{CSRF_COOKIE_NAME}={csrf}"));
+        }
+        if !cookies.is_empty() {
+            request = request.header("cookie", cookies.join("; "));
+        }
+        if let Some(csrf) = csrf_header {
+            request = request.header(CSRF_HEADER_NAME.as_str(), csrf);
+        }
+        let response = request.send().await.expect("send exact rescan");
+        let status = response.status().as_u16();
+        let body = response.json().await.expect("exact rescan JSON response");
+        (status, body)
+    }
+
     #[tokio::test]
     async fn fleet_rescan_rejects_unauthenticated_caller() {
         let Some(pool) = test_pool().await else {
@@ -928,5 +1066,86 @@ mod fleet_rescan_authorization_tests {
             status, 202,
             "Admin must be accepted and the request acknowledged as queued"
         );
+    }
+
+    #[tokio::test]
+    async fn exact_rescan_requires_admin_csrf_and_reuses_only_the_requested_derivation() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let requested = FleetAuthFixture::create(&pool).await;
+        let unrelated = FleetAuthFixture::create(&pool).await;
+        let (viewer, viewer_id) = session_token_for_role(&pool, AuthRole::Viewer).await;
+        let (admin, admin_id) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let base = spawn_fleet_server(pool.clone()).await;
+        let csrf = "task-440-exact-rescan-csrf";
+
+        let (unauthenticated, unauthenticated_body) =
+            post_derivation_rescan(&base, requested.derivation_id, None, None, None).await;
+        let (viewer_status, viewer_body) = post_derivation_rescan(
+            &base,
+            requested.derivation_id,
+            Some(&viewer),
+            Some(csrf),
+            Some(csrf),
+        )
+        .await;
+        let (missing_csrf, missing_csrf_body) =
+            post_derivation_rescan(&base, requested.derivation_id, Some(&admin), None, None).await;
+        let (first_status, first) = post_derivation_rescan(
+            &base,
+            requested.derivation_id,
+            Some(&admin),
+            Some(csrf),
+            Some(csrf),
+        )
+        .await;
+        let (second_status, second) = post_derivation_rescan(
+            &base,
+            requested.derivation_id,
+            Some(&admin),
+            Some(csrf),
+            Some(csrf),
+        )
+        .await;
+
+        let response_scan_id =
+            Uuid::parse_str(first["scan_id"].as_str().expect("scan ID response"))
+                .expect("response scan ID should be a UUID");
+        let persisted: (String, String) =
+            sqlx::query_as("SELECT status, source_trigger FROM cve_scans WHERE id = $1")
+                .bind(response_scan_id)
+                .fetch_one(&pool)
+                .await
+                .expect("exact scan lifecycle should persist");
+        let unrelated_scan: Option<Uuid> =
+            sqlx::query_scalar("SELECT id FROM cve_scans WHERE derivation_id = $1")
+                .bind(unrelated.derivation_id)
+                .fetch_optional(&pool)
+                .await
+                .expect("unrelated scan lookup should succeed");
+
+        assert_eq!(unauthenticated, 401);
+        assert_eq!(unauthenticated_body["error"], "unauthorized");
+        assert_eq!(viewer_status, 403);
+        assert_eq!(viewer_body["error"], "forbidden");
+        assert_eq!(missing_csrf, 403);
+        assert_eq!(missing_csrf_body["error"], "csrf_validation_failed");
+        assert_eq!(first_status, 202);
+        assert_eq!(second_status, 202);
+        assert_eq!(first["derivation_id"], requested.derivation_id);
+        assert_eq!(first["enqueued"], true);
+        assert_eq!(second["enqueued"], false);
+        assert_eq!(second["scan_id"], first["scan_id"]);
+        assert_eq!(persisted, ("pending".to_string(), "manual".to_string()));
+        assert!(
+            unrelated_scan.is_none(),
+            "the exact endpoint must not enqueue another fleet target"
+        );
+
+        requested.cleanup(&pool).await;
+        unrelated.cleanup(&pool).await;
+        cleanup_test_user(&pool, viewer_id).await;
+        cleanup_test_user(&pool, admin_id).await;
     }
 }

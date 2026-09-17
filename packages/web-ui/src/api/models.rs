@@ -558,7 +558,26 @@ pub struct CveFleetStats {
 /// Response from fleet rescan trigger.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FleetRescanResponse {
+    /// Counts distinct currently deployed derivations considered by the request.
+    pub eligible_count: i64,
+    /// Counts new pending scans created by the request.
     pub enqueued_count: i64,
+    /// Counts eligible derivations that already had active work.
+    pub reused_count: i64,
+    /// Summarizes the enqueue result for presentation.
+    pub message: String,
+}
+
+/// Response from an exact-derivation CVE rescan request.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DerivationRescanResponse {
+    /// Identifies the exact derivation requested by the caller.
+    pub derivation_id: i32,
+    /// Identifies the new or reused active scan.
+    pub scan_id: Uuid,
+    /// Is `true` when the request created a pending scan.
+    pub enqueued: bool,
+    /// Summarizes whether the endpoint queued or reused work.
     pub message: String,
 }
 
@@ -595,6 +614,10 @@ pub struct ScanningStatsResponse {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScanningQueueItemResponse {
+    /// Identifies the exact derivation represented by the row.
+    pub derivation_id: i32,
+    /// Is `true` when the derivation has a built store path that can be scanned.
+    pub rescan_eligible: bool,
     /// `None` when the system is deployed but has never been scanned.
     pub scan_id: Option<Uuid>,
     pub hostname: String,
@@ -615,9 +638,9 @@ pub struct ScanningQueueItemResponse {
     /// True when this derivation's commit is the latest known commit for its flake.
     #[serde(default)]
     pub is_latest_per_flake: bool,
-    /// Scan trigger source (not yet tracked server-side).
+    /// Persisted scan trigger source.
     #[serde(default)]
-    pub trigger: Option<String>,
+    pub source_trigger: Option<String>,
 }
 
 /// Paginated deployed configurations response (P2#6).
@@ -642,6 +665,8 @@ pub struct ScanningSystemsItemResponse {
     pub unscanned: i64,
     pub current_crit: i64,
     pub current_high: i64,
+    /// Identifies the derivation in the system's latest reported store path.
+    pub current_derivation_id: Option<i32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

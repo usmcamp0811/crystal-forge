@@ -560,6 +560,14 @@ pub async fn trigger_cve_fleet_rescan() -> Result<FleetRescanResponse, ApiClient
     send_json_with_csrf("POST", &url, None::<&()>).await
 }
 
+/// Enqueues or reuses a CVE scan for one exact derivation.
+pub async fn trigger_cve_derivation_rescan(
+    derivation_id: i32,
+) -> Result<DerivationRescanResponse, ApiClientError> {
+    let url = format!("{}/cves/rescan/{derivation_id}", base_url());
+    send_json_with_csrf("POST", &url, None::<&()>).await
+}
+
 /// Export CVEs as CSV (triggers browser download).
 pub async fn export_cves_csv(filters: &CveFilters) -> Result<(), ApiClientError> {
     let parts = cve_filter_query_parts(filters);

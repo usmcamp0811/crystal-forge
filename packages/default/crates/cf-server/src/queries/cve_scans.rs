@@ -46,6 +46,17 @@ pub enum CreateCveScanOutcome {
     Existing(Uuid),
 }
 
+/// Reports the durable identity returned by an operator enqueue request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EnqueueCveScanOutcome {
+    /// Identifies the pending or in-progress scan.
+    pub scan_id: Uuid,
+    /// Identifies the exact derivation requested by the caller.
+    pub derivation_id: i32,
+    /// Is `true` only when this request inserted the pending row.
+    pub created: bool,
+}
+
 impl CreateCveScanOutcome {
     /// Returns the new or existing scan identifier.
     pub fn id(self) -> Uuid {
@@ -1694,6 +1705,120 @@ pub async fn get_active_scan_for_derivation(
     .await?;
 
     Ok(row.map(|r| r.get::<Uuid, _>("id")))
+}
+
+/// Enqueues a manual scan for one exact NixOS derivation.
+///
+/// The function inserts a `pending` row for the existing worker to claim. It
+/// does not execute vulnix, schedule a build, or change deployment state. The
+/// active-scan unique index makes retries idempotent: a retry returns the scan
+/// ID that already owns the derivation's pending or in-progress slot.
+///
+/// # Returns
+///
+/// Returns `None` when `derivation_id` does not identify a built NixOS
+/// derivation. Otherwise, returns the new or reused durable scan identity.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot validate or enqueue the target.
+pub async fn enqueue_exact_cve_scan(
+    pool: &PgPool,
+    derivation_id: i32,
+    scanner_name: &str,
+    scanner_version: Option<String>,
+) -> Result<Option<EnqueueCveScanOutcome>> {
+    let mut tx = pool.begin().await?;
+    // CONCURRENCY: Use the established CVE writer lock before reading active
+    // state. Claim and terminal transitions take the same lock, so the active
+    // identity cannot disappear before this transaction returns it.
+    crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx(
+        &mut tx,
+        derivation_id,
+        &[],
+    )
+    .await?;
+
+    let eligible = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM derivations
+            WHERE id = $1
+              AND derivation_type = 'nixos'
+              AND store_path IS NOT NULL
+              AND BTRIM(store_path) <> ''
+        )
+        "#,
+    )
+    .bind(derivation_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if !eligible {
+        tx.commit().await?;
+        return Ok(None);
+    }
+
+    let scan_id = Uuid::new_v4();
+    let inserted = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        INSERT INTO cve_scans (
+            id, derivation_id, scanner_name, scanner_version,
+            status, total_packages, total_vulnerabilities,
+            critical_count, high_count, medium_count, low_count,
+            attempts, source_trigger
+        ) VALUES (
+            $1, $2, $3, $4,
+            'pending', 0, 0,
+            0, 0, 0, 0,
+            0, 'manual'
+        )
+        ON CONFLICT (derivation_id) WHERE status IN ('pending', 'in_progress')
+        DO NOTHING
+        RETURNING id
+        "#,
+    )
+    .bind(scan_id)
+    .bind(derivation_id)
+    .bind(scanner_name)
+    .bind(scanner_version)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    if let Some(scan_id) = inserted {
+        tx.commit().await?;
+        return Ok(Some(EnqueueCveScanOutcome {
+            scan_id,
+            derivation_id,
+            created: true,
+        }));
+    }
+
+    // A fleet insert does not take the writer lock, so the unique index can
+    // still win this race. Its worker cannot claim or complete the row while
+    // this transaction holds the lock.
+    let existing = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        SELECT id
+        FROM cve_scans
+        WHERE derivation_id = $1
+          AND status IN ('pending', 'in_progress')
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(derivation_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| {
+        anyhow::anyhow!("active CVE scan conflict disappeared for derivation {derivation_id}")
+    })?;
+    tx.commit().await?;
+    Ok(Some(EnqueueCveScanOutcome {
+        scan_id: existing,
+        derivation_id,
+        created: false,
+    }))
 }
 
 /// Resolves the preferred CVE scan target for one flake configuration.
@@ -3400,6 +3525,75 @@ mod tests {
             .expect("unrelated derivation should be deleted");
         already_active.cleanup(&pool).await;
         available.cleanup(&pool).await;
+    }
+
+    /// Exact enqueue and terminal completion serialize on the derivation writer
+    /// lock and therefore produce a linearizable existing-or-created result.
+    #[tokio::test]
+    async fn exact_enqueue_serializes_with_concurrent_completion() {
+        let Ok(database_url) = std::env::var("CRYSTAL_FORGE_TEST_DATABASE_URL") else {
+            return;
+        };
+        let pool = PgPool::connect(&database_url)
+            .await
+            .expect("dedicated CVE test database should be reachable");
+        let (derivation_id, _) = setup_test_derivation(&pool).await;
+        let scan_id = Uuid::new_v4();
+        sqlx::query(
+            r#"
+            INSERT INTO cve_scans (
+                id, derivation_id, scanner_name, status, attempts, source_trigger
+            ) VALUES ($1, $2, 'vulnix', 'in_progress', 1, 'manual')
+            "#,
+        )
+        .bind(scan_id)
+        .bind(derivation_id)
+        .execute(&pool)
+        .await
+        .expect("active scan should be inserted");
+
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let enqueue_pool = pool.clone();
+        let enqueue_barrier = barrier.clone();
+        let enqueue = async move {
+            enqueue_barrier.wait().await;
+            enqueue_exact_cve_scan(&enqueue_pool, derivation_id, "vulnix", None).await
+        };
+        let completion_pool = pool.clone();
+        let completion = async move {
+            barrier.wait().await;
+            complete_cve_scan(&completion_pool, scan_id, 0, 0, 0, 0, 0, 0, Some(1), None).await
+        };
+
+        let (enqueue_result, completion_result) = tokio::join!(enqueue, completion);
+        completion_result.expect("concurrent completion should succeed");
+        let outcome = enqueue_result
+            .expect("concurrent exact enqueue must not report a vanished conflict")
+            .expect("built derivation should remain eligible");
+        if outcome.created {
+            assert_ne!(outcome.scan_id, scan_id);
+        } else {
+            assert_eq!(outcome.scan_id, scan_id);
+        }
+        let active_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM cve_scans WHERE derivation_id = $1 AND status IN ('pending', 'in_progress')",
+        )
+        .bind(derivation_id)
+        .fetch_one(&pool)
+        .await
+        .expect("active scan count should load");
+        assert!(active_count <= 1, "at most one active scan may remain");
+
+        sqlx::query("DELETE FROM cve_scans WHERE derivation_id = $1")
+            .bind(derivation_id)
+            .execute(&pool)
+            .await
+            .expect("scan fixtures should be deleted");
+        sqlx::query("DELETE FROM derivations WHERE id = $1")
+            .bind(derivation_id)
+            .execute(&pool)
+            .await
+            .expect("derivation fixture should be deleted");
     }
 
     /// Two server processes racing to drain the same queue must not both own

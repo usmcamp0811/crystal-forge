@@ -11483,12 +11483,14 @@ const steps = [
       const fleetRescanResponses = [
         {
           status: 202,
-          payload: { enqueued_count: 3, message: "Queued 3 CVE scan(s)." },
+          payload: { eligible_count: 3, enqueued_count: 3, reused_count: 0, message: "Queued 3 CVE scan(s)." },
         },
         {
           status: 202,
           payload: {
+            eligible_count: 4,
             enqueued_count: 0,
+            reused_count: 4,
             message:
               "All 4 eligible system configuration(s) already have a scan pending or in progress.",
           },
@@ -11496,14 +11498,18 @@ const steps = [
         {
           status: 202,
           payload: {
+            eligible_count: 3,
             enqueued_count: 2,
+            reused_count: 1,
             message: "Queued 2 CVE scan(s); 1 already had an active scan.",
           },
         },
         {
           status: 202,
           payload: {
+            eligible_count: 0,
             enqueued_count: 0,
+            reused_count: 0,
             message: "No active systems are reporting a running configuration to scan.",
           },
         },
@@ -15446,6 +15452,44 @@ security.audit.enable = true;</fixtext>
     name: "16c-scanning-view",
     description: "Scanning view - live endpoint wiring, nested rows, and schedule modal",
     action: async (page) => {
+      const exactRescanRequests = [];
+      const exactRescanRoute = /\/api\/v1\/cves\/rescan\/\d+(?:\?.*)?$/;
+      await page.route("**/api/v1/cves/rescan-fleet", async (route) => {
+        await new Promise((resolve) => setTimeout(resolve, 120));
+        await route.fulfill({
+          status: 202,
+          contentType: "application/json",
+          body: JSON.stringify({
+            eligible_count: 3,
+            enqueued_count: 2,
+            reused_count: 1,
+            message: "Queued 2 CVE scan(s); 1 already had an active scan.",
+          }),
+        });
+      });
+      await page.route(exactRescanRoute, async (route) => {
+        const derivationId = Number(route.request().url().split("/").pop());
+        exactRescanRequests.push(derivationId);
+        await new Promise((resolve) => setTimeout(resolve, 120));
+        if (derivationId === 202) {
+          await route.fulfill({
+            status: 500,
+            contentType: "application/json",
+            body: JSON.stringify({ error: "scanner queue unavailable" }),
+          });
+          return;
+        }
+        await route.fulfill({
+          status: 202,
+          contentType: "application/json",
+          body: JSON.stringify({
+            derivation_id: derivationId,
+            scan_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            enqueued: true,
+            message: `Queued derivation ${derivationId}`,
+          }),
+        });
+      });
       await page.route("**/api/v1/scanning/stats*", async (route) => {
         await route.fulfill({
           status: 200,
@@ -15467,6 +15511,8 @@ security.audit.enable = true;</fixtext>
           contentType: "application/json",
           body: JSON.stringify([
             {
+              derivation_id: 101,
+              rescan_eligible: true,
               scan_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
               hostname: "prod-server-01",
               flake_name: "core-fleet",
@@ -15480,7 +15526,25 @@ security.audit.enable = true;</fixtext>
               freshness: "deployed",
               is_current: true,
               is_latest_per_flake: true,
-              trigger: null,
+              source_trigger: "manual",
+            },
+            {
+              derivation_id: 202,
+              rescan_eligible: true,
+              scan_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2",
+              hostname: "prod-server-01",
+              flake_name: "core-fleet",
+              commit_hash: "def5678",
+              status: "completed",
+              completed_at: new Date(Date.now() - 86400000).toISOString(),
+              scheduled_at: new Date(Date.now() - 86400000).toISOString(),
+              critical_count: 0,
+              high_count: 0,
+              medium_count: 1,
+              freshness: "recent",
+              is_current: false,
+              is_latest_per_flake: false,
+              source_trigger: "fleet",
             },
           ]),
         });
@@ -15515,6 +15579,7 @@ security.audit.enable = true;</fixtext>
               unscanned: 1,
               current_crit: 1,
               current_high: 2,
+              current_derivation_id: 101,
             },
           ]),
         });
@@ -15526,6 +15591,8 @@ security.audit.enable = true;</fixtext>
           contentType: "application/json",
           body: JSON.stringify([
             {
+              derivation_id: 101,
+              rescan_eligible: true,
               scan_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
               hostname: "prod-server-01",
               flake_name: "core-fleet",
@@ -15539,7 +15606,43 @@ security.audit.enable = true;</fixtext>
               freshness: "deployed",
               is_current: true,
               is_latest_per_flake: true,
-              trigger: null,
+              source_trigger: "manual",
+            },
+            {
+              derivation_id: 202,
+              rescan_eligible: true,
+              scan_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2",
+              hostname: "prod-server-01",
+              flake_name: "core-fleet",
+              commit_hash: "def5678",
+              status: "completed",
+              completed_at: new Date(Date.now() - 86400000).toISOString(),
+              scheduled_at: new Date(Date.now() - 86400000).toISOString(),
+              critical_count: 0,
+              high_count: 0,
+              medium_count: 1,
+              freshness: "recent",
+              is_current: false,
+              is_latest_per_flake: false,
+              source_trigger: "fleet",
+            },
+            {
+              derivation_id: 303,
+              rescan_eligible: false,
+              scan_id: null,
+              hostname: "prod-server-01",
+              flake_name: "core-fleet",
+              commit_hash: "987zyx6",
+              status: "never_scanned",
+              completed_at: null,
+              scheduled_at: null,
+              critical_count: 0,
+              high_count: 0,
+              medium_count: 0,
+              freshness: "archived",
+              is_current: false,
+              is_latest_per_flake: false,
+              source_trigger: null,
             },
           ]),
         });
@@ -15604,6 +15707,30 @@ security.audit.enable = true;</fixtext>
       await assertVisible(page.getByRole("tab", { name: /All scans/ }), "Expected All scans tab");
       await assertVisible(page.getByRole("tab", { name: /By system/ }), "Expected By system tab");
 
+      const fleetRescan = page.getByRole("button", { name: /^Rescan all$/ });
+      await fleetRescan.click();
+      await page.waitForFunction(
+        () => document.querySelector('button[aria-label="Rescan all"]')?.disabled === true,
+      );
+      await assertDisabled(fleetRescan, "Expected fleet rescan to stay disabled while pending");
+      await assertVisible(
+        page.getByText(/3 eligible, 2 queued, 1 reused/),
+        "Expected fleet response counts in success feedback",
+      );
+
+      await page.getByRole("tab", { name: /All scans/ }).click();
+      await assertVisible(page.getByText("manual").first(), "Expected persisted source_trigger in scan DTO");
+      const rowRescan = page.getByRole("button", { name: "Rescan exact derivation" }).first();
+      await rowRescan.click();
+      await assertDisabled(rowRescan, "Expected exact row rescan to stay disabled while pending");
+      await assertVisible(
+        page.getByText(/Scan IDs: bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb/),
+        "Expected returned scan identity in exact rescan feedback",
+      );
+      if (exactRescanRequests[0] !== 101) {
+        throw new Error(`Expected exact row action to request derivation 101, got ${exactRescanRequests[0]}`);
+      }
+
       await page.getByRole("tab", { name: /By system/ }).click();
       await page.waitForTimeout(500);
 
@@ -15612,6 +15739,36 @@ security.audit.enable = true;</fixtext>
       await page.waitForTimeout(400);
 
       await assertVisible(page.getByText("abc1234").first(), "Expected nested per-commit scan row after expand");
+      await assertVisible(page.getByText("def5678").first(), "Expected distinct historical derivation row");
+
+      const currentRescan = page.getByRole("button", { name: "Rescan current deployed derivation" });
+      await currentRescan.click();
+      await assertVisible(page.getByText(/current deployment: queued 1, reused 0/), "Expected current-scope feedback");
+      if (exactRescanRequests.at(-1) !== 101) {
+        throw new Error(`Expected current action to request derivation 101, got ${exactRescanRequests.at(-1)}`);
+      }
+
+      const historyRescans = page.getByRole("button", { name: "Rescan exact historical derivation" });
+      await historyRescans.nth(1).click();
+      await assertVisible(
+        page.getByText(/derivation 202:.*scanner queue unavailable.*Retrying is safe/),
+        "Expected actionable historical rescan error feedback",
+      );
+      if (exactRescanRequests.at(-1) !== 202) {
+        throw new Error(`Expected historical action to request derivation 202, got ${exactRescanRequests.at(-1)}`);
+      }
+      await assertDisabled(
+        historyRescans.nth(2),
+        "Expected an unbuilt historical derivation rescan to be disabled",
+      );
+      await page.getByRole("button", { name: "Rescan history" }).click();
+      await assertVisible(
+        page.getByText(/prod-server-01 history: queued 1, reused 0; 1 request\(s\) failed/),
+        "Expected history batch to finish before route cleanup",
+      );
+      if (exactRescanRequests.includes(303)) {
+        throw new Error("Expected history bulk rescan to exclude unbuilt derivation 303");
+      }
 
       await assertVisible(
         page.getByRole("button", { name: /^Schedule$/ }).first(),
@@ -15625,6 +15782,8 @@ security.audit.enable = true;</fixtext>
       await page.unroute("**/api/v1/scanning/systems/*/scans*");
       await page.unroute("**/api/v1/scanning/activity*");
       await page.unroute("**/api/v1/scanning/schedule*");
+      await page.unroute("**/api/v1/cves/rescan-fleet");
+      await page.unroute(exactRescanRoute);
     },
   },
   // ── End CVE/multi-rule policy checks ─────────────────────────────────────

@@ -90,6 +90,8 @@ fn scan_queue_row_to_response(
     r: crate::queries::scanning::ScanQueueRow,
 ) -> ScanningQueueItemResponse {
     ScanningQueueItemResponse {
+        derivation_id: r.derivation_id,
+        rescan_eligible: r.rescan_eligible,
         scan_id: r.scan_id, // Option<Uuid>: None for never-scanned deployed configs
         hostname: r.hostname,
         flake_name: r.flake_name,
@@ -103,7 +105,7 @@ fn scan_queue_row_to_response(
         freshness: r.freshness,
         is_current: r.is_current,
         is_latest_per_flake: r.is_latest_per_flake,
-        trigger: None,
+        source_trigger: r.source_trigger,
     }
 }
 
@@ -172,6 +174,7 @@ pub async fn get_scanning_systems(
                         unscanned: r.unscanned,
                         current_crit: r.current_crit,
                         current_high: r.current_high,
+                        current_derivation_id: r.current_derivation_id,
                     })
                     .collect::<Vec<_>>(),
             ),
