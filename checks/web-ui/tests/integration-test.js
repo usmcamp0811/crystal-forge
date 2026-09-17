@@ -3672,10 +3672,10 @@ async function routeTask440SystemData(page, overrides = {}) {
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
       current_commit: currentRevision,
       commits: [
-        { sha: currentRevision, short_sha: canonicalDesign ? currentRevision.slice(0, 7) : "abcdef0", message: canonicalDesign ? TASK_440_FIXTURE.canonicalConfig.revisionMessage : "current deployment", author: canonicalDesign ? "mreyes" : "Forge Bot", timestamp: "2026-08-28T18:00:00Z" },
-        { sha: TASK_440_NEVER_DEPLOYED_SHA, short_sha: "9999999", message: "never deployed candidate", author: "Forge Bot", timestamp: "2026-08-27T20:00:00Z" },
-        { sha: TASK_440_HISTORICAL_SHA, short_sha: "abcdef0", message: "retained deployment", author: "Forge Bot", timestamp: "2026-08-27T18:00:00Z" },
-        { sha: TASK_440_ROOT_SHA, short_sha: "1111111", message: "root revision", author: "Forge Bot", timestamp: "2026-08-20T18:00:00Z" },
+        { sha: currentRevision, short_sha: canonicalDesign ? currentRevision.slice(0, 7) : "abcdef0", message: canonicalDesign ? TASK_440_FIXTURE.canonicalConfig.revisionMessage : "current deployment", author: canonicalDesign ? "mreyes" : "Forge Bot", timestamp: "2026-08-28T18:00:00Z", config_inspectable: true },
+        { sha: TASK_440_NEVER_DEPLOYED_SHA, short_sha: "9999999", message: "never deployed candidate", author: "Forge Bot", timestamp: "2026-08-27T20:00:00Z", config_inspectable: true },
+        { sha: TASK_440_HISTORICAL_SHA, short_sha: "abcdef0", message: "retained deployment", author: "Forge Bot", timestamp: "2026-08-27T18:00:00Z", config_inspectable: true },
+        { sha: TASK_440_ROOT_SHA, short_sha: "1111111", message: "root revision", author: "Forge Bot", timestamp: "2026-08-20T18:00:00Z", config_inspectable: true },
       ],
     }) });
   });
@@ -5384,6 +5384,10 @@ async function runTask440LiveSnapshotEvaluation(page) {
     if (!exactTarget.derivationId || !exactTarget.carrierPath || Number(remainingAutomaticJobs) !== 0) {
       throw new Error(`Could not isolate the exact targeted Config inspection from automatic scheduling: ${exactTargetState}`);
     }
+    // The primary evaluation runs through a direct API request after the page
+    // loads. Reload so the UI receives the completed derivation and enables
+    // the scoped inventory request for that exact carrier.
+    await page.reload({ waitUntil: "domcontentloaded", timeout: LOAD_TIMEOUT });
     const attemptsBeforeInspection = completed.attempts.length;
     await page.getByRole("button", { name: "request full inventory" }).click();
     let targetedState = null;
