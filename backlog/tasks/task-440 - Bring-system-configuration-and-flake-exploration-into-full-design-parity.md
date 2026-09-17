@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-17 20:13'
+updated_date: '2026-09-17 20:34'
 labels:
   - design-parity
   - web-ui
@@ -351,6 +351,12 @@ author: OpenCode
 created: 2026-09-17 20:13
 ---
 Committed and pushed `55cc0dc6` (`TASK-440: Add Config previews and notification dismissal`) to MR !323. Verification completed: `cargo fmt --manifest-path packages/default/Cargo.toml --all`; `cargo fmt --manifest-path packages/web-ui/Cargo.toml --all`; `cargo check --manifest-path packages/default/Cargo.toml -p cf-server --lib --bin server`; `cargo check --manifest-path packages/web-ui/Cargo.toml`; `git diff --check`. Per maintainer instruction, the authoritative full Web UI VM check was not run. The pre-existing untracked `packages/web-ui/assets/tailwind.css` was preserved and not committed.
+---
+
+author: OpenCode
+created: 2026-09-17 20:34
+---
+Follow-up build correction committed and pushed as `5c7537af` (`TASK-440: Fix WebAssembly frontend build`). Root causes: the WASM-only IntersectionObserver callback mutated its captured Dioxus signal but was typed as `Fn` instead of `FnMut` (E0525), and the Web UI test build had a non-exhaustive `NotificationMutation` match after adding `DismissAll` (E0004). Verification: `nix build` completed successfully for the default Crystal Forge output, including the WASM Web UI, cf-server, and final package derivations. The cuda-maintainers Cachix 401 warning was non-fatal. The authoritative Web UI VM check was not run. Preserved untracked `packages/web-ui/assets/tailwind.css` remains uncommitted.
 ---
 <!-- COMMENTS:END -->
 
