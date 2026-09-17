@@ -506,7 +506,7 @@ fn merge_tree_observation(
 #[cfg(target_arch = "wasm32")]
 thread_local! {
     static VISIBLE_OPTION_OBSERVERS: std::cell::RefCell<
-        HashMap<u32, (web_sys::IntersectionObserver, wasm_bindgen::prelude::Closure<dyn Fn(js_sys::Array)>)>
+        HashMap<u32, (web_sys::IntersectionObserver, wasm_bindgen::prelude::Closure<dyn FnMut(js_sys::Array)>)>
     > = std::cell::RefCell::new(HashMap::new());
 }
 
@@ -545,26 +545,27 @@ fn use_visible_option_paths() -> (Signal<HashSet<Vec<String>>>, u32) {
             let Some(document) = window.document() else {
                 return;
             };
-            let callback = Closure::<dyn Fn(js_sys::Array)>::new(move |entries: js_sys::Array| {
-                for entry in entries.iter() {
-                    let entry: web_sys::IntersectionObserverEntry = entry.unchecked_into();
-                    let Some(raw_path) = entry.target().get_attribute("data-cfgx-path") else {
-                        continue;
-                    };
-                    let Ok(path) = serde_json::from_str::<Vec<String>>(&raw_path) else {
-                        continue;
-                    };
-                    if entry.is_intersecting() {
-                        visible.with_mut(|set| {
-                            set.insert(path);
-                        });
-                    } else {
-                        visible.with_mut(|set| {
-                            set.remove(&path);
-                        });
+            let callback =
+                Closure::<dyn FnMut(js_sys::Array)>::new(move |entries: js_sys::Array| {
+                    for entry in entries.iter() {
+                        let entry: web_sys::IntersectionObserverEntry = entry.unchecked_into();
+                        let Some(raw_path) = entry.target().get_attribute("data-cfgx-path") else {
+                            continue;
+                        };
+                        let Ok(path) = serde_json::from_str::<Vec<String>>(&raw_path) else {
+                            continue;
+                        };
+                        if entry.is_intersecting() {
+                            visible.with_mut(|set| {
+                                set.insert(path);
+                            });
+                        } else {
+                            visible.with_mut(|set| {
+                                set.remove(&path);
+                            });
+                        }
                     }
-                }
-            });
+                });
             let mut options = web_sys::IntersectionObserverInit::new();
             options.root_margin("0px");
             if let Some(root) = document.query_selector(".cfgx-scroll").ok().flatten() {

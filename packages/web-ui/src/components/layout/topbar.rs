@@ -2655,6 +2655,7 @@ mod tests {
             NotificationMutation::Read(id) => feed.read_succeeded(&attempt, id),
             NotificationMutation::Dismiss(id) => feed.dismiss_succeeded(&attempt, id).1,
             NotificationMutation::MarkAll => feed.mark_all_succeeded(&attempt),
+            NotificationMutation::DismissAll => feed.dismiss_all_succeeded(&attempt),
         }
         .unwrap();
         assert_eq!(fresh.kind, NotificationRequestKind::Head);
