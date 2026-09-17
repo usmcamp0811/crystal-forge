@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-17 09:45'
+updated_date: '2026-09-17 09:46'
 labels:
   - design-parity
   - web-ui
@@ -55,6 +55,8 @@ references:
   - git commit 7f923d5535ffde3ded45649fb42ee0b75b7d453a
   - git commit 481ae958
   - git commit 3a5f207c249c4c272f4b2ab32e11bacefcb9ba45
+  - git commit 7f49d8bb41ae0b86c5fa1ac8e6d375e7f134dfd7
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2857537294'
 documentation:
   - docs/design/CrystalForge/app.jsx
   - docs/design/CrystalForge/components/SystemDetail.jsx
@@ -239,6 +241,8 @@ The `modifiedFiles` metadata is anticipated and non-exhaustive. The implementati
 2026-09-17 final diagnostics P1 remediation verification: centralized builder credential redaction is applied before CVE diagnostic request serialization; local typed scanner failures retain bounded stderr for separately redacted persistence; terminal local failure paths no longer increment attempts; diagnostic API/UI rows use immutable persisted event IDs. Focused Nix-environment verification passed: cf-builder redaction test; serialized-request credential test; full `builder::cve_scanner::tests` (9 passed); cf-server `vulnix::vulnix_runner::tests` (10 passed); `queries::cve_scan_diagnostics::tests` (3 passed); Web UI immutable diagnostic row identity test; touched-file rustfmt check; and `git diff --check`. The local worker persistence and remote lease parity test commands compiled and returned success, but each completed in 0.00s because `CRYSTAL_FORGE_TEST_DATABASE_URL` was unavailable and their guarded database bodies skipped; a migrated isolated database run remains required before review. Previous all-target checks for cf-builder, SQLX_OFFLINE cf-server, and Web UI remain valid from this slice. Protected `flake_timeline.rs`, `coach_panel.rs`, migrations 0263/0264, generated Tailwind, stash, commits, and remotes were not modified. The two files already staged before this continuation remain staged; no staging operation was performed.
 
 2026-09-17 responsive diagnostics follow-up: the new 900x900 browser assertion reproduced a Chromium fixed-position containing-block offset where the drawer ended at 915.58px in a 900px viewport. Replaced the ineffective viewport-difference calculation with a 16px narrow-viewport inset and bounded width. Also made the descendant process-group regression noexec-safe by invoking `sh -c` instead of executing a temporary script. Verification passed: focused `16c-scanning-view` authoritative VM workflow (1/1, dark and light captures, full VM script successful), focused cf-builder descendant process-group test (1 passed), Node syntax check, package rustfmt check, and `git diff --check`. Generated `packages/web-ui/assets/tailwind.css` remains untracked and untouched.
+
+2026-09-17 responsive diagnostics follow-up committed and pushed as `7f49d8bb` (`TASK-440: Harden diagnostics viewport coverage`). Local HEAD and upstream match. Only the preserved generated `packages/web-ui/assets/tailwind.css` remains untracked. Exact-head MR pipeline 2857537294 started for `7f49d8bb`; at inspection, integration was running and web-ui, web-ui-test-runner, server-regressions, OIDC, database, CVE, state-machine, and dashboard jobs were pending. TASK-440 remains In Progress pending exact-head pipeline/broad verification; no merge or deployment occurred.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
