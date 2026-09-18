@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-18 19:43'
+updated_date: '2026-09-18 20:52'
 labels:
   - design-parity
   - web-ui
@@ -64,6 +64,7 @@ references:
   - git commit b89b45ea
   - git commit 465d6913
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2860106205'
+  - git commit 1403b799c8ee52985bc640b5d83556a5ca3021ec
 documentation:
   - docs/design/CrystalForge/app.jsx
   - docs/design/CrystalForge/components/SystemDetail.jsx
@@ -270,6 +271,8 @@ Notification slice remains uncommitted and unverified: workflow 09h now passes a
 2026-09-18 latest-per-flake correction committed and pushed as 9a753a2f (`TASK-440: Use branch snapshots for latest flake semantics`) to origin/TASK-440-system-config-flake-parity. Evaluation active/history, build active/history, and Scanning latest markers now use `COALESCE(f.snapshot_ready_at IS NOT NULL AND latest_snapshot.commit_id = c.id, FALSE)` from a set-based position-0 `flake_branch_commit_snapshot` join. `latest_only` uses that same predicate in count and row CTEs, so absent/snapshot-not-ready HEADs are not synthesized and multiple build rows for one HEAD remain latest. Updated the old TASK-399 evaluation/build database regressions and build showcase fixture to cover cross-domain identity and multiple HEAD build rows. `nix develop -c cargo check -p cf-server`, test compilation, rustfmt check, diff check, and focused pure tests passed. Migrated SQL regressions could not execute because sqlx::test attempted CREATE DATABASE and the isolated DB role lacks CREATE privilege; no database was mutated. Authoritative Web UI check was not run per maintainer instruction. Existing unrelated worktree changes and generated tailwind.css remain unstaged and uncommitted. No evaluator scheduling, merge, or deployment changes were made.
 
 Follow-up regression commit `0a59d340` (`TASK-440: Cover terminal head latest semantics`) adds the inverse terminal-HEAD/active-older evaluation assertions and is pushed to the same MR branch. Branch head is now 0a59d340.
+
+2026-09-18 verified-source evaluator packaging repair committed and pushed as `1403b799c8ee52985bc640b5d83556a5ca3021ec` (`TASK-440: Align builder evaluator packaging`) to MR !323. Root cause: both production builder wrappers prepended unrelated `pkgs.nix`, which shadowed the Nix CLI linked to `pkgs.nix-eval-jobs.nix` and caused strict `EvaluatorFingerprint` conflicts. The fix defines `evaluatorNix = pkgs.nix-eval-jobs.nix` and uses it in both `cf-builder-drv` and the public `builder` wrapper. New `checks.x86_64-linux.builder-evaluator-packaging` verifies both generated wrappers, rejects an unrelated Nix prefix, compares the packaged Nix version with `builtins.nixVersion` observed through `nix-eval-jobs`, and proves the NixOS server and builder service PATHs start with the same evaluator package. The server regression now proves both an exact fingerprint match and a mismatched Nix-version rejection. Verification passed: Nix parsing for both changed Nix files; `git diff --check`; focused builder tests (`32` binary and `58` library tests); focused matching/mismatching server evaluator tests; `builder-evaluator-packaging`; `verified-source-evaluator-parity`; and `builder-cve-contract`. The final targeted packaging check passed after strengthening the service-PATH ordering assertions. A broad `nix flake check path:. --keep-going --no-build` was stopped at maintainer request; broad verification remains delegated to CI. Local and upstream branch heads both resolve to `1403b799c8ee52985bc640b5d83556a5ca3021ec`. Unrelated existing scanning/UI changes and untracked generated Tailwind CSS remain untouched.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
