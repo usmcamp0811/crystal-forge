@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-17 21:29'
+updated_date: '2026-09-18 00:42'
 labels:
   - design-parity
   - web-ui
@@ -228,6 +228,8 @@ Verification against the task-owned isolated preview at http://127.0.0.1:8080 (A
 Session-2 preflight: worktree/branch/HEAD verified unchanged since the prior push (`bf27c03d`, origin matches). Preview session `task440-preview` (tmux) is alive from this same worktree serving http://127.0.0.1:8080 against API 127.0.0.1:3445 and the task's own PostgreSQL on 127.0.0.1:3042, currently at migration 267 (matches HEAD). No other agent activity detected on this worktree/branch during this preflight. Next free additive migration number is 0268. This pass reuses the existing isolated task database (not disposable) and existing fixture-backed mock preview flows; no persistent-database cleanup or live notification mutation will be performed against the user's own account data.
 
 2026-09-17 follow-up diagnosis: the task-local preview is reachable at `http://127.0.0.1:8080` (also `https://10.8.0.177:8090/`) but does not contain `sledge`, `campground`, or revision `2506846`; it has no ConfiguredIndex request/observation/job, no active Config Inspector or Nix process, and no heavy/interactive advisory-lock holder. The demonstrated code defect is unbounded ConfiguredIndex contention: reservation sets `waiting_for_capacity` before capacity acquisition, then retries the shared global `HEAVY_NIX_ADVISORY_LOCK` every five seconds with zero attempts, no owner/wait-duration API state, and no waiting-state recovery. The fixture preview runs mock mode, where the Config Inspector worker intentionally exits, so it cannot reproduce the maintainer target. A read-only diagnostic from the target runtime is required: the request row (status/attempts/scheduled/started/completed/execution/heartbeat/error), matching observation identity, active `pg_locks` heavy-lock holder with `pg_stat_activity`, and relevant worker process state.
+
+2026-09-17 maintainer live diagnostic: request `3e160d51-601c-4054-913f-8e3ea525b8a4` for `campground`/`sledge` at full revision `2506846b19c45cc73b8886bfc90c5785fa2792f1` (commit 3261, derivation 1525556) waited 9m01.545s, ran as execution `2ebb3863-7189-4015-a8fc-3fc3b80b56a8`, then failed terminally after 95.541ms with attempts=1 and no observation. The later inspector/lock capture is chronologically unrelated and MUST NOT be used to infer a historical leak/deadlock/timeout. Next diagnosis targets the exact pure-eval Configured command: temporary private ObserverSelectionFile read through builtins.readFile under `--option pure-eval true`; reproduce with packaged nix-eval-jobs/minimal fixture, retain bounded redacted child errors, then choose a pure-safe structured transport only if confirmed.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
