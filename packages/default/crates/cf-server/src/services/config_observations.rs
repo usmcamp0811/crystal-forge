@@ -5,18 +5,14 @@
 //! option, and provenance requests use dedicated interactive capacity. The
 //! complete configured-option inventory continues to use heavy-Nix capacity.
 
-use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use chrono::Duration as ChronoDuration;
-use serde::Serialize;
 use serde_json::{Value, json};
 use sqlx::{PgConnection, PgPool};
-use tempfile::NamedTempFile;
 use tokio::process::Command;
 use tokio::sync::Semaphore;
 use tokio::time::MissedTickBehavior;
@@ -58,52 +54,14 @@ const OBSERVATION_STDOUT_LIMIT: usize = 64 * 1024 * 1024;
 const OBSERVATION_STDERR_LIMIT: usize = 256 * 1024;
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 const CONFIGURED_DIAGNOSTIC_LIMIT: usize = 128;
+// A preserved evaluator failure must stay readable in a persisted error
+// column and an API response. Nix traces are frequently multi-kilobyte.
+const OBSERVER_ERROR_EXCERPT_LIMIT: usize = 512;
 const STALE_EXECUTION_THRESHOLD: ChronoDuration = ChronoDuration::minutes(10);
 
 fn interactive_config_limiter() -> Arc<Semaphore> {
     static LIMITER: OnceLock<Arc<Semaphore>> = OnceLock::new();
     LIMITER.get_or_init(|| Arc::new(Semaphore::new(1))).clone()
-}
-
-#[derive(Serialize)]
-struct ObserverSelection<'a> {
-    operation: &'a str,
-    path: &'a [String],
-    child_offset: u32,
-}
-
-struct ObserverSelectionFile(NamedTempFile);
-
-impl ObserverSelectionFile {
-    fn create(target: &ConfigObservationExecutionTarget) -> Result<Self> {
-        let mut file = tempfile::Builder::new()
-            .prefix("crystal-forge-config-observation-")
-            .suffix(".json")
-            .tempfile()
-            .context("create private Config observation selection")?;
-        // SECURITY: Structured operation input is transported as owner-only
-        // JSON. It is never interpolated into trusted Nix source.
-        file.as_file()
-            .set_permissions(std::fs::Permissions::from_mode(0o600))
-            .context("secure Config observation selection")?;
-        serde_json::to_writer(
-            file.as_file_mut(),
-            &ObserverSelection {
-                operation: target.kind.as_str(),
-                path: &target.path_components,
-                child_offset: target.child_offset,
-            },
-        )?;
-        file.as_file_mut().flush()?;
-        Ok(Self(file))
-    }
-
-    fn path(&self) -> Result<&str> {
-        self.0
-            .path()
-            .to_str()
-            .context("Config observation selection path is not UTF-8")
-    }
 }
 
 /// Attempts one scoped request before the optional complete-inspection queue.
@@ -266,26 +224,19 @@ async fn run_observation(
         &immutable_source.nar_hash,
     );
     let command = if execution.target.kind == ConfigObservationKind::ConfiguredIndex {
-        let selection = ObserverSelectionFile::create(&execution.target)?;
-        let expression = build_observer_expression(
-            &flake_ref,
-            &execution.target.configuration_name,
-            selection.path()?,
-        );
+        let expression = build_observer_expression(&flake_ref, &execution.target);
         let command = build_observer_command(Path::new(NIX_EVAL_JOBS_PROGRAM), &expression);
-        // The command must retain the owner-only selection file until exit.
-        return run_observation_command(pool, execution, command, Some(selection)).await;
+        return run_observation_command(pool, execution, command).await;
     } else {
         build_shallow_observer_command(Path::new(NIX_PROGRAM), &flake_ref, &execution.target)
     };
-    run_observation_command(pool, execution, command, None).await
+    run_observation_command(pool, execution, command).await
 }
 
 async fn run_observation_command(
     pool: &PgPool,
     execution: &ConfigObservationExecution,
     mut command: Command,
-    _selection: Option<ObserverSelectionFile>,
 ) -> Result<Value> {
     let evaluation_started_at = Instant::now();
     // PERFORMANCE: Only a bounded automatic value preview uses the short
@@ -333,19 +284,22 @@ async fn run_observation_command(
     }
 }
 
-fn build_observer_expression(
-    flake_ref: &str,
-    configuration_name: &str,
-    selection_path: &str,
-) -> String {
+fn build_observer_expression(flake_ref: &str, target: &ConfigObservationExecutionTarget) -> String {
     let observer = include_str!("../models/config_observer.nix");
     let shallow_observer = include_str!("../models/config_shallow_observer.nix");
     let encoder = include_str!("../models/config_value_encoding.nix");
     format!(
-        "let\n  selection = builtins.fromJSON (builtins.readFile {selection});\n  flake = builtins.getFlake {flake_ref};\n  configuration = builtins.getAttr {configuration} flake.nixosConfigurations;\n  encodeValue = ({encoder}) configuration.pkgs.lib;\nin ({observer}) {{ inherit flake configuration encodeValue; targetKey = builtins.hashString \"sha256\" (builtins.toJSON [ {flake_ref} {configuration} configuration.config.system.build.toplevel.drvPath ]); operation = selection.operation; path = selection.path; childOffset = selection.child_offset; shallowObserver = ({shallow_observer}); }}",
-        selection = nix_string_pub(selection_path),
+        "let\n  flake = builtins.getFlake {flake_ref};\n  configuration = builtins.getAttr {configuration} flake.nixosConfigurations;\n  encodeValue = ({encoder}) configuration.pkgs.lib;\nin ({observer}) {{ inherit flake configuration encodeValue; targetKey = builtins.hashString \"sha256\" (builtins.toJSON [ {flake_ref} {configuration} configuration.config.system.build.toplevel.drvPath ]); operation = {operation}; path = [ {path} ]; childOffset = {child_offset}; shallowObserver = ({shallow_observer}); }}",
         flake_ref = nix_string_pub(flake_ref),
-        configuration = nix_string_pub(configuration_name),
+        configuration = nix_string_pub(&target.configuration_name),
+        operation = nix_string_pub(target.kind.as_str()),
+        path = target
+            .path_components
+            .iter()
+            .map(|component| nix_string_pub(component))
+            .collect::<Vec<_>>()
+            .join(" "),
+        child_offset = target.child_offset,
         shallow_observer = shallow_observer,
     )
 }
@@ -453,6 +407,26 @@ fn reconcile_shallow_observer_output(
     Ok(redacted)
 }
 
+/// Returns bounded, redacted evaluator text for an operator-facing failure.
+///
+/// Evaluator errors can quote option values, module sources, and repository
+/// URLs. The excerpt is redacted before it can reach a persisted failure
+/// message, an API response, or a log record, and it is bounded so a large
+/// Nix trace cannot dominate stored failure text.
+fn observer_error_excerpt(error: &str) -> String {
+    let collapsed = error.split_whitespace().collect::<Vec<_>>().join(" ");
+    let redacted = crate::security::snapshot_redaction::redact_text(&collapsed);
+    if redacted.chars().count() <= OBSERVER_ERROR_EXCERPT_LIMIT {
+        return redacted;
+    }
+    let mut excerpt: String = redacted
+        .chars()
+        .take(OBSERVER_ERROR_EXCERPT_LIMIT)
+        .collect();
+    excerpt.push_str("...");
+    excerpt
+}
+
 fn reconcile_observer_output(
     output: BoundedProcessOutput,
     execution: &ConfigObservationExecution,
@@ -493,10 +467,16 @@ fn reconcile_observer_output(
                 } else {
                     diagnostics_truncated = true;
                 }
-                let _ = error;
                 continue;
             }
-            bail!("Config observer job failed");
+            // `nix-eval-jobs` reports a failed job as an `error` record and
+            // still exits 0. Losing this text leaves an operator with a
+            // generic failure for an exactly diagnosable launch or evaluation
+            // fault, so the bounded redacted cause is preserved here.
+            bail!(
+                "Config observer job {attr} failed: {}",
+                observer_error_excerpt(error)
+            );
         }
         let drv = row
             .get("drvPath")
@@ -534,7 +514,11 @@ fn reconcile_observer_output(
         }
     }
     let payload = if execution.target.kind == ConfigObservationKind::ConfiguredIndex {
-        let mut index = index.context("configured index result is missing")?;
+        // A failing index job bails above with its preserved cause, so this
+        // path means the evaluator returned no index record at all.
+        let mut index = index.context(
+            "configured index job produced no result record; classification did not run",
+        )?;
         let object = index
             .as_object_mut()
             .context("configured index payload is not an object")?;
@@ -727,17 +711,163 @@ mod tests {
     }
 
     #[test]
-    fn generated_expression_reads_json_selection_without_embedding_path_components() {
+    fn generated_expression_embeds_validated_structured_selection_for_pure_eval() {
+        let mut execution = execution(
+            ConfigObservationKind::ConfiguredIndex,
+            vec!["safe".to_string()],
+        );
+        execution.target.child_offset = 7;
         let expression = build_observer_expression(
             "git+https://example.test/repo?rev=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "host",
-            "/tmp/selection.json",
+            &execution.target,
         );
-        assert!(expression.contains("builtins.fromJSON (builtins.readFile"));
-        assert!(expression.contains("childOffset = selection.child_offset"));
+        assert!(!expression.contains("builtins.readFile"));
+        assert!(expression.contains("operation = \"configured_index\""));
+        assert!(expression.contains("path = [ \"safe\" ]"));
+        assert!(expression.contains("childOffset = 7"));
         assert!(expression.contains("slice childOffset"));
         assert!(expression.contains("child_offset = childOffset"));
-        assert!(!expression.contains("builtins.abort injection"));
+    }
+
+    /// `nix-eval-jobs` exits 0 and reports a failed job as an `error` record.
+    /// The demonstrated production fault took exactly this shape, so it must
+    /// surface as an actionable failure rather than success, an empty
+    /// configured list, or a bare missing-index message.
+    #[test]
+    fn exit_zero_with_an_index_error_record_fails_with_the_preserved_cause() {
+        let configured = execution(ConfigObservationKind::ConfiguredIndex, Vec::new());
+        let output = successful_output(vec![serde_json::json!({
+            "attr": "__crystalForgeConfiguredIndex",
+            "error": "access to absolute path '/tmp/selection.json' is forbidden in pure evaluation mode (use '--impure' to override)"
+        })]);
+        assert!(
+            output.status.success(),
+            "fixture must reproduce exit code 0"
+        );
+
+        let error = reconcile_observer_output(output, &configured)
+            .expect_err("an index error record must not reconcile as success");
+        let rendered = format!("{error:#}");
+
+        assert!(
+            rendered.contains("__crystalForgeConfiguredIndex"),
+            "failure must name the job that failed: {rendered}"
+        );
+        assert!(
+            rendered.contains("forbidden in pure evaluation mode"),
+            "failure must preserve the underlying evaluator cause: {rendered}"
+        );
+        assert!(
+            !rendered.contains("produced no result record"),
+            "an errored index must not be reported as a merely missing index: {rendered}"
+        );
+    }
+
+    /// A per-option classifier failure is a bounded partial-result diagnostic.
+    /// It must never be promoted into a whole-index failure.
+    #[test]
+    fn classifier_error_records_stay_partial_diagnostics_with_a_usable_index() {
+        let configured = execution(ConfigObservationKind::ConfiguredIndex, Vec::new());
+        let key = "b".repeat(64);
+        let result = reconcile_observer_output(
+            successful_output(vec![
+                serde_json::json!({
+                    "attr": "__crystalForgeConfiguredIndex",
+                    "drvPath": configured.target.carrier_drv_path,
+                    "extraValue": {
+                        "kind": "configured_index", "path_components": [], "total_traversed": 2,
+                        "diagnostics": [], "diagnostics_truncated": false
+                    }
+                }),
+                serde_json::json!({
+                    "attr": format!("configured_{key}"),
+                    "error": "ambiguous classifier poison"
+                }),
+            ]),
+            &configured,
+        )
+        .expect("a classifier failure must not fail the whole index");
+
+        assert_eq!(
+            result["classifier_diagnostics"].as_array().map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(
+            result["classifier_diagnostics"][0]["code"],
+            "configured_classifier_failed"
+        );
+        validate_config_observation_payload(
+            ConfigObservationKind::ConfiguredIndex,
+            &[],
+            0,
+            &result,
+        )
+        .expect("partial-diagnostic index should still validate");
+    }
+
+    /// Evaluator failure text can quote option values and credential-bearing
+    /// URLs. The preserved cause must be redacted and bounded.
+    #[test]
+    fn preserved_observer_error_is_redacted_and_bounded() {
+        let excerpt = observer_error_excerpt(
+            "error: while evaluating https://user:sw0rdf1sh@example.test/repo.git\n  trace line",
+        );
+        assert!(
+            !excerpt.contains("sw0rdf1sh"),
+            "credential must not survive into a preserved failure: {excerpt}"
+        );
+
+        let bounded = observer_error_excerpt(&"n".repeat(OBSERVER_ERROR_EXCERPT_LIMIT * 4));
+        assert!(bounded.chars().count() <= OBSERVER_ERROR_EXCERPT_LIMIT + 3);
+        assert!(bounded.ends_with("..."));
+    }
+
+    /// Inline selection transport replaced a private temporary JSON file, so
+    /// path components now reach trusted Nix source directly. Each component
+    /// must be escaped as a Nix string literal, and component-array identity
+    /// must survive: a component containing a dot stays one component.
+    #[test]
+    fn inline_selection_escapes_hostile_path_components_and_keeps_array_identity() {
+        let hostile = vec![
+            "quote\"component".to_string(),
+            "back\\slash".to_string(),
+            "${builtins.abort \"injection\"}".to_string(),
+            "dotted.component".to_string(),
+        ];
+        let execution = execution(ConfigObservationKind::ConfiguredIndex, hostile);
+        let expression = build_observer_expression(
+            "git+https://example.test/repo?rev=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            &execution.target,
+        );
+
+        // Interpolation must be neutralised, never evaluated. The escaped
+        // form still contains "${", so assert every occurrence is preceded
+        // by a backslash rather than asserting simple absence.
+        assert!(
+            expression.contains("\\${builtins.abort"),
+            "interpolation must be escaped: {expression}"
+        );
+        assert!(
+            expression
+                .match_indices("${builtins.abort")
+                .all(|(index, _)| index > 0 && expression.as_bytes()[index - 1] == b'\\'),
+            "every interpolation must be backslash-escaped: {expression}"
+        );
+        assert!(expression.contains("quote\\\"component"));
+        assert!(expression.contains("back\\\\slash"));
+        // A dot is data inside one component, not a component separator.
+        assert!(expression.contains("\"dotted.component\""));
+
+        let path_list = expression
+            .split_once("path = [ ")
+            .and_then(|(_, rest)| rest.split_once(" ];"))
+            .map(|(list, _)| list)
+            .expect("expression must contain a bracketed path list");
+        assert_eq!(
+            path_list.matches("\" \"").count() + 1,
+            4,
+            "four components must remain four Nix strings: {path_list}"
+        );
     }
 
     #[test]

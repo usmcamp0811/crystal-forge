@@ -3,6 +3,7 @@
 let
   observerSource = builtins.readFile ../../packages/default/crates/cf-server/src/models/config_observer.nix;
   encoderSource = builtins.readFile ../../packages/default/crates/cf-server/src/models/config_value_encoding.nix;
+  shallowObserverSource = builtins.readFile ../../packages/default/crates/cf-server/src/models/config_shallow_observer.nix;
   fixture = pkgs.runCommand "crystal-forge-config-observer-fixture" { } ''
     mkdir -p "$out"
     cat > "$out/flake.nix" <<'EOF'
@@ -12,7 +13,10 @@ let
         let
           lib = nixpkgs.lib;
           evaluated = lib.nixosSystem {
-            system = builtins.currentSystem;
+            # Pinned rather than `builtins.currentSystem` so the same fixture
+            # is usable under `--option pure-eval true`, which rejects
+            # impure builtins.
+            system = "${pkgs.stdenv.hostPlatform.system}";
             modules = [
               ({ lib, ... }: {
                 options.crystalForgeConfigured = {
@@ -132,9 +136,91 @@ let
   servicesSecondFile = servicesPageFile 512;
   provenanceFile = pkgs.writeText "config-observer-provenance.nix"
     (expressionFor "provenance" [ "crystalForgeProvenance" "many" ]);
+  # A separately locked fixture for the pure-evaluation regression.
+  #
+  # `--option pure-eval true` rejects unlocked flake inputs and absolute path
+  # literals, so this fixture carries a real `flake.lock` exactly as a
+  # production flake does. The unlocked `fixture` above is deliberately left
+  # alone so the existing "observer never writes a lock file" assertions keep
+  # their meaning.
+  lockedFixture = pkgs.runCommand "crystal-forge-config-observer-locked-fixture" {
+    nativeBuildInputs = [ pkgs.jq pkgs.nix ];
+  } ''
+    mkdir -p "$out"
+    cat > "$out/flake.nix" <<'EOF'
+    {
+      inputs.nixpkgs.url = "path:${pkgs.path}";
+      outputs = { nixpkgs, ... }:
+        let lib = nixpkgs.lib; in {
+          nixosConfigurations.test = lib.nixosSystem {
+            system = "${pkgs.stdenv.hostPlatform.system}";
+            modules = [
+              ({ lib, ... }: {
+                options.crystalForgeConfigured = {
+                  defaultOnly = lib.mkOption { type = lib.types.str; default = "default"; };
+                  ordinary = lib.mkOption { type = lib.types.str; default = "default"; };
+                  mkForce = lib.mkOption { type = lib.types.str; default = "default"; };
+                  losing = lib.mkOption { type = lib.types.str; default = "default"; };
+                };
+                config = {
+                  crystalForgeConfigured = {
+                    ordinary = "ordinary";
+                    mkForce = lib.mkForce "forced";
+                    losing = lib.mkOverride 2000 "loser";
+                  };
+                  boot.isContainer = true;
+                  # Keep the carrier closure small and offline-evaluable so
+                  # the sandboxed check never needs a substituter.
+                  networking.hostName = "config-observer-fixture";
+                  networking.domain = "test";
+                  documentation.enable = false;
+                  documentation.nixos.enable = false;
+                  system.stateVersion = "26.05";
+                };
+              })
+            ];
+          };
+        };
+    }
+    EOF
+    # The locked narHash must equal the real NAR hash of the input path.
+    nixpkgsHash="$(nix --extra-experimental-features nix-command \
+      hash path --type sha256 --sri "${pkgs.path}")"
+    jq -n --arg p "${pkgs.path}" --arg h "$nixpkgsHash" '{
+      nodes: {
+        nixpkgs: {
+          locked: { lastModified: 1, narHash: $h, path: $p, type: "path" },
+          original: { path: $p, type: "path" }
+        },
+        root: { inputs: { nixpkgs: "nixpkgs" } }
+      },
+      root: "root",
+      version: 7
+    }' > "$out/flake.lock"
+  '';
+  # Mirrors `build_observer_expression` in
+  # `packages/default/crates/cf-server/src/services/config_observations.rs`.
+  # The selection is inline structured Nix, never `builtins.readFile` of a
+  # private temporary path, because the production command enables
+  # `--option pure-eval true`. `@FLAKEREF@` is substituted at build time with
+  # the narHash-qualified store flake reference production uses.
+  pureEvalTemplate = pkgs.writeText "config-observer-pure-eval-template.nix" ''
+    let
+      flake = builtins.getFlake "@FLAKEREF@";
+      configuration = builtins.getAttr "test" flake.nixosConfigurations;
+      encodeValue = (${encoderSource}) configuration.pkgs.lib;
+    in (${observerSource}) {
+      inherit flake configuration encodeValue;
+      targetKey = builtins.hashString "sha256" (builtins.toJSON [ "@FLAKEREF@" "test" configuration.config.system.build.toplevel.drvPath ]);
+      operation = "configured_index";
+      path = [ ];
+      childOffset = 0;
+      shallowObserver = (${shallowObserverSource});
+    }
+  '';
 in
 pkgs.runCommand "crystal-forge-config-observer-check" {
-  nativeBuildInputs = [ pkgs.jq pkgs.nix-eval-jobs ];
+  nativeBuildInputs = [ pkgs.jq pkgs.nix-eval-jobs pkgs.nix ];
 } ''
   export HOME="$TMPDIR"
   export XDG_CACHE_HOME="$TMPDIR/cache"
@@ -255,6 +341,64 @@ pkgs.runCommand "crystal-forge-config-observer-check" {
     and (.extraValue.definitions | length) == 512
     and all(.extraValue.definitions[]; has("source_path") and has("priority"))
   ' provenance.jsonl >/dev/null
+
+  # ── Production command path under pure evaluation ────────────────────────
+  # Regression for the observed production failure: the configured index was
+  # constructed with `builtins.readFile` of a private temporary selection
+  # file while `--option pure-eval true` was enabled, so `nix-eval-jobs`
+  # exited 0 and emitted an error record instead of an index.
+  narHash="$(nix --extra-experimental-features nix-command hash path --type sha256 --sri "${lockedFixture}")"
+  encodedHash="$(jq -rn --arg hash "$narHash" '$hash | @uri')"
+  flakeref="path:${lockedFixture}?narHash=$encodedHash"
+  sed "s|@FLAKEREF@|$flakeref|g" "${pureEvalTemplate}" > pure-eval.nix
+
+  # These flags are the exact set emitted by `build_observer_command`.
+  nix-eval-jobs --expr "$(cat pure-eval.nix)" \
+    --option pure-eval true \
+    --meta --apply 'derivation: derivation.meta.crystalForgeConfigObservation' \
+    --option experimental-features 'nix-command flakes' \
+    --workers 2 \
+    > pure-configured.jsonl 2> pure-configured.stderr || true
+
+  # The required index record must exist and must not be an error record.
+  # Exit status alone is not evidence: a failed job still exits 0.
+  if ! jq -e 'select(.attr == "__crystalForgeConfiguredIndex") | .error == null' \
+      pure-configured.jsonl >/dev/null; then
+    echo "pure-eval configured index did not produce a successful index record" >&2
+    echo "--- stdout ---" >&2; cat pure-configured.jsonl >&2
+    echo "--- stderr ---" >&2; tail -c 4000 pure-configured.stderr >&2
+    exit 1
+  fi
+  ! grep -Fq 'forbidden in pure evaluation mode' pure-configured.jsonl
+  ! grep -Fq 'forbidden in pure evaluation mode' pure-configured.stderr
+
+  pure_configured_path() {
+    jq -e --arg name "$1" '
+      select(.attr | startswith("configured_"))
+      | select(.error == null)
+      | select(.extraValue.path_components == ["crystalForgeConfigured", $name])
+      | .extraValue.configured == true
+    ' pure-configured.jsonl >/dev/null
+  }
+  pure_absent_path() {
+    ! jq -e --arg name "$1" '
+      select(.attr | startswith("configured_"))
+      | select(.error == null)
+      | select(.extraValue.path_components == ["crystalForgeConfigured", $name])
+      | .extraValue.configured == true
+    ' pure-configured.jsonl >/dev/null
+  }
+  # A real configured assignment is classified; a declaration-only default is
+  # not. Identities are asserted, not merely the process exit status.
+  pure_configured_path ordinary
+  pure_configured_path mkForce
+  pure_absent_path defaultOnly
+  pure_absent_path losing
+
+  # Every emitted job must carry the single shared carrier identity that
+  # reconciliation binds to the request.
+  test "$(jq -r 'select(.error == null) | .drvPath' pure-configured.jsonl | sort -u | wc -l)" -eq 1
+  test ! -e "${fixture}/flake.lock"
 
   touch "$out"
 ''
