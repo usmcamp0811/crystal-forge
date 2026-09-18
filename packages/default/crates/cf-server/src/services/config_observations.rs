@@ -164,16 +164,15 @@ async fn execute_reserved_config_observation(
             result
         }
         Err(error) => {
-            // Persist a stable category. Evaluator-controlled stderr remains
-            // bounded and redacted in logs but is not a public cache contract.
-            debug!(request_id = %execution.target.request_id, %error, "scoped Config observation failed");
-            complete_config_observation_failure(
-                pool,
-                &execution,
-                "Config observation evaluation failed",
-            )
-            .await
-            .map(|_| ())
+            let safe_error = persisted_observer_failure(&error);
+            debug!(
+                request_id = %execution.target.request_id,
+                error = %safe_error,
+                "scoped Config observation failed"
+            );
+            complete_config_observation_failure(pool, &execution, &safe_error)
+                .await
+                .map(|_| ())
         }
     };
     release_capacity_lock(&mut lock_conn, capacity_lock).await;
@@ -425,6 +424,21 @@ fn observer_error_excerpt(error: &str) -> String {
         .collect();
     excerpt.push_str("...");
     excerpt
+}
+
+/// Returns the stable failure category with a bounded, redacted cause.
+///
+/// The returned text is safe for request persistence and API display. The
+/// stable prefix lets clients classify the operation, while the excerpt keeps
+/// evaluator failures actionable without exposing credentials or unbounded
+/// Nix traces.
+fn persisted_observer_failure(error: &anyhow::Error) -> String {
+    let cause = observer_error_excerpt(&format!("{error:#}"));
+    if cause.trim().is_empty() {
+        "Config observation evaluation failed".to_string()
+    } else {
+        format!("Config observation evaluation failed: {cause}")
+    }
 }
 
 fn reconcile_observer_output(
@@ -820,6 +834,26 @@ mod tests {
         let bounded = observer_error_excerpt(&"n".repeat(OBSERVER_ERROR_EXCERPT_LIMIT * 4));
         assert!(bounded.chars().count() <= OBSERVER_ERROR_EXCERPT_LIMIT + 3);
         assert!(bounded.ends_with("..."));
+    }
+
+    #[test]
+    fn persisted_observer_failure_keeps_safe_cause_and_stable_category() {
+        let error = anyhow::anyhow!(
+            "access to https://user:sw0rdf1sh@example.test/repo.git is forbidden in pure evaluation mode"
+        )
+        .context("configured index job failed");
+        let persisted = persisted_observer_failure(&error);
+
+        assert!(persisted.starts_with("Config observation evaluation failed: "));
+        assert!(persisted.contains("configured index job failed"));
+        assert!(persisted.contains("forbidden in pure evaluation mode"));
+        assert!(!persisted.contains("sw0rdf1sh"));
+        assert!(
+            persisted.chars().count()
+                <= "Config observation evaluation failed: ".chars().count()
+                    + OBSERVER_ERROR_EXCERPT_LIMIT
+                    + 3
+        );
     }
 
     /// Inline selection transport replaced a private temporary JSON file, so

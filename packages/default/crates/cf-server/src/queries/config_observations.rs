@@ -2134,6 +2134,65 @@ mod tests {
         assert_eq!(cached.observation_id, Some(observation_id));
         assert!(cached.reused);
 
+        let failure_path = vec!["failure".to_string()];
+        let failed = create_or_reuse_config_observation_request(
+            &pool,
+            system_id,
+            &revision,
+            ConfigObservationKind::Prefix,
+            &failure_path,
+            0,
+            false,
+        )
+        .await
+        .unwrap();
+        let CreateConfigObservationOutcome::Resolved(failed) = failed else {
+            panic!("failure target should resolve");
+        };
+        let counts_before_failure: (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT COUNT(*) FROM config_observations), (SELECT COUNT(*) FROM config_observation_contents)",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let failure_target = reserve_next_config_observation(&pool)
+            .await
+            .unwrap()
+            .expect("failure request should reserve");
+        assert_eq!(failure_target.request_id, failed.request_id);
+        let failed_execution =
+            start_config_observation_execution(&pool, failure_target, Uuid::new_v4())
+                .await
+                .unwrap()
+                .expect("failure request should start");
+        assert!(
+            complete_config_observation_failure(
+                &pool,
+                &failed_execution,
+                "Config observation evaluation failed: forbidden token=sw0rdf1sh",
+            )
+            .await
+            .unwrap()
+        );
+        let failed_request = get_config_observation_request(&pool, system_id, failed.request_id)
+            .await
+            .unwrap()
+            .expect("failed request should remain readable");
+        assert_eq!(failed_request.lifecycle, ConfigObservationLifecycle::Failed);
+        let failed_error = failed_request.error.expect("failure should retain a cause");
+        assert!(failed_error.contains("Config observation evaluation failed"));
+        assert!(!failed_error.contains("sw0rdf1sh"));
+        assert_eq!(
+            sqlx::query_as::<_, (i64, i64)>(
+                "SELECT (SELECT COUNT(*) FROM config_observations), (SELECT COUNT(*) FROM config_observation_contents)",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            counts_before_failure,
+            "a failed execution must not publish immutable cache content",
+        );
+
         let different_path = create_or_reuse_config_observation_request(
             &pool,
             system_id,
