@@ -2289,6 +2289,57 @@ mod tests {
         .unwrap();
         assert!(history.items.is_empty());
 
+        sqlx::query(
+            "UPDATE commits SET evaluation_status = CASE id WHEN $1 THEN 'complete' ELSE 'pending' END, evaluation_completed_at = CASE WHEN id = $1 THEN NOW() ELSE NULL END WHERE id IN ($1, $2)",
+        )
+        .bind(latest_active)
+        .bind(history_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let terminal_head_history = super::list_eval_history(
+            &pool,
+            &crate::api::models::EvalHistoryParams {
+                latest_only: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(terminal_head_history.items.len(), 1);
+        assert_eq!(terminal_head_history.items[0].commit_id, latest_active);
+        assert!(terminal_head_history.items[0].is_latest_per_flake);
+
+        let active_older_commit = super::list_eval_queue(
+            &pool,
+            &crate::api::models::EvalQueueParams {
+                latest_only: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            active_older_commit
+                .rows
+                .iter()
+                .any(|row| row.commit_id == latest_active)
+        );
+        assert!(
+            !active_older_commit
+                .rows
+                .iter()
+                .any(|row| row.commit_id == history_id)
+        );
+
+        sqlx::query(
+            "UPDATE commits SET evaluation_status = 'complete', evaluation_completed_at = NOW() WHERE id = $1",
+        )
+        .bind(history_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
         sqlx::query("DELETE FROM flake_branch_commit_snapshot WHERE flake_id = $1")
             .bind(flake_id)
             .execute(&pool)
