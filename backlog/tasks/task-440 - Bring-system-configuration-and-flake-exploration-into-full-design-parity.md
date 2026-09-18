@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-18 00:42'
+updated_date: '2026-09-18 01:45'
 labels:
   - design-parity
   - web-ui
@@ -230,6 +230,22 @@ Session-2 preflight: worktree/branch/HEAD verified unchanged since the prior pus
 2026-09-17 follow-up diagnosis: the task-local preview is reachable at `http://127.0.0.1:8080` (also `https://10.8.0.177:8090/`) but does not contain `sledge`, `campground`, or revision `2506846`; it has no ConfiguredIndex request/observation/job, no active Config Inspector or Nix process, and no heavy/interactive advisory-lock holder. The demonstrated code defect is unbounded ConfiguredIndex contention: reservation sets `waiting_for_capacity` before capacity acquisition, then retries the shared global `HEAVY_NIX_ADVISORY_LOCK` every five seconds with zero attempts, no owner/wait-duration API state, and no waiting-state recovery. The fixture preview runs mock mode, where the Config Inspector worker intentionally exits, so it cannot reproduce the maintainer target. A read-only diagnostic from the target runtime is required: the request row (status/attempts/scheduled/started/completed/execution/heartbeat/error), matching observation identity, active `pg_locks` heavy-lock holder with `pg_stat_activity`, and relevant worker process state.
 
 2026-09-17 maintainer live diagnostic: request `3e160d51-601c-4054-913f-8e3ea525b8a4` for `campground`/`sledge` at full revision `2506846b19c45cc73b8886bfc90c5785fa2792f1` (commit 3261, derivation 1525556) waited 9m01.545s, ran as execution `2ebb3863-7189-4015-a8fc-3fc3b80b56a8`, then failed terminally after 95.541ms with attempts=1 and no observation. The later inspector/lock capture is chronologically unrelated and MUST NOT be used to infer a historical leak/deadlock/timeout. Next diagnosis targets the exact pure-eval Configured command: temporary private ObserverSelectionFile read through builtins.readFile under `--option pure-eval true`; reproduce with packaged nix-eval-jobs/minimal fixture, retain bounded redacted child errors, then choose a pure-safe structured transport only if confirmed.
+
+2026-09-18 Configured transport repair committed and pushed as `01579dcc` (`TASK-440: Send Config selection inline under pure evaluation`); local and remote heads match on MR !323.
+
+Demonstrated cause of the 95ms production failure: the configured index read a private temporary selection JSON with `builtins.readFile` while `--option pure-eval true` was set. Pure evaluation forbids absolute-path reads, so `nix-eval-jobs` exited 0 and emitted an error record. Reproduced directly with packaged nix-eval-jobs: `access to absolute path '.../selection.json' is forbidden in pure evaluation mode`.
+
+Repair: inline escaped structured selection (operation, per-component Nix string literals, child offset); selection-file lifetime removed. Additional defect found and fixed in review: the index-error path discarded the evaluator message via a generic `bail!("Config observer job failed")`. It now preserves a bounded, redacted cause and distinguishes an errored index from a genuinely absent index record. Per-option classifier failures remain bounded partial diagnostics.
+
+Verified: `cargo test -p cf-server --lib services::config_observations` 9 passed / 1 ignored, including exit-0-with-error-JSONL, classifier-partial-diagnostic, redaction/bounding, and hostile path-component escaping with component-array identity. Manual real-Nix run of the exact production expression and flag set under pure evaluation against a locked fixture: exit 0, index record present with total_traversed 16258, `ordinary` and `mkForce` configured, `defaultOnly` and `losing` excluded. rustfmt and `git diff --check` clean.
+
+Pre-existing defect found (not caused by this work): `nix build .#checks.x86_64-linux.config-observer` fails with exit code 4 and an empty build log at unmodified HEAD `5c7537af` in this offline sandbox. The added pure-evaluation regression therefore could not be executed inside the sandbox locally and will first run in CI.
+
+Still open and explicitly not addressed: the preceding 9m01.545s capacity wait and whole-index classification performance.
+
+Authentication diagnosis (notification slice): the original HTTP 405 came from pointing the browser at the Dioxus dev server on 8080, which serves no PATCH route. The subsequent HTTP 401 at the Caddy origin was NOT session loss: the `cf-ui-admin` account did not exist in the isolated preview database, so `ensureAuthenticated` never obtained a session and the PATCH ran unauthenticated. After registering that account, a same-context probe recorded login 200, `__Host-cf-session` and `__Host-cf-csrf` present (Secure, HttpOnly session, domain 10.8.0.177), whoami 200 with is_authenticated true both after login and on /systems, preferences GET 200, and preferences PATCH 200. The preview server log confirms `User logged in: cf-ui-admin@example.com`.
+
+Notification slice remains uncommitted and unverified: workflow 09h now passes authentication but fails at `locator.click` on the bell with repeated `element was detached from the DOM`, indicating continuous re-render. This must be resolved and screenshots inspected before that slice is committed.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
