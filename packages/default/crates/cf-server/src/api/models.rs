@@ -338,7 +338,8 @@ pub struct ScanningQueueItemResponse {
     pub freshness: String,
     /// True when this is the latest scan row for its derivation.
     pub is_current: bool,
-    /// True when this derivation's commit is the latest known commit for its flake.
+    /// True when this derivation's commit is position-0 in the ready branch
+    /// snapshot for its flake.
     #[serde(default)]
     pub is_latest_per_flake: bool,
     /// Identifies the persisted source that created the latest scan lifecycle.
@@ -1189,11 +1190,12 @@ pub struct BuildQueueItem {
     #[serde(default)]
     pub system_id: Option<uuid::Uuid>,
 
-    /// Stable flake identity used for latest-per-flake grouping.
+    /// Stable flake identity used for branch-snapshot latest matching.
     #[serde(default)]
     pub flake_id: Option<i32>,
 
-    /// True when this is the newest item in its active/history domain for its flake.
+    /// True when this build's commit is position-0 in the ready branch snapshot
+    /// for its flake. Multiple build rows can be true for one commit.
     #[serde(default)]
     pub is_latest_per_flake: bool,
 

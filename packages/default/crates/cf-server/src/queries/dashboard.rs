@@ -794,11 +794,15 @@ pub async fn fetch_recent_build_history(
                    COALESCE(s.hostname, d.derivation_target, d.derivation_name) AS display_name,
                    COALESCE(s.system_configuration_name, '') AS system_configuration_name,
                    COALESCE(b.name, '') AS builder_name,
-                   RANK() OVER (PARTITION BY c.flake_id ORDER BY c.commit_timestamp DESC, c.id DESC) AS latest_rank
+                   COALESCE(f.snapshot_ready_at IS NOT NULL AND latest_snapshot.commit_id = c.id, FALSE)
+                       AS is_latest_per_flake
             FROM build_jobs bj
             JOIN derivations d ON d.id = bj.derivation_id
             LEFT JOIN commits c ON c.id = d.commit_id
             LEFT JOIN flakes f ON f.id = c.flake_id
+            LEFT JOIN flake_branch_commit_snapshot latest_snapshot
+              ON latest_snapshot.flake_id = c.flake_id
+             AND latest_snapshot.position = 0
             LEFT JOIN LATERAL (
                 SELECT hostname, environment_id, system_configuration_name
                 FROM systems
@@ -835,7 +839,7 @@ pub async fn fetch_recent_build_history(
                    OR status ILIKE ('%' || $7 || '%')
                    OR CASE status WHEN 'success' THEN 'complete' WHEN 'cancelling' THEN 'stopping' ELSE status END ILIKE ('%' || $7 || '%')
                    OR 'x86_64-linux' ILIKE ('%' || $7 || '%'))
-              AND (NOT $8 OR (flake_id IS NOT NULL AND latest_rank = 1))
+               AND (NOT $8 OR is_latest_per_flake)
         )
         SELECT (SELECT COUNT(*) FROM domain), (SELECT COUNT(*) FROM filtered)
         "#,
@@ -881,14 +885,15 @@ pub async fn fetch_recent_build_history(
             bj.available_at,
             COALESCE(bj.completed_at, bj.updated_at, bj.created_at) AS completed_sort_at,
             COALESCE(s.system_configuration_name, '') AS system_configuration_name,
-            RANK() OVER (
-                PARTITION BY c.flake_id
-                ORDER BY c.commit_timestamp DESC, c.id DESC
-            ) AS latest_rank
+            COALESCE(f.snapshot_ready_at IS NOT NULL AND latest_snapshot.commit_id = c.id, FALSE)
+                AS is_latest_per_flake
         FROM build_jobs bj
         JOIN derivations d ON d.id = bj.derivation_id
         LEFT JOIN commits c ON c.id = d.commit_id
         LEFT JOIN flakes f ON f.id = c.flake_id
+        LEFT JOIN flake_branch_commit_snapshot latest_snapshot
+          ON latest_snapshot.flake_id = c.flake_id
+         AND latest_snapshot.position = 0
         LEFT JOIN LATERAL (
             SELECT id, hostname, environment_id, system_configuration_name
             FROM systems
@@ -926,9 +931,9 @@ pub async fn fetch_recent_build_history(
                    OR status ILIKE ('%' || $7 || '%')
                    OR CASE status WHEN 'success' THEN 'complete' WHEN 'cancelling' THEN 'stopping' ELSE status END ILIKE ('%' || $7 || '%')
                    OR 'x86_64-linux' ILIKE ('%' || $7 || '%'))
-              AND (NOT $8 OR (flake_id IS NOT NULL AND latest_rank = 1))
+               AND (NOT $8 OR is_latest_per_flake)
         )
-        SELECT *, flake_id IS NOT NULL AND latest_rank = 1 AS is_latest_per_flake
+        SELECT *
         FROM filtered
         ORDER BY completed_sort_at DESC, job_id DESC
         LIMIT $10
@@ -1085,15 +1090,15 @@ pub async fn list_build_queue_paginated(
                 COALESCE(s.hostname, d.derivation_target, d.derivation_name) AS display_name,
                 COALESCE(s.system_configuration_name, '') AS system_configuration_name,
                 COALESCE(b.name, '') AS builder_name,
-                RANK() OVER (
-                    PARTITION BY c.flake_id,
-                        bj.status IN ('queued', 'building', 'cancelling')
-                    ORDER BY c.commit_timestamp DESC, c.id DESC
-                ) AS latest_rank
+                COALESCE(f.snapshot_ready_at IS NOT NULL AND latest_snapshot.commit_id = c.id, FALSE)
+                    AS is_latest_per_flake
             FROM build_jobs bj
             JOIN derivations d ON d.id = bj.derivation_id
             LEFT JOIN commits c ON c.id = d.commit_id
             LEFT JOIN flakes f ON f.id = c.flake_id
+            LEFT JOIN flake_branch_commit_snapshot latest_snapshot
+              ON latest_snapshot.flake_id = c.flake_id
+             AND latest_snapshot.position = 0
             LEFT JOIN LATERAL (
                 SELECT hostname, environment_id, system_configuration_name
                 FROM systems
@@ -1132,7 +1137,7 @@ pub async fn list_build_queue_paginated(
                    OR status ILIKE ('%' || $8 || '%')
                    OR CASE status WHEN 'success' THEN 'complete' WHEN 'cancelling' THEN 'stopping' ELSE status END ILIKE ('%' || $8 || '%')
                    OR 'x86_64-linux' ILIKE ('%' || $8 || '%'))
-              AND (NOT $9 OR (flake_id IS NOT NULL AND latest_rank = 1))
+               AND (NOT $9 OR is_latest_per_flake)
         )
         SELECT (SELECT COUNT(*) FROM domain), (SELECT COUNT(*) FROM filtered)
         "#,
@@ -1189,11 +1194,8 @@ pub async fn list_build_queue_paginated(
             d.commit_id,
             bj.server_failure_code,
             bj.available_at,
-            RANK() OVER (
-                PARTITION BY c.flake_id,
-                    bj.status IN ('queued', 'building', 'cancelling')
-                ORDER BY c.commit_timestamp DESC, c.id DESC
-            ) AS latest_rank,
+            COALESCE(f.snapshot_ready_at IS NOT NULL AND latest_snapshot.commit_id = c.id, FALSE)
+                AS is_latest_per_flake,
             COALESCE(s.system_configuration_name, '') AS system_configuration_name,
             -- Derivation progress counts for the same system config at this commit.
             -- total: all derivations that reached dry-run-complete or beyond (eligible to build).
@@ -1222,6 +1224,9 @@ pub async fn list_build_queue_paginated(
         JOIN derivations d ON d.id = bj.derivation_id
         LEFT JOIN commits c ON c.id = d.commit_id
         LEFT JOIN flakes f ON f.id = c.flake_id
+        LEFT JOIN flake_branch_commit_snapshot latest_snapshot
+          ON latest_snapshot.flake_id = c.flake_id
+         AND latest_snapshot.position = 0
         -- Use a LATERAL subquery to guarantee at most one system per build job.
         -- Hostname match wins over system_configuration_name match to be deterministic.
         LEFT JOIN LATERAL (
@@ -1280,9 +1285,9 @@ pub async fn list_build_queue_paginated(
                  OR status ILIKE ('%' || $8 || '%')
                  OR CASE status WHEN 'success' THEN 'complete' WHEN 'cancelling' THEN 'stopping' ELSE status END ILIKE ('%' || $8 || '%')
                  OR 'x86_64-linux' ILIKE ('%' || $8 || '%'))
-            AND (NOT $9 OR (flake_id IS NOT NULL AND latest_rank = 1))
+             AND (NOT $9 OR is_latest_per_flake)
         )
-        SELECT *, flake_id IS NOT NULL AND latest_rank = 1 AS is_latest_per_flake
+        SELECT *
         FROM filtered
         ORDER BY
             -- In-progress first, stopping second, queued third, then terminal
@@ -1492,7 +1497,7 @@ mod tests {
 
     #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires test database creation privileges"]
-    async fn latest_builds_rank_by_stable_flake_before_search_and_pagination(pool: PgPool) {
+    async fn latest_builds_follow_branch_snapshot_before_search_and_pagination(pool: PgPool) {
         let queued_at = chrono::Utc::now() - chrono::Duration::minutes(5);
         let mut job_ids = Vec::new();
 
@@ -1511,6 +1516,19 @@ mod tests {
             .bind(flake_id)
             .bind(format!("build-{}", uuid::Uuid::new_v4()))
             .fetch_one(&pool)
+            .await
+            .unwrap();
+            sqlx::query("UPDATE flakes SET snapshot_ready_at = NOW() WHERE id = $1")
+                .bind(flake_id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query(
+                "INSERT INTO flake_branch_commit_snapshot (flake_id, commit_id, position) VALUES ($1, $2, 0)",
+            )
+            .bind(flake_id)
+            .bind(commit_id)
+            .execute(&pool)
             .await
             .unwrap();
             let derivation_id: i32 = sqlx::query_scalar(
@@ -1542,11 +1560,38 @@ mod tests {
             job_ids.push((flake_id, commit_id, derivation_id, job_id));
         }
 
+        let newer_commit_id: i32 = sqlx::query_scalar(
+            "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp) VALUES ($1, $2, NOW() + INTERVAL '1 minute') RETURNING id",
+        )
+        .bind(job_ids[0].0)
+        .bind(format!("build-head-{}", uuid::Uuid::new_v4()))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE flakes SET snapshot_ready_at = NOW() WHERE id = $1")
+            .bind(job_ids[0].0)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM flake_branch_commit_snapshot WHERE flake_id = $1")
+            .bind(job_ids[0].0)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO flake_branch_commit_snapshot (flake_id, commit_id, position) VALUES ($1, $2, 0)",
+        )
+        .bind(job_ids[0].0)
+        .bind(newer_commit_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
         let newer_derivation_id: i32 = sqlx::query_scalar(
             "INSERT INTO derivations (commit_id, derivation_name, derivation_target, derivation_type, status_id) \
              VALUES ($1, 'winner-host', 'winner-host', 'nixos', 5) RETURNING id",
         )
-        .bind(job_ids[0].1)
+        .bind(newer_commit_id)
         .fetch_one(&pool)
         .await
         .unwrap();

@@ -256,9 +256,11 @@ pub async fn get_scan_queue(pool: &PgPool, limit: i64) -> Result<Vec<ScanQueueRo
     let rows = sqlx::query(
         r#"
         WITH latest_commit_per_flake AS (
-            SELECT DISTINCT ON (flake_id) id AS commit_id, flake_id
-            FROM commits
-            ORDER BY flake_id, commit_timestamp DESC NULLS LAST, id DESC
+            SELECT snapshot.flake_id, snapshot.commit_id
+            FROM flake_branch_commit_snapshot snapshot
+            JOIN flakes f ON f.id = snapshot.flake_id
+            WHERE f.snapshot_ready_at IS NOT NULL
+              AND snapshot.position = 0
         ),
         latest_per_derivation AS (
             SELECT DISTINCT ON (d.id)
@@ -422,11 +424,11 @@ pub async fn get_scan_deployed(
             ORDER BY s.id, ss.timestamp DESC NULLS LAST, ss.id DESC
         ),
         latest_commit_per_flake AS (
-            -- Order by commit_timestamp DESC first (newest git commit wins),
-            -- then by id DESC as a tiebreaker for identical timestamps.
-            SELECT DISTINCT ON (flake_id) id AS commit_id, flake_id
-            FROM commits
-            ORDER BY flake_id, commit_timestamp DESC NULLS LAST, id DESC
+            SELECT snapshot.flake_id, snapshot.commit_id
+            FROM flake_branch_commit_snapshot snapshot
+            JOIN flakes f ON f.id = snapshot.flake_id
+            WHERE f.snapshot_ready_at IS NOT NULL
+              AND snapshot.position = 0
         ),
         deployed_derivations AS (
             SELECT DISTINCT ON (d.id)
@@ -594,9 +596,11 @@ pub async fn get_scan_queue_for_system(
     let rows = sqlx::query(
         r#"
         WITH latest_commit_per_flake AS (
-            SELECT DISTINCT ON (flake_id) id AS commit_id, flake_id
-            FROM commits
-            ORDER BY flake_id, commit_timestamp DESC NULLS LAST, id DESC
+            SELECT snapshot.flake_id, snapshot.commit_id
+            FROM flake_branch_commit_snapshot snapshot
+            JOIN flakes f ON f.id = snapshot.flake_id
+            WHERE f.snapshot_ready_at IS NOT NULL
+              AND snapshot.position = 0
         ),
         selected_system AS (
             SELECT

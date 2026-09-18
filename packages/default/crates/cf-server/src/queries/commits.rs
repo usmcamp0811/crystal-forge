@@ -1238,14 +1238,14 @@ pub async fn list_eval_queue_for_user(
                 c.author,
                 COALESCE(c.evaluation_status, 'pending') AS evaluation_status,
                 COALESCE(cac.nixos_configurations, ARRAY[]::text[]) AS systems,
-                ROW_NUMBER() OVER (
-                    PARTITION BY c.flake_id,
-                        COALESCE(c.evaluation_status, 'pending') IN ('pending', 'in_progress', 'cancelling')
-                    ORDER BY c.evaluation_enqueued_at DESC, c.id DESC
-                ) AS latest_rank
+                COALESCE(f.snapshot_ready_at IS NOT NULL AND latest_snapshot.commit_id = c.id, FALSE)
+                    AS is_latest_per_flake
             FROM commits c
             JOIN flakes f ON f.id = c.flake_id
             LEFT JOIN commit_artifacts_cache cac ON cac.commit_id = c.id
+            LEFT JOIN flake_branch_commit_snapshot latest_snapshot
+              ON latest_snapshot.flake_id = c.flake_id
+             AND latest_snapshot.position = 0
             WHERE COALESCE(c.evaluation_status, 'pending') IN ('pending', 'in_progress', 'cancelling', 'complete', 'failed', 'cancelled')
               AND c.source_archived = false
               AND ($5::uuid IS NULL OR EXISTS (
@@ -1260,7 +1260,7 @@ pub async fn list_eval_queue_for_user(
                    OR git_commit_hash ILIKE ('%' || $3 || '%') OR COALESCE(message, '') ILIKE ('%' || $3 || '%')
                    OR COALESCE(author, '') ILIKE ('%' || $3 || '%') OR evaluation_status ILIKE ('%' || $3 || '%')
                    OR EXISTS (SELECT 1 FROM unnest(systems) system_name WHERE system_name ILIKE ('%' || $3 || '%')))
-              AND (NOT $4 OR latest_rank = 1)
+              AND (NOT $4 OR is_latest_per_flake)
         )
         SELECT
             COUNT(*) FILTER (WHERE evaluation_status IN ('pending', 'in_progress', 'cancelling')),
@@ -1325,14 +1325,14 @@ pub async fn list_eval_queue_for_user(
             ea.parent_attempt_id,
             ea.root_attempt_id,
             ea.available_at,
-            ROW_NUMBER() OVER (
-                PARTITION BY c.flake_id,
-                    COALESCE(c.evaluation_status, 'pending') IN ('pending', 'in_progress', 'cancelling')
-                ORDER BY c.evaluation_enqueued_at DESC, c.id DESC
-            ) AS latest_rank
+            COALESCE(f.snapshot_ready_at IS NOT NULL AND latest_snapshot.commit_id = c.id, FALSE)
+                AS is_latest_per_flake
         FROM commits c
         JOIN flakes f ON f.id = c.flake_id
         LEFT JOIN commit_artifacts_cache cac ON cac.commit_id = c.id
+        LEFT JOIN flake_branch_commit_snapshot latest_snapshot
+          ON latest_snapshot.flake_id = c.flake_id
+         AND latest_snapshot.position = 0
         LEFT JOIN LATERAL (
             SELECT attempt_number, parent_attempt_id, root_attempt_id, available_at
             FROM evaluation_attempts
@@ -1354,9 +1354,9 @@ pub async fn list_eval_queue_for_user(
                    OR commit_hash ILIKE ('%' || $3 || '%') OR COALESCE(commit_message, '') ILIKE ('%' || $3 || '%')
                    OR COALESCE(author, '') ILIKE ('%' || $3 || '%') OR evaluation_status ILIKE ('%' || $3 || '%')
                    OR EXISTS (SELECT 1 FROM unnest(systems) system_name WHERE system_name ILIKE ('%' || $3 || '%')))
-              AND (NOT $4 OR latest_rank = 1)
+              AND (NOT $4 OR is_latest_per_flake)
         )
-        SELECT *, latest_rank = 1 AS is_latest_per_flake
+        SELECT *
         FROM filtered
         ORDER BY
             CASE
@@ -1867,12 +1867,13 @@ pub async fn list_eval_history(
             SELECT c.id, c.flake_id, f.name AS flake_name, COALESCE(f.branch, 'main') AS branch,
                    c.git_commit_hash, c.message, c.author, c.evaluation_status,
                    c.evaluation_enqueued_at,
-                   ROW_NUMBER() OVER (
-                       PARTITION BY c.flake_id
-                       ORDER BY c.evaluation_enqueued_at DESC, c.id DESC
-                   ) AS latest_rank
+                    COALESCE(f.snapshot_ready_at IS NOT NULL AND latest_snapshot.commit_id = c.id, FALSE)
+                        AS is_latest_per_flake
             FROM commits c
-            JOIN flakes f ON f.id = c.flake_id
+             JOIN flakes f ON f.id = c.flake_id
+             LEFT JOIN flake_branch_commit_snapshot latest_snapshot
+               ON latest_snapshot.flake_id = c.flake_id
+              AND latest_snapshot.position = 0
             WHERE c.evaluation_status IN ('complete', 'failed', 'cancelled')
         ), filtered AS (
             SELECT * FROM domain
@@ -1881,7 +1882,7 @@ pub async fn list_eval_history(
               AND ($3::text IS NULL OR flake_name ILIKE ('%' || $3 || '%') OR branch ILIKE ('%' || $3 || '%')
                    OR git_commit_hash ILIKE ('%' || $3 || '%') OR COALESCE(message, '') ILIKE ('%' || $3 || '%')
                    OR COALESCE(author, '') ILIKE ('%' || $3 || '%') OR evaluation_status ILIKE ('%' || $3 || '%'))
-              AND (NOT $4 OR latest_rank = 1)
+              AND (NOT $4 OR is_latest_per_flake)
         )
         SELECT (SELECT COUNT(*) FROM domain), (SELECT COUNT(*) FROM filtered)
         "#,
@@ -1948,13 +1949,14 @@ pub async fn list_eval_history(
             COALESCE(ea.attempt_number, 1)  AS attempt_number,
             ea.parent_attempt_id,
             ea.root_attempt_id,
-            ROW_NUMBER() OVER (
-                PARTITION BY c.flake_id
-                ORDER BY c.evaluation_enqueued_at DESC, c.id DESC
-            ) AS latest_rank
+            COALESCE(f.snapshot_ready_at IS NOT NULL AND latest_snapshot.commit_id = c.id, FALSE)
+                AS is_latest_per_flake
         FROM commits c
         JOIN flakes f ON f.id = c.flake_id
         LEFT JOIN commit_artifacts_cache cac ON cac.commit_id = c.id
+        LEFT JOIN flake_branch_commit_snapshot latest_snapshot
+          ON latest_snapshot.flake_id = c.flake_id
+         AND latest_snapshot.position = 0
         LEFT JOIN LATERAL (
             SELECT attempt_number, parent_attempt_id, root_attempt_id
             FROM evaluation_attempts
@@ -1970,9 +1972,9 @@ pub async fn list_eval_history(
               AND ($3::text IS NULL OR flake_name ILIKE ('%' || $3 || '%') OR branch ILIKE ('%' || $3 || '%')
                    OR commit_hash ILIKE ('%' || $3 || '%') OR COALESCE(commit_message, '') ILIKE ('%' || $3 || '%')
                    OR COALESCE(author, '') ILIKE ('%' || $3 || '%') OR evaluation_status ILIKE ('%' || $3 || '%'))
-              AND (NOT $4 OR latest_rank = 1)
+              AND (NOT $4 OR is_latest_per_flake)
         )
-        SELECT *, latest_rank = 1 AS is_latest_per_flake
+        SELECT *
         FROM filtered
         ORDER BY evaluation_completed_at DESC NULLS LAST, commit_id DESC
         LIMIT $5 OFFSET $6
@@ -2198,7 +2200,7 @@ mod tests {
 
     #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires test database creation privileges"]
-    async fn latest_evaluations_rank_before_filters_and_keep_tab_domains_separate(pool: PgPool) {
+    async fn latest_evaluations_follow_branch_snapshot_across_domains_and_filters(pool: PgPool) {
         let flake_id = insert_throwaway_flake(&pool).await;
         let tie_time = chrono::Utc::now() - chrono::Duration::minutes(5);
 
@@ -2232,6 +2234,19 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
+        sqlx::query("UPDATE flakes SET snapshot_ready_at = NOW() WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO flake_branch_commit_snapshot (flake_id, commit_id, position) VALUES ($1, $2, 0)",
+        )
+        .bind(flake_id)
+        .bind(latest_active)
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let filtered = super::list_eval_queue(
             &pool,
@@ -2259,9 +2274,47 @@ mod tests {
         .await
         .unwrap();
         assert!(latest.rows.iter().any(|row| row.commit_id == latest_active));
-        assert!(latest.rows.iter().any(|row| row.commit_id == history_id));
+        assert!(!latest.rows.iter().any(|row| row.commit_id == history_id));
         assert!(!latest.rows.iter().any(|row| row.commit_id == old_active));
         assert!(latest.rows.iter().all(|row| row.is_latest_per_flake));
+
+        let history = super::list_eval_history(
+            &pool,
+            &crate::api::models::EvalHistoryParams {
+                latest_only: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(history.items.is_empty());
+
+        sqlx::query("DELETE FROM flake_branch_commit_snapshot WHERE flake_id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO flake_branch_commit_snapshot (flake_id, commit_id, position) VALUES ($1, $2, 0)",
+        )
+        .bind(flake_id)
+        .bind(history_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let moved_history = super::list_eval_history(
+            &pool,
+            &crate::api::models::EvalHistoryParams {
+                latest_only: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(moved_history.items.len(), 1);
+        assert_eq!(moved_history.items[0].commit_id, history_id);
+        assert!(moved_history.items[0].is_latest_per_flake);
 
         let mutation =
             sqlx::query("UPDATE commits SET evaluation_enqueued_at = NOW() WHERE id = $1")

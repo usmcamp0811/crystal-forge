@@ -220,7 +220,8 @@ pub fn build_queue_item_fixtures() -> Vec<BuildQueueItem> {
             built_derivs: 0,
             cached_derivs: 0,
         },
-        // Queued state (next in queue)
+        // Second system row for the same current HEAD. Builds may have multiple
+        // latest rows because the marker identifies commit freshness, not a job.
         BuildQueueItem {
             job_id: None,
             commit_id: None,
@@ -228,10 +229,10 @@ pub fn build_queue_item_fixtures() -> Vec<BuildQueueItem> {
             system_id: None,
             attempt_number: 1,
             flake_id: Some(1),
-            is_latest_per_flake: false,
+            is_latest_per_flake: true,
             hostname: "db-primary".to_string(),
             flake_name: "infrastructure".to_string(),
-            commit_hash: "f7e8d9c".to_string(),
+            commit_hash: "a1b2c3d".to_string(),
             commit_message: Some("fix: database connection pooling".to_string()),
             status: BuildStatus::Queued,
             builder_name: None,
