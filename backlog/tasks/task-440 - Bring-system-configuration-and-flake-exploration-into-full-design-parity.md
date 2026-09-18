@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-18 13:01'
+updated_date: '2026-09-18 13:37'
 labels:
   - design-parity
   - web-ui
@@ -216,6 +216,8 @@ Maintainer verification adjustment: do not run the authoritative `checks.x86_64-
 2026-09-17 follow-up: first complete the notification-only presentation correction as an independent commit. Then diagnose `sledge`/`campground` revision `2506846` ConfiguredIndex using read-only task-local runtime data and the existing real-flake probe. The implementation choice will depend on measured carrier-free classification cost and demonstrated ownership/wait cause; preserve Browse/automatic preview/primary evaluation behavior and record any material scheduler decision before implementation.
 
 2026-09-18 MR !323 stabilization pass from exact local/remote HEAD `465d6913`: validate independent review findings against TASK-440 acceptance criteria; fix only confirmed P0/P1 blockers and directly related low-risk P2 regressions; run focused Nix-environment verification; create three parallel follow-up subtasks for deferred Config, CVE/Scanning, and Compliance/POA&M work; inventory additive migrations and available upgrade evidence; update TASK-440 and MR !323 with the intentional split and exact verification state; report merge readiness without merging, deploying, rebasing, force-pushing, rewriting migrations, or touching the preserved untracked Tailwind asset and scanner stash. Exact-head CI may be observed but this pass will not wait for it.
+
+2026-09-18 latest-per-flake merge-blocker correction: replace evaluation and build domain-relative window rankings with a shared set-based position-0 join against flake_branch_commit_snapshot gated by snapshot_ready_at. Keep status/search/authorization/pagination/queue ordering unchanged; latest_only filters on the snapshot commit identity and does not synthesize a row for snapshot-not-ready flakes. Audit Scanning's latest marker and update its source-of-truth query if needed. Replace stale TASK-399 database assertions with regressions for re-evaluated older commits, cross-tab active/history identity, filtering, archival/force-push snapshots, and multiple HEAD build rows. Update only affected UI fixtures/browser expectations; skip the authoritative web-ui check locally per maintainer instruction. Run focused server tests, formatting, package checks, and diff checks, then commit and push without merge or deployment.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
