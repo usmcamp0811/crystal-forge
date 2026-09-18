@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-18 03:05'
+updated_date: '2026-09-18 03:48'
 labels:
   - design-parity
   - web-ui
@@ -214,6 +214,8 @@ Maintainer verification adjustment: do not run the authoritative `checks.x86_64-
 2026-09-17 notification dropdown correction: preserve the existing task worktree at actual HEAD `5c7537af` and untracked generated Tailwind asset; move the existing server-backed Dismiss all action to the reference-aligned footer while retaining the existing Mark all read handler in the header; place Load more as a continuation row inside the scrollable list; anchor the panel below the actual bell container with scoped CSS/DOM positioning that survives scroll, resize, and narrow viewports; align notification-only geometry and type styles with `Shell.jsx`/`styles.css`; update focused frontend/browser contracts; regenerate served CSS, inspect desktop/light/dark/narrow fixture screenshots and computed assets, run scoped formatting/tests/WASM checks/diff checks, then review, commit, and push without deployment, database mutation, or authoritative Web UI VM/CI monitoring.
 
 2026-09-17 follow-up: first complete the notification-only presentation correction as an independent commit. Then diagnose `sledge`/`campground` revision `2506846` ConfiguredIndex using read-only task-local runtime data and the existing real-flake probe. The implementation choice will depend on measured carrier-free classification cost and demonstrated ownership/wait cause; preserve Browse/automatic preview/primary evaluation behavior and record any material scheduler decision before implementation.
+
+2026-09-18 MR !323 stabilization pass from exact local/remote HEAD `465d6913`: validate independent review findings against TASK-440 acceptance criteria; fix only confirmed P0/P1 blockers and directly related low-risk P2 regressions; run focused Nix-environment verification; create three parallel follow-up subtasks for deferred Config, CVE/Scanning, and Compliance/POA&M work; inventory additive migrations and available upgrade evidence; update TASK-440 and MR !323 with the intentional split and exact verification state; report merge readiness without merging, deploying, rebasing, force-pushing, rewriting migrations, or touching the preserved untracked Tailwind asset and scanner stash. Exact-head CI may be observed but this pass will not wait for it.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
