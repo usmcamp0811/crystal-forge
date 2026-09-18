@@ -19,6 +19,20 @@ let
     chmod -R u+w repository
     chmod +x repository/bin/run
     ln -s bin/run repository/run
+
+    # INVARIANT: The `export-subst` attribute must exist only inside this
+    # throwaway fixture repository, never in the tracked Crystal Forge tree.
+    # A tracked `export-subst` file makes `git archive` output differ from a
+    # plain checkout, so the same Crystal Forge commit would hash to two
+    # different NAR hashes depending on whether a consumer's flake input is
+    # fetched with archive semantics (`gitlab:`/`github:`) or clone semantics
+    # (`git+https://`). Downstream `flake.lock` entries then fail verification
+    # with "NAR hash mismatch in input". Creating the attribute here keeps the
+    # archive assertions below while leaving Crystal Forge's own archive
+    # byte-identical to its checkout.
+    test ! -e repository/.gitattributes
+    printf 'revision.txt export-subst\n' > repository/.gitattributes
+
     git -C repository init -q
     git -C repository -c user.name=fixture -c user.email=fixture@example.invalid add .
     git -C repository -c user.name=fixture -c user.email=fixture@example.invalid commit -qm fixture

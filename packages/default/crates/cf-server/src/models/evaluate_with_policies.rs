@@ -478,6 +478,16 @@ fn classify_evaluation_failure(message: &str) -> RetryFailureClass {
         "does not exist",
         "infinite recursion",
         "syntax error",
+        // Lock and source integrity failures are a property of the exact
+        // pinned revision's `flake.lock`, not of transient infrastructure.
+        // Retrying the same revision re-fetches the same locked input and
+        // recomputes the same hash, so an automatic retry can never succeed.
+        // These needles stay specific: a bare "hash" substring also appears in
+        // ordinary store paths and unrelated diagnostics.
+        "nar hash mismatch",
+        "hash mismatch in fixed-output derivation",
+        "lock file contains",
+        "cannot update locked input",
     ]
     .iter()
     .any(|needle| message.contains(needle))
@@ -500,6 +510,48 @@ fn classify_evaluation_failure(message: &str) -> RetryFailureClass {
     } else {
         RetryFailureClass::Unknown
     }
+}
+
+/// Maximum characters retained from a preflight failure in the evaluation log.
+///
+/// The drawer needs one actionable line. Nix traces can reach megabytes, and
+/// `eval_logs` rows are streamed to every connected client, so the excerpt is
+/// bounded well below the evaluator's own stderr caps.
+const PREFLIGHT_LOG_EXCERPT_MAX_CHARS: usize = 480;
+
+/// Returns one bounded terminal evaluation-log line for a preflight failure.
+///
+/// The caller must pass the error from expected-system discovery or source
+/// materialization, which both run before `nix-eval-jobs` emits any result.
+/// The returned text is truncated to [`PREFLIGHT_LOG_EXCERPT_MAX_CHARS`] and is
+/// redacted by [`broadcast_and_persist_eval_log`] before broadcast and
+/// persistence, so this function must not be used to bypass that boundary.
+fn preflight_discovery_failure_log(error: &anyhow::Error) -> String {
+    let rendered = format!("{error:#}");
+    // Collapse the trace to its first informative line. Nix prints the useful
+    // `error: ...` summary after banner and warning lines.
+    let summary = rendered
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("error:") && line.len() > "error:".len())
+        .unwrap_or_else(|| {
+            rendered
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+                .unwrap_or("evaluation preflight failed")
+        });
+    let summary = summary.trim_start_matches("error:").trim();
+
+    let mut excerpt: String = summary
+        .chars()
+        .take(PREFLIGHT_LOG_EXCERPT_MAX_CHARS)
+        .collect();
+    if summary.chars().count() > PREFLIGHT_LOG_EXCERPT_MAX_CHARS {
+        excerpt.push('…');
+    }
+
+    format!("❌ Evaluation preflight failed: {excerpt}")
 }
 
 fn structured_evaluation_failure(source: anyhow::Error) -> EvaluationFailure {
@@ -3264,13 +3316,33 @@ async fn evaluate_with_nix_eval_jobs_inner(
         CachedSystemsState::Missing | CachedSystemsState::HydrationFailed => {
             // No cache row exists, or last hydration failed — hydrate inline now.
             // Use the credential-aware variant so private flake discovery works.
-            let systems = crate::flake::commits::load_commit_nixos_configurations_with_creds(
+            let systems = match crate::flake::commits::load_commit_nixos_configurations_with_creds(
                 repo_url,
                 commit_hash,
                 creds.as_ref().as_ref(),
                 Some(build_config),
             )
-            .await?;
+            .await
+            {
+                Ok(systems) => systems,
+                Err(error) => {
+                    // Preflight discovery runs before nix-eval-jobs starts, so
+                    // no per-system line can ever reach the drawer. Without this
+                    // terminal entry the visible log stops at "Evaluating
+                    // nixosConfigurations..." while the real cause exists only
+                    // in the attempt's error column. The commit/attempt error
+                    // stays authoritative; this entry is a bounded summary.
+                    broadcast_and_persist_eval_log(
+                        pool,
+                        cf_state,
+                        commit.id,
+                        &mut log_sequence,
+                        preflight_discovery_failure_log(&error),
+                    )
+                    .await;
+                    return Err(error);
+                }
+            };
 
             // Persist discovered systems (including legitimately empty set)
             // without overwriting changed_files. This also marks
@@ -5671,8 +5743,9 @@ fn summarize_commit_metadata(
 #[cfg(test)]
 mod tests {
     use super::{
-        authoritative_evaluator_args, classify_evaluation_failure,
-        isolate_authoritative_evaluator_credentials, systems_selected_for_evaluation,
+        PREFLIGHT_LOG_EXCERPT_MAX_CHARS, authoritative_evaluator_args, classify_evaluation_failure,
+        isolate_authoritative_evaluator_credentials, preflight_discovery_failure_log,
+        systems_selected_for_evaluation,
     };
     use crate::models::retry_policy::RetryFailureClass;
 
@@ -5778,6 +5851,87 @@ mod tests {
         ] {
             assert_eq!(classify_evaluation_failure(message), expected, "{message}");
         }
+    }
+
+    /// Locked-input integrity failures must not consume transient retries.
+    ///
+    /// A `flake.lock` entry that records a `narHash` which disagrees with the
+    /// pinned revision's real tree fails identically on every attempt, so the
+    /// class must be [`RetryFailureClass::Deterministic`].
+    #[test]
+    fn lock_integrity_failures_are_deterministic_not_transient() {
+        let observed = "nix eval failed for bfd3b68f09c5: error: NAR hash mismatch in \
+             input 'gitlab:owner/repo/465d6913e1fd8d6fb3e4459c57cee486c7d8ed14?narHash=\
+             sha256-AAAA%3D', expected 'sha256-BBBB=' but got 'sha256-AAAA='";
+        assert_eq!(
+            classify_evaluation_failure(observed),
+            RetryFailureClass::Deterministic
+        );
+
+        assert_eq!(
+            classify_evaluation_failure(
+                "error: hash mismatch in fixed-output derivation '/nix/store/x.drv'"
+            ),
+            RetryFailureClass::Deterministic
+        );
+    }
+
+    /// Classification must stay specific instead of matching any "hash" text.
+    ///
+    /// Store paths and unrelated diagnostics routinely contain `hash`, so a
+    /// broad substring rule would wrongly suppress legitimate retries.
+    #[test]
+    fn unrelated_hash_text_is_not_classified_deterministic() {
+        for message in [
+            "copying '/nix/store/abc-hash-tool' failed: connection reset",
+            "could not resolve host while fetching hash-utils",
+        ] {
+            assert_eq!(
+                classify_evaluation_failure(message),
+                RetryFailureClass::Transient,
+                "{message}"
+            );
+        }
+
+        assert_eq!(
+            classify_evaluation_failure("computed hash digest for artifact"),
+            RetryFailureClass::Unknown
+        );
+    }
+
+    /// A preflight failure must produce one bounded, actionable log line.
+    ///
+    /// The drawer otherwise ends at "Evaluating nixosConfigurations..." and
+    /// hides the persisted cause from operators.
+    #[test]
+    fn preflight_failure_log_is_terminal_bounded_and_actionable() {
+        let error = anyhow::anyhow!(
+            "nix eval failed for bfd3b68f09c5: warning: ignoring untrusted \
+             extra-substituters\nerror: NAR hash mismatch in input \
+             'gitlab:owner/repo/465d6913?narHash=sha256-AAAA%3D', expected \
+             'sha256-BBBB=' but got 'sha256-AAAA='\n       at /nix/store/x/flake.nix:3"
+        );
+
+        let line = preflight_discovery_failure_log(&error);
+
+        assert!(line.starts_with("❌ Evaluation preflight failed: "));
+        assert!(line.contains("NAR hash mismatch in input"));
+        // The untrusted-substituter warning is not the fatal cause and must not
+        // displace the real error in a single-line summary.
+        assert!(!line.contains("ignoring untrusted"));
+        assert!(!line.contains('\n'));
+        assert!(line.chars().count() <= PREFLIGHT_LOG_EXCERPT_MAX_CHARS + 64);
+    }
+
+    /// An unbounded evaluator trace must be truncated before it reaches clients.
+    #[test]
+    fn preflight_failure_log_truncates_unbounded_traces() {
+        let error = anyhow::anyhow!("error: {}", "x".repeat(200_000));
+
+        let line = preflight_discovery_failure_log(&error);
+
+        assert!(line.ends_with('…'));
+        assert!(line.chars().count() <= PREFLIGHT_LOG_EXCERPT_MAX_CHARS + 64);
     }
 
     use super::{
