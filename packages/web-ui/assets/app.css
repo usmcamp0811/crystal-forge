@@ -3184,9 +3184,9 @@ html[data-theme="light"] .sd-nix {
 }
 
 .notif-panel {
-  position: fixed;
-  top: calc(var(--coach-top, 64px) + 8px);
-  right: max(8px, env(safe-area-inset-right));
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
   z-index: 50;
   display: flex;
   flex-direction: column;
@@ -3195,8 +3195,8 @@ html[data-theme="light"] .sd-nix {
   overflow: hidden;
   background: var(--cf-card-bg);
   border: 1px solid var(--cf-card-border);
-  border-radius: var(--radius-xl);
-  box-shadow: var(--shadow-pop);
+  border-radius: 12px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.4);
 }
 
 .notif-head,
@@ -3209,7 +3209,8 @@ html[data-theme="light"] .sd-nix {
 }
 
 .notif-foot {
-  justify-content: center;
+  justify-content: space-between;
+  padding: 10px 14px;
   border-bottom: 0;
   border-top: 1px solid var(--cf-divider);
 }
@@ -3221,7 +3222,7 @@ html[data-theme="light"] .sd-nix {
 .notif-list {
   flex: 1;
   min-height: 0;
-  max-height: 320px;
+  max-height: 380px;
   margin: 0;
   padding: 0;
   overflow-y: auto;
@@ -3240,8 +3241,8 @@ html[data-theme="light"] .sd-nix {
   width: 100%;
   display: flex;
   align-items: flex-start;
-  gap: 10px;
-  padding: 12px 14px;
+  gap: 11px;
+  padding: 11px 14px;
   border: 0;
   border-bottom: 0;
   background: transparent;
@@ -3251,7 +3252,7 @@ html[data-theme="light"] .sd-nix {
 }
 
 .notif-item:hover {
-  background: var(--cf-hover-bg);
+  background: var(--cf-subtle-bg);
 }
 
 .notif-item.unread {
@@ -3260,10 +3261,6 @@ html[data-theme="light"] .sd-nix {
 
 .notif-item.unread:hover {
   background: color-mix(in oklab, var(--cf-brand-purple) 10%, var(--cf-card-bg));
-}
-
-.notif-item.unread .notif-title {
-  font-weight: 650;
 }
 
 .notif-dismiss {
@@ -3277,7 +3274,7 @@ html[data-theme="light"] .sd-nix {
 .notif-icon {
   width: 28px;
   height: 28px;
-  border-radius: 10px;
+  border-radius: 8px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -3300,9 +3297,10 @@ html[data-theme="light"] .sd-nix {
 }
 
 .notif-title {
-  font-size: 13px;
-  font-weight: 500;
+  font-size: 12.5px;
+  font-weight: 600;
   color: var(--cf-text-primary);
+  line-height: 1.35;
 }
 
 .notif-unread-marker {
@@ -3319,15 +3317,33 @@ html[data-theme="light"] .sd-nix {
   margin-top: 2px;
   font-size: 11px;
   color: var(--cf-text-muted);
-  line-height: 1.45;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .notif-at {
-  min-width: 42px;
-  font-size: 11px;
+  font-size: 10px;
   color: var(--cf-text-muted);
   text-align: right;
   font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+  white-space: nowrap;
+  padding-top: 2px;
+}
+
+.notif-mark-read-icon {
+  display: block;
+  width: 13px;
+  height: 13px;
+  flex: 0 0 13px;
+}
+
+.notif-load-more {
+  display: flex;
+  justify-content: center;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--cf-divider);
 }
 
 .notif-empty {
@@ -3546,6 +3562,8 @@ html[data-theme="light"] .sd-nix {
 
 @media (max-width: 640px) {
   .notif-panel {
+    position: fixed;
+    top: calc(var(--coach-top, 64px) + 8px);
     left: max(8px, env(safe-area-inset-left));
     right: max(8px, env(safe-area-inset-right));
     width: auto;

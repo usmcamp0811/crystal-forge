@@ -1175,13 +1175,33 @@ pub fn TopBar(title: String) -> Element {
     };
 
     use_effect(move || {
+        // The topbar can move when environment banners wrap or the viewport
+        // changes. Measure after layout and observe the topbar itself so a
+        // transient pre-style height cannot collapse viewport-bound overlays.
         let _ = js_sys::eval(
             "(() => { \
-                const h = document.querySelector('header'); \
-                if (h) { \
-                    const b = h.getBoundingClientRect().bottom; \
-                    if (b > 0) document.documentElement.style.setProperty('--coach-top', b + 'px'); \
-                } \
+                window.__cfTopbarMeasurementCleanup?.(); \
+                const topbar = document.querySelector('header.topbar'); \
+                if (!topbar) return; \
+                let frame = 0; \
+                const update = () => { \
+                    cancelAnimationFrame(frame); \
+                    frame = requestAnimationFrame(() => { \
+                        const bottom = topbar.getBoundingClientRect().bottom; \
+                        if (bottom > 0 && bottom < window.innerHeight) { \
+                            document.documentElement.style.setProperty('--coach-top', bottom + 'px'); \
+                        } \
+                    }); \
+                }; \
+                const observer = new ResizeObserver(update); \
+                observer.observe(topbar); \
+                window.addEventListener('resize', update); \
+                window.__cfTopbarMeasurementCleanup = () => { \
+                    cancelAnimationFrame(frame); \
+                    observer.disconnect(); \
+                    window.removeEventListener('resize', update); \
+                }; \
+                update(); \
             })()",
         );
     });
@@ -1351,20 +1371,6 @@ pub fn TopBar(title: String) -> Element {
                             class: "notif-head",
                             strong { "Notifications" }
                             button {
-                                "data-testid": "topbar-notifications-dismiss-all",
-                                class: "btn btn-ghost focus-ring xs",
-                                aria_label: "Dismiss all notifications",
-                                "aria-busy": notification_ctx.feed.read().mutation_pending(&NotificationMutation::DismissAll),
-                                disabled: notification_ctx.feed.read().mutation_pending(&NotificationMutation::DismissAll),
-                                title: "Dismiss all",
-                                onclick: move |_| {
-                                    if let Some(owner) = dismiss_all_owner.clone() {
-                                        dismiss_all_notifications(notification_ctx, owner);
-                                    }
-                                },
-                                if notification_ctx.feed.read().mutation_pending(&NotificationMutation::DismissAll) { "Dismissing…" } else { "Dismiss all" }
-                            }
-                            button {
                                 "data-testid": "topbar-notifications-mark-read",
                                 class: "btn-icon focus-ring",
                                 aria_label: "Mark all notifications read",
@@ -1378,11 +1384,13 @@ pub fn TopBar(title: String) -> Element {
                                     }
                                 },
                                 svg {
-                                    class: "w-3.5 h-3.5",
+                                    class: "notif-mark-read-icon",
                                     fill: "none",
                                     stroke: "currentColor",
                                     stroke_width: "2",
                                     view_box: "0 0 24 24",
+                                    width: "13",
+                                    height: "13",
                                     path { d: "M5 13l4 4L19 7" }
                                 }
                                 if notification_ctx.feed.read().mutation_pending(&NotificationMutation::MarkAll) {
@@ -1626,25 +1634,42 @@ pub fn TopBar(title: String) -> Element {
                                     }
                                 } }
                                 }
+                                }
                             }
+                            if notification_ctx.feed.read().next_cursor.is_some() && notification_ctx.feed.read().reconciliation.is_none() {
+                                li {
+                                    class: "notif-load-more",
+                                    button {
+                                        "data-testid": "topbar-notifications-load-more",
+                                        class: "btn btn-ghost focus-ring xs",
+                                        r#type: "button",
+                                        disabled: notification_ctx.feed.read().loading || notification_ctx.feed.read().loading_more,
+                                        onclick: move |_| {
+                                            if let Some(owner) = more_owner.clone() {
+                                                load_account_notifications(notification_ctx, owner, true, false)
+                                            }
+                                        },
+                                        if notification_ctx.feed.read().loading_more { "Loading..." } else { "Load more" }
+                                    }
+                                    if notification_ctx.feed.read().loading_more { span { role: "status", aria_live: "polite", class: "sr-only", "Loading more notifications." } }
+                                }
                             }
                         }
                         div {
                             class: "notif-foot",
-                            if notification_ctx.feed.read().next_cursor.is_some() && notification_ctx.feed.read().reconciliation.is_none() {
-                                button {
-                                    "data-testid": "topbar-notifications-load-more",
-                                    class: "btn btn-ghost focus-ring xs",
-                                    r#type: "button",
-                                    disabled: notification_ctx.feed.read().loading || notification_ctx.feed.read().loading_more,
-                                    onclick: move |_| {
-                                        if let Some(owner) = more_owner.clone() {
-                                            load_account_notifications(notification_ctx, owner, true, false)
-                                        }
-                                    },
-                                    if notification_ctx.feed.read().loading_more { "Loading..." } else { "Load more" }
-                                }
-                                if notification_ctx.feed.read().loading_more { span { role: "status", aria_live: "polite", class: "sr-only", "Loading more notifications." } }
+                            button {
+                                "data-testid": "topbar-notifications-dismiss-all",
+                                class: "btn btn-ghost focus-ring xs",
+                                aria_label: "Dismiss all notifications",
+                                "aria-busy": notification_ctx.feed.read().mutation_pending(&NotificationMutation::DismissAll),
+                                disabled: notification_ctx.feed.read().mutation_pending(&NotificationMutation::DismissAll),
+                                title: "Dismiss all",
+                                onclick: move |_| {
+                                    if let Some(owner) = dismiss_all_owner.clone() {
+                                        dismiss_all_notifications(notification_ctx, owner);
+                                    }
+                                },
+                                if notification_ctx.feed.read().mutation_pending(&NotificationMutation::DismissAll) { "Dismissing…" } else { "Dismiss all" }
                             }
                             button {
                                 "data-testid": "topbar-notifications-settings-button",
