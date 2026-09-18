@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-18 13:51'
+updated_date: '2026-09-18 19:43'
 labels:
   - design-parity
   - web-ui
@@ -218,6 +218,8 @@ Maintainer verification adjustment: do not run the authoritative `checks.x86_64-
 2026-09-18 MR !323 stabilization pass from exact local/remote HEAD `465d6913`: validate independent review findings against TASK-440 acceptance criteria; fix only confirmed P0/P1 blockers and directly related low-risk P2 regressions; run focused Nix-environment verification; create three parallel follow-up subtasks for deferred Config, CVE/Scanning, and Compliance/POA&M work; inventory additive migrations and available upgrade evidence; update TASK-440 and MR !323 with the intentional split and exact verification state; report merge readiness without merging, deploying, rebasing, force-pushing, rewriting migrations, or touching the preserved untracked Tailwind asset and scanner stash. Exact-head CI may be observed but this pass will not wait for it.
 
 2026-09-18 latest-per-flake merge-blocker correction: replace evaluation and build domain-relative window rankings with a shared set-based position-0 join against flake_branch_commit_snapshot gated by snapshot_ready_at. Keep status/search/authorization/pagination/queue ordering unchanged; latest_only filters on the snapshot commit identity and does not synthesize a row for snapshot-not-ready flakes. Audit Scanning's latest marker and update its source-of-truth query if needed. Replace stale TASK-399 database assertions with regressions for re-evaluated older commits, cross-tab active/history identity, filtering, archival/force-push snapshots, and multiple HEAD build rows. Update only affected UI fixtures/browser expectations; skip the authoritative web-ui check locally per maintainer instruction. Run focused server tests, formatting, package checks, and diff checks, then commit and push without merge or deployment.
+
+2026-09-18 verified-source builder evaluator packaging repair from exact pushed HEAD `70f90c83`: (1) define the builder package's evaluator Nix as `pkgs.nix-eval-jobs.nix`; replace unrelated `pkgs.nix` in both the `cf-builder-drv` makeWrapper PATH and the public `builder` writeShellApplication runtime inputs, preserving the NixOS module's existing evaluatorNix-first service PATH; (2) add a dedicated package-level Nix check that builds and executes both production builder entry points under a controlled PATH, proves each resolves the evaluator-matched Nix CLI/version, proves no unrelated `pkgs.nix` wrapper prefix remains, and verifies server/builder module PATH alignment; (3) retain and run strict server preclaim tests for matching and mismatched evaluator fingerprints, relevant builder tests, Nix formatting/evaluation, actual package builds, and focused builder/server checks; (4) inspect the resulting wrappers/PATH, commit and push only this packaging repair to MR !323 while preserving unrelated UI/scanning worktree changes.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
