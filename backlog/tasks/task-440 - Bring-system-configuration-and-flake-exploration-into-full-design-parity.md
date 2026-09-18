@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-18 01:45'
+updated_date: '2026-09-18 03:05'
 labels:
   - design-parity
   - web-ui
@@ -60,6 +60,10 @@ references:
   - git commit 9562fe09e94de3c790cd512ce7c77cc819bc0779
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2859062860'
   - git commit bf27c03d03f15355a967960c5cc666b880b01064
+  - git commit d09eccc0
+  - git commit b89b45ea
+  - git commit 465d6913
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2860106205'
 documentation:
   - docs/design/CrystalForge/app.jsx
   - docs/design/CrystalForge/components/SystemDetail.jsx
@@ -246,6 +250,12 @@ Still open and explicitly not addressed: the preceding 9m01.545s capacity wait a
 Authentication diagnosis (notification slice): the original HTTP 405 came from pointing the browser at the Dioxus dev server on 8080, which serves no PATCH route. The subsequent HTTP 401 at the Caddy origin was NOT session loss: the `cf-ui-admin` account did not exist in the isolated preview database, so `ensureAuthenticated` never obtained a session and the PATCH ran unauthenticated. After registering that account, a same-context probe recorded login 200, `__Host-cf-session` and `__Host-cf-csrf` present (Secure, HttpOnly session, domain 10.8.0.177), whoami 200 with is_authenticated true both after login and on /systems, preferences GET 200, and preferences PATCH 200. The preview server log confirms `User logged in: cf-ui-admin@example.com`.
 
 Notification slice remains uncommitted and unverified: workflow 09h now passes authentication but fails at `locator.click` on the bell with repeated `element was detached from the DOM`, indicating continuous re-render. This must be resolved and screenshots inspected before that slice is committed.
+
+2026-09-18 notification correction delivered as `d09eccc0` (`TASK-440: Match notification dropdown layout`). The focused guarded 09h workflow passed 1/1 with ordinary pointer and keyboard activation, reconciliation, mutation, pagination, focus, responsive containment, and desktop/tablet dark/light captures. `node --check checks/web-ui/tests/integration-test.js`, focused topbar Rust tests, `git diff --check`, and `nix build .#packages.x86_64-linux.web-ui --no-link -L` passed. The task-local HTTPS preview remains available; generated untracked `packages/web-ui/assets/tailwind.css` and the scanner stash remain untouched.
+
+2026-09-18 Configured failure persistence and classifier follow-ups delivered as `b89b45ea` and `465d6913`. The observation worker now persists a stable category plus the reconciler's bounded redacted cause; failed executions publish no immutable observation/content, while exact successful identity and cache reuse remain unchanged. The Config observer check now requires one successful `configured=false` record for declaration-only default and losing override negatives, and passes `shallowObserver` to every fixture after the packaged check exposed that stale fixture argument. Verification passed: focused Config observation Rust suite (20 passed, 4 ignored), exact isolated SQLx lifecycle test (1 passed using a disposable SQLx database on repository-owned PostgreSQL 127.0.0.1:3042), `nix build .#checks.x86_64-linux.config-observer --no-link -L --option eval-cache false`, `nix build .#packages.x86_64-linux.server --no-link -L --option eval-cache false` (1539 passed, 551 ignored), and `git diff --check`. No SQLx metadata refresh was required because runtime `sqlx::query` calls and schema/query shapes did not change.
+
+2026-09-18 Configured performance evidence: three equivalent full classifier runs over the 16,267-record fixture completed in 9.13 s, 8.76 s, and 7.08 s, with maximum RSS 1,011,208 KiB, 996,092 KiB, and 979,028 KiB. Each run produced one successful index, 16,224 successful classifier records, 219 configured identities, and the same 42 bounded per-option diagnostic errors. The command included Nix development-shell startup, so these wall times are conservative rather than isolated evaluator-only timings. The prior target diagnostic remains the only production queue measurement: 9m01.545s waiting, then 95.541ms to the pure-eval transport failure. The measured near-1-GiB evaluator footprint justifies retaining `HEAVY_NIX_ADVISORY_LOCK`; no scheduler or primary-evaluation change was made. Existing database coverage proves cached exact-identity reuse returns without another execution. Exact-head pipeline 2860106205 for `465d6913` is pending; per maintainer direction it was recorded but not monitored to completion.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
