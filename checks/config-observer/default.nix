@@ -85,6 +85,7 @@ let
       path = builtins.fromJSON ${builtins.toJSON (builtins.toJSON path)};
       childOffset = 0;
       encodeValue = _: _: _: throw "value encoder was forced";
+      shallowObserver = (${shallowObserverSource});
     }
   '';
   configuredFile = pkgs.writeText "config-observer-configured.nix"
@@ -104,6 +105,7 @@ let
       path = [ "crystalForgeConfigured" "ordinary" ];
       childOffset = 0;
       encodeValue = _: _: value: { kind = "scalar"; inherit value; };
+      shallowObserver = (${shallowObserverSource});
     }
   '';
   poisonOptionFile = pkgs.writeText "config-observer-poison-option.nix" ''
@@ -117,6 +119,7 @@ let
       operation = "option";
       path = [ "crystalForgeConfigured" "nestedPoison" ];
       childOffset = 0;
+      shallowObserver = (${shallowObserverSource});
     }
   '';
   servicesPageFile = offset: pkgs.writeText "config-observer-services-${toString offset}.nix" ''
@@ -130,6 +133,7 @@ let
       path = [ "services" ];
       childOffset = ${toString offset};
       encodeValue = _: _: _: throw "value encoder was forced";
+      shallowObserver = (${shallowObserverSource});
     }
   '';
   servicesFirstFile = servicesPageFile 0;
@@ -239,20 +243,23 @@ pkgs.runCommand "crystal-forge-config-observer-check" {
       | .extraValue.configured == true
     ' configured.jsonl >/dev/null
   }
-  absent_path() {
-    ! jq -e --arg name "$1" '
-      select(.attr | startswith("configured_"))
-      | select(.error == null)
-      | select(.extraValue.path_components == ["crystalForgeConfigured", $name])
-      | .extraValue.configured == true
+  unconfigured_path() {
+    jq -s -e --arg name "$1" '
+      [ .[]
+        | select(.attr | startswith("configured_"))
+        | select(.extraValue.path_components == ["crystalForgeConfigured", $name])
+      ]
+      | length == 1
+        and .[0].error == null
+        and .[0].extraValue.configured == false
     ' configured.jsonl >/dev/null
   }
-  absent_path defaultOnly
+  unconfigured_path defaultOnly
   configured_path ordinary
   configured_path mkDefault
   configured_path mkForce
   configured_path generated
-  absent_path losing
+  unconfigured_path losing
   configured_path tie
   configured_path defaultless
   configured_path throwingApply
@@ -380,20 +387,23 @@ pkgs.runCommand "crystal-forge-config-observer-check" {
       | .extraValue.configured == true
     ' pure-configured.jsonl >/dev/null
   }
-  pure_absent_path() {
-    ! jq -e --arg name "$1" '
-      select(.attr | startswith("configured_"))
-      | select(.error == null)
-      | select(.extraValue.path_components == ["crystalForgeConfigured", $name])
-      | .extraValue.configured == true
+  pure_unconfigured_path() {
+    jq -s -e --arg name "$1" '
+      [ .[]
+        | select(.attr | startswith("configured_"))
+        | select(.extraValue.path_components == ["crystalForgeConfigured", $name])
+      ]
+      | length == 1
+        and .[0].error == null
+        and .[0].extraValue.configured == false
     ' pure-configured.jsonl >/dev/null
   }
   # A real configured assignment is classified; a declaration-only default is
   # not. Identities are asserted, not merely the process exit status.
   pure_configured_path ordinary
   pure_configured_path mkForce
-  pure_absent_path defaultOnly
-  pure_absent_path losing
+  pure_unconfigured_path defaultOnly
+  pure_unconfigured_path losing
 
   # Every emitted job must carry the single shared carrier identity that
   # reconciliation binds to the request.
