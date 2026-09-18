@@ -128,6 +128,31 @@ pub enum SourceInputDeliveryMode {
     BuilderFetchPublicInputs,
 }
 
+/// Identifies why the server rejected a next-job poll before claiming work.
+///
+/// These reasons describe builder/server contract incompatibilities or source
+/// preparation cancellation. A conflict response does not claim or mutate a
+/// queued job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NextJobConflictReason {
+    /// The builder did not advertise the server's configured execution strategy.
+    UnsupportedExecutionStrategy,
+    /// The builder's evaluator fingerprint does not match the server evaluator.
+    IncompatibleEvaluator,
+    /// The configured source delivery mode cannot satisfy the evaluator contract.
+    IncompatibleSourceDelivery,
+    /// Canonical source preparation was cancelled before the job could be claimed.
+    SourceMaterializationCancelled,
+}
+
+/// Describes an HTTP 409 response from the next-job endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NextJobConflictResponse {
+    /// Stable machine-readable reason for the preclaim conflict.
+    pub reason: NextJobConflictReason,
+}
+
 // =============================================================================
 // SOURCE IDENTITY
 // =============================================================================
@@ -1069,6 +1094,39 @@ mod tests {
 
         assert!(request.supported_evaluator_contract_versions.is_empty());
         assert!(request.evaluator.is_none());
+    }
+
+    #[test]
+    fn next_job_conflict_reasons_have_stable_wire_names() {
+        for (reason, expected) in [
+            (
+                NextJobConflictReason::UnsupportedExecutionStrategy,
+                "unsupported_execution_strategy",
+            ),
+            (
+                NextJobConflictReason::IncompatibleEvaluator,
+                "incompatible_evaluator",
+            ),
+            (
+                NextJobConflictReason::IncompatibleSourceDelivery,
+                "incompatible_source_delivery",
+            ),
+            (
+                NextJobConflictReason::SourceMaterializationCancelled,
+                "source_materialization_cancelled",
+            ),
+        ] {
+            let response = NextJobConflictResponse { reason };
+            let value = serde_json::to_value(response).expect("conflict should serialize");
+
+            assert_eq!(value["reason"], expected);
+            assert_eq!(
+                serde_json::from_value::<NextJobConflictResponse>(value)
+                    .expect("conflict should deserialize")
+                    .reason,
+                reason
+            );
+        }
     }
 
     #[test]

@@ -146,8 +146,8 @@ Flow:
    with the contract version, pure-evaluation setting, lock-mutation setting,
    IFD setting, and source materialization schema. The server compares the full
    capability with its authoritative `nix-eval-jobs` fingerprint before queue
-   lookup or claim. Legacy requests and any mismatch receive HTTP 409 and do not
-   mutate a queued job.
+   lookup or claim. Legacy requests and any mismatch receive HTTP 409 with the
+   `incompatible_evaluator` reason and do not mutate a queued job.
 
 5. The builder verifies artifact size, SHA-256, format, lock digest, store name,
    and NAR hash. It rejects incompatible Nix version, purity,
@@ -220,6 +220,20 @@ Old builders and old request payloads default to version 0. The server returns
 contract the builder cannot validate. It does not silently select another
 strategy. A new builder can still poll an old server because old serde readers
 ignore the additive capability field.
+
+Every next-job 409 response has a JSON body with a stable `reason` field:
+
+- `unsupported_execution_strategy` means the builder did not advertise the
+  server's configured strategy.
+- `incompatible_evaluator` means the complete builder and server evaluator
+  fingerprints differ.
+- `incompatible_source_delivery` means the server delivery mode cannot satisfy
+  the selected evaluator contract.
+- `source_materialization_cancelled` means canonical source preparation was
+  cancelled before claim.
+
+The first three checks occur before queue lookup. Source cancellation occurs
+before the atomic claim. None of these responses claims or mutates a queued job.
 
 ## Architecture
 
@@ -545,9 +559,21 @@ Report builder heartbeat with resource metrics.
   state. Disabled, unregistered, and stale-session builders cannot persist it.
 - Stores metrics in `builder_metrics` table
 
-#### GET /api/v1/builders/:id/next-job
+#### POST /api/v1/builders/:id/next-job
 
-Poll for next available job.
+Poll for the next available job and advertise builder execution capabilities.
+Legacy servers can accept `GET` during a rolling upgrade when the builder also
+supports `server_derivation`.
+
+**Response**: `409 Conflict` (preclaim contract conflict)
+```json
+{
+  "reason": "incompatible_evaluator"
+}
+```
+
+The supported reason values and no-mutation guarantee are defined in the
+verified-source contract section above.
 
 **Response**: `200 OK` (job available)
 ```json

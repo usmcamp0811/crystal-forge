@@ -3053,6 +3053,17 @@ in {
       }
       {
         assertion =
+          !(cfg.server.enable && cfg.build.enable)
+          || lib.elem cfg.build.remote_execution_strategy cfg.build.supported_execution_strategies;
+        message = ''
+          A colocated Crystal Forge builder must support the server's configured
+          remote execution strategy. Add
+          services.crystal-forge.build.remote_execution_strategy to
+          services.crystal-forge.build.supported_execution_strategies.
+        '';
+      }
+      {
+        assertion =
           cfg.build.remote_execution_strategy != "source_re_evaluate_verified"
           || cfg.build.source_delivery_mode == "server_bundled_archive";
         message = "Verified-source evaluator contract version 1 requires source_delivery_mode = server_bundled_archive";

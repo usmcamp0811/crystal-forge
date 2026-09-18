@@ -43,10 +43,10 @@ pub use cf_protocol::builder::{
     CveScanHeartbeatResponse, CveScanLease, CveScanPolicy, CveScanResult, CveScanSchemaVersion,
     CveScannerIdentity, DerivationArchiveRequest, DerivationManifestResponse,
     EstablishBuilderSessionRequest, EstablishBuilderSessionResponse, EvaluatorFingerprint,
-    ImmutableSourceIdentity, NextJobRequest, RemoteBuildExecutionStrategy, ReportMetricsRequest,
-    ResolveBuilderIdRequest, ResolveBuilderIdResponse, SourceInputDeliveryMode,
-    VERIFIED_SOURCE_EVALUATOR_CONTRACT_VERSION, VERIFIED_SOURCE_MATERIALIZATION_SCHEMA_VERSION,
-    VerifiedSourceIdentity,
+    ImmutableSourceIdentity, NextJobConflictReason, NextJobConflictResponse, NextJobRequest,
+    RemoteBuildExecutionStrategy, ReportMetricsRequest, ResolveBuilderIdRequest,
+    ResolveBuilderIdResponse, SourceInputDeliveryMode, VERIFIED_SOURCE_EVALUATOR_CONTRACT_VERSION,
+    VERIFIED_SOURCE_MATERIALIZATION_SCHEMA_VERSION, VerifiedSourceIdentity,
 };
 
 // Re-export NextJobResponse as an alias using the protocol's BuildJob type.

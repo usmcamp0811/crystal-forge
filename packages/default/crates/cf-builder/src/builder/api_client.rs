@@ -6,8 +6,9 @@ use cf_protocol::builder::{
     CveScanClaimRequest, CveScanClaimResponse, CveScanCompleteRequest, CveScanCompleteResponse,
     CveScanFailRequest, CveScanFailResponse, CveScanFailureClass, CveScanHeartbeatRequest,
     CveScanHeartbeatResponse, EstablishBuilderSessionRequest, EstablishBuilderSessionResponse,
-    EvaluatorFingerprint, NextJobRequest, NextJobResponse, RemoteBuildExecutionStrategy,
-    ReportMetricsRequest, ResolveBuilderIdRequest, ResolveBuilderIdResponse,
+    EvaluatorFingerprint, NextJobConflictReason, NextJobConflictResponse, NextJobRequest,
+    NextJobResponse, RemoteBuildExecutionStrategy, ReportMetricsRequest, ResolveBuilderIdRequest,
+    ResolveBuilderIdResponse,
 };
 use chrono::Utc;
 use ed25519_dalek::{Signature, Signer, SigningKey};
@@ -788,12 +789,29 @@ impl BuilderApiClient {
         }
 
         if response.status() == reqwest::StatusCode::CONFLICT {
-            warn!(
-                "⚠️  Server reports incompatible execution strategy (409 Conflict). \
-                 Check server's remote_build_execution_strategy setting matches \
-                 builder supported_strategies={:?}",
-                self.supported_execution_strategies,
-            );
+            let body = response.bytes().await.unwrap_or_default();
+            match serde_json::from_slice::<NextJobConflictResponse>(&body)
+                .map(|response| response.reason)
+            {
+                Ok(NextJobConflictReason::UnsupportedExecutionStrategy) => warn!(
+                    supported_strategies = ?self.supported_execution_strategies,
+                    "Server's configured remote execution strategy is not supported by this builder (409 Conflict)"
+                ),
+                Ok(NextJobConflictReason::IncompatibleEvaluator) => warn!(
+                    builder_evaluator = ?self.evaluator,
+                    "Builder evaluator fingerprint does not match the server's authoritative evaluator (409 Conflict)"
+                ),
+                Ok(NextJobConflictReason::IncompatibleSourceDelivery) => warn!(
+                    "Server source delivery mode is incompatible with the verified-source evaluator contract (409 Conflict)"
+                ),
+                Ok(NextJobConflictReason::SourceMaterializationCancelled) => warn!(
+                    "Server cancelled canonical source preparation before claim; the builder will poll again (409 Conflict)"
+                ),
+                Err(error) => warn!(
+                    error = %error,
+                    "Server rejected next-job polling with an unstructured or unknown 409 Conflict response"
+                ),
+            }
             return Ok(None);
         }
 

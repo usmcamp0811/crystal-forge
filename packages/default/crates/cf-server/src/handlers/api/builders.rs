@@ -38,9 +38,10 @@ use crate::models::builders::{
     AppendLogsRequest, BuildJob, Builder, BuilderCachePushConfig, BuilderCreatedResponse,
     BuilderMetrics, BuilderSummary, BuilderWithEnvironments, CreateBuilderRequest,
     EstablishBuilderSessionRequest, EstablishBuilderSessionResponse, EvaluatorFingerprint,
-    KeypairRegeneratedResponse, NextJobRequest, RemoteBuildExecutionStrategy, ReportMetricsRequest,
-    ResolveBuilderIdRequest, ResolveBuilderIdResponse, SourceInputDeliveryMode,
-    UpdateBuilderEnvironmentsRequest, UpdateBuilderPublicKeyRequest, UpdateBuilderRequest,
+    KeypairRegeneratedResponse, NextJobConflictReason, NextJobConflictResponse, NextJobRequest,
+    RemoteBuildExecutionStrategy, ReportMetricsRequest, ResolveBuilderIdRequest,
+    ResolveBuilderIdResponse, SourceInputDeliveryMode, UpdateBuilderEnvironmentsRequest,
+    UpdateBuilderPublicKeyRequest, UpdateBuilderRequest,
     VERIFIED_SOURCE_EVALUATOR_CONTRACT_VERSION, VERIFIED_SOURCE_MATERIALIZATION_SCHEMA_VERSION,
     VerifiedSourceIdentity,
 };
@@ -581,6 +582,40 @@ fn source_archive_contract_is_authorized(
 ) -> bool {
     execution_strategy == RemoteBuildExecutionStrategy::SourceReEvaluateVerified
         && delivery == SourceInputDeliveryMode::ServerBundledArchive
+}
+
+fn next_job_conflict(reason: NextJobConflictReason) -> Response {
+    (
+        StatusCode::CONFLICT,
+        Json(NextJobConflictResponse { reason }),
+    )
+        .into_response()
+}
+
+fn execution_strategy_conflict(
+    request: &NextJobRequest,
+    execution_strategy: RemoteBuildExecutionStrategy,
+) -> Option<NextJobConflictReason> {
+    (!request
+        .supported_execution_strategies
+        .contains(&execution_strategy))
+    .then_some(NextJobConflictReason::UnsupportedExecutionStrategy)
+}
+
+fn evaluator_conflict(
+    request: &NextJobRequest,
+    authoritative: &EvaluatorFingerprint,
+) -> Option<NextJobConflictReason> {
+    (!verified_source_evaluator_is_compatible(request, authoritative))
+        .then_some(NextJobConflictReason::IncompatibleEvaluator)
+}
+
+fn source_delivery_conflict(
+    execution_strategy: RemoteBuildExecutionStrategy,
+    delivery: SourceInputDeliveryMode,
+) -> Option<NextJobConflictReason> {
+    (!source_archive_contract_is_authorized(execution_strategy, delivery))
+        .then_some(NextJobConflictReason::IncompatibleSourceDelivery)
 }
 
 pub(crate) fn verified_source_evaluator_is_compatible(
@@ -2144,7 +2179,7 @@ pub async fn get_next_job(
     method: Method,
     headers: axum::http::HeaderMap,
     body: Bytes,
-) -> Result<Json<crate::models::builders::NextJobResponse>, StatusCode> {
+) -> Result<Response, StatusCode> {
     // Authenticate builder request with replay resistance
     let path = format!("/api/v1/builders/{}/next-job", builder_id);
     let verified =
@@ -2168,17 +2203,14 @@ pub async fn get_next_job(
 
     let next_job_request = next_job_request_for_method(&method, &body)?;
     let execution_strategy = state.server_config.remote_build_execution_strategy;
-    if !next_job_request
-        .supported_execution_strategies
-        .contains(&execution_strategy)
-    {
+    if let Some(reason) = execution_strategy_conflict(&next_job_request, execution_strategy) {
         tracing::warn!(
             builder_id = %builder_id,
             ?execution_strategy,
             supported = ?next_job_request.supported_execution_strategies,
             "builder does not support configured remote execution strategy; returning 409 Conflict"
         );
-        return Err(StatusCode::CONFLICT);
+        return Ok(next_job_conflict(reason));
     }
     let evaluator_fingerprint =
         if execution_strategy == RemoteBuildExecutionStrategy::SourceReEvaluateVerified {
@@ -2191,14 +2223,14 @@ pub async fn get_next_job(
             })?;
             // SECURITY: Capability equality is checked before queue lookup or claim.
             // A mismatch is builder-specific and must not mutate shared job state.
-            if !verified_source_evaluator_is_compatible(&next_job_request, &authoritative) {
+            if let Some(reason) = evaluator_conflict(&next_job_request, &authoritative) {
                 tracing::warn!(
                     builder_id = %builder_id,
                     builder_evaluator = ?next_job_request.evaluator,
                     authoritative_evaluator = ?authoritative,
                     "builder evaluator is incompatible with verified-source work"
                 );
-                return Err(StatusCode::CONFLICT);
+                return Ok(next_job_conflict(reason));
             }
             Some(authoritative)
         } else {
@@ -2213,16 +2245,15 @@ pub async fn get_next_job(
     let preflight_source = if execution_strategy
         == RemoteBuildExecutionStrategy::SourceReEvaluateVerified
     {
-        if !source_archive_contract_is_authorized(
-            execution_strategy,
-            state.server_config.source_delivery_mode,
-        ) {
+        if let Some(reason) =
+            source_delivery_conflict(execution_strategy, state.server_config.source_delivery_mode)
+        {
             tracing::warn!(
                 builder_id = %builder_id,
                 ?state.server_config.source_delivery_mode,
                 "verified-source contract version 1 requires canonical server artifact delivery"
             );
-            return Err(StatusCode::CONFLICT);
+            return Ok(next_job_conflict(reason));
         }
         let (candidate, published) = loop {
             let Some(candidate) = builders::peek_next_verified_source_job(
@@ -2282,7 +2313,9 @@ pub async fn get_next_job(
                             StatusCode::SERVICE_UNAVAILABLE
                         }
                         crate::flake::verified_source::MaterializationFailureClass::Cancelled => {
-                            StatusCode::CONFLICT
+                            return Ok(next_job_conflict(
+                                NextJobConflictReason::SourceMaterializationCancelled,
+                            ));
                         }
                         crate::flake::verified_source::MaterializationFailureClass::NotPublished
                         | crate::flake::verified_source::MaterializationFailureClass::UnsupportedObjectFormat
@@ -2522,7 +2555,8 @@ pub async fn get_next_job(
     Ok(Json(crate::models::builders::NextJobResponse {
         job: job.into(),
         derivation: payload,
-    }))
+    })
+    .into_response())
 }
 
 /// Classification of a post-claim dispatch failure.
@@ -4538,6 +4572,8 @@ mod tests {
     use super::builder_id_for_resolved_builder;
     use super::canonical_signature_payload;
     use super::chunk_derivation_archive_paths;
+    use super::evaluator_conflict;
+    use super::execution_strategy_conflict;
     use super::fallback_job_status_request_for_invalid_details;
     use super::format_failure_message;
     use super::map_create_builder_error;
@@ -4547,13 +4583,14 @@ mod tests {
     use super::parse_next_job_request;
     use super::persisted_build_log_frames;
     use super::retry_failure_class;
+    use super::source_delivery_conflict;
     use super::source_flake_target_for_derivation;
     use super::verify_builder_resolve_request;
     use crate::builder::api_client::BuilderApiClient;
     use crate::derivations::{Derivation, DerivationType};
     use crate::models::builders::{
-        Builder, BuilderStatus, NextJobRequest, RemoteBuildExecutionStrategy,
-        ResolveBuilderIdRequest, SourceInputDeliveryMode,
+        Builder, BuilderStatus, NextJobConflictReason, NextJobConflictResponse, NextJobRequest,
+        RemoteBuildExecutionStrategy, ResolveBuilderIdRequest, SourceInputDeliveryMode,
     };
     use crate::models::public_key::PublicKey;
 
@@ -4712,6 +4749,88 @@ mod tests {
             vec![RemoteBuildExecutionStrategy::ServerDerivation]
         );
         assert!(request.evaluator.is_none());
+    }
+
+    #[test]
+    fn unsupported_execution_strategy_has_discriminating_preclaim_reason() {
+        let request = NextJobRequest {
+            protocol_version: 2,
+            supported_execution_strategies: vec![
+                RemoteBuildExecutionStrategy::SourceReEvaluateVerified,
+            ],
+            supported_evaluator_contract_versions: Vec::new(),
+            evaluator: None,
+        };
+
+        assert_eq!(
+            execution_strategy_conflict(&request, RemoteBuildExecutionStrategy::ServerDerivation,),
+            Some(NextJobConflictReason::UnsupportedExecutionStrategy)
+        );
+    }
+
+    #[tokio::test]
+    async fn next_job_conflict_response_contains_machine_readable_reason() {
+        let response =
+            super::next_job_conflict(NextJobConflictReason::UnsupportedExecutionStrategy);
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("conflict response body should be readable");
+        let conflict: NextJobConflictResponse =
+            serde_json::from_slice(&body).expect("conflict response should be JSON");
+
+        assert_eq!(
+            conflict.reason,
+            NextJobConflictReason::UnsupportedExecutionStrategy
+        );
+    }
+
+    #[test]
+    fn incompatible_evaluator_has_discriminating_preclaim_reason() {
+        let authoritative = super::EvaluatorFingerprint {
+            contract_version: super::VERIFIED_SOURCE_EVALUATOR_CONTRACT_VERSION,
+            nix_version: "2.34.5".to_string(),
+            evaluator_system: "x86_64-linux".to_string(),
+            pure_eval: true,
+            lockfile_mutation_allowed: false,
+            allow_import_from_derivation: true,
+            source_materialization_schema_version:
+                super::VERIFIED_SOURCE_MATERIALIZATION_SCHEMA_VERSION,
+        };
+        let request = NextJobRequest {
+            protocol_version: 2,
+            supported_execution_strategies: vec![
+                RemoteBuildExecutionStrategy::SourceReEvaluateVerified,
+            ],
+            supported_evaluator_contract_versions: vec![authoritative.contract_version],
+            evaluator: Some(super::EvaluatorFingerprint {
+                nix_version: "2.33.0".to_string(),
+                ..authoritative.clone()
+            }),
+        };
+
+        assert_eq!(
+            evaluator_conflict(&request, &authoritative),
+            Some(NextJobConflictReason::IncompatibleEvaluator)
+        );
+    }
+
+    #[test]
+    fn incompatible_source_delivery_has_discriminating_preclaim_reason() {
+        assert_eq!(
+            source_delivery_conflict(
+                RemoteBuildExecutionStrategy::SourceReEvaluateVerified,
+                SourceInputDeliveryMode::LocalGitWorktree,
+            ),
+            Some(NextJobConflictReason::IncompatibleSourceDelivery)
+        );
+        assert_eq!(
+            source_delivery_conflict(
+                RemoteBuildExecutionStrategy::SourceReEvaluateVerified,
+                SourceInputDeliveryMode::ServerBundledArchive,
+            ),
+            None
+        );
     }
 
     #[test]
