@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-18 13:50'
+updated_date: '2026-09-18 13:51'
 labels:
   - design-parity
   - web-ui
@@ -266,6 +266,8 @@ Notification slice remains uncommitted and unverified: workflow 09h now passes a
 2026-09-18 P1 fix pushed as `7c7d7e5d` to `origin/TASK-440-system-config-flake-parity` (fast-forward from `465d6913`; local and remote heads match). MR !323 head is now `7c7d7e5d`. Post-push verification proves the defect is closed at the source: GitLab's archive API for `7c7d7e5d` now serves the literal `$Format:%H$` instead of an expanded SHA, and both fetch mechanisms agree. Archive semantics (gitlab:/github: fetchers) = sha256-su1hfwk7m0JSN6WtoOqnTRQS4XoQBnmobzLw6ux4iKw=; checkout semantics (git+https:// fetcher, via read-tree plus checkout-index of the exact pushed commit) = sha256-su1hfwk7m0JSN6WtoOqnTRQS4XoQBnmobzLw6ux4iKw=. A downstream verification was then reproduced in an isolated chroot store with an empty cache: `builtins.fetchTree` for `gitlab:crystal-forge/crystal-forge/7c7d7e5d` pinned to that narHash succeeded (exit 0, resolved to /nix/store/q9b3cpymbnchz4nzyxncn89rvigy21rh-source) with no NAR hash mismatch, which is the same harness that reproduced the production failure for `465d6913`. No Campground change is required: re-running its lock update against the branch will now record a hash that verifies under either fetcher. Not done in this session: pushing or deploying anything for Campground, production database inspection for the 3262/3263 attempt lineage, and the deployed end-to-end multi-system evaluation proof, which needs a deploy the maintainer has not authorized.
 
 2026-09-18 latest-per-flake correction committed and pushed as 9a753a2f (`TASK-440: Use branch snapshots for latest flake semantics`) to origin/TASK-440-system-config-flake-parity. Evaluation active/history, build active/history, and Scanning latest markers now use `COALESCE(f.snapshot_ready_at IS NOT NULL AND latest_snapshot.commit_id = c.id, FALSE)` from a set-based position-0 `flake_branch_commit_snapshot` join. `latest_only` uses that same predicate in count and row CTEs, so absent/snapshot-not-ready HEADs are not synthesized and multiple build rows for one HEAD remain latest. Updated the old TASK-399 evaluation/build database regressions and build showcase fixture to cover cross-domain identity and multiple HEAD build rows. `nix develop -c cargo check -p cf-server`, test compilation, rustfmt check, diff check, and focused pure tests passed. Migrated SQL regressions could not execute because sqlx::test attempted CREATE DATABASE and the isolated DB role lacks CREATE privilege; no database was mutated. Authoritative Web UI check was not run per maintainer instruction. Existing unrelated worktree changes and generated tailwind.css remain unstaged and uncommitted. No evaluator scheduling, merge, or deployment changes were made.
+
+Follow-up regression commit `0a59d340` (`TASK-440: Cover terminal head latest semantics`) adds the inverse terminal-HEAD/active-older evaluation assertions and is pushed to the same MR branch. Branch head is now 0a59d340.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
