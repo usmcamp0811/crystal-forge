@@ -8,6 +8,10 @@ let
   version = serverCargoToml.package.version;
   migrationsDir = ./crates/cf-server/migrations;
   nixosOptionsMetadata = pkgs.crystal-forge.nixos-options-metadata;
+  # INVARIANT: Verified-source builders must execute the Nix CLI linked to the
+  # nix-eval-jobs evaluator. Exact evaluator fingerprints are a security
+  # boundary, so an unrelated pkgs.nix must not precede this package in PATH.
+  evaluatorNix = pkgs.nix-eval-jobs.nix;
 
   # ─────────────────────────────────────────────────────────────────────────
   # Source filtering
@@ -364,7 +368,7 @@ let
 
     postFixup = ''
       wrapProgram "$out/bin/builder" \
-        --prefix PATH : ${lib.makeBinPath [ pkgs.nix pkgs.vulnix ]}
+        --prefix PATH : ${lib.makeBinPath [ evaluatorNix pkgs.vulnix ]}
     '';
 
     # SRC_HASH intentionally not set: cf-builder does not use option_env!("SRC_HASH").
@@ -493,7 +497,7 @@ let
 
   builder = pkgs.writeShellApplication {
     name = "builder";
-    runtimeInputs = [ pkgs.nix pkgs.vulnix ];
+    runtimeInputs = [ evaluatorNix pkgs.vulnix ];
     text = ''${cf-builder-drv}/bin/builder "$@"'';
   };
 

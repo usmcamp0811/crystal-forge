@@ -4786,7 +4786,7 @@ mod tests {
     }
 
     #[test]
-    fn incompatible_evaluator_has_discriminating_preclaim_reason() {
+    fn evaluator_compatibility_has_discriminating_preclaim_reason() {
         let authoritative = super::EvaluatorFingerprint {
             contract_version: super::VERIFIED_SOURCE_EVALUATOR_CONTRACT_VERSION,
             nix_version: "2.34.5".to_string(),
@@ -4797,17 +4797,21 @@ mod tests {
             source_materialization_schema_version:
                 super::VERIFIED_SOURCE_MATERIALIZATION_SCHEMA_VERSION,
         };
-        let request = NextJobRequest {
+        let mut request = NextJobRequest {
             protocol_version: 2,
             supported_execution_strategies: vec![
                 RemoteBuildExecutionStrategy::SourceReEvaluateVerified,
             ],
             supported_evaluator_contract_versions: vec![authoritative.contract_version],
-            evaluator: Some(super::EvaluatorFingerprint {
-                nix_version: "2.33.0".to_string(),
-                ..authoritative.clone()
-            }),
+            evaluator: Some(authoritative.clone()),
         };
+
+        assert_eq!(evaluator_conflict(&request, &authoritative), None);
+
+        request.evaluator = Some(super::EvaluatorFingerprint {
+            nix_version: "2.33.0".to_string(),
+            ..authoritative.clone()
+        });
 
         assert_eq!(
             evaluator_conflict(&request, &authoritative),
