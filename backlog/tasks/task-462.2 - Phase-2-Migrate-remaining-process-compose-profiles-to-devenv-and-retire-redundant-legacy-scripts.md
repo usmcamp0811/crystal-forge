@@ -3,9 +3,10 @@ id: TASK-462.2
 title: >-
   Phase 2: Migrate remaining process-compose profiles to devenv and retire
   redundant legacy scripts
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-09-19 14:52'
+updated_date: '2026-09-19 14:53'
 labels: []
 milestone: m-1
 dependencies:
