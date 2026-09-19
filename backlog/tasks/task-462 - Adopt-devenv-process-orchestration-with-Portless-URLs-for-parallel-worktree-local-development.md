@@ -6,6 +6,7 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-09-19 14:50'
+updated_date: '2026-09-19 14:50'
 labels: []
 milestone: m-1
 dependencies: []
@@ -87,11 +88,12 @@ Do not attempt a wholesale conversion in one change. Each phase must independent
 
 - TASK-450.6 addresses sharing Rust compilation across worktrees via a compiler cache; it is a separate, complementary inner-loop improvement and is not a dependency of this task.
 - `docs/agents/database-safety.md` and `docs/agents/worktrees.md` describe the current process-compose-based database safety workflow and worktree conventions; both need review once a devenv-based path exists so they describe the current recommended workflow accurately.
+<!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
-
+<!-- AC:BEGIN -->
 - [ ] #1 Phase 1 (the linked sprint-ready subtask) is complete: a devenv-based development shell exists, models PostgreSQL + API server + web UI dev server as processes with dynamically allocated ports, and is proven to run correctly in two worktrees at the same time.
 - [ ] #2 Portless stable `.localhost` URLs work for the web UI and API processes as an opt-in convenience, and every workflow this task touches still works with Portless disabled.
 - [ ] #3 A follow-up task tracks migrating the remaining process-compose profiles and retiring redundant legacy scripts once devenv parity is proven for them.
 - [ ] #4 `docs/agents/database-safety.md` and `docs/agents/worktrees.md` (or their replacements) accurately describe whichever local-database workflow is current after this epic's phases land.
-<!-- SECTION:DESCRIPTION:END -->
+<!-- AC:END -->
