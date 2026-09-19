@@ -1,7 +1,7 @@
 ---
 id: TASK-463
 title: Add README documentation to each flake check
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-09-19 15:12'
 updated_date: '2026-09-19 15:12'
@@ -51,3 +51,9 @@ This is a documentation-only task. Do not change check behavior, `.gitlab-ci.yml
 - [ ] #5 The existing `checks/web-ui/baselines/README.md` is left untouched.
 - [ ] #6 Markdown is well-formed and passes `git diff --check` (no trailing whitespace / whitespace errors).
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+Read every checks/<name>/default.nix to extract accurate behavior (VM vs. non-VM, server build variant, timeouts, env vars). Cross-reference .gitlab-ci.yml's flake-check matrix to state CI membership accurately. Write one README.md per check directory in the repository's documentation style. Verify with git diff --check and a visual read-through; do not run nix flake check for a docs-only change unless a formatting concern arises.
+<!-- SECTION:PLAN:END -->
