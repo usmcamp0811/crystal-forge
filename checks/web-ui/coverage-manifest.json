@@ -18,7 +18,8 @@
       "12n-task440-config-narrow-keyboard": { "category": "mock" },
       "12ha-system-detail-cve-inventory-fallbacks": { "category": "mock" },
       "13j-task440-flake-states-panes-navigation": { "category": "mock" },
-      "14d-task440-cross-surface-auth-navigation": { "category": "mock" }
+      "14d-task440-cross-surface-auth-navigation": { "category": "mock" },
+      "16-cves": { "category": "mock" }
     },
     "visualThemes": [
       "dark",

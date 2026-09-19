@@ -825,6 +825,7 @@ const TEST_USER = {
 const LOAD_TIMEOUT = Number(process.env.CF_UI_LOAD_TIMEOUT_MS || 10000);
 
 const VIEWPORTS = {
+  wide: { width: 1920, height: 1080 },
   desktop: { width: 1440, height: 900 },
   tablet: { width: 900, height: 900 },
   narrowDesktop: { width: 560, height: 900 },
@@ -1400,6 +1401,21 @@ async function routeStandaloneUiBootstrap(page, role = "Admin") {
       return;
     }
 
+    if (path === "/api/v1/user/preferences" && method === "PATCH") {
+      const update = request.postDataJSON();
+      preferenceResponse.preferences = {
+        ...preferenceResponse.preferences,
+        ...update,
+        updated_at: new Date().toISOString(),
+      };
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(preferenceResponse),
+      });
+      return;
+    }
+
     if (path === "/api/v1/compliance/bundles" && method === "GET") {
       await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
       return;
@@ -1439,6 +1455,20 @@ async function routeStandaloneUiBootstrap(page, role = "Admin") {
           evals_failed_new: 0,
           cves_critical_new: 0,
         }),
+      });
+      return;
+    }
+
+    if (path === "/api/v1/navigation/acknowledge" && method === "POST") {
+      await route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
+      return;
+    }
+
+    if (path === "/api/v1/user/notifications" && method === "GET") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ unread_count: 0, next_cursor: null, notifications: [] }),
       });
       return;
     }
@@ -11489,6 +11519,7 @@ const steps = [
     name: "16-cves",
     description: "CVE dashboard - exact fleet detail and triage",
     action: async (page) => {
+      await routeStandaloneUiBootstrap(page, "Admin");
       await suppressOnboardingCoach(page);
       // Mock the CVE API endpoints so the test doesn't require real scan data.
       await page.route("**/api/v1/cves/stats*", async (route) => {
@@ -12234,12 +12265,23 @@ const steps = [
       await assertVisible(drawer, "Expected CVE detail drawer to open");
       const drawerCveId = drawer.locator(".mono:has-text('CVE-2024-1234')").first();
       await assertVisible(drawerCveId, "Expected CVE id in drawer header");
+      await assertVisible(drawer.getByText("OpenSSL bounds check issue"), "Expected advisory title in drawer header");
+      await assertVisible(drawer.getByText("exploited in the wild"), "Expected exploited status in drawer header");
+      const advisoryLink = drawer.getByTestId("cve-advisory-link");
+      await assertVisible(advisoryLink, "Expected advisory action in drawer header");
+      await assertAttribute(advisoryLink, "target", "_blank", "Advisory should open separately");
+      await assertAttribute(advisoryLink, "rel", "noopener noreferrer", "Advisory must not receive opener access");
+      await assertVisible(drawer.getByTestId("cve-cvss-vector").getByText(cveRowFixture.cvss_vector), "Expected CVSS vector section");
+      await assertVisible(drawer.getByTestId("cve-authority-details"), "Expected exact and legacy authority summary");
+      await assertVisible(drawer.getByTestId("cve-remediation").getByText("openssl-3.0.2"), "Expected prominent fixed-version remediation");
+      await assertVisible(drawer.getByTestId("cve-affected-systems"), "Expected a distinct affected-systems section");
 
       const environmentCards = drawer.getByTestId("cve-fleet-environment");
       const developmentCard = environmentCards.filter({ has: page.getByText("Development", { exact: true }) });
       const productionCard = environmentCards.filter({ has: page.getByText("Production", { exact: true }) });
       const labCard = environmentCards.filter({ has: page.getByText("Lab", { exact: true }) });
-      const archiveCard = environmentCards.filter({ has: page.getByText("Archive", { exact: true }) });
+      const affectedEnvironmentCards = drawer.getByTestId("cve-affected-environment");
+      const archiveInventory = affectedEnvironmentCards.filter({ has: page.getByText("Archive", { exact: true }) });
       await assertVisible(drawer.getByText("MIXED", { exact: true }), "Expected authoritative mixed fleet rollup");
       await assertVisible(developmentCard.getByText("EXACT ACCEPTED", { exact: true }), "Expected accepted environment state");
       await assertVisible(developmentCard.getByText(/Accepted by Morgan Reyes/), "Expected accepted-risk disposition actor");
@@ -12247,13 +12289,17 @@ const steps = [
       await assertVisible(productionCard.getByText("EXACT SCHEDULED", { exact: true }), "Expected scheduled environment state");
       await assertVisible(productionCard.getByText(/Scheduled by Morgan Reyes/), "Expected scheduled-remediation actor");
       await assertVisible(productionCard.getByText("POAM-0042: Existing OpenSSL fleet remediation"), "Expected useful scheduled POA&M link label");
+      await assertVisible(productionCard.getByText("Promote the fixed OpenSSL package and verify exact scan absence."), "Expected scheduled remediation plan");
+      await assertVisible(productionCard.getByText("Platform operators"), "Expected typed scheduled assignee");
+      await assertVisible(productionCard.getByText("2026-10-15"), "Expected scheduled target date");
+      await assertVisible(productionCard.getByText("CAT I - High"), "Expected scheduled risk");
       await assertVisible(labCard.getByText("EXACT OPEN", { exact: true }), "Expected open environment state");
-      await assertVisible(archiveCard.getByText("INVENTORY ONLY", { exact: true }), "Expected legacy-only environment state");
+      await assertCount(environmentCards.filter({ has: page.getByText("Archive", { exact: true }) }), 0, "Legacy-only environments must not imply a triage disposition");
       await assertVisible(drawer.getByTestId("cve-fleet-legacy"), "Expected display-only legacy fleet warning");
       await assertVisible(drawer.getByTestId("cve-fleet-no-scan"), "Expected no-scan fleet warning");
-      await assertVisible(archiveCard.getByText("LEGACY", { exact: true }), "Expected legacy host authority label");
-      for (let index = 0; index < await environmentCards.count(); index += 1) {
-        const card = environmentCards.nth(index);
+      await assertVisible(archiveInventory.getByText("LEGACY", { exact: true }), "Expected legacy host authority label");
+      for (let index = 0; index < await affectedEnvironmentCards.count(); index += 1) {
+        const card = affectedEnvironmentCards.nth(index);
         const declared = Number((await card.locator("header .mono").textContent()).match(/(\d+) host/)?.[1]);
         const rendered = await card.getByTestId("cve-fleet-host").count();
         if (declared !== rendered) {
@@ -12263,6 +12309,25 @@ const steps = [
       if (!new URL(page.url()).searchParams.get("cve_package")) {
         throw new Error(`Exact package selection was not encoded in URL state: ${page.url()}`);
       }
+      const assertFleetDetailCapture = async () => {
+        const authority = drawer.getByTestId("cve-authority-details");
+        const vector = drawer.getByTestId("cve-cvss-vector");
+        const legacyWarning = drawer.getByTestId("cve-fleet-legacy");
+        await assertVisible(authority, "CVE capture must preserve authority details");
+        const [authorityBox, vectorBox, legacyBox] = await Promise.all([
+          authority.boundingBox(),
+          vector.boundingBox(),
+          legacyWarning.boundingBox(),
+        ]);
+        const authorityRender = await authority.evaluate((element) => ({
+          opacity: getComputedStyle(element).opacity,
+        }));
+        if (!authorityBox || !vectorBox || !legacyBox || authorityBox.height < 30 || authorityRender.opacity !== "1" || authorityBox.y <= vectorBox.y || authorityBox.y >= legacyBox.y) {
+          throw new Error(`CVE authority details must render between the vector and legacy warning: ${JSON.stringify({ authorityBox, vectorBox, legacyBox, authorityRender })}`);
+        }
+      };
+      await captureWorkflowViewportState(page, "16-cves", "mixed-fleet-detail", "wide", assertFleetDetailCapture);
+      await captureWorkflowViewportState(page, "16-cves", "mixed-fleet-detail", "tablet", assertFleetDetailCapture);
       await page.goBack();
       await assertHidden(drawer, "Browser back should close exact fleet detail");
       await page.goForward();
@@ -12271,6 +12336,19 @@ const steps = [
       await drawer.getByTestId("cve-triage-open").click();
       let triageDialog = page.getByRole("dialog", { name: "Triage CVE-2024-1234 openssl" });
       await assertVisible(triageDialog, "Operator/Admin should receive the exact fleet triage editor");
+      await assertVisible(triageDialog.getByTestId("cve-triage-context"), "Expected vulnerability context in triage editor");
+      const assertTriageCapture = async () => {
+        const context = triageDialog.getByTestId("cve-triage-context");
+        const firstEnvironment = triageDialog.locator(".cve-triage-env").first();
+        await assertVisible(context, "CVE triage capture must preserve vulnerability context");
+        const [contextBox, environmentBox] = await Promise.all([context.boundingBox(), firstEnvironment.boundingBox()]);
+        const contextOpacity = await context.evaluate((element) => getComputedStyle(element).opacity);
+        if (!contextBox || !environmentBox || contextBox.height < 80 || contextOpacity !== "1" || contextBox.y >= environmentBox.y) {
+          throw new Error(`CVE vulnerability context must precede environment controls: ${JSON.stringify({ contextBox, environmentBox })}`);
+        }
+      };
+      await captureWorkflowViewportState(page, "16-cves", "mixed-triage-editor", "wide", assertTriageCapture);
+      await captureWorkflowViewportState(page, "16-cves", "mixed-triage-editor", "tablet", assertTriageCapture);
       const triageClose = triageDialog.getByRole("button", { name: "Close triage editor" });
       await page.waitForFunction(
         () => document.activeElement?.getAttribute("aria-label") === "Close triage editor",
@@ -12321,6 +12399,13 @@ const steps = [
         "Missing environment-specific acceptance justification must fail before POST",
       );
       if (triageBodies.length !== 0) throw new Error("Acceptance validation sent a triage request");
+      await developmentDraft.getByTestId("cve-accept-justification").fill("too short");
+      await triageDialog.getByTestId("cve-triage-submit").click();
+      await assertVisible(
+        triageDialog.getByRole("alert").filter({ hasText: "10 to 2000 bytes for Development" }),
+        "Short environment-specific acceptance justification must fail before POST",
+      );
+      if (triageBodies.length !== 0) throw new Error("Short acceptance validation sent a triage request");
       await developmentDraft.getByTestId("cve-accept-justification").fill("Internal-only service behind network segmentation.");
       const reviewDate = developmentDraft.getByTestId("cve-accept-review-date");
       await reviewDate.evaluate((input) => {
@@ -12435,7 +12520,71 @@ const steps = [
         throw new Error(`Expected exact fleet detail to reload after history navigation, got ${fleetDetailRequests}`);
       }
 
-      // Leave the drawer open so the captured screenshot shows the detail surface and triage form.
+      const legacyOnlyDetail = JSON.parse(JSON.stringify(fleetDetail));
+      legacyOnlyDetail.rollup = "outstanding";
+      legacyOnlyDetail.affected_system_count = 1;
+      legacyOnlyDetail.exact_affected_system_count = 0;
+      legacyOnlyDetail.exact_mutation_target_count = 0;
+      legacyOnlyDetail.legacy_affected_system_count = 1;
+      legacyOnlyDetail.environments = [legacyOnlyDetail.environments.find((environment) => environment.environment_name === "Archive")];
+      fleetDetailAfterMutation = legacyOnlyDetail;
+      await openFleet.click();
+      await assertVisible(drawer, "Expected legacy-only CVE inventory to remain readable");
+      await assertDisabled(
+        drawer.getByTestId("cve-triage-open"),
+        "Legacy-only CVE inventory should show why fleet triage is unavailable",
+      );
+      await assertVisible(
+        drawer.getByText("No exact current scan subjects are available"),
+        "Legacy-only CVE inventory should explain the read-only authority boundary",
+      );
+      await drawer.getByRole("button", { name: "Close fleet inventory" }).click();
+      await assertHidden(drawer, "Expected legacy-only detail to close");
+
+      const exactOnlyDetail = JSON.parse(JSON.stringify(fleetDetail));
+      exactOnlyDetail.affected_system_count = 3;
+      exactOnlyDetail.exact_affected_system_count = 3;
+      exactOnlyDetail.exact_mutation_target_count = 3;
+      exactOnlyDetail.legacy_affected_system_count = 0;
+      exactOnlyDetail.environments = exactOnlyDetail.environments.filter((environment) => environment.environment_name !== "Archive");
+      fleetDetailAfterMutation = exactOnlyDetail;
+      await openFleet.click();
+      await assertVisible(drawer, "Expected exact-only CVE inventory to remain actionable");
+      if (!(await drawer.getByTestId("cve-triage-open").isEnabled())) {
+        throw new Error("Exact-only CVE inventory did not enable fleet triage");
+      }
+      await assertHidden(drawer.getByTestId("cve-fleet-legacy"), "Exact-only inventory should not show a legacy warning");
+      await drawer.getByRole("button", { name: "Close fleet inventory" }).click();
+      await assertHidden(drawer, "Expected exact-only detail to close");
+
+      // Reopen the restored detail hierarchy for the workflow's light/dark capture.
+      fleetDetail.environments[1].disposition.poam = {
+        id: "00000000-0000-0000-0000-0000000000d1",
+        human_id: "POAM-0042",
+        title: "Existing OpenSSL fleet remediation",
+        plan: "Promote the fixed OpenSSL package and verify exact scan absence.",
+        target_date: "2026-10-15",
+        risk: "high",
+        assignee: {
+          kind: "oidc_group",
+          group_name: "platform-operators",
+          display: "Platform operators",
+          available: true,
+        },
+      };
+      fleetDetailAfterMutation = null;
+      await openFleet.click();
+      await assertVisible(drawer, "Expected restored CVE detail hierarchy for visual capture");
+      await page.waitForFunction(
+        () => getComputedStyle(document.querySelector("[data-testid='cve-fleet-drawer']")).transform === "none",
+      );
+      const drawerGeometry = await drawer.evaluate((element) => {
+        const rect = element.getBoundingClientRect();
+        return { left: rect.left, right: rect.right, viewportWidth: window.innerWidth, scrollWidth: element.scrollWidth, clientWidth: element.clientWidth };
+      });
+      if (drawerGeometry.left < 0 || drawerGeometry.right > drawerGeometry.viewportWidth + 1 || drawerGeometry.scrollWidth > drawerGeometry.clientWidth) {
+        throw new Error(`CVE detail drawer overflows the viewport: ${JSON.stringify(drawerGeometry)}`);
+      }
 
       // Unroute after test.
       await page.unroute("**/api/v1/cves/stats*");
