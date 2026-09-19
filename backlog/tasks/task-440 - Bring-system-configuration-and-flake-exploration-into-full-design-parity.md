@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-19 15:02'
+updated_date: '2026-09-19 15:03'
 labels:
   - design-parity
   - web-ui
@@ -66,6 +66,7 @@ references:
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2860106205'
   - git commit 1403b799c8ee52985bc640b5d83556a5ca3021ec
   - git commit 978e45d0
+  - git commit 77d39902
 documentation:
   - docs/design/CrystalForge/app.jsx
   - docs/design/CrystalForge/components/SystemDetail.jsx
@@ -288,6 +289,8 @@ Follow-up regression commit `0a59d340` (`TASK-440: Cover terminal head latest se
 2026-09-19 CVE drawer parity slice: Restored the exact-CVE fleet detail and triage hierarchy against `docs/design/CrystalForge/components/CvesView.jsx` while preserving server-owned exact-evidence scope. The drawer now includes the advisory header, CVSS vector, explicit exact/actionable/legacy authority, remediation details, distinct triage and affected-system sections, POA&M plan/owner/date/risk context, and a disabled read-only state for legacy-only inventory. Accepted-risk justification now enforces the server contract of 10 to 2000 bytes before submission. Browser coverage now verifies exact-only, mixed, and legacy-only states, safe NVD links, geometry, responsive captures, and triage context. `16-cves` is classified as a mocked host-compatible workflow and uses standalone bootstrap routing without changing its domain mocks.
 
 2026-09-19 CVE drawer parity verification passed in `/home/mcamp/code/crystal-forge/ci-repro-1403b799`: `nix build .#checks.x86_64-linux.web-ui-test-runner --no-link -L`; `node --check checks/web-ui/tests/integration-test.js`; `CF_UI_STATIC_CONTRACTS=1 node checks/web-ui/tests/integration-test.js`; host `16-cves` through `nix develop -c web-ui-test` with standalone API routing; `nix develop -c rustfmt --edition 2024 --check packages/web-ui/src/views/cves.rs`; `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown`; `nix develop -c cargo test --manifest-path packages/web-ui/Cargo.toml views::cves::tests`; `nix build .#packages.x86_64-linux.web-ui --no-link -L`; `git diff --check`; and the one final authoritative focused VM command `CF_UI_TEST_STEPS="16-cves" nix build --impure .#checks.x86_64-linux.web-ui --no-link -L`. The VM reported `16-cves` passed 1/1 with ten light/dark wide/tablet captures. The focused diff contains only the coverage manifest, integration workflow, scoped CSS, and CVE view. Documentation review found no new public Rust API, unsafe code, or untracked TODO/FIXME requirements. Temporary copies used by the persistent preview were removed; its pre-existing unrelated changes remain untouched.
+
+2026-09-19 CVE drawer parity slice committed as `77d39902` (`TASK-440: Restore CVE triage drawer design parity`) and pushed to `origin/TASK-440-system-config-flake-parity` for MR !323.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
