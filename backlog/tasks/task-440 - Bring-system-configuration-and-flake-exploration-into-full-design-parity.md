@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-19 03:17'
+updated_date: '2026-09-19 03:53'
 labels:
   - design-parity
   - web-ui
@@ -65,6 +65,7 @@ references:
   - git commit 465d6913
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2860106205'
   - git commit 1403b799c8ee52985bc640b5d83556a5ca3021ec
+  - git commit 978e45d0
 documentation:
   - docs/design/CrystalForge/app.jsx
   - docs/design/CrystalForge/components/SystemDetail.jsx
@@ -277,6 +278,8 @@ Notification slice remains uncommitted and unverified: workflow 09h now passes a
 Follow-up regression commit `0a59d340` (`TASK-440: Cover terminal head latest semantics`) adds the inverse terminal-HEAD/active-older evaluation assertions and is pushed to the same MR branch. Branch head is now 0a59d340.
 
 2026-09-18 verified-source evaluator packaging repair committed and pushed as `1403b799c8ee52985bc640b5d83556a5ca3021ec` (`TASK-440: Align builder evaluator packaging`) to MR !323. Root cause: both production builder wrappers prepended unrelated `pkgs.nix`, which shadowed the Nix CLI linked to `pkgs.nix-eval-jobs.nix` and caused strict `EvaluatorFingerprint` conflicts. The fix defines `evaluatorNix = pkgs.nix-eval-jobs.nix` and uses it in both `cf-builder-drv` and the public `builder` wrapper. New `checks.x86_64-linux.builder-evaluator-packaging` verifies both generated wrappers, rejects an unrelated Nix prefix, compares the packaged Nix version with `builtins.nixVersion` observed through `nix-eval-jobs`, and proves the NixOS server and builder service PATHs start with the same evaluator package. The server regression now proves both an exact fingerprint match and a mismatched Nix-version rejection. Verification passed: Nix parsing for both changed Nix files; `git diff --check`; focused builder tests (`32` binary and `58` library tests); focused matching/mismatching server evaluator tests; `builder-evaluator-packaging`; `verified-source-evaluator-parity`; and `builder-cve-contract`. The final targeted packaging check passed after strengthening the service-PATH ordering assertions. A broad `nix flake check path:. --keep-going --no-build` was stopped at maintainer request; broad verification remains delegated to CI. Local and upstream branch heads both resolve to `1403b799c8ee52985bc640b5d83556a5ca3021ec`. Unrelated existing scanning/UI changes and untracked generated Tailwind CSS remain untouched.
+
+2026-09-19 exact-head stabilization committed and pushed as `978e45d0` (`TASK-440: Stabilize exact-head web UI checks`) to `origin/TASK-440-system-config-flake-parity` / MR !323. The host runner check passes. Focused `task433-canonical-poam-lifecycle` passes all semantic assertions and its final desktop baselines; the full strict focused check still exits nonzero for three intermediate captures: `failed-evidence-edited-remediation--dark` and `reloaded-completed-history--mobile` in dark/light. No baseline, threshold, or critical-workflow policy was changed. The immediate close response now hydrates immutable requirement metadata and is asserted in both Rust database coverage and the browser workflow. A direct SQLx test compile succeeded offline but execution could not connect to a setup test database (`PoolTimedOut`); the focused NixOS browser VM exercised the same close path successfully. Temporary artifact-export code was removed before commit.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
