@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-19 02:18'
+updated_date: '2026-09-19 03:17'
 labels:
   - design-parity
   - web-ui
@@ -223,6 +223,8 @@ Maintainer verification adjustment: do not run the authoritative `checks.x86_64-
 2026-09-18 verified-source builder evaluator packaging repair from exact pushed HEAD `70f90c83`: (1) define the builder package's evaluator Nix as `pkgs.nix-eval-jobs.nix`; replace unrelated `pkgs.nix` in both the `cf-builder-drv` makeWrapper PATH and the public `builder` writeShellApplication runtime inputs, preserving the NixOS module's existing evaluatorNix-first service PATH; (2) add a dedicated package-level Nix check that builds and executes both production builder entry points under a controlled PATH, proves each resolves the evaluator-matched Nix CLI/version, proves no unrelated `pkgs.nix` wrapper prefix remains, and verifies server/builder module PATH alignment; (3) retain and run strict server preclaim tests for matching and mismatched evaluator fingerprints, relevant builder tests, Nix formatting/evaluation, actual package builds, and focused builder/server checks; (4) inspect the resulting wrappers/PATH, commit and push only this packaging repair to MR !323 while preserving unrelated UI/scanning worktree changes.
 
 2026-09-19 exact-head CI stabilization history review: before further POA&M/CVE changes, compare current behavior and strict browser expectations with design commit `9725b4ef` and implementation commits `def63adf`, `0867808d`, `0aa38dba`, and `31819e2f`. Restore the design-aligned behavior where later changes regressed it; do not approve/churn visual baselines or weaken critical checks. Re-run the focused POA&M/CVE workflows, then the authoritative Web UI gate.
+
+2026-09-19 POA&M strict-visual stabilization continuation in `/home/mcamp/code/crystal-forge/ci-repro-1403b799`: the completed mutation response is built through `cve_poam_detail_tx`, which does not hydrate immutable requirement metadata, while a subsequent GET does. This causes the desktop close-state capture to render unresolved requirement UUIDs and the reload capture to render the correct framework/control/title. Extract the existing bounded requirement-metadata hydration into a transaction-local helper, use it for both mutation and GET detail responses, add a database regression that asserts the immediate close response contains the same requirement metadata, rerun the focused POA&M workflow, then remove the temporary failure-artifact exporter and run the two required Web UI gates. Do not update strict baselines or weaken assertions.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
