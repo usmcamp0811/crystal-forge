@@ -2750,6 +2750,7 @@ pub async fn get_system_evidence(
     };
     let mut resolution_state: Option<String> = None;
     let mut current_effective_set_digest: Option<String> = None;
+    let mut current_assessment_digest: Option<String> = None;
     if let ResolutionOutcome::Resolved(effective) =
         resolve_system_effective_policies(pool, system_id).await?
     {
@@ -2773,6 +2774,16 @@ pub async fn get_system_evidence(
             .collect::<Vec<_>>();
         if !requested_policies.is_empty() {
             current_effective_set_digest = Some(effective.effective_set_digest.clone());
+            // COMPATIBILITY: Composite assessment persistence uses the
+            // enforced-composite authorization digest. The complete resolver
+            // digest remains authoritative for finding observations, but it
+            // can also include report-only or non-composite assignments that
+            // intentionally do not invalidate persisted enforcement evidence.
+            current_assessment_digest = Some(
+                crate::services::composite_enforcement::enforce_composite_authorization_digest(
+                    &effective,
+                ),
+            );
             policies = materialize_effective_policies(pool, &requested_policies).await?;
         } else if bundle_version_id.is_some() {
             resolution_state = Some("not_applicable".to_string());
@@ -2810,18 +2821,22 @@ pub async fn get_system_evidence(
         None => None,
     };
     let mut composite_results = match context.as_ref() {
-        Some(context) => match current_effective_set_digest.as_deref() {
-            Some(digest) => {
+        Some(context) => match (
+            current_assessment_digest.as_deref(),
+            current_effective_set_digest.as_deref(),
+        ) {
+            (Some(assessment_digest), Some(complete_digest)) => {
                 load_composite_assessment_results(
                     pool,
                     system.id,
                     context.derivation_id,
                     &context.target_store_path,
-                    digest,
+                    assessment_digest,
+                    complete_digest,
                 )
                 .await?
             }
-            None => HashMap::new(),
+            _ => HashMap::new(),
         },
         None => HashMap::new(),
     };
@@ -4470,16 +4485,25 @@ async fn load_composite_assessment_results(
     system_id: Uuid,
     derivation_id: i32,
     target_store_path: &str,
-    effective_set_digest: &str,
+    assessment_digest: &str,
+    complete_digest: &str,
 ) -> Result<HashMap<Uuid, crate::api::models::CompositeAssessmentResult>> {
+    // COMPATIBILITY: Current persistence writes the enforced-composite
+    // authorization digest. Assessments written before that split use the
+    // complete resolver digest. Prefer the current identity and accept the
+    // exact legacy identity only for the same system, derivation, and target.
     let rows = sqlx::query_as::<_, CompositeAssessmentResultRow>(
         r#"
         WITH exact AS (
-            SELECT id, policy_version_id, target_store_path, effective_set_digest,
+            SELECT DISTINCT ON (policy_version_id)
+                   id, policy_version_id, target_store_path, effective_set_digest,
                    effective_config_digest, effective_config
             FROM composite_policy_assessments
             WHERE system_id = $1 AND derivation_id = $2
-              AND target_store_path = $3 AND effective_set_digest = $4
+              AND target_store_path = $3
+              AND effective_set_digest IN ($4, $5)
+            ORDER BY policy_version_id, (effective_set_digest = $4) DESC,
+                     updated_at DESC, id DESC
         )
         SELECT exact.id AS assessment_id,
                exact.policy_version_id,
@@ -4509,7 +4533,8 @@ async fn load_composite_assessment_results(
     .bind(system_id)
     .bind(derivation_id)
     .bind(target_store_path)
-    .bind(effective_set_digest)
+    .bind(assessment_digest)
+    .bind(complete_digest)
     .fetch_all(pool)
     .await?;
 

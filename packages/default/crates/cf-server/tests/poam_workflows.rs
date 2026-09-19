@@ -8333,6 +8333,18 @@ async fn elapsed_waiver_replacement_and_verification_snapshot_cleanup_are_exact(
     .await
     .unwrap();
     let closure_id = closed.poam.closure_attempt_id.unwrap();
+    let closed_verification_item = closed
+        .verification_attempts
+        .iter()
+        .find(|attempt| attempt.id == closure_id)
+        .and_then(|attempt| attempt.items.first())
+        .expect("close response includes its sealed verification item");
+    assert_eq!(closed_verification_item.requirements.len(), 1);
+    assert_eq!(
+        closed_verification_item.requirements[0].framework_name,
+        "Verification Framework"
+    );
+    assert_eq!(closed_verification_item.requirements[0].external_id, "VR-3");
     let renamed_hostname = format!("renamed-{}", Uuid::new_v4());
     sqlx::query("UPDATE systems SET hostname=$2 WHERE id=$1")
         .bind(fixture.system_id)

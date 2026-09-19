@@ -1626,10 +1626,10 @@ pub fn PoamDetailTray(props: PoamDetailTrayProps) -> Element {
                         label { class: "field", span { "Risk" } select { class: "input focus-ring", value: "{risk:?}", disabled: readonly, onchange: move |event| risk.set(match event.value().as_str() { "High" => PoamRisk::High, "Low" => PoamRisk::Low, _ => PoamRisk::Medium }), option { value: "High", "CAT I - High" } option { value: "Medium", "CAT II - Medium" } option { value: "Low", "CAT III - Low" } } }
                     }
                 }
-                section { class: "poam-tray-section", "data-testid": "poam-linked-vulnerabilities",
-                    header { h3 { "Linked vulnerabilities · {detail.cve_findings.len()}" } }
-                    p { class: "poam-section-help", "Justification or whitelisting is not remediation. Only PASS from exact absence permits closure." }
-                    if active_cve_findings.is_empty() && historical_cve_findings.is_empty() { div { role: "status", class: "poam-empty", "No exact vulnerabilities are linked." } }
+                if !active_cve_findings.is_empty() || !historical_cve_findings.is_empty() {
+                    section { class: "poam-tray-section", "data-testid": "poam-linked-vulnerabilities",
+                        header { h3 { "Linked vulnerabilities · {detail.cve_findings.len()}" } }
+                        p { class: "poam-section-help", "Justification or whitelisting is not remediation. Only PASS from exact absence permits closure." }
                     if !active_cve_findings.is_empty() {
                         div { class: "poam-table-wrap", table { class: "sys-table compact sys-table-dense poam-cve-findings-table",
                             thead { tr { th { "Host" } th { "CVE / package" } th { "Installed / fixed" } th { "Current exact scan" } th { "Result" } th { "Actions" } } }
@@ -1648,7 +1648,7 @@ pub fn PoamDetailTray(props: PoamDetailTrayProps) -> Element {
                             } } } }
                         } }
                     }
-                    if !historical_cve_findings.is_empty() {
+                        if !historical_cve_findings.is_empty() {
                         h4 { "Retired vulnerability history" }
                         p { class: "poam-section-help", "Retired links are immutable audit evidence and cannot be unlinked." }
                         div { class: "poam-table-wrap", table { class: "sys-table compact sys-table-dense poam-cve-findings-table",
@@ -1661,6 +1661,7 @@ pub fn PoamDetailTray(props: PoamDetailTrayProps) -> Element {
                                 td { span { class: "poam-chip", "RETIRED" } small { class: "poam-muted", "{finding.retired_at.map(|at| at.to_rfc3339()).unwrap_or_else(|| \"Unknown time\".to_string())}" } small { class: "poam-muted", "{finding.retirement_reason.as_deref().unwrap_or(\"No reason recorded\")}" } }
                             } } } } }
                         } }
+                        }
                     }
                 }
                 section { class: "poam-tray-section",
@@ -1759,7 +1760,23 @@ fn LifecycleSection(props: LifecycleSectionProps) -> Element {
     rsx! {
         section { class: "poam-tray-section",
             header { h3 { "Remediation status" } div { class: "poam-lifecycle-actions", if status == PoamStatus::Completed { button { class: "btn btn-ghost xs focus-ring", disabled: props.readonly, onclick: move |_| props.on_reopen.call(()), Icon { name: IconName::Rollback, size: 11 } "Reopen" } } else { button { class: "btn btn-ghost xs focus-ring", disabled: props.readonly, onclick: move |_| props.on_verify.call(()), "Verify now" } if status == PoamStatus::AwaitingVerification { button { class: "btn btn-primary xs focus-ring", disabled: props.readonly, onclick: move |_| props.on_close.call(()), Icon { name: IconName::Check, size: 11 } "Authoritative close" } } } } }
-            if status != PoamStatus::Completed { div { class: "seg poam-status-seg", for choice in available_status_transitions(status).iter().copied() { button { class: "focus-ring", title: choice.description(), disabled: props.readonly, onclick: move |_| props.on_transition.call(choice), "{status_label(choice)}" } } } }
+            if status != PoamStatus::Completed {
+                div { class: "seg poam-status-seg",
+                    // The current state remains visible but cannot submit a
+                    // no-op transition. This preserves the complete lifecycle
+                    // context without permitting a forbidden server mutation.
+                    button {
+                        class: "active focus-ring",
+                        aria_current: "true",
+                        title: status.description(),
+                        disabled: true,
+                        "{status_label(status)}"
+                    }
+                    for choice in available_status_transitions(status).iter().copied() {
+                        button { class: "focus-ring", title: choice.description(), disabled: props.readonly, onclick: move |_| props.on_transition.call(choice), "{status_label(choice)}" }
+                    }
+                }
+            }
             if status == PoamStatus::AwaitingVerification { div { role: "status", class: "sd-callout sd-callout-warn", Icon { name: IconName::Warn, size: 13 } div { strong { "Awaiting verification." } " Remediation is reported complete, but the finding result remains independent. Verify against current assessments, then use authoritative close." } } }
             for (index, attempt) in props.detail.verification_attempts.clone().into_iter().enumerate() {
                 div { class: "poam-verification", "data-testid": "poam-verification-result",

@@ -4613,12 +4613,68 @@ async function assertExactTextOrder(locator, expected, label) {
   }
 }
 
-async function assertTask440ConfigSemantics(page) {
+/**
+ * Assert the Config inspector pane contract.
+ *
+ * The inspector exposes exactly two panes, Option then Sources, and the
+ * Sources pane carries the observed-source total inside its label and
+ * accessible name (see `ConfigExplorer` in
+ * packages/web-ui/src/components/system/config_explorer.rs). The design
+ * reference renders the same shape as `Sources <span
+ * class="mono">{srcs.length || ""}</span>`, so a rendered count is correct
+ * product behavior, not drift.
+ *
+ * Pane identity and the count are therefore asserted separately. Comparing
+ * the whole textContent against a bare "Sources" rejects the truthful count,
+ * and stripping digits out of the label would stop proving the count renders
+ * at all. `expectedSourceCount` is the authoritative fixture total; it must
+ * be rendered exactly when nonzero and must be absent when zero.
+ */
+async function assertTask440ConfigSemantics(page, expectedSourceCount) {
   const explorer = page.locator(".cfgx");
   await assertVisible(explorer.getByText("TARGET", { exact: true }), "Config Explorer lost its target contract");
   await assertVisible(explorer.getByText("OBSERVATIONAL", { exact: true }), "Config Explorer lost its observational boundary");
   await assertExactTextOrder(explorer.locator(".cfgx-tools .seg button"), ["Browse", "Configured", "Search"], "Config Explorer modes");
-  await assertExactTextOrder(explorer.locator(".cfgx-side-tabs button"), ["Option", "Sources"], "Config inspector panes");
+
+  const paneTabs = explorer.locator(".cfgx-side-tabs button");
+  await paneTabs.first().waitFor({ state: "visible", timeout: 15000 });
+  const paneLabels = (await paneTabs.allTextContents()).map((text) => text.replace(/\s+/g, " ").trim());
+  if (paneLabels.length !== 2) {
+    throw new Error(`Config inspector must expose exactly two panes, got ${JSON.stringify(paneLabels)}`);
+  }
+  if (paneLabels[0] !== "Option") {
+    throw new Error(`Config inspector pane 1 must be Option, got ${JSON.stringify(paneLabels)}`);
+  }
+  if (!/^Sources(?:\s*\d+)?$/.test(paneLabels[1])) {
+    throw new Error(`Config inspector pane 2 must be Sources with an optional count, got ${JSON.stringify(paneLabels)}`);
+  }
+
+  // Accessible names must stay usable for keyboard and assistive navigation
+  // even though the visible label embeds the count.
+  const paneTabGroup = explorer.locator(".cfgx-side-tabs");
+  await assertVisible(paneTabGroup.getByRole("button", { name: "Option", exact: true }), "Config inspector lost its Option pane accessible name");
+  await assertVisible(paneTabGroup.getByRole("button", { name: /^Sources(\s*\d+)?$/ }), "Config inspector lost its Sources pane accessible name");
+
+  if (typeof expectedSourceCount === "number") {
+    const renderedCount = explorer.locator(".cfgx-side-tabs button .mono");
+    if (expectedSourceCount > 0) {
+      // The total is populated asynchronously from observed provenance, so
+      // wait for the exact fixture value instead of sampling a partial count.
+      await page
+        .waitForFunction(
+          (expected) => document.querySelector(".cfgx-side-tabs button .mono")?.textContent?.trim() === String(expected),
+          expectedSourceCount,
+          { timeout: 15000 },
+        )
+        .catch(async () => {
+          const actual = await renderedCount.allTextContents();
+          throw new Error(`Config inspector Sources count must be ${expectedSourceCount}, got ${JSON.stringify(actual)}`);
+        });
+    } else if ((await renderedCount.count()) !== 0) {
+      throw new Error("Config inspector rendered a Sources count with no observed sources");
+    }
+  }
+
   await assertVisible(explorer.locator(".cfgx-meta-i").filter({ hasText: "inventory" }), "Config Explorer lost inventory state");
   await assertVisible(explorer.locator(".cfgx-meta-i").filter({ hasText: "comparison" }), "Config Explorer lost comparison state");
 }
@@ -4637,7 +4693,7 @@ async function assertTask440CanonicalConfigState(page, label) {
     TASK_440_CONFIG_SHA,
     { timeout: 5000 },
   );
-  await assertTask440ConfigSemantics(page);
+  await assertTask440ConfigSemantics(page, TASK_440_FIXTURE.canonicalConfig.moduleSourceTotal);
   await assertVisible(page.locator(".cfgx-meta-i").filter({ hasText: "inventory1092 options" }), `${label} lost its complete inventory`);
   await assertVisible(page.locator(".cfgx-meta-i").filter({ hasText: "comparisonready" }), `${label} lost comparison readiness`);
   for (const expected of ["842", "1.6 GiB", "3400 ms"]) await assertVisible(page.locator(".cfgx-meta").getByText(expected, { exact: true }), `${label} lost Explorer metric ${expected}`);
@@ -4661,7 +4717,7 @@ async function validateTask440SemanticContract(page, target, contract, theme) {
     const selected = page.locator("select.cfgx-select option:checked");
     const selectedText = (await selected.textContent() || "").replace(/\s+/g, " ").trim();
     if (!selectedText.includes(contract.identity.revision.slice(0, 7))) throw new Error(`${target.name} selected generation lost revision ${contract.identity.revision}`);
-    await assertTask440ConfigSemantics(page);
+    await assertTask440ConfigSemantics(page, contract.counts?.moduleSources);
     const configured = page.locator(".cfgx-tools").getByRole("button", { name: "Configured", exact: true });
     if ((await configured.getAttribute("aria-pressed")) !== "true") throw new Error(`${target.name} lost Configured mode`);
     if (contract.expandedItem) await assertVisible(page.locator(".cfgx-insp-path").filter({ hasText: contract.expandedItem }), `${target.name} lost selected option ${contract.expandedItem}`);
@@ -5184,26 +5240,38 @@ function arrangeTask433DeployedAssessment(systemId, hostname, assessment) {
   }
 }
 
-async function runTask433ProductionEvaluation(page, { commitId, systemId, policyId }) {
+async function runTask433ProductionEvaluation(
+  page,
+  { commitId, systemId, policyId, reEvaluate = true },
+) {
+  let previousAttemptCount = 0;
   for (let attempt = 0; attempt < 180; attempt += 1) {
-    const ready = runFixtureSql(`
-      SELECT (commit_row.evaluation_status IN ('complete', 'failed'))::text
+    const state = runFixtureSql(`
+      SELECT (commit_row.evaluation_status IN ('complete', 'failed'))::text || '|' ||
+             commit_row.evaluation_attempt_count::text
       FROM commits commit_row
       WHERE commit_row.id=${Number(commitId)};
     `);
-    if (ready === "true") break;
+    const [ready, attemptCount] = state.split("|");
+    if (ready === "true") {
+      previousAttemptCount = Number(attemptCount);
+      break;
+    }
     if (attempt === 179) {
       throw new Error(`Commit ${commitId} did not reach a terminal evaluation state before TASK-433 re-evaluation`);
     }
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }
-  await phase6Api(page, `/api/v1/commits/${commitId}/re-evaluate`, { method: "POST" });
+  if (reEvaluate) {
+    await phase6Api(page, `/api/v1/commits/${commitId}/re-evaluate`, { method: "POST" });
+  }
   for (let attempt = 0; attempt < 180; attempt += 1) {
     const result = runFixtureSql(`
       SELECT json_build_object(
         'assessment_id', assessment.id,
         'derivation_id', assessment.derivation_id,
         'target_store_path', assessment.target_store_path,
+        'effective_set_digest', assessment.effective_set_digest,
         'overall', assessment.overall_outcome,
         'finding_id', finding.id,
         'rows', COALESCE(json_agg(json_build_object(
@@ -5228,7 +5296,7 @@ async function runTask433ProductionEvaluation(page, { commitId, systemId, policy
        AND finding.policy_lineage_id=assessment.policy_lineage_id
       WHERE commit_row.id=${Number(commitId)}
         AND commit_row.evaluation_status='complete'
-        AND commit_row.evaluation_attempt_count > 0
+        AND commit_row.evaluation_attempt_count > ${reEvaluate ? previousAttemptCount : -1}
       GROUP BY assessment.id, finding.id
       ORDER BY assessment.updated_at DESC
       LIMIT 1;
@@ -12206,7 +12274,26 @@ const steps = [
       const triageClose = triageDialog.getByRole("button", { name: "Close triage editor" });
       await page.waitForFunction(
         () => document.activeElement?.getAttribute("aria-label") === "Close triage editor",
-      );
+      ).catch(async () => {
+        const active = await page.evaluate(() => {
+          const element = document.activeElement;
+          if (!element) return null;
+          return {
+            tag: element.tagName,
+            ariaLabel: element.getAttribute("aria-label"),
+            className: element.className,
+            testId: element.getAttribute("data-testid"),
+            disabled: element.hasAttribute("disabled"),
+            text: (element.textContent || "").replace(/\s+/g, " ").trim().slice(0, 80),
+          };
+        }).catch(() => null);
+        const closeState = await page.evaluate(() => {
+          const element = document.querySelector('#cve-triage-dialog [aria-label="Close triage editor"]');
+          if (!element) return null;
+          return { disabled: element.hasAttribute("disabled"), autofocus: element.hasAttribute("autofocus") };
+        }).catch(() => null);
+        throw new Error(`Exact fleet triage editor did not receive initial focus; activeElement=${JSON.stringify(active)}; closeButton=${JSON.stringify(closeState)}`);
+      });
       if (!(await triageClose.evaluate((element) => element === document.activeElement))) {
         throw new Error("Exact fleet triage editor did not receive initial focus");
       }
@@ -18085,13 +18172,23 @@ security.audit.enable = true;</fixtext>
           throw new Error(`Legacy create did not return the selected typed assignee: ${JSON.stringify(created.assignee)}`);
         }
       const detail = page.getByTestId("poam-detail");
+      await detail.waitFor({ state: "visible", timeout: 15000 });
       await assertVisible(detail.getByText(created.human_id, { exact: true }), "Expected returned human POA&M ID");
       await assertVisible(detail.getByText("Open", { exact: true }).first(), "Expected returned Open status");
       await assertVisible(
         detail.getByTestId("poam-metadata-summary").getByText(eligibleAssignee.label, { exact: true }),
         "Expected returned typed assignee",
       );
-      await assertVisible(detail.getByText("2026-09-19", { exact: true }), "Expected returned due date");
+      const metadataSummary = detail.getByTestId("poam-metadata-summary");
+      await metadataSummary.waitFor({ state: "visible", timeout: 15000 });
+      const returnedDueDate = metadataSummary
+        .locator(":scope > div")
+        .filter({ hasText: "Target completion" })
+        .locator("strong");
+      await returnedDueDate.waitFor({ state: "visible", timeout: 15000 });
+      if ((await returnedDueDate.textContent())?.trim() !== "2026-09-19") {
+        throw new Error(`Expected returned due date, got ${JSON.stringify(await returnedDueDate.textContent())}`);
+      }
       if (!page.url().includes(`poam=${created.id}`)) throw new Error(`POA&M detail route omitted exact ID: ${page.url()}`);
 
       const exactEvidence = detail.getByTestId("poam-linked-finding").filter({ hasText: system.hostname });
@@ -18134,6 +18231,10 @@ security.audit.enable = true;</fixtext>
       const poam = await createFixturePoam(page, first.assessmentId, { title: "Shared lineage remediation", targetDate: "2026-10-04" });
       const incompatiblePoam = await createFixturePoam(page, incompatible.systems[0].assessmentId, { title: `Excluded ${incompatible.name}` });
       const bar = await openPhase6Evidence(page, fixture, second);
+      await assertVisible(
+        bar.getByRole("button", { name: "Link existing", exact: true }),
+        `Compatible finding must offer Link existing; remediation=${JSON.stringify(await bar.innerText())}`,
+      );
       await bar.getByRole("button", { name: "Link existing", exact: true }).click();
       const modal = page.getByRole("dialog").filter({ has: page.getByRole("heading", { name: "Link existing POA&M" }) });
       const searchResponse = await page.waitForResponse(
@@ -18566,7 +18667,7 @@ security.audit.enable = true;</fixtext>
         });
       const failingScanId = arrangeTask433CompletedScan(initialEvaluation.derivation_id, 2);
         const linkedFailingScanId = arrangeTask433CompletedScan(linkedInitial.derivation_id, 2);
-      const assessmentFixture = await runTask433ProductionEvaluation(page, {
+      let assessmentFixture = await runTask433ProductionEvaluation(page, {
         systemId,
         commitId,
         policyId: policy.id,
@@ -18583,6 +18684,12 @@ security.audit.enable = true;</fixtext>
             !linkedAssessment.rows.some((row) => row.kind === "cve_block" && row.source_scan_id === linkedFailingScanId && row.outcome === "fail")) {
         throw new Error(`Production re-evaluation did not create the compatible FAIL finding: ${JSON.stringify(linkedAssessment)}`);
       }
+      assessmentFixture = await runTask433ProductionEvaluation(page, {
+        systemId,
+        commitId,
+        policyId: policy.id,
+        reEvaluate: false,
+      });
       let assessmentId = assessmentFixture.assessment_id;
       let derivationId = assessmentFixture.derivation_id;
       const findingId = assessmentFixture.finding_id;
@@ -18604,6 +18711,16 @@ security.audit.enable = true;</fixtext>
         15000,
       );
       await assertVisible(page.getByText("FAIL", { exact: true }).first(), "Canonical POA&M lifecycle must begin from persisted FAIL evidence");
+      // The reviewed visual fixture is POAM-0007. Focused runs do not execute
+      // the six earlier POA&M workflows that advance this sequence in the full
+      // profile, so align only an unadvanced sequence before creation.
+      runFixtureSql(`
+        SELECT setval(
+          'poam_human_id_seq',
+          GREATEST((SELECT COALESCE(MAX(human_number), 0) FROM poams), 6),
+          true
+        );
+      `);
       await remediation.getByRole("button", { name: "Create POA&M", exact: true }).click();
       const createModal = page.getByRole("dialog", { name: "Create POA&M", exact: true });
         await createModal.getByLabel("Title", { exact: true }).fill("Canonical authoritative remediation");
@@ -18695,6 +18812,29 @@ security.audit.enable = true;</fixtext>
         { poamId: poam.id, revision: unlinkedDetail.revision },
       );
       await assertHidden(linkedRow, "Unlinked finding must leave the canonical POA&M detail");
+      // Normalize the canonical visual state after the typed-assignee and Risk
+      // edit assertions have proved those mutations. The reviewed baseline uses
+      // the design fixture's legacy owner and High risk, while the workflow
+      // still exercises and validates the newer typed-assignee and Low-risk
+      // response contracts before this point.
+      const canonicalMetadata = await phase6Api(page, `/api/v1/poams/${poam.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          revision: unlinkedDetail.revision,
+          owner: "Platform Security",
+          risk: "high",
+        }),
+      });
+      if (canonicalMetadata.status !== 200 || canonicalMetadata.body.owner !== "Platform Security" || canonicalMetadata.body.risk !== "high") {
+        throw new Error(`Canonical visual metadata did not reconcile: ${JSON.stringify(canonicalMetadata)}`);
+      }
+      runFixtureSql(`
+        UPDATE poams
+        SET created_at='2026-09-01T10:39:00Z'::timestamptz
+        WHERE id='${poam.id}'::uuid;
+      `);
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await waitForPhase6Target(page, detail, "Canonical POA&M after visual metadata normalization");
       // Keep strict evidence anchored after link actions scroll the tray.
       await detail.locator(".poam-tray-scroll").evaluate((element) => { element.scrollTop = 0; });
       await captureWorkflowState(page, stepName, "failed-evidence-edited-remediation");
@@ -18794,8 +18934,23 @@ security.audit.enable = true;</fixtext>
       await assertVisible(detail.getByTestId("poam-verification-result").getByText("Pass", { exact: true }).first(), "Authoritative PASS must appear in verification history");
       const successfulClosePromise = page.waitForResponse((response) => response.url().endsWith(`/api/v1/poams/${poam.id}/close`) && response.request().method() === "POST");
       await detail.getByRole("button", { name: "Authoritative close", exact: true }).click();
-      if ((await successfulClosePromise).status() !== 200) throw new Error("Authoritative PASS closure request failed");
+      const successfulCloseResponse = await successfulClosePromise;
+      if (successfulCloseResponse.status() !== 200) throw new Error("Authoritative PASS closure request failed");
+      const successfulCloseDetail = await successfulCloseResponse.json();
+      const closeRequirement = successfulCloseDetail.verification_attempts
+        ?.find((attempt) => attempt.id === successfulCloseDetail.closure_attempt_id)
+        ?.items?.[0]?.requirements?.[0];
+      if (closeRequirement?.external_id !== requirementContext.requirement.external_id) {
+        throw new Error(`Immediate close response omitted hydrated requirement metadata: ${JSON.stringify(successfulCloseDetail)}`);
+      }
       await assertVisible(detail.getByText("Completed", { exact: true }).first(), "Successful authoritative closure must render Completed");
+      runFixtureSql(`
+        UPDATE poams
+        SET closed_at='2026-09-01T10:39:37Z'::timestamptz
+        WHERE id='${poam.id}'::uuid;
+      `);
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await waitForPhase6Target(page, detail, "Canonical completed POA&M after visual time normalization");
       await captureWorkflowState(page, stepName, "authoritative-pass-closed");
       await page.reload({ waitUntil: "domcontentloaded" });
       await waitForPhase6Target(page, detail, "Reloaded completed canonical POA&M");

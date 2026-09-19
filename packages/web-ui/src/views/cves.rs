@@ -18,7 +18,7 @@ use crate::alerts::{NAV_BADGES, acknowledge_with_cursor_and_ids, should_flash};
 use crate::api::client;
 use crate::api::models::{CveFilters, CveFleetStats, CveListItem, CvePackageGroup};
 use crate::components::dialog_focus::{
-    DialogFocusBoundary, DialogFocusRestore, DialogFocusSentinel,
+    DialogFocusBoundary, DialogFocusRestore, DialogFocusSentinel, DialogInitialFocus,
 };
 use crate::components::layout::Card;
 use crate::components::notifications::Toast;
@@ -2116,6 +2116,10 @@ fn FleetCveTriageDialog(
     };
     rsx! {
         DialogFocusRestore {}
+        // The triage editor opens on top of the fleet drawer, so the browser
+        // never applies its close button's `autofocus`. Move focus explicitly
+        // to keep the nested modal keyboard-reachable and trapped.
+        DialogInitialFocus { dialog_id: "cve-triage-dialog" }
         button { class: "modal-backdrop cve-triage-backdrop", aria_label: "Close {dialog_label}", tabindex: "-1", onclick: move |_| if !pending() { on_close.call(()) } }
         div { id: "cve-triage-dialog", class: "modal cve-triage-modal", role: "dialog", aria_modal: "true", aria_label: "{dialog_label}", "data-testid": "cve-triage-dialog", tabindex: "-1", onkeydown: move |event| if event.key() == Key::Escape && !pending() { event.stop_propagation(); on_close.call(()); },
             DialogFocusSentinel { dialog_id: "cve-triage-dialog", boundary: DialogFocusBoundary::Last }

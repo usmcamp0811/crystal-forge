@@ -1890,6 +1890,60 @@ pub async fn detail(
     detail_with_history(pool, actor, id, &PoamDetailQuery::default(), clock).await
 }
 
+async fn hydrate_requirement_metadata_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    detail: &mut PoamDetail,
+) -> Result<(), PoamError> {
+    // PERFORMANCE: One metadata query hydrates the current finding page and all
+    // bounded verification items in the response.
+    let requirement_version_ids = detail
+        .findings
+        .iter()
+        .flat_map(|finding| finding.requirement_version_ids.iter().copied())
+        .chain(
+            detail
+                .verification_attempts
+                .iter()
+                .flat_map(|attempt| attempt.items.iter())
+                .flat_map(|item| item.requirement_version_ids.iter().copied()),
+        )
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let requirement_metadata =
+        poam::finding_requirement_metadata(tx, &requirement_version_ids).await?;
+    for finding in &mut detail.findings {
+        finding.requirements = sqlx::types::Json(
+            requirement_metadata
+                .iter()
+                .filter(|requirement| {
+                    finding
+                        .requirement_version_ids
+                        .contains(&requirement.requirement_version_id)
+                })
+                .cloned()
+                .collect(),
+        );
+    }
+    for item in detail
+        .verification_attempts
+        .iter_mut()
+        .flat_map(|attempt| attempt.items.iter_mut())
+    {
+        item.requirements = sqlx::types::Json(
+            requirement_metadata
+                .iter()
+                .filter(|requirement| {
+                    item.requirement_version_ids
+                        .contains(&requirement.requirement_version_id)
+                })
+                .cloned()
+                .collect(),
+        );
+    }
+    Ok(())
+}
+
 async fn cve_poam_detail_tx(
     tx: &mut Transaction<'_, Postgres>,
     actor: &PoamActor,
@@ -1937,6 +1991,7 @@ async fn cve_poam_detail_tx(
         finding.current_observed_package_version = item.observed_package_version.clone();
         finding.resolution_state = item.result.clone();
     }
+    hydrate_requirement_metadata_tx(tx, &mut detail).await?;
     Ok(detail)
 }
 
@@ -2051,53 +2106,7 @@ pub async fn detail_with_history(
             finding.resolution_state = item.result.clone();
         }
     }
-    // PERFORMANCE: One metadata query hydrates the current finding page and all
-    // bounded verification items in the response.
-    let requirement_version_ids = detail
-        .findings
-        .iter()
-        .flat_map(|finding| finding.requirement_version_ids.iter().copied())
-        .chain(
-            detail
-                .verification_attempts
-                .iter()
-                .flat_map(|attempt| attempt.items.iter())
-                .flat_map(|item| item.requirement_version_ids.iter().copied()),
-        )
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    let requirement_metadata =
-        poam::finding_requirement_metadata(&mut tx, &requirement_version_ids).await?;
-    for finding in &mut detail.findings {
-        finding.requirements = sqlx::types::Json(
-            requirement_metadata
-                .iter()
-                .filter(|requirement| {
-                    finding
-                        .requirement_version_ids
-                        .contains(&requirement.requirement_version_id)
-                })
-                .cloned()
-                .collect(),
-        );
-    }
-    for item in detail
-        .verification_attempts
-        .iter_mut()
-        .flat_map(|attempt| attempt.items.iter_mut())
-    {
-        item.requirements = sqlx::types::Json(
-            requirement_metadata
-                .iter()
-                .filter(|requirement| {
-                    item.requirement_version_ids
-                        .contains(&requirement.requirement_version_id)
-                })
-                .cloned()
-                .collect(),
-        );
-    }
+    hydrate_requirement_metadata_tx(&mut tx, &mut detail).await?;
     tx.commit().await?;
     Ok(detail)
 }
