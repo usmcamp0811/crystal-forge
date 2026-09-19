@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-18 20:52'
+updated_date: '2026-09-19 02:18'
 labels:
   - design-parity
   - web-ui
@@ -221,6 +221,8 @@ Maintainer verification adjustment: do not run the authoritative `checks.x86_64-
 2026-09-18 latest-per-flake merge-blocker correction: replace evaluation and build domain-relative window rankings with a shared set-based position-0 join against flake_branch_commit_snapshot gated by snapshot_ready_at. Keep status/search/authorization/pagination/queue ordering unchanged; latest_only filters on the snapshot commit identity and does not synthesize a row for snapshot-not-ready flakes. Audit Scanning's latest marker and update its source-of-truth query if needed. Replace stale TASK-399 database assertions with regressions for re-evaluated older commits, cross-tab active/history identity, filtering, archival/force-push snapshots, and multiple HEAD build rows. Update only affected UI fixtures/browser expectations; skip the authoritative web-ui check locally per maintainer instruction. Run focused server tests, formatting, package checks, and diff checks, then commit and push without merge or deployment.
 
 2026-09-18 verified-source builder evaluator packaging repair from exact pushed HEAD `70f90c83`: (1) define the builder package's evaluator Nix as `pkgs.nix-eval-jobs.nix`; replace unrelated `pkgs.nix` in both the `cf-builder-drv` makeWrapper PATH and the public `builder` writeShellApplication runtime inputs, preserving the NixOS module's existing evaluatorNix-first service PATH; (2) add a dedicated package-level Nix check that builds and executes both production builder entry points under a controlled PATH, proves each resolves the evaluator-matched Nix CLI/version, proves no unrelated `pkgs.nix` wrapper prefix remains, and verifies server/builder module PATH alignment; (3) retain and run strict server preclaim tests for matching and mismatched evaluator fingerprints, relevant builder tests, Nix formatting/evaluation, actual package builds, and focused builder/server checks; (4) inspect the resulting wrappers/PATH, commit and push only this packaging repair to MR !323 while preserving unrelated UI/scanning worktree changes.
+
+2026-09-19 exact-head CI stabilization history review: before further POA&M/CVE changes, compare current behavior and strict browser expectations with design commit `9725b4ef` and implementation commits `def63adf`, `0867808d`, `0aa38dba`, and `31819e2f`. Restore the design-aligned behavior where later changes regressed it; do not approve/churn visual baselines or weaken critical checks. Re-run the focused POA&M/CVE workflows, then the authoritative Web UI gate.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
