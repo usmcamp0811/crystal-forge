@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-19 18:11'
+updated_date: '2026-09-19 18:23'
 labels:
   - design-parity
   - web-ui
@@ -233,6 +233,8 @@ Maintainer verification adjustment: do not run the authoritative `checks.x86_64-
 2026-09-19 MR !323 CVE route-isolation follow-up in `/home/mcamp/code/crystal-forge/ci-repro-1403b799`: remove the unconditional broad standalone bootstrap route from `16-cves`; retain only CVE-specific mocks; add a non-standalone authenticated identity probe after cleanup to fail if standalone mock identity survives; verify Node syntax/static contracts and the standalone runner before the authoritative Web UI gate. Inspect strict failures from representative ordered execution; do not approve or churn strict baselines unless the user explicitly changes the recorded baseline-free stabilization direction.
 
 2026-09-19 user-authorized strict-baseline correction: retain current production UI and canonical fixture behavior. For 20af, mixed Nix+CVE evidence, and POA&M completed-history mobile, run each focused workflow twice in baseline-update mode with no source changes; compare only the ten named strict capture hashes. Normalize any unstable visible fixture data before approval. After deterministic evidence, approve only those ten reviewed strict PNGs, rerun the focused affected workflows under normal strict comparison, then run exactly one normal full `nix build .#checks.x86_64-linux.web-ui --no-link -L`. Do not change thresholds, policies, or unrelated baselines.
+
+2026-09-19 strict-baseline determinism adjustment: explicitly set the reviewed collapsed-sidebar preference in 20af so focused and ordered profiles capture the same state. Normalize only synthetic policy rule identifiers in the mixed Nix/CVE fixture through the authenticated policy API before production evaluation. Do not modify server-derived assessments, verification history, timestamps, strict thresholds, or visual comparison policy. Run each approved workflow twice from unchanged source, compare the approved captures using the repository visual-diff tolerance, then refresh only the ten user-approved PNGs.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
