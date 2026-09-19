@@ -60,12 +60,12 @@ This is a documentation-only task. Do not change check behavior, `.gitlab-ci.yml
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Every top-level directory directly under `checks/` that contains a `default.nix` (i.e., is a discovered flake check attribute) has a `README.md`.
-- [ ] #2 Each README states what the check verifies, why it is a separate check, how to run it with the exact `nix build .#checks.x86_64-linux.<name>` invocation (including any required flags/env vars), and any intentionally out-of-scope behavior.
-- [ ] #3 Each README accurately reflects the check's actual current implementation (VM vs. non-VM, core vs. production server build, CI matrix membership) as read from its `default.nix` and `.gitlab-ci.yml`; no fabricated details.
-- [ ] #4 No `default.nix`, `flake.nix`, or `.gitlab-ci.yml` behavior is modified.
-- [ ] #5 The existing `checks/web-ui/baselines/README.md` is left untouched.
-- [ ] #6 Markdown is well-formed and passes `git diff --check` (no trailing whitespace / whitespace errors).
+- [x] #1 Every top-level directory directly under `checks/` that contains a `default.nix` (i.e., is a discovered flake check attribute) has a `README.md`.
+- [x] #2 Each README states what the check verifies, why it is a separate check, how to run it with the exact `nix build .#checks.x86_64-linux.<name>` invocation (including any required flags/env vars), and any intentionally out-of-scope behavior.
+- [x] #3 Each README accurately reflects the check's actual current implementation (VM vs. non-VM, core vs. production server build, CI matrix membership) as read from its `default.nix` and `.gitlab-ci.yml`; no fabricated details.
+- [x] #4 No `default.nix`, `flake.nix`, or `.gitlab-ci.yml` behavior is modified.
+- [x] #5 The existing `checks/web-ui/baselines/README.md` is left untouched.
+- [x] #6 Markdown is well-formed and passes `git diff --check` (no trailing whitespace / whitespace errors).
 <!-- AC:END -->
 
 ## Implementation Plan
