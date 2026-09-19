@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-19 16:52'
+updated_date: '2026-09-19 17:24'
 labels:
   - design-parity
   - web-ui
@@ -295,6 +295,8 @@ Follow-up regression commit `0a59d340` (`TASK-440: Cover terminal head latest se
 2026-09-19 CVE drawer parity slice committed as `77d39902` (`TASK-440: Restore CVE triage drawer design parity`) and pushed to `origin/TASK-440-system-config-flake-parity` for MR !323.
 
 2026-09-19: Classified the four-step subset's ten strict visual differences as non-representative for baseline approval: current evidence/POA&M captures render deliberate post-978 deterministic fixture identities and current typed-assignee UI, while committed baselines contain older `mega-test-system`/Owner views. The task's current stabilization direction explicitly prohibits baseline churn. The subset nevertheless proved `16-cves` no longer poisons downstream real-server evidence: the mixed evidence semantic step passed. Proceeding with static contracts and the authoritative full ordering rather than approving subset captures.
+
+2026-09-19: The authoritative normal Web UI run reached all browser workflows. `16-cves`, the policy catalog regression, canonical mixed evidence, and canonical POA&M lifecycle all completed their semantic assertions. The gate failed only its strict visual policy with the remaining ten named captures: 20af dark/light; mixed-evidence server-derived desktop dark/light and mobile dark/light plus final dark/light; and POA&M reloaded completed-history mobile dark/light. This confirms the prior four-step subset was representative of the actual strict issue. The normal run also confirmed removal of the temporary failure-artifact exporter requires its static harness contract to require printed diagnostics instead. Node syntax/static contracts and Nix parsing pass after that correction. The full run itself remains failing pending visual remediation; no baselines were changed.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
