@@ -3,10 +3,10 @@ id: TASK-462
 title: >-
   Adopt devenv process orchestration with Portless URLs for parallel-worktree
   local development
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-09-19 14:50'
-updated_date: '2026-09-19 14:50'
+updated_date: '2026-09-19 14:53'
 labels: []
 milestone: m-1
 dependencies: []
