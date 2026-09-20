@@ -109,3 +109,28 @@ No backend implementation dependency is currently required for the modal parity 
 - [ ] #12 Existing exact workflows are extended rather than duplicated: `14a-environments-add-modal` covers Create sections and save; the current Edit path covers hydration, section switching, save/reopen; `14b-environments-config-warning` covers missing builder/cache warning behavior; semantic assertions cover duplicate/invalid name, assignment load failure/retry, mutation failure, delete blocker/confirmation, and read-only authorization states.
 - [ ] #13 Focused browser/API coverage proves real Create and Edit state transitions, cache assignment, policy/bundle assignment, server errors, delete safety, and responsive light/dark behavior; screenshots supplement semantic assertions and no production path uses fabricated fixture values.
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Audit the current committed EnvironmentsView design, active Dioxus modal path, API clients/models, assignment hydration/save flows, delete contract, and existing `14-environments`, `14a-environments-add-modal`, and `14b-environments-config-warning` workflows; confirm `edit_environment_modal.rs` is unused and remove stale assumptions from this task.
+2. Normalize the shared modal state and section model for Create/Edit: authoritative hydration, draft preservation, section badges, validation ownership, loading/error/retry states, in-flight save state, and refresh-after-success behavior.
+3. Implement the persistent design shell and Basics/Danger sections with real validation, production metadata, accessible navigation, delete eligibility, and existing safety semantics.
+4. Wire Binary cache to the existing authenticated environment-cache read and admin assignment APIs, including no-cache, selection/clear, metadata, assignment failure/retry, and explicit separation from cache creation.
+5. Align Deployment and Policy enforcement presentation while preserving persisted deployment values, gate policy assignment, versioned published bundle identity, overlays, enforcement modes, CAS/version behavior, and authorization.
+6. Extend the existing environment browser workflows with semantic Create/Edit/save/reopen/error/delete/auth assertions and desktop/narrow light/dark evidence; do not add duplicate workflows unless the existing manifest cannot represent the required state transitions.
+7. Verify focused Rust/WASM/API checks and one focused authoritative environment workflow after fast checks stabilize; update task notes with any proven API gap rather than inventing a frontend fallback.
+
+Verification plan:
+- `nix develop -c cargo fmt -- --check`
+- `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown`
+- `node --check checks/web-ui/tests/integration-test.js`
+- Focused environment component/API tests and the existing `14-environments`, `14a-environments-add-modal`, and `14b-environments-config-warning` workflows.
+- One focused authoritative environment browser run after fast checks stabilize, with semantic assertions plus desktop/narrow light/dark screenshots; do not run the full unrelated Web UI suite merely for this task.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-09-20 audit: TASK-339.1 is retained and promoted as the canonical Environment Add/Edit modal task. Current active path is the unified `EnvironmentFormModal`; `edit_environment_modal.rs` is not re-exported by `components/environments/mod.rs`. Existing server contracts cover deployment metadata, gate-policy assignment, versioned compliance assignments, authenticated environment-cache reads, and admin-only cache assignment. TASK-446 is being narrowed to cache-destination editor ownership to prevent duplicate implementation.
+<!-- SECTION:NOTES:END -->
