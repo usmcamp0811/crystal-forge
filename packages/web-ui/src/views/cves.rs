@@ -18,7 +18,8 @@ use crate::alerts::{NAV_BADGES, acknowledge_with_cursor_and_ids, should_flash};
 use crate::api::client;
 use crate::api::models::{CveFilters, CveFleetStats, CveListItem, CvePackageGroup};
 use crate::components::cve::triage::{
-    CveTriageDraft, EnvironmentTriageChoice, catalog_contains_assignee, parse_risk, risk_value,
+    CveTriageDraft, EnvironmentTriageChoice, catalog_contains_assignee, fixed_version_label,
+    parse_risk, risk_value,
 };
 use crate::components::dialog_focus::{
     DialogFocusBoundary, DialogFocusRestore, DialogFocusSentinel, DialogInitialFocus,
@@ -942,7 +943,7 @@ fn CveRow(
                 if cve.fix_status == "fix_available" {
                     span {
                         class: "chip chip-healthy",
-                        title: "{cve.fixed_version.as_deref().unwrap_or(\"\")}",
+                        title: "{fixed_version_label(cve.fixed_version.as_deref(), true)}",
                         // Check icon
                         svg {
                             width: "10",
@@ -956,10 +957,7 @@ fn CveRow(
                             style: "display: inline; vertical-align: middle;",
                             polyline { points: "20 6 9 17 4 12" }
                         }
-                        " "
-                        if let Some(ver) = &cve.fixed_version {
-                            "{ver}"
-                        }
+                        " {fixed_version_label(cve.fixed_version.as_deref(), true)}"
                     }
                 } else {
                     span {
@@ -1435,7 +1433,7 @@ fn CveRowInGroup(
                 if cve.fix_status == "fix_available" {
                     span {
                         class: "chip chip-healthy",
-                        title: "{cve.fixed_version.as_deref().unwrap_or(\"\")}",
+                        title: "{fixed_version_label(cve.fixed_version.as_deref(), true)}",
                         // Check icon
                         svg {
                             width: "10",
@@ -1449,10 +1447,7 @@ fn CveRowInGroup(
                             style: "display: inline; vertical-align: middle;",
                             polyline { points: "20 6 9 17 4 12" }
                         }
-                        " "
-                        if let Some(ver) = &cve.fixed_version {
-                            "{ver}"
-                        }
+                        " {fixed_version_label(cve.fixed_version.as_deref(), true)}"
                     }
                 } else {
                     span {
@@ -1541,12 +1536,10 @@ fn fleet_rollup_class(rollup: poam_api::FleetCveTriageRollup) -> &'static str {
 }
 
 fn fleet_fix_label(detail: &poam_api::FleetCveDetail) -> String {
-    detail
-        .cve
-        .fixed_version
-        .clone()
-        .filter(|version| !version.trim().is_empty())
-        .unwrap_or_else(|| "Pending".to_string())
+    fixed_version_label(
+        detail.cve.fixed_version.as_deref(),
+        detail.cve.fix_status == "fix_available",
+    )
 }
 
 fn fleet_assignee_label(assignee: &poam_api::PoamAssigneeView) -> String {
@@ -1799,6 +1792,8 @@ fn FleetCveDetailBody(detail: poam_api::FleetCveDetail) -> Element {
             h3 { "Remediation" }
             if detail.cve.fixed_version.as_ref().is_some_and(|version| !version.trim().is_empty()) {
                 div { class: "sd-callout sd-callout-info", Icon { name: IconName::Check, size: 13 } div { "Fixed in " strong { class: "mono", "{detail.canonical_package_name}-{fixed_version}" } ". Affected systems clear only after deployment and an exact follow-up scan verifies absence." } }
+            } else if detail.cve.fix_status == "fix_available" {
+                div { class: "sd-callout sd-callout-info", Icon { name: IconName::Check, size: 13 } div { strong { "A patched release is available, but the exact version is pending. " } "Affected systems clear only after deployment and an exact follow-up scan verifies absence." } }
             } else {
                 div { class: "sd-callout sd-callout-danger", Icon { name: IconName::Warn, size: 13 } div { strong { "No upstream patch is reported. " } "Watch the advisory and record compensating controls in accepted-risk rationale or the remediation plan." } }
             }
@@ -2090,7 +2085,10 @@ fn FleetCveTriageDialog(
 
 #[cfg(test)]
 mod tests {
-    use super::{FleetDetailState, ToastLifecycle, fleet_error_state, request_token_is_current};
+    use super::{
+        FleetDetailState, ToastLifecycle, fleet_error_state, fleet_fix_label,
+        request_token_is_current,
+    };
     use crate::components::cve::triage::{
         CveTriageDraft, EnvironmentTriageChoice, EnvironmentTriageDraft,
     };
@@ -2312,11 +2310,29 @@ mod tests {
         let json = serde_json::to_value(request).unwrap();
         assert_eq!(json["canonical_package_name"], "openssl");
         assert_eq!(json["poam"]["assignee"]["kind"], "oidc_group");
+        assert!(json.get("scope").is_none());
         let serialized = json.to_string();
         assert!(!serialized.contains("system_id"));
         assert!(!serialized.contains("hostname"));
         assert!(!serialized.contains("actor"));
         assert!(!serialized.contains("evidence"));
+    }
+
+    #[test]
+    fn fleet_fix_copy_distinguishes_availability_from_an_exact_version() {
+        let assignee = serde_json::json!({
+            "kind": "oidc_group",
+            "group_name": "platform-operators",
+            "display": "platform-operators",
+            "available": true
+        });
+        let mut detail = scheduled_detail(assignee, true, None);
+        detail.cve.fixed_version = Some("  ".to_string());
+        detail.cve.fix_status = "fix_available".to_string();
+        assert_eq!(fleet_fix_label(&detail), "available — version pending");
+
+        detail.cve.fix_status = "pending".to_string();
+        assert_eq!(fleet_fix_label(&detail), "pending");
     }
 
     #[test]

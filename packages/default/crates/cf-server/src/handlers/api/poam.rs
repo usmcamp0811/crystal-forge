@@ -571,10 +571,12 @@ pub async fn triage_fleet_cve(
     }
 }
 
-/// Returns environment-scoped triage state for one System Detail CVE row.
+/// Returns host and environment triage state for one System Detail CVE row.
 ///
-/// The service derives the current environment and exact affected hosts. A
-/// hidden system or a row without current exact evidence returns not found.
+/// The service derives the selected hostname, current environment, exact
+/// environment subjects, both direct dispositions, and host-precedence
+/// effective state. A hidden system or a row without current exact evidence
+/// returns not found.
 pub async fn system_cve_triage_detail(
     State(pool): State<PgPool>,
     RequireAuth(user): RequireAuth,
@@ -600,10 +602,11 @@ pub async fn system_cve_triage_detail(
     }
 }
 
-/// Applies one environment-scoped triage action from System Detail.
+/// Applies one host- or environment-scoped triage action from System Detail.
 ///
-/// The body cannot supply environment or host identities. The handler enforces
-/// CSRF before the shared service validates authorization and exact evidence.
+/// The body selects only the safe scope enum. It cannot supply environment,
+/// system, or host-list identities. The handler enforces CSRF before the shared
+/// service validates authorization and exact evidence.
 pub async fn triage_system_cve(
     State(pool): State<PgPool>,
     RequireAuth(user): RequireAuth,

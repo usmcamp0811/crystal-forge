@@ -9695,7 +9695,7 @@ const steps = [
   },
   {
     name: "12h-system-detail-cves-grouped-justification",
-    description: "System detail package-first CVEs use authoritative environment triage with typed POA&M assignment",
+    description: "System detail package-first CVEs use authoritative host and environment triage with typed POA&M assignment",
     action: async (page) => {
       await routeSystemsWarningData(page);
       const systemId = "00000000-0000-0000-0000-0000000000a1";
@@ -9720,7 +9720,7 @@ const steps = [
         description: "Kernel memory corruption under crafted input",
         package_name: "linuxPackages_6_10.kernel",
         installed_version: "6.10.12",
-        fixed_version: "6.10.14",
+        fixed_version: null,
         first_seen: "2026-04-10T09:00:00Z",
         published_at: "2026-04-08T00:00:00Z",
         status: "fix_available",
@@ -9798,21 +9798,54 @@ const steps = [
         risk: "medium",
         assignee: { kind: "oidc_group", group_name: "platform-operators", display: "Platform operators", available: true },
       };
-      let disposition = null;
-      let reuseScheduledPoam = false;
+      const environmentPoamId = "00000000-0000-0000-0000-0000000000d2";
+      const exactAffectedHosts = [
+        host(systemId, "warning-system-01"),
+        host("00000000-0000-0000-0000-0000000000a2", "warning-system-02"),
+      ];
+      let hostDisposition = null;
+      let environmentDisposition = null;
+      const scheduledPoamSubjects = [];
       const triageRequests = [];
+      const actor = { user_id: "00000000-0000-0000-0000-0000000000f1", display: "Morgan Reyes" };
+      const acceptedDisposition = (body) => ({
+        state: "accepted",
+        justification: body.justification,
+        review_date: body.review_date,
+        actor,
+        accepted_at: "2026-09-20T12:00:00Z",
+      });
+      const scheduledDisposition = (body, id) => ({
+        state: "scheduled",
+        poam_id: id,
+        poam: {
+          id,
+          human_id: id === poamId ? "POAM-3262" : "POAM-3262-ENV",
+          ...body.poam,
+          assignee: body.poam.assignee.kind === "oidc_group"
+            ? { ...body.poam.assignee, display: "Platform operators", available: true }
+            : { ...body.poam.assignee, display: "Morgan Reyes", available: true },
+        },
+        actor,
+        scheduled_at: "2026-09-20T12:05:00Z",
+      });
       const triageDetail = () => ({
         canonical_cve_id: "CVE-2025-1111",
         canonical_package_name: "linuxPackages_6_10.kernel",
         scope: {
           kind: "current_exact_affected_hosts_in_environment",
           selected_system_id: systemId,
+          selected_system_hostname: "warning-system-01",
           environment_id: environmentId,
           environment_name: "Production",
-          exact_affected_system_count: 2,
+          exact_affected_system_count: exactAffectedHosts.length,
         },
-        systems: [host(systemId, "warning-system-01"), host("00000000-0000-0000-0000-0000000000a2", "warning-system-02")],
-        disposition,
+        systems: exactAffectedHosts,
+        host_disposition: hostDisposition,
+        environment_disposition: environmentDisposition,
+        effective_disposition: hostDisposition ?? environmentDisposition,
+        effective_source: hostDisposition ? "host" : environmentDisposition ? "environment" : "none",
+        disposition: hostDisposition ?? environmentDisposition,
       });
       const triageRoute = new RegExp(`/api/v1/systems/${systemId}/cves/CVE-2025-1111/triage(?:\\?package=linuxPackages_6_10\\.kernel)?$`);
       await page.route(triageRoute, async (route) => {
@@ -9830,52 +9863,110 @@ const steps = [
         }
         const body = request.postDataJSON();
         triageRequests.push(body);
-        if (body.action === "accept_risk") {
-          disposition = {
-            state: "accepted",
-            justification: body.justification,
-            review_date: body.review_date,
-            actor: { user_id: "00000000-0000-0000-0000-0000000000f1", display: "Morgan Reyes" },
-            accepted_at: "2026-09-20T12:00:00Z",
-          };
-          await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ detail: triageDetail(), poam_id: null, poam_reused: false }) });
-          return;
+        if (!new Set(["host", "environment"]).has(body.scope)) {
+          throw new Error(`System triage request used an invalid scope: ${JSON.stringify(body)}`);
         }
-        disposition = {
-          state: "scheduled",
-          poam_id: poamId,
-          poam,
-          actor: { user_id: "00000000-0000-0000-0000-0000000000f1", display: "Morgan Reyes" },
-          scheduled_at: "2026-09-20T12:05:00Z",
-        };
+        if (/"(?:system|environment|host)(?:_ids?|names?)?"\s*:/i.test(JSON.stringify(body))) {
+          throw new Error(`System triage request serialized a server-owned identity: ${JSON.stringify(body)}`);
+        }
+        let nextDisposition = null;
+        if (body.action === "accept_risk") {
+          nextDisposition = acceptedDisposition(body);
+        } else if (body.action === "schedule_patch") {
+          const scheduledId = body.scope === "host" ? poamId : environmentPoamId;
+          nextDisposition = scheduledDisposition(body, scheduledId);
+          scheduledPoamSubjects.push({
+            scope: body.scope,
+            poamId: scheduledId,
+            systemIds: body.scope === "host"
+              ? [systemId]
+              : exactAffectedHosts.map((system) => system.system_id),
+          });
+        } else if (body.action !== "leave_open") {
+          throw new Error(`Unexpected system triage action: ${JSON.stringify(body)}`);
+        }
+        const previous = body.scope === "host" ? hostDisposition : environmentDisposition;
+        if (body.scope === "host") hostDisposition = nextDisposition;
+        else environmentDisposition = nextDisposition;
+        const responsePoamId = nextDisposition?.state === "scheduled" ? nextDisposition.poam_id : null;
         await route.fulfill({
           status: 200,
           contentType: "application/json",
-          body: JSON.stringify({ detail: triageDetail(), poam_id: poamId, poam_reused: reuseScheduledPoam }),
+          body: JSON.stringify({
+            detail: triageDetail(),
+            poam_id: responsePoamId,
+            poam_reused: previous?.state === "scheduled" && responsePoamId === previous.poam_id,
+          }),
         });
-        reuseScheduledPoam = true;
       });
 
       try {
+        const packageToggle = page.locator("button[aria-controls^='system-cve-package-']").filter({ hasText: "linuxPackages_6_10.kernel" }).first();
+        const showInventory = async () => {
+          await page.getByRole("tab", { name: "CVEs" }).first().click();
+          await assertVisible(page.getByTestId("system-cves-exact"), "Expected exact CVE inventory authority", 12000);
+          if ((await packageToggle.getAttribute("aria-expanded")) !== "true") await packageToggle.click();
+        };
+        const openTriage = async () => {
+          await page.getByTestId("system-cve-triage-open").click();
+          const opened = page.getByRole("dialog", { name: "Triage CVE-2025-1111 linuxPackages_6_10.kernel" });
+          await assertVisible(opened, "Expected unified system triage dialog");
+          return opened;
+        };
+        const assertTriageChip = async (label, title) => {
+          const chip = page.getByTestId("system-cve-triage-state");
+          const text = (await chip.textContent())?.replace(/\s+/g, " ").trim();
+          if (text !== label) throw new Error(`Expected triage chip '${label}', got '${text}'`);
+          await assertAttribute(chip, "title", title, `Expected ${label} scope tooltip`);
+        };
+        const fillScheduledPoam = async (dialog, title = poam.title) => {
+          await dialog.getByTestId("cve-poam-title").fill(title);
+          await dialog.getByTestId("cve-poam-target").fill(poam.target_date);
+          await dialog.getByTestId("cve-poam-plan").fill(poam.plan);
+          await dialog.getByTestId("cve-poam-risk").selectOption("medium");
+          await dialog.getByTestId("cve-poam-assignee").selectOption("group:platform-operators");
+        };
+
         await page.goto(`${baseUrl}/systems/${systemId}`, { timeout: LOAD_TIMEOUT });
-        await page.getByRole("tab", { name: "CVEs" }).first().click();
-        await assertVisible(page.getByTestId("system-cves-exact"), "Expected exact CVE inventory authority", 12000);
-        const packageToggle = page
-          .locator("button[aria-controls^='system-cve-package-']")
-          .filter({ hasText: "linuxPackages_6_10.kernel" })
-          .first();
-        await packageToggle.click();
+        await showInventory();
         await assertVisible(page.getByRole("columnheader", { name: "Triage" }), "Expected unified Triage column");
         await assertCount(page.getByRole("button", { name: "Justify" }), 0, "Separate justification action must be absent");
         await assertCount(page.getByRole("button", { name: "Create POA&M" }), 0, "Separate POA&M action must be absent");
         await assertVisible(page.getByTestId("system-cve-triage-state").filter({ hasText: "Outstanding" }), "Ordinary justification must not infer accepted triage");
+        await assertVisible(page.getByText("available — version pending", { exact: true }), "Fix availability must not invent an exact version");
 
-        await page.getByTestId("system-cve-triage-open").click();
-        let dialog = page.getByRole("dialog", { name: "Triage CVE-2025-1111 linuxPackages_6_10.kernel" });
-        await assertVisible(dialog, "Expected unified system triage dialog");
+        const triageTrigger = page.getByTestId("system-cve-triage-open");
+        let dialog = await openTriage();
+        await assertAttribute(dialog.getByTestId("cve-triage-scope-host"), "aria-checked", "true", "System Detail triage must default to host scope");
+        await assertVisible(dialog.getByText("warning-system-01 only", { exact: true }).first(), "Expected hostname-only default scope copy");
+        await assertVisible(dialog.getByText("Decide for this host alone, or for every host in its environment."), "Expected host/environment header copy");
         await assertVisible(dialog.getByText("Production", { exact: true }).first(), "Expected server-derived environment");
-        await assertVisible(dialog.getByText("2", { exact: true }).first(), "Expected server-derived exact host count");
         await assertVisible(dialog.getByText("Accepted and scheduled states do not prove remediation or verification."), "Expected evidence-boundary copy");
+        await assertVisible(dialog.getByText("available — version pending", { exact: true }), "Dialog must preserve unavailable exact-version truth");
+        await page.keyboard.press("Escape");
+        await assertHidden(dialog, "Escape should close System Detail triage");
+        if (!(await triageTrigger.evaluate((element) => element === document.activeElement))) {
+          throw new Error("Closing System Detail triage did not restore trigger focus");
+        }
+
+        dialog = await openTriage();
+        await dialog.getByRole("button", { name: "Schedule patch" }).click();
+        const generatedPlan = await dialog.getByTestId("cve-poam-plan").inputValue();
+        if (!/linuxPackages_6_10\.kernel/.test(generatedPlan) || !/exact follow-up scan/i.test(generatedPlan) || /the patched release|6\.10\.14/i.test(generatedPlan)) {
+          throw new Error(`Generated remediation plan was not truthfully generic: ${generatedPlan}`);
+        }
+        await dialog.getByRole("button", { name: "Accept risk" }).click();
+        await dialog.getByTestId("cve-accept-justification").fill("Host draft must not cross scopes.");
+        await dialog.getByTestId("cve-triage-scope-environment").click();
+        await assertAttribute(dialog.getByTestId("cve-triage-scope-environment"), "aria-checked", "true", "Environment scope switch should be explicit");
+        await assertVisible(dialog.getByText("All of Production", { exact: true }).first(), "Expected environment scope copy");
+        await dialog.getByRole("button", { name: "Accept risk" }).click();
+        await dialog.getByTestId("cve-accept-justification").fill("Environment draft must not cross scopes.");
+        await dialog.getByTestId("cve-triage-scope-host").click();
+        await assertAttribute(dialog.getByTestId("cve-triage-scope-host"), "aria-checked", "true", "Host scope should be restorable");
+        if (await dialog.getByTestId("cve-accept-justification").count()) {
+          throw new Error("Switching scopes retained an unsaved host disposition draft instead of reseeding authoritative host state");
+        }
         await dialog.getByRole("button", { name: "Accept risk" }).click();
         await dialog.getByTestId("cve-accept-justification").fill("short");
         await dialog.getByTestId("cve-triage-submit").click();
@@ -9887,25 +9978,14 @@ const steps = [
         await captureWorkflowViewportState(page, "12h-system-detail-cves-grouped-justification", "accepted-triage-modal", "narrowDesktop");
         await dialog.getByTestId("cve-triage-submit").click();
         await assertHidden(dialog, "Expected accepted triage submission to close the dialog");
-        if ((await packageToggle.getAttribute("aria-expanded")) !== "true") {
-          await packageToggle.click();
-        }
-        await assertVisible(page.getByTestId("system-cve-triage-state").filter({ hasText: "Accepted" }), "Expected authoritative Outstanding to Accepted transition");
-        if (triageRequests[0].canonical_package_name !== "linuxPackages_6_10.kernel" || triageRequests[0].review_date !== "2026-10-01") {
+        await assertTriageChip("Accepted", "Risk accepted for this host (warning-system-01)");
+        if (triageRequests[0].scope !== "host" || triageRequests[0].canonical_package_name !== "linuxPackages_6_10.kernel" || triageRequests[0].review_date !== "2026-10-01") {
           throw new Error(`Accepted triage request lost package or review date: ${JSON.stringify(triageRequests[0])}`);
         }
-        for (const serverOwned of ["environment_id", "system_id", "hostname"]) {
-          if (Object.hasOwn(triageRequests[0], serverOwned)) throw new Error(`System triage request supplied server-owned ${serverOwned}`);
-        }
 
-        await page.getByTestId("system-cve-triage-open").click();
-        dialog = page.getByRole("dialog", { name: "Triage CVE-2025-1111 linuxPackages_6_10.kernel" });
+        dialog = await openTriage();
         await dialog.getByRole("button", { name: "Schedule patch" }).click();
-        await dialog.getByTestId("cve-poam-title").fill(poam.title);
-        await dialog.getByTestId("cve-poam-target").fill(poam.target_date);
-        await dialog.getByTestId("cve-poam-plan").fill(poam.plan);
-        await dialog.getByTestId("cve-poam-risk").selectOption("medium");
-        await dialog.getByTestId("cve-poam-assignee").selectOption("group:platform-operators");
+        await fillScheduledPoam(dialog);
         await assertVisible(dialog.getByText("Add the default vulnerability remediation milestones"), "Expected default milestone control");
         await dialog.getByTestId("cve-triage-submit").click();
         await page.waitForURL(
@@ -9914,7 +9994,7 @@ const steps = [
             url.searchParams.get("poam") === poamId,
         );
         const scheduledRequest = triageRequests[1];
-        if (scheduledRequest.action !== "schedule_patch" || scheduledRequest.poam.assignee.kind !== "oidc_group" || scheduledRequest.poam.assignee.group_name !== "platform-operators" || scheduledRequest.poam.risk !== "medium" || scheduledRequest.poam.default_milestones !== true) {
+        if (scheduledRequest.scope !== "host" || scheduledRequest.action !== "schedule_patch" || scheduledRequest.poam.assignee.kind !== "oidc_group" || scheduledRequest.poam.assignee.group_name !== "platform-operators" || scheduledRequest.poam.risk !== "medium" || scheduledRequest.poam.default_milestones !== true) {
           throw new Error(`Scheduled triage request changed owner, risk, or milestone intent: ${JSON.stringify(scheduledRequest)}`);
         }
         if (scheduledRequest.poam.title !== poam.title || scheduledRequest.poam.target_date !== poam.target_date || scheduledRequest.poam.plan !== poam.plan) {
@@ -9922,23 +10002,101 @@ const steps = [
         }
 
         await page.goto(`${baseUrl}/systems/${systemId}`, { timeout: LOAD_TIMEOUT });
-        await page.getByRole("tab", { name: "CVEs" }).first().click();
-        await page.getByRole("button", { name: /linuxPackages_6_10\.kernel/ }).click();
-        await assertVisible(page.getByTestId("system-cve-triage-state").filter({ hasText: "Scheduled" }), "Expected authoritative Accepted to Scheduled transition");
-        await page.getByTestId("system-cve-triage-open").click();
-        dialog = page.getByRole("dialog", { name: "Triage CVE-2025-1111 linuxPackages_6_10.kernel" });
-        await assertVisible(dialog.getByText("reuse the existing compatible POA&M"), "Expected compatible POA&M reuse outcome");
+        await showInventory();
+        await assertTriageChip("Scheduled", "Patch scheduled for this host (warning-system-01)");
+
+        dialog = await openTriage();
+        await dialog.getByTestId("cve-triage-scope-environment").click();
+        await dialog.getByRole("button", { name: "Accept risk" }).click();
+        await dialog.getByTestId("cve-accept-justification").fill("Production compensating controls accept this shared risk.");
+        await dialog.getByTestId("cve-accept-review-date").fill("2026-10-05");
+        await dialog.getByTestId("cve-triage-submit").click();
+        if (triageRequests[2].scope !== "environment") throw new Error(`Environment acceptance used the wrong scope: ${JSON.stringify(triageRequests[2])}`);
+        await assertTriageChip("Scheduled", "Patch scheduled for this host (warning-system-01)");
+
+        dialog = await openTriage();
+        await dialog.getByRole("button", { name: "Use environment default" }).click();
+        await dialog.getByTestId("cve-triage-submit").click();
+        await assertTriageChip("Accepted · env", "Risk accepted for all of Production");
+        if (hostDisposition !== null || environmentDisposition?.state !== "accepted") {
+          throw new Error("Host OPEN changed the inherited accepted environment disposition");
+        }
+
+        dialog = await openTriage();
+        await dialog.getByTestId("cve-triage-scope-environment").click();
+        await dialog.getByRole("button", { name: "Schedule patch" }).click();
+        await fillScheduledPoam(dialog, "Patch Production kernels");
+        await dialog.getByTestId("cve-triage-submit").click();
+        await page.waitForURL((url) => url.searchParams.get("poam") === environmentPoamId);
+        await page.goto(`${baseUrl}/systems/${systemId}`, { timeout: LOAD_TIMEOUT });
+        await showInventory();
+        await assertTriageChip("Scheduled · env", "Patch scheduled for all of Production");
+        if (hostDisposition !== null || environmentDisposition?.state !== "scheduled") {
+          throw new Error("Host OPEN changed the inherited scheduled environment disposition");
+        }
+
+        dialog = await openTriage();
+        await dialog.getByTestId("cve-triage-scope-environment").click();
+        await assertVisible(dialog.getByText("reuse the existing compatible POA&M"), "Expected compatible environment POA&M reuse outcome");
         await assertDisabled(dialog.getByTestId("cve-poam-risk"), "Reused POA&M risk must remain server-authored");
         await captureWorkflowViewportState(page, "12h-system-detail-cves-grouped-justification", "scheduled-triage-modal", "narrowDesktop");
         await dialog.getByTestId("cve-triage-submit").click();
         await page.waitForURL(
           (url) =>
             url.pathname === `/systems/${systemId}` &&
-            url.searchParams.get("poam") === poamId,
+            url.searchParams.get("poam") === environmentPoamId,
         );
-        const reusedRequest = triageRequests[2];
+        const reusedRequest = triageRequests.at(-1);
         if (reusedRequest.poam.default_milestones !== false || reusedRequest.poam.assignee.group_name !== poam.assignee.group_name) {
           throw new Error(`Compatible POA&M reuse changed immutable metadata: ${JSON.stringify(reusedRequest.poam)}`);
+        }
+        const hostSchedules = scheduledPoamSubjects.filter((fixture) => fixture.scope === "host");
+        if (!hostSchedules.length || hostSchedules.some((fixture) => fixture.systemIds.length !== 1 || fixture.systemIds[0] !== systemId)) {
+          throw new Error(`Host POA&M fixture escaped the selected host: ${JSON.stringify(hostSchedules)}`);
+        }
+        const expectedEnvironmentSubjects = exactAffectedHosts.map((system) => system.system_id).sort();
+        const environmentSchedules = scheduledPoamSubjects.filter((fixture) => fixture.scope === "environment");
+        if (!environmentSchedules.length || environmentSchedules.some((fixture) => fixture.systemIds.slice().sort().join(",") !== expectedEnvironmentSubjects.join(","))) {
+          throw new Error(`Environment POA&M fixture did not use current exact affected hosts: ${JSON.stringify(environmentSchedules)}`);
+        }
+
+        const browserInstance = page.context().browser();
+        if (!browserInstance) throw new Error("Viewer System Detail contract requires a browser instance");
+        const viewerContext = await browserInstance.newContext({ viewport: VIEWPORTS.desktop });
+        const viewerPage = await viewerContext.newPage();
+        let viewerMutations = 0;
+        try {
+          await suppressOnboardingCoach(viewerPage);
+          await routeStandaloneUiBootstrap(viewerPage, "Viewer");
+          await routeSystemsWarningData(viewerPage);
+          await viewerPage.route(`**/api/v1/systems/${systemId}/cve-inventory*`, async (route) => {
+            await route.fulfill({
+              status: 200,
+              contentType: "application/json",
+              body: JSON.stringify({
+                authority: "exact",
+                exact_authority_failure: null,
+                source: { scan_id: exactObservation.scan_id, scanner_name: "vulnix", scanner_version: "1.10.1", completed_at: "2026-04-10T09:00:00Z" },
+                vulnerabilities: [inventoryRow],
+                metadata: { total_findings: 1, total_cves: 1, total_packages: 1, severity: { critical: 0, high: 1, medium: 0, low: 0, unknown: 0 } },
+                inventory_revision: "viewer-authoritative-triage-revision",
+                has_more: false,
+                next_cursor: null,
+              }),
+            });
+          });
+          await viewerPage.route(triageRoute, async (route) => {
+            if (route.request().method() !== "GET") viewerMutations += 1;
+            await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(triageDetail()) });
+          });
+          await viewerPage.goto(`${baseUrl}/systems/${systemId}`, { timeout: LOAD_TIMEOUT });
+          await viewerPage.getByRole("tab", { name: "CVEs" }).first().click();
+          await viewerPage.locator("button[aria-controls^='system-cve-package-']").filter({ hasText: "linuxPackages_6_10.kernel" }).first().click();
+          await assertHidden(viewerPage.getByTestId("system-cve-triage-open"), "Viewer must not receive System Detail triage mutation controls");
+          if (viewerMutations !== 0) throw new Error(`Viewer issued ${viewerMutations} System Detail triage mutations`);
+        } finally {
+          await viewerPage.unrouteAll({ behavior: "ignoreErrors" }).catch(() => {});
+          await viewerContext.close().catch(() => {});
         }
       } finally {
         await page.unroute(`**/api/v1/systems/${systemId}/cve-inventory*`);
@@ -12374,6 +12532,8 @@ const steps = [
       let triageDialog = page.getByRole("dialog", { name: "Triage CVE-2024-1234 openssl" });
       await assertVisible(triageDialog, "Operator/Admin should receive the exact fleet triage editor");
       await assertVisible(triageDialog.getByTestId("cve-triage-context"), "Expected vulnerability context in triage editor");
+      await assertCount(triageDialog.getByTestId("cve-triage-scope-host"), 0, "Fleet triage must not expose a host scope selector");
+      await assertCount(triageDialog.getByTestId("cve-triage-scope-environment"), 0, "Fleet triage must not expose a System Detail environment scope selector");
       const assertTriageCapture = async () => {
         const context = triageDialog.getByTestId("cve-triage-context");
         const firstEnvironment = triageDialog.locator(".cve-triage-env").first();
@@ -12502,6 +12662,9 @@ const steps = [
       const firstTriage = triageBodies[0];
       if (JSON.stringify(firstTriage).match(/system_id|hostname|actor|evidence/i)) {
         throw new Error(`Fleet triage body leaked server-owned authority: ${JSON.stringify(firstTriage)}`);
+      }
+      if (Object.hasOwn(firstTriage, "scope") || firstTriage.actions.some((action) => !Object.hasOwn(action, "environment_id"))) {
+        throw new Error(`Fleet environment request shape changed with System Detail scope support: ${JSON.stringify(firstTriage)}`);
       }
       if (firstTriage.actions.map((action) => action.action).join(",") !== "accept_risk,schedule_patch,leave_open") {
         throw new Error(`Mixed environment intentions were not preserved: ${JSON.stringify(firstTriage.actions)}`);
@@ -21010,6 +21173,48 @@ function runStaticHarnessContracts() {
       poamApi.includes("pub async fn triage_system_cve") &&
       poamApi.includes('"{}/systems/{}/cves/{}/triage"'),
     "System CVE triage must retain unified GET and POST API contracts",
+  );
+  assertContract(
+    poamApi.includes("pub enum SystemCveTriageScopeChoice") &&
+      poamApi.includes("Host,") &&
+      poamApi.includes("Environment,") &&
+      poamApi.includes("pub scope: SystemCveTriageScopeChoice") &&
+      poamApi.includes("pub selected_system_hostname: String") &&
+      poamApi.includes("pub host_disposition: Option<CveEnvironmentDisposition>") &&
+      poamApi.includes("pub environment_disposition: Option<CveEnvironmentDisposition>") &&
+      poamApi.includes("pub effective_disposition: Option<CveEnvironmentDisposition>") &&
+      poamApi.includes("pub effective_source: SystemCveEffectiveDispositionSource") &&
+      poamApi.includes("pub disposition: Option<CveEnvironmentDisposition>") &&
+      poamApi.includes("pub enum SystemCveEffectiveDispositionSource") &&
+      poamApi.includes("None,"),
+    "System Detail triage types must retain scope, direct/effective provenance, hostname, and compatibility disposition",
+  );
+  assertContract(
+    cveComponent.includes('Self::AcceptedEnvironment => "Accepted · env"') &&
+      cveComponent.includes('Self::ScheduledEnvironment => "Scheduled · env"') &&
+      cveComponent.includes('"Risk accepted for all of {}"') &&
+      cveComponent.includes('"Patch scheduled for all of {}"'),
+    "System Detail inherited environment chips must retain visible and tooltip provenance",
+  );
+  for (const contract of [
+    'getByTestId("cve-triage-scope-host")',
+    'getByTestId("cve-triage-scope-environment")',
+    'effective_source: hostDisposition ? "host" : environmentDisposition ? "environment" : "none"',
+    'await assertTriageChip("Accepted · env", "Risk accepted for all of Production")',
+    'await assertTriageChip("Scheduled · env", "Patch scheduled for all of Production")',
+    'await page.keyboard.press("Escape")',
+    'routeStandaloneUiBootstrap(viewerPage, "Viewer")',
+    'available — version pending',
+    'filter({ hasText: "Legacy inventory" })',
+    'getByTestId("system-cves-no-scan")',
+  ]) {
+    assertContract(scenario12h.includes(contract), `12h System Detail triage workflow is missing ${contract}`);
+  }
+  assertContract(
+    scenario16.includes('getByTestId("cve-triage-scope-host")') &&
+      scenario16.includes('Object.hasOwn(firstTriage, "scope")') &&
+      scenario16.includes('Object.hasOwn(action, "environment_id")'),
+    "16-cves must prove fleet triage retains environment actions without System Detail scope selectors",
   );
   const sqlAuthoredHelperName = "createTask433Composite" + "AssessmentFixture";
   assertContract(!source.includes(`${sqlAuthoredHelperName}(`), "Canonical workflows must not use the SQL-authored assessment helper");

@@ -16,9 +16,10 @@ use crate::api::models::{
     CveAffectedEnvironment, CveAffectedSystemDetail, CveDispositionActor,
     CveEnvironmentDisposition, CveEnvironmentTriageAction, CveTriageConflictSubject,
     FleetCveDetail, FleetCvePoamRequest, FleetCveTriageRequest, FleetCveTriageResponse,
-    FleetCveTriageRollup, ScheduledPoamMetadata, SystemCveInventoryAuthority,
-    SystemCveTriageAction, SystemCveTriageDetail, SystemCveTriageRequest, SystemCveTriageResponse,
-    SystemCveTriageScope, SystemCveTriageScopeKind,
+    FleetCveTriageRollup, ScheduledPoamMetadata, SystemCveEffectiveDispositionSource,
+    SystemCveInventoryAuthority, SystemCveTriageAction, SystemCveTriageDetail,
+    SystemCveTriageRequest, SystemCveTriageResponse, SystemCveTriageScope,
+    SystemCveTriageScopeChoice, SystemCveTriageScopeKind,
 };
 use crate::compliance::canonical::semantic_digest;
 use crate::compliance::resolver::{
@@ -2852,6 +2853,25 @@ pub async fn unlink_cve_finding(
         .execute(&mut *tx)
         .await?;
     }
+    sqlx::query(
+        r#"UPDATE cve_system_dispositions
+           SET retired_at=$5,retired_by=$6,retirement_reason='poam_host_unlinked'
+           WHERE canonical_cve_id=$1 AND canonical_package_name=$2
+             AND system_id=$3 AND poam_id=$4 AND state='scheduled'
+             AND retired_at IS NULL
+             AND NOT EXISTS(SELECT 1 FROM poam_cve_finding_links link
+               WHERE link.poam_id=$4 AND link.system_id=$3
+                 AND link.canonical_cve_id=$1
+                 AND link.canonical_package_name=$2 AND link.retired_at IS NULL)"#,
+    )
+    .bind(&key.canonical_cve_id)
+    .bind(&key.canonical_package_name)
+    .bind(key.system_id)
+    .bind(id)
+    .bind(clock.now())
+    .bind(actor.user_id)
+    .execute(&mut *tx)
+    .await?;
     bump_and_audit(
         &mut tx,
         &actor,
@@ -3302,8 +3322,8 @@ impl FleetCveSubject {
 }
 
 #[derive(Debug, sqlx::FromRow)]
-struct EnvironmentDispositionRow {
-    environment_id: Uuid,
+struct CveDispositionRow {
+    scope_id: Uuid,
     state: String,
     justification: Option<String>,
     review_date: Option<NaiveDate>,
@@ -3419,8 +3439,8 @@ async fn fleet_cve_dispositions_tx(
     package_name: &str,
     environment_ids: &[Uuid],
 ) -> Result<BTreeMap<Uuid, CveEnvironmentDisposition>, PoamError> {
-    let rows = sqlx::query_as::<_, EnvironmentDispositionRow>(
-        r#"SELECT disposition.environment_id,disposition.state,
+    let rows = sqlx::query_as::<_, CveDispositionRow>(
+        r#"SELECT disposition.environment_id AS scope_id,disposition.state,
                   disposition.justification,disposition.review_date,
                   disposition.accepted_by,disposition.accepted_at,
                   disposition.poam_id,disposition.scheduled_by,
@@ -3453,111 +3473,169 @@ async fn fleet_cve_dispositions_tx(
     .fetch_all(&mut **tx)
     .await?;
     rows.into_iter()
-        .map(|row| {
-            let disposition = match row.state.as_str() {
-                "accepted" => CveEnvironmentDisposition::Accepted {
-                    justification: row.justification.ok_or_else(|| {
-                        PoamError::Database(anyhow::anyhow!(
-                            "accepted CVE disposition lacks justification"
-                        ))
-                    })?,
-                    review_date: row.review_date,
-                    actor: CveDispositionActor {
-                        user_id: row.accepted_by.ok_or_else(|| {
-                            PoamError::Database(anyhow::anyhow!(
-                                "accepted CVE disposition lacks actor"
-                            ))
-                        })?,
-                        display: row.actor_display,
-                    },
-                    accepted_at: row.accepted_at.ok_or_else(|| {
-                        PoamError::Database(anyhow::anyhow!(
-                            "accepted CVE disposition lacks timestamp"
-                        ))
-                    })?,
-                },
-                "scheduled" => CveEnvironmentDisposition::Scheduled {
-                    poam_id: row.poam_id.ok_or_else(|| {
-                        PoamError::Database(anyhow::anyhow!(
-                            "scheduled CVE disposition lacks POA&M"
-                        ))
-                    })?,
-                    // SECURITY: Build an optional candidate before coherence
-                    // cleanup. Stale persisted rows fail closed as OPEN instead
-                    // of turning the complete drawer read into a database error.
-                    poam: match (
-                        row.active_poam_id,
-                        row.poam_human_id,
-                        row.poam_title,
-                        row.poam_plan,
-                        row.poam_target_date,
-                        row.poam_risk.as_deref(),
-                        row.poam_assignee,
-                    ) {
-                        (
-                            Some(id),
-                            Some(human_id),
-                            Some(title),
-                            Some(plan),
-                            Some(target_date),
-                            Some(risk),
-                            Some(assignee),
-                        ) if row.poam_id == Some(id) => {
-                            let risk = match risk {
-                                "high" => Some(PoamRisk::High),
-                                "medium" => Some(PoamRisk::Medium),
-                                "low" => Some(PoamRisk::Low),
-                                _ => None,
-                            };
-                            let assignee = assignee.0;
-                            if matches!(
-                                &assignee,
-                                PoamAssigneeView::User {
-                                    available: true,
-                                    ..
-                                } | PoamAssigneeView::OidcGroup {
-                                    available: true,
-                                    ..
-                                }
-                            ) {
-                                risk.map(|risk| ScheduledPoamMetadata {
-                                    id,
-                                    human_id,
-                                    title,
-                                    plan,
-                                    target_date,
-                                    risk,
-                                    assignee,
-                                })
-                            } else {
-                                None
-                            }
-                        }
-                        _ => None,
-                    },
-                    actor: CveDispositionActor {
-                        user_id: row.scheduled_by.ok_or_else(|| {
-                            PoamError::Database(anyhow::anyhow!(
-                                "scheduled CVE disposition lacks actor"
-                            ))
-                        })?,
-                        display: row.actor_display,
-                    },
-                    scheduled_at: row.scheduled_at.ok_or_else(|| {
-                        PoamError::Database(anyhow::anyhow!(
-                            "scheduled CVE disposition lacks timestamp"
-                        ))
-                    })?,
-                },
-                _ => {
-                    return Err(PoamError::Database(anyhow::anyhow!(
-                        "unknown CVE disposition state"
-                    )));
-                }
-            };
-            Ok((row.environment_id, disposition))
-        })
+        .map(|row| Ok((row.scope_id, cve_disposition_from_row(row)?)))
         .collect()
+}
+
+fn cve_disposition_from_row(
+    row: CveDispositionRow,
+) -> Result<CveEnvironmentDisposition, PoamError> {
+    let disposition = match row.state.as_str() {
+        "accepted" => CveEnvironmentDisposition::Accepted {
+            justification: row.justification.ok_or_else(|| {
+                PoamError::Database(anyhow::anyhow!(
+                    "accepted CVE disposition lacks justification"
+                ))
+            })?,
+            review_date: row.review_date,
+            actor: CveDispositionActor {
+                user_id: row.accepted_by.ok_or_else(|| {
+                    PoamError::Database(anyhow::anyhow!("accepted CVE disposition lacks actor"))
+                })?,
+                display: row.actor_display,
+            },
+            accepted_at: row.accepted_at.ok_or_else(|| {
+                PoamError::Database(anyhow::anyhow!("accepted CVE disposition lacks timestamp"))
+            })?,
+        },
+        "scheduled" => CveEnvironmentDisposition::Scheduled {
+            poam_id: row.poam_id.ok_or_else(|| {
+                PoamError::Database(anyhow::anyhow!("scheduled CVE disposition lacks POA&M"))
+            })?,
+            // SECURITY: Build an optional candidate before coherence
+            // cleanup. Stale persisted rows fail closed as OPEN instead
+            // of turning the complete drawer read into a database error.
+            poam: match (
+                row.active_poam_id,
+                row.poam_human_id,
+                row.poam_title,
+                row.poam_plan,
+                row.poam_target_date,
+                row.poam_risk.as_deref(),
+                row.poam_assignee,
+            ) {
+                (
+                    Some(id),
+                    Some(human_id),
+                    Some(title),
+                    Some(plan),
+                    Some(target_date),
+                    Some(risk),
+                    Some(assignee),
+                ) if row.poam_id == Some(id) => {
+                    let risk = match risk {
+                        "high" => Some(PoamRisk::High),
+                        "medium" => Some(PoamRisk::Medium),
+                        "low" => Some(PoamRisk::Low),
+                        _ => None,
+                    };
+                    let assignee = assignee.0;
+                    if matches!(
+                        &assignee,
+                        PoamAssigneeView::User {
+                            available: true,
+                            ..
+                        } | PoamAssigneeView::OidcGroup {
+                            available: true,
+                            ..
+                        }
+                    ) {
+                        risk.map(|risk| ScheduledPoamMetadata {
+                            id,
+                            human_id,
+                            title,
+                            plan,
+                            target_date,
+                            risk,
+                            assignee,
+                        })
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            },
+            actor: CveDispositionActor {
+                user_id: row.scheduled_by.ok_or_else(|| {
+                    PoamError::Database(anyhow::anyhow!("scheduled CVE disposition lacks actor"))
+                })?,
+                display: row.actor_display,
+            },
+            scheduled_at: row.scheduled_at.ok_or_else(|| {
+                PoamError::Database(anyhow::anyhow!("scheduled CVE disposition lacks timestamp"))
+            })?,
+        },
+        _ => {
+            return Err(PoamError::Database(anyhow::anyhow!(
+                "unknown CVE disposition state"
+            )));
+        }
+    };
+    Ok(disposition)
+}
+
+async fn system_cve_disposition_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    system_id: Uuid,
+    cve_id: &str,
+    package_name: &str,
+) -> Result<Option<CveEnvironmentDisposition>, PoamError> {
+    let row = sqlx::query_as::<_, CveDispositionRow>(
+        r#"SELECT disposition.system_id AS scope_id,disposition.state,
+                  disposition.justification,disposition.review_date,
+                  disposition.accepted_by,disposition.accepted_at,
+                  disposition.poam_id,disposition.scheduled_by,
+                  disposition.scheduled_at,
+                  COALESCE(NULLIF(btrim(concat_ws(' ',actor.first_name,actor.last_name)),''),
+                           NULLIF(btrim(actor.username),''),actor.email,
+                           COALESCE(disposition.accepted_by,disposition.scheduled_by)::text)
+                    AS actor_display,
+                  poam.id AS active_poam_id,
+                  CASE WHEN poam.id IS NOT NULL
+                    THEN 'POAM-' || lpad(poam.human_number::text,4,'0')
+                  END AS poam_human_id,
+                  poam.title AS poam_title,poam.plan AS poam_plan,
+                  poam.target_date AS poam_target_date,poam.risk AS poam_risk,
+                  CASE WHEN poam.id IS NOT NULL THEN poam_assignee_view(poam) END
+                    AS poam_assignee
+           FROM cve_current_system_dispositions disposition
+           LEFT JOIN users actor ON actor.id=COALESCE(
+             disposition.accepted_by,disposition.scheduled_by)
+           LEFT JOIN poams poam ON poam.id=disposition.poam_id
+             AND poam.status<>'completed'
+           WHERE disposition.system_id=$1
+             AND disposition.canonical_cve_id=$2
+             AND disposition.canonical_package_name=$3"#,
+    )
+    .bind(system_id)
+    .bind(cve_id)
+    .bind(package_name)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let disposition = cve_disposition_from_row(row)?;
+    if let CveEnvironmentDisposition::Scheduled { poam_id, poam, .. } = &disposition {
+        let coherent: bool = sqlx::query_scalar(
+            r#"SELECT EXISTS(
+                 SELECT 1 FROM poam_cve_finding_links
+                 WHERE poam_id=$1 AND system_id=$2 AND canonical_cve_id=$3
+                   AND canonical_package_name=$4 AND retired_at IS NULL)"#,
+        )
+        .bind(poam_id)
+        .bind(system_id)
+        .bind(cve_id)
+        .bind(package_name)
+        .fetch_one(&mut **tx)
+        .await?;
+        // SECURITY: A stale host schedule fails closed as no override. It must
+        // not mask a coherent environment default after its exact link is lost.
+        if poam.is_none() || !coherent {
+            return Ok(None);
+        }
+    }
+    Ok(Some(disposition))
 }
 
 async fn retain_coherent_scheduled_dispositions_tx(
@@ -3579,17 +3657,38 @@ async fn retain_coherent_scheduled_dispositions_tx(
     if scheduled.is_empty() {
         return Ok(());
     }
+    let overridden_system_ids = sqlx::query_scalar::<_, Uuid>(
+        r#"SELECT system_id FROM cve_current_system_dispositions
+           WHERE canonical_cve_id=$1 AND canonical_package_name=$2
+             AND system_id=ANY($3) ORDER BY system_id"#,
+    )
+    .bind(cve_id)
+    .bind(package_name)
+    .bind(
+        subjects
+            .iter()
+            .map(|subject| subject.system_id)
+            .collect::<Vec<_>>(),
+    )
+    .fetch_all(&mut **tx)
+    .await?
+    .into_iter()
+    .collect::<BTreeSet<_>>();
     let rows = sqlx::query_as::<_, (Uuid, Uuid, String, Vec<Uuid>)>(
         r#"SELECT requested.environment_id,requested.poam_id,poam.status,
                   COALESCE(array_agg(link.system_id ORDER BY link.system_id)
                     FILTER (WHERE link.system_id IS NOT NULL),'{}'::uuid[])
            FROM UNNEST($1::uuid[],$2::uuid[]) requested(environment_id,poam_id)
            JOIN poams poam ON poam.id=requested.poam_id
-           LEFT JOIN poam_cve_finding_links link
-             ON link.poam_id=requested.poam_id AND link.retired_at IS NULL
-            AND link.canonical_cve_id=$3 AND link.canonical_package_name=$4
-            AND EXISTS(SELECT 1 FROM systems system WHERE system.id=link.system_id
-                       AND system.environment_id=requested.environment_id)
+            LEFT JOIN poam_cve_finding_links link
+              ON link.poam_id=requested.poam_id AND link.retired_at IS NULL
+             AND link.canonical_cve_id=$3 AND link.canonical_package_name=$4
+             AND EXISTS(SELECT 1 FROM systems system WHERE system.id=link.system_id
+                        AND system.environment_id=requested.environment_id)
+             AND NOT EXISTS(SELECT 1 FROM cve_current_system_dispositions host
+                 WHERE host.system_id=link.system_id
+                   AND host.canonical_cve_id=$3
+                   AND host.canonical_package_name=$4)
            GROUP BY requested.environment_id,requested.poam_id,poam.status
            ORDER BY requested.environment_id"#,
     )
@@ -3602,7 +3701,10 @@ async fn retain_coherent_scheduled_dispositions_tx(
     for (environment_id, poam_id, has_complete_metadata) in scheduled {
         let expected = subjects
             .iter()
-            .filter(|subject| subject.environment_id == environment_id)
+            .filter(|subject| {
+                subject.environment_id == environment_id
+                    && !overridden_system_ids.contains(&subject.system_id)
+            })
             .map(|subject| subject.system_id)
             .collect::<BTreeSet<_>>();
         // INVARIANT: This set equality mirrors
@@ -4120,7 +4222,7 @@ async fn compatible_existing_fleet_poam_tx(
     expected_system_ids: &BTreeSet<Uuid>,
     cve_id: &str,
     package_name: &str,
-    allow_same_identity_superset: bool,
+    allow_compatible_overlap: bool,
 ) -> Result<bool, PoamError> {
     let row: Option<(
         String,
@@ -4174,12 +4276,13 @@ async fn compatible_existing_fleet_poam_tx(
         .iter()
         .map(|system_id| (*system_id, cve_id.to_owned(), package_name.to_owned()))
         .collect::<BTreeSet<_>>();
-    let exact_subjects_match = if allow_same_identity_superset {
+    let exact_subjects_match = if allow_compatible_overlap {
         // CONCURRENCY: The canonical CVE lock serializes changes to every
-        // same-CVE link before this read. A System Detail action can therefore
-        // reuse the selected environment's subset without retiring or adopting
-        // the compatible POA&M subjects owned by another environment.
-        expected_subjects.is_subset(&active_exact_subjects)
+        // same-CVE link before this read. A System Detail action can reuse a
+        // compatible POA&M shared by another environment or expand a host-only
+        // POA&M to the complete derived environment subject set.
+        (expected_subjects.is_subset(&active_exact_subjects)
+            || active_exact_subjects.is_subset(&expected_subjects))
             && active_exact_subjects
                 .iter()
                 .all(|row| row.1 == cve_id && row.2 == package_name)
@@ -4194,7 +4297,8 @@ fn system_cve_triage_detail_from_subjects(
     cve_id: &str,
     package_name: &str,
     subjects: &[FleetCveSubject],
-    disposition: Option<CveEnvironmentDisposition>,
+    host_disposition: Option<CveEnvironmentDisposition>,
+    environment_disposition: Option<CveEnvironmentDisposition>,
 ) -> Result<SystemCveTriageDetail, PoamError> {
     let selected = subjects
         .iter()
@@ -4216,18 +4320,36 @@ fn system_cve_triage_detail_from_subjects(
             inventory_authority: SystemCveInventoryAuthority::Exact,
         })
         .collect::<Vec<_>>();
+    let (effective_disposition, effective_source) = if let Some(disposition) = &host_disposition {
+        (
+            Some(disposition.clone()),
+            SystemCveEffectiveDispositionSource::Host,
+        )
+    } else if let Some(disposition) = &environment_disposition {
+        (
+            Some(disposition.clone()),
+            SystemCveEffectiveDispositionSource::Environment,
+        )
+    } else {
+        (None, SystemCveEffectiveDispositionSource::None)
+    };
     Ok(SystemCveTriageDetail {
         canonical_cve_id: cve_id.to_owned(),
         canonical_package_name: package_name.to_owned(),
         scope: SystemCveTriageScope {
             kind: SystemCveTriageScopeKind::CurrentExactAffectedHostsInEnvironment,
             selected_system_id,
+            selected_system_hostname: selected.hostname.clone(),
             environment_id: selected.environment_id,
             environment_name: selected.environment_name.clone(),
             exact_affected_system_count: systems.len() as i64,
         },
         systems,
-        disposition,
+        host_disposition,
+        environment_disposition,
+        disposition: effective_disposition.clone(),
+        effective_disposition,
+        effective_source,
     })
 }
 
@@ -4266,11 +4388,14 @@ async fn system_cve_triage_detail_tx(
         package_name,
     )
     .await?;
+    let host_disposition =
+        system_cve_disposition_tx(tx, selected_system_id, cve_id, package_name).await?;
     system_cve_triage_detail_from_subjects(
         selected_system_id,
         cve_id,
         package_name,
         &subjects,
+        host_disposition,
         dispositions.remove(&environment_id),
     )
 }
@@ -4378,17 +4503,17 @@ pub async fn triage_fleet_cve(
     unreachable!()
 }
 
-/// Applies one disposition to the selected system's derived environment.
+/// Applies one disposition to a selected system's host or environment scope.
 ///
-/// The request cannot provide an environment action list. The service derives
-/// the environment from the selected system's current exact occurrence, then
-/// the shared fleet transaction applies the action to all current exact
-/// affected hosts in that environment.
+/// The request cannot provide system, environment, or host-list identities.
+/// Host scope changes only the path system's exact finding. Environment scope
+/// derives and changes all current exact subjects in the path system's current
+/// environment. A host disposition takes precedence on reads.
 ///
 /// # Errors
 ///
 /// Returns authorization, validation, bounded typed conflict, not-found, or
-/// database errors when the environment-wide mutation cannot commit atomically.
+/// database errors when the selected mutation cannot commit atomically.
 pub async fn triage_system_cve(
     pool: &PgPool,
     actor: &PoamActor,
@@ -4397,6 +4522,28 @@ pub async fn triage_system_cve(
     request: SystemCveTriageRequest,
     clock: &dyn PoamClock,
 ) -> Result<SystemCveTriageResponse, PoamError> {
+    if request.scope == SystemCveTriageScopeChoice::Host {
+        for retry in 0..3 {
+            match triage_system_host_cve_once(
+                pool,
+                actor,
+                selected_system_id,
+                cve_id,
+                request.clone(),
+                clock,
+            )
+            .await
+            {
+                Err(PoamError::Database(error))
+                    if retry < 2 && is_serialization_failure(&error) =>
+                {
+                    continue;
+                }
+                result => return result,
+            }
+        }
+        unreachable!();
+    }
     let current = system_cve_triage_detail(
         pool,
         actor,
@@ -4454,6 +4601,451 @@ pub async fn triage_system_cve(
         }
     }
     unreachable!()
+}
+
+async fn triage_system_host_cve_once(
+    pool: &PgPool,
+    actor: &PoamActor,
+    selected_system_id: Uuid,
+    cve_id: &str,
+    request: SystemCveTriageRequest,
+    clock: &dyn PoamClock,
+) -> Result<SystemCveTriageResponse, PoamError> {
+    require_mutator(actor)?;
+    let cve_id = cve_id.trim().to_ascii_uppercase();
+    let package_name = request.canonical_package_name.trim().to_owned();
+    if !is_canonical_cve_id(&cve_id) || package_name.is_empty() {
+        return Err(PoamError::Validation(
+            "invalid_cve_identity",
+            "A canonical CVE ID and package name are required".into(),
+        ));
+    }
+    validate_text_length(
+        &package_name,
+        MAX_SHORT_TEXT_BYTES,
+        "text_too_long",
+        "package",
+    )?;
+    let schedules = matches!(request.action, SystemCveTriageAction::SchedulePatch);
+    if schedules != request.poam.is_some() {
+        return Err(PoamError::Validation(
+            "invalid_poam_payload",
+            "Provide one POA&M payload exactly when the host schedules patching".into(),
+        ));
+    }
+    if let SystemCveTriageAction::AcceptRisk { justification, .. } = &request.action {
+        if !(10..=2_000).contains(&justification.trim().len()) {
+            return Err(PoamError::Validation(
+                "invalid_acceptance_justification",
+                "Acceptance justification must be between 10 and 2000 bytes".into(),
+            ));
+        }
+    }
+    if let Some(poam) = &request.poam {
+        if poam.title.trim().is_empty() || poam.plan.trim().is_empty() {
+            return Err(PoamError::Validation(
+                "invalid_poam_payload",
+                "Scheduled remediation requires a title and plan".into(),
+            ));
+        }
+        validate_text_length(&poam.title, MAX_SHORT_TEXT_BYTES, "text_too_long", "title")?;
+        validate_text_length(&poam.plan, MAX_PLAN_BYTES, "text_too_long", "plan")?;
+        if matches!(poam.assignee, PoamAssigneeRequest::Unassigned) {
+            return Err(PoamError::Validation(
+                "invalid_poam_assignee",
+                "Scheduled remediation requires a typed user or group assignee".into(),
+            ));
+        }
+    }
+
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT lock_poam_cve_key($1)")
+        .bind(&cve_id)
+        .execute(&mut *tx)
+        .await?;
+    let environment_id: Uuid =
+        sqlx::query_scalar("SELECT environment_id FROM systems WHERE id=$1 AND is_active")
+            .bind(selected_system_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .flatten()
+            .ok_or(PoamError::NotFound)?;
+    let before = fleet_cve_subjects_tx(
+        &mut tx,
+        actor,
+        &cve_id,
+        &package_name,
+        Some(&[environment_id]),
+    )
+    .await?;
+    let before_selected = before
+        .iter()
+        .find(|subject| subject.system_id == selected_system_id)
+        .cloned()
+        .ok_or(PoamError::NotFound)?;
+    // CONCURRENCY: Host and environment writers share the canonical order:
+    // CVE, sorted system sentinels, policy keys, then exact finding keys.
+    lock_fleet_cve_scope_tx(&mut tx, &cve_id, &[selected_system_id], &package_name).await?;
+    sqlx::query("SELECT id FROM systems WHERE id=$1 FOR UPDATE")
+        .bind(selected_system_id)
+        .execute(&mut *tx)
+        .await?;
+    let actor = current_mutating_actor_tx(&mut tx, actor).await?;
+    let current_environment_id: Option<Uuid> =
+        sqlx::query_scalar("SELECT environment_id FROM systems WHERE id=$1 AND is_active")
+            .bind(selected_system_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .flatten();
+    if current_environment_id != Some(environment_id) {
+        return Err(PoamError::Conflict(
+            "cve_evidence_changed",
+            "The selected system's environment changed; refresh and retry".into(),
+        ));
+    }
+    let subjects = fleet_cve_subjects_tx(
+        &mut tx,
+        &actor,
+        &cve_id,
+        &package_name,
+        Some(&[environment_id]),
+    )
+    .await?;
+    let selected = subjects
+        .iter()
+        .find(|subject| subject.system_id == selected_system_id)
+        .cloned()
+        .ok_or_else(|| {
+            PoamError::Conflict(
+                "cve_evidence_changed",
+                "The selected system no longer has the current exact occurrence; refresh and retry"
+                    .into(),
+            )
+        })?;
+    if selected != before_selected {
+        return Err(PoamError::Conflict(
+            "cve_evidence_changed",
+            "The selected system's exact occurrence changed; refresh and retry".into(),
+        ));
+    }
+
+    let current_host: Option<(String, Option<Uuid>)> = sqlx::query_as(
+        r#"SELECT state,poam_id FROM cve_current_system_dispositions
+           WHERE system_id=$1 AND canonical_cve_id=$2
+             AND canonical_package_name=$3 FOR UPDATE"#,
+    )
+    .bind(selected_system_id)
+    .bind(&cve_id)
+    .bind(&package_name)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let active_link_poam: Option<Uuid> = sqlx::query_scalar(
+        r#"SELECT poam_id FROM poam_cve_finding_links
+           WHERE system_id=$1 AND canonical_cve_id=$2
+             AND canonical_package_name=$3 AND retired_at IS NULL"#,
+    )
+    .bind(selected_system_id)
+    .bind(&cve_id)
+    .bind(&package_name)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let inherited_poam_id: Option<Uuid> = sqlx::query_scalar(
+        r#"SELECT poam_id FROM cve_current_environment_dispositions
+           WHERE environment_id=$1 AND canonical_cve_id=$2
+             AND canonical_package_name=$3 AND state='scheduled'"#,
+    )
+    .bind(environment_id)
+    .bind(&cve_id)
+    .bind(&package_name)
+    .fetch_optional(&mut *tx)
+    .await?
+    .flatten();
+    let resolved_assignee = match request.poam.as_ref() {
+        Some(poam) => Some(resolve_assignee_tx(&mut tx, &poam.assignee).await?),
+        None => None,
+    };
+    let mut poam_id = None;
+    let mut poam_reused = false;
+    if let Some(poam_request) = request.poam.as_ref() {
+        let assignee = resolved_assignee.as_ref().ok_or_else(|| {
+            PoamError::Database(anyhow::anyhow!("scheduled host lacks a resolved assignee"))
+        })?;
+        if let Some(existing_id) = active_link_poam {
+            if compatible_existing_fleet_poam_tx(
+                &mut tx,
+                existing_id,
+                poam_request,
+                assignee,
+                &[selected_system_id].into_iter().collect(),
+                &cve_id,
+                &package_name,
+                true,
+            )
+            .await?
+            {
+                poam_id = Some(existing_id);
+                poam_reused = true;
+            } else {
+                return Err(PoamError::ConflictDetails(
+                    "cve_subjects_already_managed",
+                    "The host is managed by an incompatible POA&M".into(),
+                    json!({"subjects":[CveTriageConflictSubject {
+                        system_id:selected.system_id,
+                        hostname:selected.hostname.clone(),
+                        environment_id:selected.environment_id,
+                        poam_id:Some(existing_id),
+                    }],"truncated":false}),
+                ));
+            }
+        } else {
+            poam_id = Some(
+                insert_fleet_cve_poam_tx(
+                    &mut tx,
+                    &actor,
+                    std::slice::from_ref(&selected),
+                    &cve_id,
+                    &package_name,
+                    poam_request,
+                    assignee,
+                    clock,
+                )
+                .await?,
+            );
+        }
+    }
+
+    let now = clock.now();
+    if !schedules && let Some(active_poam_id) = active_link_poam {
+        let current_host_poam = current_host
+            .as_ref()
+            .and_then(|(state, poam_id)| (state == "scheduled").then_some(*poam_id).flatten());
+        if current_host_poam != Some(active_poam_id) && inherited_poam_id != Some(active_poam_id) {
+            return Err(PoamError::ConflictDetails(
+                "cve_subjects_already_managed",
+                "The host is managed by an incompatible POA&M".into(),
+                json!({"subjects":[CveTriageConflictSubject {
+                    system_id:selected.system_id,
+                    hostname:selected.hostname.clone(),
+                    environment_id:selected.environment_id,
+                    poam_id:Some(active_poam_id),
+                }],"truncated":false}),
+            ));
+        }
+        let keep_inherited_link = matches!(request.action, SystemCveTriageAction::LeaveOpen)
+            && inherited_poam_id == Some(active_poam_id);
+        if !keep_inherited_link {
+            let active_count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM poam_cve_finding_links WHERE poam_id=$1 AND retired_at IS NULL",
+            )
+            .bind(active_poam_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            if active_count <= 1 {
+                let can_detach_host_only: bool = sqlx::query_scalar(
+                    r#"SELECT NOT EXISTS(
+                         SELECT 1 FROM cve_environment_dispositions
+                         WHERE poam_id=$1)
+                       AND 1=(SELECT COUNT(DISTINCT ROW(
+                         system_id,canonical_cve_id,canonical_package_name))
+                         FROM poam_cve_finding_links WHERE poam_id=$1)"#,
+                )
+                .bind(active_poam_id)
+                .fetch_one(&mut *tx)
+                .await?;
+                if current_host_poam != Some(active_poam_id) || !can_detach_host_only {
+                    return Err(PoamError::ConflictDetails(
+                        "poam_final_subject",
+                        "Changing this host disposition would remove the final active subject from a POA&M".into(),
+                        json!({"poam_ids":[active_poam_id]}),
+                    ));
+                }
+            }
+            // PERSISTENCE: A host override owns its exact subject. Retire only
+            // that link; peer environment subjects and disposition history stay
+            // active.
+            sqlx::query(
+                r#"UPDATE poam_cve_finding_links
+                   SET retired_at=$5,retired_by=$6,retirement_reason='host_triage_changed'
+                   WHERE poam_id=$1 AND system_id=$2 AND canonical_cve_id=$3
+                     AND canonical_package_name=$4 AND retired_at IS NULL"#,
+            )
+            .bind(active_poam_id)
+            .bind(selected_system_id)
+            .bind(&cve_id)
+            .bind(&package_name)
+            .bind(now)
+            .bind(actor.user_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+    if matches!(request.action, SystemCveTriageAction::LeaveOpen) {
+        if let Some(inherited_poam_id) = inherited_poam_id {
+            let active_system_ids = sqlx::query_scalar::<_, Uuid>(
+                r#"SELECT link.system_id FROM poam_cve_finding_links link
+                   JOIN systems system ON system.id=link.system_id
+                   JOIN poams poam ON poam.id=link.poam_id AND poam.status<>'completed'
+                   WHERE link.poam_id=$1 AND link.canonical_cve_id=$2
+                     AND link.canonical_package_name=$3 AND link.retired_at IS NULL
+                     AND system.environment_id=$4 ORDER BY link.system_id"#,
+            )
+            .bind(inherited_poam_id)
+            .bind(&cve_id)
+            .bind(&package_name)
+            .bind(environment_id)
+            .fetch_all(&mut *tx)
+            .await?
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+            let other_overridden_system_ids = sqlx::query_scalar::<_, Uuid>(
+                r#"SELECT system_id FROM cve_current_system_dispositions
+                   WHERE canonical_cve_id=$1 AND canonical_package_name=$2
+                     AND system_id=ANY($3) AND system_id<>$4 ORDER BY system_id"#,
+            )
+            .bind(&cve_id)
+            .bind(&package_name)
+            .bind(
+                subjects
+                    .iter()
+                    .map(|subject| subject.system_id)
+                    .collect::<Vec<_>>(),
+            )
+            .bind(selected_system_id)
+            .fetch_all(&mut *tx)
+            .await?
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+            let expected_inherited = subjects
+                .iter()
+                .filter(|subject| !other_overridden_system_ids.contains(&subject.system_id))
+                .map(|subject| subject.system_id)
+                .collect::<BTreeSet<_>>();
+            let active_inherited_system_ids = active_system_ids
+                .difference(&other_overridden_system_ids)
+                .copied()
+                .collect::<BTreeSet<_>>();
+            let mut expected_without_selected = expected_inherited.clone();
+            expected_without_selected.remove(&selected_system_id);
+            if active_inherited_system_ids == expected_without_selected {
+                // PERSISTENCE: Clearing a host schedule can expose an older
+                // environment schedule. Restore only its missing exact link;
+                // never change POA&M status or create verification evidence.
+                materialize_exact_subjects_tx(
+                    &mut tx,
+                    inherited_poam_id,
+                    actor.user_id,
+                    &[selected.baseline()],
+                    &cve_id,
+                    &package_name,
+                )
+                .await?;
+            }
+        }
+    }
+    sqlx::query(
+        r#"UPDATE cve_system_dispositions
+           SET retired_at=$4,retired_by=$5,retirement_reason=$6
+           WHERE system_id=$1 AND canonical_cve_id=$2
+             AND canonical_package_name=$3 AND retired_at IS NULL"#,
+    )
+    .bind(selected_system_id)
+    .bind(&cve_id)
+    .bind(&package_name)
+    .bind(now)
+    .bind(actor.user_id)
+    .bind(
+        if matches!(request.action, SystemCveTriageAction::LeaveOpen) {
+            "host_triage_open"
+        } else {
+            "host_triage_changed"
+        },
+    )
+    .execute(&mut *tx)
+    .await?;
+    match &request.action {
+        SystemCveTriageAction::LeaveOpen => {}
+        SystemCveTriageAction::AcceptRisk {
+            justification,
+            review_date,
+        } => {
+            sqlx::query(
+                r#"INSERT INTO cve_system_dispositions(
+                     canonical_cve_id,canonical_package_name,system_id,state,
+                     justification,review_date,accepted_by,accepted_at)
+                   VALUES($1,$2,$3,'accepted',$4,$5,$6,$7)"#,
+            )
+            .bind(&cve_id)
+            .bind(&package_name)
+            .bind(selected_system_id)
+            .bind(justification.trim())
+            .bind(review_date)
+            .bind(actor.user_id)
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+        }
+        SystemCveTriageAction::SchedulePatch => {
+            sqlx::query(
+                r#"INSERT INTO cve_system_dispositions(
+                     canonical_cve_id,canonical_package_name,system_id,state,
+                     poam_id,scheduled_by,scheduled_at)
+                   VALUES($1,$2,$3,'scheduled',$4,$5,$6)"#,
+            )
+            .bind(&cve_id)
+            .bind(&package_name)
+            .bind(selected_system_id)
+            .bind(poam_id.ok_or_else(|| {
+                PoamError::Database(anyhow::anyhow!("scheduled host lacks a POA&M"))
+            })?)
+            .bind(actor.user_id)
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+    sqlx::query(
+        r#"INSERT INTO admin_audit_events(
+             actor_user_id,actor_identifier,action,target,request_origin,metadata)
+           VALUES($1,$2,'system_host_cve_triaged',$3,$4,$5)"#,
+    )
+    .bind(actor.user_id)
+    .bind(&actor.identifier)
+    .bind(format!("cve:{cve_id}:{package_name}"))
+    .bind(actor.request_origin.as_deref())
+    .bind(
+        json!({"canonical_cve_id":cve_id,"canonical_package_name":package_name,
+        "system_id":selected_system_id,"environment_id":environment_id,
+        "poam_id":poam_id,"poam_reused":poam_reused,"scope":"host"}),
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    let mut environment_dispositions =
+        fleet_cve_dispositions_tx(&mut tx, &cve_id, &package_name, &[environment_id]).await?;
+    retain_coherent_scheduled_dispositions_tx(
+        &mut tx,
+        &mut environment_dispositions,
+        &subjects,
+        &cve_id,
+        &package_name,
+    )
+    .await?;
+    let host_disposition =
+        system_cve_disposition_tx(&mut tx, selected_system_id, &cve_id, &package_name).await?;
+    let detail = system_cve_triage_detail_from_subjects(
+        selected_system_id,
+        &cve_id,
+        &package_name,
+        &subjects,
+        host_disposition,
+        environment_dispositions.remove(&environment_id),
+    )?;
+    tx.commit().await?;
+    Ok(SystemCveTriageResponse {
+        detail,
+        poam_id,
+        poam_reused,
+    })
 }
 
 async fn triage_cve_once(
@@ -4660,11 +5252,45 @@ async fn triage_cve_once(
         ));
     }
 
+    let overridden_system_ids = sqlx::query_scalar::<_, Uuid>(
+        r#"SELECT system_id FROM cve_current_system_dispositions
+           WHERE canonical_cve_id=$1 AND canonical_package_name=$2
+             AND system_id=ANY($3) ORDER BY system_id"#,
+    )
+    .bind(&cve_id)
+    .bind(&package_name)
+    .bind(
+        subjects
+            .iter()
+            .map(|subject| subject.system_id)
+            .collect::<Vec<_>>(),
+    )
+    .fetch_all(&mut *tx)
+    .await?
+    .into_iter()
+    .collect::<BTreeSet<_>>();
     let scheduled_subjects = subjects
         .iter()
-        .filter(|subject| scheduled_environment_ids.contains(&subject.environment_id))
+        .filter(|subject| {
+            scheduled_environment_ids.contains(&subject.environment_id)
+                && !overridden_system_ids.contains(&subject.system_id)
+        })
         .cloned()
         .collect::<Vec<_>>();
+    let scheduleable_environment_ids = scheduled_subjects
+        .iter()
+        .map(|subject| subject.environment_id)
+        .collect::<BTreeSet<_>>();
+    if scheduled_environment_ids
+        .iter()
+        .any(|environment_id| !scheduleable_environment_ids.contains(environment_id))
+    {
+        return Err(PoamError::Conflict(
+            "cve_disposition_conflict",
+            "An environment has no exact subjects without host overrides; clear a host override before scheduling the environment"
+                .into(),
+        ));
+    }
     let scheduled_system_ids = scheduled_subjects
         .iter()
         .map(|subject| subject.system_id)
@@ -4685,6 +5311,30 @@ async fn triage_cve_once(
         .fetch_all(&mut *tx)
         .await?
     };
+    let host_schedule_links: Vec<(Uuid, Uuid)> = sqlx::query_as(
+        r#"SELECT link.system_id,link.poam_id
+           FROM poam_cve_finding_links link
+           JOIN systems system ON system.id=link.system_id
+           JOIN cve_current_system_dispositions host
+             ON host.system_id=link.system_id
+            AND host.canonical_cve_id=link.canonical_cve_id
+            AND host.canonical_package_name=link.canonical_package_name
+            AND host.state='scheduled' AND host.poam_id=link.poam_id
+           WHERE link.retired_at IS NULL AND link.canonical_cve_id=$1
+             AND link.canonical_package_name=$2
+             AND system.environment_id=ANY($3)
+           ORDER BY link.system_id,link.poam_id"#,
+    )
+    .bind(&cve_id)
+    .bind(&package_name)
+    .bind(
+        scheduled_environment_ids
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+    )
+    .fetch_all(&mut *tx)
+    .await?;
     let retiring_environment_ids = actions
         .iter()
         .filter_map(|(environment_id, action)| {
@@ -4700,8 +5350,13 @@ async fn triage_cve_once(
                FROM poam_cve_finding_links link
                JOIN systems system ON system.id=link.system_id
                WHERE link.retired_at IS NULL AND link.canonical_cve_id=$1
-                 AND link.canonical_package_name=$2
-                 AND system.environment_id=ANY($3)
+                  AND link.canonical_package_name=$2
+                  AND system.environment_id=ANY($3)
+                   AND NOT EXISTS(
+                     SELECT 1 FROM cve_current_system_dispositions host
+                     WHERE host.system_id=link.system_id
+                       AND host.canonical_cve_id=link.canonical_cve_id
+                       AND host.canonical_package_name=link.canonical_package_name)
                ORDER BY link.poam_id,link.system_id,link.cve_finding_id"#,
         )
         .bind(&cve_id)
@@ -4727,22 +5382,54 @@ async fn triage_cve_once(
             .map(|row| row.1)
             .collect::<BTreeSet<_>>();
         if active_scheduled_links.is_empty() {
-            poam_id = Some(
-                insert_fleet_cve_poam_tx(
+            let host_poams = host_schedule_links
+                .iter()
+                .map(|row| row.1)
+                .collect::<BTreeSet<_>>();
+            if host_poams.len() == 1 {
+                let existing_id = *host_poams.first().expect("one host POA&M");
+                let expected_existing_system_ids = scheduled_subjects
+                    .iter()
+                    .map(|subject| subject.system_id)
+                    .chain(
+                        host_schedule_links
+                            .iter()
+                            .filter(|row| row.1 == existing_id)
+                            .map(|row| row.0),
+                    )
+                    .collect::<BTreeSet<_>>();
+                if compatible_existing_fleet_poam_tx(
                     &mut tx,
-                    &actor,
-                    &scheduled_subjects,
-                    &cve_id,
-                    &package_name,
+                    existing_id,
                     poam_request,
                     resolved_assignee,
-                    clock,
+                    &expected_existing_system_ids,
+                    &cve_id,
+                    &package_name,
+                    true,
                 )
-                .await?,
-            );
-        } else if active_scheduled_links.len() == scheduled_subjects.len()
-            && active_poams.len() == 1
-        {
+                .await?
+                {
+                    poam_id = Some(existing_id);
+                    poam_reused = true;
+                }
+            }
+            if poam_id.is_none() {
+                poam_id = Some(
+                    insert_fleet_cve_poam_tx(
+                        &mut tx,
+                        &actor,
+                        &scheduled_subjects,
+                        &cve_id,
+                        &package_name,
+                        poam_request,
+                        resolved_assignee,
+                        clock,
+                    )
+                    .await?,
+                );
+            }
+        } else if active_poams.len() == 1 {
             let existing_id = *active_poams.first().expect("one active POA&M");
             let expected_existing_system_ids = scheduled_subjects
                 .iter()
@@ -4752,6 +5439,12 @@ async fn triage_cve_once(
                         .iter()
                         .filter(|row| row.0 == existing_id)
                         .map(|row| row.2),
+                )
+                .chain(
+                    host_schedule_links
+                        .iter()
+                        .filter(|row| row.1 == existing_id)
+                        .map(|row| row.0),
                 )
                 .collect::<BTreeSet<_>>();
             if compatible_existing_fleet_poam_tx(
@@ -4794,6 +5487,31 @@ async fn triage_cve_once(
                 json!({"subjects":conflicts,"truncated":scheduled_subjects.len()>MAX_FLEET_CVE_CONFLICTS}),
             ));
         }
+        if poam_reused {
+            let linked_system_ids = active_scheduled_links
+                .iter()
+                .map(|row| row.0)
+                .collect::<BTreeSet<_>>();
+            let missing_baselines = scheduled_subjects
+                .iter()
+                .filter(|subject| !linked_system_ids.contains(&subject.system_id))
+                .map(FleetCveSubject::baseline)
+                .collect::<Vec<_>>();
+            if !missing_baselines.is_empty() {
+                // PERSISTENCE: A compatible host-only POA&M can become the
+                // environment default. Add only the server-recomputed exact
+                // subjects; incompatible active links were rejected above.
+                materialize_exact_subjects_tx(
+                    &mut tx,
+                    poam_id.expect("reused POA&M identity"),
+                    actor.user_id,
+                    &missing_baselines,
+                    &cve_id,
+                    &package_name,
+                )
+                .await?;
+            }
+        }
     }
 
     for retiring_poam_id in retiring_links
@@ -4826,9 +5544,14 @@ async fn triage_cve_once(
                SET retired_at=$4,retired_by=$5,retirement_reason='fleet_triage_changed'
                FROM systems system
                WHERE system.id=link.system_id AND link.retired_at IS NULL
-                 AND link.canonical_cve_id=$1
-                 AND link.canonical_package_name=$2
-                 AND system.environment_id=ANY($3)"#,
+                  AND link.canonical_cve_id=$1
+                  AND link.canonical_package_name=$2
+                  AND system.environment_id=ANY($3)
+                   AND NOT EXISTS(
+                     SELECT 1 FROM cve_current_system_dispositions host
+                     WHERE host.system_id=link.system_id
+                       AND host.canonical_cve_id=link.canonical_cve_id
+                       AND host.canonical_package_name=link.canonical_package_name)"#,
         )
         .bind(&cve_id)
         .bind(&package_name)
@@ -4965,12 +5688,16 @@ async fn triage_cve_once(
                 &package_name,
             )
             .await?;
+            let host_disposition =
+                system_cve_disposition_tx(&mut tx, selected_system_id, &cve_id, &package_name)
+                    .await?;
             CveTriageMutationResult::System(SystemCveTriageResponse {
                 detail: system_cve_triage_detail_from_subjects(
                     selected_system_id,
                     &cve_id,
                     &package_name,
                     &subjects,
+                    host_disposition,
                     dispositions.remove(&environment_id),
                 )?,
                 poam_id,
@@ -7331,6 +8058,16 @@ async fn close_once(
         .execute(&mut *tx)
         .await?;
         sqlx::query(
+            r#"UPDATE cve_system_dispositions
+               SET retired_at=$2,retired_by=$3,retirement_reason='poam_closed'
+               WHERE poam_id=$1 AND state='scheduled' AND retired_at IS NULL"#,
+        )
+        .bind(id)
+        .bind(now)
+        .bind(actor.user_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
             "UPDATE poams SET status='completed',closed_at=$2,closure_attempt_id=$3 WHERE id=$1",
         )
         .bind(id)
@@ -7484,18 +8221,41 @@ pub async fn reopen(
         ));
     }
     let cve_environments = sqlx::query_as::<_, (Uuid, String, String, Vec<Uuid>)>(
-        r#"SELECT system.environment_id,min(finding.canonical_cve_id),
-                  min(finding.canonical_package_name),
-                  array_agg(finding.system_id ORDER BY finding.system_id)
-           FROM poam_cve_finding_links link
-           JOIN poam_cve_findings finding ON finding.id=link.cve_finding_id
-           JOIN systems system ON system.id=finding.system_id
-           WHERE link.poam_id=$1 AND link.retirement_reason=$2
-             AND system.environment_id IS NOT NULL
-           GROUP BY system.environment_id ORDER BY system.environment_id"#,
+        r#"SELECT disposition.environment_id,disposition.canonical_cve_id,
+                   disposition.canonical_package_name,
+                   array_agg(finding.system_id ORDER BY finding.system_id)
+            FROM poams poam
+            JOIN cve_environment_dispositions disposition
+              ON disposition.poam_id=poam.id AND disposition.state='scheduled'
+             AND disposition.retired_at=poam.closed_at
+             AND disposition.retirement_reason='poam_closed'
+            JOIN poam_cve_finding_links link ON link.poam_id=poam.id
+             AND link.retirement_reason=$2
+             AND link.canonical_cve_id=disposition.canonical_cve_id
+             AND link.canonical_package_name=disposition.canonical_package_name
+            JOIN poam_cve_findings finding ON finding.id=link.cve_finding_id
+            JOIN systems system ON system.id=finding.system_id
+             AND system.environment_id=disposition.environment_id
+            WHERE poam.id=$1
+            GROUP BY disposition.environment_id,disposition.canonical_cve_id,
+                     disposition.canonical_package_name
+            ORDER BY disposition.environment_id"#,
     )
     .bind(id)
     .bind(format!("closed:{attempt_id}"))
+    .fetch_all(&mut *tx)
+    .await?;
+    let cve_hosts = sqlx::query_as::<_, (Uuid, String, String)>(
+        r#"SELECT disposition.system_id,disposition.canonical_cve_id,
+                  disposition.canonical_package_name
+           FROM poams poam
+           JOIN cve_system_dispositions disposition
+             ON disposition.poam_id=poam.id AND disposition.state='scheduled'
+            AND disposition.retired_at=poam.closed_at
+            AND disposition.retirement_reason='poam_closed'
+           WHERE poam.id=$1 ORDER BY disposition.system_id"#,
+    )
+    .bind(id)
     .fetch_all(&mut *tx)
     .await?;
     // COMPATIBILITY: Exact-CVE POA&Ms can manage systems without an
@@ -7509,10 +8269,31 @@ pub async fn reopen(
             package_name,
             Some(&[*environment_id]),
         )
+        .await?;
+        let current_system_ids = current_subjects
+            .iter()
+            .map(|subject| subject.system_id)
+            .collect::<Vec<_>>();
+        let overridden_system_ids = sqlx::query_scalar::<_, Uuid>(
+            r#"SELECT system_id FROM cve_current_system_dispositions
+               WHERE canonical_cve_id=$1 AND canonical_package_name=$2
+                 AND system_id=ANY($3) ORDER BY system_id"#,
+        )
+        .bind(cve_id)
+        .bind(package_name)
+        .bind(&current_system_ids)
+        .fetch_all(&mut *tx)
         .await?
         .into_iter()
-        .map(|subject| subject.system_id)
         .collect::<BTreeSet<_>>();
+        // INVARIANT: An environment disposition owns only exact subjects that
+        // do not have a direct host override. Reopen compares the same derived
+        // ownership set that scheduling used at closure.
+        let current_subjects = current_subjects
+            .into_iter()
+            .filter(|subject| !overridden_system_ids.contains(&subject.system_id))
+            .map(|subject| subject.system_id)
+            .collect::<BTreeSet<_>>();
         if current_subjects != expected_system_ids.iter().copied().collect::<BTreeSet<_>>() {
             return Err(PoamError::Conflict(
                 "cve_disposition_conflict",
@@ -7533,6 +8314,53 @@ pub async fn reopen(
             return Err(PoamError::Conflict(
                 "cve_disposition_conflict",
                 "A current accepted or scheduled disposition prevents restoration".into(),
+            ));
+        }
+    }
+    for (system_id, cve_id, package_name) in &cve_hosts {
+        let environment_id: Option<Uuid> =
+            sqlx::query_scalar("SELECT environment_id FROM systems WHERE id=$1 AND is_active")
+                .bind(system_id)
+                .fetch_optional(&mut *tx)
+                .await?
+                .flatten();
+        let Some(environment_id) = environment_id else {
+            return Err(PoamError::Conflict(
+                "cve_disposition_conflict",
+                "A host closure subject is no longer active in an environment".into(),
+            ));
+        };
+        let current = fleet_cve_subjects_tx(
+            &mut tx,
+            &actor,
+            cve_id,
+            package_name,
+            Some(&[environment_id]),
+        )
+        .await?;
+        if !current
+            .iter()
+            .any(|subject| subject.system_id == *system_id)
+        {
+            return Err(PoamError::Conflict(
+                "cve_disposition_conflict",
+                "The host no longer has the exact closure occurrence".into(),
+            ));
+        }
+        let disposition_exists: bool = sqlx::query_scalar(
+            r#"SELECT EXISTS(SELECT 1 FROM cve_system_dispositions
+               WHERE canonical_cve_id=$1 AND canonical_package_name=$2
+                 AND system_id=$3 AND retired_at IS NULL)"#,
+        )
+        .bind(cve_id)
+        .bind(package_name)
+        .bind(system_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if disposition_exists {
+            return Err(PoamError::Conflict(
+                "cve_disposition_conflict",
+                "A current host disposition prevents restoration".into(),
             ));
         }
     }
@@ -7565,6 +8393,22 @@ pub async fn reopen(
         .bind(cve_id)
         .bind(package_name)
         .bind(environment_id)
+        .bind(id)
+        .bind(actor.user_id)
+        .bind(clock.now())
+        .execute(&mut *tx)
+        .await?;
+    }
+    for (system_id, cve_id, package_name) in &cve_hosts {
+        sqlx::query(
+            r#"INSERT INTO cve_system_dispositions(
+                  canonical_cve_id,canonical_package_name,system_id,state,
+                  poam_id,scheduled_by,scheduled_at)
+               VALUES($1,$2,$3,'scheduled',$4,$5,$6)"#,
+        )
+        .bind(cve_id)
+        .bind(package_name)
+        .bind(system_id)
         .bind(id)
         .bind(actor.user_id)
         .bind(clock.now())

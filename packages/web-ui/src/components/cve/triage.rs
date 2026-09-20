@@ -86,22 +86,65 @@ impl CveTriageDraft {
     pub(crate) fn from_system_detail(
         detail: &poam_api::SystemCveTriageDetail,
         severity: &str,
+        scope: poam_api::SystemCveTriageScopeChoice,
+        fixed_version: Option<&str>,
+        fix_available: bool,
     ) -> Self {
+        let disposition = match scope {
+            poam_api::SystemCveTriageScopeChoice::Host => &detail.host_disposition,
+            poam_api::SystemCveTriageScopeChoice::Environment => &detail.environment_disposition,
+        };
         let environment = poam_api::CveAffectedEnvironment {
             environment_id: detail.scope.environment_id,
-            environment_name: detail.scope.environment_name.clone(),
-            affected_system_count: detail.scope.exact_affected_system_count,
-            exact_affected_system_count: detail.scope.exact_affected_system_count,
+            environment_name: match scope {
+                poam_api::SystemCveTriageScopeChoice::Host => {
+                    detail.scope.selected_system_hostname.clone()
+                }
+                poam_api::SystemCveTriageScopeChoice::Environment => {
+                    detail.scope.environment_name.clone()
+                }
+            },
+            affected_system_count: match scope {
+                poam_api::SystemCveTriageScopeChoice::Host => 1,
+                poam_api::SystemCveTriageScopeChoice::Environment => {
+                    detail.scope.exact_affected_system_count
+                }
+            },
+            exact_affected_system_count: match scope {
+                poam_api::SystemCveTriageScopeChoice::Host => 1,
+                poam_api::SystemCveTriageScopeChoice::Environment => {
+                    detail.scope.exact_affected_system_count
+                }
+            },
             legacy_affected_system_count: 0,
             systems: detail.systems.clone(),
-            disposition: detail.disposition.clone(),
+            disposition: disposition.clone(),
         };
-        Self::from_environments(
+        let mut draft = Self::from_environments(
             &detail.canonical_cve_id,
             &detail.canonical_package_name,
             severity,
             &[environment],
-        )
+        );
+        let host_needs_generated_poam = scope == poam_api::SystemCveTriageScopeChoice::Host
+            && !matches!(
+                disposition,
+                Some(poam_api::CveEnvironmentDisposition::Scheduled { .. })
+            );
+        if host_needs_generated_poam {
+            let fix_target = patch_target(fixed_version, fix_available);
+            draft.title = format!(
+                "{} - patch {} on {}",
+                detail.canonical_cve_id,
+                detail.canonical_package_name,
+                detail.scope.selected_system_hostname
+            );
+            draft.plan = format!(
+                "Upgrade {} to {} on {} and verify with an exact follow-up scan.",
+                detail.canonical_package_name, fix_target, detail.scope.selected_system_hostname
+            );
+        }
+        draft
     }
 
     fn from_environments(
@@ -329,6 +372,7 @@ impl CveTriageDraft {
     pub(crate) fn system_request(
         &self,
         package: &str,
+        scope: poam_api::SystemCveTriageScopeChoice,
     ) -> Result<poam_api::SystemCveTriageRequest, String> {
         let environment = self
             .environments
@@ -352,6 +396,7 @@ impl CveTriageDraft {
         };
         Ok(poam_api::SystemCveTriageRequest {
             canonical_package_name: package.to_string(),
+            scope,
             action,
             poam: self.poam_request(scheduled)?,
         })
@@ -425,6 +470,33 @@ fn risk_for_severity(severity: &str) -> poam_api::PoamRisk {
     }
 }
 
+fn patch_target(fixed_version: Option<&str>, fix_available: bool) -> String {
+    fixed_version
+        .filter(|version| !version.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            if fix_available {
+                "a patched release".to_string()
+            } else {
+                "a patched release once available".to_string()
+            }
+        })
+}
+
+/// Returns truthful fixed-version copy from exact and availability evidence.
+pub(crate) fn fixed_version_label(fixed_version: Option<&str>, fix_available: bool) -> String {
+    fixed_version
+        .filter(|version| !version.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            if fix_available {
+                "available — version pending".to_string()
+            } else {
+                "pending".to_string()
+            }
+        })
+}
+
 /// Renders the System Detail adapter for the shared exact-CVE triage draft.
 #[component]
 pub(crate) fn SystemCveTriageDialog(
@@ -433,11 +505,24 @@ pub(crate) fn SystemCveTriageDialog(
     severity: String,
     cvss_score: Option<f32>,
     fixed_version: Option<String>,
+    fix_available: bool,
     on_close: EventHandler<()>,
     on_success: EventHandler<poam_api::SystemCveTriageResponse>,
     on_conflict: EventHandler<String>,
 ) -> Element {
-    let mut draft = use_signal(|| CveTriageDraft::from_system_detail(&detail, &severity));
+    let mut scope = use_signal(|| poam_api::SystemCveTriageScopeChoice::Host);
+    let initial_detail = detail.clone();
+    let initial_severity = severity.clone();
+    let initial_fixed_version = fixed_version.clone();
+    let mut draft = use_signal(move || {
+        CveTriageDraft::from_system_detail(
+            &initial_detail,
+            &initial_severity,
+            poam_api::SystemCveTriageScopeChoice::Host,
+            initial_fixed_version.as_deref(),
+            fix_available,
+        )
+    });
     let mut catalog = use_signal(|| None::<Result<poam_api::PoamAssigneeCatalog, String>>);
     let mut error = use_signal(|| None::<String>);
     let mut pending = use_signal(|| false);
@@ -467,10 +552,16 @@ pub(crate) fn SystemCveTriageDialog(
     let cvss = cvss_score
         .map(|score| format!("{score:.1}"))
         .unwrap_or_else(|| "N/A".to_string());
-    let fix = fixed_version
-        .clone()
-        .filter(|version| !version.trim().is_empty())
-        .unwrap_or_else(|| "Pending".to_string());
+    let fix = fixed_version_label(fixed_version.as_deref(), fix_available);
+    let host_scoped = scope() == poam_api::SystemCveTriageScopeChoice::Host;
+    let inherited_help = host_scoped
+        && detail.host_disposition.is_none()
+        && detail.environment_disposition.is_some();
+    let inherited_state = detail
+        .environment_disposition
+        .as_ref()
+        .map(disposition_label)
+        .unwrap_or("open");
     let dialog_label = format!(
         "Triage {} {}",
         detail.canonical_cve_id, detail.canonical_package_name
@@ -479,7 +570,7 @@ pub(crate) fn SystemCveTriageDialog(
     let submit = move |_: MouseEvent| {
         let request = match draft
             .read()
-            .system_request(&submit_detail.canonical_package_name)
+            .system_request(&submit_detail.canonical_package_name, scope())
         {
             Ok(request) => request,
             Err(message) => {
@@ -520,28 +611,98 @@ pub(crate) fn SystemCveTriageDialog(
         div { id: "system-cve-triage-dialog", class: "modal cve-triage-modal", role: "dialog", aria_modal: "true", aria_label: "{dialog_label}", "data-testid": "system-cve-triage-dialog", tabindex: "-1", onkeydown: move |event| if event.key() == Key::Escape && !pending() { event.stop_propagation(); on_close.call(()); },
             DialogFocusSentinel { dialog_id: "system-cve-triage-dialog", boundary: DialogFocusBoundary::Last }
             div { class: "modal-head",
-                div { h2 { "Triage {detail.canonical_cve_id}" } p { "Apply one decision to the server-derived environment scope." } }
+                div { h2 { "Triage {detail.canonical_cve_id}" } p { "Decide for this host alone, or for every host in its environment." } }
                 button { class: "btn-icon focus-ring", aria_label: "Close triage editor", autofocus: true, disabled: pending(), onclick: move |_| on_close.call(()), Icon { name: IconName::X, size: 16 } }
             }
             div { class: "modal-body cve-triage-body",
-                p { "The server derives the environment and exact affected hosts from current evidence. Accepted and scheduled states do not prove remediation or verification. Closure requires later exact evidence." }
+                p { "The server derives both scopes from current exact evidence. Accepted and scheduled states do not prove remediation or verification. Closure requires later exact evidence." }
                 div { class: "cve-triage-context", "data-testid": "cve-triage-context",
-                    header { Icon { name: IconName::Shield, size: 12 } " Vulnerability" span { "Environment scope is server-owned" } }
+                    header { Icon { name: IconName::Shield, size: 12 } " Vulnerability" span { "Scope is server-owned" } }
                     div { class: "cve-triage-context-grid",
                         div { span { "CVE" } strong { class: "mono", "{detail.canonical_cve_id}" } }
                         div { span { "Package" } strong { class: "mono", "{detail.canonical_package_name}" } }
                         div { span { "CVSS" } strong { "{cvss} · {severity}" } }
+                        div { span { "Host" } strong { "{detail.scope.selected_system_hostname}" } }
                         div { span { "Environment" } strong { "{detail.scope.environment_name}" } }
-                        div { span { "Affected hosts" } strong { "{detail.scope.exact_affected_system_count}" } }
+                        div { span { "Affected hosts" } strong { if host_scoped { "1" } else { "{detail.scope.exact_affected_system_count}" } } }
                         div { span { "Fix" } strong { class: "mono", "{fix}" } }
                     }
                 }
                 if let Some(message) = error() { div { class: "sd-callout sd-callout-danger", role: "alert", "{message}" } }
+                div { class: "field",
+                    span { "Applies to" }
+                    div { class: "seg", role: "radiogroup", aria_label: "Applies to",
+                        button {
+                            r#type: "button",
+                            role: "radio",
+                            aria_checked: host_scoped,
+                            class: if host_scoped { "active" } else { "" },
+                            "data-testid": "cve-triage-scope-host",
+                            onclick: {
+                                let detail = detail.clone();
+                                let severity = severity.clone();
+                                let fixed_version = fixed_version.clone();
+                                move |_| {
+                                    let next = poam_api::SystemCveTriageScopeChoice::Host;
+                                    scope.set(next);
+                                    draft.set(CveTriageDraft::from_system_detail(
+                                        &detail,
+                                        &severity,
+                                        next,
+                                        fixed_version.as_deref(),
+                                        fix_available,
+                                    ));
+                                    error.set(None);
+                                }
+                            },
+                            "{detail.scope.selected_system_hostname} only"
+                        }
+                        button {
+                            r#type: "button",
+                            role: "radio",
+                            aria_checked: !host_scoped,
+                            class: if !host_scoped { "active" } else { "" },
+                            "data-testid": "cve-triage-scope-environment",
+                            onclick: {
+                                let detail = detail.clone();
+                                let severity = severity.clone();
+                                let fixed_version = fixed_version.clone();
+                                move |_| {
+                                    let next = poam_api::SystemCveTriageScopeChoice::Environment;
+                                    scope.set(next);
+                                    draft.set(CveTriageDraft::from_system_detail(
+                                        &detail,
+                                        &severity,
+                                        next,
+                                        fixed_version.as_deref(),
+                                        fix_available,
+                                    ));
+                                    error.set(None);
+                                }
+                            },
+                            "All of {detail.scope.environment_name}"
+                        }
+                    }
+                    small {
+                        if host_scoped {
+                            "A host-specific decision overrides the environment default for this machine only."
+                            if inherited_help {
+                                " This host currently follows the {detail.scope.environment_name} decision ({inherited_state})."
+                            } else if detail.host_disposition.is_some() && detail.environment_disposition.is_some() {
+                                " Choosing OPEN removes this override; the host then follows the {detail.scope.environment_name} decision ({inherited_state})."
+                            } else if detail.host_disposition.is_some() {
+                                " Choosing OPEN removes this override and leaves the host outstanding."
+                            }
+                        } else {
+                            "Covers every host in {detail.scope.environment_name}, including hosts added later. POA&M evidence attaches only the {detail.scope.exact_affected_system_count} host(s) where this CVE and package were observed exactly."
+                        }
+                    }
+                }
                 fieldset { class: "cve-triage-env", "data-testid": "cve-triage-environment",
-                    legend { "{detail.scope.environment_name} · {detail.scope.exact_affected_system_count} exact host(s)" }
-                    div { class: "seg", role: "group", aria_label: "Disposition for {detail.scope.environment_name}",
+                    legend { if host_scoped { "{detail.scope.selected_system_hostname} · host override" } else { "{detail.scope.environment_name} · {detail.scope.exact_affected_system_count} exact host(s)" } }
+                    div { class: "seg", role: "group", aria_label: if host_scoped { "Disposition for {detail.scope.selected_system_hostname}" } else { "Disposition for {detail.scope.environment_name}" },
                         for (choice, label) in [(EnvironmentTriageChoice::Open, "Leave outstanding"), (EnvironmentTriageChoice::Accepted, "Accept risk"), (EnvironmentTriageChoice::Scheduled, "Schedule patch")] {
-                            button { r#type: "button", class: if current.as_ref().map(|item| item.choice) == Some(choice) { "active" } else { "" }, aria_pressed: if current.as_ref().map(|item| item.choice) == Some(choice) { "true" } else { "false" }, "data-action": "{choice.value()}", onclick: move |_| draft.write().set_choice(environment_id, choice), "{label}" }
+                            button { r#type: "button", class: if current.as_ref().map(|item| item.choice) == Some(choice) { "active" } else { "" }, aria_pressed: if current.as_ref().map(|item| item.choice) == Some(choice) { "true" } else { "false" }, "data-action": "{choice.value()}", onclick: move |_| draft.write().set_choice(environment_id, choice), if host_scoped && choice == EnvironmentTriageChoice::Open { "Use environment default" } else { "{label}" } }
                         }
                     }
                     if current.as_ref().map(|item| item.choice) == Some(EnvironmentTriageChoice::Accepted) {
@@ -550,7 +711,7 @@ pub(crate) fn SystemCveTriageDialog(
                     }
                 }
                 if scheduled {
-                    fieldset { class: "cve-triage-poam", legend { "POA&M for scheduled exact hosts" }
+                    fieldset { class: "cve-triage-poam", legend { if host_scoped { "POA&M for {detail.scope.selected_system_hostname}" } else { "POA&M for scheduled exact hosts" } }
                         if existing_poam_reuse {
                             div { class: "sd-callout sd-callout-info", "This schedule will reuse the existing compatible POA&M. Its metadata and milestones are not changed. Verification and closure require a later exact scan that no longer reports this CVE and package." }
                         } else {
@@ -583,12 +744,19 @@ pub(crate) fn SystemCveTriageDialog(
                 }
             }
             div { class: "modal-foot cve-triage-foot",
-                div { class: "cve-triage-outcome", "{detail.scope.exact_affected_system_count} exact host(s) in {detail.scope.environment_name}" }
+                div { class: "cve-triage-outcome", if host_scoped { "{detail.scope.selected_system_hostname} only" } else { "All of {detail.scope.environment_name} · {detail.scope.exact_affected_system_count} exact observed host(s)" } }
                 button { class: "btn btn-ghost focus-ring", disabled: pending(), onclick: move |_| on_close.call(()), "Cancel" }
                 button { class: "btn btn-primary focus-ring", "data-testid": "cve-triage-submit", disabled: pending() || (scheduled && draft.read().preservation_error.is_some()), onclick: submit, if pending() { "Applying..." } else { "Apply triage" } }
             }
             DialogFocusSentinel { dialog_id: "system-cve-triage-dialog", boundary: DialogFocusBoundary::First }
         }
+    }
+}
+
+fn disposition_label(disposition: &poam_api::CveEnvironmentDisposition) -> &'static str {
+    match disposition {
+        poam_api::CveEnvironmentDisposition::Accepted { .. } => "accepted",
+        poam_api::CveEnvironmentDisposition::Scheduled { .. } => "scheduled",
     }
 }
 
@@ -612,45 +780,70 @@ pub(crate) fn parse_risk(value: &str) -> poam_api::PoamRisk {
 
 #[cfg(test)]
 mod tests {
-    use super::{CveTriageDraft, EnvironmentTriageChoice};
-    use crate::views::poam_api::{self, PoamRisk, SystemCveTriageAction};
+    use super::{CveTriageDraft, EnvironmentTriageChoice, fixed_version_label};
+    use crate::views::poam_api::{
+        self, PoamRisk, SystemCveTriageAction, SystemCveTriageScopeChoice,
+    };
 
-    fn detail(disposition: serde_json::Value) -> poam_api::SystemCveTriageDetail {
+    fn detail(
+        host_disposition: serde_json::Value,
+        environment_disposition: serde_json::Value,
+    ) -> poam_api::SystemCveTriageDetail {
+        let (effective_disposition, effective_source) = if !host_disposition.is_null() {
+            (host_disposition.clone(), "host")
+        } else if !environment_disposition.is_null() {
+            (environment_disposition.clone(), "environment")
+        } else {
+            (serde_json::Value::Null, "none")
+        };
         serde_json::from_value(serde_json::json!({
             "canonical_cve_id": "CVE-2026-3262",
             "canonical_package_name": "openssl",
             "scope": {
                 "kind": "current_exact_affected_hosts_in_environment",
                 "selected_system_id": "00000000-0000-0000-0000-000000000001",
+                "selected_system_hostname": "prod-web-01",
                 "environment_id": "00000000-0000-0000-0000-000000000002",
                 "environment_name": "Production",
                 "exact_affected_system_count": 3
             },
             "systems": [],
-            "disposition": disposition
+            "host_disposition": host_disposition,
+            "environment_disposition": environment_disposition,
+            "effective_disposition": effective_disposition,
+            "effective_source": effective_source,
+            "disposition": effective_disposition
         }))
         .unwrap()
     }
 
     #[test]
     fn system_request_validates_acceptance_and_omits_scope_ids() {
-        let mut draft =
-            CveTriageDraft::from_system_detail(&detail(serde_json::Value::Null), "high");
+        let mut draft = CveTriageDraft::from_system_detail(
+            &detail(serde_json::Value::Null, serde_json::Value::Null),
+            "high",
+            SystemCveTriageScopeChoice::Host,
+            None,
+            false,
+        );
         draft.environments[0].choice = EnvironmentTriageChoice::Accepted;
         assert!(
             draft
-                .system_request("openssl")
+                .system_request("openssl", SystemCveTriageScopeChoice::Host)
                 .unwrap_err()
                 .contains("10 to 2000 bytes")
         );
         draft.environments[0].justification = "Compensating controls are active.".to_string();
-        let request = draft.system_request("openssl").unwrap();
+        let request = draft
+            .system_request("openssl", SystemCveTriageScopeChoice::Host)
+            .unwrap();
         assert!(matches!(
             request.action,
             SystemCveTriageAction::AcceptRisk { .. }
         ));
         let json = serde_json::to_value(&request).unwrap();
         assert_eq!(json["canonical_package_name"], "openssl");
+        assert_eq!(json["scope"], "host");
         assert_eq!(json["action"], "accept_risk");
         assert_eq!(json["justification"], "Compensating controls are active.");
         assert!(json["review_date"].is_null());
@@ -658,6 +851,59 @@ mod tests {
         assert!(json.get("environment_id").is_none());
         assert!(json.get("system_id").is_none());
         assert!(json.get("hostname").is_none());
+    }
+
+    #[test]
+    fn system_scope_hydration_is_independent_and_host_does_not_copy_inheritance() {
+        let accepted = serde_json::json!({
+            "state": "accepted",
+            "justification": "Environment compensating controls are active.",
+            "review_date": "2026-12-01",
+            "actor": { "user_id": "00000000-0000-0000-0000-000000000004", "display": "Operator" },
+            "accepted_at": "2026-09-19T12:00:00Z"
+        });
+        let detail = detail(serde_json::Value::Null, accepted);
+        let mut host = CveTriageDraft::from_system_detail(
+            &detail,
+            "high",
+            SystemCveTriageScopeChoice::Host,
+            None,
+            true,
+        );
+        assert_eq!(host.environments[0].choice, EnvironmentTriageChoice::Open);
+        assert!(host.environments[0].justification.is_empty());
+        assert!(host.title.contains("prod-web-01"));
+        assert!(host.plan.contains("a patched release"));
+        assert!(host.plan.contains("prod-web-01"));
+
+        host.environments[0].choice = EnvironmentTriageChoice::Scheduled;
+        host.plan = "Unsaved host-only plan".to_string();
+        let environment = CveTriageDraft::from_system_detail(
+            &detail,
+            "high",
+            SystemCveTriageScopeChoice::Environment,
+            None,
+            true,
+        );
+        assert_eq!(
+            environment.environments[0].choice,
+            EnvironmentTriageChoice::Accepted
+        );
+        assert_eq!(
+            environment.environments[0].justification,
+            "Environment compensating controls are active."
+        );
+        assert_ne!(environment.plan, "Unsaved host-only plan");
+    }
+
+    #[test]
+    fn fixed_version_copy_never_synthesizes_a_version() {
+        assert_eq!(fixed_version_label(Some("  "), false), "pending");
+        assert_eq!(
+            fixed_version_label(Some(""), true),
+            "available — version pending"
+        );
+        assert_eq!(fixed_version_label(Some("3.4.2"), true), "3.4.2");
     }
 
     #[test]
@@ -677,7 +923,13 @@ mod tests {
             "actor": { "user_id": "00000000-0000-0000-0000-000000000004", "display": "Operator" },
             "scheduled_at": "2026-09-19T12:00:00Z"
         });
-        let draft = CveTriageDraft::from_system_detail(&detail(scheduled), "critical");
+        let draft = CveTriageDraft::from_system_detail(
+            &detail(scheduled, serde_json::Value::Null),
+            "critical",
+            SystemCveTriageScopeChoice::Host,
+            Some("3.4.2"),
+            true,
+        );
         assert_eq!(draft.title, "Patch OpenSSL");
         assert_eq!(
             draft.plan,
@@ -691,7 +943,9 @@ mod tests {
             draft.hydrated_assignee.as_ref().unwrap().value,
             "group:operators"
         );
-        let request = draft.system_request("openssl").unwrap();
+        let request = draft
+            .system_request("openssl", SystemCveTriageScopeChoice::Host)
+            .unwrap();
         assert!(!request.poam.unwrap().default_milestones);
 
         let incompatible = serde_json::json!({
@@ -700,15 +954,27 @@ mod tests {
             "actor": { "user_id": "00000000-0000-0000-0000-000000000004", "display": "Operator" },
             "scheduled_at": "2026-09-19T12:00:00Z"
         });
-        let mut draft = CveTriageDraft::from_system_detail(&detail(incompatible), "high");
+        let mut draft = CveTriageDraft::from_system_detail(
+            &detail(incompatible, serde_json::Value::Null),
+            "high",
+            SystemCveTriageScopeChoice::Host,
+            None,
+            false,
+        );
         assert!(!draft.reuses_existing_poam());
         assert!(
             draft
-                .system_request("openssl")
+                .system_request("openssl", SystemCveTriageScopeChoice::Host)
                 .unwrap_err()
                 .contains("server version")
         );
         draft.environments[0].choice = EnvironmentTriageChoice::Open;
-        assert!(draft.system_request("openssl").unwrap().poam.is_none());
+        assert!(
+            draft
+                .system_request("openssl", SystemCveTriageScopeChoice::Host)
+                .unwrap()
+                .poam
+                .is_none()
+        );
     }
 }

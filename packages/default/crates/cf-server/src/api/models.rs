@@ -1124,11 +1124,12 @@ pub struct FleetCveTriageResponse {
     pub poam_reused: bool,
 }
 
-/// Selects one disposition for the selected system's derived environment.
+/// Selects one disposition for a server-derived System Detail scope.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 pub enum SystemCveTriageAction {
-    /// Removes the environment disposition and leaves the exact findings open.
+    /// Removes only the selected scope's active disposition.
     LeaveOpen,
     /// Accepts risk without creating remediation or verification evidence.
     AcceptRisk {
@@ -1137,19 +1138,31 @@ pub enum SystemCveTriageAction {
         /// Gives an optional risk review date.
         review_date: Option<chrono::NaiveDate>,
     },
-    /// Schedules every current exact affected host in the derived environment.
+    /// Schedules the exact subjects in the selected server-derived scope.
     SchedulePatch,
+}
+
+/// Selects the server-derived scope changed by a System Detail triage request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemCveTriageScopeChoice {
+    /// Changes only the selected system's direct override.
+    Host,
+    /// Changes the selected system's current environment default.
+    Environment,
 }
 
 /// Requests triage from one System Detail CVE row.
 ///
-/// The request cannot select an environment or host list. The server derives
-/// both values from the selected system's current exact occurrence.
+/// The request cannot supply a system, environment, or host list. The server
+/// derives all identities from the path system's current exact occurrence.
 #[derive(Debug, Clone, Deserialize)]
 pub struct SystemCveTriageRequest {
     /// Gives the canonical package identity selected by the System Detail row.
     pub canonical_package_name: String,
-    /// Selects the disposition for the server-derived environment.
+    /// Selects either the path host or its authoritative current environment.
+    pub scope: SystemCveTriageScopeChoice,
+    /// Selects the disposition for the server-derived scope.
     #[serde(flatten)]
     pub action: SystemCveTriageAction,
     /// Supplies POA&M metadata exactly when patching is scheduled.
@@ -1164,6 +1177,18 @@ pub enum SystemCveTriageScopeKind {
     CurrentExactAffectedHostsInEnvironment,
 }
 
+/// Identifies which active disposition supplies the effective host state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemCveEffectiveDispositionSource {
+    /// The selected system has a direct host override.
+    Host,
+    /// The selected system inherits its current environment default.
+    Environment,
+    /// Neither scope has an active disposition, so the finding is open.
+    None,
+}
+
 /// Describes the explicit environment scope derived from the selected system.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemCveTriageScope {
@@ -1171,6 +1196,8 @@ pub struct SystemCveTriageScope {
     pub kind: SystemCveTriageScopeKind,
     /// Identifies the selected system whose current environment was derived.
     pub selected_system_id: Uuid,
+    /// Gives the visible hostname for the selected system.
+    pub selected_system_hostname: String,
     /// Identifies the derived current environment.
     pub environment_id: Uuid,
     /// Gives the visible derived environment name.
@@ -1190,14 +1217,23 @@ pub struct SystemCveTriageDetail {
     pub scope: SystemCveTriageScope,
     /// Lists every current exact affected host included in the scope.
     pub systems: Vec<CveAffectedSystemDetail>,
-    /// Gives the coherent current disposition. `None` means outstanding.
+    /// Gives the selected system's direct host override.
+    pub host_disposition: Option<CveEnvironmentDisposition>,
+    /// Gives the selected system's current environment default.
+    pub environment_disposition: Option<CveEnvironmentDisposition>,
+    /// Gives the host-precedence effective disposition. `None` means OPEN.
+    pub effective_disposition: Option<CveEnvironmentDisposition>,
+    /// Identifies the scope that supplies `effective_disposition`.
+    pub effective_source: SystemCveEffectiveDispositionSource,
+    /// Gives the effective disposition for compatibility with existing clients.
+    /// New clients should use `effective_disposition` and `effective_source`.
     pub disposition: Option<CveEnvironmentDisposition>,
 }
 
-/// Reports the result of one System Detail environment-scoped mutation.
+/// Reports the result of one host- or environment-scoped System Detail mutation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemCveTriageResponse {
-    /// Gives transaction-owned state for the derived environment.
+    /// Gives transaction-owned host and environment state for the selected system.
     pub detail: SystemCveTriageDetail,
     /// Identifies the created or reused POA&M when patching was scheduled.
     pub poam_id: Option<Uuid>,

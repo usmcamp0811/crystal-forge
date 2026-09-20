@@ -12,7 +12,7 @@ use crate::api::models::{
     SystemCveInventoryMetadata, SystemCveInventoryPageResponse, SystemCveInventoryRowIdentity,
     SystemCveInventorySource, SystemCveInventoryVulnerability,
 };
-use crate::components::cve::triage::SystemCveTriageDialog;
+use crate::components::cve::triage::{SystemCveTriageDialog, fixed_version_label};
 #[cfg(test)]
 use crate::theme;
 use crate::views::poam_api::{
@@ -593,7 +593,7 @@ pub fn CvesTab(
                                                                     td { class: "mono", "{cvss_label}" }
                                                                      td {
                                                                          if cve.has_fix {
-                                                                            span { class: "chip chip-healthy", "available" }
+                                                                            span { class: "chip chip-healthy", "{fixed_version_label(cve.fixed_version.as_deref(), true)}" }
                                                                         } else {
                                                                             span { class: "chip chip-unknown", "pending" }
                                                                          }
@@ -602,7 +602,7 @@ pub fn CvesTab(
                                                                           span {
                                                                               class: "chip {triage_state.chip_class()}",
                                                                               "data-testid": "system-cve-triage-state",
-                                                                              title: triage_error.unwrap_or(triage_state.label()),
+                                                                              title: triage_error.map(str::to_string).unwrap_or_else(|| system_triage_row_title(triage_state, cached_detail)),
                                                                               "{triage_state.label()}"
                                                                           }
                                                                      }
@@ -612,11 +612,17 @@ pub fn CvesTab(
                                                                                  button {
                                                                                      class: "btn btn-ghost xs focus-ring",
                                                                                      "data-testid": "system-cve-triage-open",
-                                                                                     disabled: row_opening,
+                                                                                     aria_disabled: row_opening,
+                                                                                     aria_busy: row_opening,
                                                                                      title: "Load authoritative environment triage",
                                                                                      onclick: {
                                                                                          let target = cve.clone();
                                                                                          move |_| {
+                                                                                             // Keep the trigger focused while detail loads so the
+                                                                                             // dialog can restore focus to it after unmount.
+                                                                                             if row_opening {
+                                                                                                 return;
+                                                                                             }
                                                                                              let target = target.clone();
                                                                                              let identity = target.stable_identity.clone();
                                                                                              let cve_id = target.cve_id.clone();
@@ -731,12 +737,13 @@ pub fn CvesTab(
                     let dialog_identity = target.stable_identity.clone();
                     rsx! {
                 SystemCveTriageDialog {
-                    key: "{detail.canonical_cve_id}|{detail.canonical_package_name}|{detail.scope.environment_id}",
+                    key: "{detail.canonical_cve_id}|{detail.canonical_package_name}|{detail.scope.selected_system_id}",
                     system_id,
                     detail,
                     severity: target.severity.label().to_string(),
                     cvss_score: target.cvss_score,
                     fixed_version: target.fixed_version.clone(),
+                    fix_available: target.has_fix,
                     on_close: move |_| {
                         let generation = (*triage_open_generation.peek()).wrapping_add(1);
                         triage_open_generation.set(generation);
@@ -765,7 +772,7 @@ pub fn CvesTab(
                         );
                         triage_dialog_detail.set(None);
                         triage_target.set(None);
-                        save_status.set(Some("Environment triage updated. Accepted and scheduled states do not prove remediation or verification; closure requires later exact evidence.".to_string()));
+                        save_status.set(Some("CVE triage updated. Accepted and scheduled states do not prove remediation or verification; closure requires later exact evidence.".to_string()));
                         on_saved.call(());
                         if let Some(poam_id) = response.poam_id {
                             on_open_poam.call(poam_id);
@@ -910,7 +917,12 @@ fn group_vulnerabilities_by_package(
             group.version = "Multiple versions".to_string();
         }
 
-        let has_fix = vuln.fixed_version.is_some();
+        let normalized_fixed_version = vuln
+            .fixed_version
+            .as_ref()
+            .filter(|version| !version.trim().is_empty())
+            .cloned();
+        let has_fix = normalized_fixed_version.is_some() || vuln.status == "fix_available";
 
         if let Some(existing) = group.cves.iter_mut().find(|c| {
             c.cve_id == vuln.cve_id
@@ -924,6 +936,9 @@ fn group_vulnerabilities_by_package(
                 existing.cvss_score = vuln.cvss_score;
             }
             existing.has_fix = existing.has_fix || has_fix;
+            if existing.fixed_version.is_none() {
+                existing.fixed_version = normalized_fixed_version.clone();
+            }
             if existing.justification_reason.is_none() && vuln.justification_reason.is_some() {
                 existing.justification_reason = vuln.justification_reason.clone();
                 existing.justification_category = vuln.justification_category.clone();
@@ -945,7 +960,7 @@ fn group_vulnerabilities_by_package(
                 published_at: vuln.published_at,
                 has_fix,
                 installed_version: vuln.installed_version.clone(),
-                fixed_version: vuln.fixed_version.clone(),
+                fixed_version: normalized_fixed_version,
                 remediation: vuln.remediation.clone(),
                 remediation_conflict,
                 justification_category: vuln.justification_category.clone(),
@@ -1018,6 +1033,8 @@ enum SystemTriageRowState {
     Outstanding,
     Accepted,
     Scheduled,
+    AcceptedEnvironment,
+    ScheduledEnvironment,
     Legacy,
     NoScan,
     Conflict,
@@ -1034,6 +1051,8 @@ impl SystemTriageRowState {
             Self::Outstanding => "Outstanding",
             Self::Accepted => "Accepted",
             Self::Scheduled => "Scheduled",
+            Self::AcceptedEnvironment => "Accepted · env",
+            Self::ScheduledEnvironment => "Scheduled · env",
             Self::Legacy => "Legacy inventory",
             Self::NoScan => "No scan",
             Self::Conflict => "Conflict",
@@ -1044,7 +1063,10 @@ impl SystemTriageRowState {
 
     const fn chip_class(self) -> &'static str {
         match self {
-            Self::Accepted | Self::Scheduled => "chip-info",
+            Self::Accepted
+            | Self::Scheduled
+            | Self::AcceptedEnvironment
+            | Self::ScheduledEnvironment => "chip-info",
             Self::Outstanding => "chip-critical",
             Self::Conflict => "chip-warning",
             Self::Review
@@ -1098,15 +1120,52 @@ fn system_triage_row_state(
     }
     let detail = detail
         .filter(|detail| system_triage_detail_matches(&cve.stable_identity, system_id, detail));
-    match detail.map(|detail| &detail.disposition) {
-        Some(Some(poam_api::CveEnvironmentDisposition::Accepted { .. })) => {
-            SystemTriageRowState::Accepted
-        }
-        Some(Some(poam_api::CveEnvironmentDisposition::Scheduled { .. })) => {
-            SystemTriageRowState::Scheduled
-        }
-        Some(None) => SystemTriageRowState::Outstanding,
+    match detail.map(|detail| (&detail.effective_disposition, detail.effective_source)) {
+        Some((
+            Some(poam_api::CveEnvironmentDisposition::Accepted { .. }),
+            poam_api::SystemCveEffectiveDispositionSource::Host,
+        )) => SystemTriageRowState::Accepted,
+        Some((
+            Some(poam_api::CveEnvironmentDisposition::Scheduled { .. }),
+            poam_api::SystemCveEffectiveDispositionSource::Host,
+        )) => SystemTriageRowState::Scheduled,
+        Some((
+            Some(poam_api::CveEnvironmentDisposition::Accepted { .. }),
+            poam_api::SystemCveEffectiveDispositionSource::Environment,
+        )) => SystemTriageRowState::AcceptedEnvironment,
+        Some((
+            Some(poam_api::CveEnvironmentDisposition::Scheduled { .. }),
+            poam_api::SystemCveEffectiveDispositionSource::Environment,
+        )) => SystemTriageRowState::ScheduledEnvironment,
+        Some(_) => SystemTriageRowState::Outstanding,
         None => SystemTriageRowState::Review,
+    }
+}
+
+fn system_triage_row_title(
+    state: SystemTriageRowState,
+    detail: Option<&SystemCveTriageDetail>,
+) -> String {
+    let Some(detail) = detail else {
+        return state.label().to_string();
+    };
+    match state {
+        SystemTriageRowState::Accepted => format!(
+            "Risk accepted for this host ({})",
+            detail.scope.selected_system_hostname
+        ),
+        SystemTriageRowState::Scheduled => format!(
+            "Patch scheduled for this host ({})",
+            detail.scope.selected_system_hostname
+        ),
+        SystemTriageRowState::AcceptedEnvironment => {
+            format!("Risk accepted for all of {}", detail.scope.environment_name)
+        }
+        SystemTriageRowState::ScheduledEnvironment => format!(
+            "Patch scheduled for all of {}",
+            detail.scope.environment_name
+        ),
+        _ => state.label().to_string(),
     }
 }
 
@@ -1464,6 +1523,23 @@ mod tests {
     }
 
     #[test]
+    fn package_groups_ignore_blank_fixed_versions_and_preserve_available_state() {
+        let mut blank = vulnerability("3.4.1", None);
+        blank.fixed_version = Some("  ".into());
+        blank.status = "fix_available".into();
+        let mut exact = vulnerability("3.4.1", None);
+        exact.fixed_version = Some("3.4.3".into());
+        let groups = group_vulnerabilities_by_package(&[blank.clone(), exact]);
+
+        assert!(groups[0].cves[0].has_fix);
+        assert_eq!(groups[0].cves[0].fixed_version.as_deref(), Some("3.4.3"));
+
+        let groups = group_vulnerabilities_by_package(&[blank]);
+        assert!(groups[0].cves[0].has_fix);
+        assert_eq!(groups[0].cves[0].fixed_version, None);
+    }
+
+    #[test]
     fn unknown_only_package_has_neutral_semantics_and_no_cvss_score() {
         let mut unknown = vulnerability("3.4.1", None);
         unknown.severity = CveSeverity::Unknown;
@@ -1608,11 +1684,28 @@ mod tests {
             "scope": {
                 "kind": "current_exact_affected_hosts_in_environment",
                 "selected_system_id": system_id,
+                "selected_system_hostname": "prod-web-01",
                 "environment_id": Uuid::from_u128(3),
                 "environment_name": "Production",
                 "exact_affected_system_count": 2
             },
             "systems": [],
+            "host_disposition": {
+                "state": "accepted",
+                "justification": "Compensating controls are active.",
+                "review_date": null,
+                "actor": { "user_id": Uuid::from_u128(4), "display": "Operator" },
+                "accepted_at": "2026-09-20T12:00:00Z"
+            },
+            "environment_disposition": null,
+            "effective_disposition": {
+                "state": "accepted",
+                "justification": "Compensating controls are active.",
+                "review_date": null,
+                "actor": { "user_id": Uuid::from_u128(4), "display": "Operator" },
+                "accepted_at": "2026-09-20T12:00:00Z"
+            },
+            "effective_source": "host",
             "disposition": {
                 "state": "accepted",
                 "justification": "Compensating controls are active.",
@@ -1636,6 +1729,62 @@ mod tests {
             system_id,
             &accepted
         ));
+        assert_eq!(
+            system_triage_row_title(SystemTriageRowState::Accepted, Some(&accepted)),
+            "Risk accepted for this host (prod-web-01)"
+        );
+
+        let mut inherited = accepted.clone();
+        inherited.host_disposition = None;
+        inherited.environment_disposition = inherited.effective_disposition.clone();
+        inherited.effective_source = poam_api::SystemCveEffectiveDispositionSource::Environment;
+        assert_eq!(
+            system_triage_row_state(
+                Some(SystemCveInventoryAuthority::Exact),
+                cve,
+                system_id,
+                Some(&inherited)
+            ),
+            SystemTriageRowState::AcceptedEnvironment
+        );
+        assert_eq!(
+            SystemTriageRowState::AcceptedEnvironment.label(),
+            "Accepted · env"
+        );
+        assert_eq!(
+            system_triage_row_title(SystemTriageRowState::AcceptedEnvironment, Some(&inherited)),
+            "Risk accepted for all of Production"
+        );
+
+        let scheduled_disposition: poam_api::CveEnvironmentDisposition =
+            serde_json::from_value(serde_json::json!({
+                "state": "scheduled",
+                "poam_id": Uuid::from_u128(5),
+                "poam": null,
+                "actor": { "user_id": Uuid::from_u128(4), "display": "Operator" },
+                "scheduled_at": "2026-09-20T12:00:00Z"
+            }))
+            .unwrap();
+        inherited.environment_disposition = Some(scheduled_disposition.clone());
+        inherited.effective_disposition = Some(scheduled_disposition);
+        inherited.disposition = inherited.effective_disposition.clone();
+        assert_eq!(
+            system_triage_row_state(
+                Some(SystemCveInventoryAuthority::Exact),
+                cve,
+                system_id,
+                Some(&inherited)
+            ),
+            SystemTriageRowState::ScheduledEnvironment
+        );
+        assert_eq!(
+            SystemTriageRowState::ScheduledEnvironment.label(),
+            "Scheduled · env"
+        );
+        assert_eq!(
+            system_triage_row_title(SystemTriageRowState::ScheduledEnvironment, Some(&inherited)),
+            "Patch scheduled for all of Production"
+        );
 
         let mut wrong_package = accepted.clone();
         wrong_package.canonical_package_name = "libressl".to_string();
