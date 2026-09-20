@@ -311,6 +311,8 @@ Follow-up regression commit `0a59d340` (`TASK-440: Cover terminal head latest se
 2026-09-20 maintainer authorized the current stabilization slice to land despite the remaining strict full-order mixed-evidence visual mismatch. The GitLab CI Web UI VM job is split from the required check matrix and marked `allow_failure: true`; its screenshot artifact and MR-comment dependency remain connected. Local evidence: YAML parses with Ruby, `node --check` passed, `web-ui-test-runner` build passed, `git diff --check` passed. The one full Web UI gate executed before this CI adjustment failed only five deterministic mixed-evidence strict visual comparisons; no automatic full-gate rerun will occur in this slice.
 
 2026-09-20 Diagnosed failed job #16607942382: `web-ui-screenshots-mr-comment` ran after the allowed-to-fail upstream `web-ui-check` failed before artifact creation. Its first `ls web-ui-screenshots/*.png` therefore exited nonzero under GitLab shell errexit before the intended zero-screenshot skip. Added `mkdir -p web-ui-screenshots` in the comment job `before_script`; YAML parse and an empty-directory execution probe pass.
+
+2026-09-20 Pushed CI correction at `5e7cb962f1d87333d2315c594974ea840c280549`; its effective `.gitlab-ci.yml` places the directory setup only in `web-ui-screenshots-mr-comment`. The preceding commit's misplaced setup is removed by this corrective commit, so the branch tip has no coverage-comment change.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
