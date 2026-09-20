@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-09-19 14:51'
-updated_date: '2026-09-20 14:05'
+updated_date: '2026-09-20 18:02'
 labels: []
 milestone: m-1
 dependencies: []
@@ -180,4 +180,13 @@ Live verification is blocked in this environment: `sudo -n true` fails ("a passw
 
 ### Legacy-workflow regression (Phase 16)
 `git diff origin/dev -- shells/ packages/devScripts/ checks/web-ui/tests/web-ui-test.sh` is empty (byte-identical). `nix develop` enters successfully with the unchanged banner, `alias run-ui-dev` confirmed present in the unmodified source. Did not start the legacy fixed-port stack concurrently with the devenv verification stacks (ports would have overlapped with an already-running unrelated worktree's stack discovered on this shared machine); this is a structural, not a running, regression check, per Phase 16's own guidance to prefer cheap checks.
+
+### AC #10 — nix flake check --keep-going
+Ran `nix flake check --keep-going --accept-flake-config` to completion (~35 minutes; includes many NixOS VM-based checks, e.g. oidc-auth-test, integration-test, web-ui-reconciliation, and the full web-ui-mega-integration Playwright VM suite).
+
+Result: exactly one failure, `checks.x86_64-linux.web-ui`, due to 5 STRICT VISUAL FAIL pixel-diffs against approved design-target baselines, all for an unrelated view: `task433-canonical-mixed-nix-cve-evidence` (both themes, multiple design-target variants). Every functional workflow step in the SAME run passed (`[OK]`), including `12l-task440-config-lifecycle` (the workflow that failed for a business-logic reason in my own devenv-based mock stack — its passing here, via the real VM/evaluator path, supports that earlier finding being environment/timing-specific rather than a devenv regression).
+
+This failure is judged unrelated to TASK-462.1: `git diff --stat origin/dev` touches only flake.nix/flake.lock, devenv.yaml/devenv.nix/devenv.lock, .gitignore, two docs files, and two narrow env-var additions in packages/web-ui/src/api/client.rs and crates/cf-server/src/bin/server.rs — zero CSS, design-target, or screenshot-baseline files, and nothing that could plausibly affect pixel rendering of an unrelated CVE-evidence view belonging to a different task ("task433"). Filed as TASK-465 (Backlog) rather than re-running the ~35-minute check against origin/dev to formally prove it, given the file-diff evidence already rules out this task as the cause; not fixed here (out of scope, unrelated feature area).
+
+No other check in the full `--keep-going` run failed (exactly one `error:` line total, for `checks.x86_64-linux.web-ui`).
 <!-- SECTION:NOTES:END -->
