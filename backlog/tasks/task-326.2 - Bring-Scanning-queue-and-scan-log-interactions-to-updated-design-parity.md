@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - Matt Camp
 created_date: '2026-09-09 03:32'
-updated_date: '2026-09-20 18:01'
+updated_date: '2026-09-20 18:12'
 labels:
   - scanning
   - web-ui
@@ -213,6 +213,8 @@ Audit discovery requiring explicit scope decision: live migration-0259 exact-CVE
 Committed and pushed review follow-up as `19352160` (`TASK-326.2: Recognize activatable NixOS generations`) to MR !329. Final task status remains In Progress pending the user's scope decision for the audited migration-0259 stale-state authority defect.
 
 Backend post-build intent follow-up implemented at uncommitted worktree head based on `19352160`. Added transaction-local `create_post_build_scan_intents_tx`: persisted `on_build` plus NixOS gating, `awaiting_build`/`post_build`/`vulnix`/attempts=0 insertion, active partial conflict target, and `DO NOTHING`. The four named build admission functions now use exact returned derivation IDs and create intent in the build transaction; orphan recovery uses the same helper when it actually inserts. Completion now repairs only absent legacy post-build history, attaches the successful job to existing post-build intent, and chooses `pending`, `awaiting_closure`, or continued `awaiting_build` from output identity, remote-builder provenance, and completed cache publication. Manual/fleet provenance is not mutated; failure does not touch the waiting scan; terminal completion retries do not create fresh scans. Added four isolated PostgreSQL regressions in `queries/build_jobs.rs` covering all named admission paths, rollback atomicity, enabled/disabled/type gates, duplicate admission, manual/fleet identity, local/remote completion, non-claimable waits, failure, replacement, idempotent/terminal retry, and eligible legacy repair. Verification passed: focused PostgreSQL tests 4/4 against task-owned temporary PostgreSQL on port 35433 (then stopped); `SQLX_OFFLINE=true cargo check --tests`; touched-file rustfmt check; and `git diff --check`. Existing unrelated warnings remain. Modified only `queries/build_jobs.rs`, `queries/builders.rs`, and `queries/cve_scan_leases.rs`; no commit or push.
+
+Authority correction completed at uncommitted worktree head based on `19352160`. `attach_completed_build_to_post_build_scan_tx` now performs only policy/type-gated missing-intent repair and `completed_build_job_id` attachment; it never mutates scan status, manual/fleet provenance, or terminal history. API-builder completion, legacy/server-local completion, and cache-publication completion invoke the bounded authoritative `promote_waiting_cve_scans` only after persistence commits; promotion failures are warning-only and cannot fail the completed build/cache operation. Focused regressions now prove attachment remains `awaiting_build`, then explicit authority promotion yields local `pending`, remote `awaiting_closure`, and cache-published remote `pending`; failure/retry/idempotency behavior remains covered. Verification passed: focused ignored PostgreSQL tests 4/4 against isolated PostgreSQL on port 35433 (then stopped); `nix develop -c env SQLX_OFFLINE=true cargo check --manifest-path packages/default/crates/cf-server/Cargo.toml --tests`; touched-file rustfmt; and `git diff --check`. Existing unrelated compiler warnings remain. Modified files are `builder/worker.rs`, `queries/build_jobs.rs`, `queries/builders.rs`, `queries/cache_push.rs`, `queries/cve_scan_leases.rs`, and `queries/cve_scans.rs`; no commit or push was made.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
