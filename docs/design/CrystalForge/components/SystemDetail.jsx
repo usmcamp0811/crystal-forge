@@ -1504,7 +1504,17 @@ function CvesTab({ sys }) {
 
   const [expanded, setExpanded] = React.useState(null);
   React.useEffect(() => { if (groups.length && expanded == null) setExpanded(groups[0].pkg); }, [groups]);
-  const [poamCve, setPoamCve] = React.useState(null);
+  // Same disposition question as the CVEs view: accept the risk with a justification,
+  // or schedule the patch and open a POA&M. Scoped to this host's environment.
+  const [triageCve, setTriageCve] = React.useState(null);
+  const [, bumpTriage] = React.useReducer(x => x + 1, 0);
+  const dispOf = (c) => (c.dispositions && c.dispositions[sys.environment]) || null;
+  const triageChip = (c) => {
+    const d = dispOf(c);
+    if (!d) return <span className="chip chip-unknown" style={{ fontSize:10 }}>outstanding</span>;
+    if (d.state === "accepted") return <span className="chip chip-healthy" style={{ fontSize:10 }} title={d.justification ? `Risk accepted · ${d.justification}` : "Risk accepted"}>accepted</span>;
+    return <span className="chip chip-info" style={{ fontSize:10 }} title={`Patch scheduled · ${d.owner || "unassigned"}${d.due ? ` · due ${d.due}` : ""}`}>scheduled</span>;
+  };
 
   return (
     <section className="card" style={{ overflow: "hidden" }}>
@@ -1551,6 +1561,7 @@ function CvesTab({ sys }) {
                         <th>Severity</th>
                         <th>CVSS</th>
                         <th>Fix</th>
+                        <th>Triage</th>
                         <th style={{ textAlign: "right" }}> </th>
                       </tr>
                     </thead>
@@ -1565,9 +1576,14 @@ function CvesTab({ sys }) {
                               ? <span className="chip chip-healthy">available</span>
                               : <span className="chip chip-unknown">pending</span>}
                           </td>
+                          <td>{triageChip(c)}</td>
                           <td>
                             <div className="row-actions">
-                              {window.CvePoamCreateModal && <button className="btn-icon focus-ring" title="Create POA&M" onClick={() => setPoamCve(c)}><Icon name="plus" size={14} /></button>}
+                              {window.CveTriageModal && (
+                                <button className="btn-icon focus-ring" title={dispOf(c) ? "Edit triage" : "Triage — accept the risk or schedule a patch"} onClick={() => setTriageCve(c)}>
+                                  <Icon name={dispOf(c) ? "file" : "shield"} size={14} />
+                                </button>
+                              )}
                               <button className="btn-icon focus-ring" title="Open advisory" onClick={() => window.open(`https://nvd.nist.gov/vuln/detail/${c.id}`, '_blank')}><Icon name="link" size={14} /></button>
                             </div>
                           </td>
@@ -1581,7 +1597,25 @@ function CvesTab({ sys }) {
           })}
         </div>
       )}
-      {poamCve && window.CvePoamCreateModal && <window.CvePoamCreateModal sys={sys} cve={poamCve} onClose={() => setPoamCve(null)} onCreated={(p) => { setPoamCve(null); window.openPoamDetail?.(p.id); }}/>}
+      {triageCve && window.CveTriageModal && (
+        <window.CveTriageModal
+          cve={{
+            id: triageCve.id, pkg: triageCve.pkg,
+            cvss: parseFloat(triageCve.score), severity: triageCve.level,
+            fix: triageCve.fix, fixedIn: triageCve.fixedIn || "the patched release",
+            exploited: false,
+          }}
+          affectedSystems={[sys]}
+          initial={triageCve.dispositions || {}}
+          onClose={() => setTriageCve(null)}
+          onSubmit={(next) => {
+            triageCve.dispositions = next;
+            const d = next[sys.environment];
+            triageCve.acceptance = d ? d.state : "outstanding";
+            setTriageCve(null);
+            bumpTriage();
+          }}/>
+      )}
     </section>
   );
 }

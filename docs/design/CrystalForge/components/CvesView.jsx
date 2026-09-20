@@ -1048,4 +1048,4 @@ function CveTriageModal({ cve, affectedSystems, initial, onClose, onSubmit }) {
   );
 }
 
-Object.assign(window, { CvesView });
+Object.assign(window, { CvesView, CveTriageModal, CVE_CHOICES });
