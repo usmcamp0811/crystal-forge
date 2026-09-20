@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - Matt Camp
 created_date: '2026-09-09 03:32'
-updated_date: '2026-09-20 04:41'
+updated_date: '2026-09-20 04:47'
 labels:
   - scanning
   - web-ui
@@ -98,12 +98,14 @@ Replace separate Justify + Create POA&M with one CveTriageModal (extracted from 
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-1. Keep backend commit `0913ea87` authoritative and implement only the user-approved Scanning Web UI slice. Do not modify CVE triage views/components or `checks/web-ui/tests/integration-test.js`; do not start a host preview or touch processes/ports.
-2. Mirror the new archive-aware scan-record and exact-detail DTOs in the WASM client. Add GET collection and PATCH archive helpers while preserving legacy queue/deployed DTOs and calls.
-3. Replace the Scanning view with accessible Active, Completed, and By system tabs backed by authoritative records/stats. Implement truthful state classification and counts, wait-state wording, deterministic filters/sorts, exact per-revision history, archive/restore, exact retry only, and no cancellation or fleet-wide rescan.
-4. Expand the exact detail tray with lifecycle identity/metadata, bounded diagnostic search/navigation/export, running elapsed time, bounded polling only for a selected running scan, Escape close, and focus restoration.
-5. Add scoped responsive light/dark CSS and focused Rust unit tests for classification, filtering, ordering, failed selection, diagnostics, and export semantics.
-6. Run Web UI formatting, focused/all Web UI Rust tests, wasm-target cargo check through the Nix environment, and `git diff --check`. Fix compilation/test defects and report any concrete backend contract defect without otherwise changing backend code.
+1. Finalize the in-progress Scanning slice: review the authoritative lifecycle/query contract, correct deterministic ordering and refresh/accessibility defects, add focused unit/query coverage, then rerun targeted server and Web UI checks and commit the slice.
+2. Extract a shared CVE triage modal and typed state from the fleet CVE implementation. Reuse the existing TASK-440 evidence, locking, justification, and POA&M contracts instead of duplicating domain policy in the view.
+3. Replace System Detail's separate Justify and Create POA&M actions with one environment-scoped triage action and Triage column. Represent outstanding, accepted, and scheduled independently for each environment; keep missing, no-scan, and legacy evidence explicit and never imply remediation or verification from disposition alone.
+4. Wire accepted validation and scheduled POA&M create/reuse fields, including typed assignee, owner, due date, plan, and optional milestones, to the system-context triage API committed in `0913ea87`.
+5. Update only the focused authoritative browser workflows `16c-scanning-view`, `12h-system-detail-cves-grouped-justification`, `12ha-system-detail-cve-inventory-fallbacks`, and `16-cves`. Cover wait/failed transitions, filtering, archive/restore, exact logs, triage transitions, POA&M reuse, responsive layouts, and light/dark screenshots.
+6. Run proportional formatting, Rust tests/checks, SQLx/server checks, Web UI package build, and the single focused NixOS browser check. Inspect the final diff for documentation and scope, then commit, push, open an MR against `dev`, record evidence, and move the task to Review.
+
+Constraints: safe cancellation is not implemented by the backend, so the UI MUST NOT expose a fake cancellation control. The user's host-preview waiver remains in force because TASK-440 owns the fixed ports; do not touch that worktree or its processes. Do not implement TASK-348.2 or run an unrestricted Web UI mega-check.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
