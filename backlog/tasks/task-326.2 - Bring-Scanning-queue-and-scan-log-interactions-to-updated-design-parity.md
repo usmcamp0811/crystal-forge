@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - Matt Camp
 created_date: '2026-09-09 03:32'
-updated_date: '2026-09-20 04:10'
+updated_date: '2026-09-20 04:30'
 labels:
   - scanning
   - web-ui
@@ -118,4 +118,10 @@ User explicitly waived the other-worktree overlap stop condition and directed im
 Backend contract commit `0913ea87` adds migration 0269, durable `awaiting_build`/`awaiting_closure` states, automatic prerequisite promotion, immutable canonical trigger provenance, complete exact lifecycle history, bounded archive/restore metadata, richer exact details, and a System Detail environment-scoped triage API that reuses TASK-440 locking/evidence/POA&M semantics. Cancellation remains deliberately unsupported and all rows report `cancellable=false`; the future UI must not imply cancellation. Direct verification by the task owner: `nix develop -c cargo fmt --manifest-path packages/default/Cargo.toml --all -- --check` passed; `git diff --check` passed; `SQLX_OFFLINE=true nix develop -c cargo check --manifest-path packages/default/crates/cf-server/Cargo.toml --tests` passed with existing warnings; `nix run .#devScripts.cve-test -- up --tui=false` passed and shut down its isolated database. Preview remains blocked by the untouched TASK-440 fixed-port stack.
 
 Host-side live preview was intentionally skipped because another worktree owned the legacy fixed development ports 8080/3445. The worktree was not disturbed. UI verification used focused compile/static checks followed by isolated authoritative NixOS browser workflows.
+
+Scanning Web UI slice implemented without backend, CVE triage, or integration-test changes. The new view uses the authoritative scan-record collections and exact detail endpoint for Active, Completed, and By system. It adds real wait-count breakdowns, 15-second active/stat refresh, schedule GET/PUT handling, archive/restore, archived retention states, deterministic filters/sorts, per-system full-revision history, exact failed retry, actionable failed summary, and bounded diagnostic search/navigation/export with running-detail-only polling. No cancellation or fleet-wide rescan control is exposed because backend records are `cancellable=false`.
+
+Modified files: `packages/web-ui/src/views/scanning.rs`, `packages/web-ui/src/api/models.rs`, `packages/web-ui/src/api/client.rs`, and `packages/web-ui/assets/app.css`. Backend commit `0913ea87` compiled against the client contract without requiring backend edits; no concrete backend contract defect was found.
+
+Verification: `nix develop -c cargo test --manifest-path packages/web-ui/Cargo.toml` passed (429 passed, 1 ignored); `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown` passed with existing warnings; targeted final `rustfmt --edition 2024 --check` passed for all three modified Rust files; `git diff --check` passed. Host preview and browser/integration workflows were intentionally not run under the user's explicit waiver and instruction not to touch processes or `integration-test.js`.
 <!-- SECTION:NOTES:END -->
