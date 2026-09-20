@@ -692,31 +692,6 @@ in pkgs.testers.runNixOSTest {
           toString CF_TEST_SERVER_PORT
         } /tmp/screenshots; status=$?; printf \"%s\\n\" \"$status\" > /tmp/web-ui-tests/integration.exit' > /tmp/web-ui-tests/integration.log 2>&1 </dev/null &"
     )
-    def export_failure_artifacts():
-        # Preserve browser output and server diagnostics before rejecting the
-        # derivation. Artifact export errors must not hide the original failure.
-        try:
-            machine.succeed(
-                "journalctl -u crystal-forge-server.service --no-pager -n 300 "
-                "> /tmp/web-ui-tests/server-journal.log 2>&1 || true; "
-                "rm -rf /tmp/web-ui-failure-artifacts && "
-                "mkdir -p /tmp/web-ui-failure-artifacts && "
-                "cp -a /tmp/screenshots/. /tmp/web-ui-failure-artifacts/ && "
-                "cp /tmp/web-ui-tests/integration.log "
-                "/tmp/web-ui-failure-artifacts/integration.log && "
-                "cp /tmp/web-ui-tests/server-journal.log "
-                "/tmp/web-ui-failure-artifacts/server-journal.log && "
-                "if test -f /tmp/web-ui-tests/integration.exit; then "
-                "cp /tmp/web-ui-tests/integration.exit "
-                "/tmp/web-ui-failure-artifacts/integration.exit; fi"
-            )
-            machine.copy_from_vm(
-                "/tmp/web-ui-failure-artifacts",
-                "browser-failure-artifacts",
-            )
-        except Exception as e:
-            print(f"warning: could not export browser failure artifacts: {e}")
-
     def print_browser_diagnostics(reason):
         # Print diagnostics while the VM is reachable. Failed derivations do
         # not reliably retain files copied only into the test-driver workdir.
@@ -742,19 +717,16 @@ in pkgs.testers.runNixOSTest {
         machine.wait_for_file("/tmp/web-ui-tests/integration.exit", timeout=result_timeout)
     except Exception:
         print_browser_diagnostics("timed out waiting for integration.exit")
-        export_failure_artifacts()
         raise
     output = machine.succeed("cat /tmp/web-ui-tests/integration.log")
     print(output)
 
     # Coverage-gate failures (manifest drift) abort before any results exist.
     if machine.execute("test -f /tmp/screenshots/fatal.json")[0] == 0:
-        export_failure_artifacts()
         fatal_json = machine.succeed("cat /tmp/screenshots/fatal.json")
         raise Exception(f"Web UI check aborted: {json.loads(fatal_json)['error']}")
 
     if machine.execute("test -f /tmp/screenshots/results.json")[0] != 0:
-        export_failure_artifacts()
         exit_code = machine.succeed("cat /tmp/web-ui-tests/integration.exit").strip()
         print("=== Crystal Forge server journal after integration failure ===")
         print(
@@ -1025,7 +997,6 @@ in pkgs.testers.runNixOSTest {
             f"integration process exited non-zero after producing results.json ({exit_code})"
         )
     if integration_failures:
-        export_failure_artifacts()
         raise Exception("; ".join(integration_failures))
 
     if not ${if runExportValidation then "True" else "False"}:

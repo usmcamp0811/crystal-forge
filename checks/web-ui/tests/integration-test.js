@@ -11519,7 +11519,20 @@ const steps = [
     name: "16-cves",
     description: "CVE dashboard - exact fleet detail and triage",
     action: async (page) => {
-      await routeStandaloneUiBootstrap(page, "Admin");
+      // Do not install routeStandaloneUiBootstrap() here. Its broad
+      // page.route("**/api/**") handler has no matching page.unroute() and
+      // therefore survives step cleanup, poisoning every workflow that runs
+      // afterward on the same page/context with standalone-mocked empty
+      // responses (compliance bundles, policies, environments, eval queue,
+      // etc.). CF_UI_TEST_STANDALONE=1 runs already receive an equivalent
+      // bootstrap from the shared focused-run preflight before the step loop
+      // starts (see needsAuthPreflight below); non-standalone runs use the
+      // real session and real backend responses established by the earlier
+      // ordered login steps. If a future CVE-only standalone fixture needs
+      // role-specific bootstrap state that the shared preflight does not
+      // provide, install it only under an explicit
+      // `process.env.CF_UI_TEST_STANDALONE === "1"` guard and unroute the
+      // broad handler before this step returns.
       await suppressOnboardingCoach(page);
       // Mock the CVE API endpoints so the test doesn't require real scan data.
       await page.route("**/api/v1/cves/stats*", async (route) => {
@@ -12595,6 +12608,39 @@ const steps = [
       await page.unroute(/\/api\/v1\/cves\/CVE-2024-1234\/triage$/);
       await page.unroute(/\/api\/v1\/cves(?:\?.*)?$/);
       await page.unroute("**/api/v1/cves/rescan-fleet");
+
+      // Regression guard for the route-leak fix above: routeStandaloneUiBootstrap()
+      // must not run unconditionally in this step. Its broad
+      // page.route("**/api/**") handler has no matching page.unroute() call, so if
+      // it were still installed here it would keep answering every later
+      // workflow's API calls in this run with hardcoded standalone-mock data
+      // instead of real backend responses. CF_UI_TEST_STANDALONE=1 runs
+      // legitimately keep an equivalent bootstrap installed by the shared
+      // focused-run preflight (see needsAuthPreflight) for the rest of the run,
+      // so this probe only applies to real-backend runs (VM/full and
+      // non-standalone host runs). /api/auth/whoami is a reliable leak signal
+      // because the mock always answers with a fixed sentinel identity
+      // regardless of which backend fixtures exist.
+      if (process.env.CF_UI_TEST_STANDALONE !== "1") {
+        const identityProbe = await page.evaluate(async () => {
+          const response = await fetch("/api/auth/whoami", { credentials: "include" });
+          const body = await response.json().catch(() => ({}));
+          return { status: response.status, userId: body?.user?.id, displayName: body?.user?.display_name };
+        });
+        const standaloneSentinelUserIds = new Set([
+          "43300000-0000-4000-8000-0000000000a0",
+          "43300000-0000-4000-8000-0000000000a1",
+        ]);
+        if (
+          standaloneSentinelUserIds.has(identityProbe.userId) ||
+          identityProbe.displayName === "Standalone Admin" ||
+          identityProbe.displayName === "Standalone Viewer"
+        ) {
+          throw new Error(
+            `16-cves leaked its standalone bootstrap route past step cleanup: /api/auth/whoami still answers with mocked identity ${JSON.stringify(identityProbe)} instead of the real authenticated session`,
+          );
+        }
+      }
     },
   },
   {
@@ -12808,6 +12854,9 @@ const steps = [
     action: async (page) => {
       const stepName = "20af-policy-catalog-selection-delete-regressions";
       await suppressOnboardingCoach(page);
+      // The full profile reaches this workflow after a collapsed-sidebar
+      // interaction. Focused runs must capture the same reviewed state.
+      await setAccountPreferences(page, { sidebar_collapsed: true });
       const prefix = "TASK433 catalog deletion";
       const authenticatedWhoami = await page.evaluate(async (base) => {
         const response = await fetch(`${base}/api/auth/whoami`, { credentials: "include" });
@@ -14873,9 +14922,27 @@ By using this IS (which includes any device attached to this IS), you consent to
       const createResponse = await createPromise;
       if (createResponse.status() !== 201) throw new Error(`Dedicated mixed policy create returned ${createResponse.status()}`);
       const policy = await createResponse.json();
-      const detail = (await phase6Api(page, `/api/v1/deployment-policies/${policy.id}`)).body;
+      let detail = (await phase6Api(page, `/api/v1/deployment-policies/${policy.id}`)).body;
+      const canonicalRuleIds = [
+        "43300000-0000-4000-8000-000000000011",
+        "43300000-0000-4000-8000-000000000012",
+      ];
+      await phase6Api(page, `/api/v1/deployment-policies/${policy.id}`, {
+        method: "PUT",
+        body: JSON.stringify({
+          policy_type: detail.policy_type,
+          config: {
+            ...detail.config,
+            rules: detail.config.rules.map((rule, index) => ({
+              ...rule,
+              id: canonicalRuleIds[index],
+            })),
+          },
+        }),
+      });
+      detail = (await phase6Api(page, `/api/v1/deployment-policies/${policy.id}`)).body;
       const policyVersionId = detail.current_version_id;
-      if (detail.config.rules.length !== 2 || detail.config.rules[0].kind !== "nixos_option" || detail.config.rules[1].kind !== "cve_block") {
+       if (detail.config.rules.length !== 2 || detail.config.rules[0].kind !== "nixos_option" || detail.config.rules[1].kind !== "cve_block") {
         throw new Error(`Canonical policy is not dedicated Nix+CVE enforcement: ${JSON.stringify(detail.config)}`);
       }
       await phase6Api(page, `/api/v1/policy-versions/${policyVersionId}/requirement-mappings`, {
@@ -20991,7 +21058,8 @@ function runStaticHarnessContracts() {
       `Nix static preflight must copy ${relativePath} from a Nix path input`,
     );
   }
-  assertContract(defaultNix.includes("server-journal.log"), "Nix driver must export the server journal on browser failure");
+  assertContract(defaultNix.includes("journalctl -u crystal-forge-server.service"), "Nix driver must print the server journal on browser failure");
+  assertContract(!defaultNix.includes("browser-failure-artifacts"), "Nix driver must not retain temporary browser failure artifacts");
   assertContract(defaultNix.includes('print_browser_diagnostics("timed out waiting for integration.exit")'), "Nix driver must print browser logs before rethrowing a timeout");
   assertContract(defaultNix.includes('if ${if updateVisualBaselines then "False" else "True"}:'), "Baseline update mode must bypass only strict visual rejection");
   assertContract(source.includes("process.exitCode = 1;"), "Browser failures must produce a nonzero process exit");

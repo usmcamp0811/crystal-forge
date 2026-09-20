@@ -330,16 +330,12 @@ documented in the manifest's `exclusions`.
 - **Everything failing/timeout** — check `integration.log` output in the job
   log; a `fatal.json` marker means the run aborted before steps executed.
 - **Failed derivation diagnostics** — when the VM remains reachable, the test
-  driver exports `browser-failure-artifacts/` with `integration.log`,
-  `server-journal.log`, `integration.exit`, and all available browser reports
-  and screenshots before it rejects the derivation. The driver also prints
-  `integration.log` and the server journal before it rethrows a browser timeout.
-  A failed Nix derivation has no `result` output, so exported files are not a
-  durable artifact unless the caller or CI captures the test-driver workdir.
-  `--keep-failed` preserves the failed sandbox when the local Nix builder
-  supports it, but it does not keep a running VM and cannot recover files when
-  the VM or test driver became unreachable. Treat the printed logs as the
-  reliable fallback.
+  driver prints `integration.log` and the server journal before it rethrows a
+  browser timeout or reports a failed step. A failed Nix derivation has no
+  `result` output. `--keep-failed` preserves the failed sandbox when the local
+  Nix builder supports it, but it does not keep a running VM and cannot recover
+  files when the VM or test driver became unreachable. Treat the printed logs as
+  the reliable diagnostics.
 
 ## CI integration
 
