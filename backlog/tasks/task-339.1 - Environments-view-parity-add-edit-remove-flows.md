@@ -1,10 +1,11 @@
 ---
 id: TASK-339.1
 title: Bring Environment Add/Edit modal to current design parity
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - gpt-5.6-terra
 created_date: '2026-06-10 13:35'
-updated_date: '2026-09-20 03:16'
+updated_date: '2026-09-20 03:24'
 labels:
   - design-parity
   - environments
@@ -135,6 +136,8 @@ Verification plan:
 2026-09-20 audit: TASK-339.1 is retained and promoted as the canonical Environment Add/Edit modal task. Current active path is the unified `EnvironmentFormModal`; `edit_environment_modal.rs` is not re-exported by `components/environments/mod.rs`. Existing server contracts cover deployment metadata, gate-policy assignment, versioned compliance assignments, authenticated environment-cache reads, and admin-only cache assignment. TASK-446 is being narrowed to cache-destination editor ownership to prevent duplicate implementation.
 
 The current cache assignment API is real but asymmetric: authenticated environment reads are exposed at `/api/environments/:id/caches`, while admin assignment is performed through `PUT /api/caches/:id/environments`. The task therefore requires UI reconciliation through the existing contract and only allows backend work if an atomic environment-scoped gap is proven. Existing version-aware bundle assignment semantics remain mandatory.
+
+2026-09-19 preflight: Created clean dedicated worktree `/home/mcamp/code/crystal-forge/TASK-339.1-environment-modal-parity` on branch `TASK-339.1-environment-modal-parity` from `origin/dev` `e304867c43abc8a7d8efe1f01e71af64cca67d8b`. The dev worktree has an unrelated untracked session file and another task worktree has unrelated changes; this task worktree is clean.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
