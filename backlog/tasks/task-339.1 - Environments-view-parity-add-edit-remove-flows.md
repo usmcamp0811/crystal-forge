@@ -133,4 +133,15 @@ Verification plan:
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-09-20 audit: TASK-339.1 is retained and promoted as the canonical Environment Add/Edit modal task. Current active path is the unified `EnvironmentFormModal`; `edit_environment_modal.rs` is not re-exported by `components/environments/mod.rs`. Existing server contracts cover deployment metadata, gate-policy assignment, versioned compliance assignments, authenticated environment-cache reads, and admin-only cache assignment. TASK-446 is being narrowed to cache-destination editor ownership to prevent duplicate implementation.
+
+The current cache assignment API is real but asymmetric: authenticated environment reads are exposed at `/api/environments/:id/caches`, while admin assignment is performed through `PUT /api/caches/:id/environments`. The task therefore requires UI reconciliation through the existing contract and only allows backend work if an atomic environment-scoped gap is proven. Existing version-aware bundle assignment semantics remain mandatory.
 <!-- SECTION:NOTES:END -->
+
+## Comments
+
+<!-- COMMENTS:BEGIN -->
+created: 2026-09-20 03:16
+---
+Canonical ownership note: TASK-339.1 now owns only Environment Add/Edit modal parity. TASK-446 was narrowed to Cache destination editor parity and no longer owns environment modal implementation. Archived TASK-358 recorded parity against an older design and explicitly deferred several environment contracts; the current committed design and current production contracts have diverged, so TASK-358 completion is historical evidence, not acceptance for this task.
+---
+<!-- COMMENTS:END -->
