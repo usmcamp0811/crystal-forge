@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-20 00:29'
+updated_date: '2026-09-20 00:43'
 labels:
   - design-parity
   - web-ui
@@ -237,6 +237,8 @@ Maintainer verification adjustment: do not run the authoritative `checks.x86_64-
 2026-09-19 strict-baseline determinism adjustment: explicitly set the reviewed collapsed-sidebar preference in 20af so focused and ordered profiles capture the same state. Normalize only synthetic policy rule identifiers in the mixed Nix/CVE fixture through the authenticated policy API before production evaluation. Do not modify server-derived assessments, verification history, timestamps, strict thresholds, or visual comparison policy. Run each approved workflow twice from unchanged source, compare the approved captures using the repository visual-diff tolerance, then refresh only the ten user-approved PNGs.
 
 2026-09-19 maintainer-authorized CI adjustment: make only the authoritative Web UI GitLab job optional, without changing the Web UI check itself, strict baseline policy, or the remaining required CI matrix. Preserve Web UI screenshot artifacts and MR-comment wiring for the optional job. Commit and push the current TASK-440 baseline/harness stabilization work after CI configuration validation; merge remains contingent on the rest of CI.
+
+2026-09-20 CI follow-up for MR !323: the optional `web-ui-check` can fail before it publishes `web-ui-screenshots`, but `web-ui-screenshots-mr-comment` still runs. Create the expected directory in the comment job before its screenshot-count probe so GitLab's errexit shell treats the no-artifact path as a successful skip. Verify GitLab CI YAML parsing and the empty-directory shell path, then commit and push only this CI correction.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -307,6 +309,8 @@ Follow-up regression commit `0a59d340` (`TASK-440: Cover terminal head latest se
 2026-09-19: User explicitly authorized option 1: refresh only the ten reviewed stale strict baselines. The current collapsed 20af sidebar, `task433-mixed-evidence-target`, and typed Assignee/current POA&M history are intended. Determinism must be demonstrated by two unchanged focused runs for each affected workflow before accepting captures.
 
 2026-09-20 maintainer authorized the current stabilization slice to land despite the remaining strict full-order mixed-evidence visual mismatch. The GitLab CI Web UI VM job is split from the required check matrix and marked `allow_failure: true`; its screenshot artifact and MR-comment dependency remain connected. Local evidence: YAML parses with Ruby, `node --check` passed, `web-ui-test-runner` build passed, `git diff --check` passed. The one full Web UI gate executed before this CI adjustment failed only five deterministic mixed-evidence strict visual comparisons; no automatic full-gate rerun will occur in this slice.
+
+2026-09-20 Diagnosed failed job #16607942382: `web-ui-screenshots-mr-comment` ran after the allowed-to-fail upstream `web-ui-check` failed before artifact creation. Its first `ls web-ui-screenshots/*.png` therefore exited nonzero under GitLab shell errexit before the intended zero-screenshot skip. Added `mkdir -p web-ui-screenshots` in the comment job `before_script`; YAML parse and an empty-directory execution probe pass.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
