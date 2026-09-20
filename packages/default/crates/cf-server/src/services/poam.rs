@@ -3783,7 +3783,7 @@ pub async fn fleet_cve_detail(
 /// The function adds bounded legacy findings to the exact drawer read and
 /// labels every system with its read authority. Dispositions remain attached
 /// only to exact environments. This read does not supply subjects to any
-/// mutation; fleet mutations independently call [`fleet_cve_subjects_tx`].
+/// mutation; fleet mutations independently call `fleet_cve_subjects_tx`.
 ///
 /// # Errors
 ///
