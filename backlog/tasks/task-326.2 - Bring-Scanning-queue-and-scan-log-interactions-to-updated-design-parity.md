@@ -197,6 +197,8 @@ Review follow-up implementation complete at pre-commit state. Agent and legacy s
 Verification passed: agent `system_state::tests` 7/7; server `models::system_states::tests` under `SQLX_OFFLINE=true`; isolated PostgreSQL `system_inventory_classifies_fallbacks_and_exact_precedence` 1/1; Web UI CVE tests 35/35; JavaScript syntax/static contracts; targeted rustfmt and `git diff --check`. Focused authoritative browser evidence: `16-cves` passed in `/home/mcamp/.local/share/opencode/tool-output/tool_0bfc6650c001WanmaPZ5e8AHmx`; after repairing its stale DTO fixture, `12ha-system-detail-cve-inventory-fallbacks` passed 1/1 with dark/light screenshots in `/nix/store/yx3hjrsnnbxajfdjbf7qbdmxin41228k-vm-test-run-crystal-forge-web-ui-mega-integration`. Host preview remains blocked/waived because TASK-440 owns the fixed ports.
 
 Audit discovery requiring explicit scope decision: live migration-0259 exact-CVE view/functions and the compatibility justification handler filter invalid states before selecting the latest row. They can use an older valid state after a newer mismatch. Fixing this correctly requires a new additive migration replacing four database objects plus focused trigger/view regressions. No migration or security-boundary expansion was silently added to this wrapper/copy follow-up.
+
+Committed and pushed review follow-up as `19352160` (`TASK-326.2: Recognize activatable NixOS generations`) to MR !329. Final task status remains In Progress pending the user's scope decision for the audited migration-0259 stale-state authority defect.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
