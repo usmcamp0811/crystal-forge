@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - Matt Camp
 created_date: '2026-09-09 03:32'
-updated_date: '2026-09-20 04:47'
+updated_date: '2026-09-20 04:51'
 labels:
   - scanning
   - web-ui
@@ -128,4 +128,6 @@ Modified files: `packages/web-ui/src/views/scanning.rs`, `packages/web-ui/src/ap
 Verification: `nix develop -c cargo test --manifest-path packages/web-ui/Cargo.toml` passed (429 passed, 1 ignored); `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown` passed with existing warnings; targeted final `rustfmt --edition 2024 --check` passed for all three modified Rust files; `git diff --check` passed. Host preview and browser/integration workflows were intentionally not run under the user's explicit waiver and instruction not to touch processes or `integration-test.js`.
 
 Closed the seven Scanning review gaps. The server now exposes nullable authoritative `started_at` from `lease_started_at` or `scan_metadata.execution_started_at`; the Web UI never derives running elapsed time from lifecycle creation. Completed badges/counts subtract hidden archives and distinguish filtered visible, loaded, available, and all rows. By-system history merges the per-system derivation projection with retained scan attempts so current/recent/superseded no-scan derivations render as `Never scanned` or `Needs build` with full revisions and no detail action; archive-state caches are keyed/invalidated by the selected view. Added stable tab IDs, ARIA panel labels, Arrow/Home/End tab navigation, and schedule-dialog initial focus, focus wrapping/restoration, and Escape precedence behind the detail drawer. Schedule copy now says `Superseded configs`; Active remains without selection or cancellation controls. Verification passed: server `SQLX_OFFLINE=true cargo check --tests`; Web UI tests 432 passed/1 ignored; WASM cargo check; targeted rustfmt check; `git diff --check`. Host preview and browser workflows remain waived per user instruction, and no ports/processes were touched.
+
+Committed the finalized Scanning administration slice as `2c0d10e7`. Review fixes include queued terminology, lexicographic severity ordering, live-refresh-safe failed-stat opening, authoritative per-derivation relation labels in By system, and unique schedule-control accessible names. Verification after the fixes: focused Scanning tests passed (9/9), Web UI WASM cargo check passed with existing warnings, server offline cargo check passed with existing warnings, and `git diff --check` passed. Repository-wide Web UI `cargo fmt --check` remains blocked by pre-existing formatting differences in unrelated files; the changed Scanning file was formatted directly with rustfmt. Preview remains waived and TASK-440 processes were untouched.
 <!-- SECTION:NOTES:END -->
