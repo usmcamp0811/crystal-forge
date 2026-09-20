@@ -3,9 +3,10 @@ id: TASK-462.1
 title: >-
   Phase 1: Add a devenv shell with dynamic-port processes and prove
   parallel-worktree isolation for run-ui-dev
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-09-19 14:51'
+updated_date: '2026-09-20 02:25'
 labels: []
 milestone: m-1
 dependencies: []
