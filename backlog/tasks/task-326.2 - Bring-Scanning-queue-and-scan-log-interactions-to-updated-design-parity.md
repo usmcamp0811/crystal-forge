@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - Matt Camp
 created_date: '2026-09-09 03:32'
-updated_date: '2026-09-20 17:41'
+updated_date: '2026-09-20 17:44'
 labels:
   - scanning
   - web-ui
@@ -153,6 +153,8 @@ Adjust successful build completion to advance an existing `awaiting_build/post_b
 Reshape the production Scanning drawer around configuration identity, a concise real lifecycle strip, typed wait/failure callouts, and accessible Log/Details tabs. Keep bounded persisted diagnostics, redaction, search/navigation/highlighting/export, stale-request fencing, and all advanced metadata. Render diagnostics as terminal-style lines. Add only real retry and exact build navigation actions backed by server-issued identity.
 
 Expand focused PostgreSQL coverage across enabled/disabled policy, idempotent and concurrent insertion, local/remote promotion, non-claimable waits, build failure/retry/restart persistence, existing manual/fleet provenance, and completed-evidence semantics. Update only the 16c browser workflow for failed, waiting, running, completed, responsive, focus, Log/Details, and focused screenshots. Run cheap gates first, then exactly one final 16c VM command at candidate HEAD.
+
+Backend post-build intent follow-up: add one transaction-local helper that inserts `awaiting_build` post-build intent only for supplied NixOS derivations when persisted `on_build` is enabled, using the active partial conflict target and `DO NOTHING`. Make all four authoritative build admission functions use exact `RETURNING` derivation IDs and call the helper in the same transaction only for inserted jobs. Reshape successful build completion to attach the completed job and transition the existing post-build intent to `pending` for local output or `awaiting_closure` for remote output without cache publication; retain policy/type-gated repair for legacy missing intent and never mutate manual/fleet provenance. Add focused ignored PostgreSQL regressions for admission gates, idempotency/provenance, completion states, non-claimable waits, failures, and retry/replacement behavior. Run targeted rustfmt and the smallest dedicated PostgreSQL test selection.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
