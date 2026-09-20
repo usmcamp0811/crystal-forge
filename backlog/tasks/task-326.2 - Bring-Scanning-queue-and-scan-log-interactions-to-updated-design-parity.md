@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - Matt Camp
 created_date: '2026-09-09 03:32'
-updated_date: '2026-09-20 14:06'
+updated_date: '2026-09-20 14:43'
 labels:
   - scanning
   - web-ui
@@ -169,6 +169,8 @@ Branch `TASK-326.2-scanning-cve-triage-parity` was pushed at `664a5bd8`. MR crea
 Opened GitLab MR !329 against `dev` at exact head `664a5bd88114b3bc2d47f7e49cc2f504b4d99f29`: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/329. The MR includes four representative screenshots from the authoritative browser result. GitLab pipeline 2920 started for the exact MR head and was still running when the task moved to Review.
 
 Resumed TASK-326.2 in its existing dedicated worktree and MR !329. Fast-forwarded the clean task branch to the intentional design-only head `35519546fc5bb584922643b498cf722429f185d5`. The follow-up is limited to System Detail CVE host/environment triage, shared truthful fixed-version wording, and focused regression coverage. The existing host-preview waiver remains active; no other worktree or preview process will be touched. Migration inspection shows 0269 is the current highest migration, so the additive host-disposition migration will use 0270.
+
+Focused backend follow-up implemented and locally verified without commit or push. Added migration 0270 append-only host CVE dispositions with one-active identity uniqueness and the documented host-only orphan POA&M exception. System Detail POST accepts only `scope: host|environment`; GET now returns selected hostname, derived environment identity/name, exact environment subjects/count, direct host/environment dispositions, effective disposition/source, and scheduled POA&M metadata. Host mutations preserve canonical CVE -> system sentinel -> policy -> exact-finding lock order, exact current evidence, typed conflicts, compatible POA&M reuse/host-only expansion, independent OPEN behavior, and host-over-environment precedence. Close/reopen restores scheduled dispositions in their recorded original host or environment scope. Added direct regressions for the complete mixed-state precedence matrix, active identity uniqueness, independent scope opening, compatible/incompatible scheduling, host-only expansion/orphan behavior, close/reopen, concurrent host/environment mutations, and forged identity rejection. Verification passed: `nix develop -c env DATABASE_URL=postgresql://mcamp@127.0.0.1:55484/postgres SQLX_OFFLINE=true cargo test --quiet --manifest-path packages/default/crates/cf-server/Cargo.toml --test poam_workflows -- --test-threads=1` (70 passed); `SQLX_OFFLINE=true nix develop -c cargo check --manifest-path packages/default/crates/cf-server/Cargo.toml --tests`; touched-file rustfmt check; `git diff --check`. Existing unrelated compiler warnings remain. Modified scope is only cf-server API models, POA&M handler/service/tests, and migration 0270; no SQLx metadata changed.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
