@@ -1,11 +1,11 @@
 ---
 id: TASK-326.2
 title: Bring Scanning and per-system CVE triage to updated design parity
-status: In Progress
+status: Review
 assignee:
   - Matt Camp
 created_date: '2026-09-09 03:32'
-updated_date: '2026-09-20 13:07'
+updated_date: '2026-09-20 13:24'
 labels:
   - scanning
   - web-ui
@@ -20,6 +20,7 @@ references:
   - docs/design/CrystalForge/components/ScanningView.jsx
   - docs/design/CrystalForge/components/CvesView.jsx
   - docs/design/CrystalForge/components/SystemDetail.jsx
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/329'
 documentation:
   - docs/design/CrystalForge/components/ScanningView.jsx
   - docs/design/CrystalForge/components/CvesView.jsx
@@ -160,6 +161,8 @@ Committed unified System Detail CVE triage as `1ca41260`. The Web UI now mirrors
 Final verification completed. The authoritative focused NixOS browser check passed workflows `16c-scanning-view`, `12h-system-detail-cves-grouped-justification`, `12ha-system-detail-cve-inventory-fallbacks`, and `16-cves`, producing `/nix/store/6lnyyalkw4v52y9sni9a5dijkh91qcdb-vm-test-run-crystal-forge-web-ui-mega-integration` with 37 task-relevant screenshots. Representative desktop, narrow-desktop, tablet, light, and dark images were inspected. Static contracts, JavaScript syntax, targeted Rust formatting, `git diff --check`, Web UI tests/WASM checks, server offline checks, and server/Web UI documentation builds passed. Documentation builds retain unrelated existing warnings; the task-local private rustdoc link was corrected in `664a5bd8`. Host preview remained waived and TASK-440 ports/processes were not touched.
 
 Branch `TASK-326.2-scanning-cve-triage-parity` was pushed at `664a5bd8`. MR creation is blocked because the configured GitLab CLI OAuth grant is expired or revoked (`invalid_grant`). Git push authentication remains valid. The task stays In Progress until an MR is open; use the GitLab branch link to create an MR targeting `dev`, or refresh `glab` authentication and resume finalization.
+
+Opened GitLab MR !329 against `dev` at exact head `664a5bd88114b3bc2d47f7e49cc2f504b4d99f29`: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/329. The MR includes four representative screenshots from the authoritative browser result. GitLab pipeline 2920 started for the exact MR head and was still running when the task moved to Review.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
