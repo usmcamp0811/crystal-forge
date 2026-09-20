@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-08-28 03:43'
-updated_date: '2026-09-20 00:28'
+updated_date: '2026-09-20 00:29'
 labels:
   - design-parity
   - web-ui
@@ -305,6 +305,8 @@ Follow-up regression commit `0a59d340` (`TASK-440: Cover terminal head latest se
 2026-09-19: The authoritative normal Web UI run reached all browser workflows. `16-cves`, the policy catalog regression, canonical mixed evidence, and canonical POA&M lifecycle all completed their semantic assertions. The gate failed only its strict visual policy with the remaining ten named captures: 20af dark/light; mixed-evidence server-derived desktop dark/light and mobile dark/light plus final dark/light; and POA&M reloaded completed-history mobile dark/light. This confirms the prior four-step subset was representative of the actual strict issue. The normal run also confirmed removal of the temporary failure-artifact exporter requires its static harness contract to require printed diagnostics instead. Node syntax/static contracts and Nix parsing pass after that correction. The full run itself remains failing pending visual remediation; no baselines were changed.
 
 2026-09-19: User explicitly authorized option 1: refresh only the ten reviewed stale strict baselines. The current collapsed 20af sidebar, `task433-mixed-evidence-target`, and typed Assignee/current POA&M history are intended. Determinism must be demonstrated by two unchanged focused runs for each affected workflow before accepting captures.
+
+2026-09-20 maintainer authorized the current stabilization slice to land despite the remaining strict full-order mixed-evidence visual mismatch. The GitLab CI Web UI VM job is split from the required check matrix and marked `allow_failure: true`; its screenshot artifact and MR-comment dependency remain connected. Local evidence: YAML parses with Ruby, `node --check` passed, `web-ui-test-runner` build passed, `git diff --check` passed. The one full Web UI gate executed before this CI adjustment failed only five deterministic mixed-evidence strict visual comparisons; no automatic full-gate rerun will occur in this slice.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
