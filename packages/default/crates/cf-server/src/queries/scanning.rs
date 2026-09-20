@@ -64,6 +64,7 @@ pub struct ScanQueueRow {
 pub struct ScanSystemRow {
     pub system_id: Uuid,
     pub hostname: String,
+    pub flake_name: Option<String>,
     pub environment: Option<String>,
     pub total_configs: i64,
     pub scanned: i64,
@@ -72,6 +73,12 @@ pub struct ScanSystemRow {
     pub unscanned: i64,
     pub current_crit: i64,
     pub current_high: i64,
+    pub current_medium: i64,
+    pub current_low: i64,
+    /// Identifies exact schema-1 evidence for the current deployment.
+    pub current_scan_id: Option<Uuid>,
+    /// Is true when completed evidence exists only for non-current revisions.
+    pub historical_evidence: bool,
     /// Identifies the derivation in the system's latest reported store path.
     pub current_derivation_id: Option<i32>,
 }
@@ -119,6 +126,12 @@ pub struct ScanRecordRow {
     pub flake_name: Option<String>,
     /// Contains the exact commit hash when available.
     pub commit_hash: Option<String>,
+    /// Is true when this derivation is the exact current deployment of an
+    /// active system with matching flake and configuration identity.
+    pub is_current: bool,
+    /// Is true when this derivation belongs to the position-0 commit in its
+    /// flake's ready branch snapshot.
+    pub is_latest_per_flake: bool,
     /// Contains the persisted lifecycle state.
     pub status: String,
     /// Contains the canonical presentation trigger.
@@ -317,6 +330,8 @@ pub async fn get_scan_records(
         JOIN derivations derivation ON derivation.id = scan.derivation_id
         LEFT JOIN commits commit ON commit.id = derivation.commit_id
         LEFT JOIN flakes flake ON flake.id = commit.flake_id
+        LEFT JOIN flake_branch_commit_snapshot latest_snapshot
+          ON latest_snapshot.flake_id=commit.flake_id AND latest_snapshot.position=0
         LEFT JOIN builders builder ON builder.id = scan.lease_builder_id
         LEFT JOIN cve_scan_archives archive ON archive.scan_id = scan.id
         WHERE derivation.derivation_type = 'nixos'
@@ -356,6 +371,19 @@ pub async fn get_scan_records(
             scan.id AS scan_id, scan.derivation_id,
             derivation.derivation_name AS hostname,
             flake.name AS flake_name, commit.git_commit_hash AS commit_hash,
+            EXISTS (
+              SELECT 1 FROM systems system
+              WHERE system.is_active
+                AND system.flake_id=commit.flake_id
+                AND COALESCE(NULLIF(BTRIM(system.system_configuration_name), ''), system.hostname)=derivation.derivation_name
+                AND derivation.store_path IS NOT NULL AND BTRIM(derivation.store_path)<>''
+                AND derivation.store_path=(
+                  SELECT state.store_path FROM system_states state
+                  WHERE state.hostname=system.hostname
+                  ORDER BY state.timestamp DESC NULLS LAST,state.id DESC LIMIT 1)
+            ) AS is_current,
+            COALESCE(flake.snapshot_ready_at IS NOT NULL
+              AND latest_snapshot.commit_id=commit.id,FALSE) AS is_latest_per_flake,
             scan.status, scan.source_trigger, scan.created_at, scan.scheduled_at,
             COALESCE(
                 scan.lease_started_at,
@@ -410,6 +438,8 @@ pub async fn get_scan_records(
                 hostname: row.get("hostname"),
                 flake_name: row.get("flake_name"),
                 commit_hash: row.get("commit_hash"),
+                is_current: row.get("is_current"),
+                is_latest_per_flake: row.get("is_latest_per_flake"),
                 status: row.get("status"),
                 source_trigger: crate::queries::cve_scans::present_scan_trigger(
                     row.get::<Option<String>, _>("source_trigger").as_deref(),
@@ -508,6 +538,7 @@ pub async fn get_scan_queue(pool: &PgPool, limit: i64) -> Result<Vec<ScanQueueRo
                 c.git_commit_hash AS commit_hash,
                 c.flake_id,
                 c.id AS commit_db_id,
+                d.store_path,
                 COALESCE(cs.status, 'never_scanned') AS status,
                 cs.completed_at,
                 cs.scheduled_at,
@@ -542,7 +573,16 @@ pub async fn get_scan_queue(pool: &PgPool, limit: i64) -> Result<Vec<ScanQueueRo
                 WHEN completed_at >= NOW() - INTERVAL '30 days' THEN 'recent'
                 ELSE 'archived'
             END AS freshness,
-            TRUE AS is_current,
+            EXISTS (
+              SELECT 1 FROM systems system
+              WHERE system.is_active
+                AND system.flake_id=lpd.flake_id
+                AND COALESCE(NULLIF(BTRIM(system.system_configuration_name), ''), system.hostname)=lpd.hostname
+                AND lpd.store_path IS NOT NULL AND BTRIM(lpd.store_path)<>''
+                AND lpd.store_path=(SELECT state.store_path FROM system_states state
+                  WHERE state.hostname=system.hostname
+                  ORDER BY state.timestamp DESC NULLS LAST,state.id DESC LIMIT 1)
+            ) AS is_current,
             (lc.commit_id IS NOT NULL AND lpd.commit_db_id = lc.commit_id) AS is_latest_per_flake
             , source_trigger
         FROM latest_per_derivation lpd
@@ -959,26 +999,29 @@ pub async fn get_scan_systems(pool: &PgPool, limit: i64) -> Result<Vec<ScanSyste
     let rows = sqlx::query(
         r#"
         WITH policy AS (
-            SELECT
-                GREATEST(
-                    1,
-                    COALESCE(NULLIF(regexp_replace(deployed_interval, '[^0-9]', '', 'g'), '')::INT, 24)
-                ) AS deployed_hours
+            SELECT deployed_interval,recent_interval,archived_interval,archived_enabled
             FROM scan_schedule_policy
             WHERE id = 1
         ),
-        latest_lifecycle_per_derivation AS (
-            SELECT DISTINCT ON (s.id, d.id)
+        derivation_scope AS (
+            SELECT
                 s.id AS system_id,
                 d.id AS derivation_id,
                 s.hostname,
+                f.name AS flake_name,
                 d.store_path,
-                cs.status,
-                cs.scheduled_at,
-                cs.created_at,
-                cs.completed_at
+                CASE
+                  WHEN d.store_path IS NOT NULL AND BTRIM(d.store_path)<>''
+                    AND d.store_path=(SELECT state.store_path FROM system_states state
+                      WHERE state.hostname=s.hostname
+                      ORDER BY state.timestamp DESC NULLS LAST,state.id DESC LIMIT 1)
+                    THEN 'deployed'
+                  WHEN d.completed_at >= NOW()-INTERVAL '30 days' THEN 'recent'
+                  ELSE 'archived'
+                END AS lifecycle_class
             FROM systems s
-            JOIN commits c ON c.flake_id = s.flake_id
+            JOIN flakes f ON f.id=s.flake_id
+            JOIN commits c ON c.flake_id=s.flake_id
             JOIN derivations d
               ON d.commit_id = c.id
              AND d.derivation_name = COALESCE(
@@ -986,76 +1029,131 @@ pub async fn get_scan_systems(pool: &PgPool, limit: i64) -> Result<Vec<ScanSyste
                     s.hostname
                  )
              AND d.derivation_type = 'nixos'
-            LEFT JOIN cve_scans cs ON cs.derivation_id = d.id
             WHERE s.is_active = TRUE
-            ORDER BY s.id, d.id,
-                     COALESCE(cs.completed_at, cs.scheduled_at, cs.created_at) DESC NULLS LAST
         ),
         latest_completed_per_derivation AS (
             SELECT DISTINCT ON (d.id)
                 d.id AS derivation_id,
+                cs.id AS scan_id,
                 cs.completed_at,
                 cs.critical_count,
-                cs.high_count
+                cs.high_count,
+                cs.medium_count,
+                cs.low_count
             FROM derivations d
-            LEFT JOIN cve_scans cs ON cs.derivation_id = d.id
+            JOIN cve_scans cs ON cs.derivation_id = d.id
             WHERE d.derivation_type = 'nixos'
-              AND cs.completed_at IS NOT NULL
-            ORDER BY d.id, cs.completed_at DESC
+              AND cs.status='completed' AND cs.completed_at IS NOT NULL
+            ORDER BY d.id, cs.completed_at DESC,cs.id DESC
         ),
-        current_derivation AS (
-            SELECT DISTINCT ON (s.id)
-                s.id AS system_id,
-                d.id AS derivation_id
+        latest_state AS (
+            SELECT s.id AS system_id,state.store_path,state.generation,
+                   state.generation_matches_current_store_path
             FROM systems s
-            JOIN LATERAL (
-                SELECT ss.store_path
+            LEFT JOIN LATERAL (
+                SELECT ss.store_path,ss.generation,ss.generation_matches_current_store_path
                 FROM system_states ss
                 WHERE ss.hostname = s.hostname
                 ORDER BY ss.timestamp DESC NULLS LAST, ss.id DESC
                 LIMIT 1
             ) state ON TRUE
-            JOIN derivations d
-              ON d.store_path = state.store_path
-             AND d.derivation_name = COALESCE(
-                    NULLIF(BTRIM(s.system_configuration_name), ''),
-                    s.hostname
-                 )
-             AND d.derivation_type = 'nixos'
-            JOIN commits c ON c.id = d.commit_id AND c.flake_id = s.flake_id
             WHERE s.is_active = TRUE
-            ORDER BY s.id, d.completed_at DESC NULLS LAST, d.id DESC
+        ),
+        current_derivation AS (
+            SELECT DISTINCT ON (system.id)
+                   system.id AS system_id,derivation.id AS derivation_id
+            FROM systems system
+            JOIN latest_state state ON state.system_id=system.id
+            JOIN derivations derivation
+              ON derivation.store_path=state.store_path
+             AND derivation.derivation_name=COALESCE(
+                   NULLIF(BTRIM(system.system_configuration_name), ''),system.hostname)
+             AND derivation.derivation_type='nixos'
+            JOIN commits commit ON commit.id=derivation.commit_id
+              AND commit.flake_id=system.flake_id
+            WHERE system.is_active
+            ORDER BY system.id,derivation.completed_at DESC NULLS LAST,derivation.id DESC
+        ),
+        current_exact AS (
+            SELECT system.id AS system_id,derivation.id AS derivation_id,
+                   scan.id AS scan_id,scan.critical_count,scan.high_count,
+                   scan.medium_count,scan.low_count
+            FROM systems system
+            JOIN latest_state state ON state.system_id=system.id
+              AND state.generation IS NOT NULL
+              AND state.store_path IS NOT NULL AND BTRIM(state.store_path)<>''
+              AND state.generation_matches_current_store_path IS TRUE
+            JOIN evaluation_generation_snapshots retained
+              ON retained.system_id=system.id AND retained.generation=state.generation
+              AND retained.source_store_path=state.store_path
+              AND retained.lineage_verified IS TRUE
+            JOIN evaluation_snapshots artifact ON artifact.id=retained.snapshot_id
+              AND artifact.commit_id=retained.commit_id
+              AND artifact.configuration_name=retained.configuration_name
+              AND artifact.lifecycle='available' AND artifact.integrity_version=1
+            JOIN derivations derivation ON derivation.id=retained.derivation_id
+              AND derivation.commit_id=retained.commit_id
+              AND derivation.derivation_name=retained.configuration_name
+              AND derivation.derivation_type='nixos'
+              AND COALESCE(derivation.store_path,derivation.expected_store_path)=retained.source_store_path
+            LEFT JOIN LATERAL (
+              SELECT candidate.id,candidate.critical_count,candidate.high_count,
+                     candidate.medium_count,candidate.low_count
+              FROM cve_scans candidate
+              WHERE candidate.derivation_id=derivation.id
+                AND candidate.status='completed' AND candidate.completed_at IS NOT NULL
+                AND candidate.evidence_schema_version=1
+              ORDER BY candidate.completed_at DESC,candidate.id DESC LIMIT 1
+            ) scan ON TRUE
         )
         SELECT
             s.id AS system_id,
-            ll.hostname,
+            scope.hostname,
+            MAX(scope.flake_name) AS flake_name,
             MAX(e.name) AS environment,
             COUNT(*)::BIGINT AS total_configs,
-            COUNT(*) FILTER (
-                WHERE lc.completed_at IS NOT NULL
-                AND lc.completed_at >= NOW() - (SELECT deployed_hours * INTERVAL '1 hour' FROM policy)
-            )::BIGINT AS scanned,
-            COUNT(*) FILTER (
-                WHERE lc.completed_at IS NOT NULL
-                AND lc.completed_at < NOW() - (SELECT deployed_hours * INTERVAL '1 hour' FROM policy)
-            )::BIGINT AS stale,
-            COUNT(*) FILTER (WHERE ll.store_path IS NULL)::BIGINT AS needs_build,
-            COUNT(*) FILTER (WHERE lc.completed_at IS NULL)::BIGINT AS unscanned,
-            COALESCE(MAX(lc.critical_count) FILTER (
-                WHERE ll.derivation_id = cd.derivation_id
-            ), 0)::BIGINT AS current_crit,
-            COALESCE(MAX(lc.high_count) FILTER (
-                WHERE ll.derivation_id = cd.derivation_id
-            ), 0)::BIGINT AS current_high
-            , cd.derivation_id AS current_derivation_id
-        FROM latest_lifecycle_per_derivation ll
-        LEFT JOIN latest_completed_per_derivation lc ON lc.derivation_id = ll.derivation_id
-        JOIN systems s ON s.id = ll.system_id
+            COUNT(*) FILTER (WHERE scope.store_path IS NOT NULL AND BTRIM(scope.store_path)<>''
+              AND completed.completed_at IS NOT NULL
+              AND NOT CASE scope.lifecycle_class
+                WHEN 'deployed' THEN policy.deployed_interval<>'never'
+                  AND NOW()-completed.completed_at>policy.deployed_interval::interval
+                WHEN 'recent' THEN policy.recent_interval<>'never'
+                  AND NOW()-completed.completed_at>policy.recent_interval::interval
+                ELSE policy.archived_enabled AND policy.archived_interval<>'never'
+                  AND NOW()-completed.completed_at>policy.archived_interval::interval
+              END)::BIGINT AS scanned,
+            COUNT(*) FILTER (WHERE scope.store_path IS NOT NULL AND BTRIM(scope.store_path)<>''
+              AND completed.completed_at IS NOT NULL
+              AND CASE scope.lifecycle_class
+                WHEN 'deployed' THEN policy.deployed_interval<>'never'
+                  AND NOW()-completed.completed_at>policy.deployed_interval::interval
+                WHEN 'recent' THEN policy.recent_interval<>'never'
+                  AND NOW()-completed.completed_at>policy.recent_interval::interval
+                ELSE policy.archived_enabled AND policy.archived_interval<>'never'
+                  AND NOW()-completed.completed_at>policy.archived_interval::interval
+              END)::BIGINT AS stale,
+            COUNT(*) FILTER (WHERE scope.store_path IS NULL OR BTRIM(scope.store_path)='')::BIGINT AS needs_build,
+            COUNT(*) FILTER (WHERE scope.store_path IS NOT NULL AND BTRIM(scope.store_path)<>''
+              AND completed.completed_at IS NULL)::BIGINT AS unscanned,
+            COALESCE(MAX(current_exact.critical_count),0)::BIGINT AS current_crit,
+            COALESCE(MAX(current_exact.high_count),0)::BIGINT AS current_high,
+            COALESCE(MAX(current_exact.medium_count),0)::BIGINT AS current_medium,
+            COALESCE(MAX(current_exact.low_count),0)::BIGINT AS current_low,
+            (ARRAY_AGG(current_exact.scan_id) FILTER (WHERE current_exact.scan_id IS NOT NULL))[1]
+              AS current_scan_id,
+            (BOOL_OR(completed.scan_id IS NOT NULL)
+              AND COUNT(current_exact.scan_id)=0) AS historical_evidence,
+            MAX(current_derivation.derivation_id) AS current_derivation_id
+        FROM derivation_scope scope
+        LEFT JOIN latest_completed_per_derivation completed ON completed.derivation_id=scope.derivation_id
+        JOIN systems s ON s.id=scope.system_id
         LEFT JOIN environments e ON e.id = s.environment_id
-        LEFT JOIN current_derivation cd ON cd.system_id = s.id
+        LEFT JOIN current_exact ON current_exact.system_id=s.id
+        LEFT JOIN current_derivation ON current_derivation.system_id=s.id
+        CROSS JOIN policy
         WHERE s.is_active = TRUE
-        GROUP BY s.id, ll.hostname, cd.derivation_id
-        ORDER BY total_configs DESC, ll.hostname ASC
+        GROUP BY s.id,scope.hostname
+        ORDER BY total_configs DESC,scope.hostname ASC
         LIMIT $1
         "#,
     )
@@ -1068,6 +1166,7 @@ pub async fn get_scan_systems(pool: &PgPool, limit: i64) -> Result<Vec<ScanSyste
         .map(|row| ScanSystemRow {
             system_id: row.get("system_id"),
             hostname: row.get("hostname"),
+            flake_name: row.get("flake_name"),
             environment: row.get("environment"),
             total_configs: row.get("total_configs"),
             scanned: row.get("scanned"),
@@ -1076,6 +1175,10 @@ pub async fn get_scan_systems(pool: &PgPool, limit: i64) -> Result<Vec<ScanSyste
             unscanned: row.get("unscanned"),
             current_crit: row.get("current_crit"),
             current_high: row.get("current_high"),
+            current_medium: row.get("current_medium"),
+            current_low: row.get("current_low"),
+            current_scan_id: row.get("current_scan_id"),
+            historical_evidence: row.get("historical_evidence"),
             current_derivation_id: row.get("current_derivation_id"),
         })
         .collect())

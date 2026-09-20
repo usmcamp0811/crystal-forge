@@ -97,6 +97,7 @@ pub(crate) fn prepare_diagnostics(values: &[CveScanDiagnostic]) -> Vec<PreparedS
             "attempt_started" => "attempt_started",
             "attempt_completed" => "attempt_completed",
             "attempt_failed" => "attempt_failed",
+            "result_persistence_failed" => "result_persistence_failed",
             "attempt_requeued" => "attempt_requeued",
             _ => "output",
         };

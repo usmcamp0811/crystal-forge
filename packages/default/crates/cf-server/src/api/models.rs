@@ -351,6 +351,12 @@ pub struct ScanningScanRecordResponse {
     pub flake_name: Option<String>,
     /// Contains the exact commit hash when available.
     pub commit_hash: Option<String>,
+    /// Is true when the derivation is the exact current deployment of an
+    /// active system with matching flake and configuration identity.
+    pub is_current: bool,
+    /// Is true when the derivation belongs to the position-0 commit in its
+    /// flake's ready branch snapshot.
+    pub is_latest_per_flake: bool,
     /// Contains the persisted lifecycle status.
     pub status: String,
     /// Contains canonical trigger presentation while preserving unknown values.
@@ -465,6 +471,7 @@ pub struct ScanningDeployedResponse {
 pub struct ScanningSystemsItemResponse {
     pub system_id: Uuid,
     pub hostname: String,
+    pub flake_name: Option<String>,
     pub environment: Option<String>,
     pub total_configs: i64,
     pub scanned: i64,
@@ -473,6 +480,12 @@ pub struct ScanningSystemsItemResponse {
     pub unscanned: i64,
     pub current_crit: i64,
     pub current_high: i64,
+    pub current_medium: i64,
+    pub current_low: i64,
+    /// Identifies exact schema-1 evidence for the current deployment.
+    pub current_scan_id: Option<Uuid>,
+    /// Is true when completed evidence exists only for non-current revisions.
+    pub historical_evidence: bool,
     /// Identifies the derivation in the system's latest reported store path.
     pub current_derivation_id: Option<i32>,
 }
@@ -713,6 +726,68 @@ pub struct SystemCveInventorySource {
     pub completed_at: DateTime<Utc>,
 }
 
+/// Selects one server-authorized system CVE inventory target.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SystemCveInventorySelection {
+    /// Resolves the system's current deployment through exact authority rules.
+    #[default]
+    Current,
+    /// Resolves one retained generation by its server-issued row identity.
+    RetainedGeneration {
+        /// Identifies `evaluation_generation_snapshots.id` for this system.
+        generation_snapshot_id: Uuid,
+    },
+    /// Resolves one derivation after validating system flake and configuration.
+    ExactDerivation {
+        /// Identifies a derivation authorized for this system.
+        derivation_id: i32,
+    },
+}
+
+/// Identifies how the selected scan's finding membership is represented.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemCveEvidenceRepresentation {
+    /// Reads immutable schema-1 observation rows.
+    Schema1Observations,
+    /// Reads the schema-0 compatibility projection.
+    Schema0Projection,
+}
+
+/// Describes one server-owned inventory target candidate.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemCveInventoryCandidate {
+    /// Gives the stable selector that the server will revalidate on read.
+    pub selection: SystemCveInventorySelection,
+    /// Gives a retained generation number when applicable.
+    pub generation: Option<i32>,
+    /// Gives the exact commit hash when known.
+    pub commit_hash: Option<String>,
+    /// Gives the authorized derivation identity when available.
+    pub derivation_id: Option<i32>,
+    /// Is true only for the current deployment candidate.
+    pub is_current: bool,
+    /// Is true when the candidate belongs to the ready branch-head commit.
+    pub is_latest_per_flake: bool,
+    /// Gives the latest completed scan when one exists.
+    pub source: Option<SystemCveInventorySource>,
+    /// Gives the selected scan representation when one exists.
+    pub evidence_representation: Option<SystemCveEvidenceRepresentation>,
+    /// Is true when a completed scan is available for this target.
+    pub scan_available: bool,
+    /// Is true for every non-current target.
+    pub read_only: bool,
+}
+
+/// Returns server-owned generation and derivation candidates for future UI use.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemCveInventoryCandidatesResponse {
+    /// Contains deterministic factual candidates. Logical generation and
+    /// derivation identities remain distinct when both describe one artifact.
+    pub items: Vec<SystemCveInventoryCandidate>,
+}
+
 /// Counts severities over the same filtered scope as inventory totals.
 ///
 /// The counts include the active severity filter. They are not an
@@ -759,6 +834,10 @@ pub struct SystemCveInventoryParams {
     pub severity: Option<String>,
     /// Selects comma-separated truthful fix states from open and fix_available.
     pub status: Option<String>,
+    /// Selects `current`, `retained_generation`, or `exact_derivation`.
+    pub target: Option<String>,
+    /// Gives the UUID or integer identity required by a historical target.
+    pub target_id: Option<String>,
 }
 
 /// Returns one complete non-unioned CVE inventory source for a system.
@@ -796,6 +875,12 @@ pub struct SystemCveInventoryPageResponse {
     pub exact_authority_failure: Option<ExactCveAuthorityFailureReason>,
     /// Gives the selected scan provenance, including for a clean scan.
     pub source: Option<SystemCveInventorySource>,
+    /// Gives the normalized server-validated target identity.
+    pub selection: SystemCveInventorySelection,
+    /// Gives the selected scan representation when a scan exists.
+    pub evidence_representation: Option<SystemCveEvidenceRepresentation>,
+    /// Is true when this response cannot authorize current remediation.
+    pub read_only: bool,
     /// Contains findings from only the selected source and current page.
     pub vulnerabilities: Vec<SystemCveInventoryVulnerability>,
     /// Gives complete filtered-scope totals independent of the current page.
@@ -4109,6 +4194,9 @@ mod tests {
             authority: SystemCveInventoryAuthority::NoScan,
             exact_authority_failure: Some(ExactCveAuthorityFailureReason::MissingCurrentGeneration),
             source: None,
+            selection: SystemCveInventorySelection::Current,
+            evidence_representation: None,
+            read_only: false,
             vulnerabilities: Vec::new(),
             metadata: SystemCveInventoryMetadata::default(),
             inventory_revision: "revision".into(),

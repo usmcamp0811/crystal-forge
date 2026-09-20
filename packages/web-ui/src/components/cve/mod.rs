@@ -12,6 +12,8 @@ use crate::api::models::{
     SystemCveInventoryMetadata, SystemCveInventoryPageResponse, SystemCveInventoryRowIdentity,
     SystemCveInventorySource, SystemCveInventoryVulnerability,
 };
+#[cfg(test)]
+use crate::api::models::{SystemCveEvidenceRepresentation, SystemCveInventorySelection};
 use crate::components::cve::triage::{SystemCveTriageDialog, fixed_version_label};
 #[cfg(test)]
 use crate::theme;
@@ -214,6 +216,7 @@ pub fn CvesTab(
 ) -> Element {
     let _ = hostname;
     let mut expanded_cve: Signal<Option<String>> = use_signal(|| None);
+    let mut default_expansion_applied = use_signal(|| false);
 
     let mut save_status: Signal<Option<String>> = use_signal(|| None);
     let mut triage_details: Signal<HashMap<SystemCveInventoryRowIdentity, SystemTriageCacheEntry>> =
@@ -230,6 +233,17 @@ pub fn CvesTab(
     // example does not include a filter/search bar; filtering remains available on the
     // dedicated CVE surface, while this tab focuses on the per-system package rollup.
     let filtered_groups = group_vulnerabilities_by_package(&vulnerabilities);
+    let first_package = filtered_groups
+        .first()
+        .map(|group| group.canonical_package_name.clone());
+    use_effect(move || {
+        if !default_expansion_applied() {
+            if let Some(package) = first_package.clone() {
+                expanded_cve.set(Some(package));
+                default_expansion_applied.set(true);
+            }
+        }
+    });
 
     let shown_package_count = filtered_groups.len();
     let shown_package_suffix = if shown_package_count == 1 { "" } else { "s" };
@@ -1359,6 +1373,9 @@ mod tests {
                     .expect("test timestamp should parse")
                     .with_timezone(&chrono::Utc),
             }),
+            selection: SystemCveInventorySelection::Current,
+            evidence_representation: Some(SystemCveEvidenceRepresentation::Schema1Observations),
+            read_only: false,
             vulnerabilities: rows,
             metadata: SystemCveInventoryMetadata {
                 total_findings,

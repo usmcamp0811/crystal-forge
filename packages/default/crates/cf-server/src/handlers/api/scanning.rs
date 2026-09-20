@@ -111,7 +111,7 @@ pub async fn get_scanning_scan_records(
         collection,
         params.include_archived,
         params.system_id,
-        params.limit.clamp(1, 500),
+        params.limit.clamp(1, 10_000),
     )
     .await
     {
@@ -127,6 +127,8 @@ pub async fn get_scanning_scan_records(
                         hostname: row.hostname,
                         flake_name: row.flake_name,
                         commit_hash: row.commit_hash,
+                        is_current: row.is_current,
+                        is_latest_per_flake: row.is_latest_per_flake,
                         status: row.status,
                         source_trigger: row.source_trigger,
                         created_at: row.created_at,
@@ -202,7 +204,7 @@ pub async fn get_scanning_queue(
         return forbidden_admin();
     }
 
-    match get_scan_queue(&pool, params.limit.clamp(1, 500)).await {
+    match get_scan_queue(&pool, params.limit.clamp(1, 10_000)).await {
         Ok(rows) => (
             StatusCode::OK,
             Json(
@@ -291,7 +293,7 @@ pub async fn get_scanning_systems(
         return forbidden_admin();
     }
 
-    match get_scan_systems(&pool, params.limit.clamp(1, 500)).await {
+    match get_scan_systems(&pool, params.limit.clamp(1, 10_000)).await {
         Ok(rows) => (
             StatusCode::OK,
             Json(
@@ -299,6 +301,7 @@ pub async fn get_scanning_systems(
                     .map(|r| ScanningSystemsItemResponse {
                         system_id: r.system_id,
                         hostname: r.hostname,
+                        flake_name: r.flake_name,
                         environment: r.environment,
                         total_configs: r.total_configs,
                         scanned: r.scanned,
@@ -307,6 +310,10 @@ pub async fn get_scanning_systems(
                         unscanned: r.unscanned,
                         current_crit: r.current_crit,
                         current_high: r.current_high,
+                        current_medium: r.current_medium,
+                        current_low: r.current_low,
+                        current_scan_id: r.current_scan_id,
+                        historical_evidence: r.historical_evidence,
                         current_derivation_id: r.current_derivation_id,
                     })
                     .collect::<Vec<_>>(),
@@ -330,7 +337,7 @@ pub async fn get_scanning_system_scans(
         return forbidden_admin();
     }
 
-    match get_scan_queue_for_system(&pool, system_id, params.limit.clamp(1, 500)).await {
+    match get_scan_queue_for_system(&pool, system_id, params.limit.clamp(1, 10_000)).await {
         Ok(rows) => (
             StatusCode::OK,
             Json(

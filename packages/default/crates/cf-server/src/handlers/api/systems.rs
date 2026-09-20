@@ -15,13 +15,13 @@ use crate::api::models::{
     DeploymentStatus, FieldUpdate, ManualDeploymentAction, ManualDeploymentConversionState,
     ManualDeploymentPolicyState, ManualDeploymentRequestState, ManualDeploymentResponse,
     PipelineStage, SaveSystemCveJustificationRequest, SortOrder, SystemAgentEvent,
-    SystemCommitsResponse, SystemCveInventoryPageResponse, SystemCveInventoryParams,
-    SystemCveInventoryResponse, SystemCveInventoryRowIdentity, SystemCveInventoryVulnerability,
-    SystemDeploymentProgress, SystemDetail, SystemGeneration, SystemGenerationsResponse,
-    SystemHardwareInfo, SystemHistoryEntry, SystemMutationResponse, SystemNetworkInfo,
-    SystemRollbackGenerationRequest, SystemRollbackRequest, SystemSecurityInfo, SystemSummary,
-    SystemVulnerability, SystemsListParams, UpdateSystemPublicKeyRequest, UpdateSystemRequest,
-    VerifyGenerationClosureRequest, VerifyGenerationClosureResponse,
+    SystemCommitsResponse, SystemCveInventoryCandidatesResponse, SystemCveInventoryPageResponse,
+    SystemCveInventoryParams, SystemCveInventoryResponse, SystemCveInventoryRowIdentity,
+    SystemCveInventoryVulnerability, SystemDeploymentProgress, SystemDetail, SystemGeneration,
+    SystemGenerationsResponse, SystemHardwareInfo, SystemHistoryEntry, SystemMutationResponse,
+    SystemNetworkInfo, SystemRollbackGenerationRequest, SystemRollbackRequest, SystemSecurityInfo,
+    SystemSummary, SystemVulnerability, SystemsListParams, UpdateSystemPublicKeyRequest,
+    UpdateSystemRequest, VerifyGenerationClosureRequest, VerifyGenerationClosureResponse,
 };
 use crate::auth::models::Role;
 use crate::handlers::agent_request::CFState;
@@ -50,8 +50,8 @@ use crate::queries::build_jobs::enqueue_build_job_for_derivation;
 use crate::queries::cve_scans::{get_scan_by_id, resolve_system_cve_scan_target};
 use crate::queries::cves::{
     SystemCveInventoryPageError, SystemCveInventoryPageRequest,
-    fetch_authorized_system_cve_inventory_tx, fetch_exact_system_vulnerabilities,
-    system_cve_inventory_page_error,
+    fetch_authorized_system_cve_inventory_candidates, fetch_authorized_system_cve_inventory_tx,
+    fetch_exact_system_vulnerabilities, system_cve_inventory_page_error,
 };
 use crate::queries::derivations::reset_derivation_for_rebuild;
 use crate::queries::system_events::{
@@ -1746,7 +1746,11 @@ pub async fn get_system_cve_inventory_page(
     // SECURITY: Relationship authority is resolved only for exact rows
     // returned in this page. A cursor cannot cause legacy evidence or an
     // off-page identity to receive remediation context.
-    let keys = inventory_relationship_keys(inventory.authority, &inventory.rows);
+    let keys = if inventory.read_only {
+        Vec::new()
+    } else {
+        inventory_relationship_keys(inventory.authority, &inventory.rows)
+    };
     let relationships = if keys.is_empty() {
         Vec::new()
     } else {
@@ -1809,6 +1813,9 @@ pub async fn get_system_cve_inventory_page(
             authority: inventory.authority,
             exact_authority_failure: inventory.exact_authority_failure,
             source: inventory.source,
+            selection: inventory.selection,
+            evidence_representation: inventory.evidence_representation,
+            read_only: inventory.read_only,
             vulnerabilities,
             metadata: inventory.metadata,
             inventory_revision: inventory.inventory_revision,
@@ -1819,12 +1826,39 @@ pub async fn get_system_cve_inventory_page(
         .into_response()
 }
 
+/// Returns server-owned CVE inventory targets for one visible system.
+pub async fn get_system_cve_inventory_candidates(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(system_id): Path<Uuid>,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+    if highest_role(&roles).is_none() {
+        return forbidden();
+    }
+    match fetch_authorized_system_cve_inventory_candidates(&pool, system_id, user_id).await {
+        Ok(Some(items)) => (
+            StatusCode::OK,
+            Json(SystemCveInventoryCandidatesResponse { items }),
+        )
+            .into_response(),
+        Ok(None) => not_found(),
+        Err(error) => {
+            tracing::error!("system CVE inventory candidate query failed: {error:#}");
+            internal_error("Failed to load system CVE inventory targets")
+        }
+    }
+}
+
 fn system_cve_inventory_page_error_response(error: &anyhow::Error) -> axum::response::Response {
     match system_cve_inventory_page_error(error) {
         Some(SystemCveInventoryPageError::InvalidCursor) => {
             bad_request("Invalid or malformed pagination cursor")
         }
         Some(SystemCveInventoryPageError::InventoryChanged) => inventory_changed(),
+        Some(SystemCveInventoryPageError::TargetUnavailable) => not_found(),
         _ => internal_error("Failed to load system CVE inventory"),
     }
 }

@@ -401,6 +401,15 @@ impl CveTriageDraft {
             poam: self.poam_request(scheduled)?,
         })
     }
+
+    /// Returns whether the System Detail draft can produce a valid mutation.
+    pub(crate) fn can_submit_system(
+        &self,
+        package: &str,
+        scope: poam_api::SystemCveTriageScopeChoice,
+    ) -> bool {
+        self.system_request(package, scope).is_ok()
+    }
 }
 
 fn scheduled_assignee_selection(
@@ -562,6 +571,17 @@ pub(crate) fn SystemCveTriageDialog(
         .as_ref()
         .map(disposition_label)
         .unwrap_or("open");
+    let direct_disposition_exists = match scope() {
+        poam_api::SystemCveTriageScopeChoice::Host => detail.host_disposition.is_some(),
+        poam_api::SystemCveTriageScopeChoice::Environment => {
+            detail.environment_disposition.is_some()
+        }
+    };
+    let choice = current.as_ref().map(|item| item.choice);
+    let can_submit = draft
+        .read()
+        .can_submit_system(&detail.canonical_package_name, scope())
+        && (choice != Some(EnvironmentTriageChoice::Open) || direct_disposition_exists);
     let dialog_label = format!(
         "Triage {} {}",
         detail.canonical_cve_id, detail.canonical_package_name
@@ -746,7 +766,7 @@ pub(crate) fn SystemCveTriageDialog(
             div { class: "modal-foot cve-triage-foot",
                 div { class: "cve-triage-outcome", if host_scoped { "{detail.scope.selected_system_hostname} only" } else { "All of {detail.scope.environment_name} · {detail.scope.exact_affected_system_count} exact observed host(s)" } }
                 button { class: "btn btn-ghost focus-ring", disabled: pending(), onclick: move |_| on_close.call(()), "Cancel" }
-                button { class: "btn btn-primary focus-ring", "data-testid": "cve-triage-submit", disabled: pending() || (scheduled && draft.read().preservation_error.is_some()), onclick: submit, if pending() { "Applying..." } else { "Apply triage" } }
+                button { class: "btn btn-primary focus-ring", "data-testid": "cve-triage-submit", disabled: pending() || !can_submit, onclick: submit, if pending() { "Applying..." } else { "Apply triage" } }
             }
             DialogFocusSentinel { dialog_id: "system-cve-triage-dialog", boundary: DialogFocusBoundary::First }
         }

@@ -959,6 +959,12 @@ async fn system_scan_scope_uses_exact_flake_configuration_and_current_store_path
         "an identical config/store path from another flake must be excluded"
     );
     assert_eq!(system.current_derivation_id, Some(current_id));
+    assert_eq!(
+        system.scanned + system.stale + system.needs_build + system.unscanned,
+        system.total_configs,
+        "fresh, stale, needs-build, and never-scanned buckets must be exclusive"
+    );
+    assert_eq!(system.current_scan_id, None);
 
     sqlx::query("DELETE FROM cve_scans WHERE derivation_id = ANY($1)")
         .bind(&[current_id, history_id][..])

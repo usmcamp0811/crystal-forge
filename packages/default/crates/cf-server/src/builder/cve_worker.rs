@@ -81,6 +81,55 @@ trait CveScanRunner {
 }
 
 #[async_trait]
+trait CveScanResultWriter {
+    async fn save(
+        &self,
+        pool: &PgPool,
+        scan_id: uuid::Uuid,
+        entries: &crate::vulnix::vulnix_runner::VulnixScanOutput,
+        elapsed_ms: Option<i32>,
+        execution_id: uuid::Uuid,
+        diagnostics: &[crate::queries::cve_scan_diagnostics::PreparedScanDiagnostic],
+    ) -> Result<()>;
+}
+
+struct DatabaseCveScanResultWriter;
+
+#[async_trait]
+impl CveScanResultWriter for DatabaseCveScanResultWriter {
+    async fn save(
+        &self,
+        pool: &PgPool,
+        scan_id: uuid::Uuid,
+        entries: &crate::vulnix::vulnix_runner::VulnixScanOutput,
+        elapsed_ms: Option<i32>,
+        execution_id: uuid::Uuid,
+        diagnostics: &[crate::queries::cve_scan_diagnostics::PreparedScanDiagnostic],
+    ) -> Result<()> {
+        save_scan_results_with_diagnostics_for_execution(
+            pool,
+            scan_id,
+            entries,
+            elapsed_ms,
+            execution_id,
+            diagnostics,
+        )
+        .await
+    }
+}
+
+fn safe_bounded_error_chain(error: &anyhow::Error) -> (String, bool) {
+    let redacted = crate::security::snapshot_redaction::redact_text(&format!("{error:#}"));
+    let truncated =
+        redacted.chars().count() > crate::queries::cve_scan_diagnostics::MAX_DIAGNOSTIC_CHARS;
+    let bounded = redacted
+        .chars()
+        .take(crate::queries::cve_scan_diagnostics::MAX_DIAGNOSTIC_CHARS)
+        .collect();
+    (bounded, truncated)
+}
+
+#[async_trait]
 impl CveScanRunner for VulnixRunner {
     async fn scan_derivation(
         &self,
@@ -934,6 +983,33 @@ async fn execute_scan_inner_with_nix_program<R: CveScanRunner + Sync>(
     execution_id: uuid::Uuid,
     nix_program: &std::ffi::OsStr,
 ) -> Result<()> {
+    execute_scan_inner_with_nix_program_and_writer(
+        pool,
+        vulnix_runner,
+        &DatabaseCveScanResultWriter,
+        vulnix_version,
+        derivation,
+        scan_id,
+        execution_id,
+        nix_program,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_scan_inner_with_nix_program_and_writer<
+    R: CveScanRunner + Sync,
+    W: CveScanResultWriter + Sync,
+>(
+    pool: &PgPool,
+    vulnix_runner: &R,
+    result_writer: &W,
+    vulnix_version: Option<String>,
+    derivation: &crate::derivations::Derivation,
+    scan_id: uuid::Uuid,
+    execution_id: uuid::Uuid,
+    nix_program: &std::ffi::OsStr,
+) -> Result<()> {
     let Some(ref path) = derivation.store_path else {
         warn!(
             "❌ No store_path set for derivation {}",
@@ -1063,24 +1139,44 @@ async fn execute_scan_inner_with_nix_program<R: CveScanRunner + Sync>(
             });
             let diagnostics =
                 crate::queries::cve_scan_diagnostics::prepare_diagnostics(&raw_diagnostics);
-            if let Err(err) = save_scan_results_with_diagnostics_for_execution(
-                pool,
-                scan_id,
-                &output.entries,
-                elapsed_ms,
-                execution_id,
-                &diagnostics,
-            )
-            .await
+            if let Err(err) = result_writer
+                .save(
+                    pool,
+                    scan_id,
+                    &output.entries,
+                    elapsed_ms,
+                    execution_id,
+                    &diagnostics,
+                )
+                .await
             {
-                mark_scan_failed_for_owner(
+                // The result transaction also contained the success diagnostics,
+                // so a rollback removes them. Persist a separate fenced terminal
+                // event that identifies this as a persistence failure rather than
+                // a scanner failure.
+                let (safe_error, error_truncated) = safe_bounded_error_chain(&err);
+                let failure_message = format!("Scan result persistence failed: {safe_error}");
+                let failure_diagnostics =
+                    crate::queries::cve_scan_diagnostics::prepare_diagnostics(&[
+                        cf_protocol::builder::CveScanDiagnostic {
+                            occurred_at: Utc::now(),
+                            level: "error".to_string(),
+                            source: "server".to_string(),
+                            event_type: "result_persistence_failed".to_string(),
+                            message: failure_message.clone(),
+                            truncated: error_truncated,
+                        },
+                    ]);
+                mark_cve_scan_failed_with_diagnostics_for_execution(
                     pool,
                     scan_id,
                     derivation,
-                    &err.to_string(),
+                    &failure_message,
                     execution_id,
+                    &failure_diagnostics,
                 )
-                .await?;
+                .await
+                .context("Failed to persist terminal CVE result-persistence diagnostics")?;
                 return Err(err);
             }
             info!(
@@ -1524,6 +1620,26 @@ mod tests {
         }
     }
 
+    struct FailingPersistenceWriter;
+
+    #[async_trait]
+    impl CveScanResultWriter for FailingPersistenceWriter {
+        async fn save(
+            &self,
+            _pool: &PgPool,
+            _scan_id: uuid::Uuid,
+            _entries: &crate::vulnix::vulnix_runner::VulnixScanOutput,
+            _elapsed_ms: Option<i32>,
+            _execution_id: uuid::Uuid,
+            _diagnostics: &[crate::queries::cve_scan_diagnostics::PreparedScanDiagnostic],
+        ) -> Result<()> {
+            Err(
+                anyhow::anyhow!("Authorization: Bearer nested-persistence-secret")
+                    .context("Database query failed"),
+            )
+        }
+    }
+
     struct FailingDiagnosticRunner;
 
     #[async_trait]
@@ -1630,6 +1746,107 @@ mod tests {
             .execute(&pool)
             .await
             .expect("diagnostic derivation cleanup should succeed");
+    }
+
+    #[tokio::test]
+    async fn successful_scanner_persists_redacted_result_failure_stage() {
+        let Some(pool) = db_test_pool().await else {
+            return;
+        };
+        let directory = tempdir().expect("result persistence fixture directory");
+        let store_path = directory.path().join("system-output");
+        let derivation_path = directory.path().join("system.drv");
+        tokio::fs::write(&store_path, b"output")
+            .await
+            .expect("output fixture should exist");
+        tokio::fs::write(&derivation_path, b"derivation")
+            .await
+            .expect("derivation fixture should exist");
+        let derivation = insert_derivation(
+            &pool,
+            None,
+            &format!("result-persistence-{}", Uuid::new_v4()),
+            "nixos",
+        )
+        .await
+        .expect("persistence derivation should be inserted");
+        sqlx::query(
+            "UPDATE derivations SET store_path=$2, derivation_path=$3, status_id=$4, completed_at=NOW() WHERE id=$1",
+        )
+        .bind(derivation.id)
+        .bind(store_path.to_string_lossy().to_string())
+        .bind(derivation_path.to_string_lossy().to_string())
+        .bind(EvaluationStatus::BuildComplete.as_id())
+        .execute(&pool)
+        .await
+        .expect("persistence derivation paths should persist");
+        let derivation = get_derivation_by_id(&pool, derivation.id)
+            .await
+            .expect("persistence derivation should reload");
+        let claim = match create_cve_scan(&pool, derivation.id, "vulnix", Some("test".into()))
+            .await
+            .expect("persistence claim should persist")
+        {
+            CreateCveScanOutcome::Created(claim) => claim,
+            CreateCveScanOutcome::Existing(_) => panic!("persistence fixture must create a scan"),
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let runner = FakeRunner {
+            calls: Arc::clone(&calls),
+        };
+
+        let error = execute_scan_inner_with_nix_program_and_writer(
+            &pool,
+            &runner,
+            &FailingPersistenceWriter,
+            Some("test".to_string()),
+            &derivation,
+            claim.scan_id,
+            claim.execution_id,
+            std::ffi::OsStr::new("nix"),
+        )
+        .await
+        .expect_err("result persistence failure should propagate");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(error.to_string(), "Database query failed");
+
+        let (status, failure): (String, Option<String>) =
+            sqlx::query_as("SELECT status, scan_metadata->>'error' FROM cve_scans WHERE id=$1")
+                .bind(claim.scan_id)
+                .fetch_one(&pool)
+                .await
+                .expect("failed persistence scan should be queryable");
+        assert_eq!(status, "failed");
+        let failure = failure.expect("persistence failure should be recorded");
+        assert!(failure.contains("Scan result persistence failed"));
+        assert!(failure.contains("Database query failed"));
+        assert!(failure.contains("[REDACTED]"));
+        assert!(!failure.contains("nested-persistence-secret"));
+
+        let diagnostics: Vec<(String, String)> = sqlx::query_as(
+            "SELECT event_type, message FROM cve_scan_diagnostic_events WHERE scan_id=$1 ORDER BY id",
+        )
+        .bind(claim.scan_id)
+        .fetch_all(&pool)
+        .await
+        .expect("persistence diagnostics should be queryable");
+        assert!(diagnostics.iter().any(|(event_type, message)| {
+            event_type == "result_persistence_failed"
+                && message.contains("Database query failed")
+                && message.contains("[REDACTED]")
+                && !message.contains("nested-persistence-secret")
+        }));
+
+        sqlx::query("DELETE FROM cve_scans WHERE id=$1")
+            .bind(claim.scan_id)
+            .execute(&pool)
+            .await
+            .expect("persistence scan cleanup should succeed");
+        sqlx::query("DELETE FROM derivations WHERE id=$1")
+            .bind(derivation.id)
+            .execute(&pool)
+            .await
+            .expect("persistence derivation cleanup should succeed");
     }
 
     /// Proves a deployed output that reports `unknown-deriver` still uses the

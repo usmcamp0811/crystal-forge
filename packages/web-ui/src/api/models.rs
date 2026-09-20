@@ -647,6 +647,10 @@ pub struct ScanningScanRecordResponse {
     pub flake_name: Option<String>,
     /// Contains the full immutable revision when available.
     pub commit_hash: Option<String>,
+    #[serde(default)]
+    pub is_current: bool,
+    #[serde(default)]
+    pub is_latest_per_flake: bool,
     /// Contains the persisted lifecycle status.
     pub status: String,
     /// Contains canonical trigger provenance when recorded.
@@ -757,6 +761,7 @@ pub struct ScanningDeployedResponse {
 pub struct ScanningSystemsItemResponse {
     pub system_id: Uuid,
     pub hostname: String,
+    pub flake_name: Option<String>,
     pub environment: Option<String>,
     pub total_configs: i64,
     pub scanned: i64,
@@ -765,6 +770,14 @@ pub struct ScanningSystemsItemResponse {
     pub unscanned: i64,
     pub current_crit: i64,
     pub current_high: i64,
+    #[serde(default)]
+    pub current_medium: i64,
+    #[serde(default)]
+    pub current_low: i64,
+    #[serde(default)]
+    pub current_scan_id: Option<Uuid>,
+    #[serde(default)]
+    pub historical_evidence: bool,
     /// Identifies the derivation in the system's latest reported store path.
     pub current_derivation_id: Option<i32>,
 }
@@ -5000,6 +5013,49 @@ pub struct SystemCveInventorySource {
     pub completed_at: DateTime<Utc>,
 }
 
+/// Selects one server-authorized system CVE inventory target.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SystemCveInventorySelection {
+    #[default]
+    Current,
+    RetainedGeneration {
+        generation_snapshot_id: Uuid,
+    },
+    ExactDerivation {
+        derivation_id: i32,
+    },
+}
+
+/// Identifies the selected scan's finding representation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemCveEvidenceRepresentation {
+    Schema1Observations,
+    Schema0Projection,
+}
+
+/// Describes one server-owned candidate for future revision selection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SystemCveInventoryCandidate {
+    pub selection: SystemCveInventorySelection,
+    pub generation: Option<i32>,
+    pub commit_hash: Option<String>,
+    pub derivation_id: Option<i32>,
+    pub is_current: bool,
+    pub is_latest_per_flake: bool,
+    pub source: Option<SystemCveInventorySource>,
+    pub evidence_representation: Option<SystemCveEvidenceRepresentation>,
+    pub scan_available: bool,
+    pub read_only: bool,
+}
+
+/// Returns server-owned current and historical inventory candidates.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SystemCveInventoryCandidatesResponse {
+    pub items: Vec<SystemCveInventoryCandidate>,
+}
+
 /// Counts severities over the complete active inventory scope.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SystemCveInventorySeverityCounts {
@@ -5040,6 +5096,12 @@ pub struct SystemCveInventoryPageResponse {
     pub exact_authority_failure: Option<ExactCveAuthorityFailureReason>,
     /// Gives scan provenance, including when the scan is clean.
     pub source: Option<SystemCveInventorySource>,
+    #[serde(default)]
+    pub selection: SystemCveInventorySelection,
+    #[serde(default)]
+    pub evidence_representation: Option<SystemCveEvidenceRepresentation>,
+    #[serde(default)]
+    pub read_only: bool,
     /// Contains findings from only the selected source.
     pub vulnerabilities: Vec<SystemCveInventoryVulnerability>,
     /// Gives complete scope totals independent of loaded page count.

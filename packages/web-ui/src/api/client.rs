@@ -1049,16 +1049,37 @@ struct SystemCveInventoryPageQuery<'a> {
     limit: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
     after: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_id: Option<&'a str>,
 }
 
 fn system_cve_inventory_url(
     base: &str,
     id: &Uuid,
     after: Option<&str>,
+    selection: SystemCveInventorySelection,
 ) -> Result<String, ApiClientError> {
+    let target_id = match selection {
+        SystemCveInventorySelection::Current => None,
+        SystemCveInventorySelection::RetainedGeneration {
+            generation_snapshot_id,
+        } => Some(generation_snapshot_id.to_string()),
+        SystemCveInventorySelection::ExactDerivation { derivation_id } => {
+            Some(derivation_id.to_string())
+        }
+    };
+    let target = match selection {
+        SystemCveInventorySelection::Current => None,
+        SystemCveInventorySelection::RetainedGeneration { .. } => Some("retained_generation"),
+        SystemCveInventorySelection::ExactDerivation { .. } => Some("exact_derivation"),
+    };
     let query = serde_urlencoded::to_string(SystemCveInventoryPageQuery {
         limit: SYSTEM_CVE_INVENTORY_PAGE_SIZE,
         after,
+        target,
+        target_id: target_id.as_deref(),
     })
     .map_err(|error| ApiClientError::Deserialize(error.to_string()))?;
     Ok(format!("{base}/systems/{id}/cve-inventory-page?{query}"))
@@ -1072,7 +1093,24 @@ pub async fn fetch_system_cve_inventory(
     id: &Uuid,
     after: Option<&str>,
 ) -> Result<SystemCveInventoryPageResponse, ApiClientError> {
-    let url = system_cve_inventory_url(&base_url(), id, after)?;
+    fetch_system_cve_inventory_for_target(id, after, SystemCveInventorySelection::Current).await
+}
+
+/// Fetches one source-bound page for a server-authorized inventory target.
+pub async fn fetch_system_cve_inventory_for_target(
+    id: &Uuid,
+    after: Option<&str>,
+    selection: SystemCveInventorySelection,
+) -> Result<SystemCveInventoryPageResponse, ApiClientError> {
+    let url = system_cve_inventory_url(&base_url(), id, after, selection)?;
+    fetch_json(&url).await
+}
+
+/// Fetches factual server-owned candidates for a future revision selector.
+pub async fn fetch_system_cve_inventory_candidates(
+    id: &Uuid,
+) -> Result<SystemCveInventoryCandidatesResponse, ApiClientError> {
+    let url = format!("{}/systems/{id}/cve-inventory-sources", base_url());
     fetch_json(&url).await
 }
 
@@ -3375,19 +3413,41 @@ mod config_observation_tests {
     fn system_cve_inventory_url_bounds_pages_and_encodes_opaque_cursor() {
         let id = Uuid::from_u128(440);
         assert_eq!(
-            system_cve_inventory_url("https://example.test/api/v1", &id, None)
-                .expect("page URL should serialize"),
+            system_cve_inventory_url(
+                "https://example.test/api/v1",
+                &id,
+                None,
+                SystemCveInventorySelection::Current,
+            )
+            .expect("page URL should serialize"),
             format!("https://example.test/api/v1/systems/{id}/cve-inventory-page?limit=100")
         );
         assert_eq!(
             system_cve_inventory_url(
                 "https://example.test/api/v1",
                 &id,
-                Some("opaque+/= cursor&scope")
+                Some("opaque+/= cursor&scope"),
+                SystemCveInventorySelection::Current,
             )
             .expect("cursor URL should serialize"),
             format!(
                 "https://example.test/api/v1/systems/{id}/cve-inventory-page?limit=100&after=opaque%2B%2F%3D+cursor%26scope"
+            )
+        );
+
+        let generation_snapshot_id = Uuid::from_u128(441);
+        assert_eq!(
+            system_cve_inventory_url(
+                "https://example.test/api/v1",
+                &id,
+                None,
+                SystemCveInventorySelection::RetainedGeneration {
+                    generation_snapshot_id,
+                },
+            )
+            .expect("historical page URL should serialize"),
+            format!(
+                "https://example.test/api/v1/systems/{id}/cve-inventory-page?limit=100&target=retained_generation&target_id={generation_snapshot_id}"
             )
         );
     }

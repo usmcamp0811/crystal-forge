@@ -25,7 +25,7 @@ use crate::components::dialog_focus::{
 };
 use crate::components::icon::{Icon, IconName};
 
-const RECORD_LIMIT: i64 = 500;
+const RECORD_LIMIT: i64 = 10_000;
 const DETAIL_POLL_MS: u32 = 3_000;
 const LIVE_REFRESH_MS: u32 = 15_000;
 
@@ -227,28 +227,10 @@ fn severity_counts(row: &ScanningScanRecordResponse) -> (i32, i32, i32, i32) {
     )
 }
 
-fn latest_scan_ids(rows: &[ScanningScanRecordResponse]) -> HashSet<Uuid> {
-    let mut newest = HashMap::<String, (&ScanningScanRecordResponse, DateTime<Utc>)>::new();
-    for row in rows {
-        let key = row
-            .flake_name
-            .clone()
-            .unwrap_or_else(|| row.hostname.clone())
-            .to_ascii_lowercase();
-        let timestamp = record_time(row);
-        let replace = newest.get(&key).is_none_or(|(current, current_time)| {
-            timestamp > *current_time
-                || (timestamp == *current_time && row.scan_id < current.scan_id)
-        });
-        if replace {
-            newest.insert(key, (row, timestamp));
-        }
-    }
-    newest.values().map(|(row, _)| row.scan_id).collect()
-}
-
-fn revision_class(row: &ScanningScanRecordResponse, latest: &HashSet<Uuid>) -> &'static str {
-    if latest.contains(&row.scan_id) {
+fn revision_class(row: &ScanningScanRecordResponse) -> &'static str {
+    if row.is_current {
+        "deployed"
+    } else if row.is_latest_per_flake {
         "recent"
     } else {
         "superseded"
@@ -266,7 +248,6 @@ fn filter_and_sort_records(
     descending: bool,
 ) -> Vec<ScanningScanRecordResponse> {
     let query = query.trim().to_ascii_lowercase();
-    let latest = latest_scan_ids(rows);
     let mut filtered = rows
         .iter()
         .filter(|row| {
@@ -281,8 +262,8 @@ fn filter_and_sort_records(
             .to_ascii_lowercase();
             (query.is_empty() || identity.contains(&query))
                 && (status == "all" || status_meta(&row.status).key == status)
-                && (revision == "all" || revision_class(row, &latest) == revision)
-                && (!latest_only || latest.contains(&row.scan_id))
+                && (revision == "all" || revision_class(row) == revision)
+                && (!latest_only || row.is_latest_per_flake)
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -677,7 +658,7 @@ pub fn ScanningView() -> Element {
 
             div { class: "stat-strip scanning-stats",
                 if let Some(Ok(summary)) = stats.read().as_ref() {
-                    { stat_card("Scanning now", &summary.scanning.to_string(), Some(&format!("{} pending · {} awaiting build · {} awaiting closure", summary.queued, summary.awaiting_build, summary.awaiting_closure)), "#60a5fa") }
+                    { stat_card("Scanning now", &summary.scanning.to_string(), Some(&format!("{} queued · {} awaiting build · {} awaiting closure", summary.queued, summary.awaiting_build, summary.awaiting_closure)), "#60a5fa") }
                     { stat_card("Stale", &summary.stale.to_string(), Some("past rescan interval"), "#fbbf24") }
                     { stat_card("Never scanned", &summary.never_scanned.to_string(), None, "#9ca3af") }
                     if summary.failed > 0 {
@@ -981,11 +962,12 @@ fn records_panel(
             }
             select { class: "input filter-select focus-ring", aria_label: "Filter by revision freshness", value: revision_filter(), oninput: move |event| revision_filter.set(event.value()),
                 option { value: "all", "All revisions" }
-                option { value: "recent", "Newest per flake" }
+                option { value: "deployed", "Deployed" }
+                option { value: "recent", "Latest per flake" }
                 option { value: "superseded", "Superseded" }
             }
             button { class: if latest_only() { "btn btn-ghost xs focus-ring active-filter" } else { "btn btn-ghost xs focus-ring" }, aria_pressed: latest_only(), onclick: move |_| latest_only.toggle(), Icon { name: IconName::Star, size: 12 } " Latest per flake" }
-            span { class: "filter-count", "{filtered} visible · {loaded} loaded" if capped { " · {available} available" } if response.total != available { " · {response.total} all" } }
+            span { class: "filter-count", "{filtered} visible · {loaded} loaded" if capped { " · showing the first {loaded} of {available}; search and sorting apply to loaded records" } if response.total != available { " · {response.total} all" } }
             if completed {
                 label { class: "scanning-include-archived", input { r#type: "checkbox", checked: include_archived(), onchange: move |event| { include_archived.set(event.checked()); selected_rows.write().clear(); } } " Include archived" }
             }
@@ -1012,11 +994,11 @@ fn records_panel(
                         p { "The current retention view hides {response.hidden_archived} archived scan(s). Include archived scans to review or restore them." }
                     } else {
                         h3 { if completed { "No completed scan history" } else { "No active scans" } }
-                        p { if completed { "Terminal scan lifecycles will remain here as history." } else { "Pending, scanning, and prerequisite wait states will appear here." } }
+                        p { if completed { "Terminal scan lifecycles will remain here as history." } else { "Queued, scanning, and prerequisite wait states will appear here." } }
                     }
                 } else {
                     h3 { "No scans match these filters" }
-                    p { "The result count reflects the current client-side filters." }
+                    p { if capped { "No loaded scans match these filters. Additional records exist beyond the loaded cap." } else { "The result count reflects the current client-side filters." } }
                     button { class: "btn btn-ghost xs focus-ring", onclick: move |_| reset_filters(query, status_filter, revision_filter, latest_only), "Reset filters" }
                 }
             }
@@ -1028,8 +1010,8 @@ fn records_panel(
                         { sortable_header("Configuration", ScanSort::Configuration, sort, descending) }
                         { sortable_header("Revision", ScanSort::Revision, sort, descending) }
                         { sortable_header("Status", ScanSort::Status, sort, descending) }
-                        { sortable_header("Severity", ScanSort::Severity, sort, descending) }
-                        { sortable_header("Timestamp", ScanSort::Timestamp, sort, descending) }
+                        { sortable_header("Findings", ScanSort::Severity, sort, descending) }
+                        { sortable_header("Last scan", ScanSort::Timestamp, sort, descending) }
                         th { "Trigger" }
                         th { class: "scanning-actions-heading", span { class: "sr-only", "Actions" } }
                     } }
@@ -1087,12 +1069,21 @@ fn record_row(
         label: format!("{} · {}", row.hostname, commit_label(&row.commit_hash)),
     };
     let can_retry = row.status == "failed";
-    let revision = row.commit_hash.as_deref().unwrap_or("Revision unavailable");
+    let relation = revision_class(&row);
+    let relation_label = match relation {
+        "deployed" => "Deployed",
+        "recent" => "Recent",
+        _ => "Superseded",
+    };
+    let configuration_meta = match row.flake_name.as_deref() {
+        Some(flake) => format!("{flake} · {}", commit_label(&row.commit_hash)),
+        None => commit_label(&row.commit_hash),
+    };
     rsx! {
         tr { key: "{row.scan_id}", class: if row.archived_at.is_some() { "scanning-record archived" } else { "scanning-record" },
             if selectable { td { input { r#type: "checkbox", aria_label: format!("Select scan {}", row.scan_id), checked: selected, onchange: move |event| { if event.checked() { selected_rows.write().insert(row.scan_id); } else { selected_rows.write().remove(&row.scan_id); } } } } }
-            td { div { class: "scanning-config-name", "{row.hostname}" } div { class: "scanning-record-id mono", "scan {row.scan_id} · drv {row.derivation_id}" } }
-            td { div { class: "scanning-full-revision mono", "{revision}" } if let Some(flake) = row.flake_name.as_deref() { div { class: "scanning-history-flake", "{flake}" } } }
+            td { div { class: "scanning-config-name", "{row.hostname}" } div { class: "scanning-history-flake", "{configuration_meta}" } }
+            td { span { class: if relation == "deployed" { "chip chip-healthy" } else if relation == "recent" { "chip chip-info" } else { "chip chip-unknown" }, "{relation_label}" } }
             td {
                 span { class: "chip {meta.class}", span { class: "chip-dot", style: "background:{meta.color};" } "{meta.label}" }
                 if let Some(reason) = row.wait_reason.as_deref() { div { class: "scanning-wait", "Awaiting: {reason}" } }
@@ -1310,17 +1301,21 @@ fn system_history_table(
             tbody { for entry in rows {
                 match entry {
                 SystemHistoryEntry::Scan(row) => {
-                    let relation = match revision_relations.get(&row.derivation_id).copied() {
-                        Some((true, _)) => "Deployed",
-                        Some((false, true)) => "Recent",
+                    let relation = match (row.is_current, row.is_latest_per_flake) {
+                        (true, _) => "Deployed",
+                        (false, true) => "Recent",
                         _ if system.current_derivation_id == Some(row.derivation_id) => "Deployed",
-                        _ => "Superseded config",
+                        _ => match revision_relations.get(&row.derivation_id).copied() {
+                            Some((true, _)) => "Deployed",
+                            Some((false, true)) => "Recent",
+                            _ => "Superseded config",
+                        },
                     };
                     let meta = status_meta(&row.status);
                     let selection = ScanDetailSelection { scan_id: row.scan_id, label: format!("{} · {}", row.hostname, commit_label(&row.commit_hash)) };
                     let revision = row.commit_hash.as_deref().unwrap_or("Revision unavailable");
                     rsx! { tr { key: "history-{row.scan_id}", class: if row.archived_at.is_some() { "scanning-record archived" } else { "scanning-record" },
-                        td { div { class: "scanning-full-revision mono", "{revision}" } div { class: "scanning-record-id mono", "scan {row.scan_id} · drv {row.derivation_id}" } }
+                        td { div { class: "scanning-full-revision mono", "{revision}" } }
                         td { span { class: if relation == "Deployed" { "chip chip-healthy" } else { "chip chip-unknown" }, "{relation}" } }
                         td { span { class: "chip {meta.class}", "{meta.label}" } if let Some(reason) = row.wait_reason.as_deref() { div { class: "scanning-wait", "Awaiting: {reason}" } } if let Some(failure) = row.failure.as_deref() { div { class: "scanning-row-failure", "{failure}" } } }
                         td { { findings(row.critical_count, row.high_count, row.medium_count, row.low_count, row.status == "completed") } }
@@ -1906,6 +1901,13 @@ fn commit_label(commit_hash: &Option<String>) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
+fn coverage_width(count: i64, total: i64) -> String {
+    if total <= 0 {
+        return "0%".to_string();
+    }
+    format!("{:.2}%", (count.max(0) as f64 / total as f64) * 100.0)
+}
+
 fn stat_card(label: &str, value: &str, meta: Option<&str>, color: &str) -> Element {
     rsx! { div { class: "stat", span { class: "stat-accent", style: "--stat-color:{color};" } div { class: "stat-label", "{label}" } div { class: "stat-value", style: "color:{color};", "{value}" } if let Some(meta) = meta { div { class: "stat-meta", "{meta}" } } } }
 }
@@ -1930,6 +1932,8 @@ mod tests {
             hostname: hostname.to_string(),
             flake_name: Some("infra".to_string()),
             commit_hash: Some(format!("{hostname}-{hours_ago:02}-full-revision")),
+            is_current: false,
+            is_latest_per_flake: false,
             status: status.to_string(),
             source_trigger: Some("manual".to_string()),
             created_at: timestamp,
@@ -2041,6 +2045,30 @@ mod tests {
         let sorted =
             filter_and_sort_records(&rows, "", "all", "all", false, ScanSort::Severity, true);
         assert_eq!(sorted[0].hostname, "atlas");
+    }
+
+    #[test]
+    fn latest_filter_uses_server_revision_authority_not_scan_time() {
+        let mut older_commit_rescanned_today = row("older", "completed", 0, 0);
+        older_commit_rescanned_today.is_latest_per_flake = false;
+        let mut newer_commit_scanned_yesterday = row("newer", "completed", 24, 0);
+        newer_commit_scanned_yesterday.is_latest_per_flake = true;
+
+        let filtered = filter_and_sort_records(
+            &[
+                older_commit_rescanned_today,
+                newer_commit_scanned_yesterday.clone(),
+            ],
+            "",
+            "all",
+            "all",
+            true,
+            ScanSort::Timestamp,
+            true,
+        );
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].scan_id, newer_commit_scanned_yesterday.scan_id);
     }
 
     #[test]
