@@ -9914,7 +9914,15 @@ const steps = [
           return opened;
         };
         const assertTriageChip = async (label, title) => {
-          const chip = page.getByTestId("system-cve-triage-state");
+          await showInventory();
+          const chip = page
+            .getByTestId("system-cve-triage-state")
+            .filter({ hasText: label });
+          await assertVisible(
+            chip,
+            `Expected triage state '${label}' after authoritative inventory refresh`,
+            12000,
+          );
           const text = (await chip.textContent())?.replace(/\s+/g, " ").trim();
           if (text !== label) throw new Error(`Expected triage chip '${label}', got '${text}'`);
           await assertAttribute(chip, "title", title, `Expected ${label} scope tooltip`);
