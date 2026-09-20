@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - Matt Camp
 created_date: '2026-09-09 03:32'
-updated_date: '2026-09-20 13:06'
+updated_date: '2026-09-20 13:07'
 labels:
   - scanning
   - web-ui
@@ -158,6 +158,8 @@ Committed the finalized Scanning administration slice as `2c0d10e7`. Review fixe
 Committed unified System Detail CVE triage as `1ca41260`. The Web UI now mirrors the system-context triage GET/POST contract, extracts shared fleet/system draft validation and scheduled metadata hydration, renders authoritative environment-scoped Outstanding/Accepted/Scheduled states after bounded expanded-package hydration, and replaces separate Justify/Create POA&M controls with one triage dialog. Scheduled reuse metadata is read-only, typed assignees preserve identity, default milestones apply only to new POA&Ms, inventory revision changes invalidate cached state, and async hydration/manual-open responses use per-row generation guards. Legacy/no-scan/conflict/whitelisted states remain explicit and non-actionable; accepted/scheduled copy does not claim remediation or verification. Owner verification: focused CVE tests passed (13/13), targeted rustfmt check passed, and `git diff --check` passed. The implementation agent also ran the full Web UI suite (436 passed, 1 ignored) and WASM cargo check successfully with existing warnings. Browser workflows remain outstanding.
 
 Final verification completed. The authoritative focused NixOS browser check passed workflows `16c-scanning-view`, `12h-system-detail-cves-grouped-justification`, `12ha-system-detail-cve-inventory-fallbacks`, and `16-cves`, producing `/nix/store/6lnyyalkw4v52y9sni9a5dijkh91qcdb-vm-test-run-crystal-forge-web-ui-mega-integration` with 37 task-relevant screenshots. Representative desktop, narrow-desktop, tablet, light, and dark images were inspected. Static contracts, JavaScript syntax, targeted Rust formatting, `git diff --check`, Web UI tests/WASM checks, server offline checks, and server/Web UI documentation builds passed. Documentation builds retain unrelated existing warnings; the task-local private rustdoc link was corrected in `664a5bd8`. Host preview remained waived and TASK-440 ports/processes were not touched.
+
+Branch `TASK-326.2-scanning-cve-triage-parity` was pushed at `664a5bd8`. MR creation is blocked because the configured GitLab CLI OAuth grant is expired or revoked (`invalid_grant`). Git push authentication remains valid. The task stays In Progress until an MR is open; use the GitLab branch link to create an MR targeting `dev`, or refresh `glab` authentication and resume finalization.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
