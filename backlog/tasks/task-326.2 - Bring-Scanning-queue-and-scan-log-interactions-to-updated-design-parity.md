@@ -1,10 +1,11 @@
 ---
 id: TASK-326.2
 title: Bring Scanning and per-system CVE triage to updated design parity
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - Matt Camp
 created_date: '2026-09-09 03:32'
-updated_date: '2026-09-20 02:08'
+updated_date: '2026-09-20 02:17'
 labels:
   - scanning
   - web-ui
@@ -93,3 +94,9 @@ Replace separate Justify + Create POA&M with one CveTriageModal (extracted from 
 - [ ] #11 Browser assertions: Active/Completed switching, wait state rendering, failure actionability, archive/restore selection, log content, triage disposition, POA&M reuse, responsive/narrow/dark behavior
 - [ ] #12 Playwright: Active/Completed filtering, wait/failed transitions, log drawer, triage modal outstanding→accepted→scheduled, POA&M reuse, responsive tests; desktop/narrow/light/dark screenshots
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Started implementation in dedicated worktree `/home/mcamp/code/crystal-forge/TASK-326.2-scanning-cve-triage-parity` on branch `TASK-326.2-scanning-cve-triage-parity`, based exactly on `origin/dev` at `e304867c43abc8a7d8efe1f01e71af64cca67d8b`. The integration worktree contains unrelated untracked `session-ses_f927.md`; it does not overlap task scope and will not be modified.
+<!-- SECTION:NOTES:END -->
