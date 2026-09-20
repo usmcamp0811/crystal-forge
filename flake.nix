@@ -1,17 +1,6 @@
 {
   description = "Simple flake exporting a Rust package";
 
-  # Lets `nix develop .#devenv` fetch the devenv CLI itself (and its own
-  # dependency closure) from devenv's binary cache instead of building it
-  # from source. Purely a speed optimization for that one additive shell;
-  # every other input/output in this flake is unaffected.
-  nixConfig = {
-    extra-substituters = [ "https://devenv.cachix.org" ];
-    extra-trusted-public-keys = [
-      "devenv.cachix.org-1:w1cLUi8dv3hnoSPGAuibQv+f9TZLr6cv/Hm9XgU50cw="
-    ];
-  };
-
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/release-26.05";
     flake-utils.url = "github:numtide/flake-utils";
@@ -31,12 +20,6 @@
     # Dioxus CLI pinned to the application-compatible 0.7.3 release for the
     # incremental local UI development harness.
     nixpkgs-dioxus-cli.url = "github:NixOS/nixpkgs/09061f748ee21f68a089cd5d91ec1859cd93d0be";
-    # devenv (TASK-462.1): provides the real `devenv` CLI for the additive
-    # `devShells.devenv` shell below. The process definitions it drives
-    # live in this repository's own `devenv.yaml`/`devenv.nix` (devenv's
-    # native project format), not here; see devenv.nix's top comment for
-    # why flake integration (`devenv.lib.mkShell`) is not used instead.
-    devenv.url = "github:cachix/devenv";
   };
 
   outputs = inputs:
@@ -95,8 +78,28 @@
         # worktree's root once inside it to start the isolated
         # PostgreSQL/API/web UI stack defined in this repository's
         # `devenv.yaml`/`devenv.nix`. See docs/agents/devenv-workflow.md.
+        #
+        # Deliberately `channels.nixpkgs.devenv` (this repository's own
+        # already-pinned, already-cached nixpkgs), not a separate `devenv`
+        # flake input. An earlier revision added `inputs.devenv`, but
+        # Snowfall's `mkLib` unconditionally probes every entry in the
+        # flake's own `inputs` for a `.lib` attribute (to merge into its
+        # extended `lib`), which forces every *unrelated* flake
+        # output/check to fetch and partially evaluate that input too, even
+        # though nothing here or in devenv.nix/devenv.yaml (devenv's
+        # separately locked native project format; see devenv.nix's own
+        # top comment) ever reads it. That fetch is not yet cached anywhere
+        # CI trusts, and broke three CI jobs with no relationship to devenv
+        # (`run-ui-dev-db-check`, `oidc-auth`, `integration`) purely because
+        # they evaluate the root flake at all. The pinned nixpkgs' `devenv`
+        # package (verified: still performs genuine dynamic port
+        # allocation under real port contention, and still exposes the
+        # `process.proxy`/`processes.<name>.proxy` Portless options
+        # devenv.nix uses) avoids this class of problem entirely: it is
+        # already part of the same nixpkgs revision every other package in
+        # this flake already depends on and CI already fetches reliably.
         devShells.devenv = channels.nixpkgs.mkShell {
-          packages = [ inputs.devenv.packages.${channels.nixpkgs.stdenv.hostPlatform.system}.default ];
+          packages = [ channels.nixpkgs.devenv ];
           shellHook = ''
             echo "🧪 Crystal Forge devenv workflow (TASK-462.1, additive, parallel-worktree-safe)"
             echo ""
